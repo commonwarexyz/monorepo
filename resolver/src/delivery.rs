@@ -9,7 +9,7 @@
 use crate::{Consumer, Delivery, Outcome};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::future::Aborted;
-use std::collections::{HashMap, hash_map::Entry as HashMapEntry};
+use std::collections::{BTreeMap, btree_map::Entry as BTreeMapEntry};
 use tracing::debug;
 
 /// Completed consumer validation for a delivery.
@@ -75,7 +75,7 @@ where
     Con::Value: Clone + Send + 'static,
     Context: Clone + Send + 'static,
 {
-    entries: HashMap<Con::Key, Entry<Context, Con::Value, State>>,
+    entries: BTreeMap<Con::Key, Entry<Context, Con::Value, State>>,
     deliveries: AbortablePool<'static, PooledCompletion<Con::Key, Con::Subscriber, Context>>,
     next_generation: u64,
     consumer: Con,
@@ -90,7 +90,7 @@ where
     /// Create an empty tracker backed by the provided consumer.
     pub fn new(consumer: Con) -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: BTreeMap::new(),
             deliveries: AbortablePool::default(),
             next_generation: 0,
             consumer,
@@ -108,11 +108,11 @@ where
     /// this leaves the existing entry untouched and returns `false`.
     pub(crate) fn insert_with_state(&mut self, key: Con::Key, state: State) -> bool {
         match self.entries.entry(key) {
-            HashMapEntry::Vacant(entry) => {
+            BTreeMapEntry::Vacant(entry) => {
                 entry.insert(Entry::new(state));
                 true
             }
-            HashMapEntry::Occupied(_) => false,
+            BTreeMapEntry::Occupied(_) => false,
         }
     }
 
@@ -146,7 +146,9 @@ where
     /// Dropped entries abort in-progress deliveries. Returns the number of
     /// removed entries.
     pub fn retain<F: FnMut(&Con::Key) -> bool>(&mut self, mut predicate: F) -> usize {
-        self.entries.extract_if(|key, _| !predicate(key)).count()
+        self.entries
+            .extract_if(.., |key, _| !predicate(key))
+            .count()
     }
 
     /// Remove all entries and abort all in-progress deliveries.
@@ -313,11 +315,12 @@ mod tests {
     use super::*;
     use crate::p2p::mocks::{Consumer as MockConsumer, Key as MockKey};
     use bytes::Bytes;
-    use commonware_runtime::{Runner as _, deterministic::Runner};
+    use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic::Runner};
     use commonware_utils::{
         channel::{fallible::FallibleExt, mpsc, oneshot},
         non_empty_vec,
     };
+    use futures::FutureExt as _;
 
     type TestTracker = Tracker<MockConsumer<MockKey, Bytes>, u8>;
 
@@ -568,5 +571,57 @@ mod tests {
             assert_eq!(accepted.context, 2);
             assert_eq!(accepted.outcome, Some(Outcome::Complete));
         });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5152.
+    ///
+    /// A consumer task waits on each verdict sender until the tracker drops the pending
+    /// validation. Pruning keys with `retain` and then `drain` aborts the validations in
+    /// key order, so the senders close in key order and two runs with the same seed match.
+    #[test]
+    fn pr_5152_regression() {
+        fn run() -> (Vec<u8>, String) {
+            Runner::seeded(0).start(|context| async move {
+                let (consumer, mut senders) = PendingConsumer::new();
+                let mut tracker = Tracker::<PendingConsumer, u8>::new(consumer);
+                let (closed_sender, mut closed) = mpsc::unbounded_channel();
+
+                // Deliver keys in reverse order and park a consumer task on each verdict.
+                for key in (0..16).rev() {
+                    tracker.insert(MockKey(key));
+                    tracker.deliver(delivery(MockKey(key)), key, Bytes::new());
+                    let mut sender = senders.recv().await.unwrap();
+                    let (parked, ready) = oneshot::channel();
+                    let closed_sender = closed_sender.clone();
+                    context.child("consumer").spawn(move |_| async move {
+                        parked.send(()).unwrap();
+                        sender.closed().await;
+                        closed_sender.send_lossy(key);
+                    });
+                    ready.await.unwrap();
+                }
+
+                // Poll every validation so each one waits on its verdict.
+                assert!(tracker.next_completion().now_or_never().is_none());
+
+                // Drop one aborted validation at a time and record which sender closed.
+                let mut observed = Vec::new();
+                assert_eq!(tracker.retain(|key| key.0 % 2 == 0), 8);
+                for _ in 0..8 {
+                    assert!(matches!(tracker.next_completion().await, Err(Aborted)));
+                    observed.push(closed.recv().await.unwrap());
+                }
+                assert_eq!(tracker.drain(), 8);
+                for _ in 0..8 {
+                    assert!(matches!(tracker.next_completion().await, Err(Aborted)));
+                    observed.push(closed.recv().await.unwrap());
+                }
+                (observed, context.auditor().state())
+            })
+        }
+        let first = run();
+        let expected: Vec<u8> = (1..16).step_by(2).chain((0..16).step_by(2)).collect();
+        assert_eq!(first.0, expected);
+        assert_eq!(first, run());
     }
 }

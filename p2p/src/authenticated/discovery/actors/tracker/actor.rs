@@ -18,33 +18,32 @@ use commonware_utils::{
     ordered::Set,
 };
 use rand::{Rng, seq::SliceRandom};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> {
     context: ContextCell<E>,
 
-    // ---------- Configuration ----------
     /// The local identity advertised in greetings.
     public_key: C,
 
     /// The maximum number of peer address records allowed in a single message.
     peer_gossip_max_count: usize,
 
-    // ---------- Message-Passing ----------
     /// The mailbox for the actor.
     ///
     /// We use this to support sending a [`Message::Release`] message to the actor
     /// during [`Drop`].
     receiver: mailbox::Receiver<Message<C>>,
 
-    // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
     directory: Directory<E, C>,
 
     /// Set when a peer connects and cleared when it is killed or released.
-    mailboxes: HashMap<C, peer::Mailbox<C>>,
+    ///
+    /// Ordered so that dropping the tracker closes peer mailboxes in a reproducible order.
+    mailboxes: BTreeMap<C, peer::Mailbox<C>>,
 
     /// Subscribers to peer set updates.
     subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<C>>>,
@@ -88,7 +87,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
             peer_gossip_max_count: cfg.peer_gossip_max_count,
             receiver,
             directory,
-            mailboxes: HashMap::new(),
+            mailboxes: BTreeMap::new(),
             subscribers: Vec::new(),
             blocked_subscribers: Vec::new(),
         };
@@ -302,11 +301,14 @@ mod tests {
         ed25519::{PrivateKey, PublicKey, Signature},
     };
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, SystemTimeExt, bitmap::BitMap, ordered::Set};
+    use commonware_utils::{
+        NZUsize, SystemTimeExt, bitmap::BitMap, channel::oneshot, ordered::Set, sync::Mutex,
+    };
     use futures::{FutureExt, StreamExt, future::Either};
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::Arc,
         time::Duration,
     };
     use types::Info;
@@ -432,6 +434,57 @@ mod tests {
             tracker_pk,
             cfg: stored_cfg,
         }
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5152.
+    ///
+    /// Aborting the tracker drops the mailbox of every connected peer, which
+    /// wakes the task receiving from it. The mailboxes must close in the same
+    /// order for two runs with the same seed to match.
+    #[test]
+    fn pr_5152_regression() {
+        fn run() -> (Vec<u64>, String) {
+            deterministic::Runner::seeded(0).start(|context| async move {
+                let cfg = default_test_config(&context, PrivateKey::from_seed(0), Vec::new());
+                let tracker_pk = cfg.myself.public_key.clone();
+                let (actor, mailbox, mut oracle) = Actor::new(context.child("tracker"), cfg);
+                let handle = actor.start();
+                let peers: Vec<_> = (1..=8u64)
+                    .map(|seed| (seed, PrivateKey::from_seed(seed).public_key()))
+                    .collect();
+                let tracked =
+                    std::iter::once(tracker_pk).chain(peers.iter().map(|(_, pk)| pk.clone()));
+                oracle.track(0, Set::try_from(tracked.collect::<Vec<_>>()).unwrap());
+
+                // Connect every peer and park a task on its mailbox.
+                let closed = Arc::new(Mutex::new(Vec::new()));
+                let mut reservations = Vec::new();
+                let mut receivers = Vec::new();
+                for (seed, pk) in peers {
+                    let (peer_mailbox, mut peer_receiver) =
+                        peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
+                    reservations.push(connect_to_peer(&mailbox, &pk, peer_mailbox).await);
+                    let (parked, ready) = oneshot::channel();
+                    let closed = closed.clone();
+                    receivers.push(context.child("peer").spawn(move |_| async move {
+                        parked.send(()).unwrap();
+                        assert!(peer_receiver.recv().await.is_none());
+                        closed.lock().push(seed);
+                    }));
+                    ready.await.unwrap();
+                }
+
+                handle.abort();
+                assert!(handle.await.is_err());
+                for receiver in receivers {
+                    receiver.await.unwrap();
+                }
+                drop(reservations);
+                let closed = closed.lock().clone();
+                (closed, context.auditor().state())
+            })
+        }
+        assert_eq!(run(), run());
     }
 
     #[test]
@@ -1325,7 +1378,6 @@ mod tests {
             let (mut signer1, peer1_pk) = new_signer_and_pk(1);
             let (_signer2, peer2_pk) = new_signer_and_pk(2);
 
-            // --- Initial Connect for unauthorized peer ---
             let (peer_mailbox1, mut peer_receiver1) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             assert!(
@@ -1343,7 +1395,6 @@ mod tests {
                 "connect rejection is signaled by a missing greeting"
             );
 
-            // --- Register set 0, then Construct for authorized peer1 ---
             let set0_peers: Set<_> = [tracker_pk.clone(), peer1_pk.clone(), peer2_pk.clone()]
                 .try_into()
                 .unwrap();
@@ -1365,7 +1416,6 @@ mod tests {
                 "Tracker should know itself in set 0"
             );
 
-            // --- Peer1 sends its info, tracker learns it, Construct reflects this ---
             let peer1_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             let peer1_ts = context.current().epoch_millis();
             let peer1_info = new_peer_info(
@@ -1391,7 +1441,6 @@ mod tests {
                 "Tracker should know peer1 in set 0 after Peers msg"
             );
 
-            // --- Peer1 sends BitVec for set 0, indicating it only knows tracker ---
             // Tracker should respond with Info for peer1_pk (as it just learned it)
             let mut peer1_knowledge_s0 = BitMap::zeroes(set0_peers.len() as u64);
             peer1_knowledge_s0.set(tracker_idx_s0 as u64, true); // Peer1 knows tracker
@@ -1412,7 +1461,6 @@ mod tests {
                 _ => panic!("Expected Peers message from tracker"),
             }
 
-            // --- Set eviction and peer killing ---
             let (_signer3, peer3_pk) = new_signer_and_pk(3);
             let set1_peers: Set<_> = [tracker_pk.clone(), peer2_pk.clone()].try_into().unwrap(); // New set without peer1
             oracle.track(1, set1_peers.clone());

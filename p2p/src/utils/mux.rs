@@ -19,7 +19,7 @@ use commonware_utils::channel::{
     mpsc::{self, error::TrySendError},
     oneshot,
 };
-use std::{collections::HashMap, fmt::Debug, time::SystemTime};
+use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
 use thiserror::Error;
 use tracing::debug;
 
@@ -52,7 +52,9 @@ enum Control<P: PublicKey> {
 }
 
 /// Routing table mapping each [Channel] to the [mpsc::Sender] for [`Message<P>`].
-type Routes<P> = HashMap<Channel, mpsc::Sender<Message<P>>>;
+///
+/// Ordered so that dropping the muxer closes subchannels in a reproducible order.
+type Routes<P> = BTreeMap<Channel, mpsc::Sender<Message<P>>>;
 
 /// A backup channel response with the [Channel] that wasn't registered and the [Message] received.
 type BackupResponse<P> = (Channel, Message<P>);
@@ -89,7 +91,7 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
             receiver,
             mailbox_size,
             control_rx,
-            routes: HashMap::new(),
+            routes: BTreeMap::new(),
             backup: None,
         };
 
@@ -505,9 +507,10 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, ordered::Set, probability};
+    use commonware_utils::{NZUsize, ordered::Set, probability, sync::Mutex};
     use std::{
         num::NonZeroU32,
+        sync::Arc,
         time::{Duration, SystemTime},
     };
 
@@ -1000,5 +1003,48 @@ mod tests {
             // Registering again should not return an error.
             handle.register(7).await.unwrap();
         });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5152.
+    ///
+    /// Aborting the muxer drops the sender of every route, which wakes the task
+    /// receiving from its subchannel. The routes must close in the same order for
+    /// two runs with the same seed to match.
+    #[test]
+    fn pr_5152_regression() {
+        fn run() -> (Vec<Channel>, String) {
+            deterministic::Runner::seeded(0).start(|context| async move {
+                let oracle = start_network(context.child("network"));
+                let (sender, receiver) =
+                    oracle.control(pk(0)).register(0, TEST_QUOTA).await.unwrap();
+                let (mux, mut handle) =
+                    Muxer::new(context.child("mux"), sender, receiver, CAPACITY);
+                let mux = mux.start();
+
+                // Park a task on every subchannel.
+                let closed = Arc::new(Mutex::new(Vec::new()));
+                let mut receivers = Vec::new();
+                for subchannel in 0..8 {
+                    let (_, mut sub_rx) = handle.register(subchannel).await.unwrap();
+                    let (parked, ready) = oneshot::channel();
+                    let closed = closed.clone();
+                    receivers.push(context.child("receiver").spawn(move |_| async move {
+                        parked.send(()).unwrap();
+                        assert!(sub_rx.recv().await.is_err());
+                        closed.lock().push(subchannel);
+                    }));
+                    ready.await.unwrap();
+                }
+
+                mux.abort();
+                assert!(mux.await.is_err());
+                for receiver in receivers {
+                    receiver.await.unwrap();
+                }
+                let closed = closed.lock().clone();
+                (closed, context.auditor().state())
+            })
+        }
+        assert_eq!(run(), run());
     }
 }

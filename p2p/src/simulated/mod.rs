@@ -204,7 +204,7 @@ mod tests {
     use futures::StreamExt;
     use rand::RngExt as _;
     use std::{
-        collections::{BTreeMap, HashMap, HashSet},
+        collections::{BTreeMap, HashSet},
         net::SocketAddr,
         num::NonZeroU32,
         time::Duration,
@@ -350,6 +350,73 @@ mod tests {
         compare_outputs(25, 25);
     }
 
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5152.
+    ///
+    /// Aborting the network drops every link and every peer's channel router.
+    /// Both hold channel senders, and dropping one wakes the task receiving from
+    /// it, so they must close in the same order for two runs with the same seed
+    /// to match.
+    #[test]
+    fn pr_5152_regression() {
+        fn run() -> String {
+            deterministic::Runner::seeded(0).start(|context| async move {
+                let (network, oracle) = Network::new(
+                    context.child("network"),
+                    Config {
+                        max_size: 1024 * 1024,
+                        max_peers_per_set: NZUsize!(4),
+                        disconnect_on_block: true,
+                        tracked_peer_sets: NZUsize!(1),
+                    },
+                );
+                let handle = network.start();
+                let peers: Vec<_> = (0..4)
+                    .map(|seed| PrivateKey::from_seed(seed).public_key())
+                    .collect();
+                let mut receivers = Vec::new();
+                for peer in &peers {
+                    for channel in 0..4 {
+                        let (_, mut receiver) = oracle
+                            .control(peer.clone())
+                            .register(channel, TEST_QUOTA)
+                            .await
+                            .unwrap();
+                        let drain = async move { while receiver.recv().await.is_ok() {} };
+                        receivers.push(context.child("receiver").spawn(|_| drain));
+                    }
+                }
+                track_peers(&oracle, peers.iter().cloned()).await;
+                for dialer in &peers {
+                    for listener in &peers {
+                        if dialer == listener {
+                            continue;
+                        }
+                        oracle
+                            .add_link(
+                                dialer.clone(),
+                                listener.clone(),
+                                Link {
+                                    latency: Duration::from_millis(1),
+                                    jitter: Duration::ZERO,
+                                    success_rate: probability!(1.0),
+                                },
+                            )
+                            .await
+                            .unwrap();
+                    }
+                }
+
+                handle.abort();
+                assert!(handle.await.is_err());
+                for receiver in receivers {
+                    receiver.await.unwrap();
+                }
+                context.auditor().state()
+            })
+        }
+        assert_eq!(run(), run());
+    }
+
     #[test]
     #[should_panic(expected = "message too large")]
     fn test_message_too_big() {
@@ -370,7 +437,7 @@ mod tests {
             network.start();
 
             // Register agents
-            let mut agents = HashMap::new();
+            let mut agents = BTreeMap::new();
             for i in 0..10 {
                 let pk = PrivateKey::from_seed(i as u64).public_key();
                 let (sender, _) = oracle

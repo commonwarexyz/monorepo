@@ -1,7 +1,7 @@
 use crate::{Error, mocks};
 use commonware_utils::{channel::mpsc, sync::Mutex};
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,
     sync::Arc,
@@ -51,14 +51,18 @@ type Dialable = mpsc::UnboundedSender<(
 #[derive(Clone)]
 pub struct Network {
     ephemeral: Arc<Mutex<u16>>,
-    listeners: Arc<Mutex<HashMap<SocketAddr, Dialable>>>,
+
+    /// Delivers dialed connections to the listener bound at each address.
+    ///
+    /// Ordered so that dropping the network closes listeners in a reproducible order.
+    listeners: Arc<Mutex<BTreeMap<SocketAddr, Dialable>>>,
 }
 
 impl Default for Network {
     fn default() -> Self {
         Self {
             ephemeral: Arc::new(Mutex::new(EPHEMERAL_PORT_RANGE.start)),
-            listeners: Arc::new(Mutex::new(HashMap::new())),
+            listeners: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -121,11 +125,13 @@ impl crate::Network for Network {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Clock, Runner, Spawner,
+        Clock, Listener as _, Network as _, Runner, Spawner, Supervisor as _, deterministic,
         network::{deterministic as DeterministicNetwork, tests},
     };
     use commonware_macros::test_group;
+    use commonware_utils::{channel::oneshot, sync::Mutex};
     use rstest::rstest;
+    use std::{net::SocketAddr, sync::Arc};
 
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
@@ -156,5 +162,41 @@ mod tests {
         runner.start(|context| async move {
             tests::stress_test_network_trait(context, DeterministicNetwork::Network::default).await;
         });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5152.
+    ///
+    /// Dropping the last context drops the network and the sender of every bound
+    /// listener, which wakes the task accepting on it. The listeners must close in
+    /// the same order for two runs with the same seed to match.
+    #[test]
+    fn pr_5152_regression() {
+        fn run() -> (Vec<u16>, String) {
+            deterministic::Runner::seeded(0).start(|context| async move {
+                let auditor = context.auditor();
+                let closed = Arc::new(Mutex::new(Vec::new()));
+                let mut acceptors = Vec::new();
+                for port in 10_000..10_008 {
+                    let address = SocketAddr::from(([127, 0, 0, 1], port));
+                    let mut listener = context.bind(address).await.unwrap();
+                    let (parked, ready) = oneshot::channel();
+                    let closed = closed.clone();
+                    acceptors.push(context.child("acceptor").spawn(move |_| async move {
+                        parked.send(()).unwrap();
+                        assert!(listener.accept().await.is_err());
+                        closed.lock().push(port);
+                    }));
+                    ready.await.unwrap();
+                }
+
+                drop(context);
+                for acceptor in acceptors {
+                    acceptor.await.unwrap();
+                }
+                let closed = closed.lock().clone();
+                (closed, auditor.state())
+            })
+        }
+        assert_eq!(run(), run());
     }
 }

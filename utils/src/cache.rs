@@ -314,31 +314,28 @@ impl<K: Hash + Eq, V> Cache<K, V> {
 
     /// Retains only the entries for which `keep` returns `true`.
     ///
-    /// Dropped entries' slots and allocations are retained for reuse.
+    /// Entries are visited in slot order. Dropped entries' slots and allocations
+    /// are retained for reuse.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
-        let Self {
-            index,
-            slots,
-            free,
-            topology,
-            small,
-            main,
-            ..
-        } = self;
-        index.retain(|&mut slot| {
-            let resident = &mut slots[slot];
-            let keep = keep(&resident.key, &resident.value);
-            if !keep {
-                match topology[slot].location() {
-                    Location::Small => small.unlink(topology, slot),
-                    Location::Main => main.unlink(topology, slot),
-                    Location::Free => unreachable!("resident slot cannot be free"),
-                }
-                resident.live = false;
-                free.push(slot);
-            }
-            keep
-        });
+        // Decide every entry before detaching any, so a panicking `keep` cannot
+        // leave freed slots in the index.
+        let dropped: Vec<Slot> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.live && !keep(&entry.key, &entry.value))
+            .map(|(slot, _)| slot)
+            .collect();
+        if dropped.is_empty() {
+            return;
+        }
+        for &slot in &dropped {
+            self.unlink_resident(slot);
+            self.slots[slot].live = false;
+        }
+        self.free.extend_from_slice(&dropped);
+        let slots = &self.slots;
+        self.index.retain(|&mut slot| slots[slot].live);
     }
 
     /// Removes all entries, dropping their values and retaining the allocated
@@ -1128,7 +1125,7 @@ mod tests {
     use core::cell::{Cell, RefCell};
     use proptest::{prelude::*, test_runner::TestCaseResult};
     use std::{
-        collections::{HashMap, HashSet, VecDeque},
+        collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
         rc::Rc,
         sync::Barrier,
         thread,
@@ -1258,6 +1255,35 @@ mod tests {
         cache.put(12, 120);
         assert_eq!(cache.slots.len(), 4);
         assert_eq!(cache.len(), 4);
+        cache.check_invariants();
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5152.
+    ///
+    /// `retain` offers entries to its predicate in slot order, and a predicate
+    /// that panics after rejecting an entry leaves the cache consistent.
+    #[test]
+    fn pr_5152_regression() {
+        let mut cache = Cache::new(NZUsize!(16));
+        cache.hasher = Hasher::with_seeds(1, 2, 3, 4);
+        for key in 0..16u64 {
+            cache.put(key, key);
+        }
+
+        let mut visited = Vec::new();
+        cache.retain(|&key, _| {
+            visited.push(key);
+            true
+        });
+        assert_eq!(visited, (0..16).collect::<Vec<_>>());
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.retain(|&key, _| {
+                assert_ne!(key, 1, "retain predicate panic");
+                key != 0
+            });
+        }));
+        assert!(result.is_err());
         cache.check_invariants();
     }
 
@@ -1542,7 +1568,7 @@ mod tests {
         // Oracle: last value written for each live key. A key the cache
         // reports as present must hold its last-written value (no stale or
         // conjured values). An evicted key is simply absent.
-        let mut model = HashMap::new();
+        let mut model = BTreeMap::new();
         for op in ops {
             match op {
                 Op::Get(key) => {
@@ -1760,7 +1786,7 @@ mod tests {
             assert!(young_len <= self.small.correlation_window);
             assert!(young_len <= self.small.len);
 
-            let mut resident = HashSet::new();
+            let mut resident = BTreeSet::new();
             for (rank, &slot) in small.iter().enumerate() {
                 assert!(resident.insert(slot), "duplicate Small resident {slot}");
                 assert!(self.slots[slot].live);
@@ -1805,10 +1831,10 @@ mod tests {
                 assert_eq!(self.topology[slot].next, main[(rank + 1) % main.len()]);
             }
 
-            let indexed: HashSet<_> = self.index.iter().copied().collect();
+            let indexed: BTreeSet<_> = self.index.iter().copied().collect();
             assert_eq!(indexed.len(), self.index.len(), "duplicate indexed slot");
             assert_eq!(indexed, resident);
-            for &slot in &self.index {
+            for &slot in &indexed {
                 assert!(slot < self.slots.len());
                 assert!(resident.contains(&slot));
                 assert_eq!(self.find_slot(&self.slots[slot].key), Some(slot));
@@ -2268,9 +2294,10 @@ mod tests {
         assert!(!cache.ghost_keys().is_empty());
         assert!(
             cache
-                .index
+                .slots
                 .iter()
-                .all(|&slot| cache.slots[slot].key % 2 == 0)
+                .filter(|entry| entry.live)
+                .all(|entry| entry.key % 2 == 0)
         );
         cache.check_invariants();
 
@@ -2631,7 +2658,7 @@ mod tests {
         assert_eq!(three.hashes(), 1);
     }
 
-    #[derive(Clone, Default, Eq, PartialEq)]
+    #[derive(Clone, Default, Eq, PartialEq, Ord, PartialOrd)]
     struct ProbeKey<const COLLIDE: bool>(String);
     impl<const COLLIDE: bool> Hash for ProbeKey<COLLIDE> {
         fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
@@ -2657,7 +2684,7 @@ mod tests {
                     cache.prefill(Vec::new);
                 }
                 let mut hints = Vec::new();
-                let mut live = HashMap::new();
+                let mut live = BTreeMap::new();
                 let mut grew = false;
                 for step in 0..1024usize {
                     let key = ProbeKey::<COLLIDE>(format!("key-{step}"));
@@ -2724,7 +2751,7 @@ mod tests {
 
     #[derive(Default)]
     struct Counts {
-        owners: RefCell<HashMap<usize, usize>>,
+        owners: RefCell<BTreeMap<usize, usize>>,
         clones: RefCell<Vec<usize>>,
         values: Cell<usize>,
     }
@@ -2802,7 +2829,7 @@ mod tests {
         assert!(counts.clones.borrow().is_empty());
         assert_eq!(
             *counts.owners.borrow(),
-            HashMap::from([(0, 1), (1, 1), (2, 1)])
+            BTreeMap::from([(0, 1), (1, 1), (2, 1)])
         );
 
         // Key 0 is historical: its admission must consume Ghost and evict Main's 1.
@@ -2812,7 +2839,7 @@ mod tests {
         assert!(counts.clones.borrow().is_empty());
         assert_eq!(
             *counts.owners.borrow(),
-            HashMap::from([(0, 1), (1, 0), (2, 1)])
+            BTreeMap::from([(0, 1), (1, 0), (2, 1)])
         );
         assert!(cache.remove(&OwnedKey::new(2, &counts)));
         assert_eq!(

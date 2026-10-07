@@ -91,29 +91,29 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
     /// and add any items not yet seen with a priority of `initial`.
     pub fn reconcile(&mut self, keep: &[I], default: P) {
         // Remove items not in keep
-        let mut retained: HashSet<_> = keep.iter().collect();
-        let to_remove = self
-            .keys
-            .keys()
-            .filter(|item| !retained.remove(*item))
-            .cloned()
-            .collect::<Vec<_>>();
-        for item in to_remove {
-            let priority = self.keys.remove(&item).unwrap();
-            let entry = Entry { item, priority };
-            self.entries.remove(&entry);
-        }
+        let retained: HashSet<_> = keep.iter().collect();
+        self.retain(|item| retained.contains(item));
 
-        // Add any items not yet removed with the initial priority
-        for item in retained {
-            self.put(item.clone(), default);
+        // Add any items not yet present with the initial priority
+        for item in keep {
+            if !self.keys.contains_key(item) {
+                self.put(item.clone(), default);
+            }
         }
     }
 
     /// Retains only the items where the key satisfies the predicate.
+    ///
+    /// Items are visited in priority-ascending order.
     pub fn retain(&mut self, predicate: impl Fn(&I) -> bool) {
-        self.entries.retain(|entry| predicate(&entry.item));
-        self.keys.retain(|key, _| predicate(key));
+        let keys = &mut self.keys;
+        self.entries.retain(|entry| {
+            let keep = predicate(&entry.item);
+            if !keep {
+                keys.remove(&entry.item);
+            }
+            keep
+        });
     }
 
     /// Returns `true` if the set contains the item.
@@ -164,7 +164,7 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::{cell::RefCell, time::Duration};
 
     #[test]
     fn test_put_remove_and_iter() {
@@ -274,6 +274,40 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(*entries[0].0, "key2");
         assert_eq!(*entries[1].0, "key1");
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5152.
+    ///
+    /// A stateful `retain` predicate keeps every other item it visits. It sees each item
+    /// exactly once in priority-ascending order, and every accessor agrees on the kept items.
+    #[test]
+    fn pr_5152_regression() {
+        let mut pq = PrioritySet::new();
+        for item in 0..16u64 {
+            pq.put(item, 16 - item);
+        }
+
+        let visited = RefCell::new(Vec::new());
+        pq.retain(|&item| {
+            let mut visited = visited.borrow_mut();
+            visited.push(item);
+            visited.len() % 2 == 1
+        });
+        assert_eq!(visited.into_inner(), (0..16).rev().collect::<Vec<_>>());
+
+        let kept: Vec<u64> = (1..16).rev().step_by(2).collect();
+        assert_eq!(pq.len(), kept.len());
+        assert_eq!(pq.iter().map(|(item, _)| *item).collect::<Vec<_>>(), kept);
+        assert_eq!(pq.peek().map(|(item, _)| *item), Some(15));
+        for item in 0..16 {
+            assert_eq!(pq.contains(&item), kept.contains(&item));
+            assert_eq!(pq.get(&item).is_some(), kept.contains(&item));
+        }
+        for item in kept {
+            assert_eq!(pq.pop(), Some((item, 16 - item)));
+            assert!(!pq.contains(&item));
+        }
+        assert!(pq.is_empty());
     }
 
     #[test]

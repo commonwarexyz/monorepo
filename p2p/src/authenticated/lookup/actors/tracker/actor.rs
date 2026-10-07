@@ -18,14 +18,13 @@ use commonware_utils::{
     ordered::Set,
 };
 use rand_core::Rng;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> {
     context: ContextCell<E>,
 
-    // ---------- Message-Passing ----------
     /// The mailbox for the actor.
     ///
     /// We use this to support sending a [`Message::Release`] message to the actor
@@ -35,13 +34,14 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// The mailbox for the listener.
     listener: listener::Mailbox,
 
-    // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
     directory: Directory<E, C>,
 
     /// Maps a peer's public key to its mailbox.
     /// Set when a peer connects and cleared when it is blocked or released.
-    mailboxes: HashMap<C, peer::Mailbox>,
+    ///
+    /// Ordered so that dropping the tracker closes peer mailboxes in a reproducible order.
+    mailboxes: BTreeMap<C, peer::Mailbox>,
 
     /// Subscribers to peer set updates.
     subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<C>>>,
@@ -79,7 +79,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
                 receiver,
                 directory,
                 listener: cfg.listener,
-                mailboxes: HashMap::new(),
+                mailboxes: BTreeMap::new(),
                 subscribers: Vec::new(),
                 blocked_subscribers: Vec::new(),
             },
@@ -271,11 +271,14 @@ mod tests {
     };
     use commonware_utils::{
         NZUsize,
+        channel::oneshot,
         ordered::{Map, Set},
+        sync::Mutex,
     };
     use futures::{FutureExt, StreamExt};
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+        sync::Arc,
         time::Duration,
     };
 
@@ -324,6 +327,69 @@ mod tests {
         actor.start();
 
         TestHarness { mailbox, oracle }
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5152.
+    ///
+    /// Aborting the tracker drops the mailbox of every connected peer, which
+    /// wakes the task receiving from it. The mailboxes must close in the same
+    /// order for two runs with the same seed to match.
+    #[test]
+    fn pr_5152_regression() {
+        fn run() -> (Vec<u64>, String) {
+            deterministic::Runner::seeded(0).start(|context| async move {
+                let (cfg, _updates) = test_config(PrivateKey::from_seed(0), false);
+                let (actor, mailbox, mut oracle) = Actor::new(context.child("tracker"), cfg);
+                let handle = actor.start();
+                let peers: Vec<_> = (1..=8u64)
+                    .map(|seed| (seed, PrivateKey::from_seed(seed).public_key()))
+                    .collect();
+                let addresses = Map::<_, crate::Address>::try_from(
+                    peers
+                        .iter()
+                        .map(|(seed, pk)| {
+                            let address =
+                                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1000 + *seed as u16);
+                            (pk.clone(), address.into())
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+                oracle.track(0, addresses);
+
+                // Connect every peer and park a task on its mailbox.
+                let closed = Arc::new(Mutex::new(Vec::new()));
+                let mut reservations = Vec::new();
+                let mut receivers = Vec::new();
+                for (seed, pk) in peers {
+                    let reservation = mailbox.listen(pk.clone(), Ipv4Addr::LOCALHOST.into()).await;
+                    reservations.push(reservation.unwrap());
+                    let (peer_mailbox, mut receiver) = peer::Mailbox::new(NZUsize!(1));
+                    mailbox.connect(pk, peer_mailbox);
+                    let (parked, ready) = oneshot::channel();
+                    let closed = closed.clone();
+                    receivers.push(context.child("peer").spawn(move |_| async move {
+                        parked.send(()).unwrap();
+                        assert!(receiver.next().await.is_none());
+                        closed.lock().push(seed);
+                    }));
+                    ready.await.unwrap();
+                }
+
+                // The tracker handles messages in order, so this reply means it holds
+                // every mailbox.
+                mailbox.dialable().await;
+                handle.abort();
+                assert!(handle.await.is_err());
+                for receiver in receivers {
+                    receiver.await.unwrap();
+                }
+                drop(reservations);
+                let closed = closed.lock().clone();
+                (closed, context.auditor().state())
+            })
+        }
+        assert_eq!(run(), run());
     }
 
     #[test]
