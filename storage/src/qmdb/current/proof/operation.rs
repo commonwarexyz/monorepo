@@ -2,7 +2,7 @@
 
 use super::{RangeProof, chunk_bits};
 use crate::{
-    merkle::{Graftable, Location, Position, RangePlan, storage::Storage},
+    merkle::{ElementPlan, Graftable, Location, Position, storage::Storage},
     qmdb::Error,
 };
 use bytes::{BufMut, Bytes};
@@ -56,33 +56,31 @@ impl<F: Graftable, D: Digest, const N: usize> Proof<F, D, [u8; N]> {
         })
     }
 
-    /// Build an inclusion proof for the single operation `plan` covers from digests already in
-    /// memory, building the range proof with [RangeProof::build].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `plan` covers more than one location.
+    /// Build an inclusion proof for the operation `plan` covers from digests already in memory,
+    /// building the range proof with [RangeProof::build].
     ///
     /// # Errors
     ///
-    /// Returns [Error::OperationPruned] if the location falls in a pruned bitmap chunk.
+    /// Returns [Error::OperationPruned] if the location falls in a pruned bitmap chunk, and
+    /// otherwise the errors of [RangeProof::build].
     pub fn build<H: Hasher<Digest = D>>(
         status: &impl BitmapReadable<N>,
-        plan: RangePlan<F>,
+        plan: ElementPlan<F>,
         get_node: impl Fn(Position<F>) -> Option<D>,
         inactivity_floor: Location<F>,
         ops_root: D,
     ) -> Result<Self, Error<F>> {
-        let loc = plan.range().start;
-        assert!(
-            plan.range().end == loc + 1,
-            "operation proof plan must cover one location"
-        );
+        let loc = plan.location();
         if BitMap::<N>::to_chunk_index(*loc) < status.pruned_chunks() {
             return Err(Error::OperationPruned(loc));
         }
-        let range_proof =
-            RangeProof::build::<H, N>(status, plan, get_node, inactivity_floor, ops_root)?;
+        let range_proof = RangeProof::build::<H, N>(
+            status,
+            plan.into_range(),
+            get_node,
+            inactivity_floor,
+            ops_root,
+        )?;
         let chunk = status.get_chunk(BitMap::<N>::to_chunk_index(*loc));
         Ok(Self {
             loc,

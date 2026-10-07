@@ -32,7 +32,9 @@ use commonware_cryptography::Digest;
 use core::fmt::Debug;
 pub use location::{Location, LocationRangeExt};
 pub use position::Position;
-pub use proof::{MAX_PROOF_DIGESTS_PER_ELEMENT, Proof, RangePlan, multi_proof_positions};
+pub use proof::{
+    ElementPlan, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof, RangePlan, multi_proof_positions,
+};
 pub use read::Readable;
 use thiserror::Error;
 

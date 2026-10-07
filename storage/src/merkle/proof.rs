@@ -53,10 +53,9 @@ pub enum ReconstructionError {
 /// 4. The sibling digests needed to reconstruct each range-peak digest from the proven elements,
 ///    in depth-first (forward consumption) order for each range peak.
 ///
-/// Multi-proofs use a different, position-keyed layout: `digests` contains the sorted set of node
-/// digests required by the requested `inactive_peaks` and bagging policy. For `BackwardFold`, this
-/// may include active suffix peaks that a single range proof could collapse into a synthetic suffix
-/// accumulator.
+/// Multi-proofs use a different, position-keyed layout: `digests` contains the node digests at
+/// [multi_proof_positions], in that order. This may include active suffix peaks that a single
+/// `BackwardFold` range proof would collapse into a synthetic suffix accumulator.
 #[derive(Clone, Debug, Eq)]
 pub struct Proof<F: Family, D: Digest> {
     /// The total number of leaves in the data structure. For MMR proofs, this is the number of
@@ -554,7 +553,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
 
 /// A perfect binary subtree within a peak, identified by its root position, height,
 /// and the first leaf location it covers.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub(crate) struct Subtree<F: Family> {
     /// Position of the subtree root node.
     pub pos: Position<F>,
@@ -750,6 +749,7 @@ impl<F: Family> Subtree<F> {
 /// is read, whether the proof lists it or folds it into an accumulator, and every peak overlapping
 /// the range is rebuilt from its path siblings. Those two parameters only shape the proof's
 /// layout, which [Self::build] applies.
+#[derive(Debug)]
 pub struct RangePlan<F: Family> {
     /// Total number of leaves in the structure.
     leaves: Location<F>,
@@ -763,8 +763,6 @@ pub struct RangePlan<F: Family> {
     after: Vec<Position<F>>,
     /// Path siblings of the overlapping peaks, in left-first DFS order.
     siblings: Vec<Position<F>>,
-    /// Every position the proof reads, in strictly increasing order.
-    positions: Vec<Position<F>>,
 }
 
 impl<F: Family> RangePlan<F> {
@@ -816,19 +814,11 @@ impl<F: Family> RangePlan<F> {
         );
 
         // Siblings are kept in left-first DFS order because the verifier replays the same walk
-        // to rebuild each overlapping peak; the sorted copy is only for batched storage reads.
+        // to rebuild each overlapping peak.
         let mut siblings = Vec::new();
         for peak in &overlapping {
             peak.collect_siblings(&range, &mut siblings);
         }
-        let mut positions: Vec<_> = before
-            .iter()
-            .map(|peak| peak.pos)
-            .chain(after.iter().copied())
-            .chain(siblings.iter().copied())
-            .collect();
-        positions.sort_unstable();
-        positions.dedup();
         Ok(Self {
             leaves,
             range,
@@ -836,7 +826,6 @@ impl<F: Family> RangePlan<F> {
             overlapping,
             after,
             siblings,
-            positions,
         })
     }
 
@@ -850,10 +839,22 @@ impl<F: Family> RangePlan<F> {
         &self.range
     }
 
-    /// Every position the proof reads, in strictly increasing order, as
-    /// [super::storage::Storage::get_nodes] requires.
-    pub fn positions(&self) -> &[Position<F>] {
-        &self.positions
+    /// Every position the proof reads, in no particular order.
+    fn reads(&self) -> impl Iterator<Item = Position<F>> + '_ {
+        self.before
+            .iter()
+            .map(|peak| peak.pos)
+            .chain(self.after.iter().copied())
+            .chain(self.siblings.iter().copied())
+    }
+
+    /// Every position the proof reads, in strictly increasing order, as a batched storage read
+    /// requires.
+    pub fn positions(&self) -> Vec<Position<F>> {
+        let mut positions: Vec<_> = self.reads().collect();
+        positions.sort_unstable();
+        positions.dedup();
+        positions
     }
 
     /// Build the proof from the digests at [Self::positions], read through `get_node`.
@@ -879,6 +880,49 @@ impl<F: Family> RangePlan<F> {
             inactive_peaks,
             get_node,
         )
+    }
+}
+
+/// The plan of a proof of one element: a [RangePlan] over `location..location + 1`, which is what
+/// a proof of a single element reads.
+#[derive(Debug)]
+pub struct ElementPlan<F: Family> {
+    location: Location<F>,
+    range: RangePlan<F>,
+}
+
+impl<F: Family> ElementPlan<F> {
+    /// Plan a proof of the element at `location` in a structure of `leaves` leaves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [super::Error::LocationOverflow] if `location` is not a valid index or `leaves`
+    /// exceeds [Family::MAX_LEAVES], and [super::Error::RangeOutOfBounds] if `location` is at or
+    /// beyond `leaves`.
+    pub fn new(leaves: Location<F>, location: Location<F>) -> Result<Self, super::Error<F>> {
+        let end = location
+            .checked_add(1)
+            .ok_or(super::Error::LocationOverflow(location))?;
+        Ok(Self {
+            location,
+            range: RangePlan::new(leaves, location..end)?,
+        })
+    }
+
+    /// The proven element's location.
+    pub const fn location(&self) -> Location<F> {
+        self.location
+    }
+
+    /// Every position the proof reads, in strictly increasing order, as a batched storage read
+    /// requires.
+    pub fn positions(&self) -> Vec<Position<F>> {
+        self.range.positions()
+    }
+
+    /// The same plan as a range plan over `location..location + 1`.
+    pub fn into_range(self) -> RangePlan<F> {
+        self.range
     }
 }
 
@@ -939,7 +983,6 @@ impl<F: Family> Blueprint<F> {
             overlapping,
             after,
             siblings,
-            positions: _,
         } = plan;
 
         // `inactive_peaks` is a global boundary over the tree's peaks, not just the peaks before
@@ -1135,14 +1178,13 @@ impl<F: Family> Blueprint<F> {
 pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 122;
 
 /// Positions a multi-proof over `locations` reads from a structure of `leaves` leaves, in
-/// strictly increasing order: the union of each location's [RangePlan::positions], so it does
+/// strictly increasing order: the union of each location's [ElementPlan::positions], so it does
 /// not depend on bagging or inactive peaks either. A multi-proof is these digests in this order.
 ///
 /// # Errors
 ///
-/// Returns [super::Error::Empty] if `locations` is empty, [super::Error::LocationOverflow] if a
-/// location or `leaves` exceeds [Family::MAX_LEAVES], and [super::Error::RangeOutOfBounds] if a
-/// location is at or beyond `leaves`.
+/// Returns [super::Error::Empty] if `locations` is empty, and otherwise the errors of
+/// [ElementPlan::new] for the first offending location.
 pub fn multi_proof_positions<F: Family>(
     leaves: Location<F>,
     locations: &[Location<F>],
@@ -1150,13 +1192,11 @@ pub fn multi_proof_positions<F: Family>(
     if locations.is_empty() {
         return Err(super::Error::Empty);
     }
-    let positions = locations.iter().try_fold(BTreeSet::new(), |mut acc, loc| {
-        if !loc.is_valid_index() {
-            return Err(super::Error::LocationOverflow(*loc));
-        }
-        acc.extend(RangePlan::new(leaves, *loc..*loc + 1)?.positions());
-        Ok(acc)
-    })?;
+    let mut positions = BTreeSet::new();
+    for loc in locations {
+        let plan = ElementPlan::new(leaves, *loc)?.into_range();
+        positions.extend(plan.reads());
+    }
     Ok(positions.into_iter().collect())
 }
 
@@ -1268,10 +1308,9 @@ mod tests {
                 let mut union = set
                     .iter()
                     .flat_map(|&loc| {
-                        RangePlan::new(Location::new(leaves), loc..loc + 1)
+                        ElementPlan::new(Location::new(leaves), loc)
                             .unwrap()
                             .positions()
-                            .to_vec()
                     })
                     .collect::<Vec<_>>();
                 union.sort_unstable();
@@ -1303,6 +1342,51 @@ mod tests {
             multi_proof_positions(leaves, &[Location::new(u64::MAX)]),
             Err(Error::LocationOverflow(_))
         ));
+    }
+
+    #[test]
+    fn element_plan_rejects_invalid_inputs() {
+        type F = mmr::Family;
+        let leaves = Location::<F>::new(8);
+        assert!(matches!(
+            ElementPlan::new(leaves, leaves),
+            Err(Error::RangeOutOfBounds(_))
+        ));
+        for location in [F::MAX_LEAVES, Location::new(u64::MAX)] {
+            assert!(matches!(
+                ElementPlan::new(leaves, location),
+                Err(Error::LocationOverflow(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn range_plan_build_reports_the_first_missing_node_and_rejects_before_reading() {
+        type F = mmr::Family;
+        let hasher = H::new(BackwardFold);
+        let mem = build_raw::<F>(&hasher, 11);
+        let plan = || RangePlan::new(mem.leaves(), Location::new(3)..Location::new(5)).unwrap();
+        let positions = plan().positions();
+        let missing = positions[1];
+        let reads = core::cell::RefCell::new(Vec::new());
+        let get_node = |pos: Position<F>| {
+            reads.borrow_mut().push(pos);
+            (pos != missing).then(|| mem.get_node(pos)).flatten()
+        };
+        assert!(matches!(
+            plan().build(&hasher, 0, get_node),
+            Err(Error::ElementPruned(pos)) if pos == missing
+        ));
+        reads.borrow_mut().clear();
+        let peaks = F::peaks(mem.size()).count();
+        assert!(matches!(
+            plan().build(&hasher, peaks + 1, get_node),
+            Err(Error::InvalidProof)
+        ));
+        assert!(
+            reads.borrow().is_empty(),
+            "an invalid inactive boundary must not read nodes"
+        );
     }
 
     fn test_digest(v: u8) -> D {

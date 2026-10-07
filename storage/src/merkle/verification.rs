@@ -310,8 +310,9 @@ pub async fn historical_range_proof<
     inactive_peaks: usize,
 ) -> Result<Proof<F, D>, Error<F>> {
     let plan = RangePlan::new(leaves, range)?;
-    let digests = merkle.get_nodes(plan.positions()).await?;
-    let fetched: AHashMap<_, _> = plan.positions().iter().copied().zip(digests).collect();
+    let positions = plan.positions();
+    let digests = merkle.get_nodes(&positions).await?;
+    let fetched: AHashMap<_, _> = positions.into_iter().zip(digests).collect();
     plan.build(hasher, inactive_peaks, |pos| fetched.get(&pos).copied())
 }
 
@@ -329,13 +330,18 @@ pub async fn historical_range_proof<
 /// Returns [Error::RangeOutOfBounds] if any location in `locations` > `merkle.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if locations is empty
+/// Returns [Error::InvalidProof] if `inactive_peaks` exceeds the number of peaks
 pub async fn multi_proof<F: Family, D: Digest, S: Storage<F, Digest = D>>(
     merkle: &S,
     inactive_peaks: usize,
     locations: &[Location<F>],
 ) -> Result<Proof<F, D>, Error<F>> {
-    let leaves = Location::try_from(merkle.size())?;
+    let size = merkle.size();
+    let leaves = Location::try_from(size)?;
     let positions = multi_proof_positions(leaves, locations)?;
+    if inactive_peaks > F::peaks(size).count() {
+        return Err(Error::InvalidProof);
+    }
     let digests = merkle.get_nodes(&positions).await?;
     Ok(Proof {
         leaves,
@@ -361,6 +367,30 @@ mod tests {
 
     fn test_digest(v: u8) -> Digest {
         Sha256::hash(&[&[v]])
+    }
+
+    #[test_traced]
+    fn test_multi_proof_rejects_invalid_inactive_peaks() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let mut mmr = Mmr::new();
+            let batch = {
+                let mut batch = mmr.new_batch();
+                for element in (0..11).map(test_digest) {
+                    batch = batch.add(&hasher, &element);
+                }
+                batch.merkleize(&mmr, &hasher)
+            };
+            mmr.apply_batch(&batch).unwrap();
+            let peaks = crate::mmr::Family::peaks(mmr.size()).count();
+            let locations = [Location::new(1), Location::new(7)];
+            assert!(multi_proof(&mmr, peaks, &locations).await.is_ok());
+            assert!(matches!(
+                multi_proof(&mmr, peaks + 1, &locations).await,
+                Err(Error::InvalidProof)
+            ));
+        });
     }
 
     #[test_traced]

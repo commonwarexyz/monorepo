@@ -259,8 +259,9 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
     ) -> Result<Self, Error<F>> {
         let ops_leaves = Location::try_from(storage.size())?;
         let plan = merkle::RangePlan::new(ops_leaves, range)?;
-        let digests = storage.get_nodes(plan.positions()).await?;
-        let fetched: AHashMap<_, _> = plan.positions().iter().copied().zip(digests).collect();
+        let positions = plan.positions();
+        let digests = storage.get_nodes(&positions).await?;
+        let fetched: AHashMap<_, _> = positions.into_iter().zip(digests).collect();
         Self::build::<H, N>(
             status,
             plan,
@@ -272,14 +273,17 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
     /// Build the range proof planned by `plan` from digests already in memory.
     ///
-    /// `get_node` supplies the ops-tree digest at each of the plan's positions, and `status` the
-    /// bitmap chunks of [required_chunks]. The plan's leaf count and `status` must describe one
-    /// consistent snapshot.
+    /// `get_node` supplies the digest at each of the plan's positions as the grafted view of the
+    /// ops tree serves them, like [crate::qmdb::current::db::Db::grafted_storage]: plain ops-tree
+    /// digests below the grafting height and bitmap-authenticated grafted digests at and above it.
+    /// `status` supplies the bitmap chunks of [required_chunks]. The plan's leaf count, the digests,
+    /// `status`, `inactivity_floor`, and `ops_root` must all describe one snapshot.
     ///
     /// # Errors
     ///
     /// Returns the errors of [merkle::RangePlan::build], and [Error::DataCorrupted] if the bitmap
-    /// and the plan's leaf count imply more than one pending chunk.
+    /// and the plan's leaf count imply more than one pending chunk or pruning beyond the graftable
+    /// chunks.
     pub fn build<H: Hasher<Digest = D>, const N: usize>(
         status: &impl BitmapReadable<N>,
         plan: merkle::RangePlan<F>,
@@ -2582,15 +2586,24 @@ mod tests {
                     .collect::<Vec<_>>();
                     assert!(required.windows(2).all(|pair| pair[0] < pair[1]));
                     let ops_leaves = Location::new(leaves);
-                    let range = location.map_or(floor..ops_leaves, |loc| loc..loc + 1);
-                    let plan = merkle::RangePlan::new(ops_leaves, range).unwrap();
-                    let positions = plan.positions().iter().map(|pos| **pos).collect::<Vec<_>>();
+                    let planned = location.map_or_else(
+                        || {
+                            merkle::RangePlan::new(ops_leaves, floor..ops_leaves)
+                                .unwrap()
+                                .positions()
+                        },
+                        |loc| {
+                            merkle::ElementPlan::new(ops_leaves, loc)
+                                .unwrap()
+                                .positions()
+                        },
+                    );
+                    let positions = planned.iter().map(|pos| **pos).collect::<Vec<_>>();
                     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
-                    let fetched: BTreeMap<_, _> = plan
-                        .positions()
+                    let fetched: BTreeMap<_, _> = planned
                         .iter()
                         .copied()
-                        .zip(grafted_storage.get_nodes(plan.positions()).await.unwrap())
+                        .zip(grafted_storage.get_nodes(&planned).await.unwrap())
                         .collect();
                     let get_node = |pos: Position<F>| fetched.get(&pos).copied();
                     let storage = RecordingStorage {
@@ -2614,7 +2627,11 @@ mod tests {
                             .unwrap();
                         let built =
                             constant::OperationProof::<F, sha256::Digest, 1>::build::<Sha256>(
-                                &preloaded, plan, get_node, floor, ops_root,
+                                &preloaded,
+                                merkle::ElementPlan::new(ops_leaves, loc).unwrap(),
+                                get_node,
+                                floor,
+                                ops_root,
                             )
                             .unwrap();
                         assert_eq!(built, proof);
@@ -2640,7 +2657,11 @@ mod tests {
                         .await
                         .unwrap();
                         let built = RangeProof::build::<Sha256, 1>(
-                            &preloaded, plan, get_node, floor, ops_root,
+                            &preloaded,
+                            merkle::RangePlan::new(ops_leaves, floor..ops_leaves).unwrap(),
+                            get_node,
+                            floor,
+                            ops_root,
                         )
                         .unwrap();
                         assert_eq!(built, proof);
@@ -2679,6 +2700,24 @@ mod tests {
     async fn required_reads_match_constructor_reads() {
         check_constructor_reads::<mmr::Family>().await;
         check_constructor_reads::<mmb::Family>().await;
+    }
+
+    #[test_async]
+    async fn operation_proof_build_rejects_pruned_locations() {
+        type F = mmr::Family;
+        let (bitmap, ops, _) = fixture::<F>(16, 1).await;
+        let ops_root = ops.root(&qmdb::hasher::<Sha256>(), 0).unwrap();
+        let plan = merkle::ElementPlan::new(Location::new(16), Location::new(3)).unwrap();
+        assert!(matches!(
+            constant::OperationProof::<F, sha256::Digest, 1>::build::<Sha256>(
+                &bitmap,
+                plan,
+                |_| None,
+                Location::new(8),
+                ops_root,
+            ),
+            Err(Error::OperationPruned(loc)) if *loc == 3
+        ));
     }
 
     #[test]
