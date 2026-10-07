@@ -1656,6 +1656,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     pub(crate) async fn append(mut self: Box<Self>, item: &V) -> Result<(Box<Self>, u64), Error> {
         let _timer = self.metrics.append_timer();
         self.metrics.append_calls.inc();
+        // A compressed frame's size isn't known until it's compressed, so it can't be encoded
+        // in place.
         if self.compression.is_some() {
             return self
                 .append_many_inner(Many::Flat(std::slice::from_ref(item)))
@@ -4692,8 +4694,8 @@ mod tests {
     #[test_traced]
     fn test_single_append_matches_batch_across_boundaries() {
         deterministic::Runner::default().start(|context| async move {
-            // Lengths straddle the 1/2-byte length prefix (127/128). Each capacity fills the
-            // write buffer at different points, mixing in-buffer and own-buffer appends.
+            // Encoded sizes cross the 1-to-2-byte frame length prefix (Vec lengths 101 vs 127).
+            // Small items fit every capacity, but the 4 KiB item always takes the own-buffer path.
             let items: Vec<Vec<u8>> = [
                 0, 1, 100, 101, 127, 128, 1_024, 3, 4_096, 0, 15, 250, 128, 7, 128,
             ]
@@ -4738,7 +4740,7 @@ mod tests {
                 drop(single.sync().await.unwrap());
                 drop(batch.sync().await.unwrap());
 
-                // Single-item and batch appends write identical frames, offsets, and checksums.
+                // Both journals must have written byte-identical data and offsets files.
                 for (left, right) in [
                     (single_cfg.data_partition(), batch_cfg.data_partition()),
                     (

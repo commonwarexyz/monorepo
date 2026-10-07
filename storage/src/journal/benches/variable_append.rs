@@ -48,8 +48,8 @@ fn bench_case<const SIZE: usize>(
                     )
                     .await
                     .unwrap();
-                    // Append one item untimed so first-append setup isn't measured. Durable
-                    // cases also commit it, so timing starts with nothing pending.
+                    // Append one item first, so the write buffers' initial allocation isn't
+                    // timed. Durable cases also commit it, so timing starts with nothing pending.
                     (journal, _) = journal.append(&item).await.unwrap();
                     if commit_every != 0 {
                         journal = journal.commit().await.unwrap();
@@ -73,7 +73,8 @@ fn bench_case<const SIZE: usize>(
 }
 
 fn bench_size<const SIZE: usize>(c: &mut Criterion) {
-    // 320 KiB fits in the 1 MiB write buffer, so nothing reaches disk: measures CPU cost only.
+    // 320 KiB fits in the 1 MiB write buffer, so nothing is written to disk and only CPU cost
+    // is timed.
     bench_case::<SIZE>(c, 320 * 1024 / SIZE, None, 0);
     // 4 MiB fills the write buffer several times, then commits once at the end.
     let items = 4 * 1024 * 1024 / SIZE;
@@ -84,7 +85,7 @@ fn bench(c: &mut Criterion) {
     bench_size::<32>(c);
     bench_size::<256>(c);
     bench_size::<4_096>(c);
-    // Compressed appends still take the batch path.
+    // Compressed appends, which take the batch path.
     bench_case::<32>(c, 320 * 1024 / 32, Some(3), 0);
     // Frequent commits, where fsync dominates the per-item cost.
     bench_case::<32>(c, 64, None, 1);
