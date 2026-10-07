@@ -592,11 +592,8 @@ where
                 }
                 self.bitmap.push(true);
                 ops.push(Operation::Update(Update(key, value)));
-            } else if let Some(old_loc) = old_loc
-                && let Some(mut cursor) = self.snapshot.get_mut(&key)
-                && cursor.find(matches)
-            {
-                cursor.delete();
+            } else if let Some(old_loc) = old_loc {
+                delete_known_loc(&mut self.snapshot, &key, old_loc);
                 self.bitmap.set_bit(*old_loc, false);
                 self.bitmap.push(false);
                 ops.push(Operation::Delete(key));
@@ -609,15 +606,12 @@ where
         self.bitmap.set_bit(*start_loc - 1, false);
 
         // Walk the floor toward the tip the writes reached, under the limits the policy sets for
-        // the operations they made inactive. An empty store has no active update to move or
-        // decide.
-        if !self.is_empty() {
-            let tip = Location::new(*start_loc + Widen::widen(ops.len()));
-            let Limits { entries, skips } = policy.limits(made_inactive);
-            let mut walk = Walk::new(self.inactivity_floor_loc, tip, entries, skips);
-            self.walk(&mut walk, policy, &mut ops).await?;
-            self.inactivity_floor_loc = walk.floor;
-        }
+        // the operations they made inactive.
+        let tip = Location::new(*start_loc + Widen::widen(ops.len()));
+        let Limits { entries, skips } = policy.limits(made_inactive);
+        let mut walk = Walk::new(self.inactivity_floor_loc, tip, entries, skips);
+        self.walk(&mut walk, policy, &mut ops).await?;
+        self.inactivity_floor_loc = walk.floor;
 
         // The writes or the policy's evictions may leave the store empty.
         if self.is_empty() {
@@ -670,12 +664,7 @@ where
         // Each reached update appends at most one operation, and the commit follows.
         ops.reserve(reachable + 1);
         let logged = candidates[..reachable].partition_point(|&loc| loc < start);
-        let mut reads = if logged == 0 {
-            Vec::new()
-        } else {
-            self.log.read_many(&candidates[..logged]).await?
-        }
-        .into_iter();
+        let mut reads = self.log.read_many(&candidates[..logged]).await?.into_iter();
         for &loc in &candidates[..reachable] {
             let reached = walk.reach(Location::new(loc));
             assert!(reached, "candidate within the walk's reach");

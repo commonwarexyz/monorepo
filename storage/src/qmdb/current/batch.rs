@@ -39,11 +39,8 @@ use commonware_utils::{
 use core::ops::Range;
 use std::sync::Arc;
 
-/// Speculative chunk-level bitmap overlay.
-///
-/// Instead of tracking individual pushed bits and cleared locations, maintains materialized chunk
-/// bytes for every chunk that differs from the parent bitmap. This directly produces the chunk data
-/// needed for grafted MMR leaf computation.
+/// Speculative chunk-level bitmap overlay: materialized bytes for every chunk that differs from
+/// the parent bitmap, which grafted MMR leaf computation reads directly.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ChunkOverlay<const N: usize> {
     /// Dirty chunks: chunk_idx -> materialized chunk bytes.
@@ -281,7 +278,7 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// The inner any-layer batch that handles mutations, journal, and floor raise.
+    /// The inner any-layer batch that handles mutations, journal, and floor walk.
     inner: any::batch::UnmerkleizedBatch<F, H, U, S>,
 
     /// Parent's grafted MMR state.
@@ -551,8 +548,6 @@ where
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
 
-        // Overlap the update resolution with a candidate prefetch. The helper clamps the prefetch
-        // to the committed prefix.
         let (prepared, staged) = inner
             .resolve_updates_prefetched(updates, upserts, &db.any, &*policy, &bitmap_parent)
             .await?;

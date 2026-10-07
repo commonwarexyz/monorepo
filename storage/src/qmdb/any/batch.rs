@@ -513,8 +513,7 @@ where
     mutations: BTreeMap<U::Key, Option<U::Value>>,
     /// Merkleization state, including the retained ancestor chain.
     merkleizer: Merkleizer<F, H, U, S>,
-    /// The committed floor candidates a staged merkleize read while it resolved its updates. The
-    /// floor walk takes them whole as its first round.
+    /// The committed floor candidates a staged merkleize read while it resolved its updates.
     prefetched: Option<Prefetched<F, U>>,
 }
 
@@ -989,7 +988,7 @@ where
         log: &authenticated::Journal<F, E, C, H, S>,
         scan: &mut Location<F>,
         last: Location<F>,
-        mut need: usize,
+        need: usize,
         inactive: &[Location<F>],
         source: &mut impl Candidates<F>,
     ) -> Result<Round<F, U>, crate::qmdb::Error<F>>
@@ -1010,9 +1009,9 @@ where
         let remaining = usize::try_from((*last).saturating_sub(**scan)).unwrap_or(usize::MAX);
         let mut candidates = Vec::with_capacity(need.min(hint).min(remaining));
         let mut inactive_at = inactive.partition_point(|loc| *loc < *scan);
-        while need > 0 && *scan < last {
+        while candidates.len() < need && *scan < last {
             let kept = candidates.len();
-            let next = source.fill(*scan, *last, kept.saturating_add(need), &mut candidates);
+            let next = source.fill(*scan, *last, need, &mut candidates);
             if candidates.len() == kept {
                 // No candidate remains below `last`.
                 *scan = last;
@@ -1023,7 +1022,6 @@ where
 
             // With no listed location left ahead, every new candidate counts.
             if inactive_at == inactive.len() {
-                need -= candidates.len() - kept;
                 continue;
             }
 
@@ -1035,7 +1033,6 @@ where
                 if sorted_contains(inactive, &mut inactive_at, &loc) {
                     continue;
                 }
-                need -= 1;
                 candidates[write] = loc;
                 write += 1;
             }
@@ -1787,11 +1784,7 @@ where
     ///
     /// The selection is clamped to the committed boundary: a speculative source (e.g. the current
     /// variant's parent bitmap) extends past it, but its candidate sequence below the boundary is
-    /// identical and only committed locations need the log read. When the set activity bits
-    /// below the boundary run out early, sources may hand back either one past the last emitted
-    /// candidate or the committed boundary as the continuation point. Both are correct: the skipped span holds no
-    /// set bits, and the source cannot change during the call (commits and prunes take `&mut` on
-    /// the database).
+    /// identical and only committed locations need the log read.
     pub(crate) async fn resolve_updates_prefetched<'a, E, C, I, const N: usize>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
@@ -2304,12 +2297,8 @@ where
 {
     /// Complete a prepared merkleization, consuming staged updates recorded by
     /// [`Staged::merkleize`] (loaded keys skip the journal re-read their resolution would otherwise
-    /// require), walking the floor with `policy`, and accepting the floor candidate source. The
-    /// walk takes the candidates the batch prefetched as its first round.
-    ///
-    /// The source must meet the [`Candidates`] contract: ascending candidates that cover every
-    /// location that may hold an [active update in this chain](Move), and only set activity
-    /// bits below the database's size.
+    /// require) and walking the floor with `policy` over the candidates `source` supplies under
+    /// the [`Candidates`] contract.
     pub(crate) async fn merkleize_with_floor_walk<T: Candidates<F>, P>(
         self,
         metadata: Option<V::Value>,
@@ -2380,8 +2369,9 @@ where
 
         // Process updates/deletes of existing keys in location order, merging staged entries
         // into the read results. This includes keys from both the committed snapshot and ancestor
-        // diffs. A staged entry's `value` is `Some` for an update and `None` for a delete, and
-        // `emit` writes it as an `Update`/`Delete` at the staged location. An ancestor-staged
+        // diffs. A staged entry's `value` is `Some` for an update and `None` for a delete; the staged
+        // location orders the write, and `emit` appends its `Update`/`Delete` at the next batch
+        // location. An ancestor-staged
         // entry orders by its ancestor location but supersedes the key's committed base
         // location, exactly as its mutation-fallback path would have.
         //
@@ -2523,13 +2513,8 @@ where
     /// Complete a prepared merkleization, consuming staged updates recorded by
     /// [`Staged::merkleize`] (loaded keys skip the journal re-read their resolution would otherwise
     /// require: the caller's new value and the cached next key feed op generation directly, and
-    /// updates also skip the index probe), walking the floor with `policy`, and accepting the
-    /// floor candidate source. The walk takes the candidates the batch prefetched as its first
-    /// round.
-    ///
-    /// The source must meet the [`Candidates`] contract: ascending candidates that cover every
-    /// location that may hold an [active update in this chain](Move), and only set activity
-    /// bits below the database's size.
+    /// updates also skip the index probe) and walking the floor with `policy` over the candidates
+    /// `source` supplies under the [`Candidates`] contract.
     pub(crate) async fn merkleize_with_floor_walk<T: Candidates<F>, P>(
         self,
         metadata: Option<V::Value>,
