@@ -621,9 +621,8 @@ where
     /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness below
     /// the boundary may survive.
     ///
-    /// Pruning bounds how far back bounded initialization and compact sync serving can reach. The
-    /// current commit's witness
-    /// always survives. The prune is made durable before this method returns.
+    /// Bounded initialization and compact sync can only use witnesses that survive. The current
+    /// commit's witness always survives. The prune is made durable before this method returns.
     ///
     /// # Errors
     ///

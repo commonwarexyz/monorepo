@@ -11,8 +11,8 @@
 //! initialization or prune target. An appended entry becomes durable when the journal `commit` or
 //! `sync` completes. For [`Store::start_sync`] it becomes durable when the returned handle
 //! completes. Before that point, the entry is not guaranteed durable and recovery may fall back to
-//! the previous commit. [`Store::prune`] bounds how far back bounded initialization and compact
-//! sync serving can reach. The tip entry is never pruned.
+//! the previous commit. [`Store::prune`] drops old entries. Bounded initialization and compact
+//! sync can only use entries that survive. The tip entry is never pruned.
 
 use crate::{
     Context, SyncCompletion,
@@ -221,34 +221,25 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
 
         // After the checks above, `start` is the request's last commit location. The witness's
         // pinned nodes are the pinned nodes for this request.
-        let retained;
-        let (verified, op) = if request.size() == self.tip_witness.size() {
-            let op = Op::decode_cfg(self.tip_witness.witness.op_bytes.clone(), cfg)
-                .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
-            (&self.tip_witness, op)
-        } else {
-            let (witness, op) = self
-                .retained::<H, S, Op>(strategy, cfg, request.size())
-                .await?;
-            retained = witness;
-            (&retained, op)
-        };
-        let proof = verified.proof.clone();
+        let (verified, op) = self
+            .retained::<H, S, Op>(strategy, cfg, request.size())
+            .await?;
         Ok(match request {
             Request::Operations { .. } => Response::Operations {
-                proof,
+                proof: verified.proof,
                 operations: vec![op],
             },
             Request::Boundary { .. } => Response::Boundary {
-                proof,
+                proof: verified.proof,
                 op,
-                pinned_nodes: verified.witness.pinned_nodes.clone(),
+                pinned_nodes: verified.witness.pinned_nodes,
             },
         })
     }
 
-    /// Load and verify the retained witness that commits exactly `size` leaves, with its decoded
-    /// commit operation.
+    /// The verified witness that commits exactly `size` leaves, with its decoded commit
+    /// operation. The tip is served from the cache. Any other size is loaded from the journal
+    /// and rebuilt.
     async fn retained<H, S, Op>(
         &self,
         strategy: &S,
@@ -260,6 +251,12 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         S: Strategy,
         Op: Read + Floored<F>,
     {
+        if size == self.tip_witness.size() {
+            let op = Op::decode_cfg(self.tip_witness.witness.op_bytes.clone(), cfg)
+                .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
+            return Ok((self.tip_witness.clone(), op));
+        }
+
         // An unapplied import is absent from the journal, which still holds the partition's
         // previous contents.
         let pruned = || Error::from(crate::journal::Error::ItemPruned(*size - 1));
@@ -476,9 +473,9 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         Ok((self, Some(verified)))
     }
 
-    /// Drop all entries committing fewer than `pruning_boundary` leaves, bounding how far back
-    /// bounded initialization and compact sync serving can reach. The tip entry always survives.
-    /// Some entries below the boundary may survive.
+    /// Drop entries committing fewer than `pruning_boundary` leaves. Bounded initialization and
+    /// compact sync can only use entries that survive. The tip entry always survives, and some
+    /// entries below the boundary may also survive.
     pub(crate) async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
         self.check_import_applied()?;
 
