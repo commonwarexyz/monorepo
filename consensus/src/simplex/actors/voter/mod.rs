@@ -4360,21 +4360,11 @@ mod tests {
             &mut self,
             context: &deterministic::Context,
         ) -> oneshot::Sender<bool> {
-            let parent = self.parent.clone();
-            self.certification_request(context, &parent).await
-        }
-
-        /// Delivers `parent`'s notarization and returns its certification
-        /// request.
-        async fn certification_request(
-            &mut self,
-            context: &deterministic::Context,
-            parent: &Proposal<Sha256Digest>,
-        ) -> oneshot::Sender<bool> {
-            let (_, notarization) = build_notarization(&self.schemes, parent, self.quorum());
+            let (_, notarization) = build_notarization(&self.schemes, &self.parent, self.quorum());
             self.mailbox
                 .recovered(Certificate::Notarization(notarization));
-            take_certification_request(context, &self.certification_requests, parent.view()).await
+            take_certification_request(context, &self.certification_requests, self.parent.view())
+                .await
         }
 
         /// Answers the parent's certification request and returns the handle
@@ -4814,14 +4804,32 @@ mod tests {
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
 
+            // The conflicting notarization must exclude the local voter, which already
+            // voted for the original parent.
             let mut conflicting_parent = fixture.parent.clone();
             conflicting_parent.payload = Sha256::hash(&[b"conflicting parent"]);
-            let certified = fixture
-                .certification_request(&context, &conflicting_parent)
-                .await;
+            assert_eq!(fixture.local_index, 0);
+            let (votes, notarization) =
+                build_notarization(&fixture.schemes[1..], &conflicting_parent, fixture.quorum());
+            assert!(
+                votes
+                    .iter()
+                    .all(|vote| vote.attestation.signer != Participant::new(0)),
+                "conflicting quorum includes the local voter"
+            );
+            fixture
+                .mailbox
+                .recovered(Certificate::Notarization(notarization));
+            let certified = take_certification_request(
+                &context,
+                &fixture.certification_requests,
+                conflicting_parent.view(),
+            )
+            .await;
             fixture.finish_certification(certified).await;
             wait_for_handoff_abandoned(&context, "AncestrySuperseded").await;
             assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.digest);
+
             // The conflicting notarization supersedes the held build and issues
             // a second handoff request on the new tip.
             assert_handoff_metrics(
