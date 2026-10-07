@@ -816,7 +816,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
                 &self.blob,
                 write_at_offset,
                 physical_pages,
-                WriteOptions::DONT_CACHE,
+                WriteOptions::default(),
             )
             .await?;
 
@@ -944,7 +944,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
                     &self.blob,
                     write_at_offset,
                     physical_pages,
-                    WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+                    WriteOptions::SYNC,
                 )
                 .await?;
             self.durable_page_state = partial_page_state;
@@ -955,7 +955,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
                     &self.blob,
                     write_at_offset,
                     physical_pages,
-                    WriteOptions::DONT_CACHE,
+                    WriteOptions::default(),
                 )
                 .await?;
         }
@@ -1611,8 +1611,10 @@ mod tests {
         });
     }
 
+    /// Written pages stay in the OS page cache: direct, buffered, synced, and sealing writes never
+    /// request cache bypass, so a page the page cache later evicts is still cheap to read back.
     #[test_traced("DEBUG")]
-    fn test_writes_use_uncached_hint() {
+    fn test_writes_keep_os_cache() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
@@ -1625,12 +1627,16 @@ mod tests {
 
             (writer, _) = writer.append(b"first").await.unwrap();
             writer = writer.sync().await.unwrap();
-            assert_eq!(blob.uncached_snapshot(), (0, 1));
+            (writer, _) = writer.append(&[1; BUFFER_SIZE * 2]).await.unwrap();
+            (writer, _) = writer.append(&[2; BUFFER_SIZE - 50]).await.unwrap();
+            (writer, _) = writer.append(&[2; 100]).await.unwrap();
+            writer = writer.sync().await.unwrap();
+            assert_eq!(blob.uncached_snapshot(), (0, 0));
 
             (writer, _) = writer.append(b"second").await.unwrap();
             let (_, sync) = writer.seal().await.unwrap();
             sync.await.unwrap();
-            assert_eq!(blob.uncached_snapshot(), (1, 1));
+            assert_eq!(blob.uncached_snapshot(), (0, 0));
         });
     }
 

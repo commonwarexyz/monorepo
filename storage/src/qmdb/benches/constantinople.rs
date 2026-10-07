@@ -7,7 +7,7 @@
 //! any optimization must reproduce identical roots).
 //!
 //! Usage:
-//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [reads] [read_chunks] [updates] [threads] [page_cache]
+//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [reads] [read_chunks] [updates] [threads] [page_cache] [pipe_sleep_ms] [write_buffer_mib]
 //!
 //! - db: one of "any::unordered::fixed::mmb", "any::ordered::fixed::mmb",
 //!   "any::unordered::variable::mmb", "current::unordered::fixed::mmb", or
@@ -23,11 +23,17 @@
 //! - threads: strategy pool threads (default 8)
 //! - page_cache: page cache capacity in 4096-byte pages (default 131,072 = 512MiB, enough
 //!   to hold the default working set; shrink it to measure miss-heavy regimes)
+//! - pipe_sleep_ms: when present, replace the timed load+merkleize loop with a write pipeline
+//!   of [PIPE_BLOCKS] blocks. Each block merkleizes, applies, and starts a sync, then awaits the
+//!   previous block's sync, then idles this many milliseconds (0 = back-to-back blocks). Prints
+//!   per-phase ms per block and a `BLK` line whose `crit` is apply + start_sync, the storage
+//!   write work a database owner waits on.
+//! - write_buffer_mib: journal write buffer in MiB (default 2)
 
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
-    Runner as _, Strategizer as _, Supervisor as _,
+    Clock as _, Runner as _, Strategizer as _, Supervisor as _,
     buffer::paged::CacheRef,
     tokio::{Config as RConfig, Context, Runner},
 };
@@ -141,9 +147,10 @@ type AnyVarMerkleized = std::sync::Arc<
 const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const PAGE_CACHE_PAGES: NonZeroUsize = NZUsize!(131_072);
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
-const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
+const WRITE_BUFFER_MIB: usize = 2;
 const REPLAY_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 const CHURN_BATCHES: u64 = 4;
+const PIPE_BLOCKS: usize = 40;
 
 struct Args {
     depth: u8,
@@ -152,6 +159,7 @@ struct Args {
     num_updates: u64,
     num_reads: u64,
     read_chunks: usize,
+    pipe_sleep_ms: Option<u64>,
 }
 
 fn key(i: u64) -> Digest {
@@ -187,7 +195,7 @@ fn report(db: &str, args: &Args, mut times_ms: Vec<f64>) {
 // One macro body for both db types: their batch APIs match but share no trait, and a bench does
 // not warrant inventing one.
 macro_rules! run_pipeline {
-    ($db:ident, $args:ident, $label:literal, $merkleized:ty) => {{
+    ($db:ident, $clock:ident, $args:ident, $label:literal, $merkleized:ty) => {{
         let args = $args;
         let db = $db;
 
@@ -214,6 +222,59 @@ macro_rules! run_pipeline {
         let db = db.commit().await.unwrap();
         let db = db.sync().await.unwrap();
         eprintln!("seed+churn done in {:?}", seed_start.elapsed());
+
+        if let Some(sleep_ms) = args.pipe_sleep_ms {
+            let mut db = db;
+            let mut rng = TestRng::new(7);
+            let mut pending: Option<commonware_runtime::Handle<()>> = None;
+            let (mut merkleize, mut apply, mut start_sync, mut wait) = (0.0, 0.0, 0.0, 0.0);
+            let mut crit = Vec::with_capacity(PIPE_BLOCKS);
+            for _ in 0..PIPE_BLOCKS {
+                let mut batch = db.new_batch();
+                for (k, v) in gen_muts(&mut rng, args.num_updates, args.num_keys) {
+                    batch = batch.write(k, Some(v));
+                }
+                let t0 = Instant::now();
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                let t1 = Instant::now();
+                let (applied, _) = db.apply_batch(merkleized).await.unwrap();
+                let t2 = Instant::now();
+                let (synced, handle) = applied.start_sync().await.unwrap();
+                let t3 = Instant::now();
+                db = synced;
+                if let Some(previous) = pending.replace(handle) {
+                    previous.await.unwrap();
+                }
+                let t4 = Instant::now();
+                merkleize += (t1 - t0).as_secs_f64() * 1000.0;
+                apply += (t2 - t1).as_secs_f64() * 1000.0;
+                start_sync += (t3 - t2).as_secs_f64() * 1000.0;
+                wait += (t4 - t3).as_secs_f64() * 1000.0;
+                crit.push((t3 - t1).as_secs_f64() * 1000.0);
+                $clock.sleep(std::time::Duration::from_millis(sleep_ms)).await;
+            }
+            if let Some(previous) = pending {
+                previous.await.unwrap();
+            }
+            let n = PIPE_BLOCKS as f64;
+            println!(
+                "PIPE db={} sleep_ms={sleep_ms} merkleize={:.2} apply={:.2} start_sync={:.2} wait={:.2} ms/blk",
+                $label,
+                merkleize / n,
+                apply / n,
+                start_sync / n,
+                wait / n
+            );
+            let mean = crit.iter().sum::<f64>() / n;
+            crit.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!(
+                "BLK db={} sleep_ms={sleep_ms} crit_p50={:.2} crit_mean={mean:.2}",
+                $label,
+                crit[crit.len() / 2]
+            );
+            db.destroy().await.unwrap();
+            return;
+        }
 
         let mut rng = TestRng::new(99);
         let mut times_ms: Vec<f64> = Vec::with_capacity(args.iters);
@@ -305,6 +366,7 @@ fn main() {
         num_reads: raw.get(5).and_then(|s| s.parse().ok()).unwrap_or(32_768),
         read_chunks: raw.get(6).and_then(|s| s.parse().ok()).unwrap_or(1),
         num_updates: raw.get(7).and_then(|s| s.parse().ok()).unwrap_or(32_768),
+        pipe_sleep_ms: raw.get(10).and_then(|s| s.parse().ok()),
     };
     let threads: NonZeroUsize = raw
         .get(8)
@@ -314,6 +376,14 @@ fn main() {
         .get(9)
         .and_then(|s| s.parse().ok())
         .unwrap_or(PAGE_CACHE_PAGES);
+    let write_buffer = NonZeroUsize::new(
+        raw.get(11)
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(WRITE_BUFFER_MIB)
+            * 1024
+            * 1024,
+    )
+    .expect("write buffer must be non-zero");
     assert!(
         matches!(
             db_kind.as_str(),
@@ -335,18 +405,19 @@ fn main() {
     assert!(args.read_chunks > 0, "read_chunks must be non-zero");
 
     eprintln!(
-        "constantinople db={db_kind} depth={} iters={} keys={} reads={} read_chunks={} updates={} threads={threads} page_cache={page_cache}",
+        "constantinople db={db_kind} depth={} iters={} keys={} reads={} read_chunks={} updates={} threads={threads} page_cache={page_cache} write_buffer={write_buffer}",
         args.depth, args.iters, args.num_keys, args.num_reads, args.read_chunks, args.num_updates
     );
 
     Runner::new(RConfig::default()).start(|ctx| async move {
+        let clock = ctx.child("clock");
         let pc = CacheRef::from_pooler(&ctx, PAGE_SIZE, page_cache);
         let pc_var = pc.clone();
         let merkle_config = full::Config {
             journal_partition: "constantinople-merkle-journal".into(),
             metadata_partition: "constantinople-merkle-metadata".into(),
             items_per_blob: ITEMS_PER_BLOB,
-            write_buffer: WRITE_BUFFER,
+            write_buffer,
             replay_buffer: REPLAY_BUFFER,
             strategy: ctx.strategy(threads),
             page_cache: pc.clone(),
@@ -355,7 +426,7 @@ fn main() {
             partition: "constantinople-log".into(),
             items_per_blob: ITEMS_PER_BLOB,
             page_cache: pc,
-            write_buffer: WRITE_BUFFER,
+            write_buffer,
             replay_buffer: REPLAY_BUFFER,
         };
         match db_kind.as_str() {
@@ -372,6 +443,7 @@ fn main() {
                 let db = CurrentDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(
                     db,
+                    clock,
                     args,
                     "current::unordered::fixed::mmb",
                     CurrentMerkleized
@@ -392,6 +464,7 @@ fn main() {
                     .unwrap();
                 run_pipeline!(
                     db,
+                    clock,
                     args,
                     "current::ordered::fixed::mmb",
                     CurrentOrderedMerkleized
@@ -409,7 +482,13 @@ fn main() {
                 let db = AnyOrderedDb::init(ctx.child("db"), cfg, None)
                     .await
                     .unwrap();
-                run_pipeline!(db, args, "any::ordered::fixed::mmb", AnyOrderedMerkleized)
+                run_pipeline!(
+                    db,
+                    clock,
+                    args,
+                    "any::ordered::fixed::mmb",
+                    AnyOrderedMerkleized
+                )
             }
             "any::unordered::variable::mmb" => {
                 let cfg = commonware_storage::qmdb::any::VariableConfig {
@@ -420,7 +499,7 @@ fn main() {
                         compression: None,
                         codec_config: ((), ()),
                         page_cache: pc_var,
-                        write_buffer: WRITE_BUFFER,
+                        write_buffer,
                         replay_buffer: REPLAY_BUFFER,
                     },
                     translator: EightCap,
@@ -429,7 +508,13 @@ fn main() {
                     init_concurrency: (),
                 };
                 let db = AnyVarDb::init(ctx.child("db"), cfg, None).await.unwrap();
-                run_pipeline!(db, args, "any::unordered::variable::mmb", AnyVarMerkleized)
+                run_pipeline!(
+                    db,
+                    clock,
+                    args,
+                    "any::unordered::variable::mmb",
+                    AnyVarMerkleized
+                )
             }
             _ => {
                 let cfg = FixedConfig {
@@ -441,7 +526,7 @@ fn main() {
                     init_concurrency: (),
                 };
                 let db = AnyDb::init(ctx.child("db"), cfg, None).await.unwrap();
-                run_pipeline!(db, args, "any::unordered::fixed::mmb", AnyMerkleized)
+                run_pipeline!(db, clock, args, "any::unordered::fixed::mmb", AnyMerkleized)
             }
         }
     });
