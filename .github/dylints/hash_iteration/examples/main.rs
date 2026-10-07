@@ -34,7 +34,7 @@ where
     items.into_iter().count()
 }
 
-/// A constructor whose bound only names an associated type.
+/// A tuple struct with an `IntoIterator` bound.
 struct Holder<I: IntoIterator>(I);
 
 impl<I: IntoIterator> Holder<I> {
@@ -42,6 +42,15 @@ impl<I: IntoIterator> Holder<I> {
     /// the collection's type.
     fn visit(self) -> std::vec::IntoIter<I::Item> {
         self.0.into_iter().collect::<Vec<_>>().into_iter()
+    }
+}
+
+/// A collection behind an accessor that hides its type.
+struct Opaque(HashSet<u8>);
+
+impl Opaque {
+    fn all(&self) -> impl IntoIterator<Item = &u8> + '_ {
+        &self.0
     }
 }
 
@@ -95,7 +104,7 @@ fn main() {
     for _ in &fast {}
 
     // HashTable traversals, function values, implied, inherited, and higher-ranked bounds,
-    // items that `flatten` visits, and Rayon.
+    // items that `flatten` visits, Rayon, and opaque return types.
     let table: hashbrown::HashTable<u8> = hashbrown::HashTable::new();
     let _ = table.iter_buckets().next();
     let _ = table.iter_hash(0).next();
@@ -113,6 +122,7 @@ fn main() {
     let _ = map.par_iter().count();
     let mut parallel_pairs: Vec<(u8, u8)> = Vec::new();
     parallel_pairs.par_extend(map.clone());
+    for _ in Opaque(set.clone()).all() {}
 
     // Lookups, ordered collections, constructors, and lookalike types are not flagged.
     let _ = map.get(&1);

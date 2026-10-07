@@ -29,7 +29,7 @@ use commonware_utils::{
 };
 use rand_core::CryptoRng;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -56,8 +56,8 @@ pub struct Reporter<E: CryptoRng, S: Scheme, L: elector::Config<S>, D: Digest> {
     pub certified: Arc<Mutex<HashSet<View>>>,
     pub notarizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
     pub notarizations: Arc<Mutex<BTreeMap<View, Notarization<S, D>>>>,
-    pub certifications: Arc<Mutex<BTreeMap<View, Notarization<S, D>>>>,
-    pub nullifies: Arc<Mutex<BTreeMap<View, BTreeSet<S::PublicKey>>>>,
+    pub certifications: Arc<Mutex<HashMap<View, Notarization<S, D>>>>,
+    pub nullifies: Arc<Mutex<BTreeMap<View, HashSet<S::PublicKey>>>>,
     pub nullifications: Arc<Mutex<BTreeMap<View, Nullification<S>>>>,
     pub finalizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
     pub finalizations: Arc<Mutex<Finalizations<S, D>>>,
@@ -119,7 +119,7 @@ where
             certified: Arc::new(Mutex::new(HashSet::new())),
             notarizes: Arc::new(Mutex::new(BTreeMap::new())),
             notarizations: Arc::new(Mutex::new(BTreeMap::new())),
-            certifications: Arc::new(Mutex::new(BTreeMap::new())),
+            certifications: Arc::new(Mutex::new(HashMap::new())),
             nullifies: Arc::new(Mutex::new(BTreeMap::new())),
             nullifications: Arc::new(Mutex::new(BTreeMap::new())),
             finalizes: Arc::new(Mutex::new(BTreeMap::new())),

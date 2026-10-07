@@ -6,10 +6,8 @@
 use futures_channel::{mpsc as futures_mpsc, oneshot as futures_oneshot};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    marker::PhantomData,
-    mem::ManuallyDrop,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
 
@@ -41,7 +39,8 @@ struct Registry {
 
 struct Fields {
     // Elements that own endpoints directly or through fields, variants, tuples, arrays, nested
-    // collections, and type arguments, also when the collection sits inside a wrapper.
+    // collections, type arguments, and shared owners, also when the collection sits inside a
+    // wrapper.
     mailboxes: HashMap<u64, Mailbox>,
     slots: HashMap<u64, Slot>,
     nodes: HashSet<Node>,
@@ -51,14 +50,13 @@ struct Fields {
     permits: HashMap<u64, OwnedSemaphorePermit>,
     shared: Arc<Mutex<HashMap<u64, futures_mpsc::Sender<u8>>>>,
     optional: Option<hashbrown::HashMap<u64, mpsc::Receiver<u8>>>,
-
-    // Ordered collections, shared or inert elements, elements without endpoints, and borrowed
-    // collections are not flagged.
-    ordered: BTreeMap<u64, oneshot::Sender<()>>,
     arcs: HashMap<u64, Arc<oneshot::Sender<()>>>,
     rcs: HashMap<u64, Rc<Mailbox>>,
-    phantoms: HashMap<u64, PhantomData<oneshot::Sender<()>>>,
-    manual: HashMap<u64, ManuallyDrop<oneshot::Sender<()>>>,
+
+    // Ordered collections, weak handles, elements without endpoints, and borrowed collections
+    // are not flagged.
+    ordered: BTreeMap<u64, oneshot::Sender<()>>,
+    weak: HashMap<u64, Weak<oneshot::Sender<()>>>,
     trees: HashMap<u64, Tree>,
     borrowed: &'static HashMap<u64, oneshot::Sender<()>>,
 

@@ -35,8 +35,8 @@ declare_lint! {
     /// `HashTable::get_bucket` (also when passed as function values), `for` loops, and Rayon
     /// parallel iterators. It also covers calls and function values whose `IntoIterator` or
     /// Rayon `IntoParallelIterator` bounds are satisfied by a hash collection, including bounds
-    /// of their trait or impl, bounds implied by supertraits, and the items that `flatten`
-    /// visits.
+    /// of their trait or inherent impl, bounds implied by supertraits, and the items that
+    /// `flatten` visits.
     ///
     /// ### Why is this bad?
     ///
@@ -50,8 +50,9 @@ declare_lint! {
     /// `#[cfg_attr(dylint_lib = "hash_iteration", expect(hash_iteration, reason = "..."))]`.
     ///
     /// The lint does not see traversals inside other code. `Debug` formatting, serde
-    /// serialization, `Clone`, set operators, wrapper types that forward `IntoIterator`,
-    /// blanket trait implementations, and generic closures visit entries in hash order too.
+    /// serialization, `Clone`, set operators, wrapper types that forward `IntoIterator`, and
+    /// trait implementations whose own bounds require `IntoIterator` visit entries in hash
+    /// order too.
     ///
     /// ### Example
     ///
@@ -78,16 +79,18 @@ declare_lint! {
 declare_lint! {
     /// ### What it does
     ///
-    /// Detects hash collections whose elements wake another task when dropped. Such an element
-    /// owns a channel endpoint, an actor mailbox, a tokio permit or owned lock guard, an
-    /// aborter, or an acknowledgement, directly or through its fields, enum variants, type
-    /// arguments, tuples, and arrays. Shared values behind `Arc`, `Rc`, or `Weak` and values
-    /// in `PhantomData` or `ManuallyDrop` do not count.
+    /// Detects hash collections whose elements wake another task when dropped. The lint
+    /// recognizes an element that owns a channel endpoint, an actor mailbox, an owned tokio
+    /// mutex guard or permit, an aborter, or an acknowledgement, directly or through its
+    /// fields, enum variants, type arguments, tuples, and arrays. Values behind `Arc` or `Rc`
+    /// count, since the collection may hold their last strong reference. Values behind `Weak`
+    /// do not count.
     ///
     /// The lint reports struct and enum fields whose type holds such a collection, also inside
-    /// wrappers such as `Arc<Mutex<_>>` or `Option<_>`. It also reports a `let` that creates
-    /// one with an associated function of the collection, such as `HashMap::new` or
-    /// `Default::default`, or with `collect`.
+    /// tuples, arrays, and the type arguments of wrappers such as `Arc<Mutex<_>>` or
+    /// `Option<_>`. It also reports a `let` whose initializer is a call that creates one, with
+    /// an associated function of the collection such as `HashMap::new` or `Default::default`,
+    /// or with `collect`.
     ///
     /// ### Why is this bad?
     ///
@@ -100,8 +103,8 @@ declare_lint! {
     /// lint with the reason, for example
     /// `#[cfg_attr(dylint_lib = "hash_iteration", expect(hash_drop, reason = "..."))]`.
     ///
-    /// A `let` that receives a collection from another function or wraps a new one, as in
-    /// `Arc::new(Mutex::new(HashMap::new()))`, is not reported.
+    /// Other `let` initializers are not reported, such as a call to another function, a `?`,
+    /// block, or branch expression, or a wrapper as in `Arc::new(Mutex::new(HashMap::new()))`.
     ///
     /// ### Example
     ///
@@ -168,11 +171,10 @@ const PARALLEL: &[&str] = &[
     "IntoParallelRefIterator",
     "IntoParallelRefMutIterator",
     "ParallelDrainFull",
-    "ParallelDrainRange",
 ];
 
 /// Types whose drop wakes another task, by crate and type name. These are channel endpoints,
-/// actor mailboxes, tokio permits and owned lock guards, aborters, and acknowledgements.
+/// actor mailboxes, owned tokio mutex guards and permits, aborters, and acknowledgements.
 const WAKERS: &[(&str, &[&str])] = &[
     (
         "commonware_actor",
@@ -205,12 +207,8 @@ const WAKERS: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// Wrappers that share their contents with other owners or never drop them, by crate and type
-/// name.
-const NON_OWNING: &[(&str, &[&str])] = &[
-    ("alloc", &["Arc", "Rc", "Weak"]),
-    ("core", &["ManuallyDrop", "PhantomData"]),
-];
+/// Handles that never drop their contents, by crate and type name.
+const NON_OWNING: &[(&str, &[&str])] = &[("alloc", &["Weak"])];
 
 /// Returns whether the type definition `did` appears in `types`.
 fn listed(cx: &LateContext<'_>, did: DefId, types: &[(&str, &[&str])]) -> bool {
@@ -234,32 +232,29 @@ fn iterating_trait(cx: &LateContext<'_>, trait_id: DefId) -> bool {
 }
 
 /// Returns the hash collection that a call to `def_id` visits through an iterating method of
-/// the collection, `IntoIterator::into_iter` on it, or a Rayon parallel iterator over it.
+/// the collection.
 fn iterated_by_method<'tcx>(
     cx: &LateContext<'tcx>,
     def_id: DefId,
     generic_args: GenericArgsRef<'tcx>,
 ) -> Option<Ty<'tcx>> {
     let tcx = cx.tcx;
-    if let Some(impl_id) = tcx.impl_of_assoc(def_id) {
-        let self_ty = tcx
-            .type_of(impl_id)
-            .instantiate(tcx, generic_args)
-            .skip_norm_wip();
-        return (is_hash_collection(cx, self_ty)
-            && ITERATING.contains(&tcx.item_name(def_id).as_str()))
-        .then_some(self_ty);
-    }
-    let trait_id = tcx.trait_of_assoc(def_id)?;
-    let self_ty = generic_args.type_at(0);
-    (iterating_trait(cx, trait_id) && is_hash_collection(cx, self_ty)).then_some(self_ty)
+    let impl_id = tcx.impl_of_assoc(def_id)?;
+    let self_ty = tcx
+        .type_of(impl_id)
+        .instantiate(tcx, generic_args)
+        .skip_norm_wip();
+    (is_hash_collection(cx, self_ty) && ITERATING.contains(&tcx.item_name(def_id).as_str()))
+        .then_some(self_ty)
 }
 
 /// Returns the hash collections that a call to `def_id` iterates through its iteration bounds
-/// (see [`iterating_trait`]), including those of its trait or impl and those implied by
-/// supertraits. Examples are the argument of `extend`, `zip`, or `FromIterator::from_iter`,
-/// the receiver of a method whose trait requires `IntoIterator`, and the items that `flatten`
-/// visits. Constructors only move their fields, so their bounds are skipped.
+/// (see [`iterating_trait`]), including those of its trait or inherent impl and those implied
+/// by supertraits. Examples are the collection of a `for` loop or `IntoIterator::into_iter`,
+/// the receiver of a Rayon parallel iterator method, the argument of `extend`, `zip`, or
+/// `FromIterator::from_iter`, the receiver of a method whose trait requires `IntoIterator`,
+/// and the items that `flatten` visits. Tuple struct and enum variant constructors only move
+/// their fields, so their bounds are skipped.
 fn iterated_by_bounds<'tcx>(
     cx: &LateContext<'tcx>,
     def_id: DefId,
@@ -288,9 +283,12 @@ fn iterated_by_bounds<'tcx>(
             .instantiate_bound_regions_with_erased(predicate)
             .self_ty();
         let self_ty = tcx
-            .try_normalize_erasing_regions(cx.typing_env(), ty::Unnormalized::new_wip(self_ty))
+            .try_normalize_erasing_regions(
+                cx.typing_env().with_post_analysis_normalized(tcx),
+                ty::Unnormalized::new_wip(self_ty),
+            )
             .unwrap_or(self_ty);
-        if is_hash_collection(cx, self_ty) && !iterated.contains(&self_ty) {
+        if is_hash_collection(cx, self_ty) {
             iterated.push(self_ty);
         }
     }
@@ -395,7 +393,7 @@ fn report_iteration(cx: &LateContext<'_>, span: Span, ty: Ty<'_>) {
                 ty.peel_refs()
             ));
             diag.help(
-                "use `BTreeMap` or `BTreeSet`, or sort the entries before relying on their order",
+                "use `BTreeMap` or `BTreeSet`, or expect the lint with a reason if the order cannot matter",
             );
         }),
     );
@@ -457,20 +455,14 @@ impl<'tcx> LateLintPass<'tcx> for HashOrder {
         };
         let inputs: Vec<&Expr<'_>> = receiver.into_iter().chain(args).collect();
 
-        // An iterating method, `IntoIterator::into_iter` (which `for` loops call), or a Rayon
-        // parallel iterator. A method call is reported in full, and a path call (such as a `for`
-        // loop) is reported at the collection.
+        // An iterating method of the collection, reported at the whole call.
         if let Some(collection) = iterated_by_method(cx, def_id, generic_args) {
-            let span = match (receiver, inputs.first()) {
-                (None, Some(collection_expr)) => collection_expr.span,
-                _ => expr.span,
-            };
-            report_iteration(cx, span, collection);
+            report_iteration(cx, expr.span, collection);
             return;
         }
 
-        // Hash collections iterated through the call's `IntoIterator` bounds, reported at the
-        // matching input (or at the call, as for `flatten`).
+        // Hash collections iterated through the call's iteration bounds, such as a `for` loop or
+        // `extend`, reported at the matching input (or at the call, as for `flatten`).
         for ty in iterated_by_bounds(cx, def_id, generic_args) {
             let input = inputs.iter().find(|input| {
                 cx.tcx

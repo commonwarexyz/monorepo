@@ -13,7 +13,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
 };
 use rand_core::CryptoRng;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 // Intentionally restates View::covers with independent integer arithmetic:
 // the fuzz oracle must not delegate to the production term predicates
@@ -231,7 +231,7 @@ pub fn check<P: Simplex>(
         // Invariant: finalization_requires_notarization
         // Any finalization must be backed by some notarization for the same
         // (view, payload, parent).
-        let notarized: BTreeSet<(u64, Sha256Digest, u64)> = replicas
+        let notarized: HashSet<(u64, Sha256Digest, u64)> = replicas
             .iter()
             .flat_map(|(notarizations, _, _)| {
                 notarizations.iter().map(|(&v, d)| (v, d.payload, d.parent))
