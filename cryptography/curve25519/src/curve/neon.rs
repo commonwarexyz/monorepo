@@ -28,7 +28,7 @@ type Regs = [uint64x2_t; 5];
 
 /// The NEON backend token.
 #[derive(Clone, Copy)]
-pub(super) struct Backend;
+pub struct Backend;
 
 /// Loads one two-lane tile from each of the five limb rows.
 #[inline(always)]
@@ -682,12 +682,6 @@ fn add_mixed_regs(p: [Regs; 4], q: [Regs; 3]) -> [Regs; 4] {
     ]
 }
 
-impl super::Backend for Backend {
-    fn with_single<C: super::WithSingle>(self, computation: C) -> C::Output {
-        computation.call(single::Hybrid)
-    }
-}
-
 /// Adds a signed affine point to each of two extended points.
 ///
 /// Each result is `p[i] + q[i]` or `p[i] - q[i]` according to `negative[i]`.
@@ -730,7 +724,7 @@ fn g_add_mixed_pair(p: [G; 2], q: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
 }
 
 impl Backend {
-    pub(super) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 }

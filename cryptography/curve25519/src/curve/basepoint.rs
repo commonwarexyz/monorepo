@@ -12,7 +12,7 @@
 //!
 //! [Ed25519, section 4]: https://ed25519.cr.yp.to/ed25519-20110926.pdf
 
-use super::{Backend, F, G, GAffine, Niels, Single, WithBackend, WithSingle, with_backend};
+use super::{Backend, F, G, GAffine, Niels, WithBackend, with_backend};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use zeroize::Zeroizing;
 
@@ -46,6 +46,7 @@ impl G {
     /// Bit 255 of `scalar` must be clear. Every scalar performs the same table reads and point
     /// operations, selecting table entries with masks rather than secret-dependent branches or
     /// indexing.
+    #[inline(never)]
     pub fn mul_base_secret(scalar: &[u8; 32]) -> Self {
         with_backend(MulBase(scalar))
     }
@@ -58,19 +59,11 @@ struct MulBase<'a>(&'a [u8; 32]);
 impl WithBackend for MulBase<'_> {
     type Output = G;
 
-    fn call<B: Backend>(self, backend: B) -> G {
-        backend.with_single(self)
-    }
-}
-
-impl WithSingle for MulBase<'_> {
-    type Output = G;
-
     // Inlined so the algorithm compiles inside the backend's target-feature entry, where its
     // point operations can inline.
     #[inline(always)]
-    fn call<S: Single>(self, single: S) -> G {
-        mul_base(single, &Zeroizing::new(digits(self.0)))
+    fn call<B: Backend>(self, backend: B) -> G {
+        mul_base(backend, &Zeroizing::new(digits(self.0)))
     }
 }
 
@@ -79,26 +72,26 @@ impl WithSingle for MulBase<'_> {
 /// Pair `j` holds digits `e[2j]` and `e[2j+1]`, both read from row `j`. Adding the odd digits,
 /// multiplying by 16 with four doublings, and then adding the even digits gives
 /// `sum (16 * e[2j+1] + e[2j]) * 256^j * B`. Every digit costs one constant-time
-/// [`Single::add_selected`].
+/// [`Backend::add_selected`].
 #[inline(always)]
-fn mul_base<S: Single>(single: S, digits: &[i8; 64]) -> G {
+fn mul_base<B: Backend>(backend: B, digits: &[i8; 64]) -> G {
     let pairs = digits.as_chunks::<2>().0;
-    let mut result = single.identity();
+    let mut result = backend.identity();
     for (row, pair) in TABLE.iter().zip(pairs) {
-        result = single.to_extended(single.add_selected(result, row, pair[1]));
+        result = backend.to_extended(backend.add_selected(result, row, pair[1]));
     }
 
     // Only the last doubling feeds an addition, which reads `T`.
-    let mut multiple = single.project(result);
+    let mut multiple = backend.project(result);
     for _ in 0..3 {
-        multiple = single.to_projective(single.double(multiple));
+        multiple = backend.to_projective(backend.double(multiple));
     }
-    result = single.to_extended(single.double(multiple));
+    result = backend.to_extended(backend.double(multiple));
 
     for (row, pair) in TABLE.iter().zip(pairs) {
-        result = single.to_extended(single.add_selected(result, row, pair[0]));
+        result = backend.to_extended(backend.add_selected(result, row, pair[0]));
     }
-    single.store(result)
+    backend.store(result)
 }
 
 /// Recodes a scalar below `2^255` as `sum e[i] * 16^i`, with `e[i]` in `[-8, 7]` for `i < 63`

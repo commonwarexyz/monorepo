@@ -1,8 +1,8 @@
 //! Property suites shared by field and group backends.
 
 use super::{
-    Backend, F, FBackend, FVec, Formulas, G, GAffine, GCompleted, GProjective, LANES, MASK_51,
-    Niels, Single, WithBackend, WithSingle,
+    Backend, F, FBackend, FVec, G, GAffine, GCompleted, GProjective, LANES, MASK_51, Niels,
+    WithBackend,
     msm::{self, WithLanes},
 };
 #[cfg(test)]
@@ -19,8 +19,8 @@ pub enum Plan {
     Field,
     /// Check group arithmetic identities.
     Group,
-    /// Check single-point operations against the scalar formulas.
-    Single,
+    /// Check single-point operations against the portable backend.
+    Point,
 }
 
 impl Plan {
@@ -44,7 +44,7 @@ impl Plan {
                         fuzz_group(self.u, backend)?;
                         fuzz_group_matches_portable(self.u, backend)
                     }
-                    Plan::Single => fuzz_single_matches_formulas(self.u, backend),
+                    Plan::Point => fuzz_point_matches_portable(self.u, backend),
                 }
             }
         }
@@ -794,11 +794,11 @@ fn arbitrary_f(u: &mut Unstructured<'_>) -> arbitrary::Result<F> {
 /// The most operations a fuzzed chain of single-point operations takes.
 const MAX_STEPS: usize = 16;
 
-/// Checks a backend's single-point operations, alone and in a chain, against [`Formulas`] on
+/// Checks a backend's single-point operations, alone and in a chain, against the portable backend on
 /// arbitrary points with low-order components, rescaled projective coordinates, and spread limbs,
 /// and on points, affine operands, and table rows with arbitrary limbs below `2^52`, which the
 /// contract admits whether or not they are on the curve.
-fn fuzz_single_matches_formulas<B: Backend>(
+fn fuzz_point_matches_portable<B: Backend>(
     u: &mut Unstructured<'_>,
     backend: B,
 ) -> arbitrary::Result<()> {
@@ -860,7 +860,7 @@ fn fuzz_single_matches_formulas<B: Backend>(
     for _ in 0..u.int_in_range(0..=MAX_STEPS)? {
         chain.push(u.arbitrary()?);
     }
-    backend.with_single(SingleMatches {
+    PointMatches {
         p,
         q,
         niels,
@@ -868,7 +868,8 @@ fn fuzz_single_matches_formulas<B: Backend>(
         odd,
         chain,
         encodings,
-    });
+    }
+    .call(backend);
     Ok(())
 }
 
@@ -877,12 +878,12 @@ fn key(point: Option<GAffine>) -> Option<([u8; 32], [u8; 32])> {
     point.map(|point| (point.compress(), point.t2d.to_bytes()))
 }
 
-/// Asserts that [`Single::decompress_pair`] returns both scalar decompressions, or `None` when
+/// Asserts that [`Backend::decompress_pair`] returns both scalar decompressions, or `None` when
 /// either fails.
-fn assert_pair_matches<S: Single>(single: S, first: &[u8; 32], second: &[u8; 32]) {
+fn assert_pair_matches<B: Backend>(backend: B, first: &[u8; 32], second: &[u8; 32]) {
     let expected = GAffine::decompress(first).zip(GAffine::decompress(second));
     assert_eq!(
-        single
+        backend
             .decompress_pair([first, second])
             .map(|[a, b]| (key(Some(a)), key(Some(b)))),
         expected.map(|(a, b)| (key(Some(a)), key(Some(b)))),
@@ -933,49 +934,50 @@ impl<'a> Arbitrary<'a> for Step {
     }
 }
 
-/// A chain's current point, in a backend's native representation and as [`Formulas`] computes
+/// A chain's current point, in a backend's native representation and as the portable backend computes
 /// it.
-enum Link<S: Single> {
+enum Link<B: Backend> {
     /// A point in extended coordinates.
-    Extended(S::Extended, G),
+    Extended(B::Extended, G),
     /// The result of an addition or doubling, before its final multiplications.
-    Completed(S::Completed, GCompleted),
+    Completed(B::Completed, GCompleted),
 }
 
-impl<S: Single> Link<S> {
+impl<B: Backend> Link<B> {
     /// Finishes the point in extended coordinates, asserting that the native point stores as the
-    /// formulas' point.
-    fn extended(self, single: S, property: &str) -> (S::Extended, G) {
+    /// portable point.
+    fn extended(self, backend: B, property: &str) -> (B::Extended, G) {
         match self {
             Self::Extended(actual, expected) => (actual, expected),
             Self::Completed(actual, expected) => {
-                let actual = single.to_extended(actual);
-                let expected = Formulas.to_extended(expected);
-                assert_g_same(single.store(actual), expected, property);
+                let actual = backend.to_extended(actual);
+                let expected = super::portable::Backend::new().to_extended(expected);
+                assert_g_same(backend.store(actual), expected, property);
                 (actual, expected)
             }
         }
     }
 
     /// Finishes or projects the point in projective coordinates, asserting that the native point
-    /// stores as the formulas' point.
-    fn projective(self, single: S, property: &str) -> (S::Projective, GProjective) {
+    /// stores as the portable point.
+    fn projective(self, backend: B, property: &str) -> (B::Projective, GProjective) {
         let (actual, expected) = match self {
-            Self::Extended(actual, expected) => {
-                (single.project(actual), Formulas.project(expected))
-            }
+            Self::Extended(actual, expected) => (
+                backend.project(actual),
+                super::portable::Backend::new().project(expected),
+            ),
             Self::Completed(actual, expected) => (
-                single.to_projective(actual),
-                Formulas.to_projective(expected),
+                backend.to_projective(actual),
+                super::portable::Backend::new().to_projective(expected),
             ),
         };
-        assert_projective_same(single.store_projective(actual), expected, property);
+        assert_projective_same(backend.store_projective(actual), expected, property);
         (actual, expected)
     }
 }
 
-/// Inputs for comparing every [`Single`] operation with [`Formulas`].
-struct SingleMatches {
+/// Inputs for comparing every [`Backend`] point operation with the portable backend.
+struct PointMatches {
     /// The point every operation starts from.
     p: G,
     /// The operand of additions in extended form.
@@ -993,100 +995,100 @@ struct SingleMatches {
     encodings: [[u8; 32]; 2],
 }
 
-impl WithSingle for SingleMatches {
+impl WithBackend for PointMatches {
     type Output = ();
 
-    fn call<S: Single>(self, single: S) {
-        let formulas = Formulas;
-        let p = single.load(&self.p);
-        let q = single.load(&self.q);
-        assert_g_same(single.store(p), self.p, "load and store");
-        assert_g_same(single.store(single.identity()), G::IDENTITY, "identity");
+    fn call<B: Backend>(self, backend: B) {
+        let portable = super::portable::Backend::new();
+        let p = backend.load(&self.p);
+        let q = backend.load(&self.q);
+        assert_g_same(backend.store(p), self.p, "load and store");
+        assert_g_same(backend.store(backend.identity()), G::IDENTITY, "identity");
 
         // Each operation's completed point matches in both finished forms.
-        let check = |actual: S::Completed, expected: GCompleted, property: &str| {
+        let check = |actual: B::Completed, expected: GCompleted, property: &str| {
             assert_g_same(
-                single.store(single.to_extended(actual)),
+                backend.store(backend.to_extended(actual)),
                 expected.to_extended(),
                 property,
             );
             assert_projective_same(
-                single.store_projective(single.to_projective(actual)),
+                backend.store_projective(backend.to_projective(actual)),
                 expected.to_projective(),
                 property,
             );
         };
         check(
-            single.double(single.project(p)),
-            formulas.double(formulas.project(self.p)),
+            backend.double(backend.project(p)),
+            portable.double(portable.project(self.p)),
             "double",
         );
         for negate in [false, true] {
             check(
-                single.add(p, single.cache(q), negate),
-                formulas.add(self.p, formulas.cache(self.q), negate),
+                backend.add_cached(p, backend.cache(q), negate),
+                portable.add_cached(self.p, portable.cache(self.q), negate),
                 "add",
             );
             for niels in [&self.niels, &super::ODD_MULTIPLES.as_flattened()[self.odd]] {
                 check(
-                    single.add_niels(p, niels, negate),
-                    formulas.add_niels(self.p, niels, negate),
+                    backend.add_niels(p, niels, negate),
+                    portable.add_niels(self.p, niels, negate),
                     "add Niels",
                 );
             }
         }
         for digit in -8..=8 {
             check(
-                single.add_selected(p, &self.row, digit),
-                formulas.add_selected(self.p, &self.row, digit),
+                backend.add_selected(p, &self.row, digit),
+                portable.add_selected(self.p, &self.row, digit),
                 &format!("add selected, digit {digit}"),
             );
         }
 
         // The chain feeds each native result into the next operation, as the algorithms do,
         // finishing it in the coordinates that operation reads, and compares every finished point
-        // with the formulas. Each cache starts as `q`.
-        let mut caches = [(single.cache(q), formulas.cache(self.q)); CACHES];
-        let mut link = Link::<S>::Extended(p, self.p);
+        // with the portable backend. Each cache starts as `q`.
+        let mut caches = [(backend.cache(q), portable.cache(self.q)); CACHES];
+        let mut link = Link::<B>::Extended(p, self.p);
         for (index, &step) in self.chain.iter().enumerate() {
             let property = format!("chain input of step {index}, {step:?}");
             link = match step {
                 Step::Double { extended: false } => {
-                    let (actual, expected) = link.projective(single, &property);
-                    Link::Completed(single.double(actual), formulas.double(expected))
+                    let (actual, expected) = link.projective(backend, &property);
+                    Link::Completed(backend.double(actual), portable.double(expected))
                 }
                 Step::Double { extended: true } => {
-                    let (actual, expected) = link.extended(single, &property);
+                    let (actual, expected) = link.extended(backend, &property);
                     Link::Completed(
-                        single.double(single.project(actual)),
-                        formulas.double(formulas.project(expected)),
+                        backend.double(backend.project(actual)),
+                        portable.double(portable.project(expected)),
                     )
                 }
                 Step::Cache { slot } => {
-                    let (actual, expected) = link.extended(single, &property);
-                    caches[slot] = (single.cache(actual), formulas.cache(expected));
+                    let (actual, expected) = link.extended(backend, &property);
+                    caches[slot] = (backend.cache(actual), portable.cache(expected));
                     Link::Extended(actual, expected)
                 }
                 Step::Add { slot, negate } => {
-                    let (actual, expected) = link.extended(single, &property);
+                    let (actual, expected) = link.extended(backend, &property);
                     let (cached, expected_cached) = caches[slot];
                     Link::Completed(
-                        single.add(actual, cached, negate),
-                        formulas.add(expected, expected_cached, negate),
+                        backend.add_cached(actual, cached, negate),
+                        portable.add_cached(expected, expected_cached, negate),
                     )
                 }
                 Step::AddNiels { negate } => {
-                    let (actual, expected) = link.extended(single, &property);
+                    let (actual, expected) = link.extended(backend, &property);
                     Link::Completed(
-                        single.add_niels(actual, &self.niels, negate),
-                        formulas.add_niels(expected, &self.niels, negate),
+                        backend.add_niels(actual, &self.niels, negate),
+                        portable.add_niels(expected, &self.niels, negate),
                     )
                 }
                 Step::AddSelected { digit } => {
-                    let (actual, expected) = link.extended(single, &property);
+                    let (actual, expected) = link.extended(backend, &property);
                     Link::Completed(
-                        single.add_selected(actual, &self.row, digit),
-                        formulas.add_selected(expected, &self.row, digit),
+                        backend.add_selected(actual, &self.row, digit),
+                        portable.add_selected(expected, &self.row, digit),
                     )
                 }
             };
@@ -1098,17 +1100,17 @@ impl WithSingle for SingleMatches {
         // Decompression agrees with the scalar path, including for invalid encodings.
         let [first, second] = &self.encodings;
         assert_eq!(
-            key(single.decompress(first)),
+            key(backend.decompress(first)),
             key(GAffine::decompress(first))
         );
-        assert_pair_matches(single, first, second);
-        assert_pair_matches(single, second, first);
+        assert_pair_matches(backend, first, second);
+        assert_pair_matches(backend, second, first);
     }
 }
 
 #[cfg(test)]
 #[test]
-fn minifuzz_single() {
+fn minifuzz_point() {
     // Fully inlined point formulas can exceed the test harness's default stack in debug builds.
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -1116,29 +1118,29 @@ fn minifuzz_single() {
             commonware_invariants::minifuzz::Builder::default()
                 .with_seed(0)
                 .with_search_limit(400)
-                .test(|u| Plan::Single.run(u));
+                .test(|u| Plan::Point.run(u));
         })
         .unwrap()
         .join()
         .unwrap();
 }
 
-/// Checks the selected backend's single-point operations against [`Formulas`] on the identity,
+/// Checks the selected backend's single-point operations against the portable backend on the identity,
 /// every ZIP215 point (each low-order point among them), sums with the basepoint, equal and
 /// opposite operands, every row of the fixed-base table with reduced and with spread limbs, and
 /// coordinates and table entries at or near the field bound, each with every digit and through a
 /// chain of every transition between operations.
 #[cfg(test)]
 #[test]
-fn single_point_operations_match_formulas() {
-    struct Run(Vec<SingleMatches>);
+fn single_point_operations_match_portable() {
+    struct Run(Vec<PointMatches>);
 
     impl WithBackend for Run {
         type Output = ();
 
         fn call<B: Backend>(self, backend: B) {
             for check in self.0 {
-                backend.with_single(check);
+                check.call(backend);
             }
         }
     }
@@ -1203,7 +1205,7 @@ fn single_point_operations_match_formulas() {
         let p = rescale(p, F::from_bytes(&[i as u8 + 2; 32]), i as u8);
         for q in [points[(i + 1) % points.len()], p, p.negate(), G::IDENTITY] {
             let n = checks.len();
-            checks.push(SingleMatches {
+            checks.push(PointMatches {
                 p,
                 q,
                 niels: niels(q),
@@ -1226,7 +1228,7 @@ fn single_point_operations_match_formulas() {
         z: max,
     };
     let near = |offset: usize| F([MASK_52 - offset as u64; 5]);
-    checks.push(SingleMatches {
+    checks.push(PointMatches {
         p: bound,
         q: bound,
         niels: Niels {
@@ -1258,17 +1260,9 @@ fn decompress_pair_matches_scalar() {
         type Output = ();
 
         fn call<B: Backend>(self, backend: B) {
-            backend.with_single(self);
-        }
-    }
-
-    impl WithSingle for Check {
-        type Output = ();
-
-        fn call<S: Single>(self, single: S) {
             for first in &self.0 {
                 for second in &self.0 {
-                    assert_pair_matches(single, first, second);
+                    assert_pair_matches(backend, first, second);
                 }
             }
         }

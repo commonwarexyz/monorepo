@@ -1,22 +1,34 @@
-//! Plain-Rust lane adapter over scalar field and group arithmetic.
+//! Portable field, point, and multi-scalar arithmetic.
 
-use super::{F, FBackend, FVec, Formulas, G, GAffine, WithSingle, msm};
+#[cfg(not(target_arch = "aarch64"))]
+use super::WithBackend;
+use super::{
+    F, FBackend, FVec, G, GAffine, GCompleted, GProjective, Niels, ProjectiveNiels, basepoint, msm,
+};
 use core::array;
 
 /// The portable backend token.
 ///
 /// This is the correctness reference for accelerated backends. Each vector operation applies the
-/// corresponding scalar operation independently to every lane. All operations are variable-time
-/// because they operate only on public data.
+/// corresponding scalar operation independently to every lane. Field vector and MSM operations
+/// are variable-time because they operate only on public data. Selected point addition is
+/// constant-time.
 ///
 /// Freely constructible: unlike the accelerated backends, the portable one needs no CPU feature,
 /// so possession proves nothing and gates nothing.
 #[derive(Clone, Copy)]
-pub(super) struct Backend;
+pub struct Backend;
 
 impl Backend {
-    pub(super) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self
+    }
+
+    /// Runs a portable computation outside the runtime dispatcher's stack frame.
+    #[cfg(not(target_arch = "aarch64"))]
+    #[inline(never)]
+    pub fn call<C: WithBackend>(self, computation: C) -> C::Output {
+        computation.call(self)
     }
 }
 
@@ -55,8 +67,69 @@ impl FBackend for Backend {
 }
 
 impl super::Backend for Backend {
-    fn with_single<C: WithSingle>(self, computation: C) -> C::Output {
-        computation.call(Formulas)
+    type Extended = G;
+    type Projective = GProjective;
+    type Completed = GCompleted;
+    type Cached = ProjectiveNiels;
+
+    #[inline(always)]
+    fn load(self, point: &G) -> G {
+        *point
+    }
+
+    #[inline(always)]
+    fn store(self, point: G) -> G {
+        point
+    }
+
+    #[inline(always)]
+    fn store_projective(self, point: GProjective) -> GProjective {
+        point
+    }
+
+    #[inline(always)]
+    fn identity(self) -> G {
+        G::IDENTITY
+    }
+
+    #[inline(always)]
+    fn project(self, point: G) -> GProjective {
+        point.to_projective()
+    }
+
+    #[inline(always)]
+    fn double(self, point: GProjective) -> GCompleted {
+        point.double()
+    }
+
+    #[inline(always)]
+    fn to_projective(self, point: GCompleted) -> GProjective {
+        point.to_projective()
+    }
+
+    #[inline(always)]
+    fn to_extended(self, point: GCompleted) -> G {
+        point.to_extended()
+    }
+
+    #[inline(always)]
+    fn cache(self, point: G) -> ProjectiveNiels {
+        point.to_projective_niels()
+    }
+
+    #[inline(always)]
+    fn add_cached(self, point: G, cached: ProjectiveNiels, negate: bool) -> GCompleted {
+        point.add_projective_niels(if negate { cached.negate() } else { cached })
+    }
+
+    #[inline(always)]
+    fn add_niels(self, point: G, niels: &Niels, negate: bool) -> GCompleted {
+        point.add_niels_completed(if negate { niels.negate() } else { *niels })
+    }
+
+    #[inline(always)]
+    fn add_selected(self, point: G, row: &[Niels; 8], digit: i8) -> GCompleted {
+        point.add_niels_completed(basepoint::select(row, digit))
     }
 }
 

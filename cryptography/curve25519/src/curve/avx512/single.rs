@@ -1,5 +1,5 @@
 //! One point packed across the four 64-bit lanes of a 256-bit register, implementing
-//! [`Single`] for single-signature verification and fixed-base multiplication.
+//! [`crate::curve::Backend`] for single-signature verification and fixed-base multiplication.
 //!
 //! Register `k` holds limb `k` (radix `2^51`) of a point's coordinates, one coordinate per lane,
 //! so each multiplication level of a point addition or doubling is one lane-wise IFMA
@@ -7,35 +7,9 @@
 //! operation applies its additions and subtractions to such limbs and carries once before it
 //! multiplies, so IFMA only ever sees limbs below `2^52`.
 
-use super::Backend;
-use crate::curve::{BIAS_16P, F, G, GAffine, GProjective, LANES, MASK_51, Niels, Single};
+use super::{Backend, CachedPoint, CompletedPoint, PackedPoint, Rows};
+use crate::curve::{BIAS_16P, F, G, GAffine, GProjective, LANES, MASK_51, Niels};
 use core::arch::x86_64::*;
-
-/// Five limb registers, one coordinate per lane.
-type Rows = [__m256i; 5];
-
-/// An extended or projective point, as lanes `[X, Y, Z, T]` with limbs below `300 * 2^52`.
-///
-/// Doubling ignores the `T` lane, so the same value serves both coordinate systems.
-#[derive(Clone, Copy)]
-pub(super) struct Point(Rows);
-
-/// An addition operand, as lanes `[Y - X, Y + X, 2d*T, 2*Z]` with limbs below `2^52`.
-#[derive(Clone, Copy)]
-pub(super) struct Cached(Rows);
-
-/// The operands of a point's final multiplication: lanes `[E, G, F, E]` and `[F, H, G, H]` in
-/// [`G::add`]'s notation, with limbs below `2^52`, whose product is `[X3, Y3, Z3, T3]`.
-#[derive(Clone, Copy)]
-pub(super) struct Operands(Rows, Rows);
-
-/// The single-point operations of the AVX-512 backend.
-///
-/// Holding a [`Backend`] proves that the CPU supports AVX-512F, AVX-512VL, and AVX-512 IFMA, so
-/// every method may use their intrinsics. The methods are forced inline so that, once the
-/// algorithms inline into the backend's target-feature entry, the intrinsics inline there too.
-#[derive(Clone, Copy)]
-pub(super) struct Packed(Backend);
 
 /// `1024p`, limb-wise. Every limb exceeds every unreduced product limb, so subtracting such a limb
 /// from it never underflows, and a sum of three terms below `2^61.3` stays below `2^63`.
@@ -157,14 +131,14 @@ fn decompress_pair(backend: Backend, encodings: [&[u8; 32]; 2]) -> Option<[GAffi
     Some([points[0]?, points[1]?])
 }
 
-// SAFETY (every unsafe block in this impl): `self` holds a `Backend`, which is only constructed
+// SAFETY (every unsafe block in this impl): `self` is a `Backend`, which is only constructed
 // after detecting AVX-512F, AVX-512VL, and AVX-512 IFMA, the features of every intrinsic and
 // helper used here.
-impl Packed {
-    pub(super) const fn new(backend: Backend) -> Self {
-        Self(backend)
-    }
-
+#[allow(
+    clippy::multiple_inherent_impl,
+    reason = "Keep the packed point kernels together in this module."
+)]
+impl Backend {
     /// Splats each limb into every lane.
     #[inline(always)]
     fn splat(self, limbs: [u64; 5]) -> Rows {
@@ -252,7 +226,7 @@ impl Packed {
     /// Lane-wise square, folded but not carried, with each cross product computed once.
     ///
     /// Column `k` is `c1[k] + 2*c2[k] + 4*c4[k]`; the doubled cross products and the weights of
-    /// high halves give each column the same bound as in [`Packed::mul_wide`], whose ordering
+    /// high halves give each column the same bound as in [`Backend::mul_wide`], whose ordering
     /// this follows.
     #[inline(always)]
     fn square_wide(self, a: &Rows) -> Rows {
@@ -326,7 +300,7 @@ impl Packed {
     /// of `[Y1 - X1, Y1 + X1, T1, Z1]` by `[Y2 - X2, Y2 + X2, 2d*T2, 2*Z2]`, then `E = B - A`,
     /// `H = B + A`, `F = D - C`, and `G = D + C`, rearranged as the final operands.
     #[inline(always)]
-    fn add(self, p: &Rows, q: &Rows) -> Operands {
+    fn add_operands(self, p: &Rows, q: &Rows) -> CompletedPoint {
         let products = self.mul_wide(&self.diff_sum(p), q); // [A, B, C, D]
         let bias = self.splat(BIAS);
         let mut s = products;
@@ -348,7 +322,7 @@ impl Packed {
                 right[k] = _mm256_permute4x64_epi64::<{ order(2, 1, 3, 1) }>(s[k]); // [F, H, G, H]
             }
         }
-        Operands(left, right)
+        CompletedPoint(left, right)
     }
 
     /// [`GProjective::double`] up to its final products.
@@ -357,7 +331,7 @@ impl Packed {
     /// `E' = A + B - K`, `F' = A - B + 2Z^2`, `G' = A - B`, and `H' = A + B`, which are
     /// `-E, -F, -G, -H` of the scalar formula, so every final product is unchanged.
     #[inline(always)]
-    fn double(self, p: &Rows) -> Operands {
+    fn double(self, p: &Rows) -> CompletedPoint {
         let mut s = *p;
         // SAFETY: see the impl.
         unsafe {
@@ -393,7 +367,7 @@ impl Packed {
                 right[k] = mask_add(sum, 0b0001, sum, _mm256_add_epi64(z2, z2));
             }
         }
-        Operands(self.carry(left), self.carry(right))
+        CompletedPoint(self.carry(left), self.carry(right))
     }
 
     /// Negates the operand when `mask` selects all four lanes (it must select all or none):
@@ -582,83 +556,83 @@ impl Packed {
     }
 }
 
-impl Single for Packed {
-    type Extended = Point;
-    type Projective = Point;
-    type Completed = Operands;
-    type Cached = Cached;
+impl crate::curve::Backend for Backend {
+    type Extended = PackedPoint;
+    type Projective = PackedPoint;
+    type Completed = CompletedPoint;
+    type Cached = CachedPoint;
 
     #[inline(always)]
-    fn load(self, point: &G) -> Point {
-        Point(self.load(point))
+    fn load(self, point: &G) -> PackedPoint {
+        PackedPoint(self.load(point))
     }
 
     #[inline(always)]
-    fn store(self, point: Point) -> G {
+    fn store(self, point: PackedPoint) -> G {
         let [x, y, z, t] = self.store(&point.0);
         G { x, y, t, z }
     }
 
     #[inline(always)]
-    fn store_projective(self, point: Point) -> GProjective {
+    fn store_projective(self, point: PackedPoint) -> GProjective {
         let [x, y, z, _] = self.store(&point.0);
         GProjective { x, y, z }
     }
 
     #[inline(always)]
-    fn identity(self) -> Point {
-        Point(self.load(&G::IDENTITY))
+    fn identity(self) -> PackedPoint {
+        PackedPoint(self.load(&G::IDENTITY))
     }
 
     #[inline(always)]
-    fn project(self, point: Point) -> Point {
+    fn project(self, point: PackedPoint) -> PackedPoint {
         point
     }
 
     #[inline(always)]
-    fn double(self, point: Point) -> Operands {
+    fn double(self, point: PackedPoint) -> CompletedPoint {
         self.double(&point.0)
     }
 
     #[inline(always)]
-    fn to_projective(self, point: Operands) -> Point {
-        Point(self.mul_wide(&point.0, &point.1))
+    fn to_projective(self, point: CompletedPoint) -> PackedPoint {
+        PackedPoint(self.mul_wide(&point.0, &point.1))
     }
 
     #[inline(always)]
-    fn to_extended(self, point: Operands) -> Point {
-        Point(self.mul_wide(&point.0, &point.1))
+    fn to_extended(self, point: CompletedPoint) -> PackedPoint {
+        PackedPoint(self.mul_wide(&point.0, &point.1))
     }
 
     #[inline(always)]
-    fn cache(self, point: Point) -> Cached {
-        Cached(self.cache(&point.0))
+    fn cache(self, point: PackedPoint) -> CachedPoint {
+        CachedPoint(self.cache(&point.0))
     }
 
     #[inline(always)]
-    fn add(self, point: Point, cached: Cached, negate: bool) -> Operands {
+    fn add_cached(self, point: PackedPoint, cached: CachedPoint, negate: bool) -> CompletedPoint {
         let operand = if negate {
             self.negate(&cached.0, 0xff, TWO_P)
         } else {
             cached.0
         };
-        self.add(&point.0, &operand)
+        self.add_operands(&point.0, &operand)
     }
 
     #[inline(always)]
-    fn add_niels(self, point: Point, niels: &Niels, negate: bool) -> Operands {
+    fn add_niels(self, point: PackedPoint, niels: &Niels, negate: bool) -> CompletedPoint {
         let mask = if negate { 0xff } else { 0 };
-        self.add(&point.0, &self.niels_operand(self.load_niels(niels), mask))
+        self.add_operands(&point.0, &self.niels_operand(self.load_niels(niels), mask))
     }
 
     #[inline(always)]
-    fn add_selected(self, point: Point, row: &[Niels; 8], digit: i8) -> Operands {
-        self.add(&point.0, &self.select(row, digit))
+    fn add_selected(self, point: PackedPoint, row: &[Niels; 8], digit: i8) -> CompletedPoint {
+        self.add_operands(&point.0, &self.select(row, digit))
     }
 
     #[inline(always)]
     fn decompress_pair(self, encodings: [&[u8; 32]; 2]) -> Option<[GAffine; 2]> {
-        // SAFETY: `self` holds a `Backend`, constructed only after the feature check.
-        unsafe { decompress_pair(self.0, encodings) }
+        // SAFETY: `self` is a `Backend`, constructed only after the feature check.
+        unsafe { decompress_pair(self, encodings) }
     }
 }

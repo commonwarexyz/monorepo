@@ -4,8 +4,7 @@ mod msm;
 mod scalar;
 
 use crate::curve::{
-    Backend, G, GAffine, LANES, ODD_MULTIPLES, ODD_MULTIPLES_NAF_WIDTH, Single, WithBackend,
-    WithSingle, with_backend,
+    Backend, G, GAffine, LANES, ODD_MULTIPLES, ODD_MULTIPLES_NAF_WIDTH, WithBackend, with_backend,
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -547,14 +546,14 @@ const NAF_WIDTH: usize = 5;
 /// Returns the odd multiples `point, 3*point, ..., 15*point`, built by repeatedly adding
 /// `2*point`, so a width-[`NAF_WIDTH`] digit `d` selects entry `|d| / 2`.
 #[inline(always)]
-fn odd_multiples<S: Single>(single: S, point: &G) -> [S::Cached; 1 << (NAF_WIDTH - 2)] {
-    let point = single.load(point);
-    let double = single.cache(single.to_extended(single.double(single.project(point))));
-    let mut table = [single.cache(point); 1 << (NAF_WIDTH - 2)];
+fn odd_multiples<B: Backend>(backend: B, point: &G) -> [B::Cached; 1 << (NAF_WIDTH - 2)] {
+    let point = backend.load(point);
+    let double = backend.cache(backend.to_extended(backend.double(backend.project(point))));
+    let mut table = [backend.cache(point); 1 << (NAF_WIDTH - 2)];
     let mut multiple = point;
     for entry in &mut table[1..] {
-        multiple = single.to_extended(single.add(multiple, double, false));
-        *entry = single.cache(multiple);
+        multiple = backend.to_extended(backend.add_cached(multiple, double, false));
+        *entry = backend.cache(multiple);
     }
     table
 }
@@ -565,11 +564,11 @@ fn odd_multiples<S: Single>(single: S, point: &G) -> [S::Cached; 1 << (NAF_WIDTH
 ///
 /// Variable-time, so the points and scalars must be public.
 #[inline(always)]
-fn straus<S: Single, const N: usize>(
-    single: S,
+fn straus<B: Backend, const N: usize>(
+    backend: B,
     base: [Scalar; 2],
     terms: [(G, Scalar); N],
-) -> S::Projective {
+) -> B::Projective {
     // The basepoint multiples come from static tables, which afford a wider window and so fewer
     // additions than the per-call tables. In a width-`w` non-adjacent form every nonzero digit
     // is odd with magnitude below `2^(w-1)`, and at least `w - 1` zeros separate nonzero digits.
@@ -578,15 +577,15 @@ fn straus<S: Single, const N: usize>(
 
     // One loop builds every table, so the inlined table builder appears once. The identity's
     // cache only initializes the array.
-    let placeholder = single.cache(single.identity());
+    let placeholder = backend.cache(backend.identity());
     let mut tables = [[placeholder; 1 << (NAF_WIDTH - 2)]; N];
     for (table, (point, _)) in tables.iter_mut().zip(&terms) {
-        *table = odd_multiples(single, point);
+        *table = odd_multiples(backend, point);
     }
 
     // The shared doubling chain starts at the highest nonzero digit of any scalar. If every
     // scalar is zero, so is the sum.
-    let identity = single.project(single.identity());
+    let identity = backend.project(backend.identity());
     let Some(top) = base_digits
         .iter()
         .chain(&digits)
@@ -602,22 +601,22 @@ fn straus<S: Single, const N: usize>(
     // when an addition, which reads `T`, comes next.
     let mut sum = identity;
     for i in (0..=top).rev() {
-        let mut step = single.double(sum);
+        let mut step = backend.double(sum);
         for (digits, table) in base_digits.iter().zip(&ODD_MULTIPLES) {
             let digit = digits[i];
             if digit != 0 {
                 let multiple = &table[usize::from(digit.unsigned_abs()) / 2];
-                step = single.add_niels(single.to_extended(step), multiple, digit < 0);
+                step = backend.add_niels(backend.to_extended(step), multiple, digit < 0);
             }
         }
         for (digits, table) in digits.iter().zip(&tables) {
             let digit = digits[i];
             if digit != 0 {
                 let multiple = table[usize::from(digit.unsigned_abs()) / 2];
-                step = single.add(single.to_extended(step), multiple, digit < 0);
+                step = backend.add_cached(backend.to_extended(step), multiple, digit < 0);
             }
         }
-        sum = single.to_projective(step);
+        sum = backend.to_projective(step);
     }
     sum
 }
@@ -651,28 +650,20 @@ struct Verify<'a> {
 impl WithBackend for Verify<'_> {
     type Output = bool;
 
-    fn call<B: Backend>(self, backend: B) -> bool {
-        backend.with_single(self)
-    }
-}
-
-impl WithSingle for Verify<'_> {
-    type Output = bool;
-
     // Inlined so the algorithm compiles inside the backend's target-feature entry, where its
     // point operations can inline.
     #[inline(always)]
-    fn call<S: Single>(self, single: S) -> bool {
+    fn call<B: Backend>(self, backend: B) -> bool {
         let Some(s) = Scalar::from_canonical_bytes(&self.sig.s) else {
             return false;
         };
         let points = self.a_point.map_or_else(
             || {
-                single
+                backend
                     .decompress_pair([&self.sig.r, self.a_bytes.as_bytes()])
                     .map(|[r, a]| (r, a.to_extended()))
             },
-            |point| single.decompress(&self.sig.r).map(|r| (r, *point)),
+            |point| backend.decompress(&self.sig.r).map(|r| (r, *point)),
         );
         let Some((r, a)) = points else {
             return false;
@@ -691,16 +682,16 @@ impl WithSingle for Verify<'_> {
         let u = Scalar::from_u128(u.unsigned_abs());
         let (low, high) = s.mul_mod_l(&u).halves();
         let mut sum = straus(
-            single,
+            backend,
             [Scalar::from_u128(low), Scalar::from_u128(high)],
             [(r.to_extended().negate(), u), (a, Scalar::from_u128(v))],
         );
 
         // Multiplying by the cofactor (8) maps the sum into the prime-order subgroup.
         for _ in 0..3 {
-            sum = single.to_projective(single.double(sum));
+            sum = backend.to_projective(backend.double(sum));
         }
-        single.store_projective(sum).is_identity()
+        backend.store_projective(sum).is_identity()
     }
 }
 
@@ -740,7 +731,7 @@ pub(super) fn verify_batch_bytes(
 mod tests {
     use super::*;
     use crate::{
-        curve::Formulas,
+        curve::test_backend,
         signing::{SigningKey, VerifyingKey},
         test::strategy::Recording,
     };
@@ -825,7 +816,15 @@ mod tests {
     fn straus_matches_double_and_add() {
         // With every scalar zero, no digit is nonzero, which takes the early return.
         let basepoint = GAffine::BASEPOINT.to_extended();
-        assert!(straus(Formulas, [Scalar::ZERO; 2], [(basepoint, Scalar::ZERO)]).is_identity());
+        assert!(
+            test_backend()
+                .store_projective(straus(
+                    test_backend(),
+                    [Scalar::ZERO; 2],
+                    [(basepoint, Scalar::ZERO)]
+                ))
+                .is_identity()
+        );
 
         // Each variable point gains a low-order component, and the difference from
         // double-and-add must be exactly the identity, so the torsion part is checked too.
@@ -855,7 +854,8 @@ mod tests {
                         sum.add(point.scalar_mul(scalar.bits_be()))
                     });
                 assert!(
-                    straus(Formulas, base, terms)
+                    test_backend()
+                        .store_projective(straus(test_backend(), base, terms))
                         .to_extended()
                         .add(expected.negate())
                         .is_identity()

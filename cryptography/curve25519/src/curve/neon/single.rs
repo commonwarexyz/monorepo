@@ -4,21 +4,13 @@
 //! Coordinates retain the scalar field representation, with every limb below `2^52`.
 
 use super::{
-    Regs, digit_mac, digit_product, digit_times19, mul19, pack_pair, reduce_columns, split_pairs,
-    square_regs, unpack_pair,
+    Backend, Regs, digit_mac, digit_product, digit_times19, mul19, pack_pair, reduce_columns,
+    split_pairs, square_regs, unpack_pair,
 };
-use crate::curve::{F, G, GCompleted, GProjective, Niels, ProjectiveNiels, Single, basepoint};
+use crate::curve::{F, G, GCompleted, GProjective, Niels, ProjectiveNiels, basepoint};
 use core::arch::aarch64::*;
 
-/// The single-point operations of the NEON backend.
-///
-/// Points keep the scalar representations of [`Formulas`](crate::curve::Formulas); in each
-/// operation, two independent products run together on a NEON tile and the rest in scalar
-/// arithmetic.
-#[derive(Clone, Copy)]
-pub(super) struct Hybrid;
-
-impl Single for Hybrid {
+impl crate::curve::Backend for Backend {
     type Extended = G;
     type Projective = GProjective;
     type Completed = GCompleted;
@@ -89,11 +81,11 @@ impl Single for Hybrid {
 
     #[inline(always)]
     fn cache(self, point: G) -> ProjectiveNiels {
-        crate::curve::Formulas.cache(point)
+        point.to_projective_niels()
     }
 
     #[inline(always)]
-    fn add(self, point: G, cached: ProjectiveNiels, negate: bool) -> GCompleted {
+    fn add_cached(self, point: G, cached: ProjectiveNiels, negate: bool) -> GCompleted {
         let cached = if negate { cached.negate() } else { cached };
         let [a, b] = mul_pair(
             point.y.sub(point.x),
@@ -118,7 +110,7 @@ impl Single for Hybrid {
     }
 }
 
-/// [`G::add_niels_completed`] with the `A` and `B` products on the tile.
+/// The completed mixed-addition formula with the `A` and `B` products on the tile.
 #[inline(always)]
 fn add_niels(point: G, niels: Niels) -> GCompleted {
     let [a, b] = mul_pair(
