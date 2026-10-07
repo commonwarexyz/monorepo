@@ -16,7 +16,7 @@ const HASHMAP_TYPE: &str = "HashMap";
 
 // ---------- HashMap ----------
 
-impl<K: Ord + Hash + Eq + Write, V: Write> Write for HashMap<K, V> {
+impl<K: Ord + Write, V: Write, S> Write for HashMap<K, V, S> {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
 
@@ -42,7 +42,7 @@ impl<K: Ord + Hash + Eq + Write, V: Write> Write for HashMap<K, V> {
     }
 }
 
-impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for HashMap<K, V> {
+impl<K: EncodeSize, V: EncodeSize, S> EncodeSize for HashMap<K, V, S> {
     fn encode_size(&self) -> usize {
         // Start with the size of the length prefix
         let mut size = self.len().encode_size();
@@ -71,7 +71,7 @@ impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for HashMap<K, V
 }
 
 // Read implementation for HashMap
-impl<K: Read + Ord + Hash + Eq, V: Read> Read for HashMap<K, V> {
+impl<K: Read + Ord + Hash, V: Read> Read for HashMap<K, V> {
     type Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg));
 
     fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
@@ -107,7 +107,7 @@ mod tests {
         k_cfg: KCfg,
         v_cfg: VCfg,
     ) where
-        K: Write + EncodeSize + Read<Cfg = KCfg> + Ord + Hash + Eq + PartialEq + Debug,
+        K: Write + EncodeSize + Read<Cfg = KCfg> + Ord + Hash + Debug,
         V: Write + EncodeSize + Read<Cfg = VCfg> + PartialEq + Debug,
         HashMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
             + Decode<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
