@@ -32,6 +32,7 @@ use commonware_storage::{
             ordered, unordered,
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
+        floor::Proportional,
         operation::Key,
         sync::{self, Target as AnySyncTarget},
     },
@@ -304,7 +305,9 @@ where
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged.merkleize(updates, upserts, metadata, &guard).await?
+            staged
+                .merkleize(updates, upserts, metadata, &guard, &mut Proportional)
+                .await?
         };
         Ok(AnyMerkleized { inner, db })
     }
@@ -344,7 +347,9 @@ where
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged.merkleize(updates, upserts, metadata, &guard).await?
+            staged
+                .merkleize(updates, upserts, metadata, &guard, &mut Proportional)
+                .await?
         };
         Ok(AnyMerkleized { inner, db })
     }
@@ -394,7 +399,10 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&db, self.metadata).await?;
+        let merkleized = self
+            .batch
+            .merkleize(&db, self.metadata, &mut Proportional)
+            .await?;
         Ok(AnyMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -420,7 +428,10 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&db, self.metadata).await?;
+        let merkleized = self
+            .batch
+            .merkleize(&db, self.metadata, &mut Proportional)
+            .await?;
         Ok(AnyMerkleized {
             inner: merkleized,
             db: self.db.clone(),
