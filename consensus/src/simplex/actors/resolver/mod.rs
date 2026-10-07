@@ -29,8 +29,10 @@
 //!
 //! Background repair cannot detect a split where one participant certifies a notarization while
 //! another holds a covering nullification. Proposal verification exposes the missing ancestry and
-//! targets the first gap at the proposal's leader. At a term start, the immediate predecessor's
-//! notarization may instead come from any peer because a pipelined proposer might not hold it yet.
+//! targets the first gap at the proposal's leader. With an
+//! [`Static`](crate::simplex::elector::Static) elector, a term start's immediate
+//! predecessor may instead come from any peer because a pipelined proposer might not hold its
+//! notarization yet.
 //! A blocked certification asks any peer, since the leader that withheld the certificate may never
 //! answer. Matching evidence, finalization, or a failed certification verdict retires that request,
 //! whereas a certified-floor raise retires only background work.

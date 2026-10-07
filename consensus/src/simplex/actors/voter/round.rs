@@ -207,8 +207,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.request_verify()
     }
 
-    /// Records the ancestry view that proposal verification requested from the
-    /// leader. Returns `false` for a repeated request.
+    /// Records the ancestry view that proposal verification requested. Returns
+    /// `false` for a repeated request.
     ///
     /// Certification repair bypasses this latch so an untargeted request can
     /// widen the resolver fetch.

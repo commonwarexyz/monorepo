@@ -1071,6 +1071,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// so there is nothing to fetch yet. If we fall behind, our issuance
     /// anchor freezes and newer proposals leave the window (see
     /// [`Self::in_issuance_window`]), so the fetch resumes.
+    ///
+    /// The returned target is the proposal's leader, or `None` when any validator
+    /// may serve the fetch.
     fn resolve_ancestry(
         &self,
         err: &ParentPayloadError,
@@ -1088,8 +1091,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                     return None;
                 }
                 // A pipelined term-start leader may lack its immediate predecessor's
-                // certificate. Older parents and same-term repair retain leader affinity.
-                let pipelined_parent = proposal_view.is_term_start(self.term_length())
+                // certificate. Older parents, same-term repair, and electors that cannot
+                // pipeline retain leader affinity.
+                let pipelined_parent = L::Mode::early::<S::Certificate>().is_some()
+                    && proposal_view.is_term_start(self.term_length())
                     && parent_view.next() == *proposal_view;
                 let target = (!pipelined_parent).then(|| leader.clone());
                 Some((*parent_view, Kind::Notarization, target))
@@ -1101,10 +1106,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns work for the lowest locally admissible tracked proposal awaiting
     /// verification.
     ///
-    /// Requests missing ancestry from the proposal's elected leader. At a term start,
-    /// the immediate predecessor's notarization may come from any validator because
-    /// the pipelined proposer might not hold it. [`Self::resolve_ancestry`] decides
-    /// whether an error justifies a fetch.
+    /// Requests missing ancestry from the proposal's elected leader, except where
+    /// [`Self::resolve_ancestry`] allows any validator to serve it. That function
+    /// also decides whether an error justifies a fetch.
     pub fn try_verify(&mut self) -> Verify<S, D> {
         // Bound the scan as in [`Self::try_propose`].
         // Ascending order gives the current view precedence over optimistic work.
@@ -1128,7 +1132,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
             // Validate ancestry before claiming the request. Invalid structure
             // times out the view; missing evidence either waits for live
-            // certification or produces one targeted fetch.
+            // certification or produces one fetch.
             let parent_payload = match self.parent_payload(&proposal) {
                 Ok(parent_payload) => parent_payload,
                 Err(err) => {
@@ -3776,6 +3780,64 @@ mod tests {
             };
             assert_eq!(ctx.parent, (View::new(2), parent.payload));
             assert_eq!(proposal, child);
+        });
+    }
+
+    /// A [`Dynamic`] elector never elects a term's leader early, so no pipelined
+    /// proposer exists, and a term-start proposal's missing immediate predecessor is
+    /// requested from the proposal's leader.
+    #[test]
+    fn try_verify_targets_leader_for_term_start_parent_without_early_election() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                verifier,
+                ..
+            } = ed25519::fixture(&mut context, b"ns", 4);
+            let mut state = State::new(
+                context.child("state"),
+                Config {
+                    scheme: schemes[1].clone(),
+                    elector: RequireCertificateElector {
+                        term_length: TermLength::new(NZU32!(5)),
+                        _phantom: std::marker::PhantomData,
+                    },
+                    epoch: Epoch::new(9),
+                    view_retention: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    skip_budget: 4,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            // A nullification at view 3 covers the rest of term 1 and enters
+            // term 2 at view 6.
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(3)));
+            assert!(state.add_nullification(nullification));
+            assert_eq!(state.current_view(), View::new(6));
+
+            // The proposal names its immediate predecessor, which this node never
+            // saw notarized.
+            assert!(state.set_proposal(View::new(6), fetch_proposal(6, 5, 66)));
+            let leader =
+                participants[usize::from(state.leader_index(View::new(6)).unwrap())].clone();
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    proposal,
+                    view,
+                    kind: Kind::Notarization,
+                    target,
+                }
+                    if proposal == View::new(6)
+                        && view == View::new(5)
+                        && target == Some(leader)
+            ));
         });
     }
 
