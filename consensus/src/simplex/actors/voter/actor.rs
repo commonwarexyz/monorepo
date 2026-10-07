@@ -412,7 +412,7 @@ impl<
             .inc();
     }
 
-    /// Counts a handoff abandoned before publication.
+    /// Counts a handoff request, candidate, or build abandoned before publication.
     fn record_handoff_abandoned(&self, reason: HandoffAbandonedReason) {
         self.handoff_abandoned
             .get_or_create(&HandoffAbandoned { reason })
@@ -508,10 +508,9 @@ impl<
         pending_propose: &mut PendingProposal<D, S::PublicKey>,
         pending_verify: &mut PendingVerification<D, S::PublicKey>,
     ) {
-        // Retain optimistic future-view requests unless their captured ancestry
-        // is invalid. Drop requests for exited views. Parent certification retains
-        // pending responses and held results. Certification may continue after
-        // dropping an exited view's verification receiver.
+        // Drop requests for exited views, and requests whose captured parent is no longer
+        // valid once a replacement parent is selectable. Certification of an exited view
+        // continues after its verification receiver is dropped.
         let current_view = self.state.current_view();
         if let Some(request) = pending_propose.as_ref() {
             let reason = if request.view() < current_view {
@@ -709,7 +708,7 @@ impl<
     fn prepare_notarization(&mut self, view: View) -> Option<Notarization<S, D>> {
         let notarization = self.state.broadcast_notarization(view)?;
 
-        // Record leader-local latency at certificate readiness.
+        // Only the leader sees an unbiased latency sample, so record it now.
         if let Some(elapsed) = self.leader_elapsed(view) {
             self.notarization_latency.observe(elapsed);
             if let Some(since_entry) = self.state.elapsed_since_entry(view) {

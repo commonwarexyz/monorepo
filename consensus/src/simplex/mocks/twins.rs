@@ -54,7 +54,7 @@
 //! target and contribute to its multiplicity.
 //!
 //! Scenario generation guarantees that every case within a campaign is
-//! structurally distinct -- no duplicate (scenario, compromised-assignment)
+//! structurally distinct. No duplicate (scenario, compromised-assignment)
 //! pairs are ever emitted. The scenario space is counted with an exact
 //! compressed transition DAG: each edge stores a residual symmetry-cell
 //! transition and the exact number of concrete round scenarios represented by
@@ -359,7 +359,7 @@ pub enum Mode {
 /// The generator uses `u64` masks for recipient sets and residual cell
 /// boundaries, so campaigns support at most 64 participants.
 ///
-/// Each canonical scenario tracks residual symmetry cells -- participants that
+/// Each canonical scenario tracks residual symmetry cells, the participants that
 /// were treated identically across all rounds. Two compromised-node assignments
 /// that differ only in which members of a symmetry cell are compromised are
 /// equivalent under relabeling for the adversarial prefix, so the framework

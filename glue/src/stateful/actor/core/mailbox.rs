@@ -178,12 +178,13 @@ where
 
 /// Handle to the [`Stateful`](super::Stateful) actor.
 ///
-/// Implements the consensus application and verifying traits. The mailbox forwards
-/// proposal, verification, and reporting calls to the actor. It evaluates handoff
-/// policy on a retained application clone, including after actor shutdown. A
-/// [`HandoffPolicy::Prepare`] decision does not guarantee proposal availability.
-/// If the actor stops before replying, proposal calls return `None` and verification
-/// calls panic with "stateful actor dropped during verify".
+/// Implements the consensus [`Application`](commonware_consensus::Application) and receives
+/// finalized blocks from marshal as a [`Reporter`]. If the actor stops before responding,
+/// `propose` returns `None` and `verify` panics.
+///
+/// `handoff_policy` is answered from a retained clone of the application, including after the
+/// actor stops, so a [`HandoffPolicy::Prepare`] decision does not guarantee that the proposal
+/// can be built.
 pub struct Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,

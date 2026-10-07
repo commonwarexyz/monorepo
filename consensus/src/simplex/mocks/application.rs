@@ -216,6 +216,8 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     /// replay.
     propose_observer: Option<ProposeObserver<H, P>>,
 
+    /// Receives each built handoff proposal with its response sender, so a test
+    /// decides when and how to respond.
     handoff_propose_controller: Option<HandoffProposeController<H::Digest>>,
 
     /// Invoked on every `Message::Verify` request received by the application.
@@ -226,6 +228,7 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     /// Senders held alive to simulate proposals that hang indefinitely
     /// (used when `stall_proposals` is set).
     pending_proposes: Vec<oneshot::Sender<H::Digest>>,
+    /// Handoff response senders held alive while `stall_proposals` is set.
     pending_handoff_proposes: Vec<oneshot::Sender<HandoffProposal<H::Digest>>>,
 
     /// Senders held alive to simulate certifications that hang indefinitely

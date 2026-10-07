@@ -362,9 +362,9 @@ where
                                         verifications.schedule(verifier.clone(), request);
                                     }
                                     Some(message) => {
-                                        // Only verification may overtake an active proposal. The
-                                        // first other message becomes a FIFO barrier for later
-                                        // mailbox work.
+                                        // Only verifications overtake an active proposal. The
+                                        // first other message waits for it, and later messages
+                                        // wait behind that one.
                                         deferred_message = Some(message);
                                         receive_messages = false;
                                     }

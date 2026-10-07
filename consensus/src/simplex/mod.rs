@@ -30,7 +30,7 @@
 //!
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
-//! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
+//! * Set timer for leader proposal `t_l = 2 * delta` and advance `t_a = 3 * delta`
 //!     * If leader `l` has not been active for the configured skip timeout while a quorum of
 //!       participants has been, set both `t_l` and `t_a` to 0.
 //! * If leader `l`, broadcast `notarize(c,v)`
@@ -287,33 +287,36 @@
 //! validators require explicitly certified ancestry before verifying a term-start proposal, and
 //! so before voting to notarize it.
 //!
-//! Marshal applications use [`crate::Application::handoff_policy`] to choose
+//! Marshal applications opt in through [`crate::Application::handoff_policy`], which returns
 //! [`crate::HandoffPolicy::Prepare`] or the default [`crate::HandoffPolicy::AwaitCertification`].
-//! Stateful Glue exposes the same policy. The application makes a synchronous decision from
-//! available information. It cannot revoke this decision. `Prepare` uses the ordinary
-//! construction path, which may reuse an existing block without calling the application builder.
-//! With `AfterCertification`, construction can overlap certification while consensus holds publication.
-//! An application can choose this for individual handoffs whose outgoing leader it does not trust.
+//! `Prepare` uses the ordinary construction path, which may reuse an existing block without
+//! calling the application builder. With `AfterCertification`, construction overlaps parent
+//! certification while consensus holds publication. An application can choose it for any
+//! handoff whose outgoing leader it does not trust.
 //!
 //! With [`crate::HandoffPublication::AllowBeforeCertification`], rotating leaders can pipeline
 //! every view. The leader distributes each proposal in parallel with its parent's votes, allowing
 //! network-bound view time to drop from two network trips to one. With stable leaders,
-//! optimistic validation pipelines every view except the term start, so the
-//! handoff only moves each term's first view one network trip earlier.
+//! optimistic validation pipelines every view except the term start, so the handoff only moves
+//! each term's first view one network trip earlier.
 //!
-//! Publication before certification trusts the outgoing leader not to equivocate. If the outgoing
-//! tip never notarizes, validators cannot use the proposal built on it. The usual timeout path
-//! then nullifies the incoming term.
+//! Publication before certification trusts the outgoing leader not to equivocate and to complete
+//! its term. The early proposal becomes usable only if every uncertified view it builds on
+//! certifies, and with stable leaders that can include several views of the outgoing term. If one
+//! of them never certifies, validators cannot use the proposal, and the usual timeout path
+//! nullifies the incoming term.
 //!
 //! ### Handoff Metrics
 //!
-//! `handoff_events` counts lifecycle events. One request can count several events. `Requested`
-//! counts requests to the automaton, not unique views. `Deferred` counts explicit deferrals.
-//! Consensus can still abandon a deferred request later. `CandidateReturned` counts candidates
-//! returned by the automaton, and `Held` counts candidates retained for parent certification.
-//! Releasing a held candidate does not count it as returned again. Publication events count
-//! local relay attempts after proposal acceptance, classified by whether the exact captured
-//! parent has certified or finalized at that point. They do not imply network delivery.
+//! `handoff_events` counts lifecycle events, and one request can count several. `Requested`
+//! counts handoff requests to the automaton, not unique views. `Deferred` counts
+//! [`crate::HandoffProposal::AwaitCertification`] responses, including default ones.
+//! `CandidateReturned` counts candidates returned by the automaton, and `Held` counts candidates
+//! retained for parent certification. Releasing a held candidate does not count it again.
+//!
+//! Publication events count local relay attempts after proposal acceptance, classified by whether
+//! the exact parent had certified or finalized at that point. They do not imply network
+//! delivery.
 //!
 //! `handoff_abandoned` counts handoff requests or candidates that consensus discards before
 //! publication, and pending builds that it cancels, by reason:
@@ -335,8 +338,8 @@
 //! discards it. A closed response counts under view exit or superseded ancestry instead if one of
 //! those discards it first.
 //!
-//! Neither family tracks losses across restart or distinguishes newly built candidates from
-//! reused blocks.
+//! Neither family tracks the ordinary request that replaces a deferred handoff, losses across
+//! restart, or whether a candidate was newly built or reused.
 //!
 //! ### Latency Metrics
 //!
@@ -346,12 +349,13 @@
 //! proposal recording, so that wait is excluded. Early publication can record the proposal
 //! before parent certification and include the remaining wait in these metrics.
 //!
-//! `notarization_latency_from_view_entry` and `finalization_latency_from_view_entry` use first
-//! local view entry as their starting point, regardless of proposal timing. They measure the
-//! remaining time after entry and omit samples when no entry was recorded. Both metric pairs
-//! sample only the view's leader at the same certificate-ready event, before certificate journal
-//! persistence and network publication. Timestamps are process-local and are not restored on
-//! restart. These durations do not measure transaction latency or total speculative work.
+//! `notarization_latency_from_view_entry` and `finalization_latency_from_view_entry` measure from
+//! first local view entry, regardless of proposal timing, and omit samples when no entry was
+//! recorded.
+//!
+//! Both metric pairs sample only the view's leader at the same certificate-ready event, before
+//! the journal sync and network publication of that certificate. Timestamps are process-local and
+//! are not restored on restart.
 //!
 //! ### Optimistic Finality
 //!
@@ -651,8 +655,8 @@ impl Lookahead {
     /// Returns the lowest view whose direct notarization can anchor
     /// `view` inside the optimistic *issuance* window, or `None` when
     /// `view` can never be issued optimistically, either because
-    /// optimism is disabled or because `view` starts a term and so
-    /// requires explicitly certified ancestry.
+    /// optimism is disabled or because `view` starts a term, whose
+    /// proposals peers verify only on explicitly certified ancestry.
     ///
     /// An anchor below the floor fails the hop bound exactly like no
     /// anchor at all, so a caller decides membership by asking whether
@@ -1847,8 +1851,16 @@ mod tests {
         Sha256Digest,
     >;
 
-    /// Starts a fully linked five-validator ed25519 round-robin cluster.
-    /// Returns each validator's reporter, the view-1 leader's index, and the network oracle.
+    /// Starts a fully linked five-validator ed25519 round-robin cluster and returns each
+    /// validator's reporter, the view-1 leader's index, and the network oracle.
+    ///
+    /// With `accept_handoffs`, every application permits early publication of handoff
+    /// candidates. Otherwise, applications defer handoffs.
+    ///
+    /// The leader and certification timeouts are tuned to the callers' link latencies. When
+    /// the latency nears half the leader timeout, a view that waits for its parent's
+    /// certification takes two or more network trips and times out. Runs then stay free of
+    /// nullifications only when views pipeline.
     async fn setup_round_robin_cluster(
         context: &mut deterministic::Context,
         namespace: &[u8],
@@ -8383,6 +8395,9 @@ mod tests {
     ///   the protocol actually commits blocks under synchrony, not just
     ///   reaches a high view via nullifications.
     ///
+    /// - `handoffs`: Whether applications return handoff candidates with early publication
+    ///   during the attack prefix instead of deferring every handoff.
+    ///
     /// The term structure (length and optimistic lookahead) comes from the
     /// elector passed to [twins_campaign]: multi-view terms exercise the
     /// stable-leader finalize gate under equivocation, and a nonzero
@@ -8397,7 +8412,11 @@ mod tests {
         handoffs: bool,
     }
 
-    // Count returned prefix candidates separately for honest and twin apps.
+    /// Makes an application return handoff candidates with early publication during
+    /// the adversarial prefix and defer handoffs afterward, so early publication
+    /// evidence comes only from prefix views. `side` selects the counter in
+    /// `prefix_handoffs` that records returned prefix candidates: 0 for honest
+    /// applications and 1 for twin applications.
     fn configure_twins_handoff(
         actor: &mut mocks::application::Application<deterministic::Context, Sha256, PublicKey>,
         prefix_end: View,
@@ -8410,7 +8429,6 @@ mod tests {
                 prefix_handoffs.lock()[side] += 1;
                 response.send_lossy(proposal);
             } else {
-                // Suffix deferral isolates early publication evidence to prefix views.
                 response.send_lossy(crate::HandoffProposal::AwaitCertification);
             }
         }));

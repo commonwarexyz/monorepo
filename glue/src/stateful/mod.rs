@@ -194,13 +194,14 @@ where
 
     /// Decide whether to build on a parent that has not yet been certified.
     ///
-    /// [`Stateful`] calls this method on an application clone, outside the processing actor
-    /// and without database batches. Metadata used only for speculative preparation may live
-    /// outside the batches, but the application must share it across clones. This policy does
-    /// not change the deterministic execution contract above. See
-    /// [`commonware_consensus::Application::handoff_policy`] for early-publication trust
-    /// requirements. If readiness is uncertain, return
+    /// See [`commonware_consensus::Application::handoff_policy`] for the contract, including
+    /// early-publication trust. If readiness is uncertain, return
     /// [`HandoffPolicy::AwaitCertification`].
+    ///
+    /// [`Stateful`] calls this method on a clone of the application, outside the processing
+    /// actor and without database batches. Metadata consulted here may live outside the
+    /// batches, but the application must share it across clones. This policy does not change
+    /// the deterministic execution contract above.
     fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
         HandoffPolicy::AwaitCertification
     }

@@ -133,8 +133,6 @@ pub struct FuzzInput {
     pub term_length: TermLength,
     pub optimistic_views: ViewDelta,
     pub heterogeneous_optimism: bool,
-    /// Publication permission honest applications grant for pipelined handoff
-    /// candidates, or `None` to defer every handoff.
     pub handoff: Option<HandoffPublication>,
     pub degraded_network: bool,
     pub configuration: Configuration,

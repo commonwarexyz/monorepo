@@ -4168,6 +4168,7 @@ mod tests {
     }
 
     const HANDOFF_LEADER_TIMEOUT: Duration = Duration::from_secs(10);
+
     /// Metrics prefix of the fixture voter: the `delayed` sync context plus
     /// the `actor` child that `setup_voter` creates.
     const HANDOFF_ACTOR_METRICS: &str = "delayed_actor";
@@ -4729,8 +4730,9 @@ mod tests {
         });
     }
 
-    /// A response arriving during the parent sync stays Awaiting until the
-    /// loop resumes, then dispatches its ordinary replacement.
+    /// A deferral that arrives while the parent's certification sync is blocked
+    /// is not consumed until the loop resumes; it then dispatches its ordinary
+    /// replacement.
     #[test_traced]
     fn test_pipelined_handoff_deferred_response_during_certification_sync() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));

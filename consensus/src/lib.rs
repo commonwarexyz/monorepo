@@ -181,7 +181,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         AfterCertification,
         /// Permit early relay and the proposer's notarize vote before parent certification.
         ///
-        /// This trusts the outgoing leader not to equivocate.
+        /// This trusts the outgoing leader not to equivocate and to complete its term: the
+        /// proposal is usable only if every uncertified view it builds on certifies.
         AllowBeforeCertification,
     }
 
@@ -191,9 +192,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// The candidate is ready. Consensus applies its publication permission before
         /// relaying or voting.
         Proposed {
-            /// Prepared or reused candidate.
             payload: D,
-            /// When consensus may publish this candidate.
             publication: HandoffPublication,
         },
         /// Ask consensus to request an ordinary proposal after the parent certifies.
@@ -214,7 +213,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// consensus holds the candidate until its parent certifies or finalizes.
         ///
         /// With [`HandoffProposal::AwaitCertification`], consensus issues an ordinary
-        /// [`Automaton::propose`] for the same context once the parent certifies.
+        /// [`Automaton::propose`] for the same context once the parent certifies, unless it
+        /// has already voted to nullify this view.
         ///
         /// Closing the response abandons the local proposal opportunity for this view once
         /// the parent certifies or finalizes, without a retry. If a replacement parent
@@ -228,8 +228,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// it certifies, as after a nullification in the parent's term, or once it votes to
         /// nullify the parent's view or an earlier view of that term, since the application may
         /// verify other blocks only after this build completes. An ordinary
-        /// [`Automaton::propose`] for the same context follows if the parent certifies, or a
-        /// request on a replacement parent once one is selectable.
+        /// [`Automaton::propose`] for the same context follows if the parent certifies and
+        /// consensus has not voted to nullify this view, or a request on a replacement parent
+        /// once one is selectable.
         fn propose_handoff(
             &mut self,
             _context: Self::Context,
@@ -349,7 +350,8 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     /// An application's preparation policy for a term handoff.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum HandoffPolicy {
-        /// Prepare or reuse a candidate before parent certification with this publication permission.
+        /// Prepare or reuse a candidate before parent certification. The permission
+        /// controls when consensus may publish it.
         Prepare(HandoffPublication),
         /// Wait for the parent to certify before proposing.
         AwaitCertification,
@@ -396,23 +398,27 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Recovery and epoch-boundary reproposal may reuse a block without invoking
         /// [`Self::propose`]. The supplied [`HandoffPublication`] controls when consensus
         /// may publish the candidate. With [`HandoffPolicy::AwaitCertification`], consensus
-        /// waits for parent certification before requesting an ordinary proposal.
+        /// waits for parent certification before requesting an ordinary proposal. The
+        /// returned policy is final for the request.
         ///
-        /// The application cannot revoke this decision. Publishing early trusts the outgoing
-        /// consensus leader not to equivocate.
+        /// With deferred or coded verification, a prepared build can start before this node
+        /// has verified the parent's contents. The parent may later fail certification,
+        /// which discards the candidate.
         ///
         /// Parent certification does not cancel a prepared build. Consensus cancels it once
         /// the parent can no longer be built on before it certifies, as after a nullification
         /// in the parent's term, or once it votes to nullify the parent's view or an earlier
         /// view of that term. It then requests an ordinary proposal for the same context if the
-        /// parent certifies, or a proposal on a replacement parent once one is selectable.
+        /// parent certifies and it has not voted to nullify the proposal's view, or a proposal
+        /// on a replacement parent once one is selectable.
         ///
-        /// The context names the parent by view and digest. Its leader field names the
+        /// [`HandoffPublication::AllowBeforeCertification`] trusts the outgoing leader. The
+        /// context names the parent by view and digest, and its leader field names the
         /// incoming leader, not the outgoing one. Identify the outgoing leader from the
-        /// elector's schedule or authenticated metadata for the parent's consensus round.
-        /// A verified parent block can name an earlier proposer in its embedded context,
-        /// as with an epoch-boundary reproposal. If that identity or trust is uncertain,
-        /// prepare with [`HandoffPublication::AfterCertification`].
+        /// elector's schedule or authenticated metadata for the parent's consensus round. A
+        /// verified parent block can name an earlier proposer in its embedded context, as
+        /// with an epoch-boundary reproposal. If that identity or trust is uncertain, prepare
+        /// with [`HandoffPublication::AfterCertification`].
         ///
         /// This method runs synchronously on the proposal path. Do not block on I/O.
         /// If readiness is uncertain, return [`HandoffPolicy::AwaitCertification`].

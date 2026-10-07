@@ -3297,7 +3297,7 @@ mod tests {
 
         // Construct a Commitment with all-zero bytes (invalid CodingConfig:
         // minimum_shards=0, extra_shards=0). Serialize it and attempt to
-        // deserialize -- this must fail.
+        // deserialize, which must fail.
         let malformed_bytes = [0u8; <TestCommitment as FixedSize>::SIZE];
         let result = TestCommitment::read(&mut commonware_codec::Copying(&malformed_bytes));
         assert!(
@@ -4928,8 +4928,8 @@ mod tests {
     /// block for the same round would equivocate. The recovered proposal
     /// must also be staged for the relay, so the broadcast re-sends its
     /// shards and certification resolves through the deduplicated
-    /// re-persist. The request is issued as a handoff, which reaches
-    /// `propose` through the shared helper.
+    /// re-persist. The request is a handoff, which the same reuse path
+    /// answers as an ordinary proposal.
     #[test_traced("WARN")]
     fn test_propose_reuses_verified_block_on_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));

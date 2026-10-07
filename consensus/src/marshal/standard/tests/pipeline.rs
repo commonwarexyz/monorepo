@@ -238,8 +238,8 @@ fn retained_pipeline_handoff(first: First) {
             First::Build => {
                 build_release_tx.send_lossy(());
                 completed_rx.await.unwrap();
-                // Block certification for three link delays so the observer
-                // receives any vote published when the build completes.
+                // Keep the parent uncertified for three link delays so the
+                // observer receives any vote published when the build completes.
                 let quiet_until = context.current() + 3 * LINK.latency;
                 loop {
                     select! {

@@ -723,9 +723,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return None;
         }
 
-        // Same-term optimistic views revalidate their parent here. Other
-        // proposals validate their captured ancestry before this call, and the
-        // actor constructs the vote before processing another state transition.
+        // Same-term optimistic views recheck their parent here. A proposal outside the
+        // issuance window had its ancestry checked before this call: verification
+        // requires certified ancestry, and `proposed` validates a local build's parent.
+        // The actor constructs the vote before processing any other state transition,
+        // so that check cannot go stale.
         if self.in_issuance_window(view) && !self.optimistic_parent_ready(view) {
             return None;
         }
@@ -776,8 +778,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return None;
         }
 
-        // Optimistic notarize votes can notarize a child ahead of its parent's
-        // certification, and finalization must not run ahead of that anchor.
+        // Optimistic and pipelined handoff notarize votes can notarize a child ahead
+        // of its parent's certification, and finalization must not run ahead of that
+        // anchor.
         // Certification already applies this, so it only matters when replay
         // restores a certified round without re-running that precheck.
         let proposal = self.views.get(&view)?.proposal()?;
@@ -1368,10 +1371,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return None;
         }
 
-        // Certification repair asks any peer, even if verification already
-        // requested the parent from the leader. The untargeted duplicate widens
-        // the pending resolver request. The candidate remains dormant until its
-        // parent arrives, so certification does not request it repeatedly.
+        // A blocked certification asks any peer: the leader that withheld the
+        // certificate may never answer, and any validator that certified the parent
+        // holds its notarization. The untargeted request also widens a pending
+        // leader-targeted verification request. The candidate remains dormant until
+        // its parent arrives, so certification does not request it repeatedly.
         Some(CertificateFetch {
             proposal: *proposal_view,
             view: *parent_view,
@@ -1488,7 +1492,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Returns true when `view` or a same-term predecessor has an unresolved
     /// local certification rejection. Intra-term proposals link every
-    /// intermediate view; term starts instead require explicit ancestry.
+    /// intermediate view. A term start instead requires explicit ancestry, or,
+    /// for a pipelined handoff, a parent that passes this check in its own term.
     fn has_failed_optimistic_ancestry(&self, view: View) -> bool {
         self.failed_certifications
             .range(view.term_start(self.term_length())..=view)
@@ -1777,15 +1782,23 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Returns the parent whose explicit certification gates `proposal`.
     ///
-    /// In-term proposals require their immediate predecessor. A term-start
-    /// proposal requires its immediate predecessor when it names that view as
-    /// its parent and we have cast a notarize vote for the proposal.
+    /// In-term proposals require their immediate predecessor. A term-start proposal
+    /// that names its immediate predecessor also requires it once we have broadcast a
+    /// notarize vote in its view, as the proposer of a pipelined handoff does before
+    /// that predecessor certifies.
     ///
-    /// Our notarize vote is journaled, so replay restores this gate without
-    /// relying on the transient application decision. Ordinary term-start
-    /// votes also satisfy this rule when they name their immediate predecessor.
-    /// Those votes require explicitly certified ancestry, and append-ordered
-    /// replay restores the parent's certification before the vote.
+    /// The vote marks the round, not one proposal. If the leader equivocates, a
+    /// conflicting proposal in the same view inherits the gate, which only delays
+    /// its certification.
+    ///
+    /// The vote is journaled, so replay restores the gate. A journaled vote for an
+    /// ordinary term-start proposal implies that its parent's certification or
+    /// finalization was already durable, so the gate passes after replay.
+    ///
+    /// A term-start proposal outside this gate needs none: validators other than the
+    /// proposer verify a term-start proposal only on explicitly certified ancestry, so
+    /// its notarization includes a vote from an honest validator that certified the
+    /// parent.
     fn required_certification_parent(&self, proposal: &Proposal<D>) -> Option<View> {
         let view = proposal.view();
         self.previous_in_term(view).or_else(|| {
@@ -4131,7 +4144,8 @@ mod tests {
     }
 
     /// Certification exempts term-start candidates from the parent precheck
-    /// (see [`State::certification_parent_ready`]). A term-start proposal
+    /// unless this node voted for one naming its immediate predecessor (see
+    /// [`State::certification_parent_ready`]). A term-start proposal
     /// dispatches even when its cross-term parent is uncertified and the
     /// skipped views' nullifications are not held.
     #[test]
@@ -5965,8 +5979,8 @@ mod tests {
             );
             state.set_genesis(test_genesis());
 
-            // A vote replays after the parent's certificate and certification
-            // (journal replay is append-ordered): restore them first so the
+            // Replay is ordered by view, so the parent's certificate and
+            // certification restore before the vote. Restore them first so the
             // vote sits on explicitly certified ancestry.
             let parent = Proposal::new(
                 Rnd::new(epoch, View::new(1)),

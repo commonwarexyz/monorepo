@@ -24,8 +24,8 @@ pub struct MockVerifyingApp<B, S> {
     pub propose_result: Option<B>,
     /// The result returned by `verify`.
     pub verify_result: bool,
-    /// Policy returned for handoff proposal builds.
     handoff_policy: HandoffPolicy,
+    /// Shared by clones so that only the first proposal build blocks.
     proposal_gate: Option<Arc<Mutex<Option<ProposalGate>>>>,
     /// Blocks for which `verify` returns false.
     pub reject: Option<fn(&B) -> bool>,
