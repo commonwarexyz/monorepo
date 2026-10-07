@@ -1664,8 +1664,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         let new_size = self.bounds.end.checked_add(1).ok_or(Error::SizeOverflow)?;
         let frame = UncompressedFrame::new(item)?;
-        // Encode directly into the write buffer when the frame fits. Reuse its cached size
-        // when an owned buffer is required to flush or bypass the write buffer.
+        // Encode straight into the write buffer when the frame fits. Otherwise encode it into
+        // its own buffer, sized from the length `UncompressedFrame::new` already computed.
         let offset = match self.blobs.try_append_value(&frame) {
             Some(offset) => offset,
             None => {
@@ -4692,6 +4692,8 @@ mod tests {
     #[test_traced]
     fn test_single_append_matches_batch_across_boundaries() {
         deterministic::Runner::default().start(|context| async move {
+            // Lengths straddle the 1/2-byte length prefix (127/128). Each capacity fills the
+            // write buffer at different points, mixing in-buffer and own-buffer appends.
             let items: Vec<Vec<u8>> = [
                 0, 1, 100, 101, 127, 128, 1_024, 3, 4_096, 0, 15, 250, 128, 7, 128,
             ]

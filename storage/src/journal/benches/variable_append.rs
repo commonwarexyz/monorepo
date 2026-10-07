@@ -48,7 +48,8 @@ fn bench_case<const SIZE: usize>(
                     )
                     .await
                     .unwrap();
-                    // Warm both write buffers before timing. Durable cases start clean.
+                    // Append one item untimed so first-append setup isn't measured. Durable
+                    // cases also commit it, so timing starts with nothing pending.
                     (journal, _) = journal.append(&item).await.unwrap();
                     if commit_every != 0 {
                         journal = journal.commit().await.unwrap();
@@ -72,9 +73,9 @@ fn bench_case<const SIZE: usize>(
 }
 
 fn bench_size<const SIZE: usize>(c: &mut Criterion) {
-    // Below the write-buffer threshold: isolate per-item framing and offset bookkeeping.
+    // 320 KiB fits in the 1 MiB write buffer, so nothing reaches disk: measures CPU cost only.
     bench_case::<SIZE>(c, 320 * 1024 / SIZE, None, 0);
-    // Several buffer flushes plus final durability: measure sustained append cost.
+    // 4 MiB fills the write buffer several times, then commits once at the end.
     let items = 4 * 1024 * 1024 / SIZE;
     bench_case::<SIZE>(c, items, None, items);
 }
@@ -85,7 +86,7 @@ fn bench(c: &mut Criterion) {
     bench_size::<4_096>(c);
     // Compressed appends still take the batch path.
     bench_case::<32>(c, 320 * 1024 / 32, Some(3), 0);
-    // Expose how durability frequency changes the value of a CPU optimization.
+    // Frequent commits, where fsync dominates the per-item cost.
     bench_case::<32>(c, 64, None, 1);
     bench_case::<32>(c, 1_024, None, 64);
 }
