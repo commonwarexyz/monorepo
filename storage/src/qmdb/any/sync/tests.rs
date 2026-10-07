@@ -3148,7 +3148,7 @@ mod harnesses {
 // ===== Test Generation Macro =====
 
 /// Macro to generate all standard sync tests for a given harness.
-macro_rules! sync_tests_for_harness {
+macro_rules! sync_tests {
     ($harness:ty, $mod_name:ident) => {
         mod $mod_name {
             use super::harnesses;
@@ -3304,7 +3304,7 @@ macro_rules! sync_tests_for_harness {
 
 /// Additional from_sync_result tests that require `FromSyncTestable`.
 /// Only the MMR harnesses have `FromSyncTestable` impls.
-macro_rules! from_sync_result_tests_for_harness {
+macro_rules! from_sync_result_tests {
     ($harness:ty, $mod_name:ident) => {
         mod $mod_name {
             use super::harnesses;
@@ -3334,27 +3334,27 @@ macro_rules! from_sync_result_tests_for_harness {
 }
 
 // MMR harnesses (all tests including from_sync_result)
-sync_tests_for_harness!(harnesses::OrderedFixedHarness, ordered_fixed);
-sync_tests_for_harness!(harnesses::OrderedVariableHarness, ordered_variable);
-sync_tests_for_harness!(harnesses::UnorderedFixedHarness, unordered_fixed);
-sync_tests_for_harness!(harnesses::UnorderedVariableHarness, unordered_variable);
+sync_tests!(harnesses::OrderedFixedHarness, ordered_fixed);
+sync_tests!(harnesses::OrderedVariableHarness, ordered_variable);
+sync_tests!(harnesses::UnorderedFixedHarness, unordered_fixed);
+sync_tests!(harnesses::UnorderedVariableHarness, unordered_variable);
 
-from_sync_result_tests_for_harness!(harnesses::OrderedFixedHarness, ordered_fixed_from_sync);
-from_sync_result_tests_for_harness!(
+from_sync_result_tests!(harnesses::OrderedFixedHarness, ordered_fixed_from_sync);
+from_sync_result_tests!(
     harnesses::OrderedVariableHarness,
     ordered_variable_from_sync
 );
-from_sync_result_tests_for_harness!(harnesses::UnorderedFixedHarness, unordered_fixed_from_sync);
-from_sync_result_tests_for_harness!(
+from_sync_result_tests!(harnesses::UnorderedFixedHarness, unordered_fixed_from_sync);
+from_sync_result_tests!(
     harnesses::UnorderedVariableHarness,
     unordered_variable_from_sync
 );
 
 // MMB harnesses (sync tests only, no from_sync_result)
-sync_tests_for_harness!(harnesses::OrderedFixedMmbHarness, ordered_fixed_mmb);
-sync_tests_for_harness!(harnesses::OrderedVariableMmbHarness, ordered_variable_mmb);
-sync_tests_for_harness!(harnesses::UnorderedFixedMmbHarness, unordered_fixed_mmb);
-sync_tests_for_harness!(
+sync_tests!(harnesses::OrderedFixedMmbHarness, ordered_fixed_mmb);
+sync_tests!(harnesses::OrderedVariableMmbHarness, ordered_variable_mmb);
+sync_tests!(harnesses::UnorderedFixedMmbHarness, unordered_fixed_mmb);
+sync_tests!(
     harnesses::UnorderedVariableMmbHarness,
     unordered_variable_mmb
 );

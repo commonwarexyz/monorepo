@@ -665,7 +665,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
 // ===== Test Generation Macro =====
 
 /// Dispatches to the shared test functions in [crate::qmdb::any::sync::tests].
-macro_rules! current_sync_tests_for_harness {
+macro_rules! sync_tests {
     ($harness:ty, $mod_name:ident) => {
         mod $mod_name {
             use super::harnesses;
@@ -802,17 +802,17 @@ macro_rules! current_sync_tests_for_harness {
     };
 }
 
-current_sync_tests_for_harness!(harnesses::UnorderedFixedMmrHarness, unordered_fixed_mmr);
-current_sync_tests_for_harness!(harnesses::UnorderedFixedMmbHarness, unordered_fixed_mmb);
-current_sync_tests_for_harness!(
+sync_tests!(harnesses::UnorderedFixedMmrHarness, unordered_fixed_mmr);
+sync_tests!(harnesses::UnorderedFixedMmbHarness, unordered_fixed_mmb);
+sync_tests!(
     harnesses::UnorderedVariableMmrHarness,
     unordered_variable_mmr
 );
-current_sync_tests_for_harness!(
+sync_tests!(
     harnesses::UnorderedVariableMmbHarness,
     unordered_variable_mmb
 );
-current_sync_tests_for_harness!(harnesses::OrderedFixedMmrHarness, ordered_fixed_mmr);
-current_sync_tests_for_harness!(harnesses::OrderedFixedMmbHarness, ordered_fixed_mmb);
-current_sync_tests_for_harness!(harnesses::OrderedVariableMmrHarness, ordered_variable_mmr);
-current_sync_tests_for_harness!(harnesses::OrderedVariableMmbHarness, ordered_variable_mmb);
+sync_tests!(harnesses::OrderedFixedMmrHarness, ordered_fixed_mmr);
+sync_tests!(harnesses::OrderedFixedMmbHarness, ordered_fixed_mmb);
+sync_tests!(harnesses::OrderedVariableMmrHarness, ordered_variable_mmr);
+sync_tests!(harnesses::OrderedVariableMmbHarness, ordered_variable_mmb);
