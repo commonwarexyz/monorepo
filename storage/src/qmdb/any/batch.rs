@@ -1151,29 +1151,19 @@ where
         }
     }
 
-    /// Append `op` at the tip and record its new location in `diff` or `floor_diff` as `mv`
-    /// directs.
-    fn relocate(
-        &self,
-        ops: &mut Vec<Operation<F, U>>,
-        diff: &mut DiffSlice<U::Key, F, U::Value>,
-        floor_diff: &mut DiffVec<U::Key, F, U::Value>,
-        op: Operation<F, U>,
-        mv: Move<F>,
-    ) {
-        let Operation::Update(update) = &op else {
-            unreachable!("active operations are updates")
-        };
-        let loc = self.base_state.size + Widen::widen(ops.len());
+    /// Append `update` at the tip and record its new location in the diff or the floor diff of
+    /// `walked` as `mv` directs.
+    fn relocate(&self, walked: &mut Walked<F, U>, update: U, mv: Move<F>) {
+        let loc = self.base_state.size + Widen::widen(walked.ops.len());
         match mv {
             Move::Existing { idx, base_old_loc } => {
-                diff[idx].1 = DiffEntry::Active {
+                walked.diff[idx].1 = DiffEntry::Active {
                     value: update.value().clone(),
                     loc,
                     base_old_loc,
                 };
             }
-            Move::New { base_old_loc } => floor_diff.push((
+            Move::New { base_old_loc } => walked.floor_diff.push((
                 update.key().clone(),
                 DiffEntry::Active {
                     value: update.value().clone(),
@@ -1182,7 +1172,7 @@ where
                 },
             )),
         }
-        ops.push(op);
+        walked.ops.push(Operation::Update(update));
     }
 
     /// Walk the floor from the inherited location over the operations below the tip of
@@ -1191,8 +1181,8 @@ where
     ///
     /// A policy that keeps every entry moves each active update the walk reaches to the tip at
     /// once. Otherwise `policy` decides each one and the decisions wait for the caller to emit
-    /// them, so the diff the walk classifies against stays a snapshot of the state after the
-    /// writes, which is what [a move](Move) resolves against. An empty state has no active
+    /// them: an ordered batch folds the link repairs its evictions require into the updates it
+    /// emits, and an unordered batch emits them as they are. An empty state has no active
     /// update, so the walk does not run.
     ///
     /// `superseded_locs` holds the committed locations the batch's writes supersede, in any order.
@@ -1203,7 +1193,7 @@ where
     /// `walked.diff` may arrive in any order: it is key-sorted on the strategy pool, overlapping
     /// the first candidate read. The walk takes the `prefetched` round whole as its first, and
     /// `source` supplies the rest under the [`Candidates`] contract.
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[allow(clippy::type_complexity)]
     async fn walk<E, C, I, P, const N: usize>(
         &self,
         walked: &mut Walked<F, U>,
@@ -1256,15 +1246,13 @@ where
         }
 
         // The unread inactive list is built only for a walk that runs. Locations are unique (each
-        // committed location belongs to exactly one key), so a presorted collection needs neither
-        // the sort nor the dedup, and the last committed commit lies past every superseded
-        // location.
+        // committed location belongs to exactly one key), so a presorted collection needs no sort,
+        // and the last committed commit lies past every superseded location.
         let runs = active_keys > 0 && walk.entries > 0;
         let mut inactive = Vec::new();
         if runs {
             if !superseded_locs.is_sorted_by(|a, b| a < b) {
                 strategy.sort_by(&mut superseded_locs, |a, b| a.cmp(b));
-                superseded_locs.dedup();
             }
             superseded_locs.push(self.db_state.size - 1);
             inactive = superseded_locs;
@@ -1347,18 +1335,12 @@ where
                     break 'walk;
                 }
                 let op = read.unwrap_or_else(|| self.peek_uncommitted(loc, &walked.ops).clone());
+                let Operation::Update(update) = op else {
+                    unreachable!("active operations are updates")
+                };
                 if keeps {
-                    self.relocate(
-                        &mut walked.ops,
-                        &mut walked.diff,
-                        &mut walked.floor_diff,
-                        op,
-                        mv,
-                    );
+                    self.relocate(walked, update, mv);
                 } else {
-                    let Operation::Update(update) = op else {
-                        unreachable!("active operations are updates")
-                    };
                     let (key, value, cached) = update.into_parts();
                     let value = match policy.decide(Entry::new(loc, &key, value)).into_action() {
                         Action::Write(value) => Some(value),
@@ -1414,14 +1396,7 @@ where
             }
             return;
         };
-        let op = Operation::Update(U::from_parts(key, value, cached));
-        self.relocate(
-            &mut walked.ops,
-            &mut walked.diff,
-            &mut walked.floor_diff,
-            op,
-            mv,
-        );
+        self.relocate(walked, U::from_parts(key, value, cached), mv);
     }
 
     /// Shared final phases of merkleization: the empty-state floor, the merge of the walk's new
@@ -1876,15 +1851,11 @@ where
             .sum();
         let Limits { entries, skips } = policy.limits(staged + existing);
 
-        // The walk reads nothing at or past the floor plus its limits.
-        let reach = (*floor)
-            .saturating_add(skips)
-            .saturating_add(Widen::widen(entries));
-        let (need, last) = (entries, Location::new(reach).min(db_size));
-
-        // Below the committed boundary the activity bitmap has one set bit per active key plus
-        // the last commit, which the walk passes unread.
-        let need = need.min(db.active_keys);
+        // The walk reads nothing at or past the end of its window. Below the committed boundary
+        // the activity bitmap has one set bit per active key plus the last commit, which the walk
+        // passes unread.
+        let last = Walk::new(floor, db_size, entries, skips).end;
+        let need = entries.min(db.active_keys);
         let inactive = [db_size - 1];
 
         // Overlap the serial update resolution with the candidate prefetch, which depends only on
@@ -3140,14 +3111,12 @@ where
                 .classify(&walked.diff, loc, &key)
                 .expect("rewritten predecessor is active");
             self.relocate(
-                &mut walked.ops,
-                &mut walked.diff,
-                &mut walked.floor_diff,
-                Operation::Update(update::Ordered {
+                walked,
+                update::Ordered {
                     key,
                     value,
                     next_key,
-                }),
+                },
                 mv,
             );
         }
