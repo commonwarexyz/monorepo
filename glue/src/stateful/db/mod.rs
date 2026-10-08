@@ -597,20 +597,20 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 #[derive(Clone, Copy, Debug)]
 pub struct SyncEngineConfig {
     /// Maximum operations fetched per source request.
+    ///
+    /// Peers ignore requests larger than their `max_serve_ops` (see [`p2p::Config`]), so a larger
+    /// value stalls sync. Keep this at or below the `max_serve_ops` every peer uses.
     pub fetch_batch_size: NonZeroU64,
 
     /// Number of operations applied per local apply step.
     pub apply_batch_size: NonZeroU64,
 
-    /// Maximum number of outstanding source requests.
-    pub max_outstanding_requests: usize,
+    /// Maximum number of outstanding source requests. The request for the pinned nodes counts
+    /// toward it.
+    pub max_outstanding_requests: NonZeroUsize,
 
     /// Capacity of per-database target-update channels.
     pub update_channel_size: NonZeroUsize,
-
-    /// Number of previous targets whose outstanding requests stay eligible after a target update
-    /// (0 cancels them on every update).
-    pub max_retained_roots: usize,
 }
 
 /// A [`ManagedDb`] that can be built by syncing it from peers.
@@ -832,7 +832,7 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
 
 impl<E, T, R, D> StateSyncSet<E, R, D> for Shared<T>
 where
-    E: Send + Sync + Metrics,
+    E: Metrics,
     T: StateSyncDb<E, R> + 'static,
     R: Send + 'static,
     D: Digest,
@@ -1889,7 +1889,7 @@ pub(crate) mod tests {
         deterministic, reschedule,
     };
     use commonware_utils::{
-        NZU64,
+        NZU64, NZUsize,
         channel::{mpsc, oneshot, ring},
     };
     use futures::{FutureExt, SinkExt, pin_mut};
@@ -1970,9 +1970,8 @@ pub(crate) mod tests {
             SyncEngineConfig {
                 fetch_batch_size: NZU64!(1),
                 apply_batch_size: NZU64!(1),
-                max_outstanding_requests: 1,
+                max_outstanding_requests: NZUsize!(1),
                 update_channel_size: NZUsize!(1),
-                max_retained_roots: 0,
             }
         }
 
@@ -3294,7 +3293,7 @@ pub(crate) mod tests {
 
     impl<E> StateSyncDb<E, Arc<AtomicBool>> for SlowSyncDb
     where
-        E: Send + Clock,
+        E: Clock,
     {
         type SyncError = Infallible;
 
@@ -3360,7 +3359,7 @@ pub(crate) mod tests {
 
     impl<E> StateSyncDb<E, Arc<AtomicBool>> for RejectDuplicateTargetSyncDb
     where
-        E: Send + Clock,
+        E: Clock,
     {
         type SyncError = Infallible;
 
@@ -3437,7 +3436,7 @@ pub(crate) mod tests {
 
     impl<E> StateSyncDb<E, ()> for StaleReachedSyncDb
     where
-        E: Send + Clock,
+        E: Clock,
     {
         type SyncError = Infallible;
 
@@ -3630,7 +3629,7 @@ pub(crate) mod tests {
 
     impl<E> StateSyncDb<E, SlowSyncController> for ObservedSlowSyncDb
     where
-        E: Send + Clock,
+        E: Clock,
     {
         type SyncError = Infallible;
 
@@ -4135,9 +4134,8 @@ pub(crate) mod tests {
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
                             apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: 1,
+                            max_outstanding_requests: NZUsize!(1),
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
-                            max_retained_roots: 0,
                         },
                     )
                     .await
@@ -4174,9 +4172,8 @@ pub(crate) mod tests {
                 SyncEngineConfig {
                     fetch_batch_size: NonZeroU64::new(1).unwrap(),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
-                    max_retained_roots: 0,
                 },
             )
             .await;
@@ -4211,9 +4208,8 @@ pub(crate) mod tests {
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
                             apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: 1,
+                            max_outstanding_requests: NZUsize!(1),
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
-                            max_retained_roots: 0,
                         },
                     )
                     .await
@@ -4261,9 +4257,8 @@ pub(crate) mod tests {
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
                             apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: 1,
+                            max_outstanding_requests: NZUsize!(1),
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
-                            max_retained_roots: 0,
                         },
                     )
                     .await
@@ -4311,9 +4306,8 @@ pub(crate) mod tests {
                             SyncEngineConfig {
                                 fetch_batch_size: NonZeroU64::new(1).unwrap(),
                                 apply_batch_size: NZU64!(1),
-                                max_outstanding_requests: 1,
+                                max_outstanding_requests: NZUsize!(1),
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
-                                max_retained_roots: 0,
                             },
                         )
                         .await
@@ -4362,9 +4356,8 @@ pub(crate) mod tests {
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
                             apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: 1,
+                            max_outstanding_requests: NZUsize!(1),
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
-                            max_retained_roots: 0,
                         },
                     )
                     .await
@@ -4421,9 +4414,8 @@ pub(crate) mod tests {
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
                             apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: 1,
+                            max_outstanding_requests: NZUsize!(1),
                             update_channel_size: NonZeroUsize::new(8).unwrap(),
-                            max_retained_roots: 0,
                         },
                     )
                     .await
@@ -4479,9 +4471,8 @@ pub(crate) mod tests {
                 SyncEngineConfig {
                     fetch_batch_size: NonZeroU64::new(1).unwrap(),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
-                    max_retained_roots: 0,
                 },
             )
             .await;
@@ -4517,9 +4508,8 @@ pub(crate) mod tests {
                     SyncEngineConfig {
                         fetch_batch_size: NonZeroU64::new(1).unwrap(),
                         apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: 1,
+                        max_outstanding_requests: NZUsize!(1),
                         update_channel_size: NonZeroUsize::new(1).unwrap(),
-                        max_retained_roots: 0,
                     },
                 )
                 .await;
@@ -4559,9 +4549,8 @@ pub(crate) mod tests {
                 SyncEngineConfig {
                     fetch_batch_size: NonZeroU64::new(1).unwrap(),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
-                    max_retained_roots: 0,
                 },
             )
             .await;
@@ -4601,9 +4590,8 @@ pub(crate) mod tests {
                     SyncEngineConfig {
                         fetch_batch_size: NonZeroU64::new(1).unwrap(),
                         apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: 1,
+                        max_outstanding_requests: NZUsize!(1),
                         update_channel_size: NonZeroUsize::new(1).unwrap(),
-                        max_retained_roots: 0,
                     },
                 )
                 .await;
@@ -4734,9 +4722,8 @@ pub(crate) mod tests {
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
                             apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: 1,
+                            max_outstanding_requests: NZUsize!(1),
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
-                            max_retained_roots: 0,
                         },
                     )
                     .await
@@ -4803,9 +4790,8 @@ pub(crate) mod tests {
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
                             apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: 1,
+                            max_outstanding_requests: NZUsize!(1),
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
-                            max_retained_roots: 0,
                         },
                     )
                     .await
@@ -4866,9 +4852,8 @@ pub(crate) mod tests {
                             SyncEngineConfig {
                                 fetch_batch_size: NonZeroU64::new(1).unwrap(),
                                 apply_batch_size: NZU64!(1),
-                                max_outstanding_requests: 1,
+                                max_outstanding_requests: NZUsize!(1),
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
-                                max_retained_roots: 0,
                             },
                         )
                         .await

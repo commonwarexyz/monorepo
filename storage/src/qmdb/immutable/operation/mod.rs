@@ -85,10 +85,7 @@ impl<F: Family, K: Key, V: ValueEncoding> OperationTrait<F> for Operation<F, K, 
     }
 }
 
-impl<F: Family, K: Key, V: ValueEncoding> Display for Operation<F, K, V>
-where
-    V::Value: Encode,
-{
+impl<F: Family, K: Key, V: ValueEncoding> Display for Operation<F, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Set(key, value) => {

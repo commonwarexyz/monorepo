@@ -268,7 +268,6 @@ where
             update_rx: Some(tip_updates),
             finish_rx: finish,
             reached_target_tx: reached_target,
-            max_retained_roots: sync_config.max_retained_roots,
         })
         .await
     }

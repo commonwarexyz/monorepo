@@ -88,7 +88,6 @@ use commonware_utils::{
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
-    marker::PhantomData,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -1184,7 +1183,6 @@ impl EngineDefinition for ReshareEngine {
                 replay_buffer: IO_BUFFER_SIZE,
                 max_participants: MAX_PARTICIPANTS,
                 blocks_per_epoch: EPOCH_LENGTH,
-                batch_verifier: PhantomData::<ed25519::Batch>,
             },
         );
         let dkg_network = (
@@ -1211,9 +1209,8 @@ impl EngineDefinition for ReshareEngine {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: NZU64!(64),
-                    max_outstanding_requests: 8,
+                    max_outstanding_requests: NZUsize!(8),
                     update_channel_size: NZUsize!(256),
-                    max_retained_roots: 8,
                 },
                 prune_config: None,
             },

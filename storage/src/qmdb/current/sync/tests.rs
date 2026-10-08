@@ -1,34 +1,26 @@
-//! Tests for [crate::qmdb::current] state sync.
+//! Sync tests for [`crate::qmdb::current`] databases.
 //!
-//! This module reuses the shared sync test functions from [crate::qmdb::any::sync::tests] by
-//! implementing [SyncTestHarness] for current database types. The key difference from `any`
-//! harnesses is that `sync_target_root` returns the **QMDB ops root** (via
-//! [qmdb::sync::Database::root](crate::qmdb::sync::Database::root)), not the canonical root
-//! returned by `Db::root()`.
-//!
-//! Harnesses are instantiated for **both** MMR and MMB merkle families across each (ordered,
-//! unordered) x (fixed, variable) database variant, so the shared suite runs twice per variant.
-//!
-//! In addition to the shared harness-based suite, this module contains focused tests for
-//! `current`-specific sync behavior: pruned MMB round-trip (canonical-root reconstruction across
-//! a pruned chunk boundary) and `local_pinned_nodes` returning `None` for targets starting below
-//! the local lower bound.
+//! The harness contract and the shared sync tests live in [`crate::qmdb::sync::harness`]. This
+//! module implements the harness for `current` databases, runs a subset of the `any`-specific
+//! tests from [`crate::qmdb::any::sync::tests`], and adds `current`-specific tests. Sync targets
+//! the ops root, while the harness's canonical root is the root returned by `Db::root()`.
 
 use crate::qmdb::{
-    any::sync::tests::{ConfigOf, SyncTestHarness},
     current::tests::{fixed_config, variable_config},
-    sync::Database as SyncDatabase,
+    floor::Proportional,
+    sync::{
+        Database as SyncDatabase,
+        harness::{ConfigOf, SyncTestHarness},
+    },
 };
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_macros::test_traced;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufferPooler, Runner as _, Supervisor as _, deterministic, deterministic::Context,
+    BufferPooler, Metrics, Runner as _, Supervisor as _, deterministic, deterministic::Context,
 };
-use commonware_utils::{NZU64, non_empty_range};
+use commonware_utils::{NZU64, NZUsize, non_empty_range};
 use rand::Rng as _;
-
-// ===== Harness Implementations =====
 
 mod harnesses {
     use super::*;
@@ -175,6 +167,7 @@ mod harnesses {
     async fn apply_unordered_fixed_ops<F: merkle::Graftable>(
         db: UnorderedFixedDb<F>,
         ops: Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>>,
+        metadata: Option<Digest>,
     ) -> UnorderedFixedDb<F> {
         use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
 
@@ -191,7 +184,10 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch.merkleize(&db, None::<Digest>).await.unwrap()
+            batch
+                .merkleize(&db, metadata, &mut Proportional)
+                .await
+                .unwrap()
         };
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -200,6 +196,7 @@ mod harnesses {
     async fn apply_unordered_variable_ops<F: merkle::Graftable>(
         db: UnorderedVariableDb<F>,
         ops: Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Digest>>,
+        metadata: Option<Digest>,
     ) -> UnorderedVariableDb<F> {
         use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
 
@@ -216,7 +213,10 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch.merkleize(&db, None::<Digest>).await.unwrap()
+            batch
+                .merkleize(&db, metadata, &mut Proportional)
+                .await
+                .unwrap()
         };
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -225,6 +225,7 @@ mod harnesses {
     async fn apply_ordered_fixed_ops<F: merkle::Graftable>(
         db: OrderedFixedDb<F>,
         ops: Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>>,
+        metadata: Option<Digest>,
     ) -> OrderedFixedDb<F> {
         use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
 
@@ -241,7 +242,10 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch.merkleize(&db, None::<Digest>).await.unwrap()
+            batch
+                .merkleize(&db, metadata, &mut Proportional)
+                .await
+                .unwrap()
         };
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -250,6 +254,7 @@ mod harnesses {
     async fn apply_ordered_variable_ops<F: merkle::Graftable>(
         db: OrderedVariableDb<F>,
         ops: Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Digest>>,
+        metadata: Option<Digest>,
     ) -> OrderedVariableDb<F> {
         use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
 
@@ -266,7 +271,10 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch.merkleize(&db, None::<Digest>).await.unwrap()
+            batch
+                .merkleize(&db, metadata, &mut Proportional)
+                .await
+                .unwrap()
         };
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -277,12 +285,9 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for UnorderedFixedHarness<F> {
         type Family = F;
         type Db = UnorderedFixedDb<F>;
+        type Metadata = Digest;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            db.ops_root()
-        }
-
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
+        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
             fixed_config::<crate::translator::TwoCap>(suffix, pooler)
         }
 
@@ -299,21 +304,24 @@ mod harnesses {
             create_unordered_fixed_ops::<F>(n, seed)
         }
 
+        fn sample_metadata() -> Digest {
+            Digest::from([1; 32])
+        }
+
         async fn init_db(ctx: Context) -> Self::Db {
             let cfg = fixed_config::<crate::translator::TwoCap>("default", &ctx);
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
-        }
-
         async fn apply_ops(
             db: Self::Db,
             ops: Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>>,
+            metadata: Option<Digest>,
         ) -> Self::Db {
-            apply_unordered_fixed_ops(db, ops).await
+            apply_unordered_fixed_ops(db, ops, metadata).await
         }
+
+        crate::qmdb::any::sync::tests::db_any_harness_methods!();
     }
 
     pub type UnorderedFixedMmrHarness = UnorderedFixedHarness<mmr::Family>;
@@ -324,12 +332,9 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for UnorderedVariableHarness<F> {
         type Family = F;
         type Db = UnorderedVariableDb<F>;
+        type Metadata = Digest;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            db.ops_root()
-        }
-
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
+        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
             variable_config::<crate::translator::TwoCap>(suffix, pooler)
         }
 
@@ -346,21 +351,24 @@ mod harnesses {
             create_unordered_variable_ops::<F>(n, seed)
         }
 
+        fn sample_metadata() -> Digest {
+            Digest::from([1; 32])
+        }
+
         async fn init_db(ctx: Context) -> Self::Db {
             let cfg = variable_config::<crate::translator::TwoCap>("default", &ctx);
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
-        }
-
         async fn apply_ops(
             db: Self::Db,
             ops: Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Digest>>,
+            metadata: Option<Digest>,
         ) -> Self::Db {
-            apply_unordered_variable_ops(db, ops).await
+            apply_unordered_variable_ops(db, ops, metadata).await
         }
+
+        crate::qmdb::any::sync::tests::db_any_harness_methods!();
     }
 
     pub type UnorderedVariableMmrHarness = UnorderedVariableHarness<mmr::Family>;
@@ -371,12 +379,9 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for OrderedFixedHarness<F> {
         type Family = F;
         type Db = OrderedFixedDb<F>;
+        type Metadata = Digest;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            db.ops_root()
-        }
-
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
+        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
             fixed_config::<crate::translator::OneCap>(suffix, pooler)
         }
 
@@ -393,21 +398,24 @@ mod harnesses {
             create_ordered_fixed_ops::<F>(n, seed)
         }
 
+        fn sample_metadata() -> Digest {
+            Digest::from([1; 32])
+        }
+
         async fn init_db(ctx: Context) -> Self::Db {
             let cfg = fixed_config::<crate::translator::OneCap>("default", &ctx);
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
-        }
-
         async fn apply_ops(
             db: Self::Db,
             ops: Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>>,
+            metadata: Option<Digest>,
         ) -> Self::Db {
-            apply_ordered_fixed_ops(db, ops).await
+            apply_ordered_fixed_ops(db, ops, metadata).await
         }
+
+        crate::qmdb::any::sync::tests::db_any_harness_methods!();
     }
 
     pub type OrderedFixedMmrHarness = OrderedFixedHarness<mmr::Family>;
@@ -418,12 +426,9 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for OrderedVariableHarness<F> {
         type Family = F;
         type Db = OrderedVariableDb<F>;
+        type Metadata = Digest;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            db.ops_root()
-        }
-
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
+        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
             variable_config::<crate::translator::OneCap>(suffix, pooler)
         }
 
@@ -440,21 +445,24 @@ mod harnesses {
             create_ordered_variable_ops::<F>(n, seed)
         }
 
+        fn sample_metadata() -> Digest {
+            Digest::from([1; 32])
+        }
+
         async fn init_db(ctx: Context) -> Self::Db {
             let cfg = variable_config::<crate::translator::OneCap>("default", &ctx);
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
-        }
-
         async fn apply_ops(
             db: Self::Db,
             ops: Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Digest>>,
+            metadata: Option<Digest>,
         ) -> Self::Db {
-            apply_ordered_variable_ops(db, ops).await
+            apply_ordered_variable_ops(db, ops, metadata).await
         }
+
+        crate::qmdb::any::sync::tests::db_any_harness_methods!();
     }
 
     pub type OrderedVariableMmrHarness = OrderedVariableHarness<mmr::Family>;
@@ -502,7 +510,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             let merkleized = target_db
                 .new_batch()
                 .write(key, expected)
-                .merkleize(&target_db, None)
+                .merkleize(&target_db, None, &mut Proportional)
                 .await
                 .unwrap();
             (target_db, _) = target_db.apply_batch(merkleized).await.unwrap();
@@ -539,11 +547,10 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             },
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 4,
+            max_outstanding_requests: NZUsize!(4),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         })
         .await
         .unwrap();
@@ -598,7 +605,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             let merkleized = db
                 .new_batch()
                 .write(key, Some(Digest::from([round as u8; 32])))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -662,157 +669,80 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     });
 }
 
-// ===== Test Generation Macro =====
+/// Emits the `any`-specific sync tests that also run against `current` databases for `$harness`.
+macro_rules! current_sync_tests {
+    ($harness:ty) => {
+        #[test_traced("WARN")]
+        fn test_sync_waits_for_explicit_finish() {
+            crate::qmdb::any::sync::tests::test_sync_waits_for_explicit_finish::<$harness>();
+        }
 
-/// Dispatches to the shared test functions in [crate::qmdb::any::sync::tests].
-macro_rules! current_sync_tests_for_harness {
-    ($harness:ty, $mod_name:ident) => {
-        mod $mod_name {
-            use super::harnesses;
-            use commonware_macros::test_traced;
-            use rstest::rstest;
-            use std::num::NonZeroU64;
+        #[test_traced("WARN")]
+        fn test_sync_handles_early_finish_signal() {
+            crate::qmdb::any::sync::tests::test_sync_handles_early_finish_signal::<$harness>();
+        }
 
-            #[test_traced]
-            fn test_sync_source_fails() {
-                crate::qmdb::any::sync::tests::test_sync_source_fails::<$harness>();
-            }
+        #[test_traced("WARN")]
+        fn test_sync_fails_when_finish_sender_dropped() {
+            crate::qmdb::any::sync::tests::test_sync_fails_when_finish_sender_dropped::<$harness>();
+        }
 
-            #[rstest]
-            #[case::small_batch_size_one(10, 1)]
-            #[case::small_batch_size_gt_db_size(10, 20)]
-            #[case::batch_size_one(1000, 1)]
-            #[case::floor_div_db_batch_size(1000, 3)]
-            #[case::floor_div_db_batch_size_2(1000, 999)]
-            #[case::div_db_batch_size(1000, 100)]
-            #[case::db_size_eq_batch_size(1000, 1000)]
-            #[case::batch_size_gt_db_size(1000, 1001)]
-            fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: u64) {
-                crate::qmdb::any::sync::tests::test_sync::<$harness>(
-                    target_db_ops,
-                    NonZeroU64::new(fetch_batch_size).unwrap(),
-                );
-            }
+        #[test_traced("WARN")]
+        fn test_sync_allows_dropped_reached_target_receiver() {
+            crate::qmdb::any::sync::tests::test_sync_allows_dropped_reached_target_receiver::<
+                $harness,
+            >();
+        }
 
-            #[test_traced]
-            fn test_sync_subset_of_target_database() {
-                crate::qmdb::any::sync::tests::test_sync_subset_of_target_database::<$harness>(
-                    1000,
-                );
-            }
+        #[test_traced("WARN")]
+        fn test_sync_post_sync_usability() {
+            crate::qmdb::any::sync::tests::test_sync_post_sync_usability::<$harness>();
+        }
 
-            #[test_traced]
-            fn test_sync_use_existing_db_partial_match() {
-                crate::qmdb::any::sync::tests::test_sync_use_existing_db_partial_match::<$harness>(
-                    1000,
-                );
-            }
-
-            #[test_traced]
-            fn test_sync_use_existing_db_exact_match() {
-                crate::qmdb::any::sync::tests::test_sync_use_existing_db_exact_match::<$harness>(
-                    1000,
-                );
-            }
-
-            #[test_traced("WARN")]
-            fn test_target_update_lower_bound_decrease() {
-                crate::qmdb::any::sync::tests::test_target_update_lower_bound_decrease::<$harness>(
-                );
-            }
-
-            #[test_traced("WARN")]
-            fn test_target_update_upper_bound_decrease() {
-                crate::qmdb::any::sync::tests::test_target_update_upper_bound_decrease::<$harness>(
-                );
-            }
-
-            #[test_traced("WARN")]
-            fn test_target_update_bounds_increase() {
-                crate::qmdb::any::sync::tests::test_target_update_bounds_increase::<$harness>();
-            }
-
-            #[test_traced("WARN")]
-            fn test_target_update_on_done_client() {
-                crate::qmdb::any::sync::tests::test_target_update_on_done_client::<$harness>();
-            }
-
-            #[test_traced]
-            fn test_sync_waits_for_explicit_finish() {
-                crate::qmdb::any::sync::tests::test_sync_waits_for_explicit_finish::<$harness>();
-            }
-
-            #[test_traced]
-            fn test_sync_handles_early_finish_signal() {
-                crate::qmdb::any::sync::tests::test_sync_handles_early_finish_signal::<$harness>();
-            }
-
-            #[test_traced]
-            fn test_sync_fails_when_finish_sender_dropped() {
-                crate::qmdb::any::sync::tests::test_sync_fails_when_finish_sender_dropped::<
-                    $harness,
-                >();
-            }
-
-            #[test_traced]
-            fn test_sync_allows_dropped_reached_target_receiver() {
-                crate::qmdb::any::sync::tests::test_sync_allows_dropped_reached_target_receiver::<
-                    $harness,
-                >();
-            }
-
-            #[rstest]
-            #[case(1, 1)]
-            #[case(1, 2)]
-            #[case(1, 100)]
-            #[case(2, 1)]
-            #[case(2, 2)]
-            #[case(2, 100)]
-            // Regression test: panicked when we didn't set pinned nodes after updating target
-            #[case(20, 10)]
-            #[case(100, 1)]
-            #[case(100, 2)]
-            #[case(100, 100)]
-            #[case(100, 1000)]
-            fn test_target_update_during_sync(
-                #[case] initial_ops: usize,
-                #[case] additional_ops: usize,
-            ) {
-                crate::qmdb::any::sync::tests::test_target_update_during_sync::<$harness>(
-                    initial_ops,
-                    additional_ops,
-                );
-            }
-
-            #[test_traced]
-            fn test_sync_database_persistence() {
-                crate::qmdb::any::sync::tests::test_sync_database_persistence::<$harness>();
-            }
-
-            #[test_traced]
-            fn test_sync_post_sync_usability() {
-                crate::qmdb::any::sync::tests::test_sync_post_sync_usability::<$harness>();
-            }
-
-            #[test_traced]
-            fn test_local_pinned_nodes_below_floor() {
-                crate::qmdb::any::sync::tests::test_local_pinned_nodes_below_floor::<$harness>();
-            }
+        #[test_traced("WARN")]
+        fn test_local_pinned_nodes_below_floor() {
+            crate::qmdb::any::sync::tests::test_local_pinned_nodes_below_floor::<$harness>();
         }
     };
 }
 
-current_sync_tests_for_harness!(harnesses::UnorderedFixedMmrHarness, unordered_fixed_mmr);
-current_sync_tests_for_harness!(harnesses::UnorderedFixedMmbHarness, unordered_fixed_mmb);
-current_sync_tests_for_harness!(
+crate::qmdb::sync::harness::sync_tests!(
+    harnesses::UnorderedFixedMmrHarness,
+    unordered_fixed_mmr,
+    current_sync_tests
+);
+crate::qmdb::sync::harness::sync_tests!(
+    harnesses::UnorderedFixedMmbHarness,
+    unordered_fixed_mmb,
+    current_sync_tests
+);
+crate::qmdb::sync::harness::sync_tests!(
     harnesses::UnorderedVariableMmrHarness,
-    unordered_variable_mmr
+    unordered_variable_mmr,
+    current_sync_tests
 );
-current_sync_tests_for_harness!(
+crate::qmdb::sync::harness::sync_tests!(
     harnesses::UnorderedVariableMmbHarness,
-    unordered_variable_mmb
+    unordered_variable_mmb,
+    current_sync_tests
 );
-current_sync_tests_for_harness!(harnesses::OrderedFixedMmrHarness, ordered_fixed_mmr);
-current_sync_tests_for_harness!(harnesses::OrderedFixedMmbHarness, ordered_fixed_mmb);
-current_sync_tests_for_harness!(harnesses::OrderedVariableMmrHarness, ordered_variable_mmr);
-current_sync_tests_for_harness!(harnesses::OrderedVariableMmbHarness, ordered_variable_mmb);
+crate::qmdb::sync::harness::sync_tests!(
+    harnesses::OrderedFixedMmrHarness,
+    ordered_fixed_mmr,
+    current_sync_tests
+);
+crate::qmdb::sync::harness::sync_tests!(
+    harnesses::OrderedFixedMmbHarness,
+    ordered_fixed_mmb,
+    current_sync_tests
+);
+crate::qmdb::sync::harness::sync_tests!(
+    harnesses::OrderedVariableMmrHarness,
+    ordered_variable_mmr,
+    current_sync_tests
+);
+crate::qmdb::sync::harness::sync_tests!(
+    harnesses::OrderedVariableMmbHarness,
+    ordered_variable_mmb,
+    current_sync_tests
+);

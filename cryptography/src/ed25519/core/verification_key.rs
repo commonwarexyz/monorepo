@@ -77,6 +77,8 @@ impl From<VerificationKeyBytes> for [u8; 32] {
 ///
 /// This is also called a public key by other implementations.
 ///
+/// Equality, ordering, and hashing use the original encoding, including non-canonical encodings.
+///
 /// This type holds decompressed state used in signature verification; if the
 /// verification key may not be used immediately, it is probably better to use
 /// [`VerificationKeyBytes`], which is a refinement type for `[u8; 32]`.
@@ -91,11 +93,17 @@ impl From<VerificationKeyBytes> for [u8; 32] {
 ///
 /// [ps]: https://zips.z.cash/protocol/protocol.pdf#concreteed25519
 /// [ZIP215]:  https://zips.z.cash/zip-0215
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq)]
 #[allow(non_snake_case)]
 pub struct VerificationKey {
     pub(super) A_bytes: VerificationKeyBytes,
     pub(super) minus_A: EdwardsPoint,
+}
+
+impl PartialEq for VerificationKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.A_bytes == other.A_bytes
+    }
 }
 
 impl PartialOrd for VerificationKey {
@@ -242,5 +250,25 @@ impl VerificationKey {
         } else {
             Err(Error::InvalidSignature)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_public_key_distinct_encodings() {
+        let mut canonical = [0; 32];
+        canonical[0] = 1;
+        let mut noncanonical = [0xff; 32];
+        noncanonical[0] = 0xee;
+        noncanonical[31] = 0x7f;
+
+        let canonical = VerificationKey::try_from(canonical).unwrap();
+        let noncanonical = VerificationKey::try_from(noncanonical).unwrap();
+        assert_eq!(canonical.minus_A, noncanonical.minus_A);
+        assert_ne!(canonical, noncanonical);
+        assert_ne!(canonical.cmp(&noncanonical), core::cmp::Ordering::Equal);
     }
 }

@@ -272,7 +272,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the root span for all work attributed to this view.
     ///
     /// Disabled once the view is decided (see [Self::close_span]).
-    pub fn span(&self) -> Span {
+    pub fn span(&self) -> &Span {
         self.span.get()
     }
 

@@ -10,7 +10,7 @@ mod tests {
             Error, Family, Location, Position, StandardHasher as Standard, iterator::PeakIterator,
             mem::Mmr,
         },
-        proof::{Blueprint, nodes_required_for_multi_proof},
+        proof::{Blueprint, ElementPlan, multi_proof_positions},
     };
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 
@@ -167,8 +167,7 @@ mod tests {
     #[test]
     fn test_max_location_multi_proof() {
         let max_loc = Family::MAX_LEAVES;
-        let result =
-            nodes_required_for_multi_proof(max_loc, 0, Bagging::ForwardFold, &[max_loc - 1]);
+        let result = multi_proof_positions(max_loc, &[max_loc - 1]);
         assert!(
             result.is_ok(),
             "Should be able to generate multi-proof for MAX_LEAVES"
@@ -176,8 +175,7 @@ mod tests {
 
         // MAX_LEAVES + 1 should be rejected.
         let invalid_loc = max_loc + 1;
-        let result_overflow =
-            nodes_required_for_multi_proof(invalid_loc, 0, Bagging::ForwardFold, &[max_loc]);
+        let result_overflow = multi_proof_positions(invalid_loc, &[max_loc]);
         assert!(
             result_overflow.is_err(),
             "Should reject location > MAX_LEAVES in multi-proof"
@@ -237,9 +235,10 @@ mod tests {
         // Expected: 61 path siblings + 61 other peaks = 122 digests
         let leaves = Location::try_from(many_peaks_size).unwrap();
         let loc = Location::new(0);
-        let bp = Blueprint::new(leaves, 0, Bagging::ForwardFold, loc..loc + 1)
-            .expect("should compute blueprint for location 0");
-        let total_nodes = bp.fold_prefix.len() + bp.fetch_nodes.len();
+        let total_nodes = ElementPlan::new(leaves, loc)
+            .expect("should plan location 0")
+            .positions()
+            .len();
 
         assert_eq!(
             total_nodes, EXPECTED_WORST_CASE,
@@ -249,14 +248,10 @@ mod tests {
         // Test the rightmost leaf (in smallest tree of height 0, which is itself a peak)
         // Expected: 0 path siblings + 61 other peaks = 61 digests
         let last_leaf_loc = leaves - 1;
-        let bp = Blueprint::new(
-            leaves,
-            0,
-            Bagging::ForwardFold,
-            last_leaf_loc..last_leaf_loc + 1,
-        )
-        .expect("should compute blueprint for last leaf");
-        let total_nodes = bp.fold_prefix.len() + bp.fetch_nodes.len();
+        let total_nodes = ElementPlan::new(leaves, last_leaf_loc)
+            .expect("should plan the last leaf")
+            .positions()
+            .len();
 
         let expected_last_leaf = NUM_PEAKS - 1;
         assert_eq!(

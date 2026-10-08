@@ -296,9 +296,7 @@ impl<
     E: rand_core::Rng
         + commonware_runtime::Spawner
         + commonware_runtime::Metrics
-        + commonware_runtime::Clock
-        + Send
-        + Sync,
+        + commonware_runtime::Clock,
 > Application<E> for TestApp
 {
     type SigningScheme = TestScheme;

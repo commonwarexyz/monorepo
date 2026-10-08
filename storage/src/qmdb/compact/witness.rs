@@ -11,8 +11,8 @@
 //! initialization or prune target. An appended entry becomes durable when the journal `commit` or
 //! `sync` completes. For [`Store::start_sync`] it becomes durable when the returned handle
 //! completes. Before that point, the entry is not guaranteed durable and recovery may fall back to
-//! the previous commit. [`Store::prune`] bounds how far back bounded initialization can reach. The
-//! tip entry is never pruned.
+//! the previous commit. [`Store::prune`] drops old entries. Bounded initialization and compact
+//! sync can only use entries that survive. The tip entry is never pruned.
 
 use crate::{
     Context, SyncCompletion,
@@ -185,11 +185,11 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         &self.tip_witness
     }
 
-    /// Serve `request` from the single committed state this witness retains.
+    /// Serve `request` from a committed state this witness journal retains.
     ///
-    /// The witness holds exactly the final commit operation and the pinned nodes one operation
-    /// below it. Anything else is refused with the same errors a pruned operation log
-    /// reports.
+    /// Each retained witness holds exactly its commit operation and the pinned nodes one operation
+    /// below it. A request at a size with no retained witness, or for any other operation, is
+    /// refused with the same errors a pruned operation log reports.
     #[tracing::instrument(
         name = "qmdb.sync.serve",
         level = "info",
@@ -200,41 +200,77 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             max_ops = request.max_ops().get(),
         ),
     )]
-    pub(crate) fn compact_state<Op: Read>(
+    pub(crate) async fn compact_state<H, S, Op>(
         &self,
+        strategy: &S,
         cfg: &Op::Cfg,
         request: Request<F>,
-    ) -> Result<Response<F, Op, D>, Error<F>> {
-        let size = self.tip_witness.size();
-        let last_commit_loc = size - 1;
-        if request.size() > size || request.size() == 0 {
+    ) -> Result<Response<F, Op, D>, Error<F>>
+    where
+        H: Hasher<Digest = D>,
+        S: Strategy,
+        Op: Read + Committable<F>,
+    {
+        if request.size() > self.tip_witness.size() || request.size() == 0 {
             return Err(merkle::Error::RangeOutOfBounds(request.size()).into());
-        }
-        if request.size() < size {
-            return Err(crate::journal::Error::ItemPruned(*request.size() - 1).into());
         }
         if request.start() >= request.size() {
             return Err(merkle::Error::RangeOutOfBounds(request.start()).into());
         }
-        if request.start() < last_commit_loc {
+        if request.start() < request.size() - 1 {
             return Err(crate::journal::Error::ItemPruned(*request.start()).into());
         }
-        let op = Op::decode_cfg(self.tip_witness.witness.op_bytes.clone(), cfg)
-            .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
-        // After the checks above, `start == last_commit_loc`, so the stored pinned nodes are the
-        // pinned nodes for this request.
-        let proof = self.tip_witness.proof.clone();
+
+        // After the checks above, `start` is the request's last commit location. The witness's
+        // pinned nodes are the pinned nodes for this request.
+        let (verified, op) = self
+            .retained::<H, S, Op>(strategy, cfg, request.size())
+            .await?;
         Ok(match request {
             Request::Operations { .. } => Response::Operations {
-                proof,
+                proof: verified.proof,
                 operations: vec![op],
             },
             Request::Boundary { .. } => Response::Boundary {
-                proof,
+                proof: verified.proof,
                 op,
-                pinned_nodes: self.tip_witness.witness.pinned_nodes.clone(),
+                pinned_nodes: verified.witness.pinned_nodes,
             },
         })
+    }
+
+    /// The verified witness that commits exactly `size` leaves, with its decoded commit
+    /// operation. The tip is served from the cache. Any other size is loaded from the journal
+    /// and rebuilt.
+    async fn retained<H, S, Op>(
+        &self,
+        strategy: &S,
+        cfg: &Op::Cfg,
+        size: Location<F>,
+    ) -> Result<(VerifiedWitness<F, D>, Op), Error<F>>
+    where
+        H: Hasher<Digest = D>,
+        S: Strategy,
+        Op: Read + Committable<F>,
+    {
+        if size == self.tip_witness.size() {
+            let op = Op::decode_cfg(self.tip_witness.witness.op_bytes.clone(), cfg)
+                .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
+            return Ok((self.tip_witness.clone(), op));
+        }
+
+        // An unapplied import is absent from the journal, which still holds the partition's
+        // previous contents.
+        let pruned = || Error::from(crate::journal::Error::ItemPruned(*size - 1));
+        if self.import_pending {
+            return Err(pruned());
+        }
+        let (_, witness) = Self::first_at_or_above(&self.journal, size).await?;
+        let Some(witness) = witness.filter(|witness| witness.size == size) else {
+            return Err(pruned());
+        };
+        let mut merkle = compact::Merkle::new(strategy.clone());
+        rebuild::<F, D, H, S, Op>(witness, &mut merkle, cfg)
     }
 
     /// Apply the current compact state to the witness journal.
@@ -439,9 +475,9 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         Ok((self, Some(verified)))
     }
 
-    /// Drop all entries committing fewer than `pruning_boundary` leaves, bounding how far back
-    /// bounded initialization can reach. The tip entry always survives. Some entries
-    /// below the boundary may survive.
+    /// Drop entries committing fewer than `pruning_boundary` leaves. Bounded initialization and
+    /// compact sync can only use entries that survive. The tip entry always survives, and some
+    /// entries below the boundary may also survive.
     pub(crate) async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
         self.check_import_applied()?;
 
@@ -450,9 +486,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             return Ok(self);
         }
         // Clamp below the tip so the journal never empties: the tip is the current state.
-        let pos = Self::first_at_or_above(&self.journal, pruning_boundary)
-            .await?
-            .min(bounds.end - 1);
+        let (pos, _) = Self::first_at_or_above(&self.journal, pruning_boundary).await?;
+        let pos = pos.min(bounds.end - 1);
         (self.journal, _) = self.journal.prune(pos).await?;
         self.journal = self.journal.sync().await?;
         self.pending_sync = None;
@@ -470,24 +505,27 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     }
 
     /// Binary search for the first retained position whose entry commits at least `size`
-    /// leaves, or the end of the journal if none does.
+    /// leaves, or the end of the journal if none does, with that position's entry if any.
     async fn first_at_or_above(
         reader: &impl Contiguous<Item = Witness<F, D>>,
         size: Location<F>,
-    ) -> Result<u64, Error<F>> {
+    ) -> Result<(u64, Option<Witness<F, D>>), Error<F>> {
         let bounds = reader.bounds();
         let (mut lo, mut hi) = (bounds.start, bounds.end);
+        let mut found = None;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if reader.read(mid).await?.size < size {
+            let witness = reader.read(mid).await?;
+            if witness.size < size {
                 // The entry at `mid` is below `size`, so the answer is after it.
                 lo = mid + 1;
             } else {
                 // The entry at `mid` qualifies, so the answer is `mid` or before it.
                 hi = mid;
+                found = Some(witness);
             }
         }
-        Ok(lo)
+        Ok((lo, found))
     }
 
     /// Clear the journal so the imported witness becomes its only entry.

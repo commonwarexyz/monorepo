@@ -1,6 +1,7 @@
 use super::{
     Verifier,
     verifier::{Batch, ProposalState},
+    votes::{ObservedVote, Outcome, VoteTracker},
 };
 use crate::{
     Reporter,
@@ -9,7 +10,7 @@ use crate::{
         scheme::Scheme,
         types::{
             Activity, Attributable, Certificate, ConflictingFinalize, ConflictingNotarize, Kind,
-            NullifyFinalize, ObservedVote, Outcome, Proposal, Vote, VoteTracker,
+            NullifyFinalize, Proposal, Vote,
         },
     },
     types::{Participant, Round as Rnd},
@@ -82,12 +83,12 @@ impl<
     }
 
     /// Returns the root span of the view.
-    pub fn span(&self) -> Span {
+    pub fn span(&self) -> &Span {
         self.span.get()
     }
 
     /// Adopts the root span of the view from the voter.
-    pub fn set_span(&mut self, span: Span) {
+    pub fn adopt_span(&mut self, span: Span) {
         self.span.adopt(span);
     }
 

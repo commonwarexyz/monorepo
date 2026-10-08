@@ -7,7 +7,6 @@ use crate::{
     },
     qmdb::{
         self,
-        any::value::ValueEncoding,
         keyless::{CompactDb, Keyless, Metrics, Operation, operation::Codec},
         sync,
     },
@@ -22,7 +21,7 @@ impl<F, E, V, C, H, S> sync::Database for Keyless<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,
-    V: ValueEncoding,
+    V: Codec,
     C: sync::Journal<F, Context = E, Op = Operation<F, V>>
         + authenticated::Backing<E, Item = Operation<F, V>, Config = <C as sync::Journal<F>>::Config>,
     <C as sync::Journal<F>>::Config: Clone + Send,
@@ -151,7 +150,7 @@ impl<F, E, V, H, Cfg, S> sync::Database for CompactDb<F, E, V, H, Cfg, S>
 where
     F: Family,
     E: Context,
-    V: ValueEncoding + Codec,
+    V: Codec,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,

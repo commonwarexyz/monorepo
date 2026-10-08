@@ -22,6 +22,7 @@ use commonware_storage::{
             unordered,
             value::ValueEncoding,
         },
+        floor::Proportional,
         operation::Key,
         sync,
     },
@@ -199,7 +200,9 @@ where
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged.merkleize(updates, upserts, metadata, &guard).await?
+            staged
+                .merkleize(updates, upserts, metadata, &guard, &mut Proportional)
+                .await?
         };
         Merkleized::new(inner, db)
     }
@@ -261,7 +264,7 @@ where
         metadata: Option<Self::Metadata>,
         _floor: (),
     ) -> Result<Arc<Self::MerkleizedBatch>, Error<F>> {
-        batch.merkleize(self, metadata).await
+        batch.merkleize(self, metadata, &mut Proportional).await
     }
 
     async fn apply_batch(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {

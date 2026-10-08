@@ -14,7 +14,6 @@ use crate::{
         engine::EngineDefinition,
         exit::{ExitCondition, ProcessedHeightAtLeast},
         plan::PlanBuilder,
-        processed::ProcessedHeight,
         property::Property,
     },
     stateful::{
@@ -256,7 +255,6 @@ fn network_partition_and_rejoin() {
 fn run_finalize<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
@@ -266,7 +264,6 @@ where
 fn run_finalize_with_storage_faults<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
@@ -283,7 +280,6 @@ where
 fn finalize_plan<D>(engine: D) -> PlanBuilder<D>
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
@@ -337,8 +333,8 @@ where
 
 fn run_determinism<D>(engine: D)
 where
-    D: EngineDefinition<PublicKey = ed25519::PublicKey> + Clone,
-    D::State: ProcessedHeight + PartialEq,
+    D: EngineDefinition<PublicKey = ed25519::PublicKey>,
+    D::State: PartialEq,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
@@ -366,7 +362,6 @@ where
 fn run_crash_restart<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
@@ -401,7 +396,6 @@ where
 fn run_pruning<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     MarshalPrunedBelow: Property<ed25519::PublicKey, D::State>,
     QmdbPruned: Property<ed25519::PublicKey, D::State>,
@@ -420,7 +414,6 @@ where
 fn run_delayed_start<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
@@ -437,7 +430,6 @@ where
 fn run_state_sync<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
@@ -448,7 +440,6 @@ where
 fn run_state_sync_with_storage_faults<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
@@ -466,7 +457,6 @@ where
 fn state_sync_plan<D>(engine: D) -> PlanBuilder<D>
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
@@ -533,7 +523,6 @@ where
 fn run_lossy<D>(engine: D, link: Link)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
@@ -549,7 +538,6 @@ where
 fn run_random_crashes<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
@@ -569,7 +557,6 @@ where
 fn run_many_crashes<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
@@ -589,7 +576,6 @@ where
 fn run_total_shutdown<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
@@ -624,8 +610,8 @@ where
 
 fn run_state_sync_deterministic<D>(engine: D)
 where
-    D: EngineDefinition<PublicKey = ed25519::PublicKey> + Clone,
-    D::State: ProcessedHeight + PartialEq,
+    D: EngineDefinition<PublicKey = ed25519::PublicKey>,
+    D::State: PartialEq,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
@@ -659,7 +645,6 @@ where
 fn run_state_sync_random_crashes<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
@@ -683,7 +668,6 @@ where
 fn run_state_sync_lossy<D>(engine: D, link: Link)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
@@ -705,7 +689,6 @@ where
 fn run_state_sync_crash_during_sync<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     CrashDuringStateSyncRecovery: Property<ed25519::PublicKey, D::State>,
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
@@ -744,7 +727,6 @@ where
 fn run_state_sync_partitioned_restart_stays_stuck_until_network_heals<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
@@ -774,7 +756,6 @@ where
 fn run_rapid_crashes<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
@@ -796,7 +777,6 @@ where
 fn run_network_partition<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
-    D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
@@ -1237,9 +1217,8 @@ fn out_of_order_certifications_complete_on_qmdb() {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NZUsize!(1),
-                    max_retained_roots: 1,
                 },
                 prune_config: None,
             },
@@ -1385,9 +1364,8 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NZUsize!(1),
-                    max_retained_roots: 1,
                 },
                 prune_config: None,
             },
@@ -1571,9 +1549,8 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NZUsize!(1),
-                    max_retained_roots: 1,
                 },
                 prune_config: None,
             },
@@ -1829,9 +1806,8 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NZUsize!(1),
-                    max_retained_roots: 1,
                 },
                 // The first prune runs at block 4 and targets block 3's floor,
                 // which crosses the full QMDB's first journal blob.
