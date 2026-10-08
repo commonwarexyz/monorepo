@@ -345,7 +345,12 @@ where
                     }
                     scan.batch.sort_unstable();
                 }
-                let ops = match self.log.read_many(&scan.batch).await {
+                // A single location takes the cheaper single-item read.
+                let ops = match scan.batch[..] {
+                    [loc] => self.log.read(loc).await.map(|op| vec![op]),
+                    _ => self.log.read_many(&scan.batch).await,
+                };
+                let ops = match ops {
                     Ok(ops) => ops,
                     Err(e) => return Some((Err(e.into()), scan)),
                 };
