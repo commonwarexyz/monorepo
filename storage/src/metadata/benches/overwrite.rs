@@ -60,7 +60,7 @@ fn bench_case<const SIZE: usize>(c: &mut Criterion, keys: u64, modified: u64, pi
 }
 
 fn bench_overwrite(c: &mut Criterion) {
-    // Cases with fewer than 256 keys fit in one 4,096-byte storage page and are written whole. 255
+    // Cases with fewer than 256 keys fit in one 4,096-byte blob page and are written whole. 255
     // keys (4,092 bytes) is the largest such store, and 256 keys (4,108 bytes) is just above it.
     bench_case::<8>(c, 1, 1, false);
     bench_case::<8>(c, 3, 1, false);

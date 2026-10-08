@@ -2,9 +2,7 @@
 //! physical page format used by the blob, which is left to the blob implementation.
 
 use super::{CHECKSUM_SIZE, get_page_from_blob};
-use crate::{
-    Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions, STORAGE_PAGE_SIZE,
-};
+use crate::{BLOB_PAGE_SIZE, Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
 use ahash::AHashMap;
 use commonware_utils::{Widen, cache, sync::RwLock};
 use futures::{
@@ -166,18 +164,18 @@ impl CacheRef {
     /// Initialization eagerly allocates and zeroes all cache slots from `pool`. Eviction follows
     /// the cache's Clock2Q+ replacement algorithm.
     ///
-    /// Any `page_size` is accepted, but physical pages that do not align with storage pages (see
-    /// the module docs) amplify cold random reads. Use [super::page_size] to pick an aligned value.
+    /// Any `page_size` is accepted, but physical pages that do not align with blob pages (see the
+    /// module docs) amplify cold random reads. Use [super::page_size] to pick an aligned value.
     /// Cache misses request [ReadOptions::DONT_CACHE] because the fetched page is retained here.
     pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64: u64 = page_size.widen();
         let physical_page_size = page_size_u64 + CHECKSUM_SIZE;
-        if !physical_page_size.is_multiple_of(STORAGE_PAGE_SIZE)
-            && !STORAGE_PAGE_SIZE.is_multiple_of(physical_page_size)
+        if !physical_page_size.is_multiple_of(u64::from(BLOB_PAGE_SIZE))
+            && !u64::from(BLOB_PAGE_SIZE).is_multiple_of(physical_page_size)
         {
             debug!(
                 page_size = page_size.get(),
-                physical_page_size, "physical pages do not align with storage pages"
+                physical_page_size, "physical pages do not align with blob pages"
             );
         }
 

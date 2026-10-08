@@ -362,12 +362,13 @@ impl crate::Storage for Storage {
 mod tests {
     use super::*;
     use crate::{
-        Blob, BufferPoolConfig, ReadOptions, Runner as _, Storage as _, WriteOptions,
+        BLOB_PAGE_SIZE, Blob, BufferPoolConfig, ReadOptions, Runner as _, Storage as _,
+        WriteOptions,
         storage::{Header, Layout, shared, tests::run_storage_tests},
         telemetry::metrics::Registry,
         tokio::Runner,
     };
-    use commonware_utils::sys_rng;
+    use commonware_utils::{Widen, sys_rng};
     use futures::FutureExt as _;
     use rand::RngExt as _;
     use std::{
@@ -660,9 +661,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
-    /// Verify the end-to-end storage-page alignment invariant: paged data written to a V1 blob
-    /// with a 4096-byte physical page size occupies exactly one aligned 4096-byte disk page
-    /// per physical page (header page included), so page reads never straddle a page boundary.
+    /// Verify the end-to-end blob-page alignment invariant: paged data written to a V1 blob with a
+    /// 4096-byte physical page size occupies exactly one aligned 4096-byte disk page per physical
+    /// page (header page included), so page reads never straddle a page boundary.
     #[tokio::test]
     async fn test_v1_paged_alignment() {
         let storage_directory =
@@ -670,9 +671,8 @@ mod tests {
         let config = Config::new(storage_directory.clone(), Layout::ALL);
         let storage = Storage::new(config, test_pool());
 
-        // A logical page size whose physical page is exactly one storage page.
-        const PHYSICAL_PAGE_SIZE: u64 = crate::STORAGE_PAGE_SIZE;
-        let logical = crate::buffer::paged::page_size(PHYSICAL_PAGE_SIZE as u32);
+        // A logical page size whose physical page is exactly one blob page.
+        let logical = crate::buffer::paged::page_size(BLOB_PAGE_SIZE);
         let cache = crate::buffer::paged::CacheRef::new(
             test_pool(),
             logical,
@@ -695,18 +695,18 @@ mod tests {
         // physical page of data (the partial tail page is zero-padded to a full physical page).
         let file_path = storage_directory.join("partition").join(hex(b"aligned"));
         let raw = std::fs::read(&file_path).unwrap();
-        let pages = (logical_size as usize).div_ceil(logical.get() as usize);
-        assert_eq!(raw.len() as u64 % PHYSICAL_PAGE_SIZE, 0);
+        let raw_len: u64 = Widen::widen(raw.len());
+        let pages = logical_size.div_ceil(logical.widen());
+        assert_eq!(raw_len % u64::from(BLOB_PAGE_SIZE), 0);
         assert_eq!(
-            raw.len() as u64,
-            Layout::V1.data_offset() + pages as u64 * PHYSICAL_PAGE_SIZE
+            raw_len,
+            Layout::V1.data_offset() + pages * u64::from(BLOB_PAGE_SIZE)
         );
 
         // Every physical page sits exactly within one aligned 4096-byte disk page, with a valid
         // CRC record in its final 12 bytes.
-        for page in 0..pages {
-            let start = Layout::V1.data_offset() as usize + page * PHYSICAL_PAGE_SIZE as usize;
-            let physical = &raw[start..start + PHYSICAL_PAGE_SIZE as usize];
+        let data = &raw[usize::try_from(Layout::V1.data_offset()).unwrap()..];
+        for (page, physical) in data.chunks_exact(Widen::widen(BLOB_PAGE_SIZE)).enumerate() {
             assert!(
                 crate::buffer::paged::validate_page_for_tests(physical),
                 "page {page} failed CRC validation at aligned boundary"

@@ -3,10 +3,10 @@ use crate::{Context, SyncCompletion};
 use commonware_codec::{Codec, Copying, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, Handle, IoBufMut, ReadOptions, STORAGE_PAGE_SIZE, WriteOptions,
+    BLOB_PAGE_SIZE, Blob, BufMut, Error as RError, Handle, IoBufMut, ReadOptions, WriteOptions,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::Span;
+use commonware_utils::{Span, Widen};
 use futures::{FutureExt as _, future::try_join_all};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
@@ -440,9 +440,9 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             // every write requests cache bypass.
             let data = std::mem::take(&mut target.data).freeze();
 
-            // A store no larger than one storage page is written whole: its changed values,
-            // version, and checksum share that page, so one write replaces several.
-            let full_write = data.len() as u64 <= STORAGE_PAGE_SIZE;
+            // A store no larger than one blob page is written whole: its changed values, version,
+            // and checksum share that page, so one write replaces several.
+            let full_write = data.len() <= Widen::widen(BLOB_PAGE_SIZE);
             if full_write {
                 // This write includes every changed byte, so a non-pipelined sync can request
                 // durability with it.
@@ -462,7 +462,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
                         let start = info.start;
                         let end = start + info.length;
                         target.blob.write_at(
-                            start as u64,
+                            Widen::widen(start),
                             data.slice(start..end),
                             WriteOptions::DONT_CACHE,
                         )
@@ -472,7 +472,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
                             .blob
                             .write_at(0, data.slice(0..u64::SIZE), WriteOptions::DONT_CACHE),
                         target.blob.write_at(
-                            checksum_index as u64,
+                            Widen::widen(checksum_index),
                             data.slice(checksum_index..checksum_index + crc32::Digest::SIZE),
                             WriteOptions::DONT_CACHE,
                         ),

@@ -6,7 +6,7 @@
 //! Run with: `cargo bench --bench buffer_paged -p commonware-runtime`
 
 use commonware_runtime::{
-    STORAGE_PAGE_SIZE, Storage,
+    BLOB_PAGE_SIZE, Storage,
     buffer::paged::{CacheRef, Writer, page_size},
 };
 use criterion::{criterion_group, criterion_main};
@@ -16,7 +16,7 @@ mod append;
 mod read;
 mod sync;
 
-const PAGE_SIZE: NonZeroU16 = page_size(STORAGE_PAGE_SIZE as u32);
+const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 const PAGE_SIZE_USIZE: usize = PAGE_SIZE.get() as usize;
 const WRITE_BUFFER_SIZE: usize = PAGE_SIZE_USIZE * 4;
 const CACHE_SIZE: usize = 10_000;
