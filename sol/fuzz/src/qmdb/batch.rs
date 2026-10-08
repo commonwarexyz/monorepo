@@ -17,7 +17,7 @@ use clap::{Args, ValueEnum};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher, Keccak256, Sha256};
 use commonware_storage::{
-    merkle::{Bagging, Graftable, Location, PendingChunk as _, mem::Mem, mmb, mmr, verification},
+    merkle::{Graftable, Location, PendingChunk as _, mem::Mem, mmb, mmr, verification},
     qmdb::{
         self,
         any::{
@@ -470,13 +470,8 @@ fn multi<F: Graftable, H: Hasher, O: Codec + Clone>(
         Location::new(tree.inactivity_floor),
     );
     let locs: Vec<_> = locations.iter().copied().map(Location::new).collect();
-    let proof = block_on(verification::multi_proof(
-        ops,
-        inactive,
-        Bagging::BackwardFold,
-        &locs,
-    ))
-    .map_err(|error| error.to_string())?;
+    let proof = block_on(verification::multi_proof(ops, inactive, &locs))
+        .map_err(|error| error.to_string())?;
     let operations: Vec<_> = locations
         .iter()
         .map(|&loc| (Location::new(loc), operation(loc)))

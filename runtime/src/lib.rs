@@ -109,6 +109,33 @@ stability_scope!(BETA {
         pub const ALL: std::ops::RangeInclusive<Self> = Self::V0..=DEFAULT_BLOB_LAYOUT;
     }
 
+    /// Size in bytes of a blob page, the smallest unit in which storage is expected to read and
+    /// persist [`Blob`] data.
+    ///
+    /// Blobs created with [`DEFAULT_BLOB_LAYOUT`] begin their data on a blob-page boundary, so blob
+    /// offset `n` lies in page `n / BLOB_PAGE_SIZE`.
+    ///
+    /// Writing part of a page costs about as much as writing all of it, so writes that share a
+    /// page are cheaper combined into one. Data read together is likewise cheaper when it stays
+    /// within one page.
+    ///
+    /// A host may use a larger power-of-two unit, such as a bigger memory page or filesystem block.
+    /// Each such unit holds whole blob pages, so data within one page still shares a unit, but a
+    /// structure larger than one page may straddle two of them.
+    ///
+    /// Page alignment affects performance only: a write within one page can still tear (see
+    /// [`Blob`]). The size is a fixed power of two, independent of the host's memory
+    /// [`page_size`], so layouts derived from it are the same on every host.
+    pub const BLOB_PAGE_SIZE: u32 = 4096;
+
+    // Blob pages are a power of two, and the default layout begins blob data on a page boundary.
+    const _: () = assert!(
+        BLOB_PAGE_SIZE.is_power_of_two()
+            && DEFAULT_BLOB_LAYOUT
+                .data_offset()
+                .is_multiple_of(BLOB_PAGE_SIZE as u64)
+    );
+
     /// Application-owned version of a [`Blob`]'s contents.
     ///
     /// This is independent of the runtime-owned [`BlobLayout`].
