@@ -52,7 +52,7 @@ pub trait EngineDefinition: Clone + Send + 'static {
     type Engine: Send + 'static;
 
     /// Per-validator state inspectable by property checkers.
-    type State: ProcessedHeight + Send + Sync + 'static;
+    type State: ProcessedHeight + 'static;
 
     /// The participants for this simulation.
     ///

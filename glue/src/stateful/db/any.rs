@@ -32,6 +32,7 @@ use commonware_storage::{
             ordered, unordered,
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
+        floor::Proportional,
         operation::Key,
         sync::{self, Target as AnySyncTarget},
     },
@@ -279,7 +280,7 @@ where
     F: Family,
     E: Context,
     K: Key,
-    V: ValueEncoding + 'static,
+    V: ValueEncoding,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
@@ -308,7 +309,9 @@ where
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged.merkleize(updates, upserts, metadata, &guard).await?
+            staged
+                .merkleize(updates, upserts, metadata, &guard, &mut Proportional)
+                .await?
         };
         Ok(AnyMerkleized { inner, db })
     }
@@ -319,7 +322,7 @@ where
     F: Family,
     E: Context,
     K: Key,
-    V: ValueEncoding + 'static,
+    V: ValueEncoding,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
     I: OrderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
@@ -348,7 +351,9 @@ where
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged.merkleize(updates, upserts, metadata, &guard).await?
+            staged
+                .merkleize(updates, upserts, metadata, &guard, &mut Proportional)
+                .await?
         };
         Ok(AnyMerkleized { inner, db })
     }
@@ -389,7 +394,7 @@ where
     F: Family,
     E: Context,
     K: Key,
-    V: ValueEncoding + 'static,
+    V: ValueEncoding,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
@@ -401,7 +406,10 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&db, self.metadata).await?;
+        let merkleized = self
+            .batch
+            .merkleize(&db, self.metadata, &mut Proportional)
+            .await?;
         Ok(AnyMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -415,7 +423,7 @@ where
     F: Family,
     E: Context,
     K: Key,
-    V: ValueEncoding + 'static,
+    V: ValueEncoding,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
     I: OrderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
@@ -427,7 +435,10 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&db, self.metadata).await?;
+        let merkleized = self
+            .batch
+            .merkleize(&db, self.metadata, &mut Proportional)
+            .await?;
         Ok(AnyMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -478,8 +489,8 @@ where
     F: Family,
     E: Context + Spawner,
     K: Array,
-    V: value::FixedValue + 'static,
-    H: Hasher + 'static,
+    V: value::FixedValue,
+    H: Hasher,
     T: Translator,
     S: Strategy,
 {
@@ -579,7 +590,7 @@ where
     F: Family,
     E: Context + Spawner,
     K: Key,
-    V: value::VariableValue + 'static,
+    V: value::VariableValue,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -685,7 +696,7 @@ where
     F: Family,
     E: Context + Spawner,
     K: Array,
-    V: value::FixedValue + 'static,
+    V: value::FixedValue,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -732,7 +743,7 @@ where
     F: Family,
     E: Context + Spawner,
     K: Key,
-    V: value::VariableValue + 'static,
+    V: value::VariableValue,
     H: Hasher,
     T: Translator,
     S: Strategy,

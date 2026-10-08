@@ -431,7 +431,7 @@ fn get_bench(
 }
 
 /// Run the cold/warm read passes for each reader count against an opened database.
-async fn run_reads<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
+async fn run_reads<D: DbAny<Mmr, Key = Digest> + 'static>(
     ctx: &Context,
     db: Arc<D>,
     opened: Duration,
@@ -470,7 +470,7 @@ async fn run_reads<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
 /// deterministic key stream (so a repeat pass replays the same keys). With a `batch` size, each
 /// reader issues its gets in `batch`-key `get_many` calls instead of point gets. Returns the
 /// elapsed time, the number of gets issued, and how many found a value.
-async fn run_gets<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
+async fn run_gets<D: DbAny<Mmr, Key = Digest> + 'static>(
     ctx: &Context,
     db: Arc<D>,
     keyspace: u64,

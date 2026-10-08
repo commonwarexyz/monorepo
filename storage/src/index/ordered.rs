@@ -269,7 +269,12 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn insert_and_retain(&mut self, key: &[u8], value: V, should_retain: impl Fn(&V) -> bool) {
+    fn insert_and_retain(
+        &mut self,
+        key: &[u8],
+        value: V,
+        mut should_retain: impl FnMut(&V) -> bool,
+    ) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             BTreeEntry::Occupied(mut entry) => {
@@ -310,7 +315,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
                 );
 
                 // Drop anything that should not be retained.
-                cursor.retain(&should_retain);
+                cursor.retain(&mut should_retain);
 
                 // Add the new value only if it should be retained.
                 if should_retain(&value) {

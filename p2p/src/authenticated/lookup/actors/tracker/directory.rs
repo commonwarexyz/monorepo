@@ -48,7 +48,6 @@ pub struct Config {
 pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     context: E,
 
-    // ---------- Configuration ----------
     /// The maximum number of peer sets to track.
     max_sets: NonZeroUsize,
 
@@ -67,7 +66,6 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Minimum duration between reservations for a given peer.
     peer_connection_cooldown: Duration,
 
-    // ---------- State ----------
     /// The records of all peers.
     peers: HashMap<C, Record>,
 
@@ -78,11 +76,9 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// whether a peer is blocked, persisting even if the peer record is deleted.
     blocked: PrioritySet<C, SystemTime>,
 
-    // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
     releaser: Releaser<C>,
 
-    // ---------- Metrics ----------
     /// The metrics for the records.
     metrics: Metrics<C>,
 }
@@ -112,8 +108,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             metrics,
         }
     }
-
-    // ---------- Setters ----------
 
     /// Releases a peer.
     pub fn release(&mut self, metadata: Metadata<C>) {
@@ -352,8 +346,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         true
     }
 
-    // ---------- Getters ----------
-
     /// Returns all peers across all tracked peer sets.
     ///
     /// Same overlap rule as each stored set and as [`crate::Provider::subscribe`] documents for
@@ -481,8 +473,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     pub fn blocked(&self) -> usize {
         self.blocked.len()
     }
-
-    // --------- Helpers ----------
 
     /// Attempt to reserve a peer.
     ///

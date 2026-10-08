@@ -4701,7 +4701,7 @@ mod tests {
     where
         R: Reporter<Activity = Update<B>>,
         P: Provider<Scope = Epoch, Scheme = S>,
-        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
+        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey>,
     {
         let config = Config {
             provider,

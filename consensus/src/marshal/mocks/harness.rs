@@ -267,7 +267,7 @@ pub trait TestHarness: 'static + Sized {
     /// The application block type.
     /// Note: We require `Digestible<Digest = D>` so generic test functions can use
     /// `subscribe_by_digest` which expects the block's digest type.
-    type ApplicationBlock: crate::Block + Digestible<Digest = D> + Clone + Send + 'static;
+    type ApplicationBlock: crate::Block + Digestible<Digest = D>;
 
     /// The marshal variant type.
     type Variant: crate::marshal::core::Variant<
@@ -1837,10 +1837,6 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
     }
 }
 
-// =============================================================================
-// Standard Harness Implementation
-// =============================================================================
-
 /// Standard variant test harness.
 pub struct StandardHarness;
 
@@ -2595,10 +2591,6 @@ impl TestHarness for DeferredHarness {
     }
 }
 
-// =============================================================================
-// Coding Harness Implementation
-// =============================================================================
-
 /// Coding variant test harness.
 pub struct CodingHarness;
 
@@ -3049,10 +3041,6 @@ impl TestHarness for CodingHarness {
         assert!(handle.mailbox.verified(round, block.clone()).await);
     }
 }
-
-// =============================================================================
-// Generic Test Functions
-// =============================================================================
 
 /// Run the finalization test with the given parameters.
 pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization: bool) -> String {

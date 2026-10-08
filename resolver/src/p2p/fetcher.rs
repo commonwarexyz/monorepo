@@ -16,7 +16,6 @@ use rand_core::Rng;
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
-    marker::PhantomData,
     mem,
     time::{Duration, SystemTime},
 };
@@ -89,12 +88,11 @@ pub struct Config<P: PublicKey> {
 /// the peer might be slow or might receive the data later, and are cleared when the fetch
 /// succeeds. A blocked target is skipped until the network unblocks it, so a fetch whose every
 /// target is blocked stays outstanding and resumes once one of them is unblocked.
-pub struct Fetcher<E, P, Key, NetS>
+pub struct Fetcher<E, P, Key>
 where
     E: Clock + Rng + Metrics,
     P: PublicKey,
     Key: Span,
-    NetS: Sender<PublicKey = P>,
 {
     context: E,
 
@@ -156,17 +154,13 @@ where
 
     /// Histogram of successful response durations
     resolves: Histogram,
-
-    /// Phantom data for networking types
-    _s: PhantomData<NetS>,
 }
 
-impl<E, P, Key, NetS> Fetcher<E, P, Key, NetS>
+impl<E, P, Key> Fetcher<E, P, Key>
 where
     E: Clock + Rng + Metrics,
     P: PublicKey,
     Key: Span,
-    NetS: Sender<PublicKey = P>,
 {
     /// Creates a new fetcher.
     pub fn new(context: E, config: Config<P>) -> Self {
@@ -204,7 +198,6 @@ where
             requests_created,
             requests_sent,
             resolves,
-            _s: PhantomData,
         }
     }
 
@@ -261,7 +254,10 @@ where
     /// - Rate limit expiry time if any peer was rate-limited
     /// - `retry_timeout` if peers exist but all sends failed
     /// - `Duration::MAX` if no eligible peers (wait for external changes)
-    pub fn fetch(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
+    pub fn fetch<NetS: Sender<PublicKey = P>>(
+        &mut self,
+        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
+    ) {
         self.waiter = None;
 
         // Try each pending key until one succeeds
@@ -725,9 +721,7 @@ mod tests {
         }
     }
 
-    fn create_test_fetcher<S: Sender<PublicKey = PublicKey>>(
-        context: Context,
-    ) -> Fetcher<Context, PublicKey, MockKey, S> {
+    fn create_test_fetcher(context: Context) -> Fetcher<Context, PublicKey, MockKey> {
         let public_key = PrivateKey::from_seed(0).public_key();
         let config = Config {
             me: Some(public_key),
@@ -741,10 +735,7 @@ mod tests {
 
     fn create_unservable_fetcher(
         context: &Context,
-    ) -> (
-        Fetcher<Context, PublicKey, MockKey, SuccessMockSender>,
-        PublicKey,
-    ) {
+    ) -> (Fetcher<Context, PublicKey, MockKey>, PublicKey) {
         let public_key = PrivateKey::from_seed(0).public_key();
         let peer = PrivateKey::from_seed(1).public_key();
         let missing_peer = PrivateKey::from_seed(2).public_key();
@@ -762,11 +753,7 @@ mod tests {
     }
 
     /// Helper to add an active request directly for testing
-    fn add_test_active<S: Sender<PublicKey = PublicKey>>(
-        fetcher: &mut Fetcher<Context, PublicKey, MockKey, S>,
-        id: ID,
-        key: MockKey,
-    ) {
+    fn add_test_active(fetcher: &mut Fetcher<Context, PublicKey, MockKey>, id: ID, key: MockKey) {
         let peer = PrivateKey::from_seed(1).public_key();
         let now = fetcher.context.current();
         let deadline = now + Duration::from_secs(5);
@@ -786,7 +773,7 @@ mod tests {
     fn test_retain_function() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
 
             // Add some keys to pending and active states
             fetcher.add_retry(MockKey(1));
@@ -827,7 +814,7 @@ mod tests {
     fn test_len_functions() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
 
             // Initially empty
             assert_eq!(fetcher.len(), 0);
@@ -866,7 +853,7 @@ mod tests {
     fn test_retain_with_empty_collections() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
 
             // Test retain on empty collections
             fetcher.retain(|_| true);
@@ -881,7 +868,7 @@ mod tests {
     fn test_retain_all_elements_match_predicate() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
 
             // Add keys
             fetcher.add_retry(MockKey(1));
@@ -905,7 +892,7 @@ mod tests {
     fn test_retain_no_elements_match_predicate() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
 
             // Add keys
             fetcher.add_retry(MockKey(1));
@@ -927,7 +914,7 @@ mod tests {
     fn test_retain_drops_selected_keys() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
 
             // Add keys to both pending and active states
             fetcher.add_retry(MockKey(1));
@@ -963,7 +950,7 @@ mod tests {
     fn test_contains_function() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
 
             // Initially empty
             assert!(!fetcher.contains(&MockKey(1)));
@@ -993,7 +980,7 @@ mod tests {
     fn test_add_retry_function() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
 
             // Add first key
             fetcher.add_retry(MockKey(1));
@@ -1015,7 +1002,7 @@ mod tests {
     fn test_add_retry_duplicate_panics() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
 
             fetcher.add_retry(MockKey(1));
             // This should panic
@@ -1027,7 +1014,7 @@ mod tests {
     fn test_get_pending_deadline() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
 
             // No deadline when empty
             assert!(fetcher.get_pending_deadline().is_none());
@@ -1050,7 +1037,7 @@ mod tests {
     fn test_get_active_deadline() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let fetcher = create_test_fetcher::<FailMockSender>(context);
+            let fetcher = create_test_fetcher(context);
 
             // No deadline when empty (requester has no timeouts)
             assert!(fetcher.get_active_deadline().is_none());
@@ -1061,7 +1048,7 @@ mod tests {
     fn test_pop_active() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let fetcher = create_test_fetcher::<FailMockSender>(context);
+            let fetcher = create_test_fetcher(context);
 
             // No active requests, should return None when popping
             // (This tests the case where requester.next() returns None or the active map doesn't contain the key)
@@ -1073,7 +1060,7 @@ mod tests {
     fn test_pop_response_defers_peer_rating() {
         let runner = Runner::default();
         runner.start(|context| async move {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
             let local_peer = PrivateKey::from_seed(0).public_key();
             let peer = PrivateKey::from_seed(1).public_key();
             fetcher.reconcile(&[local_peer, peer.clone()]);
@@ -1103,7 +1090,7 @@ mod tests {
     fn test_record_response_scores_by_size() {
         let runner = Runner::default();
         runner.start(|context| async move {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
             let local_peer = PrivateKey::from_seed(0).public_key();
             let small = PrivateKey::from_seed(1).public_key();
             let large = PrivateKey::from_seed(2).public_key();
@@ -1135,7 +1122,7 @@ mod tests {
             // An empty response has zero throughput regardless of latency.
             assert_eq!(throughput(Duration::from_millis(1), 0), 0);
 
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
             let local_peer = PrivateKey::from_seed(0).public_key();
             let empty = PrivateKey::from_seed(1).public_key();
             let real = PrivateKey::from_seed(2).public_key();
@@ -1179,7 +1166,7 @@ mod tests {
         // response outweighs its slower second response.
         let runner = Runner::default();
         runner.start(|context| async move {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
             let local_peer = PrivateKey::from_seed(0).public_key();
             let bursty = PrivateKey::from_seed(1).public_key();
             let steady = PrivateKey::from_seed(2).public_key();
@@ -1199,7 +1186,7 @@ mod tests {
     fn test_reconcile_and_block() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
 
@@ -1217,7 +1204,7 @@ mod tests {
     fn test_edge_cases_empty_state() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let fetcher = create_test_fetcher::<FailMockSender>(context);
+            let fetcher = create_test_fetcher(context);
 
             // Test all functions on empty fetcher
             assert_eq!(fetcher.len(), 0);
@@ -1233,7 +1220,7 @@ mod tests {
     fn test_retain_edge_cases() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
 
             // Retain on an empty fetcher is a no-op.
             fetcher.retain(|key| *key != MockKey(1));
@@ -1252,7 +1239,7 @@ mod tests {
     fn test_retain_preserves_active_state() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
 
             // Add keys to active with specific IDs
             add_test_active(&mut fetcher, 100, MockKey(1));
@@ -1276,7 +1263,7 @@ mod tests {
     fn test_mixed_operations() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
 
             // Add keys to both pending and active
             fetcher.add_retry(MockKey(1));
@@ -1309,7 +1296,7 @@ mod tests {
     fn test_ready_vs_retry() {
         let runner = Runner::default();
         runner.start(|context| async move {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context.child("fetcher"));
+            let mut fetcher = create_test_fetcher(context.child("fetcher"));
 
             // Add some keys to pending and active states
             fetcher.add_retry(MockKey(1));
@@ -1342,7 +1329,7 @@ mod tests {
     fn test_ready_requests_precede_all_retries() {
         let runner = Runner::default();
         runner.start(|context| async move {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context.child("fetcher"));
+            let mut fetcher = create_test_fetcher(context.child("fetcher"));
 
             fetcher.add_retry(MockKey(1));
             context.sleep(Duration::from_millis(50)).await;
@@ -1369,7 +1356,7 @@ mod tests {
                 retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
             };
-            let mut fetcher: Fetcher<_, _, MockKey, FailMockSender> =
+            let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, other_public_key]);
             let mut sender = WrappedSender::new(
@@ -1417,7 +1404,7 @@ mod tests {
                 retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
             };
-            let mut fetcher: Fetcher<_, _, MockKey, FailMockSender> =
+            let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, peer1.clone()]);
             let mut sender = WrappedSender::new(
@@ -1471,7 +1458,7 @@ mod tests {
                 retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
             };
-            let mut fetcher: Fetcher<_, _, MockKey, SuccessMockSender> =
+            let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, peer]);
             let mut sender = WrappedSender::new(
@@ -1507,7 +1494,7 @@ mod tests {
                 retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
             };
-            let mut fetcher: Fetcher<_, _, MockKey, SuccessMockSender> =
+            let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, peer]);
             let mut sender = WrappedSender::new(
@@ -1628,7 +1615,7 @@ mod tests {
                 retry_timeout,
                 priority_requests: false,
             };
-            let mut fetcher: Fetcher<_, _, MockKey, FailMockSender> =
+            let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
             // Add peers (FailMockSender doesn't rate limit, just fails sends)
             fetcher.reconcile(&[public_key, peer1, peer2]);
@@ -1668,7 +1655,7 @@ mod tests {
     fn test_add_targets() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
             let peer3 = PrivateKey::from_seed(3).public_key();
@@ -1717,7 +1704,7 @@ mod tests {
     fn test_targets_cleanup() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
 
@@ -1764,7 +1751,7 @@ mod tests {
     fn test_blocked_peers_keep_targets_until_unblocked() {
         let runner = Runner::default();
         runner.start(|context| async move {
-            let mut fetcher = create_test_fetcher::<SuccessMockSender>(context.child("fetcher"));
+            let mut fetcher = create_test_fetcher(context.child("fetcher"));
             let public_key = PrivateKey::from_seed(0).public_key();
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
@@ -1790,7 +1777,7 @@ mod tests {
     fn test_target_behavior_on_send_failure() {
         let runner = Runner::default();
         runner.start(|context| async move {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context.child("fetcher"));
+            let mut fetcher = create_test_fetcher(context.child("fetcher"));
             let public_key = PrivateKey::from_seed(0).public_key();
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
@@ -1816,7 +1803,7 @@ mod tests {
     fn test_target_retention_on_pop() {
         let runner = Runner::default();
         runner.start(|context| async move {
-            let mut fetcher = create_test_fetcher::<SuccessMockSender>(context.child("fetcher"));
+            let mut fetcher = create_test_fetcher(context.child("fetcher"));
             let public_key = PrivateKey::from_seed(0).public_key();
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
@@ -1865,7 +1852,7 @@ mod tests {
     fn test_no_fallback_when_targets_unavailable() {
         let runner = Runner::default();
         runner.start(|context| async move {
-            let mut fetcher = create_test_fetcher::<SuccessMockSender>(context.child("fetcher"));
+            let mut fetcher = create_test_fetcher(context.child("fetcher"));
             let public_key = PrivateKey::from_seed(0).public_key();
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
@@ -1906,7 +1893,7 @@ mod tests {
     fn test_clear_targets() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
 
@@ -1943,7 +1930,7 @@ mod tests {
                 retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
             };
-            let mut fetcher: Fetcher<_, _, MockKey, LimitedMockSender<Context>> =
+            let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
             let quota = Quota::per_second(NZU32!(1));
@@ -1998,7 +1985,7 @@ mod tests {
     fn test_peer_prioritization() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let mut fetcher = create_test_fetcher(context);
             let public_key = PrivateKey::from_seed(0).public_key();
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
