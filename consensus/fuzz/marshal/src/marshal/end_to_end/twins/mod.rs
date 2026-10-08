@@ -14,7 +14,7 @@
 mod coding;
 mod layout;
 mod observer;
-pub(crate) mod stack;
+pub mod stack;
 
 use super::{
     app::{
@@ -120,11 +120,11 @@ impl fmt::Debug for MarshalTwinsInputDebug<'_> {
     }
 }
 
-pub(crate) type SchemeOf<P> = <P as Simplex>::Scheme;
-pub(crate) type PublicKeyOf<P> =
+pub type SchemeOf<P> = <P as Simplex>::Scheme;
+pub type PublicKeyOf<P> =
     <<P as Simplex>::Scheme as commonware_cryptography::certificate::Verifier>::PublicKey;
-pub(crate) type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
-pub(crate) type B<P> = MockBlock<Sha256Digest, Ctx<P>>;
+pub type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
+pub type B<P> = MockBlock<Sha256Digest, Ctx<P>>;
 type PrimaryApp<P> = AlwaysAcceptBlockBuilderApp<Ctx<P>, SchemeOf<P>>;
 type BackendMarker<P, A, M> = std::marker::PhantomData<fn() -> (P, A, M)>;
 

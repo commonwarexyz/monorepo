@@ -56,7 +56,7 @@ use commonware_storage::archive::immutable;
 use commonware_utils::{NZU64, NZUsize, channel::oneshot};
 use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
-pub(crate) const DEFAULT_MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
+pub const DEFAULT_MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
 pub(crate) const POLL: Duration = Duration::from_millis(50);
 /// Marshal Twins' budget includes its scripted prefix and slower links.
 const MARSHAL_TWINS_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
@@ -74,7 +74,7 @@ pub(crate) const ATTACK_VICTIM_VERIFY_DELAY: Duration = Duration::from_millis(
     CERTIFICATION_TIMEOUT_MILLIS + LEADER_TIMEOUT_MILLIS + ATTACK_TIMING_MARGIN_MILLIS,
 );
 
-pub(crate) trait TwinsBlockBuilder<P: Simplex>:
+pub trait TwinsBlockBuilder<P: Simplex>:
     commonware_consensus::Application<
         deterministic::Context,
         SigningScheme = SchemeOf<P>,
@@ -146,7 +146,7 @@ impl<P: Simplex> TwinsBlockBuilder<P> for SelectedBlockBuilderApp<Ctx<P>, Scheme
 }
 
 /// Instantiates the standard marshal wrapper used as the Simplex automaton and relay.
-pub(crate) trait TwinsMarshal<P: Simplex, A: TwinsBlockBuilder<P>> {
+pub trait TwinsMarshal<P: Simplex, A: TwinsBlockBuilder<P>> {
     type Wrapper: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>
         + Relay<Digest = Sha256Digest, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>
         + Reporter<Activity = Update<B<P>>>;
@@ -160,7 +160,7 @@ pub(crate) trait TwinsMarshal<P: Simplex, A: TwinsBlockBuilder<P>> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MarshalChoice {
+pub enum MarshalChoice {
     Deferred,
     Inline,
 }
@@ -174,7 +174,7 @@ impl fmt::Display for MarshalChoice {
     }
 }
 
-pub(crate) struct DeferredMarshal;
+pub struct DeferredMarshal;
 
 impl<P: Simplex, A: TwinsBlockBuilder<P>> TwinsMarshal<P, A> for DeferredMarshal {
     type Wrapper = Deferred<deterministic::Context, SchemeOf<P>, A, B<P>, FixedEpocher>;
@@ -194,7 +194,7 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>> TwinsMarshal<P, A> for DeferredMarshal
     }
 }
 
-pub(crate) struct InlineMarshal;
+pub struct InlineMarshal;
 
 impl<P: Simplex, A: TwinsBlockBuilder<P>> TwinsMarshal<P, A> for InlineMarshal {
     type Wrapper = Inline<deterministic::Context, SchemeOf<P>, A, B<P>, FixedEpocher>;
@@ -332,11 +332,11 @@ type MarshalResolver<P> = (
     resolver::Mailbox<Sha256Digest, PublicKeyOf<P>>,
 );
 
-pub(crate) struct Validator<P: Simplex> {
-    pub(crate) mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
-    pub(crate) application: Application<B<P>>,
+pub struct Validator<P: Simplex> {
+    pub mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
+    pub application: Application<B<P>>,
     actor: Option<MarshalActor<P>>,
-    pub(crate) buffer: buffered::Mailbox<PublicKeyOf<P>, B<P>>,
+    pub buffer: buffered::Mailbox<PublicKeyOf<P>, B<P>>,
     resolver: Option<MarshalResolver<P>>,
 }
 
@@ -355,7 +355,7 @@ impl<P: Simplex> Validator<P> {
 
     /// Removes the installed resolver so a caller can wrap it (for example in an
     /// observing adapter) before starting the actor with [`Self::start_with_buffer`].
-    pub(crate) fn take_resolver(&mut self) -> MarshalResolver<P> {
+    pub fn take_resolver(&mut self) -> MarshalResolver<P> {
         self.resolver
             .take()
             .expect("marshal resolver must be installed before actor startup")
@@ -366,7 +366,7 @@ impl<P: Simplex> Validator<P> {
     /// (for example a recording wrapper around the real buffer), so a scenario can
     /// observe the fetches and blocks the marshal issues. The `handler::Receiver`
     /// half of the resolver tuple must be the one the real resolver engine feeds.
-    pub(crate) fn start_with_buffer<R, Buf>(
+    pub fn start_with_buffer<R, Buf>(
         &mut self,
         reporter: impl Reporter<Activity = Update<B<P>>>,
         resolver: (handler::Receiver<Sha256Digest>, R),
@@ -387,7 +387,7 @@ impl<P: Simplex> Validator<P> {
     }
 }
 
-pub(crate) fn genesis_block<P: Simplex>(leader: PublicKeyOf<P>) -> B<P> {
+pub fn genesis_block<P: Simplex>(leader: PublicKeyOf<P>) -> B<P> {
     let parent = Sha256::hash(&[b""]);
     let context = Ctx::<P> {
         round: Round::new(Epoch::zero(), View::zero()),
@@ -397,7 +397,7 @@ pub(crate) fn genesis_block<P: Simplex>(leader: PublicKeyOf<P>) -> B<P> {
     B::<P>::new::<Sha256>(context, parent, Height::zero(), 0)
 }
 
-pub(crate) async fn setup_network<P: Simplex>(
+pub async fn setup_network<P: Simplex>(
     context: deterministic::Context,
     participants: Vec<PublicKeyOf<P>>,
 ) -> Oracle<PublicKeyOf<P>, deterministic::Context> {
@@ -439,7 +439,7 @@ pub(crate) async fn setup_network_links<P: Simplex>(
 /// caller-built pair (the caller has already registered the backfill channel,
 /// and the wedge does not apply to it).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn setup_validator<P: Simplex>(
+pub async fn setup_validator<P: Simplex>(
     context: deterministic::Context,
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,
@@ -614,7 +614,7 @@ pub(crate) async fn setup_validator<P: Simplex>(
     }
 }
 
-pub(crate) async fn register_engine_networks<P: Simplex>(
+pub async fn register_engine_networks<P: Simplex>(
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,
 ) -> NetworkChannels<PublicKeyOf<P>> {
