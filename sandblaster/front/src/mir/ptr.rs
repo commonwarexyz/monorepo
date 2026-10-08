@@ -93,9 +93,17 @@ const HELPERS: &[(&str, Helper, &str, Option<bool>, bool)] = &[
     ("core::ptr::mut_ptr::<impl *mut T>::offset", Helper::Move { neg: false, signed: true }, "* is -> *", Some(true), true),
 ];
 
-/// The admitted helpers' definition paths (printed on the record).
+/// The admitted helpers' definition paths (named where a library `unsafe
+/// fn` call is refused; the record prints [`admitted_unsafe_fns`]).
 pub fn helper_paths() -> Vec<&'static str> {
     HELPERS.iter().map(|h| h.0).collect()
+}
+
+/// The library `unsafe fn`s crate code may call: the admitted helpers
+/// declared `unsafe fn` (`add`, `sub`, `offset`; A-S7), printed on the
+/// record; every other library `unsafe fn` is refused.
+pub fn admitted_unsafe_fns() -> Vec<&'static str> {
+    HELPERS.iter().filter(|h| h.4).map(|h| h.0).collect()
 }
 
 /// An admitted helper `f` (an instance whose definition is in the table):

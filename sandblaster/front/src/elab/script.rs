@@ -1755,6 +1755,16 @@ impl<'a> Elab<'a> {
             let eq_t = mk::eq(mk::int_ty(w), x.clone(), mk::lit(w, v.clone()));
             let relevant = s.f.mode == Mode::Proof;
             let p_eq = s.prove(ObligationKind::Assert, sp, &eq_t, relevant)?;
+            // facts the goal mentions whose types mention `k` (a
+            // precondition `k < 64` proving the bound of `t[k]` in it):
+            // generalized with `k`, else the motive is ill-typed
+            if let Some(xl) = s.f.scope.local(var) {
+                let g = goal.at(d);
+                let deps: Vec<(u32, Tm)> = s.dependent_facts(xl).into_iter().filter(|(l, _)| super::refine::mentions(&g, d, *l)).collect();
+                if !deps.is_empty() {
+                    return s.case_generalized(xl, &x, w, &v, p_eq, &g, &deps, body, kind.clone(), span, sp);
+                }
+            }
             let gv = s.eval(&goal.at(d))?;
             let xv = s.eval(&x)?;
             let mut bb = s.budget();
@@ -1769,6 +1779,70 @@ impl<'a> Elab<'a> {
             let sym = mk::apps(mk::global(s.p.g("eq::sym")), [(Rel::Rel, wt.clone()), (Rel::Rel, x.clone()), (Rel::Rel, mk::lit(w, v.clone())), (Rel::Rel, p_eq)]);
             Ok(Rc::new(Term::Transport { ty: wt, lhs: mk::lit(w, v.clone()), rhs: x, eq: sym, motive: m, val: p }))
         })
+    }
+}
+
+impl<'a> Elab<'a> {
+    /// One case `k = v` of `case_chain` whose goal `g` (a term at the
+    /// current depth `d`) mentions facts whose types mention `k` (`deps`,
+    /// `(level, type)`: the precondition `k < 64` of a goal reading
+    /// `t[k]`): the motive generalizes them with `k`, syntactically like a
+    /// refining `match` (`refine.rs`), `y. Π(h′ : F[k := y]).. G[k := y,
+    /// h := h′]`, so every proof in the goal (the facts, and the proofs
+    /// built from them) is about the generalized index. The case proves
+    /// `Π(h′ : F[k := v]).. G[k := v, h := h′]`, each `h′` a fact; the
+    /// transport along `v == k` is applied to the facts.
+    #[allow(clippy::too_many_arguments)]
+    fn case_generalized(&mut self, xl: u32, x: &Tm, w: Width, v: &num_bigint::BigInt, p_eq: Tm, g: &Tm, deps: &[(u32, Tm)], body: &'a [ScriptStmt], kind: ObligationKind, span: Span, sp: Span) -> R<Tm> {
+        use super::refine::{revert_subst, subst_levels};
+        let d = self.depth();
+        let k = deps.len();
+        // each fact generalized with its own relevance
+        let rels: Vec<Rel> = deps.iter().map(|(l, _)| self.f.scope.ctx.entries.get(*l as usize).map(|e| e.rel).unwrap_or(Rel::Irr)).collect();
+        // `Π(h′ : F[k := a]).. G[k := a, h := h′]` with `a` the term `at`
+        // (built at depth `ad`), at depth `top` (the facts' binders from
+        // level `top` on)
+        let generalized = |at: &Tm, ad: u32, top: u32| -> Tm {
+            let mut t = subst_levels(g, d, &revert_subst(xl, at, ad, deps, top, k), top + k as u32);
+            for (i, (_, f)) in deps.iter().enumerate().rev() {
+                let dom = subst_levels(f, d, &revert_subst(xl, at, ad, deps, top, i), top + i as u32);
+                t = mk::pi("h", rels[i], dom, t);
+            }
+            t
+        };
+        // the motive at depth d + 1 (`y` at level d), and the case's goal
+        let motive = generalized(&mk::var(0), d + 1, d + 1);
+        let lit = mk::lit(w, v.clone());
+        let case_goal = generalized(&lit, d, d);
+        let saved = self.f.scope.clone();
+        let mut cur = case_goal;
+        let mut doms: Vec<Tm> = Vec::new();
+        for r in &rels {
+            let Term::Pi { dom, cod, .. } = &*cur.clone() else {
+                self.f.scope = saved;
+                return internal(sp, "`cases`: a generalized fact has no binder");
+            };
+            if let Err(e) = self.push_fact_rel("h_case", *r, dom, None, FactOrigin::PathCond, sp) {
+                self.f.scope = saved;
+                return Err(e);
+            }
+            doms.push(dom.clone());
+            cur = cod.clone();
+        }
+        let here = self.depth();
+        let p = self.script(body, Val::new(cur, here), kind, span);
+        self.f.scope = saved;
+        let mut p = p?;
+        for (dom, r) in doms.iter().zip(&rels).rev() {
+            p = mk::lam("h", *r, dom.clone(), p);
+        }
+        let wt = mk::int_ty(w);
+        let sym = mk::apps(mk::global(self.p.g("eq::sym")), [(Rel::Rel, wt.clone()), (Rel::Rel, x.clone()), (Rel::Rel, lit.clone()), (Rel::Rel, p_eq)]);
+        let mut t: Tm = Rc::new(Term::Transport { ty: wt, lhs: lit, rhs: x.clone(), eq: sym, motive, val: p });
+        for ((l, _), r) in deps.iter().zip(&rels) {
+            t = Rc::new(Term::App { rel: *r, fun: t, arg: self.f.scope.var(*l) });
+        }
+        Ok(t)
     }
 }
 

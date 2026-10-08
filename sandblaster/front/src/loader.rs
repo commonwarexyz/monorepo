@@ -733,7 +733,8 @@ impl Loader<'_> {
         let target_arch = self.target.arch.name().to_string();
         let target_features: Vec<String> = self.target.features.iter().cloned().collect();
         let codegen_flags = self.target.codegen_flags.clone();
-        self.lift_sources.push(crate::lift::LiftSource { module_index: c, file: cfile, ast: cast, ghost, name, unverified: opts.unverified.clone(), decl_span: span, host: opts.host, opts, children, module_path, mir, window_mir, path_display, text, mir_extra, target_arch, target_features, codegen_flags });
+        let build_cfg = self.target.cfg.clone();
+        self.lift_sources.push(crate::lift::LiftSource { module_index: c, file: cfile, ast: cast, ghost, name, unverified: opts.unverified.clone(), decl_span: span, host: opts.host, opts, children, module_path, mir, window_mir, path_display, text, mir_extra, target_arch, target_features, codegen_flags, build_cfg });
         c
     }
 

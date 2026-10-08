@@ -20,7 +20,7 @@ const HEADER: &str = r#"(sbmir 1)
 fn names() -> ModuleNames {
     let mut host = BTreeMap::new();
     host.insert("Error".to_string(), vec!["EndOfBuffer".to_string()]);
-    ModuleNames { module: String::new(), sealed: BTreeSet::new(), host_enums: host, requires: BTreeSet::new(), open: BTreeMap::new(), dsl_modules: vec![], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default(), target_arch: None, static_features: None, codegen_flags: None }
+    ModuleNames { module: String::new(), sealed: BTreeSet::new(), host_enums: host, requires: BTreeSet::new(), open: BTreeMap::new(), dsl_modules: vec![], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default(), target_arch: None, static_features: None, codegen_flags: None, build_cfg: None }
 }
 
 fn load(body: &str) -> Result<mir::Loaded, String> {
@@ -895,10 +895,10 @@ fn the_mir_opt_level_is_the_readings_and_a_window_extraction_is_the_same_program
     let header_twins = [
         (at("(mir-opt-level 1)\n", &unopt), "-Zmir-opt-level=0"),
         (at("", &unopt), "-Zmir-opt-level=0"),
-        (at("(mir-opt-level 0)\n", &unopt).replace("(module \"k::m\")", "(module \"k::n\")"), "module"),
-        (at("(mir-opt-level 0)\n", &unopt).replace("2026-06-20", "2026-06-21"), "compiler"),
-        (at("(mir-opt-level 0)\n(source \"a.rs\" \"00\")\n", &unopt), "sources"),
-        (at("(mir-opt-level 0)\n", &unopt).replace("(root \"k::m::f\")", ""), "roots"),
+        (at("(mir-opt-level 0)\n", &unopt).replace("(module \"k::m\")", "(module \"k::n\")"), "(module \"k::n\")"),
+        (at("(mir-opt-level 0)\n", &unopt).replace("2026-06-20", "2026-06-21"), "(rustc"),
+        (at("(mir-opt-level 0)\n(source \"a.rs\" \"00\")\n", &unopt), "(source \"a.rs\" \"00\")"),
+        (at("(mir-opt-level 0)\n", &unopt).replace("(root \"k::m::f\")", ""), "(root \"k::m::f\")"),
         (at("(mir-opt-level 0)\n", &unopt.replace("(fn \"k::m::f\"", "(fn \"k::m::g\"")), "no `k::m::f`"),
         (at("(mir-opt-level 0)\n", &unopt.replace("(2 u16 imm)", "(2 u32 imm)")), "signature of `k::m::f`"),
     ];

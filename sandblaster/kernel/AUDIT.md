@@ -1392,20 +1392,20 @@ are about is checked against it by a kernel theorem per lifted function.
 
 | File | Code lines | Role | Trusts |
 | --- | --- | --- | --- |
-| `front/src/mir/literal.rs` | 1,788 (1,739 before stage neon-mul, 1,476 before the narrow reading of existing `unsafe`, 1,436 before C8's first slice, 1,431 before C1's review fixes, 1,297 before C1's outcome split, 1,287 before stage finish-A's slice leaves, 1,217 before stage reader-widen) | L's generator: per MIR instance, `Root`, `St` (one `Option` slot per local, one per `&mut` referent cell), `Blk`, `rank`, `run` by measure recursion (fuel only at loop headers and self-calls) to a `mir::Res(Out)` outcome (`Ret`, `Panic`, `Stuck`); places, reference codes, calls with the cell protocol, operators, casts, intrinsics, leaves — tables, each construct read locally. `Panic` only from a terminator: a failed `Assert` of a kind whose failure panics (`PANIC_ASSERT_KINDS`: overflow, bounds, division or remainder by zero; any other kind is stuck where it fails), a block `must_panic` reads (every path ends in a call of a function of `PANIC_FNS`, on the way only `PANIC_MSG_FNS` calls and steps that cannot be undefined behaviour), a callee's panic, an index leaf. The post-order, the loop headers, the blocks from which every path diverges and type-occurrence pruning come from the untrusted `cfg.rs` as numbers and booleans: they only place fuel (every decrease is kernel-checked) or read a block or path as stuck (never as a panic) | the MIR reference (each construct's meaning); `literal.core`; the names of `mod.rs`; the lift's models in the leaves (A5); the tables of panic functions and message constructors (their documented behaviour in core and std); `cfg.rs` for nothing but fuel placement and stuck blocks |
+| `front/src/mir/literal.rs` | 1,799 (1,788 before stage soundness-fixes, 1,739 before stage neon-mul, 1,476 before the narrow reading of existing `unsafe`, 1,436 before C8's first slice, 1,431 before C1's review fixes, 1,297 before C1's outcome split, 1,287 before stage finish-A's slice leaves, 1,217 before stage reader-widen) | L's generator: per MIR instance, `Root`, `St` (one `Option` slot per local, one per `&mut` referent cell), `Blk`, `rank`, `run` by measure recursion (fuel only at loop headers and self-calls) to a `mir::Res(Out)` outcome (`Ret`, `Panic`, `Stuck`); places, reference codes, calls with the cell protocol, operators, casts, intrinsics, leaves — tables, each construct read locally. `Panic` only from a terminator: a failed `Assert` of a kind whose failure panics (`PANIC_ASSERT_KINDS`: overflow, bounds, division or remainder by zero; any other kind is stuck where it fails), a block `must_panic` reads (every path ends in a call of a function of `PANIC_FNS`, on the way only `PANIC_MSG_FNS` calls and steps that cannot be undefined behaviour), a callee's panic, an index leaf. The post-order, the loop headers, the blocks from which every path diverges and type-occurrence pruning come from the untrusted `cfg.rs` as numbers and booleans: they only place fuel (every decrease is kernel-checked) or read a block or path as stuck (never as a panic) | the MIR reference (each construct's meaning); `literal.core`; the names of `mod.rs`; the lift's models in the leaves (A5); the tables of panic functions and message constructors (their documented behaviour in core and std); `cfg.rs` for nothing but fuel placement and stuck blocks |
 | `front/src/mir/literal.core` | 315 (298 before stage neon-mul, 203 before the narrow reading, 201 before C1's review fixes, 186 before C1, 170 before stage finish-A's slice leaves, 139 before stage reader-widen) | L's library: the option monad within a block, the outcome `mir::Res` with its combinators (`mir::st`, `mir::bindr`, `mir::then`, `mir::check`, `mir::check_or_stuck`, `mir::or_panic`), checked/unchecked/division operators per width, signed comparisons and sign extension of bits, `bswap`, array get/set under the bound test, the leaves' models (the index leaves' panic exactly where core's `index` panics) | the kernel's primitives and prelude; the lift's models (`crate::__lift_model`, host models) in the leaves |
 | `front/src/mir/stmt.rs` | 240 (213 before C1's panic statement; 234 with the optimizer's panic statement, removed 2026-10-05; 210 before stage optimizer-generic) | the statements `L::thm::f` and, for a panic contract, `L::pthm::f` (`S_f`'s telescope with the no-panic clause `Not(P)` read as `P`, the conclusion `Panic`): `S_f`'s telescope, `init`, `erase` (its preconditions are `S_f`'s, which the elaborator's check below makes the declared contract's) | `S_f`'s telescope (the elaborator and its precondition check); L's `LFn` record; the lift's index of the no-panic clause (`MirContract::panic`) |
-| `front/src/mir/ir.rs`, `sexp.rs` | 700 (659 before stage neon-mul, 611 before the narrow reading, 529 before C10's first stage, 482 before C8's first slice), 131 | the parse L reads; malformed input is an error, never a default; every access to a union's fields made unsupported (`refuse_union_access`); the recorded MIR optimization level; rustc's fake raw borrow of a slice place fused with its `PtrMetadata` into the place's length (`fake_metadata`), any other fake raw borrow unsupported | the printer's format |
+| `front/src/mir/ir.rs`, `sexp.rs` | 718 (715 before stage cfg-binding-fixes, 706 before stage leftovers, 700 before stage soundness-fixes, 659 before stage neon-mul, 611 before the narrow reading, 529 before C10's first stage, 482 before C8's first slice), 131 | the parse L reads; malformed input is an error, never a default; every access to a union's fields made unsupported (`refuse_union_access`); the recorded MIR optimization level; every header record kept for the window extraction's check, the `(rustflags ..)` and `(cfg ..)` records, both required of an extraction with `(unsafe-reading 1)`; rustc's fake raw borrow of a slice place fused with its `PtrMetadata` into the place's length (`fake_metadata`), any other fake raw borrow unsupported | the printer's format |
 | `front/src/mir/arch.rs` | 115 (111 before the narrow reading; C8's first slice, 2026-10-06) | the reading of `core::arch` code (§21.2): a vector type as its model representation, an intrinsic call as its validated model, every refusal | the target models and their evidence verdict (TCB item 4); `intrinsics::VecTy` (hashed, TCB item 2) |
-| `front/src/mir/mod.rs` | 638 (635 before stage neon-mul, 572 before the narrow reading, 542 before C10's first stage, 531 before C8's first slice, 491 before stage reader-widen) | names (`kernel_adt`, `is_transparent` (never a union), `host_model_method`, `instance_global`: the lifted function a module instance is) and the load checks (format version, module, compiler release, overflow checks, the MIR optimization level, the sources' SHA-256); the window extraction's check (`load_window`) | the lift's names (`ModuleNames`: DSL modules, sealed traits, host models) |
-| `sandblaster/mirx` | 1,254 (1,215 before the narrow reading, 1,208 before C10's first stage; 1,122 before C8's first slice; 1,131 before `--replace` was removed, 2026-10-05) | the printer (rustc's data, transcribed); the pinned and recorded `-Zmir-opt-level` | rustc (A4: the build compiles the MIR it printed) |
-| `front/src/mir/ptr.rs` | 422 (414 before stage neon-mul's `u128`; new: the narrow reading of existing `unsafe`, 2026-10-07) | which library pointer helpers, types and `core::arch` loads and stores L reads, and how a value is bytes: `HELPERS` (formations, casts, moves) matched by the exact path of their definition and the instance's exact signature and declared unsafety (A-S7); `plain` (unsigned integers, a `u128` as its two 64-bit words, model-represented vectors, arrays of them: no `UnsafeCell`, no niche, A-S6); the little-endian byte views (`bytes_text`, `of_bytes_text`; a `u128`'s are its low word's bytes then its high word's, back from exactly sixteen); `MEM_INTRINSICS` (13 rows: path, store or load, bytes, alignment, the stdarch function read; A-S5); `pure_reinterpretation` (the kernel finds the model the identity on its vector type, A-S9); the families' bases | the target models and their evidence verdict (TCB item 4); stdarch's implementation of each row (re-read by `tests/unsafe_simd.rs`) |
-| `front/src/mir/window.rs` | 415 (new) | the window rule W0–W4 on the unoptimized window extraction (§2.6 of DESIGN-UNSAFE-SIMD, A-S1): formations, families, ancestors, liveness, the window, the verdicts with the `&mut` parameters the base reaches (A-S8); `verdict_for` carries a verdict to the level-1 MIR L reads by source span and kind, exactly one or refused | the printer's storage markers and spans; rustc's level-0 MIR preserving the source's aliasing structure (A3′) |
-| `front/src/target.rs` (the build's codegen flags) | 29 (new) | `-C target-cpu` and `-C target-feature` of the build's `CARGO_ENCODED_RUSTFLAGS`, which `mir::load` requires to be the defaults before the static features count (A-S3) | Cargo's `CARGO_ENCODED_RUSTFLAGS` and `CARGO_CFG_TARGET_FEATURE` |
+| `front/src/mir/mod.rs` | 676 (675 before stage cfg-binding-fixes, 667 before stage leftovers, 638 before stage soundness-fixes, 635 before stage neon-mul, 572 before the narrow reading, 542 before C10's first stage, 531 before C8's first slice, 491 before stage reader-widen) | names (`kernel_adt`, `is_transparent` (never a union), `host_model_method`, `instance_global`: the lifted function a module instance is) and the load checks (format version, module, compiler release, overflow checks, the MIR optimization level, no rustflags, the cfg set the build knows — refused when the build's rustflags make it unknowable —, the sources' SHA-256); the window extraction's check (`load_window`: every header record but the level, every shared type definition, every function's signature) | the lift's names (`ModuleNames`: DSL modules, sealed traits, host models) |
+| `sandblaster/mirx` | 1,260 (one line changed in stage cfg-binding-fixes, the quoting; 1,257 before stage leftovers, 1,254 before stage soundness-fixes, 1,215 before the narrow reading, 1,208 before C10's first stage; 1,122 before C8's first slice; 1,131 before `--replace` was removed, 2026-10-05) | the printer (rustc's data, transcribed; every string written as the reader reads it back); the pinned and recorded `-Zmir-opt-level` | rustc (A4: the build compiles the MIR it printed) |
+| `front/src/mir/ptr.rs` | 425 (422 before stage soundness-fixes, 414 before stage neon-mul's `u128`; new: the narrow reading of existing `unsafe`, 2026-10-07) | which library pointer helpers, types and `core::arch` loads and stores L reads, and how a value is bytes: `HELPERS` (formations, casts, moves) matched by the exact path of their definition and the instance's exact signature and declared unsafety (A-S7); `plain` (unsigned integers, a `u128` as its two 64-bit words, model-represented vectors, arrays of them: no `UnsafeCell`, no niche, A-S6); the little-endian byte views (`bytes_text`, `of_bytes_text`; a `u128`'s are its low word's bytes then its high word's, back from exactly sixteen); `MEM_INTRINSICS` (13 rows: path, store or load, bytes, alignment, the stdarch function read; A-S5); `pure_reinterpretation` (the kernel finds the model the identity on its vector type, A-S9); the families' bases | the target models and their evidence verdict (TCB item 4); stdarch's implementation of each row (re-read by `tests/unsafe_simd.rs`) |
+| `front/src/mir/window.rs` | 486 (415 before stage soundness-fixes; new with the narrow reading) | the window rule W0–W4 on the unoptimized window extraction (§2.6 of DESIGN-UNSAFE-SIMD, A-S1): formations, families, the bases (the locals whose own storage the family reaches), ancestors, each point's uses, liveness, the window, the verdicts with the `&mut` parameters the base reaches (A-S8); `verdict_for` carries a verdict to the level-1 MIR L reads by source span and kind, exactly one or refused | the printer's storage markers and spans; rustc's level-0 MIR preserving the source's aliasing structure (A3′) |
+| `front/src/target.rs` (the build's codegen flags and cfg set) | 116 (110 before stage cfg-final, 68 before stage cfg-binding-fixes, 29 before stage leftovers) | `-C target-cpu` and `-C target-feature` of the build's `CARGO_ENCODED_RUSTFLAGS`, which `mir::load` requires to be the defaults before the static features count (A-S3); since stage leftovers the cfg set a build script knows (`build_cfg`: the features of `CARGO_CFG_FEATURE`, the builtin cfgs of `BUILD_CFGS` from `CARGO_CFG_<NAME>`, the `--cfg`s of `CARGO_ENCODED_RUSTFLAGS`) and which of the extraction's cfgs it can know (`build_sees`: not `target_feature`, A-S3's, nor the nightly-only `NIGHTLY_CFGS`); since stage cfg-binding-fixes the rustflags read as rustc's option parser reads them (`rustc_options`, `codegen_options`) and the build's set unknowable (`Err`) when they set `-C debug-assertions`, `-C opt-level`, `-O`, `-C overflow-checks`, a `-Z` option or an `@file`; since stage cfg-final the `--cfg`s taken through that reader (one that is another option's value is none) and the set unknowable when a `--cfg` sets a builtin cfg (a name of `BUILD_CFGS` or `NIGHTLY_CFGS`, or `target_feature`) | Cargo's `CARGO_ENCODED_RUSTFLAGS`, `CARGO_CFG_TARGET_FEATURE`, `CARGO_CFG_FEATURE` and `CARGO_CFG_<NAME>` (set by Cargo alone: an assumption, below); the pinned release's builtin cfgs (`BUILD_CFGS`, `NIGHTLY_CFGS` against rustc's `default_configuration`, `GATED_CFGS` and `disallow_cfgs`) and its options (`rustc_optgroups`, getopts' grouping) |
 | `front/src/mir/gate.rs` and its call site | 176 + ≈ 30 (159 + ≈ 27 before C1; 232 + ≈ 29 with the optimizer's shipped and panic acceptance, removed 2026-10-05) | the gate's trusted check: the literal reading enters the kernel only through its loader (which records, per extraction, the globals and inductives it loaded and the MIR of each instance it read); a listed function is accepted only when its MIR instance is that function (the lift finds instances by unqualified lifted names), the kernel holds `L::thm::<f>` (and, with a panic contract, listed as the function's declaration has it, `hir::FnDef::nopanic_clause`, `L::pthm::<f>`) whose type is α-equal (up to proofs) to `stmt`'s statement generated afresh, read from this MIR, reaching only definitions of the elaboration, of L's library or of its own extraction's literal reading, with no inductive added otherwise, and every module type its MIR instances reach is declared alike by the MIR and the subset (variants and fields by name and in order, discriminants `0, 1, ..`). Call site: the gate's errors (`driver::gates::theorem_gate`) | the kernel (`alpha_eq_relevant`, `refs_closure`); the files above; the lift's list of the functions read from MIR; the elaborator |
-| the precondition check: `front/src/elab/items.rs` (`fn_requires`, `as_declared`, `depth_prop`), `typeck` (`#[mir_contract]`, `#[panics_when]`), `hir::FnDef::declared` | 22 + 30 + 1 | a function read from MIR is elaborated only when it has as many `requires` clauses as its declared contract, each precondition α-equal to the elaboration of the declared clause at the same depth, and the depth bound exactly when declared, α-equal to the declared one; the lift carries the declared contract apart from the function's own attributes (`#[mir_contract(..)]`, copied from the skeleton's and the attachments' attributes); a panic contract `panics_when(p)` is, in both, the last clause `!(p)` (typeck appends it after every `requires`). Otherwise the function has no definition, so no theorem | typeck and the elaborator (TCB items 2, 6) |
-| the lift glue | ≈ 391 (≈ 351 before the narrow reading: the narrow reading's admission of `unsafe` (an extraction by the current printer; the `unsafe` marker dropped; a `transmute` written in the crate named; an older extraction refused with "extract it again"), the `&mut [T]` state, the build's features and codegen flags passed to the load; ≈ 320 before C10's first stage: `window_mir = ".."`, its file and its check; ≈ 290 before C8's first slice: the kept `#[target_feature]` and `core::arch` uses, the target's architecture, the named pointer loads) | loading, signature checks, the declared contracts (the skeleton's attributes before the body is read and the attachments' after, carried as `#[mir_contract(..)]`; the body reader sees the signature only), a panic contract (laws file only, a function read from MIR, at most one; its no-panic clause's index `MirContract::panic`), the list of functions read from MIR (`lift::MirContract`) | the lift's skeleton (TCB item 8) |
-| **total** | **≈ 6,690** (≈ 6,572 before stage neon-mul, 2026-10-07; ≈ 5,162 before the narrow reading of existing `unsafe`, 2026-10-07; ≈ 5,012 before C10's first stage, ≈ 4,687 before C8's first slice, ≈ 4,680 before C1's review fixes, ≈ 4,447 before C1; re-counted after the removal of 2026-10-05: ≈ 4,552 before it; ≈ 4,289 before stage reader-widen, ≈ 4,430 before stage optimizer-generic, ≈ 4,526 before stage finish-A) | the literal reading, its statement, parse, names and printer (≈ 6,051 with `mir/ptr.rs`, `mir/window.rs` and the codegen flags; ≈ 5,933 before stage neon-mul; ≈ 4,563 before the narrow reading; ≈ 4,444 before C10's first stage, with `mir/arch.rs`; 4,149 before C8's first slice), the gate's trusted check with its call site (≈ 197), the precondition check (53), the lift glue (≈ 391; ≈ 351 before the narrow reading, ≈ 320 before C10's first stage, ≈ 290 before C8's first slice); ≈ 4,972 when the structurer's trust was first replaced, ≈ 4,780 with the structurer trusted (`docs/checked-structuring.md`, stage tcb-review) | |
+| the precondition check: `front/src/elab/items.rs` (`fn_requires`, `as_declared`, `depth_prop`), `typeck` (`#[mir_contract]`, `#[panics_when]`), `hir::FnDef::declared` | 27 + 33 + 1 (recounted from the code in stage cfg-final; 22 + 30 + 1 before, 39 in DESIGN §1.1) | a function read from MIR is elaborated only when it has as many `requires` clauses as its declared contract, each precondition α-equal to the elaboration of the declared clause at the same depth, and the depth bound exactly when declared, α-equal to the declared one; the lift carries the declared contract apart from the function's own attributes (`#[mir_contract(..)]`, copied from the skeleton's and the attachments' attributes); a panic contract `panics_when(p)` is, in both, the last clause `!(p)` (typeck appends it after every `requires`). Otherwise the function has no definition, so no theorem | typeck and the elaborator (TCB items 2, 6) |
+| the lift glue | ≈ 394 (≈ 391 before stage leftovers: the build's cfg set passed to the load; ≈ 351 before the narrow reading: the narrow reading's admission of `unsafe` (an extraction by the current printer; the `unsafe` marker dropped; a `transmute` written in the crate named; an older extraction refused with "extract it again"), the `&mut [T]` state, the build's features and codegen flags passed to the load; ≈ 320 before C10's first stage: `window_mir = ".."`, its file and its check; ≈ 290 before C8's first slice: the kept `#[target_feature]` and `core::arch` uses, the target's architecture, the named pointer loads) | loading, signature checks, the declared contracts (the skeleton's attributes before the body is read and the attachments' after, carried as `#[mir_contract(..)]`; the body reader sees the signature only), a panic contract (laws file only, a function read from MIR, at most one; its no-panic clause's index `MirContract::panic`), the list of functions read from MIR (`lift::MirContract`) | the lift's skeleton (TCB item 8) |
+| **total** | **≈ 6,935** (≈ 6,921 before stage cfg-final, 2026-10-08, whose code added 6 and whose recount of the precondition check 8; ≈ 6,875 before stage cfg-binding-fixes, 2026-10-07; ≈ 6,813 before stage leftovers, 2026-10-07; ≈ 6,690 before stage soundness-fixes, 2026-10-07; ≈ 6,572 before stage neon-mul, 2026-10-07; ≈ 5,162 before the narrow reading of existing `unsafe`, 2026-10-07; ≈ 5,012 before C10's first stage, ≈ 4,687 before C8's first slice, ≈ 4,680 before C1's review fixes, ≈ 4,447 before C1; re-counted after the removal of 2026-10-05: ≈ 4,552 before it; ≈ 4,289 before stage reader-widen, ≈ 4,430 before stage optimizer-generic, ≈ 4,526 before stage finish-A) | the literal reading, its statement, parse, names and printer (≈ 6,285 with `mir/ptr.rs`, `mir/window.rs` and the codegen flags and cfg set; ≈ 6,279 before stage cfg-final; ≈ 6,233 before stage cfg-binding-fixes; ≈ 6,174 before stage leftovers; ≈ 6,051 before stage soundness-fixes; ≈ 5,933 before stage neon-mul; ≈ 4,563 before the narrow reading; ≈ 4,444 before C10's first stage, with `mir/arch.rs`; 4,149 before C8's first slice), the gate's trusted check with its call site (≈ 197), the precondition check (61; 53 before its recount in stage cfg-final), the lift glue (≈ 394; ≈ 391 before stage leftovers, ≈ 351 before the narrow reading, ≈ 320 before C10's first stage, ≈ 290 before C8's first slice); ≈ 4,972 when the structurer's trust was first replaced, ≈ 4,780 with the structurer trusted (`docs/checked-structuring.md`, stage tcb-review) | |
 
 **Unions and the MIR optimization level (C10's first stage, "prepare",
 2026-10-06; `docs/DESIGN-UNSAFE-SIMD.md`, amendments A-S2 and A-S1 and
@@ -1440,7 +1440,8 @@ by `cargo check` at its default, 1: an assumption, below); that
 `WINDOW_MIR_OPT_LEVEL` and has the main extraction's compiler, crate,
 module, overflow checks, target, exclusions, sources, roots and every
 function with the same definition, item, parameters, return type, body
-presence and target features. Nothing reads the window extraction yet
+presence and target features (since stage soundness-fixes: every header
+record but the level, and every type definition the two share; below). Nothing reads the window extraction yet
 but this check; its reader, the window rule, is trusted and comes with
 its own checklist.
 
@@ -1466,7 +1467,10 @@ from its model.
    `core::`; its shape, mutability and unsafety are the function's real
    signature; a definition in the table whose instance differs in any of
    them is refused, not read; no lookup is by name.
-3. *The types* (`ptr::plain`): only unsigned integers (not `u128`), model
+3. *The types* (`ptr::plain`): only unsigned integers (`u128` too since
+   stage neon-mul: held as its two 64-bit words, low word first, its bytes
+   the low word's eight little-endian bytes then the high word's, back
+   only from exactly sixteen; the engine multiply's item 1 below), model
    vectors and arrays of them; every other type, nested anywhere in a
    base or pointee, refused; the byte views are little-endian and
    complete (`mem::elems` over every element, `mem::pieces` consuming
@@ -1494,13 +1498,14 @@ from its model.
    use of a member (a return, a store into memory, an argument of any
    other call, a cast, a comparison); that the ancestors of the base
    include the reference, the place it borrows and an `unsize` source,
-   closed over assignments and calls that reach memory; that W2 refuses
-   any mention of an ancestor inside the window but the storage markers
-   of ancestors that are not the base; W3 and W4 as stated; that the
-   window is the intersection of what follows the formation and what
-   precedes a use; and that `verdict_for` accepts a formation of the
-   level-1 MIR only when exactly one level-0 verdict has its span and
-   kind.
+   closed over assignments and calls that reach memory, and every base
+   whatever its type (since stage soundness-fixes, below); that W2
+   refuses any use of an ancestor inside the window but the storage
+   markers of ancestors that are not bases; W3 (reads only) and W4 as
+   stated; that the window is the intersection of what follows the
+   formation and what precedes a use; and that `verdict_for` accepts a
+   formation of the level-1 MIR only when exactly one level-0 verdict has
+   its span and kind.
 7. *The feature binding* (`mir::load`): the static features count only
    when the build's are known, equal to the extraction's, and neither the
    extraction nor the build set `-C target-cpu` or `-C target-feature`;
@@ -1582,6 +1587,441 @@ line of `mirx`.
 `the_rs_engine_root_reads_the_engine_trait_at_both_engines` (the real
 extraction's four fake raw borrows read as lengths, none unread).
 
+**The review's fixes (stage soundness-fixes, 2026-10-07;
+`docs/mir-lift.md` §20.1, §20.10; `docs/DESIGN-UNSAFE-SIMD.md`, its
+implementation record).** About 123 trusted code lines: `mir/window.rs`
++71 (the bases, each point's uses classified, W2 with a base's storage
+markers, W3 reads only), `mir/ir.rs` +6 (every header record kept; the
+`(rustflags ..)` record), `mir/mod.rs` +29 (`load_window` comparing every
+header record but the level and every shared type definition, the specific
+comparisons it replaces removed; `load` refusing a main extraction with
+rustflags), `mir/literal.rs` +11 (the alignment arm's test hook), `mir/ptr.rs`
++3 (`admitted_unsafe_fns`, printed on the record), `mirx` +3 (the
+`(rustflags ..)` record). `extract.sh` (a script, not counted) refuses
+inherited rustflags. The record's memory-safety statement
+(`mir/safety.rs`, 389 lines) and its printing are untrusted
+presentation.
+
+*What an auditor checks.*
+1. *The bases* (`window::check`, `lives_in_local`): the place a `&raw`
+   formation borrows, when it has no `Deref`, makes its root local a base;
+   so does every `&`, `&mut` or `&raw` of a place without `Deref` assigned
+   (into any destination place) to an ancestor, flow-insensitively,
+   iterated to a fixpoint together with the ancestors; every base is an
+   ancestor whatever its type. A place with a `Deref` is never a base (its
+   memory is behind the dereferenced local, an ancestor by its type).
+2. *The uses* (`local_uses`): an assignment's or a call's destination,
+   whole or a place of it, is written; a copied operand, a `shared` or
+   `fake` borrow, `&raw const`, a length, a discriminant, an index, and a
+   switch's, assertion's or assumption's operand are read; a moved operand
+   is moved whole or out of a place; any other borrow kind and `&raw mut`
+   borrow mutably; a storage marker, a drop; an unprinted statement,
+   rvalue, callee or terminator uses every local, unknown.
+3. *W2* refuses any use of an ancestor inside the window except the
+   storage marker of an ancestor that is not a base; *W3* lets a use of an
+   ancestor pass only as a read, a whole move of a shared reference, or a
+   storage marker of a non-base, and refuses every use of an ancestor of
+   `&mut` type.
+4. *The window extraction's configuration* (`mir::load_window`): every
+   header record that `ir::parse` keeps (every top-level record but `fn`
+   and `adt-def`) equals the main extraction's but `(mir-opt-level ..)`,
+   the one listed exception; every type definition the two share is equal
+   with the text of unprinted types blanked; `mir::load` refuses a main
+   extraction with a non-empty `(rustflags ..)`. mirx prints that record
+   from `SBMIR_RUSTFLAGS`, which `extract.sh` sets to what it passes in
+   `CARGO_ENCODED_RUSTFLAGS` after refusing inherited rustflags.
+5. *Test hooks* (`literal::test_fault`): `set_iter_mut_overlaps` and
+   `set_row_align` are set only by the toolchain's own tests; their
+   thread-locals start unset, and a build sets neither.
+
+*Pinned by:* `tests/unsafe_simd.rs` — `a_base_that_lives_in_a_local_is_an_ancestor`
+(the 24 twins' window verdicts, the positive functions'),
+`the_literal_reading_is_stuck_where_a_base_in_a_local_is_used_in_the_window`
+and `with_the_modules_types_declared_the_struct_twins_are_stuck_at_their_formations`
+(L stuck with the reason; the positives as rustc computes),
+`each_local_base_twin_is_refused_by_name_when_lifted` (the lift),
+`the_window_rule_fails_closed_inside_a_shared_window` (W3's every arm on
+hand-written MIR), `every_checked_in_window_verdict` (the 52 checked-in
+verdicts printed, rs_engine's asserted),
+`a_window_extraction_under_other_codegen_flags_is_refused` (F2's twins and
+each header record), `the_alignment_arm_reads_only_aligned_offsets_of_an_aligned_base`
+(F5); `tests/mir.rs` (the window extraction's load); `tests/reader_widen.rs`
+`window_reads_as_rustc_computes` (F10); `tests/verified_roots.rs`
+`the_rs_engine_record_states_its_memory_safety` (F4, F9); the Miri gate's
+23 new twins. Mutants (each run, then reverted; every one caught): in `window.rs`, a borrow into an ancestor no longer making a base, a base no longer an ancestor whatever its type, a base's storage marker skipped in W2, the `&raw` formation's place no longer a base, W3 letting through a base moved, a drop, an unprinted operation, a move out of a place, a borrow of an unknown kind (`"mut"` alone mutable), `&raw mut`, an assignment's destination, an owning value (a `Box`) moved whole, an unprinted rvalue or callee mentioning no local (14); in `mod.rs`, the header comparison skipped, the `(rustflags ..)` record left out of it, the four codegen records left out (the old list), the type definitions not compared, `load`'s rustflags refusal skipped (5); in `literal.rs`, the alignment arm's base check and its offset check removed (2).
+
+**The extraction's configuration (stage leftovers, 2026-10-07;
+`docs/mir-lift.md` §20.1, §20.10; `docs/DESIGN-UNSAFE-SIMD.md`, its
+implementation record).** 62 trusted code lines: `mirx` +3 (the record),
+`mir/ir.rs` +9 (its parse), `mir/mod.rs` +8 (the build's cfg set in
+`ModuleNames`, the binding in `load`), `target.rs` +39 (`build_cfg`,
+`build_sees`, `BUILD_CFGS`, `NIGHTLY_CFGS`), the lift glue +3 (the
+build's cfg set passed from `TargetInfo` to the load). `extract.sh` (a
+script, not counted) passes `--features`, `--no-default-features` and
+`--profile` to Cargo.
+
+The `(rustflags ..)` record repeats what `extract.sh` passed; the cfg set
+is read from the compiler. A body compiled under another configuration
+is another program — a Cargo feature (`#[cfg(feature = "..")]`), a
+`--cfg` from any source, the profile's `debug_assertions`, the target —
+and none of the other records showed a feature. (The profile's `panic`
+is in the record, but no build script sees it: an assumption, below;
+since stage cfg-binding-fixes the build also refuses rustflags that
+change its configuration where its build script cannot see the result,
+below.)
+
+*What an auditor checks.*
+1. *The printer* (`mirx`): `(cfg ..)` is `Session::config` whole — the set
+   `#[cfg]` and `cfg!` were evaluated against, after the command line's
+   `--cfg`s (Cargo's `feature = ".."` among them) and rustc's own
+   (`default_configuration`, the target features) were added — each entry
+   its name and value as rustc holds them, sorted.
+2. *The parse* (`ir::parse`): each entry is one or two strings, anything
+   else malformed; the record is a header record like every other. Since
+   stage cfg-binding-fixes an extraction with `(unsafe-reading 1)` must
+   have it and `(rustflags ..)` (the narrow reading's printer, through
+   `extract.sh`, writes both), else it is malformed: without them a main
+   and a window extraction, or an extraction and a build, of two
+   configurations would be compared without what tells them apart.
+3. *The window extraction* (`load_window`): the record is compared with
+   the main extraction's, like every header record but the level (the
+   list of exceptions, `NOT_COMPARED`, is unchanged).
+4. *The binding* (`load`): when the extraction has the record and the
+   build knows its configuration (`ModuleNames::build_cfg`, set from a
+   build script's variables by `TargetInfo::from_cargo_env`), the record
+   restricted to what a build script knows (`target::build_sees`) must
+   equal the build's set (`target::build_cfg`), else the load is refused
+   naming what only each side has.
+5. *The build's side* (`target.rs`): `build_cfg` reads the features from
+   `CARGO_CFG_FEATURE` (split at `,`), each name of `BUILD_CFGS` from
+   `CARGO_CFG_<NAME>` in the form Cargo prints it (a bare cfg as empty, a
+   valued one's values joined by `,`), and every `--cfg spec` and
+   `--cfg=spec` of `CARGO_ENCODED_RUSTFLAGS` (`name` or `name="value"`;
+   since stage cfg-final only those rustc reads, through `rustc_options`,
+   and none of a builtin cfg's name, below);
+   `build_sees` keeps a builtin of `BUILD_CFGS` in its Cargo form only (the
+   nightly's bare `target_has_atomic` is left out) and every other name
+   but `target_feature` (bound by A-S3) and `NIGHTLY_CFGS` — so a cfg the
+   lists do not know (a `--cfg`, a builtin of a later release) is
+   compared, fail closed. `BUILD_CFGS` is the pinned release's stable
+   builtin cfgs (`rustc_session::config::cfg::default_configuration`,
+   with `test` and `proc_macro`), `NIGHTLY_CFGS` its `GATED_CFGS`. Cargo
+   never sets `CARGO_CFG_TEST` (one build-script run serves the library
+   and its `--test` harness): the build's set never has `test`, so the
+   library's compile is bound and an extraction recorded with `test`
+   (`extract.sh --profile test` checks in test mode) is refused by every
+   build; the harness's compile is not bound (an assumption, below).
+6. *At every toolchain bump*: both lists against the new release's
+   `default_configuration` and `GATED_CFGS`, and the build script's
+   variables `tests/unsafe_simd.rs` (`build_env`) holds, captured on this
+   release, captured again (`a_build_under_other_features_or_flags_refuses_the_extraction`
+   loads a re-extracted fixture under them: a builtin new in the record
+   fails it).
+
+*Assumptions (what no build compares).*
+* `sandblaster check` (the CLI) knows no build configuration: the
+  extraction's recorded cfg set is assumed to be the shipping build's
+  (rs_engine's: the features `bls12381`, `crc-fast`, `default`,
+  `num-rational`, `num-traits`, `std`, the dev profile's
+  `debug_assertions`).
+* Extractions older than the record are not bound (the legacy rule): the
+  shipped varint, MMR and verifier extractions, made before the narrow
+  reading's printer (no `(unsafe-reading 1)`; since stage
+  cfg-binding-fixes an extraction with that record and without the cfg
+  record is malformed, and the older fixtures were extracted again).
+  They were not re-extracted: their builds run under several feature sets
+  (`commonware-codec` is `default,std` in its own tests, `std` alone in
+  storage's, `arbitrary,default,std` in the workspace's; storage adds
+  `test-utils` in its own tests), so a bound extraction would refuse all
+  but one of them; their extracted code is assumed not to depend on the
+  features, the profile or a `--cfg` that differ between those builds.
+* The cfgs only a nightly compiler shows (`NIGHTLY_CFGS`:
+  `overflow_checks`, `ub_checks`, `relocation_model`, `fmt_debug`,
+  `target_has_reliable_*`, ..) and the unstable target features: the
+  stable build cannot see them. `overflow_checks` and `ub_checks` follow
+  `debug_assertions` unless set, and since stage cfg-binding-fixes a
+  build whose rustflags set `-C debug-assertions`, `-C opt-level`, `-O`,
+  `-C overflow-checks` or any `-Z` option is refused, and since stage
+  cfg-final one whose rustflags set a builtin cfg by `--cfg`; what stays
+  unseen is the profile's own `overflow-checks` (§1.1 item 7's
+  assumption).
+* A profile's `panic`: Cargo passes it to the crate's rustc but to no
+  build script — `CARGO_CFG_PANIC` comes from `rustc --print cfg` with the
+  rustflags alone, so a `-C panic` of the rustflags is bound and the
+  profile's is not (measured, stage cfg-binding-fixes: under a profile
+  that inherits `dev` and sets `panic = "abort"` every build-script
+  variable is as under `dev` but the paths that hold the profile's
+  directory, `OUT_DIR` and the library search path; `CARGO_CFG_PANIC` is
+  `unwind`, and so under `release` with `panic = "abort"`). The build's
+  profile is assumed to set the extraction's strategy (the record has
+  it, `("panic" ..)`). It changes no verified statement unless the code
+  tests `cfg(panic ..)`: under `abort` a panic still panics, ending the
+  process instead of unwinding. No Commonware profile sets `panic`, and
+  no Commonware source tests `cfg(panic ..)`.
+* The test harness's compile: `cargo test --lib` compiles the in-place
+  files again under `cfg(test)`, served by the same build-script run,
+  whose variables are the library build's (measured, stage
+  cfg-binding-fixes: no `CARGO_CFG_TEST`, nothing else either). The
+  verified statements are about the library; the harness's compile of the
+  verified functions is assumed to be the library's (each verified
+  module's source tests `cfg(test)` only for its `#[cfg(test)] mod
+  tests`).
+* The dependencies' configuration: the record is the extracted crate's
+  session. An extraction carries other crates' bodies (callees, to
+  `MAX_DEPTH`: the MMR's and the verifier's hold `commonware_codec`
+  bodies), and a dependency's features, macros and constants reach the
+  crate's own bodies; a dependency's features (Cargo's feature
+  unification, `extract.sh --features dep/f`) change them without
+  changing any record, for the window comparison and for the build alike.
+  Assumed: a window extraction is made with its main one's options, and
+  the build's dependencies are configured as the extraction's.
+  rs_engine's extractions carry only its own crate's, core's and std's
+  bodies (fixed by the `(rustc ..)` and `(target ..)` records). Not
+  recorded (stage cfg-binding-fixes, the validator's V3): rustc's identity
+  of a crate, its `StableCrateId` (and the SVH, which hashes it), hashes
+  Cargo's `-C metadata`, which for a workspace member hashes the
+  `RUSTC_WORKSPACE_WRAPPER` path — mirx's own binary (measured: two
+  wrapper paths, two metadata values) —, so the record would differ
+  between two extractor target directories and an extraction would no
+  longer be reproducible; and a build's stable compiler gives other ids,
+  so it could not compare them either.
+* Flags no build script sees: a `cargo::rustc-cfg` of the crate's own
+  build script (the extraction's stub prints none), flags passed only to
+  the crate's final rustc invocation (`cargo rustc -- ..`, a
+  `RUSTC_WRAPPER` that adds flags), a `--cfg` or the options the build
+  refuses in its rustflags (`-C debug-assertions`, `-C opt-level`, `-O`,
+  `-C overflow-checks`, `-Z`, `@file`) among them.
+* The build script's `CARGO_CFG_*` variables are Cargo's (stage
+  cfg-final, the validator's F2 of stage validate-cfg-fixes): Cargo sets
+  a bare builtin's variable (`CARGO_CFG_DEBUG_ASSERTIONS`, `_UNIX`,
+  `_WINDOWS`, `_TEST`, `_PROC_MACRO`) only when the cfg holds and removes
+  none it leaves unset, so one in the environment Cargo runs in, or in
+  Cargo's `[env]` table (which reaches build scripts), passes through as
+  if Cargo had set it (measured: under a release build,
+  `CARGO_CFG_DEBUG_ASSERTIONS=` in the shell or `--config
+  'env.CARGO_CFG_DEBUG_ASSERTIONS=""'` gives the build the dev profile's
+  set, and the dev extraction loads). A variable Cargo sets wins (an
+  inherited `CARGO_CFG_FEATURE` is replaced; `CARGO_ENCODED_RUSTFLAGS` is
+  always set). A build script cannot tell an inherited variable from
+  Cargo's: assumed, neither the build's environment nor Cargo's `[env]`
+  sets any `CARGO_CFG_*` variable.
+* A bound extraction serves one configuration: a build script that
+  verifies it under another (a release build of a dev extraction, a
+  dependent's feature set) is refused (under the assumption above on
+  Cargo's variables), and there is one extraction per module.
+
+*Pinned by:* `tests/unsafe_simd.rs`
+`a_window_extraction_under_other_features_is_refused` (the fixture
+`sd_ptr_feat`: `param_write`'s shape with the aliasing write behind the
+feature `alias`, extracted with and without it at both levels; across the
+features refused both ways, the feature named; without the record the two
+programs differ in no header record, so the verdict carried from the
+window extraction without the write would pass the formation of the main
+one with it: since stage cfg-binding-fixes either extraction without the
+record is refused), `a_build_under_other_features_or_flags_refuses_the_extraction`
+(a stable build script's variables: refused under the other feature set
+both ways, a release profile, a `--cfg` in both forms, an extraction
+recorded with `test`; the record's nightly-only cfgs not compared; not
+bound without a build configuration; refused without the record),
+`the_lift_binds_the_extraction_to_the_builds_configuration`
+(through the lift). Mutants (each run, then reverted; every one caught):
+the binding skipped, everything compared (no `build_sees`), the record
+left out of the window comparison, the parse dropping the record, the
+build not reading its features, its rustflags' `--cfg`s, its builtin cfgs,
+a builtin compared in any form (the bare `target_has_atomic`), the
+nightly-only cfgs compared, `debug_assertions` not a builtin the build
+sees, the lift, the loader or `from_cargo_env` not passing the build's set
+on (13).
+
+**The build's rustflags, the printer's records and quoting (stage
+cfg-binding-fixes, 2026-10-07; the validator's V1–V8 of stage
+leftovers; `docs/mir-lift.md` §20.1, §20.10).** 46 trusted code
+lines: `target.rs` +42 (`rustc_options`, the reader of rustc's
+option parser; `codegen_options` and A-S3's `codegen_flags` through it;
+the refusal in `build_cfg`, `BuildCfg`), `mir/mod.rs` +1 (an unknowable
+configuration refused by `load`), `mir/ir.rs` +3 (an `(unsafe-reading
+1)` extraction must record its rustflags and cfg set), `mirx` 0 (one line
+changed: `q`, the quoting); the lift glue 0 (the type `BuildCfg` passed
+on). The fixtures `sd_ptr`, `sd_ptr_twins`, `sd_ptr_local`, `sd_ptr_cfg`
+(its four files) and `sd_neon_mul128` with its two twins were extracted
+again: each file gained exactly its missing header records, `(rustflags
+"")` and `(cfg ..)`, its functions and type definitions byte-identical, so
+the window verdicts (92, compared in full text) and the theorems are
+unchanged; `sd_ptr_feat`'s four came out byte-identical under the new
+quoting.
+
+*What an auditor checks.*
+1. *The reader of the rustflags* (`target::rustc_options`): it reads the
+   arguments as rustc's getopts does (the pinned release's
+   `rustc_optgroups`): `--codegen v` and `--codegen=v` (getopts takes no
+   abbreviation); any other long option without `=v` takes the next
+   argument as its value, skipped, but the flags `--help`, `--test`,
+   `--version` and `--verbose` (so `--allow -L -O` sets `-O`: `-L` is a
+   lint's name); a group of short options, any of the flags `g h O V v`,
+   then at most one option that takes a value — the group's rest, else
+   the next argument —, `C` and `Z` kept, `A D F L W l o` skipped with
+   their values (so `-L -O` is no `-O`, and `-D warnings -O` is); an
+   empty argument is an argument (Cargo passes an empty segment of
+   `CARGO_ENCODED_RUSTFLAGS` on, and `-A '' -O` sets `-O`: A-S3's reader
+   dropped them). `-O` is `opt-level=3`; a codegen option's name has `_`
+   read as `-` (rustc's lookup: `-C target_feature` is `-C
+   target-feature`, which A-S3's reader missed before).
+2. *The refusal* (`build_cfg`): `Err` for the first `-C debug-assertions`,
+   `-C opt-level` (`-O`) or `-C overflow-checks` (rustc derives
+   `debug_assertions` from the first or else the level, and the overflow
+   checks from the third or else `debug_assertions`; Cargo's
+   `CARGO_CFG_DEBUG_ASSERTIONS` follows the profile, the rustflags come
+   last on rustc's command line, and no variable shows the overflow
+   checks), any `-Z` option (the cfgs only a nightly shows follow them:
+   `ub_checks`, `fmt_debug`, `contract_checks`, `sanitize`,
+   `target_thread_local`), and any argument starting with `@` (rustc
+   reads arguments from that file, wherever it stands). The other codegen
+   options change no cfg in the pinned release's `default_configuration`
+   but `-C panic` (in `CARGO_CFG_PANIC`, which follows the rustflags),
+   `-C target-cpu` and `-C target-feature` (A-S3, and
+   `CARGO_CFG_TARGET_FEATURE`), and `-C relocation-model` (a cfg only a
+   nightly shows, from the target's model: no stable code tests it).
+3. *The binding* (`load`): an `Err` refuses every extraction with the
+   record, naming the flag; without the record (the legacy rule) or
+   without a build configuration nothing changes.
+4. *The parse* (`ir::parse`): with `(unsafe-reading 1)`, no
+   `(rustflags ..)` or no `(cfg ..)` is malformed.
+5. *The printer's quoting* (`mirx`'s `q`): `"` and `\` escaped, every
+   other character as it is, which the reader (`sexp.rs`: an escape's
+   backslash dropped, any other character copied) reads back exactly;
+   `{:?}`'s escapes (`\t`, `\u{301}`) read back as `t` and `u{301}`, so
+   two cfg values could print the same record. No checked-in extraction
+   holds a character `{:?}` escapes but `"`, so each prints as before.
+
+*Pinned by:* `tests/unsafe_simd.rs`
+`a_build_whose_rustflags_change_its_configuration_refuses_the_extraction`
+(both directions: a dev extraction under a dev build with `-C
+debug-assertions=off`, which loaded before, and a release extraction
+under a release build with `-C debug-assertions=on`, each loading under
+its own build; every spelling, grouped short options, after a short or
+a long option's value and after an empty argument, `-O`, `-C opt-level`,
+`-C overflow-checks`, `-Z` in both forms, an `@file` also as another
+option's value; no refusal for options that change no cfg or for a `-O`
+that is another option's value; `-C panic=abort` bound through
+`CARGO_CFG_PANIC`; A-S3's flags in the `_` spelling and in grouped and
+long forms), `the_lift_refuses_a_build_whose_rustflags_change_its_configuration`
+(through the lift), `an_extraction_by_the_printer_records_its_rustflags_and_cfg_set`
+(every checked-in `.sbmir`: the 23 with `(unsafe-reading 1)` have both
+records and are refused without either; as an older printer's they
+parse), `a_malformed_cfg_entry_is_refused` (eight malformed records,
+each refused as a malformed entry; a well-formed record read), `a_cfg_value_reads_back_as_rustc_holds_it`
+(`sd_ptr_cfg`'s window twin under `--cfg sd_quote="a\tc\u{301}\u{7f}"`,
+extracted by the printer: the value read back exactly; Cargo refuses a
+newline in a cfg value). Mutants (each run, then reverted): the refusal
+skipped; `-C debug-assertions`, `-C opt-level` (`-O`) and `-C
+overflow-checks` each left out of it; a `-Z` option, an `@file` not
+refused; `-O` not read; `_` not read as `-`; a group's leading flags not
+skipped; a short option's value not taken from the next argument;
+`--codegen v`, `--codegen=v` not read; a long option's value not skipped,
+and the long flags taking one; empty arguments dropped; `load` taking an
+unknowable configuration for none; A-S3's `-C target-cpu` and `-C
+target-feature` not read through the reader; the parse's requirement
+removed, and each record's alone; a malformed entry read as `("", None)`
+(the validator's N6); the printer quoting with `{:?}`, its twin extracted
+again under it (23, every one caught; the reader's 17 run again on the
+final code). The 21 cfg mutants of stages leftovers and validate-leftovers
+run again on the final code: every one caught.
+
+**The build's `--cfg`s and the precondition check's count (stage
+cfg-final, 2026-10-08; the validator's F1–F5 of stage validate-cfg-fixes;
+`docs/mir-lift.md` §20.1).** 6 trusted code lines, all in `target.rs`
+(242 → 248): `rustc_options` reads every long option by getopts' one rule
+(its `=v`, else the next argument, but for the four flags) and keeps
+`--cfg`'s value (as `c`) beside `--codegen`'s (`C`); `build_cfg` takes the
+build's `--cfg`s from it instead of scanning the arguments, and refuses
+(`Err`) a `--cfg` of a builtin cfg's name.
+
+*What an auditor checks.*
+1. *The build's `--cfg`s* (`rustc_options`, `build_cfg`): they are exactly
+   the reader's `c` options, `--cfg v` and `--cfg=v` where rustc reads an
+   option, never another option's value. rustc 1.98.1 reads `-L
+   --cfg=x`, `-A --cfg=x`, `--allow --cfg=x` and `--remap-path-prefix
+   --cfg=x` without setting `x` (F1: `build_cfg` scanned the arguments, so
+   a release build whose rustflags held `-L --cfg=debug_assertions`
+   claimed `debug_assertions` and took a dev extraction, shown through the
+   variables Cargo really gave such a build). An `@file` is still found by
+   a scan: rustc expands it wherever it stands.
+2. *A builtin cfg set by `--cfg`* (`build_cfg`): `Err` for a `--cfg` whose
+   name (trimmed) is a name of `BUILD_CFGS` or `NIGHTLY_CFGS`, or
+   `target_feature`, whatever its value. rustc's lint
+   `explicit_builtin_cfgs_in_flags` (`rustc_session::config::cfg::
+   disallow_cfgs`) denies these but `test`, each in some shapes only
+   (`--cfg debug_assertions="x"` passes), and `-A
+   explicit_builtin_cfgs_in_flags` or `--cap-lints allow` lets every one
+   through; rustc then sets the cfg but derives the rest of the
+   configuration from the option that sets it (F3, measured on rustc
+   1.98.1: `-O -A explicit_builtin_cfgs_in_flags --cfg debug_assertions`
+   and `-O --cap-lints allow --cfg debug_assertions` give
+   `cfg!(debug_assertions)` and no overflow checks,
+   `cfg-final/logs/probe-cap-lints.txt`), while Cargo's
+   `CARGO_CFG_DEBUG_ASSERTIONS` follows the profile, so the build's set
+   equalled a dev extraction's. The three lists are the pinned release's
+   builtin cfgs: on rustc 1.98.1 the lint denies every name of them but
+   `test` in some shape (`cfg-final/logs/probe-builtin-cfgs.txt`), and
+   `default_configuration` and `disallow_cfgs` name no other. `test`,
+   which rustc allows (Cargo passes `--cfg test` itself, for a `harness =
+   false` target), is refused in the rustflags too: fail closed. At every
+   toolchain bump, the lists against `default_configuration` and
+   `disallow_cfgs` (the configuration section's item 6).
+3. *A `--cfg` read as text* (F4): `build_cfg` reads a spec as text —
+   trimmed, the value's quotes dropped —, not as rustc parses it (no
+   escapes such as `\x41` or `\u{..}`, no raw strings or identifiers, no
+   comments). This fails closed: a build whose `--cfg` uses them gets a
+   name or value no record holds and is refused even where it agrees,
+   never accepted, since `load` refuses an extraction with rustflags (a
+   bound record holds no `--cfg` of the rustflags) and a feature name
+   cannot hold `\`.
+4. *The precondition check's count* (F5): DESIGN §1.1 gave 39 (stage
+   tcb-checks' count), the table 22 + 30 + 1 = 53 (C1's). Counted again
+   from the code as it stands (`cfg-final/scripts/count-precondition.py`,
+   every counted line printed): `elab/items.rs` 27 — `fn_requires`' count
+   of clauses (4) and per-clause comparison (3), `depth_prop` (5),
+   `as_declared` (11), the depth bound's comparison at its call site (4);
+   stage tcb-checks' 22 was its net change, which subtracted the six lines
+   of the inline depth hypothesis `depth_prop` replaced —; `typeck` 33 —
+   `mod.rs` 29: `Contracts::declared` and `::panics_when`, `DecreasesAttr`,
+   `#[mir_contract]` (15, its `panics_when(..)` and the no-panic clause
+   appended to the declared contract included), `#[panics_when]` (8), the
+   no-panic clause appended to `requires` (3); `expr.rs` 4: the declared
+   contract typed and set —; `hir::FnDef::declared` 1. 61 in all; the
+   total grows by 8 with it.
+
+*Pinned by:* `tests/unsafe_simd.rs`
+`a_cfg_that_is_another_options_value_is_not_the_builds` (F1's
+release-build twin: under a release build whose rustflags hold `-L
+--cfg=debug_assertions`, or four other spellings of it, the dev
+extraction refused, `debug_assertions` named, and the release one loaded;
+`-L --cfg=feature="alias"` refusing the extraction with the feature and
+loading the one without; a `--cfg=sd_twin` that is another option's value
+no cfg of the build; a `--cfg` after another option's whole value the
+build's), `a_build_that_sets_a_builtin_cfg_by_cfg_refuses_the_extraction`
+(F3: 13 builtin `--cfg`s — the validator's `-A
+explicit_builtin_cfgs_in_flags --cfg debug_assertions`, `--cap-lints
+allow`, a value and spaces rustc lets through, names of each list, `test`
+— each refusing the dev extraction under a dev and a release build and
+the release one under a release build, the cfg named; names that are no
+builtin, the feature by `--cfg` among them, the build's own),
+`the_lift_refuses_a_build_whose_rustflags_change_its_configuration` (both
+through the lift). End to end, the validator's probe run again on the
+final code (the variables Cargo really gave each build): the release
+builds with `-L --cfg=debug_assertions` and with `-A
+explicit_builtin_cfgs_in_flags --cfg debug_assertions` refuse the dev
+extraction; the dev builds with `-L --cfg=spec` and `--remap-path-prefix
+--cfg=spec`, which refused it, load it (rustc sets no `spec`); the two
+with an inherited `CARGO_CFG_DEBUG_ASSERTIONS` still load it (F2, the
+assumption above). Mutants (each run, then reverted; every one caught): F1's, `build_cfg`'s
+`--cfg`s by the old scan of the arguments, `rustc_options` keeping no
+`--cfg` value, a long option's value in the next argument not consumed,
+the long flags taking a value, a long option's `=v` not read, `--codegen`
+not kept; F3's, the refusal skipped, `BUILD_CFGS`', `NIGHTLY_CFGS`' and
+`target_feature`'s names each let through, the refusal only for a bare
+cfg (rustc's lint shape), a bare `--cfg`'s name not trimmed (12).
+
 **`core::arch` code (C8's first slice, 2026-10-06; `docs/mir-lift.md`
 §20.9).** The rows above include it: `mir/arch.rs` (111), its arm of
 `literal.rs` (+40: the vector type, the call), the parse of the target,
@@ -1631,7 +2071,7 @@ argument order, each breaking exactly its function's theorem),
 `tests/hardware.rs` (the ghost lane view).
 
 **Untrusted** (code lines, counted as above): `front/src/mir/read.rs`
-(3,989; 2,975 before C10's stages, the structurer), `cfg.rs` (299, with the literal reading's shape
+(4,127; 3,992 before stage prover-gaps, which added the innermost of several bindings of a loop's name; 2,975 before C10's stages, the structurer), `cfg.rs` (299, with the literal reading's shape
 facts), the walker `simproof.rs` (5,544; 5,453 before stage neon-mul, 5,083 before C10's stages, 4,999 before C1, 5,014 before the removal
 of 2026-10-05) and its driver `checked.rs` (1,706; 1,624 before stage neon-mul, 1,615 before C10's stages, 1,468 before C1, 1,889
 before the removal: planning, dependency order, loop and model lemmas, the verdict cache —

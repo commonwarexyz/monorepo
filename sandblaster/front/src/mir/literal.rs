@@ -2242,15 +2242,21 @@ impl<'a> Gen<'a> {
         // the alignment its contract needs (A-S5): every current row is
         // unaligned (1); a row needing `a` is read only for a base aligned
         // to `a` (its elements' size) and an offset that is a multiple of `a`
-        // (else stuck, even where the address happens to be aligned)
+        // (else stuck, even where the address happens to be aligned).
+        // (`test_fault::set_row_align` reads every row as needing more, for
+        // the toolchain's own test of this arm; never set by a build)
+        let align = match test_fault::row_align() {
+            0 => row.align,
+            t => t,
+        };
         let aligned = |body: String, rt: &str| -> R<String> {
-            if row.align <= 1 {
+            if align <= 1 {
                 return Ok(body);
             }
-            if base_align(&base.ty) % row.align != 0 {
-                return Err(format!("`{}` needs {}-byte alignment, which a base of {:?} does not give", a.path, row.align, base.ty));
+            if base_align(&base.ty) % align != 0 {
+                return Err(format!("`{}` needs {}-byte alignment, which a base of {:?} does not give", a.path, align, base.ty));
             }
-            Ok(bind("Usize", rt, &format!("mir::rem_usize off {}usize", row.align), "rr", &format!("match #eq_usize(rr, 0usize) : Bool as _ return Option({rt}) with | false => {} | true => {body} end", none(rt))))
+            Ok(bind("Usize", rt, &format!("mir::rem_usize off {}usize", align), "rr", &format!("match #eq_usize(rr, 0usize) : Bool as _ return Option({rt}) with | false => {} | true => {body} end", none(rt))))
         };
         let pv = self.operand(fx, p)?;
         let len = if matches!(base.ty, Ty::Slice(_)) { Some("fst(v)") } else { None };
@@ -2298,12 +2304,15 @@ impl<'a> Gen<'a> {
 /// thread's setting reaches only the readings generated on that thread):
 /// the `IterMut` model of A-S4 broken so that every element it yields is the
 /// slice's first — codes that overlap, the disjointness its write-backs
-/// rely on lost — which the theorem of a loop over it must catch.
+/// rely on lost — which the theorem of a loop over it must catch; and every
+/// admitted load and store row read as needing an alignment none needs, so
+/// that the alignment arm is tested (A-S5, the review's F5).
 pub mod test_fault {
     use std::cell::Cell;
 
     thread_local! {
         static ITER_MUT_OVERLAPS: Cell<bool> = const { Cell::new(false) };
+        static ROW_ALIGN: Cell<u64> = const { Cell::new(0) };
     }
 
     /// Sets (or clears) the fault on this thread.
@@ -2314,6 +2323,19 @@ pub mod test_fault {
     /// Whether the fault is set on this thread.
     pub fn iter_mut_overlaps() -> bool {
         ITER_MUT_OVERLAPS.with(|c| c.get())
+    }
+
+    /// Reads every admitted load and store row as needing `align` bytes of
+    /// alignment on this thread (0: each row's own), so that the alignment
+    /// arm of a load or store (amendment A-S5), which no admitted row needs,
+    /// is exercised by a test.
+    pub fn set_row_align(align: u64) {
+        ROW_ALIGN.with(|c| c.set(align));
+    }
+
+    /// The alignment set on this thread (0: none).
+    pub fn row_align() -> u64 {
+        ROW_ALIGN.with(|c| c.get())
     }
 }
 

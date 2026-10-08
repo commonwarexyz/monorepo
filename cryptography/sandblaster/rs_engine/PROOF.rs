@@ -400,19 +400,18 @@ fn update_at_self(x: Seq<[u8; 64]>, i: Nat) {
     }
 }
 
-/// `Scalar::mul`'s inner loop from element `iter_24.start` of chunk
+/// `Scalar::mul`'s inner loop from element `iter.start` of chunk
 /// `x_chunk_index` on: that chunk with those elements multiplied.
 #[lift_attach(crate::reed_solomon::engine::engine_scalar::Scalar::mul, loop_nr = 1)]
 fn scalar_mul_elements() {
-    invariant(iter_24.end <= 32usize);
-    invariant(32usize <= iter_24.end);
-    invariant(iter_24.start <= 32usize);
+    invariant(iter.end == 32usize);
+    invariant(iter.start <= 32usize);
     invariant(x_chunk_index < x.len());
-    decreases((iter_24.end as Int) - (iter_24.start as Int));
-    ensures(|ret: &[[u8; 64]]| ret == crate::proof::chunks_of(x).update(x_chunk_index as Nat, crate::proof::elems16_from(*lut, x[x_chunk_index], iter_24.start)));
+    decreases((iter.end as Int) - (iter.start as Int));
+    ensures(|ret: &[[u8; 64]]| ret == crate::proof::chunks_of(x).update(x_chunk_index as Nat, crate::proof::elems16_from(*lut, x[x_chunk_index], iter.start)));
     at_start! {
-        crate::proof::elems16_step(*lut, x[x_chunk_index], iter_24.start);
-        crate::proof::elems16_end(*lut, x[x_chunk_index], iter_24.start);
+        crate::proof::elems16_step(*lut, x[x_chunk_index], iter.start);
+        crate::proof::elems16_end(*lut, x[x_chunk_index], iter.start);
         crate::proof::update_at_self(x, x_chunk_index as Nat);
     }
 }
@@ -490,16 +489,16 @@ fn loop16_end(lut16: [[u16; 16]; 4], x: &[[u8; 64]], iter: usize) {
     follows();
 }
 
-/// `Scalar::mul`'s loop from chunk `iter_9` on: the chunks from `iter_9` on
+/// `Scalar::mul`'s loop from chunk `iter` on: the chunks from `iter` on
 /// multiplied, one at a time.
 #[lift_attach(crate::reed_solomon::engine::engine_scalar::Scalar::mul, loop_nr = 0)]
 fn scalar_mul_loop() {
-    invariant(iter_9 <= x.len());
-    decreases((x.len() as Int) - (iter_9 as Int));
-    ensures(|ret: &[[u8; 64]]| ret == crate::proof::muls16_from(*lut, x, iter_9 as Nat));
+    invariant(iter <= x.len());
+    decreases((x.len() as Int) - (iter as Int));
+    ensures(|ret: &[[u8; 64]]| ret == crate::proof::muls16_from(*lut, x, iter as Nat));
     at_start! {
-        crate::proof::loop16_step(*lut, x, iter_9);
-        crate::proof::loop16_end(*lut, x, iter_9);
+        crate::proof::loop16_step(*lut, x, iter);
+        crate::proof::loop16_end(*lut, x, iter);
     }
 }
 
@@ -596,38 +595,17 @@ fn scalar_mul_multiplies_every_chunk(s: Scalar, x: &[[u8; 64]], log_m: u16) {
 /// entry `n`.
 #[lemma]
 fn lo_bytes_at(r: [u16; 16], n: usize) {
-    ensures(implies(n < 16usize, crate::laws::lo_bytes(r)[n] == r[n] as u8));
-    if n < 16usize {
-        by_cases(n, 0..16);
-    } else {
-        follows();
-    }
+    requires(n < 16usize);
+    ensures(crate::laws::lo_bytes(r)[n] == r[n] as u8);
+    by_cases(n, 0..16);
 }
 
 /// Likewise the high bytes.
 #[lemma]
 fn hi_bytes_at(r: [u16; 16], n: usize) {
-    ensures(implies(n < 16usize, crate::laws::hi_bytes(r)[n] == (r[n] >> 8u32) as u8));
-    if n < 16usize {
-        by_cases(n, 0..16);
-    } else {
-        follows();
-    }
-}
-
-/// The byte split, row by row (the rows `is_split_of` compares are equal).
-#[lemma]
-fn split_rows(lut: Multiply128lutT, lut16: [[u16; 16]; 4]) {
-    requires(crate::laws::is_split_of(lut, lut16));
-    ensures(crate::laws::row_bytes(lut.lo[0]) == crate::laws::lo_bytes(lut16[0])
-        && crate::laws::row_bytes(lut.lo[1]) == crate::laws::lo_bytes(lut16[1])
-        && crate::laws::row_bytes(lut.lo[2]) == crate::laws::lo_bytes(lut16[2])
-        && crate::laws::row_bytes(lut.lo[3]) == crate::laws::lo_bytes(lut16[3])
-        && crate::laws::row_bytes(lut.hi[0]) == crate::laws::hi_bytes(lut16[0])
-        && crate::laws::row_bytes(lut.hi[1]) == crate::laws::hi_bytes(lut16[1])
-        && crate::laws::row_bytes(lut.hi[2]) == crate::laws::hi_bytes(lut16[2])
-        && crate::laws::row_bytes(lut.hi[3]) == crate::laws::hi_bytes(lut16[3]));
-    by_unfolding(crate::laws::is_split_of);
+    requires(n < 16usize);
+    ensures(crate::laws::hi_bytes(r)[n] == (r[n] >> 8u32) as u8);
+    by_cases(n, 0..16);
 }
 
 /// The low bytes of four entries, xored, are the low byte of their xor.
@@ -671,13 +649,9 @@ fn hi_byte_of(r0: [u16; 16], r1: [u16; 16], r2: [u16; 16], r3: [u16; 16], a: u8,
 fn lo_byte_split(lut: Multiply128lutT, lut16: [[u16; 16]; 4], a: u8, b: u8) {
     requires(crate::laws::is_split_of(lut, lut16));
     ensures(crate::laws::mul_lo_byte(lut, a, b) == crate::laws::mul16(lut16, a, b) as u8);
-    split_rows(lut, lut16);
     unfold(crate::laws::mul_lo_byte);
-    rewrite(crate::laws::row_bytes(lut.lo[0]) == crate::laws::lo_bytes(lut16[0]));
-    rewrite(crate::laws::row_bytes(lut.lo[1]) == crate::laws::lo_bytes(lut16[1]));
-    rewrite(crate::laws::row_bytes(lut.lo[2]) == crate::laws::lo_bytes(lut16[2]));
-    rewrite(crate::laws::row_bytes(lut.lo[3]) == crate::laws::lo_bytes(lut16[3]));
     unfold(crate::laws::mul16);
+    // each NEON row read as the scalar row it splits (`is_split_of`)
     lo_byte_of(lut16[0], lut16[1], lut16[2], lut16[3], a, b);
     follows();
 }
@@ -687,13 +661,9 @@ fn lo_byte_split(lut: Multiply128lutT, lut16: [[u16; 16]; 4], a: u8, b: u8) {
 fn hi_byte_split(lut: Multiply128lutT, lut16: [[u16; 16]; 4], a: u8, b: u8) {
     requires(crate::laws::is_split_of(lut, lut16));
     ensures(crate::laws::mul_hi_byte(lut, a, b) == (crate::laws::mul16(lut16, a, b) >> 8u32) as u8);
-    split_rows(lut, lut16);
     unfold(crate::laws::mul_hi_byte);
-    rewrite(crate::laws::row_bytes(lut.hi[0]) == crate::laws::hi_bytes(lut16[0]));
-    rewrite(crate::laws::row_bytes(lut.hi[1]) == crate::laws::hi_bytes(lut16[1]));
-    rewrite(crate::laws::row_bytes(lut.hi[2]) == crate::laws::hi_bytes(lut16[2]));
-    rewrite(crate::laws::row_bytes(lut.hi[3]) == crate::laws::hi_bytes(lut16[3]));
     unfold(crate::laws::mul16);
+    // each NEON row read as the scalar row it splits (`is_split_of`)
     hi_byte_of(lut16[0], lut16[1], lut16[2], lut16[3], a, b);
     follows();
 }
@@ -704,72 +674,8 @@ fn hi_byte_split(lut: Multiply128lutT, lut16: [[u16; 16]; 4], a: u8, b: u8) {
 fn chunk_split(lut: Multiply128lutT, lut16: [[u16; 16]; 4], c: [u8; 64]) {
     requires(crate::laws::is_split_of(lut, lut16));
     ensures(crate::laws::mul_chunk(lut, c) == crate::laws::mul_chunk16(lut16, c));
-    unfold(crate::laws::mul_chunk);
-    rewrite(lo_byte_split(lut, lut16, c[0], c[32]));
-    rewrite(lo_byte_split(lut, lut16, c[1], c[33]));
-    rewrite(lo_byte_split(lut, lut16, c[2], c[34]));
-    rewrite(lo_byte_split(lut, lut16, c[3], c[35]));
-    rewrite(lo_byte_split(lut, lut16, c[4], c[36]));
-    rewrite(lo_byte_split(lut, lut16, c[5], c[37]));
-    rewrite(lo_byte_split(lut, lut16, c[6], c[38]));
-    rewrite(lo_byte_split(lut, lut16, c[7], c[39]));
-    rewrite(lo_byte_split(lut, lut16, c[8], c[40]));
-    rewrite(lo_byte_split(lut, lut16, c[9], c[41]));
-    rewrite(lo_byte_split(lut, lut16, c[10], c[42]));
-    rewrite(lo_byte_split(lut, lut16, c[11], c[43]));
-    rewrite(lo_byte_split(lut, lut16, c[12], c[44]));
-    rewrite(lo_byte_split(lut, lut16, c[13], c[45]));
-    rewrite(lo_byte_split(lut, lut16, c[14], c[46]));
-    rewrite(lo_byte_split(lut, lut16, c[15], c[47]));
-    rewrite(lo_byte_split(lut, lut16, c[16], c[48]));
-    rewrite(lo_byte_split(lut, lut16, c[17], c[49]));
-    rewrite(lo_byte_split(lut, lut16, c[18], c[50]));
-    rewrite(lo_byte_split(lut, lut16, c[19], c[51]));
-    rewrite(lo_byte_split(lut, lut16, c[20], c[52]));
-    rewrite(lo_byte_split(lut, lut16, c[21], c[53]));
-    rewrite(lo_byte_split(lut, lut16, c[22], c[54]));
-    rewrite(lo_byte_split(lut, lut16, c[23], c[55]));
-    rewrite(lo_byte_split(lut, lut16, c[24], c[56]));
-    rewrite(lo_byte_split(lut, lut16, c[25], c[57]));
-    rewrite(lo_byte_split(lut, lut16, c[26], c[58]));
-    rewrite(lo_byte_split(lut, lut16, c[27], c[59]));
-    rewrite(lo_byte_split(lut, lut16, c[28], c[60]));
-    rewrite(lo_byte_split(lut, lut16, c[29], c[61]));
-    rewrite(lo_byte_split(lut, lut16, c[30], c[62]));
-    rewrite(lo_byte_split(lut, lut16, c[31], c[63]));
-    rewrite(hi_byte_split(lut, lut16, c[0], c[32]));
-    rewrite(hi_byte_split(lut, lut16, c[1], c[33]));
-    rewrite(hi_byte_split(lut, lut16, c[2], c[34]));
-    rewrite(hi_byte_split(lut, lut16, c[3], c[35]));
-    rewrite(hi_byte_split(lut, lut16, c[4], c[36]));
-    rewrite(hi_byte_split(lut, lut16, c[5], c[37]));
-    rewrite(hi_byte_split(lut, lut16, c[6], c[38]));
-    rewrite(hi_byte_split(lut, lut16, c[7], c[39]));
-    rewrite(hi_byte_split(lut, lut16, c[8], c[40]));
-    rewrite(hi_byte_split(lut, lut16, c[9], c[41]));
-    rewrite(hi_byte_split(lut, lut16, c[10], c[42]));
-    rewrite(hi_byte_split(lut, lut16, c[11], c[43]));
-    rewrite(hi_byte_split(lut, lut16, c[12], c[44]));
-    rewrite(hi_byte_split(lut, lut16, c[13], c[45]));
-    rewrite(hi_byte_split(lut, lut16, c[14], c[46]));
-    rewrite(hi_byte_split(lut, lut16, c[15], c[47]));
-    rewrite(hi_byte_split(lut, lut16, c[16], c[48]));
-    rewrite(hi_byte_split(lut, lut16, c[17], c[49]));
-    rewrite(hi_byte_split(lut, lut16, c[18], c[50]));
-    rewrite(hi_byte_split(lut, lut16, c[19], c[51]));
-    rewrite(hi_byte_split(lut, lut16, c[20], c[52]));
-    rewrite(hi_byte_split(lut, lut16, c[21], c[53]));
-    rewrite(hi_byte_split(lut, lut16, c[22], c[54]));
-    rewrite(hi_byte_split(lut, lut16, c[23], c[55]));
-    rewrite(hi_byte_split(lut, lut16, c[24], c[56]));
-    rewrite(hi_byte_split(lut, lut16, c[25], c[57]));
-    rewrite(hi_byte_split(lut, lut16, c[26], c[58]));
-    rewrite(hi_byte_split(lut, lut16, c[27], c[59]));
-    rewrite(hi_byte_split(lut, lut16, c[28], c[60]));
-    rewrite(hi_byte_split(lut, lut16, c[29], c[61]));
-    rewrite(hi_byte_split(lut, lut16, c[30], c[62]));
-    rewrite(hi_byte_split(lut, lut16, c[31], c[63]));
-    unfold(crate::laws::mul_chunk16);
+    // element by element: each byte of the product by the row split
+    using(lo_byte_split, hi_byte_split);
     follows();
 }
 
@@ -792,15 +698,6 @@ fn all_split(lut: Multiply128lutT, lut16: [[u16; 16]; 4], x: Seq<[u8; 64]>) {
     }
 }
 
-/// Two slices with the same elements as one sequence are equal.
-#[lemma]
-fn same_chunks(a: &[[u8; 64]], b: &[[u8; 64]], m: Seq<[u8; 64]>) {
-    requires(a == m);
-    requires(b == m);
-    ensures(a == b);
-    follows();
-}
-
 #[proof]
 fn neon_mul_is_scalar_mul(n: Neon, s: Scalar, x: &[[u8; 64]], log_m: u16) {
     let a = { let mut a = x; n.mul(&mut a, log_m); a };
@@ -811,8 +708,7 @@ fn neon_mul_is_scalar_mul(n: Neon, s: Scalar, x: &[[u8; 64]], log_m: u16) {
             == crate::laws::mul_all(n.mul128[log_m as usize], x) by { neon_mul_multiplies_every_chunk(n, x, log_m); };
             // its row is the byte split of the scalar engine's row
             == crate::laws::mul_all16(s.mul16[log_m as usize], x) by { all_split(n.mul128[log_m as usize], s.mul16[log_m as usize], x); };
+            // the scalar engine multiplies every chunk through its row
+            == b by { scalar_mul_multiplies_every_chunk(s, x, log_m); follows(); };
     }
-    // the scalar engine multiplies every chunk through its row
-    scalar_mul_multiplies_every_chunk(s, x, log_m);
-    same_chunks(a, b, crate::laws::mul_all16(s.mul16[log_m as usize], x));
 }

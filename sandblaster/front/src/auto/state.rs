@@ -219,6 +219,19 @@ impl St {
         lvl
     }
 
+    /// [`St::push_fact`] with the fact's type term given (`ty_tm`, at the
+    /// current depth, convertible with `ty`) instead of read back from its
+    /// value: a statement built from the goal's terms stays as small as
+    /// those terms ([`super::terms`]).
+    pub fn push_fact_tm(&mut self, env: &Env, ty: V, ty_tm: Tm, proof: Tm, origin: Origin) -> u32 {
+        let name = self.fresh_name("h");
+        let lvl = self.depth();
+        self.wraps.push(Wrap::Let { name: name.clone(), ty: ty_tm, val: proof });
+        self.push_raw(env, name, Rel::Irr, ty.clone());
+        self.facts.push(Fact { lvl, ty, origin });
+        lvl
+    }
+
     /// Push a λ binder (for a `Π` target); if it is a proposition it also
     /// becomes a fact. Returns the entry.
     pub fn push_lam(&mut self, env: &Env, name: Name, rel: Rel, ty: V, is_prop: bool) -> EnvEntry {

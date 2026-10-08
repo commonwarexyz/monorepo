@@ -1,0 +1,8 @@
+[package]
+name = "fx-sd-ptr-cfg"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(sd_twin)"] }

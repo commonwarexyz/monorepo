@@ -351,14 +351,36 @@ lift, is not listed there yet (§19, stale text).
    `RuntimeChecks(overflow)` as true; the build refuses an extraction
    without them, but cannot see the profile that compiles the crate
    (`cfg(overflow_checks)` is unstable, and Cargo does not pass a profile's
-   `overflow-checks` to build scripts). A panic contract whose panic is an
-   overflow or underflow (13 of the MMR's 18: the position and location
-   arithmetic and `children`; all 13 of the verifier's) holds only with
-   them. Every profile of this workspace sets them; a downstream crate's
-   default release profile does not, and there that code wraps instead of
-   panicking. (The value theorems carry over: where they hold no checked
-   operation overflows, so a build without the checks computes the same
-   values.)
+   `overflow-checks` to build scripts; since stage cfg-binding-fixes a
+   build whose rustflags change them — `-C overflow-checks`, or
+   `-C debug-assertions`, `-C opt-level`, `-O`, which they follow — is
+   refused where the extraction records its cfg set). A panic contract
+   whose panic is an overflow or underflow (13 of the MMR's 18: the
+   position and location arithmetic and `children`; all 13 of the
+   verifier's) holds only with them. Every profile of this workspace sets
+   them; a downstream crate's default release profile does not, and there
+   that code wraps instead of panicking. (The value theorems carry over:
+   where they hold no checked operation overflows, so a build without the
+   checks computes the same values.) And **the extraction's configuration
+   is the build's** where the build cannot compare them: the MIR records
+   the session's cfg set (the crate's features, the target's and the
+   profile's cfgs, every `--cfg`; since stage leftovers), which a build
+   script binds to its own, refusing a build whose rustflags change the
+   configuration where it cannot see the result (stage cfg-binding-fixes)
+   or set a builtin cfg by `--cfg` (stage cfg-final), the `--cfg`s read
+   where rustc reads them; not bound are `sandblaster check` (no build
+   configuration), extractions older than the record (the shipped varint,
+   MMR and verifier ones), the cfgs only a nightly compiler shows, a
+   profile's `panic` (no build script sees it), the test harness's compile
+   (`cfg(test)`: the library's is bound), the dependencies' configuration
+   (their features: not recorded), and flags no build script sees
+   (`kernel/AUDIT.md` §21.1). And **the build script's `CARGO_CFG_*`
+   variables are Cargo's**: Cargo sets a bare builtin's variable
+   (`CARGO_CFG_DEBUG_ASSERTIONS`, `_UNIX`, `_TEST`, ..) only when the cfg
+   holds and removes none it leaves unset, so one set in the environment
+   Cargo runs in, or in Cargo's `[env]` table, reaches the build script as
+   if Cargo had set it (a release build then takes a dev extraction), and
+   a build script cannot tell; assumed, neither sets any.
 8. **The lift** (`#[lift(mir = "m.sbmir", ..)] mod m;`, SEMANTICS.md §19,
    `docs/mir-lift.md` §20): the exec items the lift produces from a Rust
    file mean what rustc compiles from it. Its parts:
@@ -372,27 +394,34 @@ lift, is not listed there yet (§19, stale text).
      function, a callee's panic, an index leaf past the end), `Stuck` for
      everything else that gives no value (out of fuel, undefined
      behaviour, an unmodeled construct; `docs/mir-lift.md` §20.4). Files:
-     the generator `mir/literal.rs` (1,788 code lines; 1,739 before stage
-     neon-mul, 1,476 before the narrow reading of existing `unsafe`, 1,436
+     the generator `mir/literal.rs` (1,799 code lines; 1,788 before stage
+     soundness-fixes, 1,739 before stage neon-mul, 1,476 before the narrow reading of existing `unsafe`, 1,436
      before C8, 1,297 before C1) and its library `literal.core` (315; 298;
      203; 186); its reading of
      `core::arch` code `mir/arch.rs` (115; 111, C8: a vector type as its
      model representation, an intrinsic call as its validated target
      model, `docs/mir-lift.md` §20.9); the narrow reading's tables
-     `mir/ptr.rs` (422; 414 before stage neon-mul's `u128`: the admitted
+     `mir/ptr.rs` (425; 422 before stage soundness-fixes, 414 before stage neon-mul's `u128`: the admitted
      pointer helpers by exact path and signature, the plain byte views, the admitted loads and stores with
      their alignment, the pure-reinterpretation check) and its window rule
-     `mir/window.rs` (415: W0–W4 on the unoptimized extraction, the
+     `mir/window.rs` (486, 415 before stage soundness-fixes: W0–W4 on the unoptimized extraction, the bases that live in locals, the
      verdicts carried to L by source span and kind; §20.10); the theorem
      statements `mir/stmt.rs` (240; 213); the parse `mir/ir.rs` and
-     `sexp.rs` (700; 659 before stage neon-mul, 611 before the narrow reading, 529 before the union
+     `sexp.rs` (718; 715 before stage cfg-binding-fixes, 706 before stage leftovers, 700 before stage soundness-fixes, 659 before stage neon-mul, 611 before the narrow reading, 529 before the union
      fix and the optimization-level record of 2026-10-06, 482 before C8,
-     131); names and load checks `mir/mod.rs` (638; 635 before stage neon-mul,
+     131); names and load checks `mir/mod.rs` (676; 675 before stage cfg-binding-fixes, 667 before stage leftovers, 638 before stage soundness-fixes, 635 before stage neon-mul,
      572 before the narrow reading's feature binding (A-S3), window verdicts and `IterMut`
      models, 542 before the optimization-level check and the window
      extraction's load, 531 before C8, the check that the MIR is of the
-     build's architecture included); the build's codegen flags in
-     `target.rs` (29, A-S3); the printer `mirx` (1,254; 1,215 before the
+     build's architecture included); the build's codegen flags and cfg set
+     in `target.rs` (116: the flags 29, A-S3, since stage leftovers the
+     cfg set a build script knows, 39, since stage cfg-binding-fixes the
+     rustflags read as rustc's option parser reads them and the refusal of
+     those that change the configuration unseen, 42, and since stage
+     cfg-final the `--cfg`s read through that reader and a builtin cfg set
+     by `--cfg` refused, 6); the printer `mirx`
+     (1,260, its quoting changed in stage cfg-binding-fixes; 1,257
+     before stage leftovers, 1,254 before stage soundness-fixes, 1,215 before the
      narrow reading's records, 1,208 before it pinned and recorded the MIR
      optimization level, 1,122 before C8: a rustc driver on the pinned
      nightly of the stable release; its output is checked in with the
@@ -407,12 +436,44 @@ lift, is not listed there yet (§19, stale text).
      afresh, reaching only definitions of the elaboration, of L's library or
      of its own extraction, and every module type its MIR reaches is
      declared alike by the MIR and the subset. Then the elaborator's
-     precondition check (39: a function read from MIR is elaborated only
-     when each precondition, a panic contract's no-panic clause included,
-     is α-equal to its declared contract's clause) and the lift glue (about
-     350, the panic contract's attachment and no-panic clause and the
-     window extraction's declaration included).
-     **About 6.69k code lines in all** (6.57k before stage neon-mul,
+     precondition check (61: `elab/items.rs` 27, `typeck` 33, `hir.rs` 1,
+     counted from the code in stage cfg-final, where 39, stage
+     tcb-checks' count, and 53, C1's, had been given, `kernel/AUDIT.md`
+     §21.1; a function read from MIR is elaborated only when each
+     precondition, a panic contract's no-panic clause included, is
+     α-equal to its declared contract's clause) and the lift glue (about
+     394, as `kernel/AUDIT.md` §21.1 counts it: the panic contract's
+     attachment and no-panic clause and the window extraction's
+     declaration included; about 351 before the narrow reading of
+     existing `unsafe`, which added about 40, and stage leftovers 3).
+     **About 6.94k code lines in all** (≈ 6,935; 6.92k before stage
+     cfg-final, 2026-10-08, which added 6 — the build's `--cfg`s read
+     where rustc reads them, through the option reader, and a builtin cfg
+     set by `--cfg` refused, both in `target.rs` — and recounted the
+     precondition check from the code, 61 where 53 was counted, +8; 6.88k
+     before stage cfg-binding-fixes, 2026-10-07, which added 46: the build's rustflags
+     read as rustc's option parser reads them, A-S3's flags read through
+     that reader, and a build whose rustflags set `-C debug-assertions`,
+     `-C opt-level`, `-O`, `-C overflow-checks`, a `-Z` option or an
+     `@file` refused, its configuration unknowable to its build script
+     (+42 in `target.rs`, +1 in `mir/mod.rs`); an extraction with
+     `(unsafe-reading 1)` required to record its rustflags and cfg set (+3
+     in the parse); and the printer's quoting, one line changed;
+     6.81k before stage leftovers,
+     2026-10-07, which added 62: the session's cfg set printed by mirx,
+     `(cfg ..)` (+3), parsed (+9), compared by `load_window` with every
+     header record and bound by `load` to the build's where a build script
+     knows it (+8 in `mir/mod.rs`), the build's side, `target::build_cfg`
+     and `build_sees` (+39), and the lift glue that passes it (+3); 6.69k
+     before stage soundness-fixes,
+     2026-10-07, which added about 123: the window rule's bases — the locals
+     whose own storage a pointer reaches — and each point's uses classified,
+     W3 reading only (+71), the window extraction compared with its main one
+     on every header record but the optimization level and on every shared
+     type definition, a main extraction with rustflags refused (+29 in
+     `mir/mod.rs`, +6 in the parse), the alignment arm's test hook (+11),
+     the admitted library `unsafe fn`s listed for the record (+3) and the
+     printer's `(rustflags ..)` record (+3); 6.57k before stage neon-mul,
      2026-10-07, which added 118: in L a `u128` held as its two words, the
      code step `PRange` with `split_at_mut`'s model, `Len`, the referent's
      type after the `Deref` of a `&mut`, `ptr.rs`'s `u128` byte views, the
@@ -440,7 +501,7 @@ lift, is not listed there yet (§19, stale text).
      `must_panic` with its tables of panic functions and message
      constructors in L, the `Assert` kinds that panic, the panic statement,
      the gate's second theorem, the glue).
-   * **The theorem.** S (`mir/read.rs` 3,989, steered by `mir/cfg.rs` 299)
+   * **The theorem.** S (`mir/read.rs` 4,127, steered by `mir/cfg.rs` 299)
      is untrusted. Every build checks, per lifted function,
      `L::thm::f : Π x̄ (pre). Σ k. Π n (k ≤ len n). run n b0 (Ret init(x̄))
      = Ret(erase(S_f x̄))` (total correctness, final `&mut` referents
@@ -1089,8 +1150,12 @@ products (`mul_mono`), and library lemmas for complements and exponents;
 decide stuck comparisons by linarith; arithmetic congruence; `Delta`
 unfolding that unblocks a match; bounded case splits and enumeration of
 small integer ranges; `BvRefl`; linarith search producing a §5.8
-certificate. `#[bridges]` lemmas (`front/stdlib/bridges.rs`) are rules of
-every proof. Every search is deterministic and bounded by steps; the
+certificate. Where a goal's values are too large for those steps' motives,
+three steps work on the goal's terms as written (`auto::terms`): a `bool`
+spec's conjuncts become facts (a conjunct comparing arrays, their
+equation), two array literals are equal element by element, and a
+∀-fact's conclusion is matched on the terms. `#[bridges]` lemmas
+(`front/stdlib/bridges.rs`) are rules of every proof. Every search is deterministic and bounded by steps; the
 wall-clock deadline and memory cap are safety nets that fail the build,
 never decide a proof.
 
@@ -2314,7 +2379,7 @@ verifier's `Subtree` code). +about 150 trusted lines (item 8).
 | C6 | per-function checking, summary lint, library spec mutation once per version | every root's check time | small | 11–21 |
 | C7 | contract schemas (one reviewed line generates a newtype's routine contracts), views on lifted types, host-callable by name, cross-root reuse | review cost; a representation change of `PeakIterator` | +150–350 | 13–23 |
 | C8 | **first slice done** (2026-10-06): `core::arch` value intrinsic calls read from MIR (S and L) onto the retained models, the feature rule on MIR, laws over vector lanes. **Second slice, first item done** (2026-10-07): the lane closer (untrusted). Next: `core::array::from_fn`/`map` leaves, the AVX models loaded with their surface entries; the missing NEON and SSE models (§16.4; loads, stores and the `unsafe` around them are C10) | Reed–Solomon's NEON and x86 engines, curve25519's backends | +about 335 so far (models already item 4) | second slice 7–13 |
-| C10 | **decided 2026-10-06** (decision 9): the narrow reading of existing `unsafe` SIMD (`docs/DESIGN-UNSAFE-SIMD.md` and its amendments): raw pointers formed from references, offsets, vector loads and stores, `#[target_feature]` calls; bounds in L, the window rule on an unoptimized extraction, static features and `requires_features`; the two-model Miri cross-check over the real engine functions and an independent review land with the reading. **First stage done** (2026-10-06): the union fix, the optimization-level pin and check, the window extraction. **Second stage done** (2026-10-07, `docs/mir-lift.md` §20.10): the reading (L's memory model, the window rule W0–W4 with the `&mut` parameters it reaches, the feature binding A-S3, pure reinterpretation A-S9, `IterMut` A-S4; S and the walker's read-back rewrite and sharing abstraction), the Miri gate over the fixtures and, through a harness, the real NEON engine; `Zip`, `requires_features`, `u128` bases (C4, `mul_128`'s table rows) and the independent review not yet. Not a general memory model (the old C10, a +1.0–1.5k raw-pointer memory model, left the roadmap with decision 1) | Reed–Solomon's four engines as written: `<Neon as Engine>::mul` first | about 510–775 plus the mutable iterator models (+about 150 so far) | the reading 14–26; NEON `mul` 8–13 after it; all four engines 48–87 |
+| C10 | **decided 2026-10-06** (decision 9): the narrow reading of existing `unsafe` SIMD (`docs/DESIGN-UNSAFE-SIMD.md` and its amendments): raw pointers formed from references, offsets, vector loads and stores, `#[target_feature]` calls; bounds in L, the window rule on an unoptimized extraction, static features and `requires_features`; the two-model Miri cross-check over the real engine functions and an independent review land with the reading. **First stage done** (2026-10-06): the union fix, the optimization-level pin and check, the window extraction. **Second stage done** (2026-10-07, `docs/mir-lift.md` §20.10): the reading (L's memory model, the window rule W0–W4 with the `&mut` parameters it reaches, the feature binding A-S3, pure reinterpretation A-S9, `IterMut` A-S4; S and the walker's read-back rewrite and sharing abstraction), the Miri gate over the fixtures and, through a harness, the real NEON engine; `Zip`, `requires_features`, `u128` bases (C4, `mul_128`'s table rows) and the independent review not yet. **Review fixes done** (2026-10-07, stage soundness-fixes, after an agent's review): the window rule's bases (a local whose own storage a pointer reaches: F1, critical), the window extraction compared with its main one on every header record but the level and on every shared type definition, rustflags never inherited by an extraction (F2), the memory-safety statement and the admitted library `unsafe fn`s on the record (F4, F9), the alignment arm tested (F5); the human review is still open. **Leftovers done** (2026-10-07, stage leftovers): the extraction's cfg set recorded from the compiler and bound to the build's where a build script knows it (+62 trusted lines); `by_cases` under a precondition the goal uses; equations between applications rewriting a target on its term; the per-byte law of the chunk multiplier proven. **Configuration binding fixes done** (2026-10-07, stage cfg-binding-fixes, after a validation): a build whose rustflags change its configuration where its build script cannot see the result refused, the rustflags read as rustc's option parser reads them; an extraction by the narrow reading's printer required to record its rustflags and cfg set (the fixtures extracted again); the printer's quoting read back exactly (+46 trusted lines); a profile's `panic`, the test harness's `cfg(test)` and the dependencies' features recorded as assumptions. Not a general memory model (the old C10, a +1.0–1.5k raw-pointer memory model, left the roadmap with decision 1) | Reed–Solomon's four engines as written: `<Neon as Engine>::mul` first | about 510–775 plus the mutable iterator models (+about 150 so far) | the reading 14–26; NEON `mul` 8–13 after it; all four engines 48–87 |
 | C11 | (research) bit-blasting with a checked certificate checker | after C4, if bit proofs still dominate | none | 5 spike, then 20–40 |
 
 **Order.** SIMD first: C8's first slice (done: value-only NEON and SSSE3

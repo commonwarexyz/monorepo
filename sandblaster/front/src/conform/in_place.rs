@@ -27,7 +27,12 @@
 //!   bounds, and substitutes the instances for the source's type
 //!   parameters in the paths it writes;
 //! * a host model (`#[lift(host)] mod host;` in the DSL module `m`) models
-//!   the host's `m::Name` (the DSL re-exports it there, as the host does).
+//!   the host's `m::Name` (the DSL re-exports it there, as the host does);
+//! * a parameter too large to generate whose type the host gives a
+//!   `Default` value is fixed to it ([`Plan::fixed`]): the harness has one
+//!   more entry per such type, writing `<T as Default>::default()`, and is
+//!   then built before the inputs are generated (its first run reads the
+//!   host's values, [`fixed_values`]; the second compares the cases).
 //!
 //! The copy is built with the build's features (`CARGO_FEATURE_*`), with
 //! overflow checks and debug assertions (cargo's `dev` profile), in its own
@@ -75,6 +80,11 @@ pub(super) struct Spell {
     /// field as its `T`, a `u128` as its two 64-bit words). A name declared
     /// in two files is left out.
     pub(super) host_fields: HashMap<String, Vec<(String, String)>>,
+    /// The data types of the in-place files the host gives a `Default`
+    /// value (`impl Default for Name`, `#[derive(Default)]`), by host path
+    /// (`crate::a::b::Name`): a parameter of such a type too large to
+    /// generate is fixed to that value ([`Plan::fixed`]).
+    pub(super) defaults: HashSet<String>,
 }
 
 impl Spell {
@@ -160,6 +170,44 @@ fn host_struct_fields(text: &str, out: &mut HashMap<String, Vec<(String, String)
         let syn::Fields::Named(fs) = &st.fields else { continue };
         let fields = fs.named.iter().map(|f| (f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default(), quote::ToTokens::to_token_stream(&f.ty).to_string().replace(' ', ""))).collect();
         out.insert(name, fields);
+    }
+}
+
+/// The data types of a source file (top level) with a `Default` value:
+/// `impl Default for Name` (the trait's path ending in `Default`, any
+/// generics) or `#[derive(.., Default, ..)]` on `struct Name`; by host path
+/// (the file's module path `segs`, then the name).
+fn host_defaults(text: &str, segs: &[String], out: &mut HashSet<String>) {
+    let Ok(file) = syn::parse_file(text) else { return };
+    let path = |n: String| format!("{}::{n}", Spell::path_of(segs));
+    for it in &file.items {
+        match it {
+            syn::Item::Impl(im) => {
+                let Some((None, tr, _)) = &im.trait_ else { continue };
+                if tr.segments.last().is_none_or(|s| s.ident != "Default") {
+                    continue;
+                }
+                if let syn::Type::Path(p) = &*im.self_ty
+                    && p.qself.is_none()
+                    && let Some(last) = p.path.segments.last()
+                {
+                    out.insert(path(last.ident.to_string()));
+                }
+            }
+            syn::Item::Struct(st) => {
+                let mut derived = false;
+                for a in st.attrs.iter().filter(|a| a.path().is_ident("derive")) {
+                    let _ = a.parse_nested_meta(|m| {
+                        derived |= m.path.segments.last().is_some_and(|s| s.ident == "Default");
+                        Ok(())
+                    });
+                }
+                if derived {
+                    out.insert(path(st.ident.to_string()));
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -532,6 +580,7 @@ pub fn check_in_place(out: &mut elab::Output, krate: &Crate, c: &Checked, infos:
         }
         ip.modules.insert(info.name.clone(), segs.clone());
         host_struct_fields(&text, &mut ip.host_fields, &mut seen_structs);
+        host_defaults(&text, &segs, &mut ip.defaults);
         files.push((segs, path, text));
     }
     if files.is_empty() {
@@ -624,7 +673,7 @@ pub fn check_in_place(out: &mut elab::Output, krate: &Crate, c: &Checked, infos:
         k.push_str(&format!("host {} {}\n", l.name, hex(&sha256(c.sm.get(l.file).map(|f| f.text.as_bytes()).unwrap_or_default()))));
     }
     k.push_str(&format!("entries {}\n", hex(&sha256(format!("{entries:?}{:?}{:?}{:?}{:?}", c.lift_facts.instances, c.lift_facts.open_instances, c.lift_facts.test_hook, c.lift_facts.mir_host_types).as_bytes()))));
-    k.push_str(&format!("budget {INITIAL} {EVALS} {ROUNDS} {STEPS} {SEED} {}\n", super::LITERAL_CASES));
+    k.push_str(&format!("budget {INITIAL} {EVALS} {ROUNDS} {STEPS} {SEED} {} fixed {MAX_INPUT_ELEMS} {FIXED_EVALS}\n", super::LITERAL_CASES));
     k.push_str(&super::literal_key(c));
     k.push_str(&super::items_key(krate));
     rep.key = hex(&sha256(k.as_bytes()));
@@ -670,10 +719,24 @@ pub fn check_in_place(out: &mut elab::Output, krate: &Crate, c: &Checked, infos:
         g.pre_out = Some(po);
     }
     let plans = g.plans(&entries, &mut rep);
+    // (a fixed parameter: the harness is built first, and writes the host's
+    // value of each fixed type before the inputs are generated)
+    let fixed = fixed_types(&plans);
+    let mut built = None;
+    if !fixed.is_empty() && rep.errors.is_empty() {
+        match build_in_place(&g, &plans, &fixed, &files, &tree, &host, cfg).and_then(|exe| fixed_values(&mut g, &fixed, plans.len(), &exe, cfg).map(|()| exe)) {
+            Ok(exe) => built = Some(exe),
+            Err(e) => rep.errors.push(e),
+        }
+    }
     let cases = g.run(&plans, &mut rep);
     rep.cases = cases.len();
     if rep.errors.is_empty() {
-        match harness_in_place(&g, &plans, &cases, &files, &tree, &host, cfg) {
+        let exe = match built {
+            Some(exe) => Ok(exe),
+            None => build_in_place(&g, &plans, &fixed, &files, &tree, &host, cfg),
+        };
+        match exe.and_then(|exe| run_in_place(&g, &plans, &cases, &exe, cfg)) {
             Ok(outputs) => {
                 let rustc = compare(&g, &plans, &cases, &outputs, &mut rep);
                 let panics = super::literal::compare(&g, &plans, &cases, &rustc, &lits, &mut rep);
@@ -1119,9 +1182,52 @@ impl HostCrate {
     }
 }
 
-/// Writes the copy of the host crate with the harness, builds it with
-/// cargo and runs it; returns its output line by case.
-fn harness_in_place(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], files: &[(Vec<String>, PathBuf, String)], tree: &[(PathBuf, Vec<u8>)], host: &HostCrate, cfg: &Config) -> Result<Vec<String>, String> {
+/// The types of the fixed parameters of `plans` ([`Plan::fixed`]), each
+/// once, in order.
+fn fixed_types(plans: &[Plan<'_>]) -> Vec<Ty> {
+    let mut out: Vec<Ty> = Vec::new();
+    for p in plans {
+        for &i in &p.fixed {
+            let t = p.params[i].peel_refs().clone();
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
+/// Reads the host's value of each fixed type (`fixed`, in order) from the
+/// built harness `exe`: its entries after the plans' (`n_plans + k`) write
+/// `<T as Default>::default()`; each is read back as the kernel term of
+/// its type, once ([`Gen::fixed`]). A panic, an unreadable value or one
+/// the kernel cannot build fails the check.
+fn fixed_values(g: &mut Gen<'_>, fixed: &[Ty], n_plans: usize, exe: &Path, cfg: &Config) -> Result<(), String> {
+    let dir = &cfg.work_dir;
+    let text: String = (0..fixed.len()).map(|k| format!("{k} {}\n", n_plans + k)).collect();
+    std::fs::write(dir.join("cases.txt"), &text).map_err(|e| format!("cannot write the cases: {e}"))?;
+    let outs = run_harness(exe, dir, fixed.len())?;
+    for (t, o) in fixed.iter().zip(&outs) {
+        let rt = g.rust_ty(t)?;
+        if let Some(msg) = o.strip_prefix("PANIC\t") {
+            return Err(format!("the host's `{rt}::default()` panicked in the harness ({msg}): the functions taking it cannot be compared"));
+        }
+        let j = J::parse(o).map_err(|e| format!("the harness wrote an unreadable `{rt}::default()` ({e})"))?;
+        let tm = g.conv().term(t, &j).map_err(|e| format!("the host's `{rt}::default()` is not a value of the lifted type ({e})"))?;
+        drop(j);
+        // (its equal subterms shared: a table's millions of literals are a
+        // few thousand values, its arrays' types and length proofs one each,
+        // and the kernel's evaluator evaluates a shared node once)
+        g.fixed.insert(tkey(t), crate::mir::simproof::hashcons(&tm));
+    }
+    Ok(())
+}
+
+/// Writes the copy of the host crate with the harness and builds it with
+/// cargo; returns the harness binary. Its entries are the plans' harness
+/// functions, then one per fixed type (`fixed`) writing the host's
+/// `Default` value of it ([`fixed_values`]).
+fn build_in_place(g: &Gen<'_>, plans: &[Plan<'_>], fixed: &[Ty], files: &[(Vec<String>, PathBuf, String)], tree: &[(PathBuf, Vec<u8>)], host: &HostCrate, cfg: &Config) -> Result<PathBuf, String> {
     let Some(ip) = &g.ip else { return Err("not an in-place harness".into()) };
     let mut em = Emit { g, readers: BTreeMap::new(), writers: BTreeMap::new() };
     // the harness functions, in the modules of their files
@@ -1132,6 +1238,14 @@ fn harness_in_place(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], files: &[(V
         let home = Spell::access(segs);
         entry_code.entry(home.clone()).or_default().push_str(&entry_fn(&mut em, g, pi, p, "pub ")?);
         arms.push(format!("{pi} => {home}::__e{pi}(&mut t)"));
+    }
+    // the host's value of each fixed type (in the module of its writer)
+    for (k, t) in fixed.iter().enumerate() {
+        em.writer(t)?;
+        let rt = g.rust_ty(t)?;
+        let home = g.ip_home(t);
+        entry_code.entry(home.clone()).or_default().push_str(&format!("    pub fn __d{k}() -> ::std::string::String {{\n        let v: {rt} = <{rt} as ::core::default::Default>::default();\n        let mut o = ::std::string::String::new();\n        __W::w(&v, &mut o);\n        o\n    }}\n"));
+        arms.push(format!("{} => {home}::__d{k}()", plans.len() + k));
     }
     // the code of each module: readers, writers, harness functions
     let common = ip.common();
@@ -1219,18 +1333,6 @@ pub use self::{COMMON}::run as {RUN};
         w("Cargo.lock", &host.lock)?;
     }
     w("harness_main.rs", &format!("fn main() {{\n    {}::{RUN}();\n}}\n", host.lib_name))?;
-    // the cases
-    let mut text = String::new();
-    for (ci, c) in cases.iter().enumerate() {
-        let p = &plans[c.plan];
-        let mut toks = vec![ci.to_string(), c.plan.to_string()];
-        for (t, a) in p.params.iter().zip(&c.args) {
-            tokens(g, t, a, &mut toks)?;
-        }
-        text.push_str(&toks.join(" "));
-        text.push('\n');
-    }
-    std::fs::write(dir.join("cases.txt"), &text).map_err(|e| format!("cannot write the cases: {e}"))?;
     // build the copy (its own target directory; the build's jobserver)
     let target = dir.join("target");
     let mut cmd = Command::new(&cfg.cargo);
@@ -1267,8 +1369,20 @@ pub use self::{COMMON}::run as {RUN};
             Err(e) => return Err(format!("waiting for cargo: {e}")),
         }
     }
-    let exe = target.join("debug").join(if cfg!(windows) { "sandblaster_conformance.exe" } else { "sandblaster_conformance" });
-    run_harness(&exe, dir, cases.len())
+    Ok(target.join("debug").join(if cfg!(windows) { "sandblaster_conformance.exe" } else { "sandblaster_conformance" }))
+}
+
+/// Writes the cases file and runs the built harness `exe` on it; returns
+/// its output line by case.
+fn run_in_place(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], exe: &Path, cfg: &Config) -> Result<Vec<String>, String> {
+    let dir = &cfg.work_dir;
+    let mut text = String::new();
+    for (ci, c) in cases.iter().enumerate() {
+        text.push_str(&case_line(g, plans, ci, c)?);
+        text.push('\n');
+    }
+    std::fs::write(dir.join("cases.txt"), &text).map_err(|e| format!("cannot write the cases: {e}"))?;
+    run_harness(exe, dir, cases.len())
 }
 
 #[cfg(test)]
@@ -1368,5 +1482,27 @@ mod tests {
         assert_eq!(out.get("Lut"), Some(&vec![("lo".to_string(), "[u128;4]".to_string())]));
         host_struct_fields("pub struct Lut(u8);\n", &mut out, &mut seen);
         assert_eq!(out.get("Lut"), None);
+    }
+
+    /// The types the host gives a `Default` value (stage prover-gaps: a
+    /// parameter too large to generate, an engine with its tables, is fixed
+    /// to it), by host path: `impl Default for T` under any spelling of the
+    /// trait's path and with generics, and `#[derive(Default)]`. Negative
+    /// twins: another trait named `Default`'s method, an inherent `default`,
+    /// a negative impl, a derive without `Default`, another file's module
+    /// path.
+    #[test]
+    fn the_types_the_host_gives_a_default_value() {
+        let segs = vec!["engine".to_string(), "engine_neon".to_string()];
+        let mut out = HashSet::new();
+        host_defaults("pub struct Neon;\nimpl Default for Neon { fn default() -> Self { Neon } }\nimpl ::core::default::Default for Scalar { fn default() -> Self { todo!() } }\nimpl<F: Family> std::default::Default for Pos<F> { fn default() -> Self { todo!() } }\n#[derive(Clone, Default)]\npub struct Plain(u8);\n", &segs, &mut out);
+        let want: HashSet<String> = ["Neon", "Scalar", "Pos", "Plain"].iter().map(|n| format!("crate::engine::engine_neon::{n}")).collect();
+        assert_eq!(out, want);
+        let mut none = HashSet::new();
+        host_defaults("impl Neon { fn default() -> Self { Neon } }\nimpl Clone for Neon { fn clone(&self) -> Self { *self } }\nimpl !Default for Neon {}\n#[derive(Clone, Copy)]\npub struct NoDefault(u8);\nimpl DefaultLike for Neon {}\n", &segs, &mut none);
+        assert!(none.is_empty(), "{none:?}");
+        let mut root = HashSet::new();
+        host_defaults("#[derive(Default)]\npub struct T;\n", &[], &mut root);
+        assert_eq!(root, HashSet::from(["crate::T".to_string()]));
     }
 }

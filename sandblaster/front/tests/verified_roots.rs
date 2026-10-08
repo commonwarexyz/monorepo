@@ -156,6 +156,89 @@ fn the_rs_engine_root_reads_the_engine_trait_at_both_engines() {
     assert!(c.render().contains("engine_scalar::Scalar"), "{}", c.render());
 }
 
+/// The memory-safety statement of DESIGN-UNSAFE-SIMD §5.3 (the review's F4,
+/// stage soundness-fixes), generated from the reading's own facts
+/// (`mir::safety`), states what the hand-written one in the design record
+/// states: `mul_neon`'s one pointer, formed by `as_mut_ptr` from the chunk
+/// `chunk` (a mutable 64-byte base reached through its `&mut` parameter
+/// `x`, A3), its 6 moves and its 4 loads and 4 stores of 16 bytes at
+/// offsets 0, 16, 32 and 48, its 2 calls of `mul_128`, NEON its own
+/// `#[target_feature]`; `mul_128`'s 8 shared pointers formed by
+/// `ptr::from_ref` from the `u128` rows `lut.lo[0..4]` and `lut.hi[0..4]`,
+/// one 16-byte load each at offset 0, its intrinsics' NEON static on the
+/// target; `<Neon as Engine>::mul`'s call of `mul_neon`, a
+/// `#[target_feature(enable = "neon")]` function; `muladd_128`'s call of
+/// `mul_128`; `<Scalar as Engine>::mul`, safe code. The record prints the
+/// statement and the admitted library `unsafe fn`s (A-S7: `add`, `sub`,
+/// `offset`). Twin: the records of code without a pointer or an intrinsic
+/// (the MMR) print neither.
+#[test]
+fn the_rs_engine_record_states_its_memory_safety() {
+    use sandblaster_front::mir::safety;
+    let c = check(RS_ENGINE);
+    assert!(c.ok(), "{}", c.render());
+    let mm = c.lift_facts.mir_loaded.first().expect("the extraction");
+    let read: Vec<(String, String)> = c.lift_facts.mir_read.iter().map(|(n, k, _)| (n.clone(), k.clone())).collect();
+    let by_key: std::collections::BTreeMap<&str, &str> = read.iter().map(|(n, k)| (k.as_str(), n.as_str())).collect();
+    let named = |k: &str| by_key.get(k).map(|n| n.to_string());
+    let fx = |suffix: &str| -> safety::FnFacts {
+        let (n, k) = read.iter().find(|(n, _)| n.ends_with(suffix)).unwrap_or_else(|| panic!("no `{suffix}` in {read:?}"));
+        safety::facts(&mm.loaded.m, k, n, &named).expect("facts")
+    };
+    // `mul_neon`
+    let f = fx("mul_neon");
+    let [fam] = f.families.as_slice() else { panic!("{f:?}") };
+    assert_eq!((fam.what.as_str(), fam.mutable, fam.base_bytes, fam.source.as_str(), fam.params.as_slice(), fam.moves), ("as_mut_ptr", true, Some(64), "chunk", &["x".to_string()][..], 6), "{fam:?}");
+    let at = |store: bool| -> Vec<Option<u64>> { fam.accesses.iter().filter(|a| a.store == store && a.name == if store { "vst1q_u8" } else { "vld1q_u8" } && a.bytes == 16).map(|a| a.off).collect() };
+    for store in [false, true] {
+        assert_eq!(at(store), [Some(0), Some(16), Some(32), Some(48)], "{fam:?}");
+    }
+    assert_eq!(f.calls.iter().map(|(k, n)| (k.rsplit("::").next().unwrap().to_string(), *n)).collect::<Vec<_>>(), [("mul_128".to_string(), 2)], "{f:?}");
+    assert!(f.own_features.contains(&"neon".to_string()) && f.needs.contains("neon"), "{f:?}");
+    // `mul_128`
+    let f = fx("mul_128");
+    assert_eq!(f.families.len(), 8, "{f:?}");
+    let srcs: Vec<&str> = f.families.iter().map(|x| x.source.as_str()).collect();
+    assert_eq!(srcs, ["lut.lo[0]", "lut.lo[1]", "lut.lo[2]", "lut.lo[3]", "lut.hi[0]", "lut.hi[1]", "lut.hi[2]", "lut.hi[3]"]);
+    for fam in &f.families {
+        assert_eq!((fam.what.as_str(), fam.mutable, fam.base_bytes, fam.moves, fam.params.len()), ("ptr::from_ref", false, Some(16), 0, 0), "{fam:?}");
+        assert_eq!(fam.accesses, [safety::Access { name: "vld1q_u8".into(), store: false, bytes: 16, off: Some(0) }], "{fam:?}");
+    }
+    for i in ["vld1q_u8", "vqtbl1q_u8", "vandq_u8", "vshrq_n_u8", "veorq_u8", "vdupq_n_u8"] {
+        assert!(f.intrinsics.contains(i), "{i}: {f:?}");
+    }
+    assert!(f.own_features.is_empty() && f.needs.contains("neon") && mm.loaded.m.static_facts.as_ref().is_some_and(|s| s.contains(&"neon".to_string())), "{f:?}");
+    // `<Neon as Engine>::mul`, `muladd_128`, `<Scalar as Engine>::mul`
+    let f = fx("Neon::mul");
+    assert!(f.families.is_empty() && f.tf_calls.iter().any(|(k, t)| k.ends_with("mul_neon") && t.contains(&"neon".to_string())), "{f:?}");
+    let f = fx("muladd_128");
+    assert!(f.families.is_empty() && f.calls.iter().any(|(k, n)| k.ends_with("mul_128") && *n == 1), "{f:?}");
+    let f = fx("Scalar::mul");
+    assert!(f.families.is_empty() && f.intrinsics.is_empty() && f.tf_calls.is_empty(), "{f:?}");
+    // the record
+    let rec = sandblaster_front::driver::lifted::memory_safety(&c.lift_facts);
+    eprintln!("{rec}");
+    for want in [
+        "1 raw pointer formed by `as_mut_ptr` from `chunk` (`[u8; 64]`: a mutable base of 64 bytes",
+        "reached through the `&mut` parameter `x`, assumed to alias no other parameter (A3)",
+        "6 moves and 4 loads (`vld1q_u8`, 16 bytes at offsets 0, 16, 32 and 48) and 4 stores (`vst1q_u8`, 16 bytes at offsets 0, 16, 32 and 48), each inside the base",
+        "8 raw pointers formed by `ptr::from_ref` from `lut.lo[0]`, `lut.lo[1]`, `lut.lo[2]`, `lut.lo[3]`, `lut.hi[0]`, `lut.hi[1]`, `lut.hi[2]` and `lut.hi[3]` (`u128`: a shared base of 16 bytes",
+        "through each 1 load (`vld1q_u8`, 16 bytes at offset 0), each inside the base",
+        "a `#[target_feature(enable = \"neon\")]` function",
+        "Its intrinsics (`vld1q_u8` and `vst1q_u8`) need `neon`: `neon` enabled by its own `#[target_feature]`.",
+        "need `neon`: `neon` enabled statically on `arm64-apple-macosx` (the build's static target features, A-S3).",
+        "No intrinsic: safe code.",
+        "The library `unsafe fn`s crate code may call",
+        "core::ptr::mut_ptr::<impl *mut T>::add",
+    ] {
+        assert!(rec.contains(want), "{want}\n{rec}");
+    }
+    assert_eq!(rec.matches("// Memory safety").count(), 1, "one section per extraction:\n{rec}");
+    // twin: code without a pointer or an intrinsic has no such section
+    let c = check(MMR);
+    assert_eq!(sandblaster_front::driver::lifted::memory_safety(&c.lift_facts), "");
+}
+
 /// Every root passes the front end's stack check (DESIGN.md §3.7), and the
 /// verifier's non-tail recursion `Subtree::reconstruct_digest` (depth
 /// bounded by its attachment, `decreases(self.height, max = 64)`) has an

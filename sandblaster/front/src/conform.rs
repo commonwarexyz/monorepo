@@ -56,6 +56,20 @@
 //!    contract compared on no input fails the check: this also catches a
 //!    condition that never holds on the function's domain, whose panic
 //!    theorem would hold vacuously.
+//! 6. **Fixed inputs** (in place). A parameter whose type holds more than
+//!    [`MAX_INPUT_ELEMS`] elements (an engine with its multiplication
+//!    tables, 8 MiB) is not generated: when the host gives its type a
+//!    `Default` value (`impl Default for T`, `#[derive(Default)]`), it is
+//!    fixed to that value ([`Plan::fixed`]). The harness writes the host's
+//!    value once (`<T as Default>::default()`, read back as the model's
+//!    argument: one kernel term, built once) and passes the host's own to
+//!    every call; the other parameters vary as usual, on a smaller budget
+//!    ([`FIXED_EVALS`] inputs: each evaluation builds the value whole), and
+//!    the model is evaluated by the reference strategy (the kernel's closed
+//!    evaluation type-checks its term first, and checking a value of
+//!    millions of elements outgrows the memory cap). Without a `Default`,
+//!    or as a state or under a precondition, the function is skipped,
+//!    named.
 //!
 //! Bounded (a fixed evaluation budget per function; seconds for the varint
 //! pilot's 64 functions) and cached: a pass is recorded in the work
@@ -101,7 +115,7 @@ pub use in_place::{check_in_place, host_inputs, HostInputs};
 pub use literal::LITERAL_CASES;
 
 /// This check's version (part of the cache key).
-pub const VERSION: &str = "sandblaster-lift-conformance/6";
+pub const VERSION: &str = "sandblaster-lift-conformance/7";
 /// The buffer model in Rust (the harness's crate `bytes`).
 pub const BYTES_SHIM: &str = include_str!("../lift/conform_bytes.rs");
 /// The host traits the lift knows (the harness root).
@@ -116,8 +130,13 @@ const ROUNDS: usize = 4;
 /// Kernel steps per evaluation.
 const STEPS: u64 = 500_000_000;
 /// The largest input (scalar elements, [`Gen::elems`]) the check builds:
-/// a larger one (a 65,536-entry table of an engine) is skipped, named.
+/// a larger one (a 65,536-entry table of an engine) is fixed to the host's
+/// `Default` value (in place, [`Plan::fixed`]) or skipped, named.
 const MAX_INPUT_ELEMS: u64 = 1 << 16;
+/// Inputs per function with a fixed parameter ([`Plan::fixed`]), in one
+/// round: each evaluation builds the fixed value whole (millions of
+/// elements), so the budget is a few inputs, not [`EVALS`].
+const FIXED_EVALS: usize = 8;
 /// Wall-clock limit of the harness run.
 const RUN_TIMEOUT: Duration = Duration::from_secs(120);
 /// The harness module appended to the source copy.
@@ -654,6 +673,19 @@ struct Plan<'a> {
     /// The original returns `impl Trait` (`ConformEntry::opaque_ret`): only
     /// inputs of its panic region are compared (no result is read back).
     panic_only: bool,
+    /// The parameters fixed to the host's `Default` value of their type (in
+    /// place: a type holding more than [`MAX_INPUT_ELEMS`] elements, passed
+    /// by value or by reference, of a function without a precondition):
+    /// the harness passes `<T as Default>::default()`, the model its value
+    /// as the harness wrote it ([`Gen::fixed`]); a case holds a placeholder
+    /// there ([`fixed_placeholder`]).
+    fixed: Vec<usize>,
+}
+
+/// A case's argument at a fixed parameter ([`Plan::fixed`]): its value is
+/// the host's, never generated, converted or written as tokens.
+fn fixed_placeholder(name: &str) -> J {
+    J::Str(format!("(the host's `{name}::default()`)"))
 }
 
 /// The model's outcome of an input on which the function's panic contract
@@ -693,6 +725,10 @@ struct Gen<'a> {
     /// it panics are compared too (rustc panics, the literal reading panics).
     pre_dom: HashMap<ItemId, Option<GlobalId>>,
     pre_out: Option<&'a elab::Output>,
+    /// In-place modules: the host's `Default` value of each fixed
+    /// parameter's type ([`Plan::fixed`]), by type key: its kernel term,
+    /// built once from what the harness wrote (`in_place::fixed_values`).
+    fixed: HashMap<String, Tm>,
 }
 
 /// A `core::arch` vector as the array of its lanes, lane 0 first (its
@@ -721,7 +757,25 @@ fn num(j: &J) -> Option<u128> {
 
 impl<'a> Gen<'a> {
     fn new(out: &'a elab::Output, krate: &'a Crate, c: &'a Checked, info: &LiftedInfo) -> Gen<'a> {
-        Gen { out, krate, c, module: info.name.clone(), hosts: c.lifted.iter().filter(|l| l.host).map(|l| l.name.clone()).collect(), harvest: HashMap::new(), harvest_shapes: HashMap::new(), pools: HashMap::new(), rng: Rng(SEED), ip: None, pre: HashMap::new(), pre_dom: HashMap::new(), pre_out: None }
+        Gen { out, krate, c, module: info.name.clone(), hosts: c.lifted.iter().filter(|l| l.host).map(|l| l.name.clone()).collect(), harvest: HashMap::new(), harvest_shapes: HashMap::new(), pools: HashMap::new(), rng: Rng(SEED), ip: None, pre: HashMap::new(), pre_dom: HashMap::new(), pre_out: None, fixed: HashMap::new() }
+    }
+
+    /// The kernel term of argument `i` of a case of `p`: the fixed value's
+    /// term ([`Plan::fixed`]) or the conversion of `j`.
+    fn arg_term(&self, p: &Plan<'_>, i: usize, j: &J) -> Result<Tm, String> {
+        if p.fixed.contains(&i) {
+            return self.fixed.get(&tkey(p.params[i].peel_refs())).cloned().ok_or_else(|| format!("no value of the fixed parameter {i} (the harness did not write the host's)"));
+        }
+        self.conv().term(&p.params[i], j)
+    }
+
+    /// Whether `t` is a data type of the in-place files to which the host
+    /// gives a `Default` value ([`in_place::Spell::defaults`]).
+    fn host_default(&self, t: &Ty) -> bool {
+        match (&self.ip, t.peel_refs()) {
+            (Some(ip), Ty::Adt(id, _)) => ip.defaults.contains(&self.krate.item(*id).path.to_string()),
+            _ => false,
+        }
     }
 
     fn conv(&self) -> Conv<'_> {
@@ -803,14 +857,38 @@ impl<'a> Gen<'a> {
                 continue;
             }
             // (an input of more than `MAX_INPUT_ELEMS` elements: each kernel
-            // evaluation would build it whole, beyond the per-function budget)
-            if let Some(n) = params.iter().map(|t| self.elems(t)).find(|n| *n > MAX_INPUT_ELEMS) {
+            // evaluation would build it whole, beyond the per-function
+            // budget; in place, a parameter of a type the host gives a
+            // `Default` value, passed by value or by reference to a function
+            // without a precondition, is fixed to that value instead)
+            let mut fixed = Vec::new();
+            let mut big = None;
+            for (i, t) in params.iter().enumerate() {
+                let n = self.elems(t);
+                if n <= MAX_INPUT_ELEMS {
+                    continue;
+                }
+                if pre.is_none() && !e.opaque_ret && matches!(e.params[i], ParamPass::Value | ParamPass::Ref) && self.host_default(t) {
+                    fixed.push(i);
+                } else {
+                    big = Some(n);
+                    break;
+                }
+            }
+            if let Some(n) = big {
                 skip(&mut er, format!("an input holds {n} elements (a table of the engine, fixed in its type): beyond the check's evaluation budget ({MAX_INPUT_ELEMS})"), rep);
                 continue;
             }
+            for &i in &fixed {
+                let name = match params[i].peel_refs() {
+                    Ty::Adt(id, _) => self.krate.item(*id).name.clone(),
+                    t => format!("{t:?}"),
+                };
+                rep.notes.push(format!("`{}`: its `{name}` parameter holds {} elements: fixed to the host's `{name}::default()` (its value as the harness wrote it is the model's), compared on {FIXED_EVALS} input(s)", e.lifted, self.elems(&params[i])));
+            }
             let invariant_arg = params.iter().any(|t| self.has_invariant(t));
             rep.entries.push(er);
-            plans.push(Plan { e, index: rep.entries.len() - 1, g, params, ret: f.ret.clone(), comps, state_of, callee, invariant_arg, pre, pre_dom, panic_only: e.opaque_ret });
+            plans.push(Plan { e, index: rep.entries.len() - 1, g, params, ret: f.ret.clone(), comps, state_of, callee, invariant_arg, pre, pre_dom, panic_only: e.opaque_ret, fixed });
         }
         plans
     }
@@ -1047,6 +1125,19 @@ impl<'a> Gen<'a> {
     }
 
     /// Candidate values of a parameter type (cached by type).
+    /// The candidates of parameter `i` of `p`: the placeholder of a fixed
+    /// parameter ([`Plan::fixed`]), else the pool of its type.
+    fn pool_of(&mut self, p: &Plan<'_>, i: usize, t: &Ty) -> Vec<J> {
+        if p.fixed.contains(&i) {
+            let name = match t.peel_refs() {
+                Ty::Adt(id, _) => self.krate.item(*id).name.clone(),
+                other => format!("{other:?}"),
+            };
+            return vec![fixed_placeholder(&name)];
+        }
+        self.pool(t, 0)
+    }
+
     fn pool(&mut self, t: &Ty, depth: u32) -> Vec<J> {
         if let Some(a) = lanes_ty(t) {
             return self.pool(&a, depth);
@@ -1101,8 +1192,8 @@ impl<'a> Gen<'a> {
     fn eval(&self, p: &Plan<'_>, args: &[J], reference: &mut usize) -> Result<Vec<J>, Option<String>> {
         let conv = self.conv();
         let mut tms: Vec<(Rel, Tm)> = Vec::new();
-        for (t, j) in p.params.iter().zip(args) {
-            tms.push((Rel::Rel, conv.term(t, j).map_err(|_| None)?));
+        for (i, j) in args.iter().enumerate().take(p.params.len()) {
+            tms.push((Rel::Rel, self.arg_term(p, i, j).map_err(|_| None)?));
         }
         if let Some(chk) = p.pre {
             // the precondition, decided by its checker: an input that does
@@ -1132,7 +1223,13 @@ impl<'a> Gen<'a> {
             });
         }
         let term = mk::apps(mk::global(p.g), tms);
-        let v = if p.invariant_arg {
+        // (erased proofs in an argument, or a fixed one: the reference
+        // strategy. The kernel's closed evaluation type-checks its term
+        // first, and its check of a fixed value of millions of elements
+        // outgrows the memory cap where the evaluation does not: the scalar
+        // engine's 8 MiB table, more than 3.5 GB to check, 1.4 GB to
+        // evaluate.)
+        let v = if p.invariant_arg || !p.fixed.is_empty() {
             *reference += 1;
             crate::driver::stage::eval_reference(&self.out.env, &term, STEPS).map_err(Some)?
         } else {
@@ -1403,15 +1500,26 @@ impl<'a> Gen<'a> {
         let mut corpora: Vec<Vec<Vec<J>>> = plans.iter().map(|_| Vec::new()).collect();
         for round in 0..ROUNDS {
             for (pi, p) in plans.iter().enumerate() {
-                let budget = EVALS * (round + 1) / ROUNDS;
+                // (a fixed parameter: `FIXED_EVALS` candidates, in the first
+                // round, each evaluation building the fixed value whole)
+                let fixed = !p.fixed.is_empty();
+                let budget = if !fixed {
+                    EVALS * (round + 1) / ROUNDS
+                } else if round == 0 {
+                    FIXED_EVALS
+                } else {
+                    0
+                };
                 if evals[pi] >= budget || p.panic_only {
                     continue;
                 }
                 self.rng = Rng(SEED ^ meval::hash_str(&p.e.lifted) ^ (round as u64).wrapping_mul(0x9E37_79B9));
-                let pools: Vec<Vec<J>> = p.params.iter().map(|t| self.pool(t, 0)).collect();
+                let pools: Vec<Vec<J>> = p.params.iter().enumerate().map(|(i, t)| self.pool_of(p, i, t)).collect();
                 // half of this round's evaluations for candidates, the rest
                 // for mutants of the inputs that showed a new outcome class
-                let fresh = ((budget - evals[pi]) / 2).clamp(1, INITIAL);
+                // (a fixed parameter: the first `FIXED_EVALS` of the whole
+                // shuffled candidate list, a sample of every strategy)
+                let fresh = if fixed { INITIAL } else { ((budget - evals[pi]) / 2).clamp(1, INITIAL) };
                 let mut queue: Vec<Vec<J>> = combine(&pools, fresh, &mut self.rng);
                 let corpus = &mut corpora[pi];
                 let mut qi = 0;
@@ -1427,7 +1535,8 @@ impl<'a> Gen<'a> {
                         let parent = corpus[self.rng.below(corpus.len() as u64) as usize].clone();
                         let i = self.rng.below(parent.len().max(1) as u64) as usize;
                         let mut child = parent.clone();
-                        if let (Some(t), Some(a)) = (p.params.get(i), parent.get(i)) {
+                        // (a fixed parameter is never mutated)
+                        if let (Some(t), Some(a), false) = (p.params.get(i), parent.get(i), p.fixed.contains(&i)) {
                             child[i] = self.mutate(t, a, 0);
                         }
                         child
@@ -1506,7 +1615,7 @@ impl<'a> Gen<'a> {
         let mut found: Vec<Vec<J>> = Vec::new();
         let mut added = 0;
         self.rng = Rng(SEED ^ meval::hash_str(&p.e.lifted) ^ 0x7061_6e69_635f_7265);
-        let pools: Vec<Vec<J>> = p.params.iter().map(|t| self.pool(t, 0)).collect();
+        let pools: Vec<Vec<J>> = p.params.iter().enumerate().map(|(i, t)| self.pool_of(p, i, t)).collect();
         let mut queue = combine(&pools, PANIC_TRIES, &mut self.rng);
         let mut tries = 0;
         let mut qi = 0;
@@ -1939,6 +2048,20 @@ impl Emit<'_, '_> {
     }
 }
 
+/// The cases file's line of case `ci`: its index, its plan's, then the
+/// tokens of its arguments (none at a fixed parameter, [`Plan::fixed`]: the
+/// harness passes the host's own value there).
+fn case_line(g: &Gen<'_>, plans: &[Plan<'_>], ci: usize, c: &Case) -> Result<String, String> {
+    let p = &plans[c.plan];
+    let mut toks = vec![ci.to_string(), c.plan.to_string()];
+    for (i, (t, a)) in p.params.iter().zip(&c.args).enumerate() {
+        if !p.fixed.contains(&i) {
+            tokens(g, t, a, &mut toks)?;
+        }
+    }
+    Ok(toks.join(" "))
+}
+
 /// The input tokens of a value (the order the readers read them).
 fn tokens(g: &Gen<'_>, t: &Ty, j: &J, out: &mut Vec<String>) -> Result<(), String> {
     if let Some(a) = lanes_ty(t) {
@@ -2008,6 +2131,13 @@ fn entry_fn(em: &mut Emit<'_, '_>, g: &Gen<'_>, pi: usize, p: &Plan<'_>, vis: &s
     let mut s = format!("    {vis}fn __e{pi}(t: &mut __T<'_>) -> ::std::string::String {{\n");
     let mut call_args = Vec::new();
     for (i, (pass, t)) in p.e.params.iter().zip(&p.params).enumerate() {
+        // (a fixed parameter: the host's own value, no tokens read)
+        if p.fixed.contains(&i) {
+            let rt = g.rust_ty(t.peel_refs())?;
+            s.push_str(&format!("        let a{i}: {rt} = <{rt} as ::core::default::Default>::default();\n"));
+            call_args.push(if *pass == ParamPass::Ref { format!("&a{i}") } else { format!("a{i}") });
+            continue;
+        }
         let r = em.reader(t)?;
         let rt = g.rust_ty(t)?;
         // (a library newtype the lift reads as its field: converted)
@@ -2182,12 +2312,7 @@ fn harness(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], src: &str, hosts: &[
     // the cases
     let mut text = String::new();
     for (ci, c) in cases.iter().enumerate() {
-        let p = &plans[c.plan];
-        let mut toks = vec![ci.to_string(), c.plan.to_string()];
-        for (t, a) in p.params.iter().zip(&c.args) {
-            tokens(g, t, a, &mut toks)?;
-        }
-        text.push_str(&toks.join(" "));
+        text.push_str(&case_line(g, plans, ci, c)?);
         text.push('\n');
     }
     w("cases.txt", &text)?;

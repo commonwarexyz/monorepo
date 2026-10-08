@@ -48,6 +48,7 @@ pub mod literal;
 pub mod ptr;
 pub mod read;
 pub mod replay;
+pub mod safety;
 pub mod sexp;
 pub mod simproof;
 pub mod stmt;
@@ -142,6 +143,12 @@ pub struct ModuleNames {
     /// `-C target-feature` flags, when known: a build that changes the
     /// target's static features with them is refused (A-S3).
     pub codegen_flags: Option<(Option<String>, String)>,
+    /// The build's cfg set as far as it knows it (`target::build_cfg`: a
+    /// build script's features, builtin cfgs and `--cfg`s), when known: an
+    /// extraction whose `(cfg ..)` record differs from it there is refused,
+    /// and every extraction with the record when the build's rustflags make
+    /// it unknowable (`Err`).
+    pub build_cfg: Option<crate::target::BuildCfg>,
 }
 
 /// Host models a library type of rustc's MIR is read as (SEMANTICS.md
@@ -810,6 +817,29 @@ pub fn load(text: &str, sources: &dyn std::ops::Fn(&str) -> Option<Vec<u8>>, mut
     if !m.overflow_checks {
         return Err("the .sbmir file was extracted without overflow checks (the workspace's profiles build with them)".into());
     }
+    // compiled with extra rustflags (a negative twin's window extraction):
+    // the build compiles the crate without them, so another program
+    if let Some(f) = &m.rustflags
+        && !f.is_empty()
+    {
+        return Err(format!("the MIR was extracted with the rustflags {f:?} (`extract.sh --rustflags`, for a window extraction's negative twin only): the build compiles the crate without them (extract it again without `--rustflags`)"));
+    }
+    // the session's cfg set the MIR was built under is this build's, as far
+    // as the build knows its own (`target::build_sees`): the crate's
+    // features, the target's and the profile's cfgs, every `--cfg`; a body
+    // compiled under another configuration is another program, and a build
+    // whose rustflags change its configuration where its build script
+    // cannot see the result is refused (an extraction without the record,
+    // which the narrow reading's printer always writes, is not bound: the
+    // legacy rule, AUDIT.md §21.1)
+    if let (Some(rec), Some(build)) = (&m.cfg, &names.build_cfg) {
+        let build = build.as_ref().map_err(|e| format!("the MIR's configuration cannot be bound to this build's: {e}"))?;
+        let ours: BTreeSet<(String, Option<String>)> = rec.iter().filter(|(n, v)| crate::target::build_sees(n, v.is_some())).cloned().collect();
+        if &ours != build {
+            let only = |a: &BTreeSet<(String, Option<String>)>, b: &BTreeSet<(String, Option<String>)>| a.difference(b).map(|(n, v)| v.as_ref().map(|v| format!("{n}={v:?}")).unwrap_or(n.clone())).collect::<Vec<_>>().join(", ");
+            return Err(format!("the MIR was extracted under another configuration than this build's: only the extraction has [{}], only this build has [{}] (a body compiled under another configuration is another program: extract it again with this build's features and profile, `extract.sh --features .. --profile ..`)", only(&ours, build), only(build, &ours)));
+        }
+    }
     // the MIR is the image of one optimization level's passes: the readings'
     // own (`None`: an extraction older than the record, which `cargo check`
     // made at its default, this level)
@@ -889,13 +919,38 @@ pub fn load(text: &str, sources: &dyn std::ops::Fn(&str) -> Option<Vec<u8>>, mut
     Ok(Loaded { m, names, by_lifted, window: None })
 }
 
+/// A type definition with the text of every type the printer does not
+/// print blanked (for `load_window`'s comparison).
+fn adt_shape(d: &ir::AdtDef) -> String {
+    fn blank(t: &Ty) -> Ty {
+        match t {
+            Ty::Unsupported(_) => Ty::Unsupported(String::new()),
+            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(blank).collect()),
+            Ty::Array(e, n) => Ty::Array(Box::new(blank(e)), *n),
+            Ty::Slice(e) => Ty::Slice(Box::new(blank(e))),
+            Ty::Ref(m, e) => Ty::Ref(*m, Box::new(blank(e))),
+            Ty::Ptr(m, e) => Ty::Ptr(*m, Box::new(blank(e))),
+            Ty::Closure(p, c) => Ty::Closure(p.clone(), Box::new(blank(c))),
+            Ty::FnDef(p, ts) => Ty::FnDef(p.clone(), ts.iter().map(blank).collect()),
+            Ty::Simd(p, l, n) => Ty::Simd(p.clone(), Box::new(blank(l)), *n),
+            other => other.clone(),
+        }
+    }
+    let vs: Vec<_> = d.variants.iter().map(|v| (v.idx, &v.name, v.discr, v.fields.iter().map(|(n, t)| (n, blank(t))).collect::<Vec<_>>(), v.no_glue)).collect();
+    format!("{:?}", (&d.path, d.is_enum, d.is_union, d.args.iter().map(blank).collect::<Vec<_>>(), vs))
+}
+
 /// Parses the window extraction of `main`'s module (`window_mir = ".."`)
 /// and checks that it is the same program at MIR optimization level
-/// [`WINDOW_MIR_OPT_LEVEL`]: the level recorded, exactly; the same
-/// compiler, crate, module, overflow checks, target, exclusions, sources
-/// (by SHA-256: `main`'s were checked against the files) and roots; and
-/// every function of `main` with the same definition, item, parameters,
-/// return type, body presence and target features. Its other locals and
+/// [`WINDOW_MIR_OPT_LEVEL`]: the level recorded, exactly; every other
+/// header record the same as `main`'s (the compiler, crate, module,
+/// overflow checks, target, printer, static target features, byte order,
+/// codegen flags, rustflags, cfg set, exclusions, sources — by SHA-256:
+/// `main`'s were checked against the files —, roots and notes: all records but the level,
+/// so a record the printer adds is compared too); every type definition the
+/// two share the same; and every function of `main` with the same
+/// definition, item, parameters, return type, body presence and target
+/// features. Its other locals and
 /// its blocks differ by construction (the passes level 1 runs), and it may
 /// follow library functions `main` does not.
 pub fn load_window(text: &str, main: &mut Loaded) -> Result<(), String> {
@@ -905,21 +960,39 @@ pub fn load_window(text: &str, main: &mut Loaded) -> Result<(), String> {
         return Err(format!("the window extraction must be of -Zmir-opt-level={WINDOW_MIR_OPT_LEVEL} (`extract.sh --mir-opt-level {WINDOW_MIR_OPT_LEVEL}`); it records {:?}", w.mir_opt_level));
     }
     let same = |what: &str, a: String, b: String| if a == b { Ok(()) } else { Err(format!("the window extraction's {what} is {b}, the extraction's {a}")) };
-    same("compiler", m.rustc.clone(), w.rustc.clone())?;
-    same("crate", m.krate.clone(), w.krate.clone())?;
-    same("module", m.module.clone(), w.module.clone())?;
-    same("overflow checks", m.overflow_checks.to_string(), w.overflow_checks.to_string())?;
-    same("target", format!("{:?}", m.target), format!("{:?}", w.target))?;
-    same("exclusions", format!("{:?}", m.exclude), format!("{:?}", w.exclude))?;
-    same("sources", format!("{:?}", m.sources), format!("{:?}", w.sources))?;
-    same("roots", format!("{:?}", m.roots), format!("{:?}", w.roots))?;
+    // every header record is the extraction's but the optimization level,
+    // which is what the window extraction differs by (fail closed: a record
+    // the printer adds is compared too): the compiler, crate, module,
+    // overflow checks, target, printer, static target features, byte order,
+    // `-C target-cpu`, `-C target-feature`, rustflags, the cfg set (the
+    // crate's features among it), exclusions, sources, roots and notes. A
+    // body compiled under another configuration is another program, and
+    // the verdicts are carried to the extraction by source position (the
+    // review's F2: a window extraction made under `-C target-feature=+sm4`
+    // was accepted beside a default one).
+    fn header(s: &Sbmir) -> Vec<&(String, String)> {
+        const NOT_COMPARED: &[&str] = &["mir-opt-level"];
+        s.header.iter().filter(|(h, _)| !NOT_COMPARED.contains(&h.as_str())).collect()
+    }
+    let (hm, hw) = (header(m), header(&w));
+    if hm != hw {
+        let only = |a: &[&(String, String)], b: &[&(String, String)]| a.iter().filter(|r| !b.contains(r)).map(|r| r.1.clone()).collect::<Vec<_>>().join(" ");
+        return Err(format!("the window extraction's header records are not the extraction's (a body compiled under another configuration is another program; extract both with the same `extract.sh`): the window extraction has {}, the extraction {}", only(&hw, &hm), only(&hm, &hw)));
+    }
+    // every type definition the two have in common is the same (the text
+    // of a type the printer does not print aside: rustc's internal ids in
+    // it differ between runs, and no reading reads such a type)
+    for (k, a) in &m.adts {
+        if let Some(b) = w.adts.get(k)
+            && adt_shape(a) != adt_shape(b)
+        {
+            return Err(format!("the window extraction's definition of `{k}` is not the extraction's"));
+        }
+    }
     for (k, f) in &m.fns {
         let Some(g) = w.fns.get(k) else { return Err(format!("the window extraction has no `{k}`")) };
         let sig = |f: &Fn| format!("{} {:?} {} {:?} {:?} {} {:?}", f.def, f.item, f.argc, f.spread_arg, f.locals.iter().take(f.argc + 1).collect::<Vec<_>>(), f.has_body, f.target_features);
         same(&format!("signature of `{k}`"), sig(f), sig(g))?;
-    }
-    if m.unsafe_reading != w.unsafe_reading {
-        return Err("the window extraction and the extraction were made by different printers (`(unsafe-reading ..)`)".into());
     }
     // the window rule's verdicts on the formations of crate code, carried to
     // the extraction the readings read (DESIGN-UNSAFE-SIMD §2.6, A-S1)

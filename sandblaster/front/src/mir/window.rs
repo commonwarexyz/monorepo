@@ -24,16 +24,37 @@
 //!   derivations (a copy or move into a local, a `PtrToPtr` cast, `Offset`,
 //!   an admitted `cast`/`add`/`sub`/`offset` helper); a local reached from
 //!   two formations belongs to none (both refused);
-//! * its **ancestors** `A(F)`: `σ` (and the unsize temporary) and, closed
-//!   flow-insensitively over the body, every local that can reach memory
-//!   (its type holds a reference, a raw pointer or a lifetime; or it is the
-//!   base itself) and flows into an ancestor: the root local of any place an
-//!   assignment to an ancestor reads, borrows or casts (behind a dereference
-//!   or not), and every reference-carrying argument of a call whose result
-//!   or whose argument is an ancestor;
+//! * a place **lives in its root local** when it has no `Deref`: its memory
+//!   is part of that local's own storage (a field, an element, a variant's
+//!   field of it); a place with a `Deref` is memory behind the reference or
+//!   pointer that `Deref` reads, which a local's storage holds;
+//! * its **bases** `B(F)`: the locals whose own storage holds memory the
+//!   family can reach — the root local of the place a `&raw` formation
+//!   borrows when that place lives in it, and the root local of every place
+//!   that lives in its root local and is borrowed (`&`, `&mut`, `&raw`) by an
+//!   assignment to an ancestor (flow-insensitively, as the ancestors). A
+//!   reference can point only into a local's storage (made by borrowing a
+//!   place that lives there: a base), into memory behind another reference
+//!   (whose local is an ancestor by its type), into memory a parameter or a
+//!   call result reaches (from the caller, or from the call's
+//!   reference-carrying arguments: ancestors), or into constant or static
+//!   memory (immutable for the admitted types; no local holds it);
+//! * its **ancestors** `A(F)`: `σ` (and the unsize temporary), every base,
+//!   and, closed flow-insensitively over the body, every local that can
+//!   reach memory (its type holds a reference, a raw pointer or a lifetime)
+//!   and flows into an ancestor: the root local of any place an assignment
+//!   to an ancestor reads, borrows or casts (behind a dereference or not),
+//!   and every reference-carrying argument of a call whose result or whose
+//!   argument is an ancestor;
 //! * its **uses** `U(F)`: the points that read a member; its **window**
 //!   `W(F)`: the points other than `F` on a path from `F` to a use, the path
-//!   not passing `F` again.
+//!   not passing `F` again;
+//! * how a point **uses** a local ([`Use`]): it reads it (a copy, a shared
+//!   borrow, a length, a discriminant, an index), moves it whole or out of
+//!   a place of it, writes a place of it (an assignment's or a call's
+//!   destination), borrows a place of it mutably, marks its storage, drops a
+//!   place of it, or does anything (an unprinted statement or rvalue, a call
+//!   of an unprinted callee).
 //!
 //! **Rules**:
 //!
@@ -41,24 +62,34 @@
 //! * **W1** (no escape): every read of a member is a derivation into a
 //!   member, the pointer argument of an admitted load or store
 //!   (`ptr::MEM_INTRINSICS`), or a storage marker;
-//! * **W2** (mutable families): no point of the window mentions an ancestor
-//!   (read, write, borrow, move, drop, call argument), except the storage
-//!   marker of an ancestor that is not the base itself (a reference's
-//!   storage ending touches no referent);
-//! * **W3** (shared families): no point of the window assigns an ancestor,
-//!   borrows one mutably (`&mut`, `&raw mut`), or uses an ancestor of `&mut`
-//!   type;
+//! * **W2** (mutable families): no point of the window uses an ancestor in
+//!   any way, except the storage marker of an ancestor that is not a base (a
+//!   reference's storage ending touches no referent; a base's ends the
+//!   memory itself);
+//! * **W3** (shared families): a point of the window uses an ancestor only
+//!   to read it, to move a whole shared reference (its value), or to mark
+//!   the storage of one that is not a base; an ancestor of `&mut` type not
+//!   at all (it could write, or hand on the right to write). So no write,
+//!   mutable borrow, move of a base, of an owning value (a `Box` its new
+//!   owner could free) or out of memory, drop, storage end of a base or
+//!   unknown effect reaches the base while the snapshot is in use;
 //! * **W4**: a store's pointer belongs to a mutable family (L also reads a
 //!   store through a shared pointer as stuck).
 //!
 //! **Exactness**: in a window that passes W2, every access to the base goes
 //! through the family's one tag (Stacked Borrows: the raw tag above the
 //! reborrow, no other tag used before the last use; Tree Borrows: no foreign
-//! access to the reborrow in the window), so L's reading of the accesses as
-//! reads and writes of the base through its reference code is exact; W3
-//! keeps a shared family's snapshot equal to memory at every use. Two `&mut`
-//! parameters are not related here: their disjointness is the caller's
-//! (assumption A3), named per formation ([`Verdict::params`], A-S8).
+//! access to the reborrow in the window), and a base local's storage lives
+//! throughout, so L's reading of the accesses as reads and writes of the
+//! base through its reference code is exact; W3 keeps a shared family's
+//! snapshot equal to memory at every use. A use of the base through a
+//! reference made before `F` and used after it is either through an
+//! ancestor or refused by the borrow checker (its loan would be live where
+//! `F` borrows); a pointer made before `F` from the same base is another
+//! family, whose window holds `F`'s borrow of a base or ancestor it shares.
+//! Two `&mut` parameters are not related here: their disjointness is the
+//! caller's (assumption A3), named per formation ([`Verdict::params`],
+//! A-S8).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -182,36 +213,110 @@ fn rv_locals(rv: &Rvalue, out: &mut Vec<usize>) {
     }
 }
 
-/// Every local a point mentions (read, written, borrowed, its storage
-/// marked): `(local, as a storage marker)`.
-fn mentions(f: &Fn, p: Point) -> Vec<(usize, bool)> {
+/// How a point uses a local (the rules' view of a mention).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Use {
+    /// Read: a copied operand, a shared borrow (`&`, `&raw const`, a fake
+    /// borrow), a length, a discriminant, an index, a switch's or an
+    /// assertion's operand.
+    Read,
+    /// Moved whole (`move _l`).
+    MoveWhole,
+    /// Moved out of a place of it (`move _l.f`, `move (*_l)`).
+    MovePart,
+    /// Written: an assignment's or a call's destination, whole or a place of it.
+    Write,
+    /// A place of it borrowed mutably (`&mut`, `&raw mut`, any borrow kind
+    /// but `shared` and `fake`).
+    MutBorrow,
+    /// Its storage marked (`StorageLive`, `StorageDead`).
+    Storage,
+    /// A place of it dropped (`Drop`: its destructor runs through `&mut`).
+    Drop,
+    /// An unprinted statement, rvalue or callee: anything.
+    Unknown,
+}
+
+/// Every use a point makes of a local: `(local, how)` (a local may appear
+/// several times).
+fn local_uses(f: &Fn, p: Point) -> Vec<(usize, Use)> {
+    fn place(pl: &Place, u: Use, out: &mut Vec<(usize, Use)>) {
+        out.push((pl.local, u));
+        for pr in &pl.proj {
+            if let Proj::Index(l) = pr {
+                out.push((*l, Use::Read));
+            }
+        }
+    }
+    fn operand(o: &Operand, out: &mut Vec<(usize, Use)>) {
+        match o {
+            Operand::Copy(pl) => place(pl, Use::Read, out),
+            Operand::Move(pl) => place(pl, if pl.proj.is_empty() { Use::MoveWhole } else { Use::MovePart }, out),
+            Operand::Const(_) | Operand::RuntimeChecks(_) => {}
+        }
+    }
+    let all = || (0..f.locals.len()).map(|l| (l, Use::Unknown)).collect();
     let bl = &f.blocks[p.0];
     let mut out = Vec::new();
     if p.1 < bl.stmts.len() {
         match &bl.stmts[p.1] {
             Stmt::Assign(d, rv, _) => {
-                place_locals(d, &mut out);
-                rv_locals(rv, &mut out);
+                place(d, Use::Write, &mut out);
+                match rv {
+                    Rvalue::Use(o) | Rvalue::Un(_, o) | Rvalue::Cast(_, o, _) | Rvalue::Repeat(o, _) => operand(o, &mut out),
+                    Rvalue::Bin(_, a, b) | Rvalue::Checked(_, a, b) => {
+                        operand(a, &mut out);
+                        operand(b, &mut out);
+                    }
+                    Rvalue::Ref(k, q) => place(q, if k == "shared" || k == "fake" { Use::Read } else { Use::MutBorrow }, &mut out),
+                    Rvalue::AddrOf(m, q) => place(q, if *m { Use::MutBorrow } else { Use::Read }, &mut out),
+                    Rvalue::Discr(q) | Rvalue::Len(q) => place(q, Use::Read, &mut out),
+                    Rvalue::Agg(_, os) => os.iter().for_each(|o| operand(o, &mut out)),
+                    // (an unprinted rvalue: anything)
+                    Rvalue::Unsupported(_) => return all(),
+                }
             }
-            Stmt::Assume(o, _) => op_locals(o, &mut out),
-            Stmt::Storage(_, l) => return vec![(*l, true)],
-            // (an unprinted statement: everything is mentioned)
-            Stmt::Unsupported(_) => return (0..f.locals.len()).map(|l| (l, false)).collect(),
+            Stmt::Assume(o, _) => operand(o, &mut out),
+            Stmt::Storage(_, l) => out.push((*l, Use::Storage)),
+            // (an unprinted statement: anything)
+            Stmt::Unsupported(_) => return all(),
         }
     } else {
         match &bl.term {
-            Term::Switch(o, ..) | Term::Assert(o, ..) => op_locals(o, &mut out),
-            Term::Drop(pl, ..) => place_locals(pl, &mut out),
+            Term::Switch(o, ..) | Term::Assert(o, ..) => operand(o, &mut out),
+            Term::Drop(pl, ..) => place(pl, Use::Drop, &mut out),
+            // (an unprinted callee: anything)
+            Term::Call(Callee::Unsupported(_), ..) => return all(),
             Term::Call(_, args, d, _) => {
-                args.iter().for_each(|a| op_locals(a, &mut out));
-                place_locals(d, &mut out);
+                args.iter().for_each(|a| operand(a, &mut out));
+                place(d, Use::Write, &mut out);
             }
-            Term::Return => out.push(0),
-            Term::Unsupported(_) => return (0..f.locals.len()).map(|l| (l, false)).collect(),
+            Term::Return => out.push((0, Use::MoveWhole)),
+            Term::Unsupported(_) => return all(),
             Term::Goto(_) | Term::Unreachable | Term::Resume | Term::Abort => {}
         }
     }
-    out.into_iter().map(|l| (l, false)).collect()
+    out
+}
+
+/// What a use does, for a verdict.
+fn how(u: Use) -> &'static str {
+    match u {
+        Use::Read => "read",
+        Use::MoveWhole => "moved",
+        Use::MovePart => "moved out of",
+        Use::Write => "written",
+        Use::MutBorrow => "borrowed mutably",
+        Use::Storage => "given a storage marker (its memory ends or begins anew)",
+        Use::Drop => "dropped",
+        Use::Unknown => "used by an operation the extraction does not print",
+    }
+}
+
+/// Whether a place lives in its root local: no `Deref`, so its memory is
+/// part of that local's own storage.
+fn lives_in_local(p: &Place) -> bool {
+    !p.proj.iter().any(|x| matches!(x, Proj::Deref))
 }
 
 /// The locals a point reads (its uses, for liveness and W1): every mention
@@ -373,13 +478,14 @@ pub fn check(m: &Sbmir, f: &Fn) -> Vec<Verdict> {
             if members.contains(&0) {
                 return Err("W1: the pointer is returned (it escapes)".into());
             }
-            // σ and the ancestors
+            // σ, the bases and the ancestors
             let mut anc: BTreeSet<usize> = BTreeSet::new();
-            let mut base: Option<usize> = None;
+            let mut bases: BTreeSet<usize> = BTreeSet::new();
             if what.starts_with("&raw") {
                 anc.insert(src.local);
-                if !src.proj.iter().any(|p| matches!(p, Proj::Deref)) {
-                    base = Some(src.local);
+                // (the place `&raw` borrows lives in its root local: a base)
+                if lives_in_local(src) {
+                    bases.insert(src.local);
                 }
             } else {
                 anc.insert(src.local);
@@ -395,7 +501,7 @@ pub fn check(m: &Sbmir, f: &Fn) -> Vec<Verdict> {
                 }
             }
             loop {
-                let before = anc.len();
+                let before = (anc.len(), bases.len());
                 for p in &pts {
                     let bl = &f.blocks[p.0];
                     let mut flow: Vec<usize> = Vec::new();
@@ -404,6 +510,14 @@ pub fn check(m: &Sbmir, f: &Fn) -> Vec<Verdict> {
                             && anc.contains(&d.local)
                         {
                             rv_locals(rv, &mut flow);
+                            // a borrow, into an ancestor, of a place that
+                            // lives in its root local: that local's storage
+                            // holds memory the family can reach (a base)
+                            if let Rvalue::Ref(_, q) | Rvalue::AddrOf(_, q) = rv
+                                && lives_in_local(q)
+                            {
+                                bases.insert(q.local);
+                            }
                         }
                     } else if let Term::Call(_, args, d, _) = &bl.term {
                         let mut ls = Vec::new();
@@ -414,12 +528,14 @@ pub fn check(m: &Sbmir, f: &Fn) -> Vec<Verdict> {
                         }
                     }
                     for l in flow {
-                        if f.locals.get(l).is_some_and(|(t, _)| reaches_memory(m, t, 0)) || Some(l) == base {
+                        if f.locals.get(l).is_some_and(|(t, _)| reaches_memory(m, t, 0)) {
                             anc.insert(l);
                         }
                     }
+                    // (every base is an ancestor, whatever its type)
+                    anc.extend(bases.iter().copied());
                 }
-                if anc.len() == before {
+                if (anc.len(), bases.len()) == before {
                     break;
                 }
             }
@@ -475,26 +591,40 @@ pub fn check(m: &Sbmir, f: &Fn) -> Vec<Verdict> {
                 q.extend(preds.get(&p).cloned().unwrap_or_default());
             }
             for p in fwd.intersection(&back) {
-                for (l, storage) in mentions(f, *p) {
+                for (l, u) in local_uses(f, *p) {
                     if !anc.contains(&l) || members.contains(&l) {
                         continue;
                     }
-                    // a reference's storage ending touches no referent
-                    if storage && Some(l) != base {
+                    let base = bases.contains(&l);
+                    // a reference's storage ending touches no referent (a
+                    // base's ends the memory itself)
+                    if u == Use::Storage && !base {
                         continue;
                     }
                     if *mutable {
+                        if base {
+                            return Err(format!("W2: `_{l}`, the local the base lives in, is {} inside the pointer's window: {} (the base is reached only through the pointer while it is in use, and lives throughout)", how(u), show_point(f, *p)));
+                        }
                         return Err(format!("W2: `_{l}`, through which the base is reached, is used inside the pointer's window: {} (the base is reached only through the pointer while it is in use)", show_point(f, *p)));
                     }
-                    // a shared family: no write to an ancestor in the window
-                    let writes = match point_stmt(f, *p) {
-                        PointRef::Stmt(Stmt::Assign(d, rv, _)) => d.local == l || matches!(rv, Rvalue::Ref(k, q) if k == "mut" && q.local == l) || matches!(rv, Rvalue::AddrOf(true, q) if q.local == l),
-                        PointRef::Term(Term::Call(_, _, d, _)) => d.local == l,
+                    // a shared family: the base only read while its snapshot
+                    // is in use (a shared reference moved whole is a read of
+                    // it; an owning value moved, a `Box`, could be freed)
+                    let mut_ref = matches!(f.locals.get(l), Some((Ty::Ref(true, _), _)));
+                    let shared_ref = matches!(f.locals.get(l), Some((Ty::Ref(false, _), _)));
+                    let read = match u {
+                        Use::Read => true,
+                        Use::MoveWhole => !base && shared_ref,
                         _ => false,
                     };
-                    let mut_ref = matches!(f.locals.get(l), Some((Ty::Ref(true, _), _)));
-                    if writes || mut_ref || storage {
-                        return Err(format!("W3: `_{l}`, through which the base is reached, is written or used mutably inside a shared pointer's window: {}", show_point(f, *p)));
+                    if mut_ref || !read {
+                        if base {
+                            return Err(format!("W3: `_{l}`, the local the base lives in, is {} inside a shared pointer's window: {} (the snapshot must equal memory at every use)", how(u), show_point(f, *p)));
+                        }
+                        if mut_ref || matches!(u, Use::Write | Use::MutBorrow) {
+                            return Err(format!("W3: `_{l}`, through which the base is reached, is written or used mutably inside a shared pointer's window: {}", show_point(f, *p)));
+                        }
+                        return Err(format!("W3: `_{l}`, through which the base is reached, is {} inside a shared pointer's window: {}", how(u), show_point(f, *p)));
                     }
                 }
             }

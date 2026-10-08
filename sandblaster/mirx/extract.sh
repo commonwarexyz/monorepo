@@ -5,7 +5,8 @@
 #   sandblaster/mirx/extract.sh <package> <module>[,<module>..] <out.sbmir> [--exclude T,..] [--stub out.rs=src.rs,..]
 #       [--stubs crate:out.rs=src.rs;crate2:..] [--instance Trait=path::Type,..] [--skip-traits T,..]
 #       [--inject name=file.rs,..] [--items 'mod=Item,..;mod2=..'] [--skip-fns T::m,..]
-#       [--manifest path/Cargo.toml] [--target <triple>] [--mir-opt-level N]
+#       [--manifest path/Cargo.toml] [--target <triple>] [--mir-opt-level N] [--rustflags '<flags>']
+#       [--features f,..] [--no-default-features] [--profile <name>]
 #
 #   sandblaster/mirx/extract.sh commonware-codec varint codec/sandblaster/varint/varint.sbmir \
 #       --exclude u128,i128 --stub varint.rs=codec/sandblaster/varint/varint.rs
@@ -37,6 +38,38 @@
 #   (`-Zmir-opt-level`, default 1: what `cargo check` runs); the `.sbmir`
 #   records it and the build refuses an extraction at another level
 #   (`docs/mir-lift.md` §20.1).
+# * --rustflags: extra rustc flags for the extracted crate, for a negative
+#   twin only (a window extraction made under other flags than its main
+#   extraction); the `.sbmir` records them, `(rustflags "..")`, the build
+#   refuses a main extraction with any, and a window extraction must record
+#   its main extraction's.
+# * --features, --no-default-features, --profile: the extracted crate's
+#   Cargo features and the profile it is checked with (Cargo's options,
+#   passed on; `cargo check`'s default profile is `dev`). mirx records the
+#   session's whole cfg set, `(cfg ..)`, read from rustc (the features, the
+#   target's cfgs, the profile's `debug_assertions` and `panic`, every
+#   `--cfg`): a window extraction must record its main extraction's, and a
+#   build that knows its own configuration (a build script) refuses an
+#   extraction made under another (`mir::load`), so extract with the
+#   features and profile of the build that verifies the module. (`--profile
+#   test` checks the crate in test mode, `cfg(test)`, which no build script
+#   sees: such an extraction is refused by every build. A build whose
+#   rustflags set `-C debug-assertions`, `-C opt-level`, `-O`,
+#   `-C overflow-checks`, a `-Z` option or an `@file` is refused too: a
+#   build script cannot see the configuration they make. A profile's
+#   `panic` reaches no build script: it is assumed to be the extraction's,
+#   kernel/AUDIT.md §21.1.)
+#
+# Rustflags are never inherited: a body compiled under other flags (another
+# `--cfg`, `-C target-feature`, a `-Z` pass) is another program, and the
+# window rule's verdicts are carried to the main extraction by source
+# position (docs/mir-lift.md §20.10, the review's F2). So a non-empty
+# `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` or
+# `CARGO_TARGET_<triple>_RUSTFLAGS` in the environment is refused, and the
+# extraction runs with `CARGO_ENCODED_RUSTFLAGS` set (empty, or the
+# `--rustflags`), which overrides every other source of rustflags, Cargo's
+# configuration files included; mirx records what it was
+# (`SBMIR_RUSTFLAGS`).
 #
 #   sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location,merkle::mmr,merkle::hasher,merkle::proof \
 #       storage/sandblaster/verifier/verifier.sbmir \
@@ -47,7 +80,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 pkg="$1"; module="$2"; out="$3"; shift 3
-exclude=""; stub=""; stubs=""; instance=""; skip=""; inject=""; items=""; skipfns=""; manifest="$root/Cargo.toml"; target=""; level=1
+exclude=""; stub=""; stubs=""; instance=""; skip=""; inject=""; items=""; skipfns=""; manifest="$root/Cargo.toml"; target=""; level=1; rustflags=""; cargo_opts=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --exclude) exclude="$2"; shift 2 ;;
@@ -61,8 +94,19 @@ while [ $# -gt 0 ]; do
     --manifest) manifest="$2"; case "$manifest" in /*) ;; *) manifest="$root/$manifest" ;; esac; shift 2 ;;
     --target) target="$2"; shift 2 ;;
     --mir-opt-level) level="$2"; shift 2 ;;
+    --rustflags) rustflags="$2"; shift 2 ;;
+    --features) cargo_opts+=(--features "$2"); shift 2 ;;
+    --no-default-features) cargo_opts+=(--no-default-features); shift ;;
+    --profile) cargo_opts+=(--profile "$2"); shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
+done
+# no inherited rustflags (above)
+for v in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS $(env | sed -n 's/^\(CARGO_TARGET_[A-Z0-9_]*_RUSTFLAGS\)=.*/\1/p'); do
+  if [ -n "$(printenv "$v" || true)" ]; then
+    echo "extract.sh: $v is set ($(printenv "$v")): an extraction is compiled with no inherited rustflags (a body compiled under other flags is another program; docs/mir-lift.md §20.1). Unset it; a negative twin passes its flags with --rustflags." >&2
+    exit 2
+  fi
 done
 toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$root/sandblaster/mirx/rust-toolchain.toml")"
 tdir="${SBMIR_TARGET_DIR:-$root/target/sandblaster-mirx}"
@@ -104,5 +148,6 @@ RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER="$tdir/driver/release/sandblaster-mirx" \
 SBMIR_CRATE="$crate" SBMIR_MODULE="$module" SBMIR_OUT="$out" SBMIR_EXCLUDE="$exclude" SBMIR_STUB="$abs_stub" \
 SBMIR_STUBS="$abs_stubs" SBMIR_INSTANCE="$instance" SBMIR_INJECT="$abs_inject" \
 SBMIR_ITEMS="$items" SBMIR_SKIP_FNS="$skipfns" SBMIR_MIR_OPT_LEVEL="$level" \
-CARGO_TARGET_DIR="$tdir/check" cargo +"$toolchain" check -q --manifest-path "$manifest" -p "$pkg" ${target:+--target "$target"}
+SBMIR_RUSTFLAGS="$rustflags" CARGO_ENCODED_RUSTFLAGS="$(printf '%s' "$rustflags" | tr ' ' '\037')" \
+CARGO_TARGET_DIR="$tdir/check" cargo +"$toolchain" check -q --manifest-path "$manifest" -p "$pkg" ${target:+--target "$target"} ${cargo_opts[@]+"${cargo_opts[@]}"}
 echo "wrote $out"

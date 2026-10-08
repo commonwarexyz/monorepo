@@ -137,6 +137,9 @@ pub struct LiftSource {
     /// extraction's (`mir::load`, DESIGN-UNSAFE-SIMD A-S3).
     pub target_features: Vec<String>,
     pub codegen_flags: Option<(Option<String>, String)>,
+    /// The build's cfg set as far as a build script knows it (when known):
+    /// bound to the extraction's (`mir::load`).
+    pub build_cfg: Option<crate::target::BuildCfg>,
 }
 
 /// What a lifted module is, for module-mode emission (`driver::gates`,
@@ -588,6 +591,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     let target_arch: Option<String> = sources.first().map(|s| s.target_arch.clone());
     let static_features: Option<Vec<String>> = sources.first().map(|s| s.target_features.clone());
     let codegen_flags: Option<(Option<String>, String)> = sources.first().and_then(|s| s.codegen_flags.clone());
+    let build_cfg = sources.first().and_then(|s| s.build_cfg.clone());
     let dsl_modules: Vec<String> = sources.iter().filter(|s| !s.ghost && !s.host).map(|s| s.module_path.clone()).collect();
     let mir_files: Vec<(String, Vec<u8>)> = sources.iter().filter(|s| !s.ghost && !s.host).map(|s| (s.path_display.clone(), s.text.clone().into_bytes())).chain(sources.iter().flat_map(|s| s.mir_extra.clone())).collect();
     for s in &sources {
@@ -677,7 +681,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
             let open: BTreeMap<String, Vec<String>> = cx.open.instances.iter().map(|(t, p)| (t.clone(), vec![p.clone()])).chain(cx.open.multi.iter().map(|(t, ps)| (t.clone(), ps.clone()))).map(|(t, ps)| (t, ps.iter().map(|p| path_key(p).trim_start_matches("crate::").to_string()).collect())).collect();
             let consts: BTreeMap<(String, String), bool> = cx.open.assoc_consts.iter().map(|(t, c)| ((t.clone(), c.clone()), cx.open.const_fns.contains(&open::const_name(t, c)))).collect();
             let invariant_types = cx.attach_ty.keys().map(|k| k.rsplit("::").next().unwrap_or(k).to_string()).collect();
-            let names = crate::mir::ModuleNames { module: String::new(), sealed: sealed.clone(), host_enums: host_enums.clone(), requires, open, dsl_modules: dsl_modules.clone(), current: Default::default(), consts, invariant_types, host: mir_host.clone(), target_arch: target_arch.clone(), static_features: static_features.clone(), codegen_flags: codegen_flags.clone() };
+            let names = crate::mir::ModuleNames { module: String::new(), sealed: sealed.clone(), host_enums: host_enums.clone(), requires, open, dsl_modules: dsl_modules.clone(), current: Default::default(), consts, invariant_types, host: mir_host.clone(), target_arch: target_arch.clone(), static_features: static_features.clone(), codegen_flags: codegen_flags.clone(), build_cfg: build_cfg.clone() };
             let lookup = |p: &str| -> Option<Vec<u8>> { files.iter().find(|(f, _)| f.ends_with(&format!("/{p}")) || f == p).map(|(_, b)| b.clone()) };
             match crate::mir::load(text, &lookup, names, suffix) {
                 Ok(mut l) => {

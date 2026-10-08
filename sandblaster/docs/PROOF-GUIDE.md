@@ -573,6 +573,17 @@ error[obligation]: unproven obligation [ensures] in `crate::l`
 `by_cases(a, b)`), or an integer with its range: `by_cases(k, lo..hi)`, or
 `by_cases(k in lo..hi)` inside `proof! { .. }`. The statements **after** a
 `by_cases` run in every case. Use `match` when a case needs steps of its own.
+A precondition about the integer is split with it, so a lemma can state
+its bound as a precondition and read a table at the index:
+
+```rust
+#[lemma]
+fn lo_bytes_at(r: [u16; 16], n: usize) {
+    requires(n < 16usize);
+    ensures(lo_bytes(r)[n] == r[n] as u8);
+    by_cases(n, 0..16);
+}
+```
 
 ```rust
 // before (reconstruction_gate)

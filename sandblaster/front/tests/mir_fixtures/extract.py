@@ -98,6 +98,28 @@ FIXTURES = [
     ("sd_ptr_window", "sd_ptr", "a", "a.window.sbmir", ["--mir-opt-level", "0"]),
     ("sd_ptr_twins", "sd_ptr_twins", "a", "a.sbmir", []),
     ("sd_ptr_twins_window", "sd_ptr_twins", "a", "a.window.sbmir", ["--mir-opt-level", "0"]),
+    # pointers whose base lives in a local, and the window rule's other
+    # siblings (stage soundness-fixes, the review's F1)
+    ("sd_ptr_local", "sd_ptr_local", "a", "a.sbmir", []),
+    ("sd_ptr_local_window", "sd_ptr_local", "a", "a.window.sbmir", ["--mir-opt-level", "0"]),
+    # bodies that differ by the codegen configuration (stage soundness-fixes,
+    # the review's F2): the window extraction made under other rustflags
+    # (`--rustflags`, for these negative twins only) must be refused
+    ("sd_ptr_cfg", "sd_ptr_cfg", "a", "a.sbmir", []),
+    ("sd_ptr_cfg_window", "sd_ptr_cfg", "a", "a.window.sbmir", ["--mir-opt-level", "0"]),
+    ("sd_ptr_cfg_window_sm4", "sd_ptr_cfg", "a", "a.window-sm4.sbmir", ["--mir-opt-level", "0", "--rustflags", "-Ctarget-feature=+sm4"]),
+    ("sd_ptr_cfg_window_cfg", "sd_ptr_cfg", "a", "a.window-cfg.sbmir", ["--mir-opt-level", "0", "--rustflags", "--cfg sd_twin"]),
+    # a cfg value with characters the printer must not escape away (stage
+    # cfg-binding-fixes: a tab, a combining accent, a DEL; Cargo itself
+    # refuses a newline), read back exactly
+    ("sd_ptr_cfg_window_quote", "sd_ptr_cfg", "a", "a.window-quote.sbmir", ["--mir-opt-level", "0", "--rustflags", '--cfg sd_quote="a\\tc\\u{301}\\u{7f}"']),
+    # a body that differs by a Cargo feature (stage leftovers): the crate
+    # without and with its feature `alias`, each extracted at both levels;
+    # mirx records the session's cfg set, `(cfg ..)`, the features among it
+    ("sd_ptr_feat", "sd_ptr_feat", "a", "a.sbmir", []),
+    ("sd_ptr_feat_window", "sd_ptr_feat", "a", "a.window.sbmir", ["--mir-opt-level", "0"]),
+    ("sd_ptr_feat_alias", "sd_ptr_feat", "a", "a-alias.sbmir", ["--features", "alias"]),
+    ("sd_ptr_feat_alias_window", "sd_ptr_feat", "a", "a.window-alias.sbmir", ["--mir-opt-level", "0", "--features", "alias"]),
     # tests/simd.rs: Reed–Solomon's NEON `mul_128` shape (table rows loaded
     # through shared pointers, TBL lookups proven lane by lane), and its twins
     ("sd_neon_mul128", "sd_neon_mul128", "a", "a.sbmir", []),

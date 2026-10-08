@@ -184,6 +184,22 @@ pub struct Engine<'a> {
     /// the equation's addresses, the depth and the facts (their number and
     /// the last one), the values kept alive.
     pub mention_memo: super::util::FxMap<(usize, usize, u32, usize, usize), (V, V, V, bool)>,
+    /// The statement terms of the facts ([`super::terms`]): by level, each
+    /// at the depth of its level — the goal's (the elaborator's
+    /// [`crate::elab::basic::GoalTerms`]) and those of the facts derived
+    /// from them on the term level.
+    pub fact_terms: Vec<(u32, Tm)>,
+    /// The goal's target value and its term (at the goal's depth), for the
+    /// term-level steps on the root target ([`super::terms`]).
+    pub root: Option<(V, Tm)>,
+    /// Facts split into their conjuncts on the term level
+    /// ([`super::terms`]): their value-level saturation is skipped (forward
+    /// rules still fire on them).
+    pub term_split: Vec<u32>,
+    /// Facts of those splits that carry nothing of their own (the rests of
+    /// a conjunction, a comparison of arrays whose equation is a fact too):
+    /// not saturated at all.
+    pub term_inert: Vec<u32>,
 }
 
 impl<'a> Engine<'a> {
@@ -224,6 +240,10 @@ impl<'a> Engine<'a> {
             occurs_memo: super::util::FxMap::default(),
             motive_memo: super::util::FxMap::default(),
             mention_memo: super::util::FxMap::default(),
+            fact_terms: Vec::new(),
+            root: None,
+            term_split: Vec::new(),
+            term_inert: Vec::new(),
         }
     }
 
@@ -981,7 +1001,24 @@ impl<'a> Engine<'a> {
         if let Some(p) = self.close_by_fact(st, &t0)? {
             return Ok(Some(p));
         }
-        let mut t = t0;
+        // the root target on its term ([`super::terms`]), before the
+        // simplifier and saturation work on its value: a quantified fact
+        // whose conclusion matches it, or, for two array literals, element
+        // by element
+        if self.root.as_ref().is_some_and(|(v, _)| Rc::ptr_eq(v, &t0)) {
+            if let Some(eg) = self.root.as_ref().map(|(_, tm)| shift(tm, (st.depth() - self.goal_depth) as i64))
+                && let Some(p) = self.term_backward(st, &eg, false)?
+            {
+                return Ok(Some(p));
+            }
+            if let Some(p) = self.term_array_split(st, &t0)? {
+                return Ok(Some(p));
+            }
+            if let Some(p) = self.term_rewrite(st, &t0)? {
+                return Ok(Some(p));
+            }
+        }
+        let mut t = t0.clone();
         let mut conts: Vec<Cont> = Vec::new();
         // the simplifier's normal form of the target first (its casts, and the
         // guards the facts decide), so the facts' normal forms meet it before
@@ -1903,6 +1940,12 @@ fn prove_goal_with(env: &Env, g: &Goal, b: &mut Budget, cfg: &AutoConfig, db: &L
             st.add_ctx_fact(l as u32, entry.ty.clone(), Origin::Goal(origin));
         }
     }
+    // the goal's terms, when the elaborator registered them
+    // ([`super::terms`])
+    if let Some(gt) = crate::elab::basic::goal_terms(g.id.0) {
+        e.fact_terms = gt.facts.iter().filter(|(l, _)| *l < depth && !crate::elab::fact_hidden(*l) && st.facts.iter().any(|f| f.lvl == *l)).cloned().collect();
+        e.root = Some((g.target.clone(), gt.target.clone()));
+    }
     if e.trace {
         for f in &st.facts {
             eprintln!("[auto] goal fact h{}: {}", f.lvl, e.show(&st, &f.ty));
@@ -2019,6 +2062,9 @@ impl<'a> Engine<'a> {
             let body = self.enumerate(&st, var.0, &lo, &hi, g.target.clone(), false)?;
             return Ok(body.map(|b| st.finish(b)));
         }
+        // the goal's large `bool` facts split into their conjuncts on their
+        // terms ([`super::terms`])
+        self.term_conjuncts(&mut st)?;
         let body = self.solve_in(&mut st, g.target.clone(), false)?;
         Ok(body.map(|b| st.finish(b)))
     }

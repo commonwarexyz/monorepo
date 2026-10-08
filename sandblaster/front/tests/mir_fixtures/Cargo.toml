@@ -71,6 +71,9 @@ members = [
     "sd_neon_ptr",
     "sd_neon_shift",
     "sd_ptr",
+    "sd_ptr_cfg",
+    "sd_ptr_feat",
+    "sd_ptr_local",
     "sd_ptr_twins",
     "sd_x86",
 ]

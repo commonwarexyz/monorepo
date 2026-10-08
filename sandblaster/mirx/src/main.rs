@@ -252,8 +252,12 @@ impl SpanMap {
     }
 }
 
+/// A string as the reader reads it back (`front/src/mir/sexp.rs`): `"`
+/// and `\` escaped, every other character as it is (the reader drops an
+/// escape's backslash, so `{:?}`'s `\n` or `\u{301}` would read back as
+/// `n` or `u{301}`, and two strings could print the same).
 fn q(s: &str) -> String {
-    format!("{s:?}")
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// Extraction state.
@@ -543,6 +547,22 @@ fn extract<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> ControlFlow<(), ()> {
     let _ = writeln!(out, "(endian {})", tcx.sess.target.endian.as_str());
     let _ = writeln!(out, "(target-cpu {} {})", tcx.sess.opts.cg.target_cpu.as_deref().map(q).unwrap_or_else(|| "default".into()), q(&tcx.sess.target.cpu));
     let _ = writeln!(out, "(target-feature-flags {})", q(&tcx.sess.opts.cg.target_feature));
+    // the extra rustc flags the crate was compiled with: `extract.sh` refuses
+    // inherited ones and sets these (`--rustflags`, for a negative twin;
+    // empty otherwise); the build refuses a main extraction with any, and a
+    // window extraction must record its main extraction's
+    if let Ok(f) = std::env::var("SBMIR_RUSTFLAGS") {
+        let _ = writeln!(out, "(rustflags {})", q(&f));
+    }
+    // the session's cfg set (`Session::config`, what `#[cfg]` and `cfg!`
+    // were evaluated against), read from rustc, not from what was passed:
+    // the target's (its features too), the profile's (`debug_assertions`,
+    // `panic`), the crate's Cargo features (`feature`) and every `--cfg`,
+    // whatever passed it. A window extraction must record the same set, and
+    // the build binds it to its own (`mir::load`)
+    let mut cfg: Vec<String> = tcx.sess.config.iter().map(|(n, v)| format!(" ({}{})", q(n.as_str()), v.map(|v| format!(" {}", q(v.as_str()))).unwrap_or_default())).collect();
+    cfg.sort();
+    let _ = writeln!(out, "(cfg{})", cfg.concat());
     let _ = writeln!(out, "(exclude{})", exclude.iter().map(|e| format!(" {}", q(e))).collect::<String>());
     for (f, h) in &ex.spans.files {
         let _ = writeln!(out, "(source {} {})", q(f), q(h));

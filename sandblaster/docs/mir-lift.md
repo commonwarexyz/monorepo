@@ -497,14 +497,91 @@ A **window extraction** (`#[lift(mir = "m.sbmir", window_mir =
 flow are the source's (level 1 already runs passes such as `CopyProp`,
 `SimplifyLocals` and `RemoveZsts`, which merge and drop locals and
 assignments). Only the window (aliasing) analysis of pointers in crate
-code (`docs/DESIGN-UNSAFE-SIMD.md` §2.6, not built yet) reads it; L and S
-never do. `mir::load_window` refuses it unless it records level 0 exactly
-and has the main extraction's compiler, crate, module, overflow checks,
-target, exclusions, sources (by SHA-256) and roots, and every function of
-the main extraction with the same definition, item, parameters, return
-type, body presence and target features (its other locals and its blocks
-differ by construction, and it may follow library functions the main one
-does not). Pinning level 0 for the main extraction instead was measured
+code (`docs/DESIGN-UNSAFE-SIMD.md` §2.6, §20.10) reads it; L and S
+never do. `mir::load_window` refuses it unless it records level 0 exactly;
+every other header record equal to the main extraction's (fail closed,
+since stage soundness-fixes: the compiler, crate, module, overflow checks,
+target, printer, static target features, byte order, `-C target-cpu`,
+`-C target-feature`, rustflags, the cfg set (since stage leftovers),
+exclusions, sources by SHA-256, roots and
+notes — every top-level record but the functions and the type definitions,
+so a record the printer adds is compared too; `(mir-opt-level ..)` is the
+one record left out, the one the two differ by); every type definition the
+two share equal (the text of a type the printer does not print blanked:
+rustc's internal ids in it differ between runs); and every function of the
+main extraction with the same definition, item, parameters, return type,
+body presence and target features (its other locals and its blocks differ
+by construction, and it may follow library functions the main one does
+not). A body compiled under another configuration is another program, and
+the window rule's verdicts are carried to the main extraction by source
+position: before the comparison was fail closed, a window extraction made
+under `-C target-feature=+sm4` was accepted beside a default one, judging a
+body without the write the main one has (the review's F2). `extract.sh`
+inherits no rustflags: it refuses a non-empty `RUSTFLAGS`,
+`CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` or
+`CARGO_TARGET_<triple>_RUSTFLAGS` and runs Cargo with
+`CARGO_ENCODED_RUSTFLAGS` set (empty, overriding Cargo's configured
+rustflags too, or `--rustflags`, an option for negative twins only), and
+mirx records them, `(rustflags "..")`; `mir::load` refuses a main
+extraction that records any. Since stage leftovers mirx also records the
+session's cfg set, `(cfg ..)`, read from rustc rather than from what was
+passed: the crate's Cargo features, the target's and the profile's cfgs
+(`debug_assertions`, `panic`) and every `--cfg`, whatever passed it. A
+window extraction must record its main extraction's (a feature that
+compiles a write in or out shows in no other record), and `mir::load`
+binds a main extraction's record to the build's own where a build script
+knows it (`target::build_cfg`: its features, `CARGO_CFG_FEATURE`; the
+builtin cfgs a stable compiler shows, `CARGO_CFG_<NAME>`; its rustflags'
+`--cfg`s), refusing an extraction made under another configuration
+(`extract.sh --features`, `--no-default-features` and `--profile` extract
+for a build's). Since stage cfg-binding-fixes (the validation of stage
+leftovers): a build whose rustflags set what rustc derives the
+configuration from where its build script cannot see the result —
+`-C debug-assertions`, or the optimization level `debug_assertions`
+follows without it (`-C opt-level`, `-O`), since Cargo's
+`CARGO_CFG_DEBUG_ASSERTIONS` follows the profile; `-C overflow-checks`,
+which no variable shows; a `-Z` option; an `@file`, whose arguments rustc
+reads — is refused, the rustflags read as rustc's option parser reads
+them (every spelling, short options grouped, an option's value in the
+next argument); an extraction with `(unsafe-reading 1)` must record its
+rustflags and cfg set (the older fixtures were extracted again); and
+mirx writes every string as the reader reads it back (only `"` and `\`
+escaped: the reader drops an escape's backslash, so `{:?}`'s `\t` read
+back as `t`). Since stage cfg-final (the validation of stage
+cfg-binding-fixes): the build's `--cfg`s are the ones rustc reads,
+through the same option reader — `-L --cfg=x` is `-L`'s value and sets no
+`x`, yet a release build whose rustflags held `-L --cfg=debug_assertions`
+claimed the cfg and took a dev extraction —; and a build whose rustflags
+set a builtin cfg by `--cfg` is refused, whatever its value: past `-A
+explicit_builtin_cfgs_in_flags`, rustc sets the cfg but derives the rest
+from the option that sets it (`--cfg debug_assertions` in a release build:
+the cfg, and no overflow checks). Not bound (the assumptions of
+`kernel/AUDIT.md` §21.1):
+`sandblaster check` (no build configuration); extractions older than the
+record; the cfgs only a nightly compiler shows and the unstable target
+features; a profile's `panic`, which no build script sees (Cargo's
+`CARGO_CFG_PANIC` follows the rustflags only); the test harness's compile
+(`cargo test --lib` compiles the in-place files again under `cfg(test)`
+from the same build-script run, which cannot tell; the library's compile
+is bound, and an extraction recorded with `test` is refused); the build's
+environment (Cargo sets a bare builtin's `CARGO_CFG_<NAME>` only when the
+cfg holds and removes none it leaves unset, so a `CARGO_CFG_DEBUG_ASSERTIONS`
+in the environment Cargo runs in, or in Cargo's `[env]` table, reaches a
+release build's script as Cargo's, and a build script cannot tell:
+assumed, neither sets any `CARGO_CFG_*` variable); and the
+dependencies' configuration. An extraction carries other crates' bodies
+(the MMR's and the verifier's hold `commonware_codec` bodies), and a
+dependency's features, macros and constants reach the crate's own; the
+record is the extracted crate's session alone, so a window extraction is
+assumed made with its main one's options and the build's dependencies
+configured as the extraction's. Recording each crate's identity was
+measured and left out: rustc's `StableCrateId` hashes Cargo's
+`-C metadata`, which for a workspace member hashes the
+`RUSTC_WORKSPACE_WRAPPER` path, mirx's own binary, so the record would
+change with the extractor's target directory and extractions would stop
+being reproducible; a build's stable compiler gives other ids anyway.
+
+Pinning level 0 for the main extraction instead was measured
 on 2026-10-06: varint kept its 63 theorems and its lock, but the
 structured reading refused six MMR functions and the verifier's `Subtree`
 code (`checked_add` read `_0` before it is set; a `&str` constant
@@ -640,7 +717,11 @@ Trait` result is the type of the instance's return place. A parameter
 bound by `_` is read only when zero-sized. Loops are numbered in source
 order for attachments (`loop_nr = k`); in a loop's attachment a source name
 denotes the variable in scope at the loop (the one of that name live at
-its header: `let size = *size;` shadows the parameter `size`). A module
+its header: `let size = *size;` shadows the parameter `size`; of several
+live there — an inner `for` loop's `iter` and the outer loop's, still
+needed after it — the innermost binding, whose definition every other
+one's precedes on every path; two of which neither comes first stay
+unresolved). A module
 read from MIR keeps none of its `use` leaves that no lifted item names
 (`use Trait as _` only steered rustc's method resolution).
 
@@ -1397,6 +1478,8 @@ of the above.
 | `(endian little)` | the target's byte order |
 | `(target-cpu default "apple-m1")` | the `-C target-cpu` of the extraction (`default`, or the CPU given) and the target's default CPU |
 | `(target-feature-flags "")` | the extraction's `-C target-feature` flags |
+| `(rustflags "")` | the extra rustc flags the extraction was compiled with: none (`extract.sh` refuses inherited ones; `--rustflags`, for a window extraction's negative twin only); the build refuses a main extraction with any (stage soundness-fixes) |
+| `(cfg ("debug_assertions") ("feature" "std") ..)` | the session's cfg set, read from rustc (`Session::config`): the Cargo features, the target's and the profile's cfgs, every `--cfg`; a window extraction must record its main one's, and a build script binds it to its own (stage leftovers); required, with `(rustflags ..)`, of an extraction with `(unsafe-reading 1)`, each value read back exactly (stage cfg-binding-fixes) |
 | `(local)`, `(unsafe)` on a function | a function of the extracted crate; a declared `unsafe fn` (not a safe `#[target_feature]` one) |
 | `(ptr mut T)`, `(ptr const T)` | a raw pointer type |
 | `(cast ptr-to-ptr ..)`, `(addr-of mut P)` | MIR's `PtrToPtr` cast and `&raw mut P` (`RawPtrKind`) |
@@ -1448,7 +1531,11 @@ model's bytes there and writes the base back through the code; through
 behaviour, `cast_mut()` or not), and so past the end. A row that needs an
 alignment `a > 1` is read only for a base aligned to `a` (its element's
 size) and an offset that is a multiple of `a` (else `Stuck`, even where
-the address happens to be aligned); every current row needs 1.
+the address happens to be aligned); every current row needs 1, so a test
+exercises the arm by reading every row as needing 16 bytes
+(`literal::test_fault::set_row_align`, never set by a build: a load from a
+`[u128; 2]` reads at offsets 0 and 16 and is stuck at 8, one from a byte
+array is refused, named; the review's F5).
 
 **Pure reinterpretation** (amendment A-S9, `mir::ptr::pure_reinterpretation`).
 A row is read only when its validated model is a pure byte
@@ -1468,25 +1555,74 @@ every row is an unaligned copy of its bytes there, so a toolchain bump
 that changes one fails the build's tests.
 
 **The window rule** (`mir/window.rs`, trusted; DESIGN-UNSAFE-SIMD §2.6,
-A-S1, A-S8). It runs on the unoptimized window extraction
-(`window_mir = ".."`, §20.1), per formation of crate code. A pointer
-family is the formation's pointer and every pointer derived from it by
-the admitted moves and casts; its window runs from the formation to the
-family's last use. Its rules:
+A-S1, A-S8; the bases and W3's reads-only form since stage
+soundness-fixes, 2026-10-07). It runs on the unoptimized window
+extraction (`window_mir = ".."`, §20.1), per formation of crate code. A
+pointer family is the formation's pointer and every pointer derived from
+it by the admitted moves and casts; its window runs from the formation to
+the family's last use. Its **ancestors** are the locals through which the
+family's memory can be reached: the reference it was formed from (or the
+local whose place `&raw` borrows), an `unsize` source and, closed
+flow-insensitively over the body, every local that can reach memory (its
+type holds a reference, a raw pointer or a lifetime) and flows into an
+ancestor, and every **base**. A base is a local whose own storage holds
+memory the family reaches: the root local of a place that lives in it (a
+place without a `Deref`: the local, a field, an element, a variant's
+field) and is borrowed (`&`, `&mut`, `&raw`) into an ancestor, or by the
+`&raw` formation itself — a local array, a by-value parameter, a local
+struct's or tuple's field, a row of a local array of rows, a temporary.
+A reference can point only into a local's storage (a base), into memory
+behind another reference (whose local is an ancestor by its type), into
+what a parameter or a call result reaches (the caller's memory, A3, or
+memory reached from the call's reference-carrying arguments, which are
+ancestors), or into constant or static memory (no local holds it, and it
+is immutable for the admitted types). Its rules:
 
 * **W0**: the family's pointers are live only inside the window;
 * **W1**: no pointer of the family escapes: it is not returned, stored
   into memory, passed to a function that is not an admitted operation, or
   derived into anything but a member or an admitted load or store;
 * **W2**: nothing reaches the base but the family inside the window: no
-  use of the reference it was formed from, or of any reference or place
-  that reaches the same memory (the base's ancestors: the reference, the
-  place it borrows, an `unsize` source), reads included — which is
-  stricter than both Stacked and Tree Borrows (a read through the parent
-  leaves a raw pointer usable in both) and is the rule's conservative
-  side; storage markers of ancestors that are not the base are not uses;
-* **W3**: a shared formation's base is not written in the window;
+  point of the window uses an ancestor in any way — a read, a write, a
+  borrow, a move, a drop, a call's argument or destination, an operation
+  the extraction does not print — which is stricter than both Stacked and
+  Tree Borrows (a read through the parent leaves a raw pointer usable in
+  both) and is the rule's conservative side. The storage marker of an
+  ancestor that is not a base is not a use (a reference's storage ending
+  touches no referent); a base's is (its memory ends, or begins anew);
+* **W3**: inside a shared formation's window an ancestor is only read (a
+  copied operand, a shared or fake borrow, a length, a discriminant, an
+  index), moved whole when it is a shared reference (its value), or given
+  a storage marker when it is not a base; an ancestor of `&mut` type is
+  not used at all. A write, a borrow of any other kind than `shared` and
+  `fake` (mutable, whatever it is named), a move of a base, of an owning
+  value (a `Box` its new owner could free) or out of a place, a drop, a
+  base's storage marker and an operation the extraction does not print (a
+  statement, an rvalue, a call through a function pointer) are refused:
+  the snapshot equals memory at every use;
 * **W4**: no store through a pointer formed from a shared reference.
+
+Two pointers formed from one base are two families; the second
+formation's borrow of the base, or of an ancestor the two share, is a
+use inside the first's window (W2, or W3 when it is mutable). A
+reference made before the formation and used after it either is an
+ancestor or keeps a loan the formation's borrow conflicts with (rejected
+by rustc's borrow checker). Stage soundness-fixes found the rule had
+counted a base only for `&raw` of a place without `Deref` (the review's
+F1): a base local's own uses, and its storage's end, passed unseen for a
+formation by `as_mut_ptr`, `as_ptr`, `from_mut`, `from_ref` or `&raw mut
+(*r)`, so a function with undefined behaviour (Miri: Stacked and Tree
+Borrows) got a verdict and a value. The twins (`mir_fixtures/sd_ptr_local`,
+25 functions: a local array, a by-value parameter, a field of a local
+struct and a tuple, a row of a nested array, a `Box` and a `Vec` owned by
+a local, a temporary, a closure capturing the local, two pointers from one
+base, a reborrow moved, a loop and a call writing the local, a local dead
+before the use, a `static mut`) are refused — with their rule by the
+window rule, stuck in L, by name by the lift — and the 23 with undefined
+behaviour are reported by Miri; `moved_into_call` is refused
+conservatively (a moved-from local's contents are not the language's to
+rely on, though Miri reads them), and the `static mut`, defined, is
+outside the reading (rustc folds its address into a pointer constant).
 
 Two formations reached from one local are refused. Each formation's
 verdict is carried to the level-1 MIR that L reads by its source span and
@@ -1604,7 +1740,35 @@ referent's type after a `Deref` of a `&mut`), `literal.core` +17
 `PRange` step), `ir.rs` +41 (the fake raw borrow fused with its
 metadata), `mod.rs` +3 (the `split_at_mut` model; `u128` in names),
 `ptr.rs` +8 (`u128` plain, its size and byte views) and one changed line
-of `mirx` (the fake raw borrow printed).
+of `mirx` (the fake raw borrow printed). Stage soundness-fixes (2026-10-07)
+added about 123: `window.rs` +71 (the bases, each point's uses, W2 with a
+base's storage markers, W3 reads only), `mod.rs` +29 and `ir.rs` +6 (the
+window extraction compared on every header record but the level and on
+every shared type definition; a main extraction with rustflags refused),
+`literal.rs` +11 (the alignment arm's test hook, never set by a build),
+`ptr.rs` +3 (`admitted_unsafe_fns`) and `mirx` +3 (the `(rustflags ..)`
+record). Untrusted, the same stage: `mir/safety.rs` (389), the record's
+memory-safety statement (DESIGN-UNSAFE-SIMD §5.3) generated from the
+reading's own facts — each formation with its verdict, its base, its
+family's moves, loads and stores with their offsets, the intrinsics and
+the features they need, the `#[target_feature]` and other calls — printed
+on a verified build's record with the admitted library `unsafe fn`s
+(A-S7). Stage leftovers (2026-10-07) added 62: the session's cfg set,
+`(cfg ..)` — `mirx` +3, its parse `ir.rs` +9, `mod.rs` +8 (compared by
+`load_window` with every header record; bound by `load` to the build's),
+`target.rs` +39 (the cfg set a build script knows, `build_cfg`, and what
+of the record it can know, `build_sees`) and the lift glue +3. Stage
+cfg-binding-fixes (2026-10-07) added 46: `target.rs` +42 (the build's
+rustflags read as rustc's option parser reads them, `rustc_options`, with
+A-S3's flags read through it; a build whose rustflags change its
+configuration unseen — `-C debug-assertions`, `-C opt-level`, `-O`,
+`-C overflow-checks`, a `-Z` option, an `@file` — unknowable, `Err`),
+`mod.rs` +1 (such a build refuses the extraction), `ir.rs` +3 (an
+`(unsafe-reading 1)` extraction must record its rustflags and cfg set),
+and one line of the printer changed (its quoting). Stage cfg-final
+(2026-10-08) added 6, all in `target.rs`: the build's `--cfg`s taken
+through `rustc_options` (one that is another option's value is none), and
+a `--cfg` of a builtin cfg's name refused (`Err`).
 
 *Pinned by:* `tests/unsafe_simd.rs` (the window verdicts of the fixtures;
 L against rustc on concrete inputs; each twin stuck or refused in L with
@@ -1614,6 +1778,17 @@ twins; the theorems of every function of the chunk multiplier, its
 of an offset, a load's width, a load's family, a formation's kind and the
 `IterMut` model's disjointness; the admitted rows against the toolchain's
 stdarch; the Miri gate's record against the pinned toolchain and the
-covered files, with its twins), `tests/simd.rs` (an extraction older than
-this reading), `tests/mir.rs` (the window extraction's load),
-`front/tests/miri/run.sh`.
+covered files, with its twins; since stage soundness-fixes, the bases
+that live in a local — `sd_ptr_local`'s 25 twins refused in the window
+rule (24), in L and by the lift —, W3's fail-closed arms on hand-written MIR,
+the checked-in verdicts, a window extraction under other codegen flags —
+`sd_ptr_cfg` — and each header record, and the alignment arm; since
+stage cfg-binding-fixes the build's rustflags that change its
+configuration in every spelling, the records required of every
+checked-in extraction, a malformed cfg entry, a cfg value read back
+exactly; since stage cfg-final a `--cfg` that is another option's value,
+the release build's twin among them, and a builtin cfg set by `--cfg`),
+`tests/simd.rs` (an extraction older than this reading), `tests/mir.rs`
+(the window extraction's load), `tests/verified_roots.rs` (the
+memory-safety statement and the admitted library `unsafe fn`s on
+rs_engine's record), `front/tests/miri/run.sh`.

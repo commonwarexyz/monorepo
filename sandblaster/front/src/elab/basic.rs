@@ -109,7 +109,9 @@ pub fn set_goal_terms(g: Option<GoalTerms>) {
     GOAL_TERMS.with(|c| *c.borrow_mut() = g);
 }
 
-fn goal_terms(id: u32) -> Option<GoalTerms> {
+/// The terms the elaborator registered for the goal of obligation `id`
+/// (also read by `crate::auto::terms`).
+pub(crate) fn goal_terms(id: u32) -> Option<GoalTerms> {
     GOAL_TERMS.with(|c| c.borrow().as_ref().filter(|g| g.id == id).cloned())
 }
 

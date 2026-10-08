@@ -540,6 +540,11 @@ fn transparent_body(env: &sandblaster_kernel::api::Env, g: sandblaster_kernel::t
 /// redexes and top-level `let`s and unfolds transparent non-recursive
 /// definitions at the head until `pred` holds (at most a few steps).
 pub fn head_unfold(env: &sandblaster_kernel::api::Env, t: &Tm, pred: &dyn Fn(&Term) -> bool) -> Option<Tm> {
+    head_unfold_if(env, t, pred, &|_| true)
+}
+
+/// [`head_unfold`], unfolding only the globals `unfold` admits.
+pub fn head_unfold_if(env: &sandblaster_kernel::api::Env, t: &Tm, pred: &dyn Fn(&Term) -> bool, unfold: &dyn Fn(sandblaster_kernel::term::GlobalId) -> bool) -> Option<Tm> {
     let mut t = simp_redexes(t);
     for _ in 0..16 {
         if pred(&t) {
@@ -550,6 +555,9 @@ pub fn head_unfold(env: &sandblaster_kernel::api::Env, t: &Tm, pred: &dyn Fn(&Te
             _ => {
                 let (h, args) = crate::elab::items::spine(&t);
                 let Term::Global(g) = &*h else { return None };
+                if !unfold(*g) {
+                    return None;
+                }
                 let (inner, arity) = transparent_body(env, *g)?;
                 if args.len() != arity {
                     return None;

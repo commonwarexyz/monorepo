@@ -54,7 +54,7 @@ fn with_env(f: impl FnOnce(&mut Env) + Send) {
 fn names() -> ModuleNames {
     let mut host_enums = BTreeMap::new();
     host_enums.insert("Error".to_string(), vec!["EndOfBuffer".to_string()]);
-    ModuleNames { module: String::new(), sealed: BTreeSet::new(), host_enums, requires: BTreeSet::new(), open: BTreeMap::new(), dsl_modules: vec!["crate::m".into()], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default(), target_arch: None, static_features: None, codegen_flags: None }
+    ModuleNames { module: String::new(), sealed: BTreeSet::new(), host_enums, requires: BTreeSet::new(), open: BTreeMap::new(), dsl_modules: vec!["crate::m".into()], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default(), target_arch: None, static_features: None, codegen_flags: None, build_cfg: None }
 }
 
 /// The reading of a fixture, loaded (every instance with a body).

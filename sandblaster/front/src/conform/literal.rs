@@ -15,10 +15,11 @@
 //!   read back as a value of S's result type (the states, then the
 //!   result) and `erase` the statement's own map into L's `Out`;
 //! * both are evaluated by `Env::eval_closed` (the kernel's type check and
-//!   closed evaluation; a value with invariant fields carries erased proofs
-//!   and goes through the reference strategy of `sandblaster eval`, as the
-//!   structured reading's evaluation does) and compared by the kernel's
-//!   conversion.
+//!   closed evaluation; a value with invariant fields carries erased proofs,
+//!   and a fixed argument's check outgrows the memory cap (an engine's
+//!   tables, `conform::Plan::fixed`): those go through the reference
+//!   strategy of `sandblaster eval`, as the structured reading's evaluation
+//!   does) and compared by the kernel's conversion.
 //!
 //! An input where the function's panic contract says it panics (in place:
 //! its domain holds, its no-panic clause does not; `conform::PANIC_CASE`)
@@ -133,6 +134,35 @@ pub(super) fn prepare(out: &mut elab::Output, c: &Checked, entries: &[&ConformEn
     res
 }
 
+/// The largest read-back of a value a mismatch prints (estimated nodes,
+/// [`crate::auto::meter::value_cost`]); a larger one is described by its
+/// size: L's outcome can hold a whole input (an engine's 8 MiB of tables,
+/// gigabytes as text).
+const MAX_SHOWN: u64 = 100_000;
+
+/// A value for a mismatch message: its first 600 characters, or its size
+/// when its read-back exceeds [`MAX_SHOWN`] nodes (estimated first, so the
+/// value is never read back whole).
+fn printed(env: &sandblaster_kernel::api::Env, v: &V) -> String {
+    let ctx = sandblaster_kernel::api::Ctx::default();
+    if crate::auto::meter::value_cost(env, &ctx, v, None, false, MAX_SHOWN) >= MAX_SHOWN {
+        return format!("a value too large to print (a read-back of {MAX_SHOWN} nodes or more)");
+    }
+    let t = env.quote(Lvl(0), v, true);
+    // (a shared read-back prints as a tree: printed only when that is small too)
+    let mut n = 0u64;
+    let mut stack = vec![t.clone()];
+    while let Some(x) = stack.pop() {
+        n += 1;
+        if n > 4 * MAX_SHOWN {
+            return format!("a value too large to print (more than {} nodes as a tree)", 4 * MAX_SHOWN);
+        }
+        crate::elab::tm::children(&x, &mut |c| stack.push(c.clone()));
+    }
+    let t = env.print_term(&[], &t);
+    if t.len() > 600 { format!("{}..", &t[..t.floor_char_boundary(600)]) } else { t }
+}
+
 /// `2^FUEL_LOG` units of fuel, by doubling.
 fn fuel_term(env: &sandblaster_kernel::api::Env) -> Result<Tm, String> {
     let one = env.parse_term(&[], "Cons[Unit](tt, Nil[Unit])").map_err(|e| e.to_string())?;
@@ -160,7 +190,7 @@ pub(super) fn compare(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], rustc: &[
         // (the panic inputs have a budget of their own: the search for them
         // runs after the coverage-driven inputs, which spend `literal`'s)
         if panic_case && let Some(lit) = lits.get(&p.e.lifted) && rep.entries[p.index].panics < LITERAL_CASES {
-            let Ok(args) = p.params.iter().zip(&c.args).map(|(t, j)| conv.term(t, j)).collect::<Result<Vec<Tm>, String>>() else { continue };
+            let Ok(args) = c.args.iter().enumerate().take(p.params.len()).map(|(i, j)| g.arg_term(p, i, j)).collect::<Result<Vec<Tm>, String>>() else { continue };
             let input = format!("({})", c.args.iter().map(J::render).collect::<Vec<_>>().join(", "));
             let lhs = mk::apps(lit.run.clone(), args.into_iter().map(|a| (Rel::Rel, a)).chain([(Rel::Rel, lit.fuel.clone())]));
             let got = env.eval_closed(&lhs, &mut Budget { steps: STEPS }).and_then(|nf| env.eval(&VEnv::default(), Lvl(0), &nf, &mut Budget { steps: STEPS }).map_err(|e| e.into()));
@@ -171,7 +201,7 @@ pub(super) fn compare(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], rustc: &[
                 rep.entries[p.index].panics += 1;
             } else {
                 let what = match &got {
-                    Ok(l) => env.print_term(&[], &env.quote(Lvl(0), l, false)),
+                    Ok(l) => printed(env, l),
                     Err(e) => format!("no outcome (its kernel evaluation failed: {})", format!("{e:?}").lines().next().unwrap_or("")),
                 };
                 rep.mismatches.push(Mismatch { lifted: p.e.lifted.clone(), callee: p.callee.clone(), input, model: format!("the literal reading of rustc's MIR gives {what} where its panic contract says it panics"), rustc: r.as_ref().err().cloned().unwrap_or_default() });
@@ -191,7 +221,7 @@ pub(super) fn compare(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], rustc: &[
         }
         // the arguments (a value the kernel cannot build, an invariant that
         // does not hold, is not an input of the function)
-        let Ok(args) = p.params.iter().zip(&c.args).map(|(t, j)| conv.term(t, j)).collect::<Result<Vec<Tm>, String>>() else { continue };
+        let Ok(args) = c.args.iter().enumerate().take(p.params.len()).map(|(i, j)| g.arg_term(p, i, j)).collect::<Result<Vec<Tm>, String>>() else { continue };
         let jret = if comps.len() == 1 { comps[0].clone() } else { J::Arr(comps.clone()) };
         let input = format!("({})", c.args.iter().map(J::render).collect::<Vec<_>>().join(", "));
         let shown = if comps.len() == 1 { comps[0].render() } else { format!("[{}]", comps.iter().map(J::render).collect::<Vec<_>>().join(", ")) };
@@ -209,7 +239,13 @@ pub(super) fn compare(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], rustc: &[
         // proofs, which the kernel's closed evaluation refuses: those go
         // through the reference strategy of `sandblaster eval`, as the
         // structured reading's evaluation does)
+        // (a fixed argument, `conform::Plan::fixed`, likewise: its check
+        // outgrows the memory cap where its evaluation does not)
+        let fixed = !p.fixed.is_empty();
         let eval = |t: &Tm| -> Result<V, String> {
+            if fixed {
+                return crate::driver::stage::eval_reference(env, t, STEPS);
+            }
             match env.eval_closed(t, &mut Budget { steps: STEPS }) {
                 Ok(nf) => env.eval(&VEnv::default(), Lvl(0), &nf, &mut Budget { steps: STEPS }).map_err(|e| format!("{e:?}")),
                 Err(_) => crate::driver::stage::eval_reference(env, t, STEPS),
@@ -227,8 +263,7 @@ pub(super) fn compare(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], rustc: &[
             }
         };
         if !env.conv(Lvl(0), &l, &rr, &mut Budget { steps: STEPS }).unwrap_or(false) {
-            let t = env.print_term(&[], &env.quote(Lvl(0), &l, false));
-            mismatch(if t.len() > 600 { format!("{}..", &t[..t.floor_char_boundary(600)]) } else { t });
+            mismatch(printed(env, &l));
         }
         rep.entries[p.index].literal += 1;
         rep.literal_cases += 1;

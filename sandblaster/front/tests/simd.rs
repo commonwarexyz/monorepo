@@ -572,6 +572,21 @@ impl Scratch {
             ("CARGO_CFG_TARGET_FEATURE", TargetInfo::aarch64_apple_darwin().features.iter().cloned().collect::<Vec<_>>().join(",")),
             ("CARGO_CFG_TARGET_ENDIAN", "little".into()),
             ("CARGO_CFG_TARGET_POINTER_WIDTH", "64".into()),
+            // the rest of a dev build script's configuration (stable cargo
+            // 1.98.1, no features): the extractions record theirs, which
+            // must be the build's (`mir::load`)
+            ("CARGO_CFG_DEBUG_ASSERTIONS", String::new()),
+            ("CARGO_CFG_FEATURE", String::new()),
+            ("CARGO_CFG_PANIC", "unwind".into()),
+            ("CARGO_CFG_TARGET_ABI", String::new()),
+            ("CARGO_CFG_TARGET_ENV", String::new()),
+            ("CARGO_CFG_TARGET_FAMILY", "unix".into()),
+            ("CARGO_CFG_TARGET_HAS_ATOMIC", "128,16,32,64,8,ptr".into()),
+            ("CARGO_CFG_TARGET_HAS_ATOMIC_PRIMITIVE_ALIGNMENT", "128,16,32,64,8,ptr".into()),
+            ("CARGO_CFG_TARGET_OS", "macos".into()),
+            ("CARGO_CFG_TARGET_VENDOR", "apple".into()),
+            ("CARGO_CFG_UNIX", String::new()),
+            ("CARGO_ENCODED_RUSTFLAGS", String::new()),
             ("SANDBLASTER_CACHE_DIR", self.dir.join("cache").display().to_string()),
             ("SANDBLASTER_CACHE_KEY", "test secret".into()),
         ]

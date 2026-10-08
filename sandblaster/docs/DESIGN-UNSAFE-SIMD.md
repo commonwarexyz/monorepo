@@ -2438,3 +2438,870 @@ state GF(2^16) multiplication, which rests on the tables (layer 3, open).
   among the Miri gate's twins) and are counted in §1.1 item 8 and AUDIT.md.
 * Presenting rs_engine's laws: yes, with the caveats above. F1 and F2 do
   not reach that module.
+
+### Stage "soundness-fixes" (2026-10-07; the review's findings fixed)
+
+Notes, scripts, logs, the patch scripts and the probes:
+`sandblaster-wt/recovery/unsafe-simd/impl/soundness-fixes/` (outside the
+repository). The trusted lines are counted in DESIGN.md §1.1 item 8 and
+`kernel/AUDIT.md` §21.1; the normative text is `docs/mir-lift.md` §20.1 and
+§20.10. The independent human review of `mir/window.rs` and of L's pointer
+arms (A-process) is still open.
+
+**F1, the window rule's bases (critical), fixed in principle.** Which
+places can be a pointer's base, re-derived: a reference points into a
+local's own storage only when it was made by borrowing a place that lives
+in that local (no `Deref`: the local, a field, an element, a variant's
+field); otherwise into memory behind another reference (whose local is an
+ancestor by its type), into what a parameter or a call result reaches
+(the caller's memory, A3, or memory reached from the call's
+reference-carrying arguments, ancestors), or into constant or static
+memory (no local holds it; immutable for the admitted types). So the
+**bases** of a formation are the root locals of the places that live in
+them and are borrowed (`&`, `&mut`, `&raw`) into an ancestor, or by the
+`&raw` formation itself, computed flow-insensitively with the ancestors;
+every base is an ancestor whatever its type. Every direct use of a base
+is a point that mentions it, and each point's uses are classified
+(`Use`: read, moved whole, moved out of, written, borrowed mutably, a
+storage marker, dropped, an unprinted operation). W2 refuses any use of an
+ancestor in the window but the storage marker of an ancestor that is not a
+base (a base's storage marker ends its memory). W3 now allows only reads
+(a copy, a shared or fake borrow, a length, a discriminant, an index), a
+whole move of a shared reference (its value; an owning value moved, a
+`Box`, could be freed by its new owner) and a non-base storage marker; an
+ancestor of `&mut` type not at all. Two pointers from one base are two
+families, the second's borrow a use in the first's window; a reference
+made before the formation and used after it is an ancestor or a loan the
+borrow checker rejects.
+
+Beyond the prototype (`../rv/f1-window-fix.patch`), which the re-derivation
+confirmed for its two constructs (a borrow into an ancestor makes a base;
+a base's storage counts), W3 had to refuse more than writes: a base moved
+inside a shared window (`moved_into_call` passed the prototype), an
+owning value moved (a `Box` the base is reached through), a drop, a move
+out of memory behind an ancestor, a borrow of a kind other than
+`shared` and `fake` (mutable whatever it is named; the old rule matched
+`"mut"` only), and an unprinted rvalue or callee (which mentioned no local
+before: an unprinted statement or terminator already mentioned all).
+
+*Twins* (`front/tests/mir_fixtures/sd_ptr_local`, extracted at levels 1
+and 0): the review's six programs and 19 siblings — a by-value parameter
+written through a mutable pointer, `&raw mut` of a local written, and of a
+local whose scope ended, a field of a local struct, a tuple's array, a row
+of a local array of rows, a `Box` and a `Vec` owned by a local, a
+temporary (shared and mutable), a closure writing the local, two mutable
+pointers from one local, a shared then a mutable one, a reborrow moved and
+written, a loop and a call writing the local, a pointer formed in a loop's
+body and used after it, a non-`Copy` local moved into a call inside a
+shared window, a `static mut` — each refused: its window verdict names the
+rule (W2 or W3, the local the base lives in), L is stuck there with that
+reason (`struct_field` and `moved_into_call` with the module's types
+declared, the lifted crate's environment; `boxed` earlier, on the `Box`,
+which L does not model), the lift's diagnostic pass names it, and every one with
+undefined behaviour is in the Miri gate's twins (23: both models report
+each but `local_raw_write`, Stacked Borrows only; `moved_into_call` is
+clean under Miri, which reads a moved-from local's bytes, and is refused
+conservatively; `static_mut_store` is defined and refused as a cast of a
+pointer constant). Positive: a local written only through its pointer, two
+shared pointers to one local (both read as rustc computes them), an
+immutable static and a promoted constant (their window verdicts pass; L
+does not read a constant reference to an array, stuck, named: a
+conservative refusal; the lift refuses the `static` item itself), and the
+two alignment fixtures below. Before the fix 19 of the 24 twins the window
+rule judges passed it; after it, each is refused.
+
+*The checked-in verdicts*: the 52 verdicts of every checked-in window
+extraction (rs_engine's 9, `sd_neon_mul128` and its two twins 8 each,
+`sd_ptr` 5, `sd_ptr_twins` 14) are byte-identical in full text before and
+after (`tests/unsafe_simd.rs` `every_checked_in_window_verdict` prints them;
+it asserts rs_engine's nine `Ok`, `mul_neon`'s naming `x`).
+
+**F2, the window extraction's configuration (medium), fail closed.** The
+parse keeps every header record (`Sbmir::header`: every top-level record
+but the functions and the type definitions); `load_window` requires every
+one but `(mir-opt-level ..)` equal to the main extraction's — so a record
+the printer adds later is compared without anyone listing it — and every
+type definition the two share equal (the text of a type the printer does
+not print blanked: rustc's internal ids in it differ between runs). The
+specific comparisons it replaces (compiler, crate, module, overflow
+checks, target, exclusions, sources, roots, printer) are all header
+records. `extract.sh` refuses a non-empty inherited `RUSTFLAGS`,
+`CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` or
+`CARGO_TARGET_<triple>_RUSTFLAGS`, and runs Cargo with
+`CARGO_ENCODED_RUSTFLAGS` set (empty, or `--rustflags`, an option for
+negative twins only), which overrides every other source of rustflags,
+Cargo's configuration files included; mirx records them, `(rustflags
+"..")`, and `load` refuses a main extraction recording any. The record is
+what makes a `--cfg` difference visible: no other record shows it.
+
+*Twins* (`front/tests/mir_fixtures/sd_ptr_cfg`: `param_write`'s shape with
+the write compiled out under `-C target-feature=+sm4`, `cfg_alias`, the
+review's, and under `--cfg sd_twin`, `cfg_flag_alias`): with the matching
+window extraction both formations fail W2; the window extraction made
+under `-C target-feature=+sm4` is refused, naming its static features, its
+`-C target-feature` and its rustflags; the one made under `--cfg sd_twin`
+is refused naming its rustflags, the only record it differs in; each
+header record changed alone (rustflags, byte order, target CPU, target
+feature flags, printer, overflow checks, exclusions, a note) is refused,
+and so is a type definition both share, changed (`sd_ptr_local`'s
+`Pair`); a main extraction with rustflags is refused by `load`.
+
+**F10, `reader_widen`.** `window` (`data.get(i..j)`) moves from the
+functions read only to those proven: its theorem is kernel-checked and
+accepted by the trusted check (`prove_and_check` refuses any theorem the
+gate's α-equality refuses), and what it equates is right: L's reading of
+it, with core's `get` by a range followed in library MIR, gives rustc's
+value on every range of the slices of lengths 0 to 3, out-of-order and
+out-of-bounds ones included (`window_reads_as_rustc_computes`, 86 inputs).
+
+**F5, the alignment arm.** A test hook (`literal::test_fault::
+set_row_align`, never set by a build, beside the `IterMut` fault) reads
+every admitted row as needing a given alignment. With 16: a load from a
+base aligned to 16 (`[u128; 2]`, `rows_at`) reads at offsets 0 and 16 and
+is stuck at 8, and one from a byte array (`bytes_at`) is refused, named;
+with the rows' own alignment (1) every offset in bounds reads, as rustc
+computes.
+
+**F9, A-S7 on the record.** The record of a build whose functions read
+from MIR form a raw pointer lists the library `unsafe fn`s crate code may
+call (`ptr::admitted_unsafe_fns`: `add`, `sub`, `offset` of `*const T` and
+`*mut T`, under `core::` and `std::`).
+
+**F4, the memory-safety statement, generated.** `mir::safety` (untrusted:
+it restates what each MIR theorem implies and can misdescribe, never
+admit) reads, per function read from MIR, the facts the narrow reading
+itself read — each formation with its window verdict (its kind, the `&mut`
+parameters its base is reached through), its family's base
+(`ptr::bases`), the family's moves and its loads and stores through the
+admitted table with their byte counts and constant offsets, the
+intrinsics called with the features they need and where the body has them
+(its own `#[target_feature]`, or the target's static features bound to the
+build's), the `#[target_feature]` functions and the other functions read
+from MIR it calls — and the record prints one statement per function.
+For rs_engine it states what the hand-written statement (stage neon-mul,
+above) states (`tests/verified_roots.rs`
+`the_rs_engine_record_states_its_memory_safety` checks each fact):
+
+| the hand-written statement | the record, generated |
+| --- | --- |
+| `mul_neon`'s 4 loads and 4 stores each touch 16 bytes inside that chunk's 64, at offsets 0, 16, 32 and 48 | 4 loads (`vld1q_u8`, 16 bytes at offsets 0, 16, 32 and 48) and 4 stores (`vst1q_u8`, the same), each inside the base |
+| one pointer formed from the chunk's `&mut [u8; 64]` (`as_mut_ptr`; 6 moves, each inside the chunk) | 1 raw pointer formed by `as_mut_ptr` from `chunk` (`[u8; 64]`: a mutable base of 64 bytes); 6 moves |
+| nothing else touches the chunk while that pointer is in use (the window rule) | the window rule passed: nothing else reaches the base while the pointer is in use |
+| `mul_neon` forms raw pointers from its `&mut` parameter `x`, which aliases no other parameter (A3) | reached through the `&mut` parameter `x`, assumed to alias no other parameter (A3) |
+| each of the 8 table loads of a `mul_128` call (two calls per chunk) reads the 16 bytes of one `u128` table entry (`lut.lo[i]`, `lut.hi[i]`) through a pointer formed from a shared reference, which nothing writes in its window | `mul_128`: 8 raw pointers formed by `ptr::from_ref` from `lut.lo[0]` .. `lut.hi[3]` (`u128`: a shared base of 16 bytes); through each 1 load (`vld1q_u8`, 16 bytes at offset 0); nothing writes the base while the pointer is in use; `mul_neon` calls `mul_128` (2 call sites) |
+| it calls `mul_neon`, a `#[target_feature(enable = "neon")]` function, with NEON static | `Neon::mul` calls `Neon::mul_neon`, a `#[target_feature(enable = "neon")]` function; `neon` enabled statically on `arm64-apple-macosx` (A-S3) |
+| every NEON instruction it runs (`LD1`, `ST1`, `TBL`, `AND`, `USHR`, `EOR`, `DUP`) runs with NEON available | `mul_neon`'s intrinsics (`vld1q_u8`, `vst1q_u8`) need `neon`, its own `#[target_feature]`; `mul_128`'s (`vld1q_u8`, `vqtbl1q_u8`, `vandq_u8`, `vshrq_n_u8`, `veorq_u8`, `vdupq_n_u8`) need `neon`, static |
+| `Neon::muladd_128`: the same 8 table loads of its `mul_128` call; no store | `Neon::muladd_128`: no raw pointer; it calls `Neon::mul_128` (1 call site); its intrinsic `veorq_u8` needs `neon`, static |
+| `<Scalar as Engine>::mul`: safe code | `Scalar::mul`: no raw pointer; no intrinsic: safe code |
+
+Not generated: that `x`'s chunks are yielded once each by `iter_mut`
+(the `IterMut` model's disjointness, A-S4, which no per-function fact
+shows), that no function panics (a theorem's outcome `Ret`; the record
+lists panic contracts where there are some), and the instructions'
+mnemonics.
+
+**F3** (AUDIT.md §21.1 checklist item 3: `u128` is plain since stage
+neon-mul) and **F8** (`docs/checked-structuring.md` §4 A3 restated as
+§2.7 and A-S1 ask, with A3′; A4's mirx size) are fixed in the text.
+
+**The lock-hash question** (stage neon-mul). The spec sheet's kernel
+statement of `scalar_mul_multiplies_every_chunk` carries, as the proof of
+the index bound `log_m as usize < 65536` in `s.mul16[log_m as usize]`, a
+term the elaborator built under the call's facts: a λ over `h_ens`, the
+type of `Scalar::mul::ensures` (PROOF.rs's summary, mentioning
+`crate::proof::muls16_from`), applied to it. The lock does not cover it.
+`canon` replaces every irrelevant subterm (a proof: an argument the
+kernel's relevance table marks irrelevant, printed with a leading `.`) by
+`•`, and the item's dependencies are the globals in relevant positions
+only, so neither `muls16_from` nor `Scalar::mul::ensures` is hashed or a
+dependency. Shown: the lock preview of a copy of the crate as it is, and
+of one with PROOF.rs's `muls16_from` renamed (which changes that term), have
+the same root (`581461cb`), the same item hash (`5e9eb968`), canon, source
+hash and dependencies; only the entry's displayed `kernel type` line
+differs, which `lock::compare` does not compare (it compares hashes and the
+de-elaborated statement), so a PROOF.rs edit leaves a matching lock
+matching (`spec --accept` would list the entry as restated: its displayed
+text). Nothing to fix; the three accepted locks are untouched.
+
+**Measured** (the final sources; logs in the stage's notes).
+
+* Mutants of every trusted construct, each run then reverted, every one
+  caught by its twin for its own reason: 14 in `window.rs` (a borrow into
+  an ancestor no longer making a base; a base no longer an ancestor
+  whatever its type; a base's storage marker skipped in W2; the `&raw`
+  formation's place no longer a base; W3 letting through a base moved, an
+  owning value (a `Box`) moved whole, a drop, an unprinted operation, a
+  move out of a place, a borrow of an unknown kind, `&raw mut`, an
+  assignment's destination; an unprinted rvalue or callee mentioning no
+  local), 5 in `mod.rs` (the header
+  comparison skipped; the `(rustflags ..)` record left out of it; the four
+  records the review named left out, the old list; the type definitions
+  not compared; `load`'s rustflags refusal skipped) and 2 in `literal.rs`
+  (the alignment arm's base check and its offset check removed).
+* The 52 checked-in window verdicts are byte-identical in full text
+  before and after every window change (rs_engine's 9, `sd_neon_mul128`
+  and its two twins 8 each, `sd_ptr` 5, `sd_ptr_twins` 14).
+* `extract.sh` refuses `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
+  `CARGO_BUILD_RUSTFLAGS` and `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS`
+  when set (exit 2, nothing written).
+* The Miri gate (`run.sh --engines`, 1,301 s): the positive fixtures clean
+  under Stacked and Tree Borrows (4 tests each, one new: `sd_ptr_local`'s
+  positive functions and its alignment fixtures at offsets 0, 8 and 16);
+  all 28
+  undefined-behaviour twins reported, the 23 new ones by both models but
+  `ub_local_raw_write` (Stacked Borrows only), as `ub_two_formations`
+  before; Commonware's NEON engine against its naive engine clean under
+  both (2 tests each). `GATE.txt` rewritten: it now covers
+  `sd_ptr_local/src/a.rs`, and the Miri crate's three changed files.
+* `cargo check --all-targets` of the seven sandblaster packages: 0
+  warnings; mirx's build: 0 warnings.
+* `sandblaster check` of rs_engine (the release CLI, cache off), unchanged:
+  331 definitions checked, 2,887 obligations proven (2,836 automated, 51
+  hinted), the 3 laws proven, the gates boundary, examples (58), sections
+  (2), law rules (0 errors, the 4 `law-resembles-impl` warnings) and
+  MIR theorems (5 of 5, 47.8 s) passed, the lock missing (52 items, not
+  accepted): NOT VERIFIED for the lock only.
+* The full front suite (its lib and all 77 test binaries, one at a time),
+  `sandblaster-kernel` and `sandblaster-targets`: 80 runs, 1,389 tests
+  passed, 16 ignored, 0 failed — among them `reader_widen` 4 (red before),
+  `unsafe_simd` 18 (+1 ignored), `mir` 51, `literal` 41, `simd` 10,
+  `hardware` 10, `fault_injection` 4, `theorem_gate` 13, `verified_roots`
+  8, `lift_open` 28, `typeck` 27, `panic_contracts` 14 (+2), `walker` 4.
+  One more test was added to `unsafe_simd` afterwards (the two struct
+  twins read with the module's types declared) and the binary run again:
+  19 passed, 1 ignored.
+* The review's own probes against the final tree (its harness, outside the
+  repository): every `fx/rv_local` program refused and stuck in L where it
+  gave a value; `fx/rv_cfg`'s window extraction refused; `fx/rv_green_x`
+  (`local_xor` with its laws and proofs) refused by the front end, no
+  permit, where the review's build gave one.
+* Codec and storage, the cache off: `cargo test -p commonware-codec`
+  (308 s; 147 + 16 + 5 passed): "verified module `varint` ... 21250
+  obligation(s) proven, 603 definition(s) kernel-checked; every §15 gate
+  passed; lift conformance passed; SPEC.lock: matches (116 item(s), root
+  38c1c9c0..)"; `cargo test -p commonware-storage --lib` (1,629 s; 3,776
+  passed, 2 ignored): "`mmr` verified in place ... 4263 ..., 741 ...;
+  SPEC.lock: matches (211 item(s), root d87803e2..)" and "`verifier`
+  verified in place ... 2339 ..., 588 ...; SPEC.lock: matches (272
+  item(s), root a7563685..)". The three accepted locks are unchanged.
+
+**Deviations, and why.**
+
+1. *W3 refuses more than the prototype*: a base moved, an owning value
+   moved, a drop, a move out of a place, any borrow kind but `shared` and
+   `fake`, and an unprinted rvalue or callee. Re-deriving "every direct
+   use" showed the prototype's W3 (writes, `"mut"` borrows, `&mut`
+   ancestors, a base's storage) let a moved base through; the rest close
+   the rule on what it cannot read. None changes a checked-in verdict.
+2. *F2's record*: besides refusing inherited rustflags, `extract.sh` sets
+   `CARGO_ENCODED_RUSTFLAGS` (overriding Cargo's configuration files) and
+   mirx records the flags, `(rustflags "..")`, so that the comparison
+   sees a `--cfg` difference no other record shows, and `load` refuses a
+   main extraction made with any. The checked-in extractions before this
+   stage (the shipped modules', the older fixtures', rs_engine's) were not
+   re-extracted: each pair lacks the record on both sides and compares
+   equal; every new extraction carries it.
+3. *Type definitions are compared too*, with the text of a type the
+   printer does not print blanked (it carries rustc's internal ids, which
+   differ between the two runs of the printer: five of rs_engine's shared
+   definitions differ only there).
+4. *F5 through a test hook in L* (`test_fault::set_row_align`, beside the
+   `IterMut` fault), since no admitted row needs alignment: a build never
+   sets it.
+5. *F4 is generated from the MIR the readings read*, through the trusted
+   tables (`ptr::bases`, `ptr::derivation`, `ptr::MEM_INTRINSICS`, the
+   window verdicts), not from the structured reading: what the statement
+   says does not depend on S's bookkeeping. It does not state what no
+   per-function fact shows (the `IterMut` model's disjointness, A-S4).
+6. *An immutable static and a promoted constant* pass the window rule but
+   L does not read a constant reference to an array: stuck, named (a
+   conservative refusal the engines do not meet).
+
+**Open.**
+
+* The independent human review of `mir/window.rs` and of L's pointer arms
+  (A-process).
+* The review's F6 and F7 (conservative refusals: a store through a
+  `split_at_mut` half; an `IterMut` through `enumerate`, `zip`, `rev`).
+* The crate's configuration beyond flags (Cargo features) is not
+  recorded: both extractions are made from one manifest by one run of
+  `extract.py`, and a feature changed between them would not show. A
+  record of the crate's `cfg` set would close it (a printer change).
+  *Closed in stage leftovers* (the `(cfg ..)` record, below).
+* The build's own `--cfg` rustflags are not checked against the
+  extraction's (A-S3 binds `-C target-cpu` and `-C target-feature` only).
+  *Closed in stage leftovers* where a build script verifies the module.
+
+### Stage "prover-gaps" (2026-10-07; neon-mul's open prover gaps)
+
+Notes, scripts, logs and probes:
+`sandblaster-wt/recovery/unsafe-simd/impl/prover-gaps/` (outside the
+repository). Every change is in untrusted code — `auto` (the prover), the
+elaborator's `calc!`, the structured reading S (`mir/read.rs`) and the
+conformance check's generator — so the trusted lines of DESIGN.md §1.1
+item 8 and `kernel/AUDIT.md` §21.1 are unchanged (both give S's size, now
+4,127 code lines, 3,992 before); the kernel, L, the window rule,
+SEMANTICS.md and every law are untouched.
+
+**The five gaps, fixed in the prover** (each on shapes other than
+rs_engine's: `tests/prover_gaps.rs` §5, four tests, each with negative
+twins; a mutation removing each fix fails its test — logs/mutations-gaps.log,
+7 of 7 caught):
+
+* (a) *A `bool` spec's conjuncts as facts* (`auto::terms::term_conjuncts`).
+  A fact `P(ā) == true` whose transparent `P` unfolds, on its term, to the
+  elaborator's conjunction (`if c { rest } else { false }`) is split into
+  its conjuncts: `c == true` by a match on `c` whose `false` arm transports
+  the fact to `false == true`, the rest by the transport to `c == true`;
+  a conjunct comparing two arrays of machine integers (`array::eq`) becomes
+  the arrays' equation (`array::eq_sound_<w>`). Each link is a fact naming
+  the previous one by its variable (nesting the transports copied each
+  proof into the next: 197k kernel steps became 8M). Test: `split_of(w, v,
+  h)`, eight 16-byte comparisons; a late conjunct, all of them reordered,
+  one as a `rewrite`'s equation. Twins: rows the fact does not pair, a
+  conjunct of a disjunction.
+* (b) *Array literals equal element by element*
+  (`auto::terms::term_array_split`, `term_backward`). A target `a == b`
+  whose sides unfold on their terms (transparent functions; never an
+  intrinsic, which the kernel unfolds only on closed arguments) to array
+  literals of one length is proven element by element — each pair by a
+  fact, by a ∀-fact matched on the element's term (`using(lemma)`), or by
+  the search — and the arrays' equation by `array::ext` over a list
+  congruence built as a `let` chain (linear; nested motives were
+  quadratic, 14.7 s for `chunk_split`, now about 3 s). Test: two literals
+  of 24 table lookups, by 24 element facts and by `using(sub_eq)`. Twins:
+  the elements in another order, a ∀-fact about other terms.
+* (c) *`calc!` through views* (`elab/apply.rs`, `calc_view_ext`). A chain
+  from a slice (or array) through its view to another concludes the
+  slices' own equation by `slice::ext` (`array::ext`). Test: slices and
+  arrays; twin: a chain whose last link does not hold.
+* (d) *A loop bound as one equation* (`auto/rewrite.rs`). A fact that
+  fixes a field of a variable to a literal (`iter.end == 32usize`) and
+  occurs in the target only inside arguments of folded recursive
+  applications is rewritten last: rewritten first, it made the loop's
+  application unfold at every step and exhausted the budget. Test:
+  `rw_mix::mix_grid`'s nested loops, bounds `iter.end == 3u32` and
+  `4u32`; twins: a wrong bound, a wrong `ensures`.
+* (e) *Source names for loop iterators* (`mir/read.rs`, `loop_scopes`).
+  When several locals of one source name are live at a loop's header (an
+  outer loop's `iter`, still needed after the inner loop's), the
+  attachment's name is the innermost binding: the one whose definition is
+  dominated by every other one's (the CFG's dominators, each local's first
+  definition). Same test (both loops' iterators are `iter`).
+
+A regression the suites caught on the way: the term-level unfolding of
+(b) first went through hardware models (`vqtbl1q_u8`, `_mm_shuffle_epi8`),
+which the kernel's conversion does not unfold on symbolic arguments; the
+goal's proof was refused by the kernel (`simd` and `hardware`, 2 tests
+each). The unfolding now stops at an intrinsic (`elab::tm::head_unfold_if`).
+
+**rs_engine's `PROOF.rs`**: 818 → 726 lines (667 → 578 code; 38 → 36
+lemmas): `split_rows` and its two calls removed (a); `chunk_split`'s 64
+`rewrite`s replaced by `using(lo_byte_split, hi_byte_split); follows();`
+(b); `same_chunks` removed, the `calc!` ends `== b by {
+scalar_mul_multiplies_every_chunk(..) }` (c); the scalar inner loop's
+bound `iter.end == 32usize` (d); `iter` for `iter_9` and `iter_24` (e).
+`sandblaster check`: 329 definitions, 2,671 obligations proven (2,620
+automated, 51 hinted; were 331 and 2,887), the 3 laws, MIR theorems 5 of
+5, every gate but the lock, 108 s. Lock preview: 52 items, root
+`581461cb..`, identical to the neon-mul stage's (`PROOF.rs` is not part of
+the surface: its 76 items are proof internals). `lo_byte_split` and
+`hi_byte_split` keep their four `rewrite(row_bytes(..) == lo_bytes(..))`
+steps each: without them both are unproven, the facts being there (from
+(a)) but `auto` not rewriting the target with an equation between two
+stuck spec applications (open).
+
+**The pending laws** (`tests/unsafe_simd.rs`). `mul_chunks`' loop body is
+read as an element function with its contract (`chunk64`), the loop's
+contract is `muls_from` one chunk at a time, the summary follows, and the
+length law is proven from them: new test
+`the_loop_contract_and_the_length_law_are_proven` (1,296 obligations, 6/6
+MIR theorems, every gate but the sections gate, which names the
+functions without laws). The law of every byte stays `#[ignore]`d: its
+last step reads a 64-byte literal at a symbolic index, and enumerating
+the index (`by_cases(j, 0..64)`) runs the kernel's check out of fuel; with
+a `requires(j < 64)` the elaborator's `by_cases` produced an ill-typed
+proof (the hypothesis kept `j` where the split had replaced it: the
+kernel refused it, `TypeMismatch` for `h_req0`) — an elaborator bug,
+open.
+
+**Conformance on the real tables** (`conform.rs`,
+`conform/in_place.rs`, `conform/literal.rs`; untrusted). A parameter whose
+type holds more than 65,536 elements was skipped; now, in place, when the
+host gives its type a `Default` (`impl Default for Neon`), it is fixed to
+the host's own value: the harness, built before the inputs are
+generated, writes `<T as Default>::default()` once (48 MB of JSON for both
+engines), read back as one kernel term with its equal subterms shared
+(heap 2.2 → 1.1 GB); every call passes the host's own value; the other
+parameters vary, on 8 inputs per function in one round (a sample of the
+whole candidate list), and the model is evaluated by the reference
+strategy (the kernel's closed evaluation type-checks its term first:
+checking the scalar engine's 4.26 million entries outgrew the memory cap
+where evaluating them takes 1.4 GB). Result
+(`sandblaster conform` on the root, cache off, 428 s): 824 inputs on 5
+functions, the literal reading on 152 of them, 0 mismatches. `Neon::mul`,
+`mul_neon` and `Scalar::mul`, skipped before, are compared on 8 inputs
+each with the real tables (1,114,111 and 4,259,839 elements; slices of 0 to
+16 chunks, `log_m` from 0 to 65,535 — `GF_MODULUS`, 59,036, 32,767, 8,192,
+..; 8 outcome classes each), the literal reading on all 24. A first run
+evaluating the model by `eval_closed` failed `Scalar::mul` on every input
+(the kernel's check of the table ran into the memory cap, `OutOfFuel`):
+the reason for the reference strategy.
+Mutation (`mutate-conform.py` in the notes): with each array field of the
+fixed value rotated by one entry before it becomes the model's (row
+`log_m` of the model's table is the host's row `log_m + 1`), the check
+fails with 44 mismatches on the three table functions, the structured
+model's and the literal reading's, and none elsewhere. Its first run
+aborted instead: a mismatch printed L's outcome whole, a value holding
+the table (an 8 GiB string); a mismatch now prints a value only when its
+read-back is small (`literal::printed`), else its size.
+
+**Validation** (the final sources; one release binary for the root, the
+conformance runs and the lock preview):
+
+* Suites: `prover_gaps` 19, `auto_*` (7 binaries) 71, `prover_ergonomics_*`
+  (7) 95, `simd` 10, `hardware` 10, `unsafe_simd` 20 (1 ignored), `mir`
+  51, `literal` 41, `loop_post` 28, `reader_widen` 4, `walker` 4,
+  `theorem_gate` 13, `verified_roots` 8, `lift_conformance` 13 (1
+  ignored), the front's unit tests 35 (among them the new
+  `the_types_the_host_gives_a_default_value`): all pass.
+* rs_engine as above (329 definitions, 2,671 obligations, 5/5 MIR
+  theorems, the lock preview's root unchanged).
+* Codec and storage builds, the cache off: `varint` VERIFIED, 21,250
+  obligations, 603 definitions, lift conformance passed, `SPEC.lock`
+  matches (116 items, root `38c1c9c0..`); `mmr` VERIFIED in place, 4,263
+  and 741, lock `d87803e2..` (211 items); `verifier` VERIFIED in place,
+  2,339 and 588, lock `a7563685..` (272 items). The counts are the
+  previous stage's; the three accepted locks are unchanged.
+
+**Open.**
+
+* `auto` does not rewrite the target with a fact equating two stuck spec
+  applications (`row_bytes(lut.lo[0]) == lo_bytes(lut16[0])`): the eight
+  `rewrite`s of `lo_byte_split`/`hi_byte_split` stay. *Closed in stage
+  leftovers.*
+* `by_cases(j, ..)` under a `requires` mentioning `j`: the elaborator
+  builds an ill-typed proof (refused by the kernel). The per-byte law of
+  `mul_chunks` (`pending_chunk_and_slice_laws`) is still open. *Both
+  closed in stage leftovers.*
+* Layer 3 and `fft`/`ifft` (step 8), as before.
+
+### Stage "leftovers" (2026-10-07; the fix round's open items)
+
+Notes, scripts, logs and probes:
+`sandblaster-wt/recovery/unsafe-simd/impl/leftovers/` (outside the
+repository). Five items, in order; the first is trusted (62 code lines,
+DESIGN.md §1.1 item 8, `kernel/AUDIT.md` §21.1), the rest untrusted or
+proof text. The kernel, SEMANTICS.md, every law and Commonware's sources
+are untouched; no `spec --accept`.
+
+**1. The extraction's cfg set (trusted).** `(rustflags ..)` repeats what
+`extract.sh` passed, and nothing recorded the crate's configuration: a body
+behind `#[cfg(feature = "..")]` compiled in one extraction and out of the
+other showed in no record. mirx now prints the session's cfg set,
+`(cfg ("debug_assertions") ("feature" "std") ..)` — `Session::config`, the
+set `#[cfg]` and `cfg!` were evaluated against: the crate's Cargo features,
+the target's and the profile's cfgs, every `--cfg` whatever passed it
+(+3), parsed (+9). The window extraction must record its main extraction's
+(it is a header record: `load_window`'s fail-closed comparison covers it
+unchanged). `load` binds a main extraction's record to the build's
+configuration where a build script knows it (+8): `target::build_cfg`
+(+39) reads the features (`CARGO_CFG_FEATURE`), the builtin cfgs a stable
+compiler shows (`BUILD_CFGS`, from `CARGO_CFG_<NAME>` in Cargo's form) and
+the `--cfg`s of `CARGO_ENCODED_RUSTFLAGS`; `target::build_sees` restricts
+the record to what a build script can know (not `target_feature`, A-S3's,
+nor the nightly-only `NIGHTLY_CFGS`; any other name is compared, fail
+closed); the lift passes the build's set on (+3). `extract.sh` takes
+`--features`, `--no-default-features` and `--profile` (Cargo's options).
+Not bound, and recorded as assumptions (AUDIT §21.1): `sandblaster check`
+(no build configuration; rs_engine's record states its features), the
+extractions older than the record (the legacy rule), the cfgs only a
+nightly shows and the unstable target features, flags no build script sees
+(its own `rustc-cfg`, `cargo rustc -- --cfg`, a wrapper's flags). A bound
+extraction serves one configuration: a release build of a dev extraction,
+or a dependent's other feature set, is refused.
+
+*Measured on the build side* (a probe crate's build script, stable 1.98.1):
+`CARGO_CFG_FEATURE` holds the exact feature names (empty without one),
+`CARGO_CFG_DEBUG_ASSERTIONS` follows the profile, a `--cfg` of `RUSTFLAGS`
+shows as `CARGO_CFG_<NAME>` and in `CARGO_ENCODED_RUSTFLAGS`, `cargo clippy`
+adds nothing; a nightly build script also shows the gated cfgs and the
+unstable features (left out on both sides).
+
+*Twins* (`front/tests/mir_fixtures/sd_ptr_feat`: `param_write`'s shape, the
+aliasing write behind the feature `alias`; extracted without and with it
+at both levels): each pair loads, the formation passing without the write
+and failing W2 with it; a window extraction of the other features is
+refused both ways, the feature named; without the record the two programs
+differ in no header record and the verdict carried from the window
+extraction without the write passes the main extraction's formation with
+it (the hole); a build script's variables of the other feature set (both
+ways), of a release profile, or with a `--cfg` (both forms) refuse the
+extraction, through the lift too; not bound without the record or without
+a build configuration. Mutants: 13, every one caught.
+
+*The shipped extractions.* rs_engine's two were extracted again: they
+differ from the checked-in ones by exactly two header lines each,
+`(rustflags "")` and `(cfg ..)` (features `bls12381`, `crc-fast`,
+`default`, `num-rational`, `num-traits`, `std`), so its theorems, window
+verdicts and lock preview are unchanged (measured below). varint's, the
+MMR's and the verifier's were not (the legacy rule): binding them would
+refuse their ordinary builds, which run under several feature sets
+(`commonware-codec` is `default,std` in its own tests, `std` alone inside
+storage's, `arbitrary,default,std` in the workspace's; storage adds
+`test-utils` in its own tests), and today's printer would also change more
+than the record (a probe re-extraction of varint adds nine header records
+and the `(local)` markers of its 92 functions).
+
+**2. `by_cases` under a precondition the goal uses** (the elaborator,
+`elab/script.rs` `case_generalized`). A case's motive abstracted the index
+in the goal's value, leaving its proofs alone, but the goal holds proofs of
+the index's bound — the precondition `h_req0` itself, or proofs built from
+it — whose types mention the index, so the kernel rejected the proof
+(TypeMismatch on `h_req0`). When the goal mentions facts whose types
+mention the split variable, the motive now generalizes them with it,
+syntactically, like a refining `match`: `y. Π(h′ : F[k := y]).. G[k := y,
+h := h′]`; each case proves `Π(h′ : F[k := v]).. G[k := v, h := h′]`, the
+`h′` as facts; the transport is applied to the facts. Without such facts
+the old path runs. Test (`tests/prover_gaps.rs` §12): a 16-entry table at
+one bound, a 4×4 grid at two bounds split twice, both bounds in one
+conjunction, a bound the goal derives (`n + 1` under `n < 15`); twins
+refuted, never rejected. Without the fix all four positives are rejected
+exactly as reported. rs_engine's `lo_bytes_at` and `hi_bytes_at` now state
+their bound as a precondition (their `implies(..)` form and its `if`/`else`
+were the workaround).
+
+**3. Equations between applications on the target's term** (`auto`,
+`auto::terms::term_rewrite`). A fact `row_bytes(lut.lo[0]) ==
+lo_bytes(lut16[0])` (a conjunct of `is_split_of`) was no rewrite rule:
+both sides unfold, to array literals of stuck bytes, so neither is stuck.
+On the root target's term an occurrence of one side of such an equation
+(both sides applications of transparent definitions; stated as an
+equation, or as `array::eq(..) == true` over machine integers) is now
+rewritten to the other when another fact names that other side and not
+the first, each equation once; the rewritten target is closed by a fact or
+a quantified fact on its term, or by the search (bounded). Test
+(`tests/prover_gaps.rs` §13, the `le16`/`lows16` rows of `split_of` and two
+nibble lookups): proven; twins (the lemma's rows swapped, a row the fact
+does not pair, no fact naming the other side) refuted. `lo_byte_split` and
+`hi_byte_split` lose their four `rewrite`s each.
+
+**4. The per-byte law** (`tests/unsafe_simd.rs`, test data). Its last step
+read the 64-byte literal `mul64(c)` at a symbolic byte by enumerating the
+bytes: 64 cases, each evaluating the literal, outgrew the kernel's fuel and
+the memory cap. The generic way: a per-width lemma reading an array
+literal at a symbolic index through its element function, `map64_at(c, g,
+j)`: `[g(c[0]), .., g(c[63])][j] == g(c[j])` under `j < 64`, proven once for
+the width by its 64 cases with `g` and `c` symbolic (cheap: each case reads
+one element of a literal of applications of a variable), which needed
+item 2; `mul64_at` is its instance at `|b| mul_byte(b, lo, hi)`. The byte
+is stated over the opaque `chunk64` (`chunk64_at`), so the law's goal never
+holds the 64 bytes (over `mul64` it had more than 100,000 nodes, too many
+for a motive), and the loop's chunk `k = i` reads through
+`seq::index_update_same`. The law proves; the test is now
+`the_law_of_every_byte_of_every_chunk_is_proven`, with twins (the tables
+swapped; the lemma claiming another element). A generic `<T, U>` lemma
+cannot live in a `#[lift]` proof module (only sealed-trait generics are
+monomorphized); the standard library could hold it, but the accepted MMR
+and verifier roots mount that library, so it stays in the test.
+
+**5.** rs_engine's calc ends its last step with `follows();`: the
+`warning[script]` is gone.
+
+**Measured** (the final sources; logs in the stage's notes).
+
+* `cargo check --all-targets` of the seven sandblaster packages: 0
+  warnings; mirx's build: 0 warnings.
+* The full front suite (its lib and all 77 test binaries, one at a time),
+  `sandblaster-kernel` and `sandblaster-targets`: 80 runs, 1,402 tests
+  passed, 15 ignored, 0 failed (`unsafe_simd` 24, the byte law no longer
+  ignored; `prover_gaps` 21).
+* Mutants (each run, then reverted): the 13 of item 1, every one caught;
+  item 2's fix removed, caught by its test and by the byte law; item 3's
+  step removed and its `names_apart` inverted, both caught.
+* The window verdicts: the 52 recorded by stage soundness-fixes (rs_engine's
+  9, `sd_neon_mul128` and its two twins 8 each, `sd_ptr` 5, `sd_ptr_twins`
+  14) are identical in full text.
+* rs_engine (the release CLI, cache off): 329 definitions, 2,653
+  obligations (2,602 automated, 51 hinted), the 3 laws, the gates boundary,
+  examples (58), sections (2), law rules (0 errors, the 4
+  `law-resembles-impl` warnings) and MIR theorems (5 of 5) passed, the lock
+  missing (52 items): NOT VERIFIED for the lock only; no `warning[script]`.
+  The lock preview is byte-identical to stage prover-gaps' (root
+  `581461cb..`). `PROOF.rs`: 714 lines (564 code lines), 726 (578) before.
+* Codec and storage, the cache off: `cargo test -p commonware-codec` (147 +
+  16 + 5 passed), `varint` VERIFIED (21,250 obligations, 603 definitions,
+  lift conformance passed, `SPEC.lock` matches, root `38c1c9c0..`);
+  `cargo test -p commonware-storage --lib` (3,776 passed, 2 ignored), `mmr`
+  VERIFIED in place (4,263, 741, lock `d87803e2..`) and `verifier`
+  (2,339, 588, lock `a7563685..`). The counts and the three accepted locks
+  are unchanged.
+* The Miri gate (`run.sh --engines`, 947 s): the positive fixtures clean
+  under Stacked and Tree Borrows (4 tests each), all 28 undefined-behaviour
+  twins reported (`ub_two_formations` and `ub_local_raw_write` by Stacked
+  Borrows only, as recorded), the NEON engine against the naive one clean
+  under both (2 tests each); `GATE.txt` rewritten byte-identical.
+
+**Open.**
+
+* A bound extraction serves one configuration (one extraction per module):
+  a crate verified by its build script under several feature sets or
+  profiles would need one extraction per configuration, selected by the
+  build's; the shipped varint, MMR and verifier extractions stay unbound
+  (the legacy rule) until then.
+* The human audit (A-process) of the trusted files, now with this stage's
+  62 lines; rs_engine's laws and lock await the user; layer 3 and
+  `fft`/`ifft` (step 8).
+
+### Stage "cfg-binding-fixes" (2026-10-07; the validation of stage leftovers)
+
+Notes, scripts, logs and probes:
+`sandblaster-wt/recovery/unsafe-simd/impl/cfg-binding-fixes/` (outside the
+repository). The independent validation of stage leftovers
+(`validate-leftovers/NOTES.md`) found the cfg binding failing open under
+`-C debug-assertions` in the build's rustflags (V1, demonstrated), a
+profile's `panic` and the test harness's `cfg(test)` claimed bound (V2,
+V4), the dependencies' configuration not recorded (V3), the legacy rule
+still admitting an extraction by the narrow reading's printer without the
+record (V5), two exotic cfg values printing the same record (V6), no
+negative twin for the parse's refusal of a malformed entry (N6), and two
+counts of the lift glue (V8). All closed here: 46 trusted code lines
+(DESIGN.md §1.1 item 8, `kernel/AUDIT.md` §21.1). The kernel, SEMANTICS.md,
+every law and Commonware's sources are untouched; no `spec --accept`.
+
+**V1: rustflags that change the configuration where a build script cannot
+see it (trusted, `target.rs` +42, `mir/mod.rs` +1).** rustc derives
+`debug_assertions` from `-C debug-assertions`, or without it from the
+optimization level, and the overflow checks from `-C overflow-checks`, or
+without it from `debug_assertions`; Cargo's `CARGO_CFG_DEBUG_ASSERTIONS`
+follows the profile, and the rustflags come last on rustc's command line
+(measured: `cargo build -v`). A build whose rustflags set
+`-C debug-assertions`, `-C opt-level` (`-O`), `-C overflow-checks`, any
+`-Z` option (the cfgs only a nightly shows follow them) or an `@file`
+(rustc reads arguments from it) now has an unknowable configuration
+(`target::build_cfg` returns `Err`), and `mir::load` refuses every
+extraction with the record under it, naming the flag. The rustflags are
+read as rustc's option parser (getopts) reads them (`rustc_options`):
+`--codegen v`, `--codegen=v`, short options grouped (`-gO`,
+`-gCdebug-assertions=off`), a value in the next argument (`-L -O` is no
+`-O`), a long option's value (`--allow -L -O` is), an empty argument as
+an argument (Cargo passes one on: `-A '' -O` is), and a codegen option's
+`_` as `-` (rustc's lookup), each measured against rustc 1.98.1 and
+Cargo. A-S3's `-C target-cpu`/`-C target-feature` reader now goes through
+it: it missed `-C target_feature` and dropped empty arguments before. The other codegen options change no stable
+cfg in the pinned release (`-C panic` is in `CARGO_CFG_PANIC`, which
+follows the rustflags; `-C relocation-model` sets a cfg only a nightly
+shows).
+
+**V2, V4, V3: assumptions, AUDIT corrected.** No build-script variable
+carries a profile's `panic` (measured: a profile that inherits `dev` and
+sets `panic = "abort"` leaves every variable as under `dev` but the paths
+holding the profile's directory; `CARGO_CFG_PANIC` stays `unwind`), and
+none tells a `--test` compile from the library's (the variables of `cargo
+test --lib`'s build-script run are the library build's; Cargo sets no
+`CARGO_CFG_TEST`). Both are stated as assumptions: the build's profile
+sets the extraction's panic strategy (no Commonware profile sets `panic`,
+no Commonware source tests `cfg(panic ..)`; under `abort` a panic still
+panics), and the test harness compiles the verified functions as the
+library does (each verified module tests `cfg(test)` only for its `mod
+tests`); the library's compile is bound, and an extraction recorded with
+`test` (`extract.sh --profile test`) is refused by every build. The
+dependencies' configuration is not recorded: a crate's `StableCrateId`
+(and its SVH) hashes Cargo's `-C metadata`, which for a workspace member
+hashes the `RUSTC_WORKSPACE_WRAPPER` path, mirx's own binary (measured:
+two wrapper paths, two metadata values), so a record of them would change
+with the extractor's target directory and extractions would stop being
+reproducible; a build's stable compiler gives other ids anyway. Stated in
+AUDIT §21.1 and `docs/mir-lift.md` §20.1 (rs_engine's extractions carry
+only its own crate's, core's and std's bodies).
+
+**V5: the records required (trusted, `mir/ir.rs` +3).** An extraction with
+`(unsafe-reading 1)` must record `(rustflags ..)` and `(cfg ..)`, else it
+is malformed. The fixtures that lacked them were extracted again
+(`sd_ptr`, `sd_ptr_twins`, `sd_ptr_local`, `sd_ptr_cfg` with its three
+window twins, `sd_neon_mul128` with its two twins: 16 files): each gained
+exactly its missing header records, its functions and type definitions
+byte-identical, so the 92 window verdicts (compared in full text) and the
+theorems are unchanged. `tests/simd.rs`'s in-place build now gives the
+build script a stable build's whole configuration (it gave four
+variables: the build's set came out empty and refused the re-extracted
+`sd_neon_mul128`).
+
+**V6: the printer's quoting (trusted, `mirx`, one line changed).** mirx
+quoted with `{:?}`, whose escapes the reader reads back without their
+backslash (`\t` as `t`, `\u{301}` as `u{301}`): it now escapes only `"`
+and `\` and writes every other character as it is. No checked-in
+extraction holds another escaped character, so each prints as before
+(`sd_ptr_feat`'s four came out byte-identical; rs_engine's, extracted again
+into scratch, too). Twin: `sd_ptr_cfg`'s window extraction under
+`--cfg sd_quote="a\tc\u{301}\u{7f}"` reads back exactly (Cargo itself
+refuses a newline in a cfg value).
+
+**N6, V8.** `a_malformed_cfg_entry_is_refused` feeds eight malformed
+records. DESIGN.md §1.1 item 8 now gives the lift glue as AUDIT counts it,
+about 394 (it said about 350, the count before the narrow reading).
+
+*Tests* (`tests/unsafe_simd.rs`, untrusted):
+`a_build_whose_rustflags_change_its_configuration_refuses_the_extraction`,
+`the_lift_refuses_a_build_whose_rustflags_change_its_configuration`,
+`an_extraction_by_the_printer_records_its_rustflags_and_cfg_set`,
+`a_malformed_cfg_entry_is_refused`, `a_cfg_value_reads_back_as_rustc_holds_it`;
+updated: the F2 twins (the `--cfg` twin differs in its rustflags and cfg
+records), the feature twins (without the record: refused), the build's
+side (a `--cfg` beside a benign codegen option; an extraction recorded
+with `test`; refused without the record).
+
+**Measured** (the final sources; logs in the stage's notes).
+
+* `cargo check --all-targets` of the seven sandblaster packages: 0
+  warnings.
+* The full front suite (its lib and all 77 test binaries, one at a time),
+  `sandblaster-kernel` and `sandblaster-targets`: 80 runs, 1,407 tests
+  passed, 15 ignored, 0 failed (`unsafe_simd` 29: five new).
+* Mutants (each run, then reverted; the runner restores a file even when
+  it is killed): the 23 of this stage's trusted lines — the refusal, each
+  option of it, the reader's every rule (grouping, values, long options
+  and long flags, empty arguments, `_`, `-O`, `--codegen`), `load`'s
+  refusal, A-S3's flags through the reader, the parse's requirement and
+  each record's, N6, the printer's quoting with its twin extracted again
+  under the mutant — every one caught, the reader's 17 again on the final
+  code; the 21 cfg mutants of stages leftovers and validate-leftovers,
+  again on the final code: every one caught.
+* The window verdicts: 92 (rs_engine's 9, `sd_neon_mul128` and its two
+  twins 8 each, `sd_ptr` 5, `sd_ptr_twins` 14, `sd_ptr_local` 37,
+  `sd_ptr_cfg` 2, `sd_ptr_feat` 1), identical in full text before and
+  after the re-extraction.
+* rs_engine (the release CLI, cache off): 329 definitions, 2,653
+  obligations (2,602 automated, 51 hinted), the 3 laws, the gates
+  boundary, examples (58), sections (2), law rules (0 errors, the 4
+  `law-resembles-impl` warnings) and MIR theorems (5 of 5) passed, the lock
+  missing (52 items): NOT VERIFIED for the lock only; no
+  `warning[script]`. The lock preview's root is `581461cb..`, as before;
+  its two extractions, made again into scratch with the final printer,
+  are byte-identical to the checked-in ones.
+* Codec and storage, the cache off: `cargo test -p commonware-codec` (147 +
+  16 + 5 passed), `varint` VERIFIED (21,250 obligations, 603 definitions,
+  lift conformance passed, `SPEC.lock` matches, root `38c1c9c0..`);
+  `cargo test -p commonware-storage --lib` (3,776 passed, 2 ignored), `mmr`
+  VERIFIED in place (4,263, 741, lock `d87803e2..`) and `verifier`
+  (2,339, 588, lock `a7563685..`). The counts and the three accepted locks
+  are unchanged.
+* The Miri gate (`run.sh --engines`, 947 s): the positive fixtures clean
+  under Stacked and Tree Borrows (4 tests each), all 28 undefined-behaviour
+  twins reported (`ub_two_formations` and `ub_local_raw_write` by Stacked
+  Borrows only, as recorded), the NEON engine against the naive one clean
+  under both (2 tests each); `GATE.txt` rewritten byte-identical.
+
+**Open.**
+
+* The shipped varint, MMR and verifier extractions stay unbound (the
+  legacy rule); a bound extraction serves one configuration.
+* The assumptions this stage states rather than closes: a profile's
+  `panic`, the test harness's `cfg(test)`, the dependencies' features.
+* Once a module is bound, a build whose rustflags carry a `--cfg` of their
+  own (the benchmark workflow's `--cfg full_bench`, for one: refused since
+  stage leftovers) or a `-Z` option (a nightly build's) is refused: fail
+  closed, by design; such a build verifies nothing.
+* The human audit (A-process) of the trusted files, now with this stage's
+  46 lines; rs_engine's laws and lock await the user; layer 3 and
+  `fft`/`ifft` (step 8).
+
+### Stage "cfg-final" (2026-10-08; the validation of stage cfg-binding-fixes)
+
+Notes, scripts, logs and probes:
+`sandblaster-wt/recovery/unsafe-simd/impl/cfg-final/` (outside the
+repository). The independent validation of stage cfg-binding-fixes
+(`validate-cfg-fixes/NOTES.md`) found the build binding failing open three
+ways, each needing a deliberate rustflag, variable or `[env]` entry, none
+reaching a shipped verified module: a `--cfg` that rustc reads as another
+option's value counted as the build's (F1, shown end to end), a builtin
+cfg set by `--cfg` past rustc's lint (F3), and `CARGO_CFG_*` variables
+inherited from the environment or Cargo's `[env]` (F2); also that a
+`--cfg` is read as text (F4, fail closed) and two counts of the
+precondition check (F5). F1 and F3 are closed in code, F2 is stated as an
+assumption, F4 is noted and F5 recounted: 6 trusted code lines, all in
+`target.rs` (DESIGN.md §1.1 item 8, `kernel/AUDIT.md` §21.1). The kernel,
+SEMANTICS.md, every law and Commonware's sources are untouched; no `spec
+--accept`; no extraction changed.
+
+**F1: the build's `--cfg`s where rustc reads them (trusted).** rustc
+1.98.1 reads `-L --cfg=x`, `-A --cfg=x`, `--allow --cfg=x` and
+`--remap-path-prefix --cfg=x` as the first option's value and sets no `x`;
+`build_cfg` scanned the arguments for `--cfg`, so a release build whose
+rustflags held `-L --cfg=debug_assertions` claimed `debug_assertions` and
+took a dev extraction. `rustc_options` now reads every long option by
+getopts' one rule (its `=v`, else the next argument, but for the four
+flags) and keeps `--cfg`'s values beside `--codegen`'s; `build_cfg` takes
+its `--cfg`s from it.
+
+**F3: a builtin cfg set by `--cfg` (trusted).** Past `-A
+explicit_builtin_cfgs_in_flags` or `--cap-lints allow`, rustc takes `--cfg
+debug_assertions` and sets the cfg, but derives the overflow checks and
+`ub_checks` from `-C debug-assertions` (measured: in a release build the
+cfg holds and `255u8 + 1` wraps); Cargo's `CARGO_CFG_DEBUG_ASSERTIONS`
+follows the profile. A `--cfg` whose name is a builtin cfg's (of
+`BUILD_CFGS` or `NIGHTLY_CFGS`, or `target_feature`, whatever its value)
+now makes the build's configuration unknowable, and every extraction with
+the record is refused, the cfg named. The three lists are the pinned
+release's builtin cfgs: rustc's lint denies every name of them but `test`
+in some shape, and `test` is refused too (fail closed).
+
+**F2: an assumption.** Cargo sets a bare builtin's `CARGO_CFG_<NAME>` only
+when the cfg holds and removes none it leaves unset, so a
+`CARGO_CFG_DEBUG_ASSERTIONS` in the shell or in Cargo's `[env]` reaches a
+release build's script as Cargo's; a build script cannot tell. Stated in
+AUDIT §21.1, DESIGN.md §1.1 item 7 and `docs/mir-lift.md` §20.1: neither
+the build's environment nor Cargo's `[env]` sets any `CARGO_CFG_*`
+variable.
+
+**F4, F5.** AUDIT notes that a `--cfg` is read as text (no escapes, raw
+strings or comments), which can only refuse a build that agrees. The
+precondition check, counted again from the code as it stands, is 61 lines
+(`elab/items.rs` 27, `typeck` 33, `hir.rs` 1), where DESIGN gave 39 and
+AUDIT 53; the total grows by 8 with it.
+
+*Tests* (`tests/unsafe_simd.rs`, untrusted):
+`a_cfg_that_is_another_options_value_is_not_the_builds` (F1's
+release-build twin and the feature's), `a_build_that_sets_a_builtin_cfg_by_cfg_refuses_the_extraction`
+(F3, 13 builtin `--cfg`s under both profiles, and the names that are no
+builtin); `the_lift_refuses_a_build_whose_rustflags_change_its_configuration`
+gained both through the lift.
+
+**Measured** (the final sources; logs in the stage's notes).
+
+* `cargo check --all-targets` of the seven sandblaster packages: 0
+  warnings.
+* The front tests that cover the binding and the gate: `unsafe_simd` 31
+  (two new), `simd` 10, `mir` 51, `literal` 41, `theorem_gate` 13,
+  `verified_roots` 8: all passed.
+* Mutants (each run, then reverted; the runner restores a file even when
+  it is killed): the 12 of this stage's trusted lines — F1's, the old scan
+  of the arguments, no `--cfg` value kept, a long option's value not
+  consumed, the long flags taking one, a long option's `=v` not read,
+  `--codegen` not kept; F3's, the refusal skipped, each list's names let
+  through, the refusal only for a bare cfg, a bare name not trimmed —:
+  every one caught.
+* End to end, the validator's probe again (the variables Cargo really gave
+  each build): the release builds with `-L --cfg=debug_assertions` and
+  `-A explicit_builtin_cfgs_in_flags --cfg debug_assertions` refuse the dev
+  extraction; the dev builds with `-L --cfg=spec` and
+  `--remap-path-prefix --cfg=spec` load it; the two with an inherited
+  `CARGO_CFG_DEBUG_ASSERTIONS` load it (F2).
+* Codec and storage, the cache off: `cargo test -p commonware-codec` (147 +
+  16 + 5 passed), `varint` VERIFIED (21,250 obligations, 603 definitions,
+  lift conformance passed, `SPEC.lock` matches, root `38c1c9c0..`);
+  `cargo test -p commonware-storage --lib` (3,776 passed, 2 ignored), `mmr`
+  VERIFIED in place (4,263, 741, lock `d87803e2..`) and `verifier`
+  (2,339, 588, lock `a7563685..`). rs_engine's lock preview: root
+  `581461cb..`, byte-identical to the last stage's.
+
+**Open.**
+
+* F2 is an assumption, not a check: a build script cannot tell an
+  inherited `CARGO_CFG_*` variable from Cargo's.
+* The assumptions stated before (a profile's `panic`, the test harness's
+  `cfg(test)`, the dependencies' features, flags no build script sees) and
+  the legacy rule for the shipped extractions are unchanged.
+* The human audit (A-process) of the trusted files, now with this stage's
+  6 lines; rs_engine's laws and lock await the user; layer 3 and
+  `fft`/`ifft` (step 8).

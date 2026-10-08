@@ -10,7 +10,10 @@
 //! the literal reading is kernel-checked. Negative twins: a changed constant
 //! of a construct's MIR breaks that function's theorem and no other; a
 //! signed range reads but its termination is not proven. `window` (`get` by
-//! a range) reads and elaborates; its theorem is not proven yet.
+//! a range) has its theorem since the stages of the narrow reading of
+//! existing `unsafe` (stage soundness-fixes moved it here from the functions
+//! read only; the literal reading of it is compared with rustc's value on
+//! every range of short slices, `window_reads_as_rustc_computes`).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -28,12 +31,13 @@ const B: &str = include_str!("mir_fixtures/rw_mix/src/b.rs");
 const MIR: &str = include_str!("mir_fixtures/rw_mix/a.sbmir");
 
 /// The functions of `src/a.rs` whose readings are proven end to end.
-const PROVEN: &[&str] = &["sum_bytes", "count_zeros", "mix_grid", "steps", "smax", "sclass", "widen", "widen_bits", "plus4", "le32", "be32", "le_bytes", "rot", "low_sum", "crc8", "same"];
+const PROVEN: &[&str] = &["sum_bytes", "count_zeros", "mix_grid", "steps", "smax", "sclass", "widen", "widen_bits", "plus4", "le32", "be32", "le_bytes", "rot", "low_sum", "crc8", "same", "window"];
 
-/// Read and elaborated, the theorem not proven yet: `window` (`get` by a
-/// range; the walk's abstraction of the literal side's dependent tests
-/// meets a slice value whose pair type it does not recover).
-const READ_ONLY: &[&str] = &["window"];
+/// Read and elaborated, the theorem not proven yet: none (`window`, `get` by
+/// a range, was here until its theorem was proven: one of the stages of the
+/// narrow reading of existing `unsafe` taught the walker the abstraction of
+/// a slice value's pair type that its literal side's dependent tests need).
+const READ_ONLY: &[&str] = &[];
 
 /// `src/a.rs` lifted in place with `items`, its MIR beside the DSL root;
 /// `b.rs` (which `a.rs` calls into) is a file of the host crate, not lifted.
@@ -164,4 +168,87 @@ fn a_signed_range_reads_but_its_termination_is_not_proven() {
     let (errs, m) = theorems(&c, &c.lift_facts);
     assert!(errs.iter().any(|e| e.contains("spin__loop0") && e.contains("termination measure")), "{errs:#?}");
     assert_eq!(m.proven(), 0, "{:?}", m.outcomes.iter().map(|o| &o.global).collect::<Vec<_>>());
+}
+
+// ---------------------------------------------------------------------------
+// `window`'s literal reading against rustc's value
+// ---------------------------------------------------------------------------
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use sandblaster_front::mir::literal::LFn;
+use sandblaster_front::mir::{self, ModuleNames};
+use sandblaster_kernel::api::Env;
+use sandblaster_kernel::term::Lvl;
+use sandblaster_kernel::value::{Budget, VEnv};
+
+/// A kernel environment with the lift prelude (a lifted crate's), on the
+/// elaboration thread.
+fn with_env(f: impl FnOnce(&mut Env) + Send) {
+    let root = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n#[lift(mir = \"w.sbmir\")]\nmod w;\npub use w::{Counter, Wrap};\n";
+    let fs = MemFs::from_files([("r/mod.rs", root), ("r/w.rs", include_str!("mir_fixtures/lift_w/w.rs")), ("r/w.sbmir", include_str!("mir_fixtures/lift_w/w.sbmir"))]);
+    let c = driver::check(Path::new("r/mod.rs"), &fs, &TargetInfo::aarch64_apple_darwin());
+    assert!(c.ok(), "{}", c.render());
+    let k = c.krate.as_ref().unwrap();
+    sandblaster_front::elab::with_big_stack(move || {
+        let mut out = checked::elaborate_names(k, &[]);
+        f(&mut out.env)
+    });
+}
+
+/// `run fuel b0 (Ret init)` of `lf` with the parameters `args` (no `&mut`
+/// parameter).
+fn run(lf: &LFn, fuel: usize, args: &[&str]) -> String {
+    let mut slots: Vec<String> = Vec::new();
+    for (i, t) in lf.local_tys.iter().enumerate() {
+        slots.push(if i >= 1 && i <= args.len() { format!("Some[{t}]({})", args[i - 1]) } else { format!("None[{t}]") });
+    }
+    let fuel = (0..fuel).fold("Nil[Unit]".to_string(), |l, _| format!("Cons[Unit](tt, {l})"));
+    format!("{} ({fuel}) {}::b0 (mir::Res::Ret[{st}]({st}::st({})))", lf.run, lf.blk, slots.join(", "), st = lf.st)
+}
+
+/// A `&[u8]` argument: the slice value its shared reference reads as.
+fn bytes_slice(v: &[u8]) -> String {
+    let l = v.iter().rev().fold("Nil[U8]".to_string(), |l, b| format!("Cons[U8]({b}u8, {l})"));
+    format!("slice::mk U8 {n}usize ({l}) .pair(SliceOk U8 {n}usize ({l}), refl(Int, {n}int), refl(Bool, true))", n = v.len())
+}
+
+/// The theorem of `window` (above) equates its structured reading with the
+/// literal one; this checks what it equates: the literal reading of
+/// `data.get(i..j)` — core's `get` by a range, followed in library MIR —
+/// gives rustc's value on every range `i..j` with `i, j <= len + 2` of the
+/// slices of lengths 0 to 3: the length of the subslice where `i <= j <=
+/// len`, `usize::MAX` where `get` gives `None`.
+#[test]
+fn window_reads_as_rustc_computes() {
+    let names = ModuleNames { module: String::new(), sealed: BTreeSet::new(), host_enums: BTreeMap::new(), requires: BTreeSet::new(), open: BTreeMap::new(), dsl_modules: vec!["crate::a".into()], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default(), target_arch: Some("aarch64".into()), static_features: None, codegen_flags: None, build_cfg: None };
+    let (a, b) = (A.as_bytes().to_vec(), B.as_bytes().to_vec());
+    let l = mir::load(MIR, &|p| match p {
+        "src/a.rs" => Some(a.clone()),
+        "src/b.rs" => Some(b.clone()),
+        _ => None,
+    }, names, "a")
+    .unwrap_or_else(|e| panic!("{e}"));
+    with_env(|env| {
+        let lit = checked::load_literal(env, &l.m, &l.names, &[], None).unwrap_or_else(|e| panic!("{e}"));
+        let lf = lit.lfn("fx_rw_mix::a::window").expect("window");
+        assert!(lf.faults.is_empty(), "{:?}", lf.faults);
+        let mut n = 0;
+        for len in 0..4usize {
+            let data: Vec<u8> = (0..len as u8).map(|x| 3 * x + 1).collect();
+            for i in 0..len + 3 {
+                for j in 0..len + 3 {
+                    let want = data.get(i..j).map_or(usize::MAX, |s| s.len());
+                    let t = run(lf, 4, &[&bytes_slice(&data), &format!("{i}usize"), &format!("{j}usize")]);
+                    let mut bud = Budget { steps: 4_000_000_000 };
+                    let (g, w) = (env.parse_term(&[], &t).unwrap_or_else(|e| panic!("{e}\n{t}")), env.parse_term(&[], &format!("mir::Res::Ret[Usize]({want}usize)")).unwrap());
+                    let gv = env.eval(&VEnv::default(), Lvl(0), &g, &mut bud).expect("eval");
+                    let wv = env.eval(&VEnv::default(), Lvl(0), &w, &mut bud).expect("eval");
+                    assert!(env.conv(Lvl(0), &gv, &wv, &mut bud).expect("conv"), "window({data:?}, {i}, {j}): the reading is not {want}: {}", env.eval_closed(&g, &mut bud).map(|t| env.print_term(&[], &t)).unwrap_or_default());
+                    n += 1;
+                }
+            }
+        }
+        eprintln!("window: {n} inputs, each as rustc computes");
+    });
 }

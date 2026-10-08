@@ -68,6 +68,44 @@
 //!   gives its conclusion when a fact compares the same operands and
 //!   linear arithmetic proves the premise (`auto::facts`,
 //!   `implication_units`).
+//!
+//! Five more, from the Reed–Solomon engine's proofs
+//! (cryptography/sandblaster/rs_engine, stage prover-gaps of the narrow
+//! reading of existing `unsafe`), each shown here on a shape of its own:
+//!
+//! * a conjunct of a large `bool` fact comparing arrays (`split_of(w, v,
+//!   h)`, eight comparisons of 16-byte views) was out of reach: the fact's
+//!   value is the chain of all their element comparisons, too large for
+//!   the motives that split it. The fact is split on its term
+//!   (`auto::terms`), a comparison of arrays becoming their equation;
+//! * an equation between two array literals whose elements the facts
+//!   equate one by one needed a `rewrite` per element: it is now proven
+//!   element by element on its term, each element by a fact, by a
+//!   `using(lemma)` fact instantiated on the terms, or by the search;
+//! * a `calc!` from a slice through a spec value to another slice proved
+//!   only that their views are equal: it now concludes the slices' (and
+//!   arrays') equation by extensionality (`slice::ext`, `array::ext`);
+//! * a loop's bound stated as an equation (`iter.end == 3`) made the loop's
+//!   own call unfold and no longer meet its induction hypothesis: a field of
+//!   a variable fixed to a literal now rewrites the target last, after the
+//!   equations between stuck terms;
+//! * a loop attachment named an iterator by its MIR local (`iter_12`) where
+//!   two loops' iterators (both `iter` in rustc's debug info) are live: the
+//!   source name now denotes the innermost binding (its definition
+//!   dominated by the others').
+//!
+//! Two more, from the same proofs (stage leftovers):
+//!
+//! * `by_cases(k, a..b)` under a precondition the goal uses (`requires(k <
+//!   16)` proving the bound of `t[k]` in the statement) built a motive
+//!   that generalized `k` but not the precondition, and the kernel
+//!   rejected the proof: the facts the goal mentions whose types mention
+//!   `k` are now generalized with it (`elab::script::case_generalized`);
+//! * a fact equating two applications the evaluator unfolds
+//!   (`row_bytes(t) == lo_bytes(r)`) was no rewrite rule — neither side is
+//!   stuck — so a target writing one of them needed a `rewrite`: the root
+//!   target's term is now rewritten with such equations toward the terms
+//!   other facts name (`auto::terms::term_rewrite`).
 
 #[path = "spec15_util.rs"]
 mod util;
@@ -1127,6 +1165,574 @@ fn mask_short(k: u32) {
         proven(&r, name);
     }
     for name in ["shl_mul_nofit", "shl_one_off", "mask_short", "shr_mono_strict", "shl_mono_nofit"] {
+        refuted(&r, name);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 5. Large values on their terms; loops by their source names
+// ---------------------------------------------------------------------------
+
+/// `[f(0), .., f(n - 1)]`.
+fn lit(n: usize, f: impl Fn(usize) -> String) -> String {
+    format!("[{}]", (0..n).map(f).collect::<Vec<_>>().join(", "))
+}
+
+/// Sixteen-byte views of four words and of sixteen halves, and `split_of`:
+/// `w`'s words are the low bytes of `h`'s rows, `v`'s the high ones (eight
+/// conjuncts comparing 16-byte arrays); `split_either`, the same
+/// comparisons as a disjunction.
+fn byte_views(conj: &str, disj: &str) -> String {
+    format!(
+        r#"
+/// The sixteen bytes of four words, low first.
+#[spec]
+pub fn le16(w: [u32; 4]) -> [u8; 16] {{
+    {words}
+}}
+/// The low bytes of sixteen halves.
+#[spec]
+pub fn lows16(r: [u16; 16]) -> [u8; 16] {{
+    {lows}
+}}
+/// Their high bytes.
+#[spec]
+pub fn highs16(r: [u16; 16]) -> [u8; 16] {{
+    {highs}
+}}
+/// `w` and `v` are the byte split of `h`.
+#[spec]
+pub fn split_of(w: [[u32; 4]; 4], v: [[u32; 4]; 4], h: [[u16; 16]; 4]) -> bool {{
+    {conj}
+}}
+/// One of the comparisons holds.
+#[spec]
+pub fn split_either(w: [[u32; 4]; 4], v: [[u32; 4]; 4], h: [[u16; 16]; 4]) -> bool {{
+    {disj}
+}}
+"#,
+        words = lit(16, |i| format!("(w[{}] >> {}u32) as u8", i / 4, 8 * (i % 4))),
+        lows = lit(16, |i| format!("r[{i}] as u8")),
+        highs = lit(16, |i| format!("(r[{i}] >> 8u32) as u8")),
+    )
+}
+
+/// A fact `split_of(w, v, h)` (a `bool` function whose eight conjuncts
+/// compare 16-byte arrays) gives each comparison as the arrays' equation:
+/// a late conjunct, all of them reordered, and one as a `rewrite`'s
+/// equation. Negative twins: a comparison of rows the fact does not pair,
+/// and a conjunct of the disjunction `split_either`.
+#[test]
+fn a_conjunct_comparing_arrays_is_their_equation() {
+    let pairs: Vec<String> = (0..4).flat_map(|k| [format!("le16(w[{k}]) == lows16(h[{k}])"), format!("le16(v[{k}]) == highs16(h[{k}])")]).collect();
+    let reordered: Vec<String> = pairs.iter().step_by(2).chain(pairs.iter().skip(1).step_by(2)).cloned().collect();
+    let r = run_plain(&format!(
+        r#"{views}
+/// A late conjunct.
+#[lemma]
+fn seventh(w: [[u32; 4]; 4], v: [[u32; 4]; 4], h: [[u16; 16]; 4]) {{
+    requires(split_of(w, v, h));
+    ensures(le16(w[3]) == lows16(h[3]));
+    follows();
+}}
+/// All of them, reordered.
+#[lemma]
+fn all(w: [[u32; 4]; 4], v: [[u32; 4]; 4], h: [[u16; 16]; 4]) {{
+    requires(split_of(w, v, h));
+    ensures({reordered});
+    follows();
+}}
+/// A conjunct as a rewrite's equation.
+#[lemma]
+fn at(w: [[u32; 4]; 4], v: [[u32; 4]; 4], h: [[u16; 16]; 4], i: usize) {{
+    requires(split_of(w, v, h));
+    requires(i < 16usize);
+    ensures(le16(v[2])[i] == highs16(h[2])[i]);
+    rewrite(le16(v[2]) == highs16(h[2]));
+    follows();
+}}
+/// Negative twin: rows the fact does not pair.
+#[lemma]
+fn crossed(w: [[u32; 4]; 4], v: [[u32; 4]; 4], h: [[u16; 16]; 4]) {{
+    requires(split_of(w, v, h));
+    ensures(le16(w[3]) == lows16(h[2]));
+    follows();
+}}
+/// Negative twin: one of the comparisons holds, not this one.
+#[lemma]
+fn from_either(w: [[u32; 4]; 4], v: [[u32; 4]; 4], h: [[u16; 16]; 4]) {{
+    requires(split_either(w, v, h));
+    ensures(le16(w[0]) == lows16(h[0]));
+    follows();
+}}
+"#,
+        views = byte_views(&pairs.join(" && "), &pairs.join(" || ")),
+        reordered = reordered.join(" && "),
+    ));
+    for name in ["seventh", "all", "at"] {
+        proven(&r, name);
+    }
+    for name in ["crossed", "from_either"] {
+        refuted(&r, name);
+    }
+}
+
+/// A byte through two nibble tables of 16-bit entries (truncated) and
+/// through two of bytes, `narrows` relating the tables, and every byte of
+/// a 24-byte block through each (two array literals whose elements
+/// `sub_eq` equates one by one).
+fn nibble_tables() -> String {
+    format!(
+        r#"
+/// The low bytes of sixteen halves.
+#[spec]
+pub fn lows16(r: [u16; 16]) -> [u8; 16] {{
+    {lows}
+}}
+/// A byte through two nibble tables of 16-bit entries, truncated.
+#[spec]
+pub fn sub_wide(t: [[u16; 16]; 2], x: u8) -> u8 {{
+    (t[0][(x & 15u8) as usize] ^ t[1][(x >> 4u32) as usize]) as u8
+}}
+/// A byte through two nibble tables of bytes.
+#[spec]
+pub fn sub_bytes(b: [[u8; 16]; 2], x: u8) -> u8 {{
+    b[0][(x & 15u8) as usize] ^ b[1][(x >> 4u32) as usize]
+}}
+/// `b` holds the low bytes of `t`.
+#[spec]
+pub fn narrows(t: [[u16; 16]; 2], b: [[u8; 16]; 2]) -> bool {{
+    lows16(t[0]) == b[0] && lows16(t[1]) == b[1]
+}}
+/// Every byte of a block through the wide tables.
+#[spec]
+pub fn map_wide(t: [[u16; 16]; 2], c: [u8; 24]) -> [u8; 24] {{
+    {wide}
+}}
+/// Through the byte tables.
+#[spec]
+pub fn map_bytes(b: [[u8; 16]; 2], c: [u8; 24]) -> [u8; 24] {{
+    {bytes}
+}}
+/// Through the byte tables, last byte first.
+#[spec]
+pub fn map_bytes_rev(b: [[u8; 16]; 2], c: [u8; 24]) -> [u8; 24] {{
+    {bytes_rev}
+}}
+/// Byte `n` of the low bytes is the low byte of entry `n`.
+#[lemma]
+fn lows16_at(r: [u16; 16], n: usize) {{
+    ensures(implies(n < 16usize, lows16(r)[n] == r[n] as u8));
+    if n < 16usize {{
+        by_cases(n, 0..16);
+    }} else {{
+        follows();
+    }}
+}}
+/// One byte.
+#[lemma]
+fn sub_eq(t: [[u16; 16]; 2], b: [[u8; 16]; 2], x: u8) {{
+    requires(narrows(t, b));
+    ensures(sub_wide(t, x) == sub_bytes(b, x));
+    unfold(sub_bytes);
+    rewrite_rev(lows16(t[0]) == b[0]);
+    rewrite_rev(lows16(t[1]) == b[1]);
+    lows16_at(t[0], (x & 15u8) as usize);
+    lows16_at(t[1], (x >> 4u32) as usize);
+    rewrite(lows16(t[0])[(x & 15u8) as usize] == t[0][(x & 15u8) as usize] as u8);
+    rewrite(lows16(t[1])[(x >> 4u32) as usize] == t[1][(x >> 4u32) as usize] as u8);
+    unfold(sub_wide);
+    bv();
+}}
+"#,
+        lows = lit(16, |i| format!("r[{i}] as u8")),
+        wide = lit(24, |i| format!("sub_wide(t, c[{i}])")),
+        bytes = lit(24, |i| format!("sub_bytes(b, c[{i}])")),
+        bytes_rev = lit(24, |i| format!("sub_bytes(b, c[{}])", 23 - i)),
+    )
+}
+
+/// Two array literals of 24 table lookups, equal element by element: with
+/// each element's fact in scope (24 instances of `sub_eq`), and with
+/// `using(sub_eq)` (the lemma instantiated on each element's term).
+/// Negative twins: the elements in another order, and a quantified fact
+/// that equates other terms.
+#[test]
+fn array_literals_are_equal_element_by_element() {
+    let inst: String = (0..24).map(|i| format!("    sub_eq(t, b, c[{i}]);\n")).collect();
+    let r = run_plain(&format!(
+        r#"{tables}
+/// The elements' facts, then the arrays.
+#[lemma]
+fn maps_inst(t: [[u16; 16]; 2], b: [[u8; 16]; 2], c: [u8; 24]) {{
+    requires(narrows(t, b));
+    ensures(map_wide(t, c) == map_bytes(b, c));
+{inst}    follows();
+}}
+/// The lemma as a quantified fact.
+#[lemma]
+fn maps_using(t: [[u16; 16]; 2], b: [[u8; 16]; 2], c: [u8; 24]) {{
+    requires(narrows(t, b));
+    ensures(map_wide(t, c) == map_bytes(b, c));
+    using(sub_eq);
+    follows();
+}}
+/// Negative twin: the elements in another order.
+#[lemma]
+fn maps_rev(t: [[u16; 16]; 2], b: [[u8; 16]; 2], c: [u8; 24]) {{
+    requires(narrows(t, b));
+    ensures(map_wide(t, c) == map_bytes_rev(b, c));
+    using(sub_eq);
+    follows();
+}}
+/// Negative twin: a quantified fact about other terms.
+#[lemma]
+fn maps_other(t: [[u16; 16]; 2], b: [[u8; 16]; 2], c: [u8; 24]) {{
+    requires(narrows(t, b));
+    ensures(map_wide(t, c) == map_bytes(b, c));
+    using(lows16_at);
+    follows();
+}}
+"#,
+        tables = nibble_tables(),
+    ));
+    for name in ["sub_eq", "maps_inst", "maps_using"] {
+        proven(&r, name);
+    }
+    for name in ["maps_rev", "maps_other"] {
+        refuted(&r, name);
+    }
+}
+
+/// A `calc!` from a slice through a spec value to another slice concludes
+/// the slices' equation (their views, the lists, are equal: `slice::ext`),
+/// and likewise for arrays (`array::ext`). Negative twin: a chain whose
+/// last link does not hold.
+#[test]
+fn a_chain_through_views_concludes_the_equation_of_slices_and_arrays() {
+    let r = run_plain(
+        r#"
+/// A sequence twice.
+#[spec]
+pub fn twice(s: Seq<u8>) -> Seq<u8> {
+    seq![..s, ..s]
+}
+/// Two slices with the same view.
+#[lemma]
+fn slices(a: &[u8], b: &[u8], x: &[u8]) {
+    requires(a == twice(x));
+    requires(b == twice(x));
+    ensures(a == b);
+    calc! {
+        a
+            == twice(x) by { follows(); };
+            == b by { follows(); };
+    }
+}
+/// Two arrays with the same view.
+#[lemma]
+fn arrays(a: [u8; 4], b: [u8; 4], x: Seq<u8>) {
+    requires(a == x);
+    requires(b == x);
+    ensures(a == b);
+    calc! {
+        a
+            == x by { follows(); };
+            == b by { follows(); };
+    }
+}
+/// Negative twin: `b` is `x` four times.
+#[lemma]
+fn slices_bad(a: &[u8], b: &[u8], x: &[u8]) {
+    requires(a == twice(x));
+    requires(b == twice(twice(x)));
+    ensures(a == b);
+    calc! {
+        a
+            == twice(x) by { follows(); };
+            == b by { follows(); };
+    }
+}
+"#,
+    );
+    for name in ["slices", "arrays"] {
+        proven(&r, name);
+    }
+    refuted(&r, "slices_bad");
+}
+
+const RW_A: &str = include_str!("mir_fixtures/rw_mix/src/a.rs");
+const RW_B: &str = include_str!("mir_fixtures/rw_mix/src/b.rs");
+const RW_MIR: &str = include_str!("mir_fixtures/rw_mix/a.sbmir");
+
+/// `mix_grid` of the fixture `rw_mix` (nested loops over `0..4` and
+/// `0..3`, both iterators named `iter` by rustc) lifted in place from its
+/// MIR, with `proof` as its proof file.
+fn run_mix_grid(proof: &str) -> Run {
+    let root = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n#[lift(in_place, mir = \"a.sbmir\", items = \"mix_grid\")]\n#[path = \"../../src/a.rs\"]\nmod a;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n\npub use a::mix_grid;\n";
+    run_files_raw(&[("c/sandblaster/m/mod.rs", root), ("c/src/a.rs", RW_A), ("c/src/b.rs", RW_B), ("c/sandblaster/m/a.sbmir", RW_MIR), ("c/sandblaster/m/PROOF.rs", proof)], sandblaster_front::elab::Options::default())
+}
+
+/// `mix_grid`'s loop attachments with the inner loop's bound `bound` (an
+/// invariant on `iter.end`) and its result `ret` (the inner loop from
+/// `iter.start`, as `inner_from` computes it).
+fn mix_grid_proof(bound: &str, ret: &str) -> String {
+    format!(
+        r#"//! mix_grid's loops.
+use sandblaster::prelude::*;
+
+/// The inner loop from `j` on.
+#[spec]
+#[decreases(3 - (j as Int))]
+pub fn inner_from(s: u32, i: u32, n: u32, j: u32) -> u32 {{
+    if j < 3u32 {{ inner_from(s.wrapping_mul(31u32).wrapping_add(i ^ j ^ n), i, n, j + 1u32) }} else {{ s }}
+}}
+
+/// The inner loop: `iter` is its own iterator (the outer one's is live too).
+#[lift_attach(crate::a::mix_grid, loop_nr = 1)]
+fn inner() {{
+    invariant({bound});
+    invariant(iter.start <= 3u32);
+    decreases((iter.end as Int) - (iter.start as Int));
+    ensures(|ret: u32| ret == {ret});
+}}
+
+/// The outer loop: `iter` is the outer iterator.
+#[lift_attach(crate::a::mix_grid, loop_nr = 0)]
+fn outer() {{
+    invariant(iter.end == 4u32);
+    invariant(iter.start <= 4u32);
+    decreases((iter.end as Int) - (iter.start as Int));
+}}
+"#
+    )
+}
+
+/// Loop attachments name each loop's iterator by its source name (`iter`,
+/// the innermost binding of the name where both loops' iterators are live)
+/// and state its bound as an equation (`iter.end == 3u32`), the inner
+/// loop's result through its own call and its induction hypothesis.
+/// Negative twins: the inner loop's bound as the outer's (`4`), and its
+/// result one element short.
+#[test]
+fn nested_loops_name_their_iterators_and_bound_them_by_equations() {
+    let ok = run_mix_grid(&mix_grid_proof("iter.end == 3u32", "crate::proof::inner_from(s, i, n, iter.start)"));
+    assert!(ok.front_ok, "front end rejected the attachments:\n{}", ok.rendered);
+    assert!(ok.unproven.is_empty(), "unproven:\n{}", ok.explain());
+    for h in ["crate::a::mix_grid__loop0", "crate::a::mix_grid__loop1"] {
+        assert!(ok.checked_defs.iter().any(|d| d == h), "{h} not checked:\n{}", ok.explain());
+    }
+    no_rejection(&ok);
+    for (bound, ret, what) in [
+        ("iter.end == 4u32", "crate::proof::inner_from(s, i, n, iter.start)", "the outer loop's bound"),
+        ("iter.end == 3u32", "crate::proof::inner_from(s, i, n, iter.start + 1u32)", "one element short"),
+    ] {
+        let r = run_mix_grid(&mix_grid_proof(bound, ret));
+        assert!(r.front_ok, "{what}: front end rejected the attachments:\n{}", r.rendered);
+        assert!(r.unproven.iter().any(|(d, _, _)| d.starts_with("crate::a::mix_grid__loop1")), "{what}: proven:\n{}", r.explain());
+        no_rejection(&r);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 12. Stage leftovers: a case split under a precondition the goal uses
+// ---------------------------------------------------------------------------
+
+/// A table read at an index under its bound (`requires(n < 16)`): the
+/// goal's index operations hold proofs of the bound, the precondition, so
+/// a case split on the index must generalize the precondition with it
+/// (`by_cases(n, 0..16)` built a motive with `y` for `n` around a proof of
+/// `n < 16` where the index wanted one of `y < 16`, and the kernel rejected
+/// the proof). Shapes: a 16-entry table and one bound; a 4×4 grid read at
+/// two indices with one bound each, split on both; a bound in a conjunction;
+/// a bound the goal derives (`n + 1` under `n < 15`). Negative twins (an
+/// unproven obligation, never a kernel rejection): another entry, the grid
+/// read the other way, cases that do not cover the bound.
+#[test]
+fn a_case_split_generalizes_the_preconditions_the_goal_uses() {
+    let r = run_plain(&format!(
+        r#"
+/// The low bytes of sixteen halves.
+#[spec]
+pub fn lows16(r: [u16; 16]) -> [u8; 16] {{
+    {lows}
+}}
+/// A 4×4 grid transposed.
+#[spec]
+pub fn tr(t: [[u8; 4]; 4]) -> [[u8; 4]; 4] {{
+    {tr}
+}}
+/// One table, one bound.
+#[lemma]
+fn low_at(r: [u16; 16], n: usize) {{
+    requires(n < 16usize);
+    ensures(lows16(r)[n] == r[n] as u8);
+    by_cases(n, 0..16);
+}}
+/// Two indices, one bound each, a split on each.
+#[lemma]
+fn tr_at(t: [[u8; 4]; 4], i: usize, j: usize) {{
+    requires(i < 4usize);
+    requires(j < 4usize);
+    ensures(tr(t)[i][j] == t[j][i]);
+    by_cases(i, 0..4);
+    by_cases(j, 0..4);
+}}
+/// Both bounds in one precondition.
+#[lemma]
+fn tr_at_and(t: [[u8; 4]; 4], i: usize, j: usize) {{
+    requires(i < 4usize && j < 4usize);
+    ensures(tr(t)[i][j] == t[j][i]);
+    by_cases(i, 0..4);
+    by_cases(j, 0..4);
+}}
+/// A bound the goal derives from the precondition.
+#[lemma]
+fn low_next(r: [u16; 16], n: usize) {{
+    requires(n < 15usize);
+    ensures(lows16(r)[n + 1usize] == r[n + 1usize] as u8);
+    by_cases(n, 0..15);
+}}
+/// Negative twin: another entry.
+#[lemma]
+fn low_at_bad(r: [u16; 16], n: usize) {{
+    requires(n < 16usize);
+    ensures(lows16(r)[n] == r[15usize - n] as u8);
+    by_cases(n, 0..16);
+}}
+/// Negative twin: the grid read the other way.
+#[lemma]
+fn tr_at_bad(t: [[u8; 4]; 4], i: usize, j: usize) {{
+    requires(i < 4usize);
+    requires(j < 4usize);
+    ensures(tr(t)[i][j] == t[i][j]);
+    by_cases(i, 0..4);
+    by_cases(j, 0..4);
+}}
+/// Negative twin: the cases do not cover the bound.
+#[lemma]
+fn low_at_short(r: [u16; 16], n: usize) {{
+    requires(n < 16usize);
+    ensures(lows16(r)[n] == r[n] as u8);
+    by_cases(n, 0..8);
+}}
+"#,
+        lows = lit(16, |i| format!("r[{i}] as u8")),
+        tr = lit(4, |i| lit(4, |j| format!("t[{j}][{i}]"))),
+    ));
+    for name in ["low_at", "tr_at", "tr_at_and", "low_next"] {
+        proven(&r, name);
+    }
+    for name in ["low_at_bad", "tr_at_bad", "low_at_short"] {
+        refuted(&r, name);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 13. Stage leftovers: the target rewritten with equations between
+//     applications on their terms
+// ---------------------------------------------------------------------------
+
+/// Two lookups through `w`'s first rows (their bytes, `le16`) and through
+/// `h`'s entries; the low bytes of two entries' lookups (`low_of`, stated
+/// over `lows16`).
+fn lookups() -> String {
+    r#"
+/// A byte through two rows of `w`, a nibble each.
+#[spec]
+pub fn look_w(w: [[u32; 4]; 4], x: u8) -> u8 {
+    le16(w[0])[(x & 15u8) as usize] ^ le16(w[1])[(x >> 4u32) as usize]
+}
+/// The same through two rows of entries.
+#[spec]
+pub fn look_h(h: [[u16; 16]; 4], x: u8) -> u16 {
+    h[0][(x & 15u8) as usize] ^ h[1][(x >> 4u32) as usize]
+}
+/// Byte `n` of the low bytes is the low byte of entry `n`.
+#[lemma]
+fn lows_at(r: [u16; 16], n: usize) {
+    ensures(implies(n < 16usize, lows16(r)[n] == r[n] as u8));
+    if n < 16usize {
+        by_cases(n, 0..16);
+    } else {
+        follows();
+    }
+}
+/// The low bytes of two entries, xored, are the low byte of their xor.
+#[lemma]
+fn low_of(r0: [u16; 16], r1: [u16; 16], x: u8) {
+    ensures(lows16(r0)[(x & 15u8) as usize] ^ lows16(r1)[(x >> 4u32) as usize] == (r0[(x & 15u8) as usize] ^ r1[(x >> 4u32) as usize]) as u8);
+    lows_at(r0, (x & 15u8) as usize);
+    lows_at(r1, (x >> 4u32) as usize);
+    rewrite(lows16(r0)[(x & 15u8) as usize] == r0[(x & 15u8) as usize] as u8);
+    rewrite(lows16(r1)[(x >> 4u32) as usize] == r1[(x >> 4u32) as usize] as u8);
+    bv();
+}
+"#
+    .to_string()
+}
+
+/// A fact equating two applications that the evaluator unfolds (`le16(w[0])
+/// == lows16(h[0])`, a conjunct of `split_of`) rewrites the target where
+/// it writes one of them, on the terms, to the other, when another fact
+/// names that one (`low_of`'s statement): the value-level steps cannot use
+/// such an equation (neither side is stuck: both are array literals of
+/// stuck bytes), so `look_split` needed a `rewrite` per row. Negative
+/// twins (an unproven obligation, never a kernel rejection): the rows
+/// swapped in the lemma (the rewritten target is not its statement), a
+/// row the fact does not pair (`h[2]`), no lemma naming the other side.
+#[test]
+fn equations_between_applications_rewrite_the_target_on_its_terms() {
+    let pairs: Vec<String> = (0..4).flat_map(|k| [format!("le16(w[{k}]) == lows16(h[{k}])"), format!("le16(v[{k}]) == highs16(h[{k}])")]).collect();
+    let disj: Vec<String> = pairs.clone();
+    let r = run_plain(&format!(
+        r#"{views}{lookups}
+/// The lookups through `w`'s rows are the low byte of those through `h`.
+#[lemma]
+fn look_split(w: [[u32; 4]; 4], v: [[u32; 4]; 4], h: [[u16; 16]; 4], x: u8) {{
+    requires(split_of(w, v, h));
+    ensures(look_w(w, x) == look_h(h, x) as u8);
+    unfold(look_w);
+    unfold(look_h);
+    low_of(h[0], h[1], x);
+    follows();
+}}
+/// Negative twin: the lemma about the rows swapped.
+#[lemma]
+fn look_split_swapped(w: [[u32; 4]; 4], v: [[u32; 4]; 4], h: [[u16; 16]; 4], x: u8) {{
+    requires(split_of(w, v, h));
+    ensures(look_w(w, x) == look_h(h, x) as u8);
+    unfold(look_w);
+    unfold(look_h);
+    low_of(h[1], h[0], x);
+    follows();
+}}
+/// Negative twin: a row the fact does not pair.
+#[lemma]
+fn look_split_unpaired(w: [[u32; 4]; 4], v: [[u32; 4]; 4], h: [[u16; 16]; 4], x: u8) {{
+    requires(split_of(w, v, h));
+    ensures(look_w(w, x) == (h[0][(x & 15u8) as usize] ^ h[2][(x >> 4u32) as usize]) as u8);
+    unfold(look_w);
+    low_of(h[0], h[2], x);
+    follows();
+}}
+/// Negative twin: no fact names the other side.
+#[lemma]
+fn look_split_alone(w: [[u32; 4]; 4], v: [[u32; 4]; 4], h: [[u16; 16]; 4], x: u8) {{
+    requires(split_of(w, v, h));
+    ensures(look_w(w, x) == look_h(h, x) as u8);
+    unfold(look_w);
+    unfold(look_h);
+    follows();
+}}
+"#,
+        views = byte_views(&pairs.join(" && "), &disj.join(" || ")),
+        lookups = lookups(),
+    ));
+    for name in ["lows_at", "low_of", "look_split"] {
+        proven(&r, name);
+    }
+    for name in ["look_split_swapped", "look_split_unpaired", "look_split_alone"] {
         refuted(&r, name);
     }
 }

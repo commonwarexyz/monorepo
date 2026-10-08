@@ -374,6 +374,13 @@ impl<'a> Engine<'a> {
     /// in it.
     pub fn rewrite_with_facts(&mut self, st: &mut St, t: &V) -> R<Option<(V, Cont)>> {
         let keys = keys_in(t);
+        // a field of a variable fixed to a literal (`r.end == 32`) that the
+        // target has only in the arguments of a folded recursive application
+        // (a loop's call of itself on `r`): rewritten last, after the
+        // equations between stuck terms (an induction hypothesis about that
+        // application); rewritten first, the application no longer meets
+        // the facts about it, and the literal makes it unfold
+        let mut late: Vec<EqRule> = Vec::new();
         for r in self.fact_rules(st) {
             match key_of(&r.from) {
                 Some(k) if keys.contains(&k) => {}
@@ -381,6 +388,10 @@ impl<'a> Engine<'a> {
             }
             // a term back to a variable the target was expanded from
             if !st.expanded.is_empty() && self.def_var(&r.to).is_some_and(|x| st.expanded.contains(&x)) {
+                continue;
+            }
+            if fixes_field(&r) && self.field_in_folded_app(st, t, &r.from)? && !self.has_scrutinee(st, t, &r.from)? {
+                late.push(r);
                 continue;
             }
             let e = self.rule_proof(st, &r);
@@ -422,6 +433,13 @@ impl<'a> Engine<'a> {
                 self.note(format!("rewrite into terms no other fact mentions (fact h{}{})", f.lvl, if rev { ", reversed" } else { "" }));
             }
             if let Some(res) = self.rewrite_stuck_eq(st, t, &f, rev)? {
+                return Ok(Some(res));
+            }
+        }
+        for r in late {
+            let e = self.rule_proof(st, &r);
+            if let Some(res) = self.rewrite(st, t, &r.ty, &r.from, &r.to, e)? {
+                self.note("rewrite with a fact equation (a field fixed to a literal, last)");
                 return Ok(Some(res));
             }
         }
@@ -1654,7 +1672,7 @@ impl<'a> Engine<'a> {
                 return Ok(());
             }
             let f = st.facts[i].clone();
-            if f.lvl == rule.lvl || st.rewritten.contains(&(f.lvl, rule.lvl)) || (matches!(&*f.ty, Value::Sigma { .. }) && std::env::var_os("SANDBLASTER_X_SIGMA").is_none()) {
+            if f.lvl == rule.lvl || st.rewritten.contains(&(f.lvl, rule.lvl)) || (matches!(&*f.ty, Value::Sigma { .. }) && std::env::var_os("SANDBLASTER_X_SIGMA").is_none()) || self.term_split.contains(&f.lvl) || self.term_inert.contains(&f.lvl) {
                 continue;
             }
             // (a variable fixed to a literal is also substituted where it is
@@ -1885,6 +1903,42 @@ impl<'a> Engine<'a> {
         })
     }
 
+    /// Does the field `p` of a variable (a projection chain of it,
+    /// [`fixes_field`]) occur in the arguments of a folded application of a
+    /// recursive global in the value?
+    fn field_in_folded_app(&mut self, st: &St, v: &V, p: &V) -> R<bool> {
+        let Value::Neu(Neutral { head: Head::Var(l), spine: ps }) = &**p else { return Ok(false) };
+        let (l, k) = (l.0, ps.len());
+        let mut stuck = Vec::new();
+        self.collect_stuck(v, &mut stuck);
+        let mut cands: Vec<V> = Vec::new();
+        for s in &stuck {
+            let (StuckKind::App { def }, Value::Neu(Neutral { head: Head::Global { args, .. }, .. })) = (&s.kind, &*s.val) else { continue };
+            if !self.is_recursive(*def) {
+                continue;
+            }
+            for a in args {
+                let Arg::Rel(x) = a else { continue };
+                walk(x, &mut |y| {
+                    if let Value::Neu(n) = &**y
+                        && matches!(n.head, Head::Var(h) if h.0 == l)
+                        && n.spine.len() >= k
+                        && cands.len() < 64
+                    {
+                        cands.push(prefix(n, k));
+                    }
+                    true
+                });
+            }
+        }
+        for c in cands {
+            if self.conv(st.depth(), &c, p)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Does `ty` contain a stuck match whose scrutinee converts with `s`?
     fn has_scrutinee(&mut self, st: &St, ty: &V, s: &V) -> R<bool> {
         let Some(k) = key_of(s) else { return Ok(false) };
@@ -1906,6 +1960,18 @@ impl<'a> Engine<'a> {
 /// constructor (`true`, `None`, `3`).
 fn fixes_var(r: &EqRule) -> bool {
     as_var(&r.from).is_some() && (matches!(&*r.to, Value::Lit { .. }) || matches!(&*r.to, Value::Ctor { args, .. } if args.is_empty()))
+}
+
+/// A rule `x.f ↦ v` that fixes a field of a variable to a literal or a
+/// field-less constructor (`r.end == 32`): a projection chain of a
+/// variable — `fst`, `snd`, the one arm of a match on a one-constructor
+/// type (a struct's field) — on the left.
+fn fixes_field(r: &EqRule) -> bool {
+    let Value::Neu(n) = &*r.from else { return false };
+    matches!(n.head, Head::Var(_))
+        && !n.spine.is_empty()
+        && n.spine.iter().all(|e| matches!(e, Elim::Fst | Elim::Snd) || matches!(e, Elim::Match { arms, .. } if arms.len() == 1))
+        && (matches!(&*r.to, Value::Lit { .. }) || matches!(&*r.to, Value::Ctor { args, .. } if args.is_empty()))
 }
 
 

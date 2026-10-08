@@ -76,20 +76,54 @@ the same command at `--mir-opt-level 0` into a second file, declared
 beside the main one (`#[lift(mir = "m.sbmir", window_mir =
 "m.window.sbmir", ..)]`): unoptimized MIR for the window (aliasing)
 analysis of pointers in crate code only, checked at load to be the same
-program as the main extraction (`docs/DESIGN-UNSAFE-SIMD.md`):
+program as the main extraction — every header record but the level, and
+every type definition the two share, equal (`docs/DESIGN-UNSAFE-SIMD.md`):
 
 ```text
 sandblaster/mirx/extract.sh <package> <modules> <dir>/m.sbmir <options..>
 sandblaster/mirx/extract.sh <package> <modules> <dir>/m.window.sbmir <options..> --mir-opt-level 0
 ```
 
+No rustflags are inherited (stage soundness-fixes, 2026-10-07): a body
+compiled under other flags is another program, and the window rule's
+verdicts are carried to the main extraction by source position. So
+`extract.sh` refuses a non-empty `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
+`CARGO_BUILD_RUSTFLAGS` or `CARGO_TARGET_<triple>_RUSTFLAGS`, and runs
+Cargo with `CARGO_ENCODED_RUSTFLAGS` set — empty, which overrides Cargo's
+configured rustflags too, or the flags of `--rustflags '<flags>'`, an
+option for a window extraction's negative twin only — and the extraction
+records them, `(rustflags "..")`: the build refuses a main extraction with
+any, and a window extraction whose record differs from its main one's.
+
+The extraction also records the session's cfg set (stage leftovers,
+2026-10-07), `(cfg ("debug_assertions") ("feature" "std") ..)`, read from
+rustc rather than from what was passed: the crate's Cargo features, the
+target's and the profile's cfgs and every `--cfg`, whatever passed it. A
+window extraction must record its main one's, and a build script binds a
+main extraction's record to its own configuration (`mir::load`: its
+features, the builtin cfgs a stable compiler shows, its rustflags'
+`--cfg`s): extract with the features and profile of the build that
+verifies the module (`--features f,..`, `--no-default-features`,
+`--profile <name>`, Cargo's options; `cargo check`'s profile is `dev`).
+Since stage cfg-binding-fixes (2026-10-07) an extraction with
+`(unsafe-reading 1)` must have both records (an older one is extracted
+again); `--profile test` checks the crate in test mode (`cfg(test)`),
+which no build script sees, so such an extraction is refused by every
+build; a build whose rustflags set `-C debug-assertions`, `-C opt-level`,
+`-O`, `-C overflow-checks`, a `-Z` option or an `@file` is refused (its
+build script cannot see the configuration they make); and a profile's
+`panic` reaches no build script, so it is assumed to be the extraction's
+(`kernel/AUDIT.md` §21.1). Every string is written as the reader reads it
+back: `"` and `\` escaped, every other character as it is.
+
 From the narrow reading of existing `unsafe` on (2026-10-07,
 `docs/mir-lift.md` §20.10), every extraction records what that reading
 needs: `(unsafe-reading 1)`; the target's static features
 (`(target-static-features ..)`, rustc's stable ones, which the build binds
 to its own `CARGO_CFG_TARGET_FEATURE`), its byte order, the extraction's
-`-C target-cpu` and `-C target-feature` (both must be the defaults: do not
-pass them through `RUSTFLAGS` when extracting); per function `(local)`
+`-C target-cpu` and `-C target-feature` (both must be the defaults), the
+extra rustflags (`(rustflags "")`: none, above), the cfg set (`(cfg ..)`,
+above); per function `(local)`
 (of the extracted crate) and `(unsafe)` (a declared `unsafe fn`); raw
 pointer types, `PtrToPtr` casts and `&raw` borrows; and, in a window
 extraction only, the storage markers. Re-extract any module or fixture

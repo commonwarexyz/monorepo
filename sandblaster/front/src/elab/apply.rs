@@ -851,6 +851,14 @@ impl<'a> Elab<'a> {
                 (Ok(x), Ok(y)) => self.env.conv(sandblaster_kernel::term::Lvl(self.depth()), &x, &y, &mut self.budget()).unwrap_or(false),
                 _ => false,
             };
+            // a chain from a slice (or an array) through spec values to
+            // another composes at their views, the lists: equal lists make
+            // equal slices (`slice::ext`, the lengths follow) and arrays
+            // (`array::ext`), so the conclusion `a == b` follows without a
+            // lemma of the view's injectivity
+            if !agrees && let Some(p) = self.calc_view_ext(&c, &pf, relevant) {
+                return k(self, c, p);
+            }
             if !agrees {
                 let id = self.obligations.len() as u32;
                 let failure = AutoFailure { tried: vec![format!("`calc!`: the links compose to {}, not to {}", trunc(self.show_tm(&composed)), trunc(self.show_tm(&c)))], ..Default::default() };
@@ -902,6 +910,38 @@ impl<'a> Elab<'a> {
             return k(self, c, pf);
         }
         self.calc_facts(links, 0, concl, sp, relevant, k)
+    }
+
+    /// A chain's proof `pf` of `view(a) == view(b)` as a proof of the
+    /// conclusion `c`, when `c` equates two slices (`Eq(Slice T, a, b)`:
+    /// `slice::ext T a b pf`, whose hypothesis is the lists' equation) or two
+    /// arrays (`Eq(Array T N, a, b)`: `array::ext T N a b pf`); `None`
+    /// otherwise or when the kernel does not accept it (the chain then
+    /// composes to something else, reported as before).
+    fn calc_view_ext(&mut self, c: &Tm, pf: &Tm, relevant: bool) -> Option<Tm> {
+        let Term::Eq { ty, lhs, rhs } = &**c else { return None };
+        let (h, args) = crate::elab::items::spine(ty);
+        let Term::Global(g) = &*h else { return None };
+        let name = self.env.global_name(*g)?;
+        let (ext, tys): (&str, Vec<Tm>) = match (&*name, args.as_slice()) {
+            ("Slice", [t]) => ("slice::ext", vec![t.clone()]),
+            ("Array", [t, n]) => ("array::ext", vec![t.clone(), n.clone()]),
+            _ => return None,
+        };
+        let ext = self.env.lookup_global(ext)?;
+        let mut parts: Vec<(Rel, Tm)> = tys.into_iter().map(|t| (Rel::Rel, t)).collect();
+        parts.push((Rel::Rel, lhs.clone()));
+        parts.push((Rel::Rel, rhs.clone()));
+        parts.push((Rel::Irr, pf.clone()));
+        let p = mk::apps(mk::global(ext), parts);
+        // (a link that failed has been reported, its proof a placeholder:
+        // the chain is not blamed for it)
+        if crate::elab::tm::has_erased(pf) || self.check_proof(&p, c, relevant).is_ok() {
+            return Some(p);
+        }
+        // (a relevant position: the equation promoted)
+        let q = self.promote_irr(c, &p, 1)?;
+        self.check_proof(&q, c, relevant).ok().map(|_| q)
     }
 
     /// The chain so far (`q : Eq(a, e0, last)`) adapted to the next link's

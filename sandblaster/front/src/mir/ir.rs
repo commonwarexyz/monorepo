@@ -298,6 +298,19 @@ pub struct Sbmir {
     pub endian: Option<String>,
     pub target_cpu: Option<(Option<String>, String)>,
     pub target_feature_flags: Option<String>,
+    /// The extra rustc flags the crate was compiled with (`(rustflags
+    /// "..")`: `extract.sh --rustflags`, for a negative twin only; `None`: an
+    /// extraction older than the record).
+    pub rustflags: Option<String>,
+    /// The extraction's cfg set, read from rustc's session (`(cfg ("name")
+    /// ("name" "value") ..)`: the target's, the profile's, the crate's
+    /// features and every `--cfg`); `None`: an extraction older than the
+    /// record. `mir::load` binds it to the build's.
+    pub cfg: Option<Vec<(String, Option<String>)>>,
+    /// Every header record (each top-level record but the functions and
+    /// the type definitions), as `(its head, its text)`, in order:
+    /// `mir::load_window` compares them all but the optimization level.
+    pub header: Vec<(String, String)>,
     /// The static features the readings count as facts: the extraction's,
     /// once `mir::load` has checked them equal to the build's own
     /// (`CARGO_CFG_TARGET_FEATURE`) and the flags they come from default
@@ -688,6 +701,9 @@ pub fn parse(text: &str) -> Result<Sbmir, String> {
     let mut version = None;
     for e in &top {
         let t = e.tail();
+        if !matches!(e.head(), Some("fn" | "adt-def")) {
+            m.header.push((e.head().unwrap_or("").to_string(), e.to_string()));
+        }
         match e.head() {
             Some("sbmir") => version = t.first().and_then(Sx::num),
             Some("rustc") => m.rustc = t[0].str().unwrap_or("").to_string(),
@@ -716,6 +732,15 @@ pub fn parse(text: &str) -> Result<Sbmir, String> {
                 m.target_cpu = Some((given, t.get(1).and_then(Sx::str).ok_or_else(|| err("target-cpu default", e))?.to_string()));
             }
             Some("target-feature-flags") => m.target_feature_flags = Some(t.first().and_then(Sx::str).ok_or_else(|| err("target-feature-flags", e))?.to_string()),
+            Some("rustflags") => m.rustflags = Some(t.first().and_then(Sx::str).ok_or_else(|| err("rustflags", e))?.to_string()),
+            Some("cfg") => {
+                let entry = |x: &Sx| match x.tail_all() {
+                    [Sx::Str(n)] => Ok((n.clone(), None)),
+                    [Sx::Str(n), Sx::Str(v)] => Ok((n.clone(), Some(v.clone()))),
+                    _ => Err(err("cfg entry", x)),
+                };
+                m.cfg = Some(t.iter().map(entry).collect::<Result<_, _>>()?);
+            }
             Some("exclude") => m.exclude = t.iter().filter_map(Sx::str).map(str::to_string).collect(),
             Some("source") => m.sources.push((t[0].str().unwrap_or("").to_string(), t[1].str().unwrap_or("").to_string())),
             Some("root") => m.roots.push(t[0].str().unwrap_or("").to_string()),
@@ -766,6 +791,12 @@ pub fn parse(text: &str) -> Result<Sbmir, String> {
     }
     if version != Some(1) {
         return Err(format!(".sbmir format version {version:?}; this reader reads version 1"));
+    }
+    // the narrow reading's printer records the rustflags and the cfg set
+    // (through `extract.sh`): without them a window extraction or a build
+    // of another configuration could not be told apart
+    if m.unsafe_reading && (m.rustflags.is_none() || m.cfg.is_none()) {
+        return Err("malformed .sbmir: an extraction with `(unsafe-reading 1)` records its rustflags and its cfg set, `(rustflags ..)` and `(cfg ..)` (an extraction older than the records, or made without `extract.sh`: extract it again with `sandblaster/mirx/extract.sh`)".into());
     }
     refuse_union_access(&mut m);
     Ok(m)

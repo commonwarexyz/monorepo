@@ -252,10 +252,17 @@ pub fn root_locals(m: &Sbmir, nm: &dyn Names, key: &str, params: &[String]) -> R
 /// For each loop (in source order), the reading's name of the variable that
 /// a source name denotes at the loop's header, where a user variable
 /// shadows a parameter or another variable of the same name (`let size =
-/// *size;`: `size` → `size_2`): loop attachments are written against the
-/// source's scopes. The variable of that name live at the header is the one
-/// in scope there. (Attachments are proof steps and checked contracts of the
-/// helper, so this choice cannot change what is proven about the code.)
+/// *size;`: `size` → `size_2`; the iterator rustc names `iter` in every
+/// `for` loop: `iter` → `iter_24` in an inner loop): loop attachments are
+/// written against the source's scopes. The variable of that name live at
+/// the header is the one in scope there; when several are live (an outer
+/// loop's iterator, still needed after the inner loop), the innermost
+/// binding is: the one whose definition comes after every other one's on
+/// every path (its definition is dominated by theirs), as a later `let` of
+/// the same name shadows an earlier one. Two bindings neither of which
+/// comes first stay unresolved. (Attachments are proof steps and checked
+/// contracts of the helper, so this choice cannot change what is proven
+/// about the code.)
 pub fn loop_scopes(m: &Sbmir, key: &str, params: &[String]) -> Result<Vec<HashMap<String, String>>, String> {
     let f = m.fns.get(key).ok_or_else(|| format!("no MIR for `{key}`"))?;
     let names = local_names(f, params, true);
@@ -269,6 +276,8 @@ pub fn loop_scopes(m: &Sbmir, key: &str, params: &[String]) -> Result<Vec<HashMa
             by_name.entry(n.clone()).or_default().push(*l);
         }
     }
+    let idom = dominators(&cfg);
+    let sites = def_sites(f, &cfg);
     Ok(cfg
         .headers
         .iter()
@@ -276,13 +285,162 @@ pub fn loop_scopes(m: &Sbmir, key: &str, params: &[String]) -> Result<Vec<HashMa
             let mut map = HashMap::new();
             for (n, ls) in &by_name {
                 let live: Vec<usize> = ls.iter().copied().filter(|l| cfg.live_in[*h].contains(l)).collect();
-                if ls.len() > 1 && live.len() == 1 && names[live[0]] != *n {
-                    map.insert(n.clone(), names[live[0]].clone());
+                if ls.len() < 2 || live.is_empty() {
+                    continue;
+                }
+                let chosen = if live.len() == 1 { Some(live[0]) } else { innermost(&live, &sites, &idom, f.argc) };
+                if let Some(c) = chosen
+                    && names[c] != *n
+                {
+                    map.insert(n.clone(), names[c].clone());
                 }
             }
             map
         })
         .collect())
+}
+
+/// The immediate dominator of every reachable block (`None` for the entry
+/// and unreachable blocks), by the iterative algorithm of Cooper, Harvey and
+/// Kennedy on a reverse post-order.
+fn dominators(cfg: &Cfg) -> Vec<Option<usize>> {
+    let n = cfg.n;
+    if n == 0 {
+        return vec![];
+    }
+    // reverse post-order from the entry
+    let mut post: Vec<usize> = Vec::new();
+    let mut seen = vec![false; n];
+    let mut stack: Vec<(usize, usize)> = vec![(0, 0)];
+    seen[0] = true;
+    while let Some((b, i)) = stack.pop() {
+        if let Some(&s) = cfg.succ[b].get(i) {
+            stack.push((b, i + 1));
+            if !seen[s] {
+                seen[s] = true;
+                stack.push((s, 0));
+            }
+        } else {
+            post.push(b);
+        }
+    }
+    let mut order = vec![usize::MAX; n];
+    for (i, b) in post.iter().enumerate() {
+        order[*b] = i;
+    }
+    let rpo: Vec<usize> = post.iter().rev().copied().collect();
+    let mut idom: Vec<Option<usize>> = vec![None; n];
+    idom[0] = Some(0);
+    let intersect = |idom: &[Option<usize>], mut a: usize, mut b: usize| -> usize {
+        while a != b {
+            while order[a] < order[b] {
+                a = idom[a].unwrap_or(0);
+            }
+            while order[b] < order[a] {
+                b = idom[b].unwrap_or(0);
+            }
+        }
+        a
+    };
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &b in rpo.iter().skip(1) {
+            let mut new: Option<usize> = None;
+            for &p in &cfg.pred[b] {
+                if idom[p].is_none() {
+                    continue;
+                }
+                new = Some(match new {
+                    None => p,
+                    Some(x) => intersect(&idom, p, x),
+                });
+            }
+            if new.is_some() && idom[b] != new {
+                idom[b] = new;
+                changed = true;
+            }
+        }
+    }
+    idom[0] = None;
+    idom
+}
+
+/// Whether block `a` dominates block `b`.
+fn dominates(idom: &[Option<usize>], a: usize, b: usize) -> bool {
+    let mut x = b;
+    for _ in 0..idom.len() + 1 {
+        if x == a {
+            return true;
+        }
+        match idom.get(x).copied().flatten() {
+            Some(p) => x = p,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Where each local is first defined: the block and statement index of its
+/// first whole assignment (a call's result is its block's last
+/// "statement"), in reverse post-order of the reachable blocks.
+fn def_sites(f: &Fn, cfg: &Cfg) -> HashMap<usize, (usize, usize)> {
+    let mut sites: HashMap<usize, (usize, usize)> = HashMap::new();
+    let mut order: Vec<usize> = (0..f.blocks.len()).filter(|b| cfg.reach.get(*b).copied().unwrap_or(false)).collect();
+    let (post, _) = super::cfg::dfs_order(f);
+    order.sort_by_key(|b| std::cmp::Reverse(post.get(*b).copied().unwrap_or(0)));
+    for b in order {
+        let bl = &f.blocks[b];
+        for (i, s) in bl.stmts.iter().enumerate() {
+            if let Stmt::Assign(p, _, _) = s
+                && p.proj.is_empty()
+            {
+                sites.entry(p.local).or_insert((b, i));
+            }
+        }
+        if let Term::Call(_, _, dest, _) = &bl.term
+            && dest.proj.is_empty()
+        {
+            sites.entry(dest.local).or_insert((b, bl.stmts.len()));
+        }
+    }
+    sites
+}
+
+/// The innermost of several live locals of one name: the one whose
+/// definition every other one's precedes (dominates); a parameter's
+/// definition is the entry. `None` when no single one is innermost.
+fn innermost(live: &[usize], sites: &HashMap<usize, (usize, usize)>, idom: &[Option<usize>], argc: usize) -> Option<usize> {
+    let site = |l: usize| -> Option<(usize, i64)> {
+        if l >= 1 && l <= argc {
+            return Some((0, -1));
+        }
+        sites.get(&l).map(|(b, i)| (*b, *i as i64))
+    };
+    // `a`'s definition precedes `b`'s on every path
+    let before = |a: (usize, i64), b: (usize, i64)| -> bool { if a.0 == b.0 { a.1 < b.1 } else { dominates(idom, a.0, b.0) } };
+    let mut found = None;
+    for &c in live {
+        let Some(sc) = site(c) else { return None };
+        let mut inner = true;
+        for &o in live {
+            if o == c {
+                continue;
+            }
+            let Some(so) = site(o) else { return None };
+            if !before(so, sc) {
+                inner = false;
+                break;
+            }
+        }
+        if inner {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(c);
+        }
+    }
+    found
 }
 
 /// The value type of a local (`&T` is `T`).

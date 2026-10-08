@@ -12,8 +12,9 @@
 #    the reading verifies) run clean under Stacked Borrows and under Tree
 #    Borrows.
 # 2. Every twin whose refusal is about undefined behaviour (bounds,
-#    aliasing, a store through a shared formation) is reported as undefined
-#    behaviour by at least one of the two models.
+#    aliasing, a store through a shared formation, a base that lives in a
+#    local used or dead inside the window: `mir_fixtures/sd_ptr_local`) is
+#    reported as undefined behaviour by at least one of the two models.
 # 3. With `--engines`, the real engine functions this host reaches:
 #    Commonware's NEON Reed–Solomon engine as shipped (`mul`, `fft`, `ifft`:
 #    `mul_neon`, `fftb_128`, `ifftb_128` and their loops) against its naive
@@ -49,7 +50,14 @@ for m in $models; do
   fi
 done
 
-for t in ub_load_past_end ub_offset_past_end ub_store_through_shared ub_alias ub_two_formations; do
+# (the `sd_ptr_local` twins: bases that live in a local of the forming
+# function and the window rule's other siblings, stage soundness-fixes)
+twins="ub_load_past_end ub_offset_past_end ub_store_through_shared ub_alias ub_two_formations
+  ub_local_write ub_local_shared ub_local_scope ub_local_from_mut ub_local_raw_deref ub_param_by_value
+  ub_param_by_value_mut ub_local_raw_write ub_raw_scope ub_struct_field ub_tuple_field ub_nested_array
+  ub_boxed ub_vec_slice ub_temporary ub_temporary_mut ub_closure_write ub_two_pointers
+  ub_shared_then_mut ub_reborrow_moved ub_after_loop ub_after_call ub_loop_scope"
+for t in $twins; do
   seen=""
   for m in $models; do
     out=$(cd "$here" && MIRIFLAGS="$(flags $m)" cargo "+$toolchain" miri test --test twins -- --exact "$t" 2>&1)
@@ -85,6 +93,7 @@ if [ "$fail" = 0 ] && [ "${1:-}" = "--engines" ]; then
     done <<EOF
 sandblaster/front/tests/mir_fixtures/sd_ptr/src/a.rs
 sandblaster/front/tests/mir_fixtures/sd_ptr_twins/src/a.rs
+sandblaster/front/tests/mir_fixtures/sd_ptr_local/src/a.rs
 sandblaster/front/tests/miri/src/lib.rs
 sandblaster/front/tests/miri/tests/positive.rs
 sandblaster/front/tests/miri/tests/twins.rs

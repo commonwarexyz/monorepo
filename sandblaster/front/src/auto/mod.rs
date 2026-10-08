@@ -28,6 +28,7 @@
 //! | 12. `BvRefl` | [`search`] (`try_bvrefl`) |
 //! | 13. linarith certificate search (simplex over exact rationals) on `Env::linearize` systems, then integer cuts and on-demand disequality splits | [`arith`], [`simplex`], [`rat`]; certificates of quoted proofs are re-derived by [`repair`] |
 //! | §13.9 E-matching of ∀-facts, conditional simp sets | [`ematch`] |
+//! | steps on the goal's terms where its values are too large for motives: a `bool` spec's conjuncts as facts (arrays compared become equations), array literals equal element by element, ∀-facts matched on the terms | [`terms`] |
 //!
 //! Prelude lemmas (DESIGN.md §6, §3.4 method facts) are core text in
 //! `sandblaster/front/lemmas/*.core`, loaded by [`lemmas::load`] and
@@ -86,6 +87,7 @@ pub mod search;
 pub mod simplex;
 pub mod state;
 pub mod surface;
+pub mod terms;
 pub mod util;
 
 use sandblaster_kernel::api::Env;

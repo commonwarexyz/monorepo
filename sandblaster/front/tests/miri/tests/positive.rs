@@ -3,7 +3,7 @@
 #![cfg(target_arch = "aarch64")]
 
 use core::arch::aarch64::*;
-use sd_miri::ptr;
+use sd_miri::{local, ptr};
 
 fn mul_byte(b: u8, lo: &[u8; 16], hi: &[u8; 16]) -> u8 {
     lo[(b & 15) as usize] ^ hi[(b >> 4) as usize]
@@ -64,4 +64,33 @@ fn xor_rows_and_load_row() {
     // SAFETY: 16 bytes.
     unsafe { vst1q_u8(out.as_mut_ptr(), ptr::load_row(&row)) };
     assert_eq!(out, row);
+}
+
+/// The positive functions of `sd_ptr_local` (stage soundness-fixes): a local
+/// written only through its pointer, two shared pointers to one local, an
+/// immutable static, a promoted constant, and the alignment fixtures (loads
+/// from byte `k` of a pair of `u128`s and of a byte array).
+#[test]
+fn local_bases_read_as_written() {
+    let mut seed = 4u64;
+    let b = bytes(&mut seed);
+    let x: [u8; 16] = std::array::from_fn(|_| bytes(&mut seed));
+    assert_eq!(local::local_ok(vec(&x)), x);
+    assert_eq!(local::two_shared_ok(b), [b; 16]);
+    assert_eq!(local::static_ok(), local::TABLE);
+    assert_eq!(local::promoted_ok(), [3u8; 16]);
+    // the alignment fixtures: sixteen bytes from byte `k` of a 32-byte base
+    let all: [u8; 32] = std::array::from_fn(|i| i as u8);
+    let rows = [u128::from_le_bytes(all[..16].try_into().unwrap()), u128::from_le_bytes(all[16..].try_into().unwrap())];
+    for k in [0usize, 8, 16] {
+        let mut a = [0u8; 16];
+        let mut b = [0u8; 16];
+        // SAFETY: 16 bytes of each.
+        unsafe {
+            vst1q_u8(a.as_mut_ptr(), local::rows_at(&rows, k));
+            vst1q_u8(b.as_mut_ptr(), local::bytes_at(&all, k));
+        }
+        assert_eq!(a, all[k..k + 16]);
+        assert_eq!(b, all[k..k + 16]);
+    }
 }

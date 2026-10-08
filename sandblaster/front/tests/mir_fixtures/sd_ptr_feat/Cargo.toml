@@ -1,0 +1,10 @@
+[package]
+name = "fx-sd-ptr-feat"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[features]
+# compiles in the aliasing write of `a::feat_alias` (a negative twin's
+# configuration: tests/unsafe_simd.rs extracts the crate with and without it)
+alias = []

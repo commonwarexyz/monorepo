@@ -114,7 +114,7 @@ type Subst<'s> = &'s [(u32, Tm, u32)];
 /// `t` (a term at depth `t_depth`) with the variables of `sub` replaced,
 /// moved to depth `out_depth ≥ t_depth` (every replacement's depth is at
 /// most `out_depth`).
-fn subst_levels(t: &Tm, t_depth: u32, sub: Subst<'_>, out_depth: u32) -> Tm {
+pub(super) fn subst_levels(t: &Tm, t_depth: u32, sub: Subst<'_>, out_depth: u32) -> Tm {
     super::tm::map_post(t, 0, &mut |n, b| match &*n {
         Term::Var(i) if i.0 >= b => {
             let lvl = t_depth - 1 - (i.0 - b);
@@ -131,7 +131,7 @@ fn subst_levels(t: &Tm, t_depth: u32, sub: Subst<'_>, out_depth: u32) -> Tm {
 /// The substitution of a refinement at a point where the refined value is
 /// `v` (built at depth `vd`) and the reverted facts' new binders start at
 /// level `h0`: `x ↦ v`, `hᵢ ↦ Var(h0 + i)`.
-fn revert_subst(x: u32, v: &Tm, vd: u32, facts: &[(u32, Tm)], h0: u32, upto: usize) -> Vec<(u32, Tm, u32)> {
+pub(super) fn revert_subst(x: u32, v: &Tm, vd: u32, facts: &[(u32, Tm)], h0: u32, upto: usize) -> Vec<(u32, Tm, u32)> {
     let mut sub = vec![(x, v.clone(), vd)];
     for (i, (l, _)) in facts.iter().enumerate().take(upto) {
         // the i-th new binder, as a variable term at the depth just after it
@@ -141,7 +141,7 @@ fn revert_subst(x: u32, v: &Tm, vd: u32, facts: &[(u32, Tm)], h0: u32, upto: usi
 }
 
 /// Whether the variable at level `x` occurs in `t` (a term at depth `d`).
-fn mentions(t: &Tm, d: u32, x: u32) -> bool {
+pub(super) fn mentions(t: &Tm, d: u32, x: u32) -> bool {
     super::tm::any_node_depth(t, &mut |n, b| matches!(n, Term::Var(i) if i.0 >= b && d - 1 - (i.0 - b) == x))
 }
 
@@ -296,7 +296,7 @@ impl<'a> Elab<'a> {
 
     /// The facts in scope (not hidden) whose type mentions the variable at
     /// level `x`: `(level, type term at the current depth)`.
-    fn dependent_facts(&self, x: u32) -> Vec<(u32, Tm)> {
+    pub(super) fn dependent_facts(&self, x: u32) -> Vec<(u32, Tm)> {
         let d = self.depth();
         let mut out = Vec::new();
         let mut seen = std::collections::BTreeSet::new();

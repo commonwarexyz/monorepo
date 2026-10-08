@@ -175,6 +175,7 @@ pub fn module_code(source_text: &str, info: &LiftedInfo, facts: &LiftFacts, h: &
     if !h.host_models.is_empty() {
         s.push_str(&format!("// Host models the proofs assume (checked by rustc at the end of this file): {}.\n", h.host_models.join(", ")));
     }
+    s.push_str(&memory_safety(facts));
     s.push_str(&format!("// SPEC.lock root: {}\n", h.spec_root));
     s.push_str(body);
     if !body.ends_with('\n') {
@@ -189,6 +190,33 @@ pub fn module_code(source_text: &str, info: &LiftedInfo, facts: &LiftFacts, h: &
         }
     }
     Ok(s)
+}
+
+/// The memory-safety section of a record (docs/DESIGN-UNSAFE-SIMD.md
+/// §5.3, `crate::mir::safety`): for each lifted MIR module whose functions
+/// read from MIR form a raw pointer, call an intrinsic or call a
+/// `#[target_feature]` function, one statement per such function, from the
+/// reading's own facts, and, when a pointer is formed, the library `unsafe
+/// fn`s crate code may call (A-S7). Empty for code without any.
+pub fn memory_safety(facts: &LiftFacts) -> String {
+    let mut s = String::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for mm in &facts.mir_loaded {
+        // (several lifted modules of one extraction share its MIR)
+        if !seen.insert(mm.loaded.m.module.clone()) {
+            continue;
+        }
+        let read: Vec<(String, String)> = facts.mir_read.iter().filter(|(_, k, _)| mm.loaded.m.fns.contains_key(k)).map(|(n, k, _)| (n.clone(), k.clone())).collect();
+        let Some((lines, pointers)) = crate::mir::safety::section(&mm.loaded, &read) else { continue };
+        s.push_str("// Memory safety (docs/DESIGN-UNSAFE-SIMD.md §5.3, from the narrow reading's own facts): each function's MIR theorem holds on every input of its domain and excludes `Stuck`, so every pointer move, load and store below is in bounds, every window exclusive and every intrinsic run with its features — no undefined behaviour from them:\n");
+        for l in lines {
+            s.push_str(&format!("//   {l}\n"));
+        }
+        if pointers {
+            s.push_str(&format!("// The library `unsafe fn`s crate code may call (A-S7: matched by the exact path of their definition and their signature; every other is refused): {}.\n", crate::mir::ptr::admitted_unsafe_fns().join(", ")));
+        }
+    }
+    s
 }
 
 /// The status line of a crate verified in place.
@@ -243,6 +271,7 @@ pub fn in_place_record(h: &InPlaceInfo<'_>, facts: &LiftFacts) -> String {
     for (f, x) in &facts.pointer_params {
         s.push_str(&format!("// Assumed (A3, docs/DESIGN-UNSAFE-SIMD.md A-S8): `{f}` forms raw pointers from its `&mut` parameter `{x}`, which aliases no other parameter (Rust's guarantee for `&mut`, which host `unsafe` could break; the window rule does not check it).\n"));
     }
+    s.push_str(&memory_safety(facts));
     for (f, b) in &facts.host_depth_bounds {
         s.push_str(&format!("// Host obligation (a recursion depth bound, the stack safety of DESIGN.md §3.7: proven at every lifted call, unchecked at host calls): `{f}` needs `{b}`.\n"));
     }

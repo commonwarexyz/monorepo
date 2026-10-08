@@ -2121,17 +2121,43 @@ sufficient fuel. By A2, the MIR run terminates with that value.
     of a finite execution.
   * Status: a meta-argument about the generator's output, not a kernel
     fact. It is the same kind of claim as A1.
-* **A3. The reference model.**
+* **A3. The reference model.** (Restated 2026-10-07, stage
+  soundness-fixes, as `docs/DESIGN-UNSAFE-SIMD.md` §2.7 and its amendment
+  A-S1 ask: the narrow reading of existing `unsafe`, decided 2026-10-06.
+  It read before: "...exact for borrow-checked MIR of the subset: no
+  interior mutability, no raw pointers, no `unsafe`
+  (`#![forbid(unsafe_code)]` on every verified module)".)
   * State passing of `&mut` referents, write-back at return, and snapshots
-    for shared references are exact for borrow-checked MIR of the subset:
-    no interior mutability, no raw pointers, no `unsafe`
-    (`#![forbid(unsafe_code)]` on every verified module).
+    for shared references are exact for borrow-checked MIR of the subset
+    with no interior mutability, and with raw pointers only in families
+    that pass the window rule (`docs/mir-lift.md` §20.10, `mir/window.rs`),
+    formed and used in crate code. Inside a family's window its base is
+    reached only through the family, and a base that lives in a local of
+    the forming function lives throughout the window. A mutable pointer
+    reads and writes the base's current value through its reference code;
+    a shared pointer reads a snapshot that equals memory at every use.
+    Every other `unsafe` operation is outside the subset (the lift's
+    diagnostic pass names it, and L is stuck on it).
+  * **A3′** (amendment A-S1): the MIR the window rule reads preserves the
+    source's aliasing structure — no optimization pass has merged, moved
+    or deleted an access or a reference's flow. Mitigation: the rule reads
+    a second extraction pinned at `-Zmir-opt-level=0` (`window_mir`),
+    which `mir::load_window` requires to be the same program as the
+    readings' level-1 extraction (every header record but the level, so
+    the same compiler, target, codegen flags, rustflags, sources and roots;
+    every type definition the two share; every function's signature);
+    each verdict is carried to the level-1 MIR by its formation's source
+    position and kind, exactly one or refused.
   * The returned-reference translation of §2.4 relies on the same
     exclusivity.
+  * `#![forbid(unsafe_code)]` stays on every DSL root (laws, proofs, the
+    dialect); a lifted file's `unsafe` is read only through the narrow
+    reading.
   * This replaces today's trust that `read.rs`'s state passing is right,
     with the same assumption made once, generically.
-* **A4. `mirx` prints rustc's MIR** (1,131 lines; unchanged). It is
-  extracted at the pinned release (`docs/mir-lift.md` §2).
+* **A4. `mirx` prints rustc's MIR** (1,131 lines when this was written;
+  1,254 before stage soundness-fixes, 1,257 after it: `kernel/AUDIT.md`
+  §21.1). It is extracted at the pinned release (`docs/mir-lift.md` §2).
 * **A5. Host models and leaves** mean what the host functions do. This is
   unchanged, and they are the same model functions S uses.
 * **A6. The kernel**, unchanged. No new prelude definitions beyond L's

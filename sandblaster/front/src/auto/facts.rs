@@ -84,6 +84,16 @@ impl<'a> Engine<'a> {
     }
 
     fn sat_one(&mut self, st: &mut St, f: &Fact, idx: usize) -> R<Option<Tm>> {
+        // a fact split into its conjuncts on its term ([`super::terms`]):
+        // the conjuncts carry what it says; its value (too large for the
+        // value-level steps' motives) only triggers forward rules
+        if self.term_inert.contains(&f.lvl) {
+            return Ok(None);
+        }
+        if self.term_split.contains(&f.lvl) {
+            self.forward(st, f)?;
+            return Ok(None);
+        }
         // the simplifier first: a fact whose scrutinees the other facts
         // decide is replaced by its normal form, which is saturated instead
         if self.simp_fact(st, f)? {
