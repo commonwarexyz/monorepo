@@ -104,8 +104,11 @@ impl<'a, V: Viewable, F: Future + Unpin> Future for Waiter<'a, V, F> {
 
 /// Unified response from a regular or handoff proposal request.
 enum ProposalResponse<D> {
-    /// An ordinary candidate or a held candidate released after parent certification.
+    /// An ordinary candidate.
     Proposed(D),
+    /// A held candidate released by parent certification. It was relayed when held, so only
+    /// the lock-in and the vote remain.
+    Released(D),
     /// A response from a handoff request.
     Handoff(Handoff<D>),
 }
@@ -121,7 +124,7 @@ enum ProposalState<D> {
     /// request for the same context follows exact parent certification, unless we voted to
     /// nullify the request's view.
     Waiting,
-    /// A volatile build result whose publication requires parent certification.
+    /// A relayed candidate whose lock-in and notarize vote require parent certification.
     ///
     /// Once its parent has certified, the select loop consumes the result only
     /// after the journal sync that follows that certification.
@@ -453,7 +456,7 @@ impl<
             match &request {
                 ProposalRequest::Handoff(_) => {
                     self.record_handoff_event(HandoffEventKind::Requested);
-                    ProposalState::Handoff(self.automaton.handoff(context).await)
+                    ProposalState::Handoff(self.automaton.prepare(context).await)
                 }
                 ProposalRequest::Regular(_) => {
                     ProposalState::Regular(self.automaton.propose(context).await)
@@ -755,11 +758,15 @@ impl<
 
     /// Processes the automaton's response to a proposal request.
     ///
+    /// `released` marks a held candidate whose relay was counted when it was held, so only its
+    /// vote is counted here.
+    ///
     /// Returns the view to notify if the proposal was recorded.
     fn process_proposed(
         &mut self,
         request: ProposalRequest<D, S::PublicKey>,
         proposed: Result<D, oneshot::error::RecvError>,
+        released: bool,
     ) -> Option<View> {
         // Try to use result
         let is_handoff = request.is_handoff();
@@ -802,6 +809,9 @@ impl<
         // certificate), extra payload bytes are harmless, and the worst a
         // crash can do is relay a different payload for the same round after
         // restart (see [Plan::Propose]).
+        //
+        // This is also the lock-in for a candidate that was relayed while held:
+        // the relay stores it before the vote follows.
         let _ = self.relay.broadcast(
             proposed,
             Plan::Propose {
@@ -809,12 +819,19 @@ impl<
             },
         );
         if is_handoff {
-            let event = if self.state.proposal_parent_certified(&context) {
-                HandoffEventKind::PublishedAfterCertification
+            let certified = self.state.proposal_parent_certified(&context);
+            if !released {
+                self.record_handoff_event(if certified {
+                    HandoffEventKind::RelayedAfterCertification
+                } else {
+                    HandoffEventKind::RelayedBeforeCertification
+                });
+            }
+            self.record_handoff_event(if certified {
+                HandoffEventKind::VotedAfterCertification
             } else {
-                HandoffEventKind::PublishedBeforeCertification
-            };
-            self.record_handoff_event(event);
+                HandoffEventKind::VotedBeforeCertification
+            });
         }
         Some(view)
     }
@@ -1275,7 +1292,7 @@ impl<
                             receiver.await.map(ProposalResponse::Handoff)
                         }
                         Some(Request(_, _, ProposalState::Held(payload))) if ready => {
-                            Ok(ProposalResponse::Proposed(*payload))
+                            Ok(ProposalResponse::Released(*payload))
                         }
                         _ => pending().await,
                     };
@@ -1316,8 +1333,9 @@ impl<
                 // Retain a waiting, held, or closed handoff outside the round proposal
                 // slot until its parent resolves. The captured request and build latch
                 // remain active until then.
-                let proposed = match proposed {
-                    Ok(ProposalResponse::Proposed(payload)) => Ok(payload),
+                let (proposed, released) = match proposed {
+                    Ok(ProposalResponse::Proposed(payload)) => (Ok(payload), false),
+                    Ok(ProposalResponse::Released(payload)) => (Ok(payload), true),
                     Ok(ProposalResponse::Handoff(Handoff::Wait)) => {
                         self.record_handoff_event(HandoffEventKind::WaitReturned);
                         pending_propose = Some(Request(request, span, ProposalState::Waiting));
@@ -1326,25 +1344,35 @@ impl<
                     Ok(ProposalResponse::Handoff(Handoff::Stage(payload)))
                         if !self.state.proposal_parent_certified(request.context()) =>
                     {
+                        // Relay the held candidate now so its distribution overlaps parent
+                        // certification. The relay stores nothing and names no proposal
+                        // (see [Plan::Prepare]); the lock-in and the vote wait for the parent.
                         self.record_handoff_event(HandoffEventKind::CandidateReturned);
                         self.record_handoff_event(HandoffEventKind::Held);
+                        let _ = self.relay.broadcast(
+                            payload,
+                            Plan::Prepare {
+                                round: request.context().round,
+                            },
+                        );
+                        self.record_handoff_event(HandoffEventKind::RelayedBeforeCertification);
                         pending_propose = Some(Request(request, span, ProposalState::Held(payload)));
                         continue;
                     }
                     Ok(ProposalResponse::Handoff(Handoff::Publish(payload) | Handoff::Stage(payload))) => {
                         self.record_handoff_event(HandoffEventKind::CandidateReturned);
-                        Ok(payload)
+                        (Ok(payload), false)
                     }
                     Err(_) if request.is_handoff() => {
                         pending_propose = Some(Request(request, span, ProposalState::Closed));
                         continue;
                     }
-                    Err(err) => Err(err),
+                    Err(err) => (Err(err), false),
                 };
 
                 // Process the automaton's response
                 let Some(proposed_view) =
-                    span.in_scope(|| self.process_proposed(request, proposed))
+                    span.in_scope(|| self.process_proposed(request, proposed, released))
                 else {
                     continue;
                 };

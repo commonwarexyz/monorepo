@@ -675,6 +675,18 @@ where
                     .persist_verified(round, block, ack, buffer, application, resolver)
                     .await;
             }
+            Message::Prepared {
+                round,
+                block,
+                recipients,
+                ..
+            } => {
+                // A held candidate is only sent. It is stored by the later
+                // [Message::Verified] that the lock-in requests, so an abandoned
+                // candidate leaves nothing for the propose paths to reuse after a
+                // restart.
+                buffer.send(round, block, recipients);
+            }
             Message::Verified {
                 round, block, ack, ..
             } => {

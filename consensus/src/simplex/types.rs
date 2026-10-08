@@ -35,7 +35,7 @@ pub struct Context<D: Digest, P: PublicKey> {
     /// its own term covers the parent view.
     ///
     /// A pipelined handoff request instead names the previous view as its parent before that
-    /// view certifies (see [`crate::CertifiableAutomaton::handoff`]).
+    /// view certifies (see [`crate::CertifiableAutomaton::prepare`]).
     pub parent: (View, D),
 }
 

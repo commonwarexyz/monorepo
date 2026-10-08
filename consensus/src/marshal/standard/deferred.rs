@@ -78,8 +78,10 @@ use crate::{
     Reporter,
     marshal::{
         Update,
+        ancestry::Ancestry,
         application::{
             gates::{self, GateOutcome, Gates},
+            prepare::{self, Resolved},
             validation::{Stage, is_inferred_reproposal_at_certify},
         },
         core::{CommitmentFallback, DigestFallback, Mailbox},
@@ -109,7 +111,7 @@ use commonware_runtime::{
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand_core::Rng;
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 use tracing::{Instrument as _, debug, info_span};
 
 /// An [`Application`] adapter that handles epoch transitions and validates block ancestry.
@@ -460,6 +462,126 @@ where
         });
         rx
     }
+
+    /// Runs the proposal checks for `consensus_context` and yields what the proposal path does
+    /// next: reuse a block of marshal's own, skip the view, or build on the fetched parent.
+    ///
+    /// The returned future borrows nothing from `self`, so the propose task and a prepare
+    /// request's [`Parent`](crate::marshal::ancestry::Parent) handle can both await it.
+    fn checks(
+        &self,
+        consensus_context: Context<B::Digest, S::PublicKey>,
+    ) -> impl Future<Output = Resolved<B::Digest, B, impl Ancestry<B>>> + Send + 'static {
+        let context = self.context.clone();
+        let marshal = self.marshal.clone();
+        let epocher = self.epocher.clone();
+        let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
+        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
+        let build_duration = self.build_duration.clone();
+        async move {
+            // On leader recovery, marshal may already hold a verified block
+            // for this round (persisted by a pre-crash propose that reached
+            // its relay broadcast while the notarize vote never reached the
+            // journal).
+            //
+            // The pre-crash digest may already have been broadcast, so
+            // building a fresh block would equivocate. The stored block is
+            // the only proposal we can broadcast for this round.
+            //
+            // The recovered block is safe to reuse only if its embedded
+            // context matches the context simplex just recovered, or if it
+            // is the parent re-proposed at the epoch boundary: that stores the
+            // parent under its original context, whose round is the parent's own.
+            // Otherwise the cached block was built against a different
+            // parent and cannot be broadcast under the current header, so
+            // skip the view and let the voter nullify it via timeout.
+            let last_in_epoch = epocher
+                .last(consensus_context.epoch())
+                .expect("current epoch should exist");
+            if let Some(block) = marshal.get_verified(consensus_context.round).await {
+                let block_context = block.context();
+                let digest = block.digest();
+                let reproposal =
+                    digest == consensus_context.parent.1 && block.height() == last_in_epoch;
+                if !reproposal && block_context != consensus_context {
+                    debug!(
+                        round = ?consensus_context.round,
+                        ?consensus_context,
+                        ?block_context,
+                        "skipping proposal: cached verified block context no longer matches"
+                    );
+                    return Resolved::Skip;
+                }
+                // Stage the recovered block so the relay broadcast re-sends
+                // it through the same handshake as a fresh proposal. The
+                // relay-time persist deduplicates against the pre-crash
+                // write, with the handle covering the original.
+                debug!(
+                    round = ?consensus_context.round,
+                    ?digest,
+                    reproposal,
+                    "reusing verified block from marshal on leader recovery"
+                );
+                return Resolved::Reuse(digest, block, "recovered block");
+            }
+
+            // The parent for any consensus context is in the same epoch: the
+            // boundary block of the previous epoch is the genesis block of the
+            // current epoch.
+            //
+            // Proposal context carries the parent view and commitment but not
+            // the parent height. The parent may sit above the finalized tip and
+            // may still be uncertified, so this must stay round-bound until the
+            // block is returned.
+            let (parent_view, parent_commitment) = consensus_context.parent;
+            let parent_request = marshal.subscribe_by_commitment(
+                parent_commitment,
+                CommitmentFallback::FetchByRound {
+                    round: Round::new(consensus_context.epoch(), parent_view),
+                },
+            );
+            let parent_timer = proposal_parent_fetch_duration.timer(&*context);
+            let Ok(parent) = parent_request.await else {
+                debug!(
+                    ?parent_commitment,
+                    reason = "failed to fetch parent block",
+                    "skipping proposal"
+                );
+                return Resolved::Skip;
+            };
+            parent_timer.observe(&*context);
+
+            // Deferred verification votes before it checks that a block's parent field
+            // matches the parent named by its consensus context, so an uncertified
+            // handoff parent may be unlinked. Build only on a linked parent. A parent at
+            // view zero is the epoch's genesis block, which needs no link check. The first
+            // epoch's genesis has no context parent to match, and a later epoch's genesis
+            // is the previous epoch's finalized boundary block.
+            //
+            // The coding variant needs no such check: it fetches each parent by the
+            // commitment in its child's consensus context, and its ancestry stream ends
+            // at a fetched parent that does not match the child's link.
+            if parent_view != View::zero() && parent.parent() != parent.context().parent.1 {
+                debug!(
+                    ?parent_commitment,
+                    reason = "parent does not link to its context parent",
+                    "skipping proposal"
+                );
+                return Resolved::Skip;
+            }
+
+            // Special case: If the parent block is the last block in the epoch,
+            // re-propose it as to not produce any blocks that will be cut out
+            // by the epoch transition.
+            if parent.height() == last_in_epoch {
+                return Resolved::Reuse(parent.digest(), parent, "re-proposed boundary block");
+            }
+
+            let ancestor_stream =
+                marshal.ancestor_stream(context.clone(), [parent], ancestor_fetch_duration);
+            Resolved::Build(ancestor_stream, build_duration.timer(&*context))
+        }
+    }
 }
 
 impl<E, S, A, B, ES> Automaton for Deferred<E, S, A, B, ES>
@@ -498,15 +620,9 @@ where
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
-        let marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let epocher = self.epocher.clone();
         let gates = self.gates.clone();
-
-        // Metrics
-        let build_duration = self.build_duration.clone();
-        let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
+        let checks = self.checks(consensus_context.clone());
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -519,139 +635,33 @@ where
         );
         context.spawn(move |runtime_context| {
             async move {
-                // On leader recovery, marshal may already hold a verified block
-                // for this round (persisted by a pre-crash propose that reached
-                // its relay broadcast while the notarize vote never reached the
-                // journal).
-                //
-                // The pre-crash digest may already have been broadcast, so
-                // building a fresh block would equivocate. The stored block is
-                // the only proposal we can broadcast for this round.
-                //
-                // The recovered block is safe to reuse only if its embedded
-                // context matches the context simplex just recovered, or if it
-                // is the parent re-proposed at the epoch boundary: that stores the
-                // parent under its original context, whose round is the parent's own.
-                // Otherwise the cached block was built against a different
-                // parent and cannot be broadcast under the current header, so
-                // drop the receiver and let the voter nullify the view via
-                // timeout.
-                let last_in_epoch = epocher
-                    .last(consensus_context.epoch())
-                    .expect("current epoch should exist");
-                if let Some(block) = marshal.get_verified(consensus_context.round).await {
-                    let block_context = block.context();
-                    let digest = block.digest();
-                    let reproposal =
-                        digest == consensus_context.parent.1 && block.height() == last_in_epoch;
-                    if !reproposal && block_context != consensus_context {
-                        debug!(
-                            round = ?consensus_context.round,
-                            ?consensus_context,
-                            ?block_context,
-                            "skipping proposal: cached verified block context no longer matches"
-                        );
-                        return;
-                    }
-                    // Stage the recovered block so the relay broadcast re-sends
-                    // it through the same handshake as a fresh proposal. The
-                    // relay-time persist deduplicates against the pre-crash
-                    // write, with the handle covering the original.
-                    debug!(
-                        round = ?consensus_context.round,
-                        ?digest,
-                        reproposal,
-                        "reusing verified block from marshal on leader recovery"
-                    );
-                    gates
-                        .stage(
-                            consensus_context.round,
-                            digest,
-                            block,
-                            tx,
-                            "recovered block",
-                        )
-                        .await;
-                    return;
-                }
-
-                // The parent for any consensus context is in the same epoch: the
-                // boundary block of the previous epoch is the genesis block of the
-                // current epoch.
-                //
-                // Proposal context carries the parent view and commitment but not
-                // the parent height. The parent may sit above the finalized tip and
-                // may still be uncertified, so this must stay round-bound until the
-                // block is returned.
-                let (parent_view, parent_commitment) = consensus_context.parent;
-                let parent_request = marshal.subscribe_by_commitment(
-                    parent_commitment,
-                    CommitmentFallback::FetchByRound {
-                        round: Round::new(consensus_context.epoch(), parent_view),
-                    },
-                );
-
-                let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
-                let parent = select! {
+                let resolved = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
                         return;
                     },
-                    result = parent_request => match result {
-                        Ok(parent) => parent,
-                        Err(_) => {
-                            debug!(
-                                ?parent_commitment,
-                                reason = "failed to fetch parent block",
-                                "skipping proposal"
-                            );
-                            return;
-                        }
-                    },
+                    resolved = checks => resolved,
                 };
-                parent_timer.observe(&runtime_context);
+                let (ancestor_stream, build_timer) = match resolved {
+                    Resolved::Reuse(digest, block, name) => {
+                        gates
+                            .stage(
+                                consensus_context.round,
+                                digest,
+                                block,
+                                |id| {
+                                    tx.send_lossy(id);
+                                },
+                                name,
+                            )
+                            .await;
+                        return;
+                    }
+                    Resolved::Skip => return,
+                    Resolved::Build(ancestor_stream, build_timer) => (ancestor_stream, build_timer),
+                };
 
-                // Deferred verification votes before it checks that a block's parent field
-                // matches the parent named by its consensus context, so an uncertified
-                // handoff parent may be unlinked. Build only on a linked parent. A parent at
-                // view zero is the epoch's genesis block, which needs no link check. The first
-                // epoch's genesis has no context parent to match, and a later epoch's genesis
-                // is the previous epoch's finalized boundary block.
-                //
-                // The coding variant needs no such check: it fetches each parent by the
-                // commitment in its child's consensus context, and its ancestry stream ends
-                // at a fetched parent that does not match the child's link.
-                if parent_view != View::zero() && parent.parent() != parent.context().parent.1 {
-                    debug!(
-                        ?parent_commitment,
-                        reason = "parent does not link to its context parent",
-                        "skipping proposal"
-                    );
-                    return;
-                }
-
-                // Special case: If the parent block is the last block in the epoch,
-                // re-propose it as to not produce any blocks that will be cut out
-                // by the epoch transition.
-                if parent.height() == last_in_epoch {
-                    let digest = parent.digest();
-                    gates
-                        .stage(
-                            consensus_context.round,
-                            digest,
-                            parent,
-                            tx,
-                            "re-proposed boundary block",
-                        )
-                        .await;
-                    return;
-                }
-
-                let ancestor_stream = marshal.ancestor_stream(
-                    Arc::new(runtime_context.child("ancestor_stream")),
-                    [parent],
-                    ancestor_fetch_duration,
-                );
+                let (parent_view, parent_commitment) = consensus_context.parent;
                 let build_request = application
                     .propose(
                         (
@@ -668,7 +678,6 @@ where
                         parent = %parent_commitment
                     ));
 
-                let build_timer = build_duration.timer(&runtime_context);
                 let built_block = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -694,7 +703,9 @@ where
                         consensus_context.round,
                         digest,
                         Arc::new(built_block),
-                        tx,
+                        |id| {
+                            tx.send_lossy(id);
+                        },
                         "proposed block",
                     )
                     .await;
@@ -868,22 +879,34 @@ where
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
+    /// Prepares a term-start proposal on an uncertified parent.
+    ///
+    /// The application receives the parent as a [`Parent`](crate::marshal::ancestry::Parent)
+    /// handle. Asking the handle for the ancestry runs the same checks as [`Self::propose`], in
+    /// the same order, and a block those checks reuse without the application answers
+    /// [`Handoff::Stage`]. An application that declines without asking costs no lookup or
+    /// fetch, and one that declines on its first poll is answered [`Handoff::Wait`] on this
+    /// task without a spawn.
     #[allow(clippy::async_yields_async)]
-    #[tracing::instrument(name = "marshal.deferred.handoff", level = "info", skip_all, fields(round = %consensus_context.round))]
-    async fn handoff(
+    #[tracing::instrument(name = "marshal.deferred.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
+    async fn prepare(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
-        let policy = self.application.handoff_policy(&consensus_context);
-        let context = self.context.clone();
-        gates::handoff(
-            &*context,
-            self,
-            policy,
-            consensus_context.round,
+        let checks = self.checks(consensus_context.clone());
+        let span = info_span!(
+            "marshal.deferred.application.prepare",
+            round = %consensus_context.round
+        );
+        prepare::request(
+            self.context.as_ref(),
+            &self.application,
+            self.gates.clone(),
             consensus_context,
+            checks,
+            span,
+            |block: B| (block.digest(), Arc::new(block)),
         )
-        .await
     }
 
     #[allow(clippy::async_yields_async)]

@@ -2,6 +2,7 @@
 
 use crate::{Block, Heightable, types::Height};
 use commonware_cryptography::{Digest, Digestible};
+use commonware_macros::stability;
 use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
 use futures::{
     FutureExt, Stream,
@@ -31,6 +32,31 @@ pub trait Ancestry<B: Block>: Stream<Item = Arc<B>> + Clone + Send + Unpin + 'st
     /// Peeks at the latest block in the stream without consuming it. Returns [None]
     /// if the stream does not yet have a block available or has been exhausted.
     fn peek(&self) -> Option<&B>;
+}
+
+/// The uncertified parent of a pipelined handoff, fetched on demand.
+///
+/// [`Application::prepare`](crate::Application::prepare) receives one. An application that
+/// builds asks for the parent's [`Ancestry`]. One that declines never touches it, and the
+/// marshal then does no lookup, fetch, or check for the request.
+#[stability(ALPHA)]
+pub trait Parent<B: Block>: Send + 'static {
+    /// Fetches the parent and returns its ancestry when the proposal is the application's to
+    /// build.
+    ///
+    /// Returns `None` when the marshal handles the view itself: it found the epoch boundary
+    /// block or a candidate stored for the round before a restart (reused, or the view skipped
+    /// under inline verification), or it cannot build on this parent. Return
+    /// [`Handoff::Wait`](crate::Handoff::Wait) then; the marshal discards any block.
+    fn ancestry(self) -> impl Future<Output = Option<impl Ancestry<B>>> + Send;
+}
+
+/// A fetched ancestry is a parent that is already resolved.
+#[stability(ALPHA)]
+impl<B: Block, A: Ancestry<B>> Parent<B> for A {
+    async fn ancestry(self) -> Option<impl Ancestry<B>> {
+        Some(self)
+    }
 }
 
 /// Returns true when `child_height` is exactly the successor of `parent_height`.

@@ -15,8 +15,10 @@ pub enum HandoffEventKind {
     WaitReturned,
     CandidateReturned,
     Held,
-    PublishedBeforeCertification,
-    PublishedAfterCertification,
+    RelayedBeforeCertification,
+    RelayedAfterCertification,
+    VotedBeforeCertification,
+    VotedAfterCertification,
 }
 
 /// Handoff event label.

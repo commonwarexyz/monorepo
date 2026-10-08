@@ -108,7 +108,7 @@
 //! [`coding::Marshaled`]: commonware_consensus::marshal::coding::Marshaled
 
 use commonware_consensus::{
-    CertifiableBlock, Epochable, HandoffPolicy, Viewable, marshal::ancestry::Ancestry,
+    CertifiableBlock, Epochable, Handoff, Viewable, marshal::ancestry::Ancestry,
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
@@ -194,15 +194,18 @@ where
 
     /// Decide whether to build on a parent that has not yet been certified.
     ///
-    /// See [`commonware_consensus::Application::handoff_policy`] for the contract, including
-    /// early-publication trust. If readiness is uncertain, return [`HandoffPolicy::Wait`].
+    /// With [`Handoff::Publish`] or [`Handoff::Stage`], [`Stateful`] fetches the parent, builds
+    /// the block through [`propose`](Self::propose), and attaches the decision to the result.
+    /// See [`commonware_consensus::Application::prepare`] for the contract, including
+    /// early-publication trust. If readiness is uncertain, return [`Handoff::Wait`], which
+    /// costs no work: consensus requests an ordinary proposal once the parent certifies.
     ///
     /// [`Stateful`] calls this method on a clone of the application, outside the processing
     /// actor and without database batches. Metadata used only for this decision may live outside
-    /// the batches, but the application must share it across clones. This policy does not change
-    /// the deterministic execution contract above.
-    fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
-        HandoffPolicy::Wait
+    /// the batches, but the application must share it across clones. This decision does not
+    /// change the deterministic execution contract above.
+    fn handoff(&self, _context: &Self::Context) -> Handoff<()> {
+        Handoff::Wait
     }
 
     /// Builds a block on top of the provided parent ancestry.

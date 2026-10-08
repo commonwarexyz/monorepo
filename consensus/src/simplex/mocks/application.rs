@@ -3,7 +3,7 @@
 
 use super::relay::Relay;
 use crate::{
-    Automaton as Au, CertifiableAutomaton as CAu, Handoff, HandoffPolicy, Relay as Re,
+    Automaton as Au, CertifiableAutomaton as CAu, Handoff, Relay as Re,
     simplex::{Plan, types::Context},
     types::{Epoch, Round},
 };
@@ -90,7 +90,7 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 }
 
 impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
-    async fn handoff(
+    async fn prepare(
         &mut self,
         context: Self::Context,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
@@ -202,7 +202,8 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     fail_verification: bool,
     drop_proposals: bool,
     stall_proposals: bool,
-    handoff: HandoffPolicy,
+    /// The decision attached to a handoff candidate. `Wait` builds nothing.
+    handoff: Handoff<()>,
     drop_verifications: bool,
     should_certify: Certifier<H::Digest>,
 
@@ -265,7 +266,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 fail_verification: false,
                 drop_proposals: false,
                 stall_proposals: false,
-                handoff: HandoffPolicy::Wait,
+                handoff: Handoff::Wait,
                 drop_verifications: false,
                 should_certify: cfg.should_certify,
 
@@ -292,7 +293,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
     }
 
     /// When set, `Message::Propose` requests, and `Message::Handoff` requests that a non-Wait
-    /// policy would answer, are held open indefinitely: the response sender is parked in
+    /// decision would answer, are held open indefinitely: the response sender is parked in
     /// `pending_proposes` or `pending_handoffs`, keeping the oneshot alive so the caller's
     /// `receiver` never resolves. This simulates a propose that is still in flight at the
     /// moment the voter crashes.
@@ -300,8 +301,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.stall_proposals = stall;
     }
 
-    /// Sets the policy used to answer handoff proposal requests.
-    pub const fn set_handoff(&mut self, handoff: HandoffPolicy) {
+    /// Sets the decision attached to handoff candidates.
+    pub const fn set_handoff(&mut self, handoff: Handoff<()>) {
         self.handoff = handoff;
     }
 
@@ -434,9 +435,18 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
 
     fn broadcast(&mut self, payload: H::Digest, plan: Plan<P>) {
         let (contents, recipients) = match plan {
+            // A held candidate is sent once, when it is prepared. Its lock-in
+            // does not send it again, mirroring marshal's relay.
+            Plan::Prepare { .. } => {
+                let contents = self.pending.get(&payload).expect("missing payload").clone();
+                self.seen.insert(payload, contents.clone());
+                (contents, Recipients::All)
+            }
             Plan::Propose { .. } => {
                 let contents = self.pending.remove(&payload).expect("missing payload");
-                self.seen.insert(payload, contents.clone());
+                if self.seen.insert(payload, contents.clone()).is_some() {
+                    return;
+                }
                 (contents, Recipients::All)
             }
             Plan::Forward { recipients, .. } => {
@@ -499,14 +509,11 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         if let Some(observer) = &self.propose_observer {
                             observer(context.clone());
                         }
-                        let respond = match self.handoff {
-                            HandoffPolicy::Publish => Handoff::Publish,
-                            HandoffPolicy::Stage => Handoff::Stage,
-                            HandoffPolicy::Wait => {
-                                response.send_lossy(Handoff::Wait);
-                                continue;
-                            }
-                        };
+                        let decision = self.handoff;
+                        if decision.is_wait() {
+                            response.send_lossy(Handoff::Wait);
+                            continue;
+                        }
                         if self.stall_proposals {
                             self.pending_handoffs.push(response);
                             continue;
@@ -515,7 +522,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                             continue;
                         }
                         let round = context.round;
-                        let proposal = respond(self.propose(context).await);
+                        let digest = self.propose(context).await;
+                        let proposal = decision.map(|()| digest);
                         if let Some(controller) = &self.handoff_controller {
                             controller(round, proposal, response);
                         } else {

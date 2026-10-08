@@ -6,11 +6,11 @@ use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, HandoffPolicy,
-    Reporter, Viewable,
+    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Handoff, Reporter,
+    Viewable,
     marshal::{
         Update,
-        ancestry::{Ancestry, BoxedAncestry},
+        ancestry::{Ancestry, BoxedAncestry, Parent},
     },
 };
 use commonware_cryptography::Digestible;
@@ -183,9 +183,9 @@ where
 /// and reporting calls to the actor. If the actor stops before responding, `propose` returns `None`
 /// and `verify` panics with "stateful actor dropped during verify".
 ///
-/// `handoff_policy` is answered from a retained clone of the application, including after
-/// the actor stops, so a policy other than [`HandoffPolicy::Wait`] does not guarantee that
-/// the proposal can be built.
+/// `prepare` decides through a retained clone of the application, including after the actor
+/// stops, so a decision other than [`Handoff::Wait`] does not guarantee that the proposal can
+/// be built.
 pub struct Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -284,8 +284,26 @@ where
         receiver.await.ok().flatten()
     }
 
-    fn handoff_policy(&self, context: &Self::Context) -> HandoffPolicy {
-        self.application.handoff_policy(context)
+    /// Decides through [`Application::handoff`] before any work, since the build needs
+    /// database batches that only the processing actor can prepare. A [`Handoff::Wait`]
+    /// decision never touches the parent or the actor queue. Otherwise the ancestry is fetched
+    /// and the build runs as an ordinary proposal, and the decision is attached to the result.
+    async fn prepare(
+        &mut self,
+        context: (E, Self::Context),
+        parent: impl Parent<Self::Block>,
+        upstream: Self::Input,
+    ) -> Handoff<Self::Block> {
+        let decision = self.application.handoff(&context.1);
+        if decision.is_wait() {
+            return Handoff::Wait;
+        }
+        let Some(ancestry) = parent.ancestry().await else {
+            return Handoff::Wait;
+        };
+        self.propose(context, ancestry, upstream)
+            .await
+            .map_or(Handoff::Wait, |block| decision.map(|()| block))
     }
 
     async fn verify(

@@ -4,13 +4,21 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{CertifiableBlock, Epochable, HandoffPolicy, marshal::ancestry::Ancestry};
+use crate::{
+    CertifiableBlock, Epochable, Handoff,
+    marshal::ancestry::{Ancestry, Parent},
+};
 use commonware_runtime::deterministic;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use std::{future::pending, marker::PhantomData, sync::Arc};
+use std::{
+    future::{pending, poll_fn},
+    marker::PhantomData,
+    sync::Arc,
+    task::Poll,
+};
 
 /// A mock application that implements `Application` for testing.
 ///
@@ -24,8 +32,18 @@ pub struct MockVerifyingApp<B, S> {
     pub propose_result: Option<B>,
     /// The result returned by `verify`.
     pub verify_result: bool,
-    /// The policy returned by `handoff_policy`.
-    handoff: HandoffPolicy,
+    /// The decision `prepare` attaches to a built block. `Wait` declines without asking for
+    /// the parent.
+    handoff: Handoff<()>,
+    /// Whether `prepare` asks the parent handle for its ancestry before building. A mock that
+    /// does not returns `propose_result` under its decision anyway, which marshal must discard.
+    ask_parent: bool,
+    /// Whether `prepare` returns `propose_result` under its decision even when the parent
+    /// handle yields no ancestry, which marshal must discard.
+    ignore_absence: bool,
+    /// Whether `prepare` suspends once before building, so marshal drives it from a task
+    /// instead of answering it on its first poll.
+    suspend: bool,
     /// Shared by clones so that only the first proposal build blocks.
     proposal_gate: Option<Arc<Mutex<Option<ProposalGate>>>>,
     /// Blocks for which `verify` returns false.
@@ -59,9 +77,27 @@ impl<B, S> MockVerifyingApp<B, S> {
         self
     }
 
-    /// Configure the policy returned for handoff builds.
-    pub const fn with_handoff(mut self, policy: HandoffPolicy) -> Self {
-        self.handoff = policy;
+    /// Configure the decision `prepare` attaches to a built block.
+    pub const fn with_handoff(mut self, handoff: Handoff<()>) -> Self {
+        self.handoff = handoff;
+        self
+    }
+
+    /// Make `prepare` return `propose_result` without asking the parent handle.
+    pub const fn without_parent(mut self) -> Self {
+        self.ask_parent = false;
+        self
+    }
+
+    /// Make `prepare` return `propose_result` even when the parent handle yields no ancestry.
+    pub const fn ignoring_absence(mut self) -> Self {
+        self.ignore_absence = true;
+        self
+    }
+
+    /// Make `prepare` suspend once before building.
+    pub const fn suspending(mut self) -> Self {
+        self.suspend = true;
         self
     }
 
@@ -88,12 +124,29 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
         Self {
             propose_result: None,
             verify_result: true,
-            handoff: HandoffPolicy::Wait,
+            handoff: Handoff::Wait,
+            ask_parent: true,
+            ignore_absence: false,
+            suspend: false,
             proposal_gate: None,
             reject: None,
             _phantom: PhantomData,
         }
     }
+}
+
+/// Suspends once, so a future that awaits it is not ready on its first poll.
+async fn suspend() {
+    let mut suspended = false;
+    poll_fn(|cx| {
+        if suspended {
+            return Poll::Ready(());
+        }
+        suspended = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    })
+    .await;
 }
 
 impl<B, S> crate::Application<deterministic::Context> for MockVerifyingApp<B, S>
@@ -126,8 +179,39 @@ where
         self.propose_result.clone()
     }
 
-    fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
-        self.handoff
+    async fn prepare(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        parent: impl Parent<Self::Block>,
+        input: Self::Input,
+    ) -> Handoff<Self::Block> {
+        if self.handoff.is_wait() {
+            return Handoff::Wait;
+        }
+        let decision = self.handoff;
+        if self.suspend {
+            suspend().await;
+        }
+        if !self.ask_parent {
+            let block = self
+                .propose_result
+                .clone()
+                .expect("unasked prepare needs a block");
+            return decision.map(|()| block);
+        }
+        let Some(ancestry) = parent.ancestry().await else {
+            if !self.ignore_absence {
+                return Handoff::Wait;
+            }
+            let block = self
+                .propose_result
+                .clone()
+                .expect("prepare ignoring an absent ancestry needs a block");
+            return decision.map(|()| block);
+        };
+        self.propose(context, ancestry, input)
+            .await
+            .map_or(Handoff::Wait, |block| decision.map(|()| block))
     }
 
     async fn verify(
@@ -151,7 +235,7 @@ where
 pub struct GatedVerifyingApp<B, S> {
     started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
-    handoff: HandoffPolicy,
+    handoff: Handoff<()>,
     _phantom: PhantomData<(B, S)>,
 }
 
@@ -165,7 +249,7 @@ impl<B, S> GatedVerifyingApp<B, S> {
             Self {
                 started: Arc::new(Mutex::new(Some(started_tx))),
                 release: Arc::new(Mutex::new(Some(release_rx))),
-                handoff: HandoffPolicy::Wait,
+                handoff: Handoff::Wait,
                 _phantom: PhantomData,
             },
             started_rx,
@@ -173,9 +257,9 @@ impl<B, S> GatedVerifyingApp<B, S> {
         )
     }
 
-    /// Configure the policy returned for handoff builds.
-    pub const fn with_handoff(mut self, policy: HandoffPolicy) -> Self {
-        self.handoff = policy;
+    /// Configure the decision `prepare` attaches to a built block.
+    pub const fn with_handoff(mut self, handoff: Handoff<()>) -> Self {
+        self.handoff = handoff;
         self
     }
 }
@@ -200,8 +284,17 @@ where
         None
     }
 
-    fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
-        self.handoff
+    async fn prepare(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+        parent: impl Parent<Self::Block>,
+        _input: Self::Input,
+    ) -> Handoff<Self::Block> {
+        if self.handoff.is_wait() {
+            return Handoff::Wait;
+        }
+        let _ = parent.ancestry().await;
+        Handoff::Wait
     }
 
     async fn verify(

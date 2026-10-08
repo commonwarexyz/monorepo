@@ -175,9 +175,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     }
 
     /// An application's response to a handoff proposal request.
+    ///
+    /// `Handoff<()>` is the same decision without a payload, and [`map`](Self::map) attaches one.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Handoff<D> {
-        /// Permit relay and the proposer's notarize vote before parent certification.
+        /// Relay the candidate and cast the proposer's notarize vote before parent certification.
         ///
         /// This trusts the outgoing leader not to equivocate and to complete its term: the
         /// proposal is usable only if every uncertified view it builds on certifies.
@@ -186,10 +188,33 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// consensus does not resend it. If the quorum needs a validator still in an earlier term,
         /// the incoming term times out.
         Publish(D),
-        /// Stage the candidate until its parent certifies or finalizes.
+        /// Relay the candidate and withhold the proposer's notarize vote until its parent
+        /// certifies or finalizes.
+        ///
+        /// The relay commits to nothing: only the vote names a proposal, and the candidate is
+        /// stored only when consensus locks it in for that vote. If the parent is replaced
+        /// before it certifies, the proposer can relay another candidate for the same view.
+        ///
+        /// A relay may instead hold the candidate until the lock-in, as the coding marshal does.
         Stage(D),
         /// Request an ordinary proposal after the parent certifies.
         Wait,
+    }
+
+    impl<D> Handoff<D> {
+        /// Returns whether this response declines to build.
+        pub const fn is_wait(&self) -> bool {
+            matches!(self, Self::Wait)
+        }
+
+        /// Applies `f` to the payload, keeping the decision.
+        pub fn map<T>(self, f: impl FnOnce(D) -> T) -> Handoff<T> {
+            match self {
+                Self::Publish(payload) => Handoff::Publish(f(payload)),
+                Self::Stage(payload) => Handoff::Stage(f(payload)),
+                Self::Wait => Handoff::Wait,
+            }
+        }
     }
 
     /// CertifiableAutomaton extends [Automaton] with the ability to certify payloads before finalization.
@@ -198,7 +223,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// phase between notarization and finalization. Applications that do not need custom certification
     /// logic can use the default implementation which always certifies.
     pub trait CertifiableAutomaton: Automaton {
-        /// Generate a payload for a term-start proposal whose parent is not yet certified.
+        /// Prepare a payload for a term-start proposal whose parent is not yet certified.
         ///
         /// Returning [`Handoff::Publish`] or [`Handoff::Stage`] commits the application to
         /// the same verification and certification obligations as returning a payload from
@@ -206,6 +231,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// With [`Handoff::Wait`], consensus issues an ordinary [`Automaton::propose`] for the same
         /// context once the parent certifies, unless it has already voted to nullify this view.
+        ///
+        /// Consensus requests the relay of a [`Handoff::Stage`] candidate as soon as it arrives.
+        /// Its notarize vote is cast once the parent certifies or finalizes, and the candidate is
+        /// stored then.
         ///
         /// Closing the response forfeits the local proposal opportunity for this view once the
         /// parent certifies or finalizes, and the view then times out as a missing proposal.
@@ -227,7 +256,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// blocks only after this build completes could otherwise keep that parent or view from
         /// certifying. The request then waits as if the application had returned
         /// [`Handoff::Wait`].
-        fn handoff(
+        ///
+        /// # Request Contract
+        ///
+        /// Per view and per process, with at most `f` faulty validators, consensus calls this
+        /// method at most twice and [`Automaton::propose`] at most once. It skips this method when
+        /// the parent is already certified. A second call follows only when the outgoing leader
+        /// equivocated at the parent view and its other block there was notarized, replacing the
+        /// parent this node voted for. A restart resets these counts.
+        fn prepare(
             &mut self,
             _context: Self::Context,
         ) -> impl Future<Output = oneshot::Receiver<Handoff<Self::Digest>>> + Send
@@ -338,21 +375,10 @@ stability_scope!(ALPHA {
     pub mod aggregation;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::ancestry::Ancestry;
+    use crate::marshal::ancestry::{Ancestry, Parent};
     use commonware_cryptography::certificate::Scheme;
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand_core::Rng;
-
-    /// An application's policy for a term handoff.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub enum HandoffPolicy {
-        /// Prepare or reuse a candidate and respond with [`Handoff::Publish`].
-        Publish,
-        /// Prepare or reuse a candidate and respond with [`Handoff::Stage`].
-        Stage,
-        /// Wait for the parent to certify before proposing.
-        Wait,
-    }
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
@@ -389,20 +415,29 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             input: Self::Input,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
 
-        /// Decide whether to prepare a proposal before its parent certifies.
+        /// Build a block on a parent that has not yet certified, or decline with
+        /// [`Handoff::Wait`].
         ///
-        /// With [`HandoffPolicy::Publish`] or [`HandoffPolicy::Stage`], the marshal uses its
-        /// ordinary proposal path. Recovery and epoch-boundary reproposal may reuse a block
-        /// without invoking [`Self::propose`]. With [`HandoffPolicy::Wait`], consensus waits
-        /// for parent certification before requesting an ordinary proposal. The returned
-        /// policy is final for the request.
+        /// The marshal calls this in place of [`Self::propose`] for a term-start proposal whose
+        /// parent is uncertified. The parent is not fetched in advance: ask `parent` for its
+        /// ancestry to build, and return [`Handoff::Wait`] without touching it to decline at no
+        /// cost. The default declines.
+        ///
+        /// Asking for the ancestry runs the marshal's proposal checks. The ancestry is absent when
+        /// they find the epoch boundary block, a candidate stored for this round before a restart
+        /// (reused, or the view skipped under inline verification), or a parent the marshal
+        /// cannot build on. The marshal then answers consensus itself and discards whatever this
+        /// method returns. A block returned without asking for the ancestry is discarded too, so
+        /// a stored candidate is never contradicted.
+        ///
+        /// With [`Handoff::Publish`] or [`Handoff::Stage`], the marshal stages the returned block
+        /// as it would a proposal. With [`Handoff::Wait`], consensus waits for parent
+        /// certification before requesting [`Self::propose`] for the same context. The decision
+        /// is final for the request.
         ///
         /// With deferred or coded verification, a prepared build can start before this node
         /// has verified the parent's contents. The parent may later fail certification,
         /// which discards the candidate.
-        ///
-        /// A prepared build that yields no block answers [`Handoff::Wait`], so consensus can
-        /// request an ordinary proposal once the parent certifies.
         ///
         /// Parent certification does not cancel a prepared build. Consensus cancels it once the
         /// parent can no longer be built on before it certifies, as after a nullification in the
@@ -411,21 +446,34 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// proposal for the same context if the parent certifies, or can request a proposal on a
         /// replacement parent once one is selectable.
         ///
-        /// [`HandoffPolicy::Publish`] trusts the outgoing consensus leader not to equivocate and to
+        /// [`Handoff::Publish`] trusts the outgoing consensus leader not to equivocate and to
         /// complete its term (see [`Handoff::Publish`]). The context names the parent by view and
         /// digest, and its leader field names the incoming leader, not the outgoing one. Identify
         /// the outgoing leader from the elector's schedule or authenticated metadata for the
         /// parent's consensus round. A verified parent block can name an earlier proposer in its
         /// embedded context, as with an epoch-boundary reproposal. If that identity or trust is
-        /// uncertain, prepare with [`HandoffPolicy::Stage`].
+        /// uncertain, return [`Handoff::Stage`], which can relay the block before the parent
+        /// certifies but withholds the vote.
         ///
-        /// This method runs synchronously on the proposal path. Do not block on I/O.
-        /// If readiness is uncertain, return [`HandoffPolicy::Wait`].
+        /// This future may be cancelled before it completes. Implementations must be
+        /// cancellation-safe.
+        ///
+        /// Its first poll runs on the consensus task, so ask for the ancestry before doing any
+        /// work.
+        ///
+        /// If readiness is uncertain, return [`Handoff::Wait`].
         ///
         /// A wrapper around another application must forward this method, since the default
-        /// would otherwise replace the inner application's choice with [`HandoffPolicy::Wait`].
-        fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
-            HandoffPolicy::Wait
+        /// would otherwise replace the inner application's choice with [`Handoff::Wait`]. A
+        /// resolved ancestry is itself a [`Parent`], so a wrapper that needs the parent first can
+        /// pass the ancestry on.
+        fn prepare(
+            &mut self,
+            _context: (E, Self::Context),
+            _parent: impl Parent<Self::Block>,
+            _input: Self::Input,
+        ) -> impl Future<Output = Handoff<Self::Block>> + Send {
+            async { Handoff::Wait }
         }
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.

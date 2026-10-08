@@ -1,11 +1,10 @@
 use crate::{
-    Automaton, Handoff, HandoffPolicy,
     marshal::core::{Mailbox, Variant, durability::Durable as _},
     types::Round,
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_macros::select;
-use commonware_runtime::{Handle, Metrics, Spawner};
+use commonware_runtime::Handle;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
@@ -13,9 +12,16 @@ use commonware_utils::{
 use std::{collections::HashMap, sync::Arc};
 use tracing::debug;
 
-/// A proposal staged for its relay broadcast: the block and the ack that
-/// delivers its durable-sync handle once marshal persists it.
-type Staged<B> = (Arc<B>, oneshot::Sender<Handle<()>>);
+/// A proposal staged for its relay broadcast.
+pub(crate) struct Staged<B> {
+    /// The staged block.
+    pub(crate) block: Arc<B>,
+    /// Delivers the durable-sync handle once marshal persists the block.
+    pub(crate) ack: oneshot::Sender<Handle<()>>,
+    /// Whether the block was already sent to peers while held, so the lock-in
+    /// broadcast only persists it.
+    pub(crate) sent: bool,
+}
 
 /// Result of an in-flight certification gate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,20 +102,32 @@ impl<D: Digest, B> Gates<D, B> {
         self.inner.lock().proposals.remove(&(round, digest))
     }
 
+    /// Returns the staged proposal for `(round, digest)` for a send that does not
+    /// persist it, and marks it sent so the lock-in broadcast only persists it.
+    ///
+    /// The entry stays staged: a held candidate may still be abandoned, and it
+    /// is stored only once consensus locks it in.
+    pub(crate) fn send_staged(&self, round: Round, digest: D) -> Option<Arc<B>> {
+        let mut inner = self.inner.lock();
+        let staged = inner.proposals.get_mut(&(round, digest))?;
+        staged.sent = true;
+        Some(staged.block.clone())
+    }
+
     /// Persists the staged proposal for `(round, id)` without broadcasting it,
     /// completing the propose durability handshake.
     ///
-    /// A staged proposal whose broadcast was never requested cannot resolve
-    /// its certification gate. Certification demands durability, so the staged
-    /// block is flushed to `marshal` for persistence, which delivers the
+    /// A staged proposal that was never locked in by a propose broadcast cannot
+    /// resolve its certification gate. Certification demands durability, so the
+    /// staged block is flushed to `marshal` for persistence, which delivers the
     /// durable-sync handle through the staged ack. Does nothing when no
-    /// proposal is staged (the relay broadcast already took it).
+    /// proposal is staged (the lock-in broadcast already took it).
     pub(crate) fn flush_unrelayed<S, V>(&self, marshal: &Mailbox<S, V>, round: Round, id: D)
     where
         S: Scheme,
         V: Variant<Block = Arc<B>>,
     {
-        if let Some((block, ack)) = self.take_staged(round, id) {
+        if let Some(Staged { block, ack, .. }) = self.take_staged(round, id) {
             marshal.verified_deferred(round, block, ack);
         }
     }
@@ -132,7 +150,7 @@ impl<D: Digest, B> Gates<D, B> {
     /// durability handshake for `(round, id)`.
     ///
     /// Registers a certification gate and the staged block, publishes `id` to
-    /// consensus on `tx`, then awaits the durable-sync handle so
+    /// consensus through `publish`, then awaits the durable-sync handle so
     /// [`certify`](crate::CertifiableAutomaton::certify) can require durability
     /// before the finalize vote. Both registrations happen before `id` is
     /// published so the relay broadcast and `certify` always find them.
@@ -149,7 +167,7 @@ impl<D: Digest, B> Gates<D, B> {
         round: Round,
         id: D,
         block: Arc<B>,
-        tx: oneshot::Sender<D>,
+        publish: impl FnOnce(D),
         name: &'static str,
     ) {
         let (durable_tx, durable_rx) = oneshot::channel();
@@ -157,9 +175,16 @@ impl<D: Digest, B> Gates<D, B> {
         {
             let mut inner = self.inner.lock();
             inner.certifications.insert((round, id), durable_rx);
-            inner.proposals.insert((round, id), (block, ack));
+            inner.proposals.insert(
+                (round, id),
+                Staged {
+                    block,
+                    ack,
+                    sent: false,
+                },
+            );
         }
-        tx.send_lossy(id);
+        publish(id);
         let Ok(handle) = persist.await else {
             return;
         };
@@ -203,46 +228,6 @@ pub(crate) async fn forward<T, U>(
     {
         output.send_lossy(value);
     }
-}
-
-/// Answers a handoff request through `automaton`'s ordinary proposal path.
-///
-/// [`HandoffPolicy::Wait`] resolves the receiver immediately. Otherwise, the built
-/// candidate is sent in the response the policy names. A build that yields no block
-/// answers [`Handoff::Wait`], so consensus can still request an ordinary proposal once
-/// the parent certifies. Closing the receiver cancels the build.
-pub(crate) async fn handoff<E, A>(
-    context: &E,
-    automaton: &mut A,
-    policy: HandoffPolicy,
-    round: Round,
-    consensus_context: A::Context,
-) -> oneshot::Receiver<Handoff<A::Digest>>
-where
-    E: Spawner + Metrics,
-    A: Automaton,
-{
-    let (mut tx, rx) = oneshot::channel();
-    let respond = match policy {
-        HandoffPolicy::Publish => Handoff::Publish,
-        HandoffPolicy::Stage => Handoff::Stage,
-        HandoffPolicy::Wait => {
-            tx.send_lossy(Handoff::Wait);
-            return rx;
-        }
-    };
-    let proposal = automaton.propose(consensus_context).await;
-    context
-        .child("handoff")
-        .with_attribute("round", round)
-        .spawn(move |_| async move {
-            let response = select! {
-                _ = tx.closed() => return,
-                result = proposal => result.map_or(Handoff::Wait, respond),
-            };
-            tx.send_lossy(response);
-        });
-    rx
 }
 
 /// Drives a certification gate `task` to a certify verdict, recovering through `fallback` when the
@@ -530,15 +515,27 @@ mod tests {
             context.spawn({
                 let gates = gates.clone();
                 move |_| async move {
-                    gates.stage(round(1), digest, Arc::new(7), tx, "test").await;
+                    gates
+                        .stage(
+                            round(1),
+                            digest,
+                            Arc::new(7),
+                            |id| {
+                                tx.send_lossy(id);
+                            },
+                            "test",
+                        )
+                        .await;
                 }
             });
 
             // The id is published only after the gate and staged block are registered.
             assert_eq!(rx.await.expect("id published"), digest);
             let gate = gates.take(round(1), digest).expect("gate registered");
-            let (block, ack) = gates.take_staged(round(1), digest).expect("block staged");
+            let Staged { block, ack, sent } =
+                gates.take_staged(round(1), digest).expect("block staged");
             assert_eq!(*block, 7);
+            assert!(!sent, "a staged block starts unsent");
             assert!(
                 gates.take_staged(round(1), digest).is_none(),
                 "taking twice should yield None"
@@ -547,6 +544,46 @@ mod tests {
             // Delivering a durable handle resolves the gate.
             ack.send_lossy(Handle::ready(Ok(())));
             assert_eq!(gate.await.expect("gate resolved"), GateOutcome::Ready(true));
+        });
+    }
+
+    #[test]
+    fn test_send_staged_marks_sent_and_keeps_entry() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let gates = TestGates::new();
+            let digest = Sha256::hash(&[b"block"]);
+            let (tx, rx) = oneshot::channel();
+
+            context.spawn({
+                let gates = gates.clone();
+                move |_| async move {
+                    gates
+                        .stage(
+                            round(1),
+                            digest,
+                            Arc::new(7),
+                            |id| {
+                                tx.send_lossy(id);
+                            },
+                            "test",
+                        )
+                        .await;
+                }
+            });
+            assert_eq!(rx.await.expect("id published"), digest);
+
+            assert!(
+                gates
+                    .send_staged(round(1), Sha256::hash(&[b"other"]))
+                    .is_none()
+            );
+            let block = gates.send_staged(round(1), digest).expect("block staged");
+            assert_eq!(*block, 7);
+
+            // The entry survives the send so the lock-in broadcast can persist it.
+            let Staged { sent, .. } = gates.take_staged(round(1), digest).expect("still staged");
+            assert!(sent, "sending must mark the staged block sent");
         });
     }
 
@@ -561,7 +598,17 @@ mod tests {
             context.spawn({
                 let gates = gates.clone();
                 move |_| async move {
-                    gates.stage(round(1), digest, Arc::new(7), tx, "test").await;
+                    gates
+                        .stage(
+                            round(1),
+                            digest,
+                            Arc::new(7),
+                            |id| {
+                                tx.send_lossy(id);
+                            },
+                            "test",
+                        )
+                        .await;
                 }
             });
             assert_eq!(rx.await.expect("id published"), digest);

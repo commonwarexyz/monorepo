@@ -4,7 +4,7 @@ use crate::stateful::{
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, HandoffPolicy, Heightable,
+    Block as ConsensusBlock, CertifiableBlock, Handoff, Heightable,
     marshal::{ancestry::Ancestry, standard::Standard},
     simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
     types::{Epoch, Height, View},
@@ -278,14 +278,16 @@ impl CertifiableBlock for TestBlock {
 #[derive(Clone)]
 pub(crate) struct TestApp {
     finalization_hooks: Option<Arc<AtomicUsize>>,
-    handoff: HandoffPolicy,
+    handoff: Handoff<()>,
+    proposal: Option<TestBlock>,
 }
 
 impl Default for TestApp {
     fn default() -> Self {
         Self {
             finalization_hooks: None,
-            handoff: HandoffPolicy::Wait,
+            handoff: Handoff::Wait,
+            proposal: None,
         }
     }
 }
@@ -302,11 +304,17 @@ impl TestApp {
         )
     }
 
-    pub(crate) fn with_handoff(handoff: HandoffPolicy) -> Self {
+    pub(crate) fn with_handoff(handoff: Handoff<()>) -> Self {
         Self {
             handoff,
             ..Self::default()
         }
+    }
+
+    /// Makes `propose` build `proposal` instead of declining.
+    pub(crate) fn with_proposal(mut self, proposal: TestBlock) -> Self {
+        self.proposal = Some(proposal);
+        self
     }
 }
 
@@ -333,7 +341,7 @@ impl<
         TestBlock::new(0, 0)
     }
 
-    fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
+    fn handoff(&self, _context: &Self::Context) -> Handoff<()> {
         self.handoff
     }
 
@@ -344,7 +352,10 @@ impl<
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
-        None
+        self.proposal.clone().map(|block| Proposed {
+            block,
+            merkleized: TestMerkleized,
+        })
     }
 
     async fn verify(

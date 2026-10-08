@@ -262,8 +262,10 @@
 //! Consensus handles each handoff response as follows:
 //!
 //! * [`crate::Handoff::Wait`]: request an ordinary proposal once the parent certifies.
-//! * [`crate::Handoff::Stage`]: hold the candidate until the parent certifies or finalizes.
-//! * [`crate::Handoff::Publish`]: permit early relay and the proposer's own notarize vote.
+//! * [`crate::Handoff::Stage`]: relay the candidate now and hold the proposer's notarize vote
+//!   until the parent certifies or finalizes (see [`Plan::Prepare`]).
+//! * [`crate::Handoff::Publish`]: relay the candidate and cast the proposer's notarize vote
+//!   before the parent certifies.
 //! * Closed response: time out the view as a missing proposal once the parent certifies or
 //!   finalizes.
 //!
@@ -287,15 +289,18 @@
 //! replacement once the rules above permit it. Restart also discards all of them, and the voter
 //! can then issue a fresh request.
 //!
-//! Marshal applications opt in through [`crate::Application::handoff_policy`], which returns
-//! [`crate::HandoffPolicy::Publish`], [`crate::HandoffPolicy::Stage`], or the default
-//! [`crate::HandoffPolicy::Wait`]. Stateful Glue exposes the same policy. The application makes a
-//! synchronous decision from available information. It cannot revoke this decision.
+//! Marshal applications opt in through [`crate::Application::prepare`], which receives the
+//! uncertified parent as a handle, asks it for the ancestry to build, and returns the block with
+//! [`crate::Handoff::Publish`] or [`crate::Handoff::Stage`], or declines with the default
+//! [`crate::Handoff::Wait`] at no cost. Stateful Glue decides synchronously through its own
+//! `handoff` hook and builds through its ordinary proposal path. The decision is final for the
+//! request.
 //!
-//! `Publish` and `Stage` use the ordinary construction path, which may reuse an existing block
-//! without calling the application builder. A build that yields no block answers `Wait`. With
-//! `Stage`, construction overlaps parent certification while consensus holds publication. An
-//! application can choose it for any handoff whose outgoing leader it does not trust.
+//! Asking for the ancestry runs the ordinary construction checks, which may reuse an existing
+//! block without the application: such a block is staged. A build that yields no block answers
+//! `Wait`. With `Stage`, construction and distribution overlap parent certification while
+//! consensus holds the vote. An application can choose it for any handoff whose outgoing leader
+//! it does not trust.
 //!
 //! With [`crate::Handoff::Publish`], rotating leaders can pipeline every view. The leader
 //! distributes each proposal in parallel with its parent's votes, allowing network-bound view time
@@ -455,12 +460,17 @@
 //! * `CandidateReturned`: the automaton returned a candidate.
 //! * `Held`: consensus retained a candidate for parent certification. Releasing a held candidate
 //!   does not count it again.
-//! * `PublishedBeforeCertification`: consensus attempted a local relay after proposal acceptance,
+//! * `RelayedBeforeCertification`: consensus requested the candidate's relay before the exact
+//!   parent had certified or finalized, either when it held the candidate or when it accepted
+//!   an early publication.
+//! * `RelayedAfterCertification`: consensus requested the candidate's relay once the exact
+//!   parent had certified or finalized.
+//! * `VotedBeforeCertification`: consensus recorded the candidate and cast its notarize vote
 //!   before the exact parent had certified or finalized.
-//! * `PublishedAfterCertification`: consensus attempted a local relay after proposal acceptance,
-//!   once the exact parent had certified or finalized.
+//! * `VotedAfterCertification`: consensus recorded the candidate and cast its notarize vote
+//!   once the exact parent had certified or finalized, including a held candidate it released.
 //!
-//! One request can count several events. Publication events do not imply network delivery.
+//! One request can count several events. Relay events do not imply network delivery.
 //!
 //! `handoff_abandoned` counts handoff requests or candidates that consensus discards before
 //! publication, and pending builds that it cancels, by reason:
@@ -587,7 +597,8 @@
 //! consensus message and is not gated on this sync: to lower view latency, it is requested as soon
 //! as the automaton returns a payload, which is safe because extra payload bytes (unlike votes)
 //! cannot form a conflicting certificate (see [`Plan::Propose`]). A staged handoff candidate is
-//! held until its parent certifies or finalizes, and its relay is requested once it does.
+//! relayed when it is held (see [`Plan::Prepare`]), and its lock-in and notarize vote wait
+//! until its parent certifies or finalizes.
 //!
 //! ## Automaton Failure Semantics
 //!
@@ -760,13 +771,32 @@ cfg_if::cfg_if! {
 
         /// Describes how a payload should be broadcast to the network.
         pub enum Plan<P: PublicKey> {
-            /// Initial broadcast of a newly proposed block to all participants.
+            /// Early broadcast of a held term-start candidate to all participants.
+            ///
+            /// Requested when a [`crate::Handoff::Stage`] candidate is held for its
+            /// parent's certification. The relay sends the payload without storing
+            /// it: the proposer has not voted for it, and the candidate may still be
+            /// abandoned for one built on a replacement parent. A later
+            /// [`Plan::Propose`] for the same payload stores it without sending it
+            /// again.
+            ///
+            /// A relay may defer the send to the matching [`Plan::Propose`], as the
+            /// coding marshal does.
+            Prepare {
+                /// The round in which the candidate was built.
+                round: Round,
+            },
+            /// Lock-in broadcast of a proposed block to all participants.
             ///
             /// Requested before the proposer's notarize vote is durable: a
             /// proposer that crashes and restarts may emit this plan again
             /// with a different payload for the same round. Consumers must
             /// tolerate multiple candidates per round (at most one is ever
             /// referenced by the proposer's signed votes).
+            ///
+            /// This is the lock-in for a payload: the relay stores it, and the
+            /// proposer's vote follows. A payload already sent by [`Plan::Prepare`]
+            /// is stored without being sent again.
             Propose {
                 /// The round in which the block was proposed.
                 round: Round,
@@ -802,7 +832,7 @@ pub(crate) fn quorum(n: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::{
-        Handoff, HandoffPolicy, Monitor, Viewable,
+        Handoff, Monitor, Viewable,
         simplex::{
             elector::{
                 Config as _, Elector, Random, RandomVersion, RoundRobin, RoundRobinElector,
@@ -1902,7 +1932,7 @@ mod tests {
         link: Link,
         elector: RoundRobin<Sha256>,
         propose_latency: (f64, f64),
-        handoff: HandoffPolicy,
+        handoff: Handoff<()>,
     ) -> (
         Vec<RoundRobinReporter>,
         usize,
@@ -2011,7 +2041,7 @@ mod tests {
                     ViewDelta::new(128),
                 ),
                 /* propose_latency */ (10.0, 0.0),
-                HandoffPolicy::Wait,
+                Handoff::Wait,
             )
             .await;
 
@@ -2069,7 +2099,7 @@ mod tests {
                     ViewDelta::new(4),
                 ),
                 /* propose_latency */ (10.0, 0.0),
-                HandoffPolicy::Publish,
+                Handoff::Publish(()),
             )
             .await;
 
@@ -2126,7 +2156,7 @@ mod tests {
                 },
                 RoundRobin::<Sha256>::default(),
                 /* propose_latency */ (10.0, 0.0),
-                HandoffPolicy::Publish,
+                Handoff::Publish(()),
             )
             .await;
 
@@ -2252,7 +2282,7 @@ mod tests {
                     application_cfg,
                 );
                 if idx == incoming {
-                    actor.set_handoff(HandoffPolicy::Stage);
+                    actor.set_handoff(Handoff::Stage(()));
                     let build = build.clone();
                     actor.set_handoff_controller(Box::new(move |round, proposal, response| {
                         if round.view() == View::new(3) {
@@ -2353,7 +2383,7 @@ mod tests {
                     ViewDelta::new(100),
                 ),
                 /* propose_latency */ (1.0, 0.0),
-                HandoffPolicy::Wait,
+                Handoff::Wait,
             )
             .await;
 
@@ -8450,7 +8480,7 @@ mod tests {
         prefix_end: View,
         returned: Arc<AtomicUsize>,
     ) {
-        actor.set_handoff(HandoffPolicy::Publish);
+        actor.set_handoff(Handoff::Publish(()));
         actor.set_handoff_controller(Box::new(move |round, proposal, response| {
             if round.view() <= prefix_end {
                 returned.fetch_add(1, Ordering::Relaxed);
@@ -8825,7 +8855,7 @@ mod tests {
                         .lines()
                         .filter(|line| {
                             line.contains("_handoff_events_total{")
-                                && line.contains("event=\"PublishedBeforeCertification\"")
+                                && line.contains("event=\"VotedBeforeCertification\"")
                         })
                         .map(|line| line.split_once(' ').unwrap().1.parse::<u64>().unwrap())
                         .sum::<u64>();

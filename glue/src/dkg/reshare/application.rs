@@ -1,12 +1,12 @@
 use crate::dkg::{
     ReshareBlock,
     network::Directory,
-    reshare::{EpochInfoResponse, Mailbox},
+    reshare::{EpochInfoResponse, LogReservation, Mailbox},
     types::Payload,
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, CertifiableBlock, HandoffPolicy,
-    marshal::ancestry::Ancestry,
+    Application as ConsensusApplication, CertifiableBlock, Handoff,
+    marshal::ancestry::{Ancestry, Parent},
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
@@ -87,6 +87,58 @@ where
     fn phase(&self, height: Height) -> Option<EpochPhase> {
         self.epocher.containing(height).map(|info| info.phase())
     }
+
+    /// Selects the reshare payload for the block that extends `ancestry`, with the dealer-log
+    /// reservation it was taken from.
+    ///
+    /// Returns `None` when no block may be proposed on this ancestry: the parent is missing, or
+    /// the final block's epoch info is not available. Records the height, phase, and payload
+    /// presence on the current span.
+    async fn payload(
+        &mut self,
+        ancestry: impl Ancestry<B>,
+    ) -> Option<(
+        Option<Payload<V, C, B::Directory>>,
+        Option<LogReservation<B, V, C>>,
+    )> {
+        let Some(parent) = ancestry.peek() else {
+            debug!("proposal rejected: missing parent ancestry");
+            return None;
+        };
+        let height = parent.height().next();
+        let phase = self.phase(height);
+        let span = tracing::Span::current();
+        span.record("height", height.traced());
+        span.record("phase", field::debug(phase));
+
+        let (payload, log_reservation) = if self.final_block(height) {
+            match self.reshare.epoch_info(ancestry).await {
+                EpochInfoResponse::Available(payload) => (payload, None),
+                EpochInfoResponse::Pending => {
+                    debug!("proposal skipped: final block epoch info is not ready");
+                    return None;
+                }
+                EpochInfoResponse::Following => {
+                    debug!("proposal skipped: follower has no final block epoch info");
+                    return None;
+                }
+                EpochInfoResponse::Unavailable => {
+                    debug!("proposal skipped: final block epoch info is unavailable");
+                    return None;
+                }
+            }
+        } else if matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late)) {
+            let mut reservation = self.reshare.next_log(height).await;
+            let payload = reservation
+                .as_mut()
+                .and_then(|reservation| reservation.take_payload());
+            (payload, reservation)
+        } else {
+            (None, None)
+        };
+        span.record("has_payload", payload.is_some());
+        Some((payload, log_reservation))
+    }
 }
 
 impl<A, B, V, C> Clone for Application<A, B, V, C>
@@ -120,10 +172,6 @@ where
     type Block = A::Block;
     type Input = I;
 
-    fn handoff_policy(&self, context: &Self::Context) -> HandoffPolicy {
-        self.inner.handoff_policy(context)
-    }
-
     #[tracing::instrument(
         name = "dkg.reshare.application.propose",
         level = "info",
@@ -140,42 +188,7 @@ where
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
     ) -> Option<Self::Block> {
-        let Some(parent) = ancestry.peek() else {
-            debug!("proposal rejected: missing parent ancestry");
-            return None;
-        };
-        let height = parent.height().next();
-        let phase = self.phase(height);
-        let span = tracing::Span::current();
-        span.record("height", height.traced());
-        span.record("phase", field::debug(phase));
-
-        let (payload, log_reservation) = if self.final_block(height) {
-            match self.reshare.epoch_info(ancestry.clone()).await {
-                EpochInfoResponse::Available(payload) => (payload, None),
-                EpochInfoResponse::Pending => {
-                    debug!("proposal skipped: final block epoch info is not ready");
-                    return None;
-                }
-                EpochInfoResponse::Following => {
-                    debug!("proposal skipped: follower has no final block epoch info");
-                    return None;
-                }
-                EpochInfoResponse::Unavailable => {
-                    debug!("proposal skipped: final block epoch info is unavailable");
-                    return None;
-                }
-            }
-        } else if matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late)) {
-            let mut reservation = self.reshare.next_log(height).await;
-            let payload = reservation
-                .as_mut()
-                .and_then(|reservation| reservation.take_payload());
-            (payload, reservation)
-        } else {
-            (None, None)
-        };
-        span.record("has_payload", payload.is_some());
+        let (payload, log_reservation) = self.payload(ancestry.clone()).await?;
         let proposed = self
             .inner
             .propose(
@@ -193,6 +206,54 @@ where
             reservation.included();
         }
         proposed
+    }
+
+    /// Prepares on an uncertified parent as [`Self::propose`] builds on a certified one.
+    ///
+    /// The payload depends on the parent's height, so the parent is fetched before the inner
+    /// application is asked. The inner application then receives the fetched ancestry as its
+    /// parent, and an inner application that declines still costs the fetch and the payload
+    /// selection (a dealer-log reservation, released afterward, or the final block's epoch
+    /// info).
+    #[tracing::instrument(
+        name = "dkg.reshare.application.prepare",
+        level = "info",
+        skip_all,
+        fields(
+            height = field::Empty,
+            phase = field::Empty,
+            has_payload = field::Empty
+        )
+    )]
+    async fn prepare(
+        &mut self,
+        context: (E, Self::Context),
+        parent: impl Parent<Self::Block>,
+        input: Self::Input,
+    ) -> Handoff<Self::Block> {
+        let Some(ancestry) = parent.ancestry().await else {
+            return Handoff::Wait;
+        };
+        let Some((payload, log_reservation)) = self.payload(ancestry.clone()).await else {
+            return Handoff::Wait;
+        };
+        let prepared = self
+            .inner
+            .prepare(
+                context,
+                ancestry,
+                Input {
+                    upstream: input,
+                    payload,
+                },
+            )
+            .await;
+        if !prepared.is_wait()
+            && let Some(reservation) = log_reservation
+        {
+            reservation.included();
+        }
+        prepared
     }
 
     #[tracing::instrument(
@@ -326,7 +387,8 @@ mod tests {
         proposal_entered: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         verify_count: Arc<Mutex<usize>>,
         verify_result: bool,
-        handoff: HandoffPolicy,
+        /// The decision `prepare` attaches to a built block; `Wait` builds nothing.
+        handoff: Handoff<()>,
     }
 
     impl RecordingApp {
@@ -337,7 +399,7 @@ mod tests {
                 proposal_entered: Arc::new(Mutex::new(None)),
                 verify_count: Arc::new(Mutex::new(0)),
                 verify_result: true,
-                handoff: HandoffPolicy::Wait,
+                handoff: Handoff::Wait,
             }
         }
 
@@ -374,10 +436,6 @@ mod tests {
         type Block = TestBlock;
         type Input = Input<(), TestBlsVariant, PrivateKey>;
 
-        fn handoff_policy(&self, _: &Self::Context) -> HandoffPolicy {
-            self.handoff
-        }
-
         async fn propose(
             &mut self,
             (_, context): (E, Self::Context),
@@ -406,6 +464,24 @@ mod tests {
                 }
                 None => block,
             })
+        }
+
+        async fn prepare(
+            &mut self,
+            context: (E, Self::Context),
+            parent: impl Parent<Self::Block>,
+            input: Self::Input,
+        ) -> Handoff<Self::Block> {
+            if self.handoff.is_wait() {
+                return Handoff::Wait;
+            }
+            let Some(ancestry) = parent.ancestry().await else {
+                return Handoff::Wait;
+            };
+            let decision = self.handoff;
+            self.propose(context, ancestry, input)
+                .await
+                .map_or(Handoff::Wait, |block| decision.map(|()| block))
         }
 
         async fn verify(&mut self, _: (E, Self::Context), _: impl Ancestry<Self::Block>) -> bool {
@@ -551,30 +627,51 @@ mod tests {
         )
     }
 
-    /// The wrapper forwards the inner application's handoff policy, so an inner application
-    /// that opts into pipelined handoffs keeps that choice behind the reshare adapter.
+    /// The wrapper forwards a prepare request to the inner application with the reshare
+    /// payload for the prepared height, so an inner application that opts into pipelined
+    /// handoffs keeps its decision and its block carries the payload. An inner application
+    /// that declines releases the dealer-log reservation.
     #[test]
-    fn handoff_policy_forwards_inner_decision() {
+    fn prepare_forwards_inner_decision_with_payload() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let parent = midpoint_parent();
-            for policy in [
-                HandoffPolicy::Publish,
-                HandoffPolicy::Stage,
-                HandoffPolicy::Wait,
-            ] {
+            let payload = epoch_payload(10);
+            for decision in [Handoff::Publish(()), Handoff::Stage(()), Handoff::Wait] {
                 let inner = RecordingApp {
-                    handoff: policy,
+                    handoff: decision,
                     ..RecordingApp::accepting()
                 };
-                let app = wrapper_with_inner(&context, EpochInfoResponse::Unavailable, inner);
-                assert_eq!(
-                    <TestWrapper as ConsensusApplication<deterministic::Context>>::handoff_policy(
-                        &app,
-                        &block_context(&parent, 2),
-                    ),
-                    policy
-                );
+                let (mut app, release_rx) = log_wrapper(&context, payload.clone(), inner.clone());
+                let prepared = app
+                    .prepare(
+                        (context.child("app"), block_context(&parent, 2)),
+                        ancestry::from_iter([Arc::new(parent.clone())]),
+                        (),
+                    )
+                    .await;
+                match (decision, prepared) {
+                    (Handoff::Publish(()), Handoff::Publish(block))
+                    | (Handoff::Stage(()), Handoff::Stage(block)) => {
+                        assert!(inner.proposed() == vec![Some(payload.clone())]);
+                        assert!(block.payload() == Some(payload.clone()));
+                        assert!(
+                            release_rx.now_or_never().is_none(),
+                            "an included payload must keep its reservation"
+                        );
+                    }
+                    (Handoff::Wait, Handoff::Wait) => {
+                        assert!(
+                            inner.proposed().is_empty(),
+                            "a declined prepare builds nothing"
+                        );
+                        assert_eq!(
+                            release_rx.await.expect("reservation should be released"),
+                            parent.height().next()
+                        );
+                    }
+                    _ => panic!("the wrapper must forward the inner decision"),
+                }
             }
         });
     }

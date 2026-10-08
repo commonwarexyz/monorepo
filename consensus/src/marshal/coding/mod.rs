@@ -64,8 +64,8 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 #[cfg(test)]
 mod tests {
     use crate::{
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, HandoffPolicy,
-        Heightable, Relay, Reporter,
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, Relay,
+        Reporter,
         marshal::{
             ancestry::{Ancestry, BlockProvider},
             coding::{
@@ -4987,11 +4987,11 @@ mod tests {
             // resolves through the durability gate registered by the
             // recovery staging.
             //
-            // Request `Publish` rather than the conservative `Stage` to show that the
-            // handoff forwards the application's permission.
+            // Request `Publish` to show that a recovered block is staged regardless of
+            // the application's decision: marshal reuses it without the application.
             let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
                 GatedVerifyingApp::new();
-            let mock_app = mock_app.with_handoff(HandoffPolicy::Publish);
+            let mock_app = mock_app.with_handoff(Handoff::Publish(()));
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -5004,12 +5004,12 @@ mod tests {
 
             // Handoff requests use the ordinary proposal reuse path.
             let decision = marshaled
-                .handoff(ctx)
+                .prepare(ctx)
                 .await
                 .await
                 .expect("handoff proposal must return a decision");
-            let Handoff::Publish(commitment) = decision else {
-                panic!("application published handoff but marshal responded {decision:?}");
+            let Handoff::Stage(commitment) = decision else {
+                panic!("a recovered block must be staged but marshal responded {decision:?}");
             };
             assert_eq!(
                 commitment, commitment_a,

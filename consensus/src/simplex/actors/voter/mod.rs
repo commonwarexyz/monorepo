@@ -53,7 +53,7 @@ pub struct Config<
 mod tests {
     use super::*;
     use crate::{
-        Handoff, HandoffPolicy, Viewable,
+        Handoff, Viewable,
         simplex::{
             actors::{
                 Kind, batcher,
@@ -299,8 +299,8 @@ mod tests {
         stall_proposals: bool,
         /// Whether the mock application drops proposal responses.
         drop_proposals: bool,
-        /// Policy the mock application uses to answer handoff proposal requests.
-        handoff: HandoffPolicy,
+        /// Decision the mock application uses to answer handoff proposal requests.
+        handoff: Handoff<()>,
         /// Receives the voter's task handle so a test can abort it and restart the voter.
         actor_handle: Option<Arc<Mutex<Option<Handle<()>>>>>,
         /// Views whose verification requests reached the mock application.
@@ -326,7 +326,7 @@ mod tests {
                 handoff_responses: None,
                 stall_proposals: false,
                 drop_proposals: false,
-                handoff: HandoffPolicy::Wait,
+                handoff: Handoff::Wait,
                 actor_handle: None,
                 verify_requests: None,
                 fail_verification: false,
@@ -4009,7 +4009,7 @@ mod tests {
                     timeout_retry: Duration::from_secs(30),
                     local_index,
                     propose_latency_ms: 10.0,
-                    handoff: HandoffPolicy::Publish,
+                    handoff: Handoff::Publish(()),
                     ..Default::default()
                 },
             )
@@ -4070,7 +4070,8 @@ mod tests {
                 &context.encode(),
                 "actor",
                 &[
-                    ("PublishedBeforeCertification", 1),
+                    ("RelayedBeforeCertification", 1),
+                    ("VotedBeforeCertification", 1),
                     ("CandidateReturned", 1),
                     ("Requested", 1),
                 ],
@@ -4114,7 +4115,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     certifier,
-                    handoff: HandoffPolicy::Publish,
+                    handoff: Handoff::Publish(()),
                     ..Default::default()
                 },
             )
@@ -4337,9 +4338,9 @@ mod tests {
     }
 
     impl HandoffFixture {
-        /// Starts the fixture voter with `policy` and takes the candidate the application
+        /// Starts the fixture voter with `decision` and takes the candidate the application
         /// returns for the view 3 handoff request, leaving the test to answer it.
-        async fn new(context: &mut deterministic::Context, policy: HandoffPolicy) -> Self {
+        async fn new(context: &mut deterministic::Context, decision: Handoff<()>) -> Self {
             let HandoffFixture {
                 participants,
                 schemes,
@@ -4360,7 +4361,7 @@ mod tests {
             } = HandoffFixture::start(
                 context,
                 VoterOptions {
-                    handoff: policy,
+                    handoff: decision,
                     ..Default::default()
                 },
             )
@@ -4371,7 +4372,7 @@ mod tests {
             };
             assert_eq!(
                 matches!(proposal, Handoff::Publish(_)),
-                policy == HandoffPolicy::Publish
+                decision == Handoff::Publish(())
             );
 
             Self {
@@ -4635,6 +4636,53 @@ mod tests {
         }
     }
 
+    /// Waits for the relay of a candidate held for its parent's certification.
+    async fn observe_handoff_relay(
+        context: &deterministic::Context,
+        relayed: &mut mpsc::UnboundedReceiver<(Sha256Digest, Bytes)>,
+        digest: Sha256Digest,
+    ) {
+        select! {
+            message = relayed.recv() => {
+                let (relayed_digest, _) = message.expect("relay observer must remain open");
+                assert_eq!(relayed_digest, digest, "held handoff must be relayed");
+            },
+            _ = context.sleep(Duration::from_secs(2)) => {
+                panic!("held handoff was not relayed");
+            }
+        }
+    }
+
+    /// Waits for the notarize vote that releases a held candidate. The candidate was
+    /// relayed when it was held, so no second relay may arrive.
+    async fn observe_handoff_vote(
+        context: &deterministic::Context,
+        relayed: &mut mpsc::UnboundedReceiver<(Sha256Digest, Bytes)>,
+        batcher: &mut mailbox::Receiver<batcher::Message<ed25519::Scheme, Sha256Digest>>,
+        digest: Sha256Digest,
+    ) {
+        loop {
+            select! {
+                message = relayed.recv() => {
+                    let (relayed_digest, _) = message.expect("relay observer must remain open");
+                    assert_ne!(relayed_digest, digest, "released handoff must not relay again");
+                },
+                message = batcher.recv() => {
+                    if let batcher::Message::Constructed(Vote::Notarize(vote)) =
+                        message.expect("batcher must remain open")
+                        && vote.view() == View::new(3)
+                    {
+                        assert_eq!(vote.proposal.payload, digest, "released handoff must be voted");
+                        return;
+                    }
+                },
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("released handoff was not voted");
+                }
+            }
+        }
+    }
+
     async fn observe_handoff_publication(
         context: &deterministic::Context,
         relayed: &mut mpsc::UnboundedReceiver<(Sha256Digest, Bytes)>,
@@ -4670,18 +4718,19 @@ mod tests {
     fn test_pipelined_handoff_build_before_certification() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             let mut relayed = fixture.observer();
 
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
+            observe_handoff_relay(&context, &mut relayed, fixture.candidate.digest).await;
             let certified = fixture.certify_parent(&context).await;
 
             let release = fixture.block_certification(certified).await;
             assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.candidate.digest);
 
             fixture.release_certification(release).await;
-            observe_handoff_publication(
+            observe_handoff_vote(
                 &context,
                 &mut relayed,
                 &mut fixture.batcher,
@@ -4698,7 +4747,8 @@ mod tests {
                 HANDOFF_ACTOR_METRICS,
                 &[
                     ("Held", 1),
-                    ("PublishedAfterCertification", 1),
+                    ("RelayedBeforeCertification", 1),
+                    ("VotedAfterCertification", 1),
                     ("CandidateReturned", 1),
                     ("Requested", 1),
                 ],
@@ -4709,12 +4759,12 @@ mod tests {
 
     /// Certification completes before the application answers. Entering the child
     /// view on the certified parent keeps the pending build, and the single build is
-    /// published once, after certification, for either policy.
+    /// published once, after certification, for either decision.
     async fn certification_first_reuses_build(
         context: &mut deterministic::Context,
-        policy: HandoffPolicy,
+        decision: Handoff<()>,
     ) {
-        let mut fixture = HandoffFixture::new(context, policy).await;
+        let mut fixture = HandoffFixture::new(context, decision).await;
         let mut relayed = fixture.observer();
         let certified = fixture.certify_parent(context).await;
 
@@ -4741,7 +4791,8 @@ mod tests {
             &context.encode(),
             HANDOFF_ACTOR_METRICS,
             &[
-                ("PublishedAfterCertification", 1),
+                ("RelayedAfterCertification", 1),
+                ("VotedAfterCertification", 1),
                 ("CandidateReturned", 1),
                 ("Requested", 1),
             ],
@@ -4749,21 +4800,21 @@ mod tests {
         );
     }
 
-    /// [`certification_first_reuses_build`] under [`HandoffPolicy::Stage`].
+    /// [`certification_first_reuses_build`] under [`Handoff::Stage`].
     #[test_traced]
     fn test_pipelined_handoff_certification_first_reuses_build_stage() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            certification_first_reuses_build(&mut context, HandoffPolicy::Stage).await;
+            certification_first_reuses_build(&mut context, Handoff::Stage(())).await;
         });
     }
 
-    /// [`certification_first_reuses_build`] under [`HandoffPolicy::Publish`].
+    /// [`certification_first_reuses_build`] under [`Handoff::Publish`].
     #[test_traced]
     fn test_pipelined_handoff_certification_first_reuses_build_publish() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            certification_first_reuses_build(&mut context, HandoffPolicy::Publish).await;
+            certification_first_reuses_build(&mut context, Handoff::Publish(())).await;
         });
     }
 
@@ -4772,10 +4823,11 @@ mod tests {
     fn test_pipelined_handoff_held_build_released_by_parent_finalization() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             let mut relayed = fixture.observer();
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
+            observe_handoff_relay(&context, &mut relayed, fixture.candidate.digest).await;
 
             let (_, finalization) = build_finalization(
                 &peers(&fixture.schemes, fixture.local_index),
@@ -4785,7 +4837,7 @@ mod tests {
             fixture
                 .mailbox
                 .recovered(Certificate::Finalization(finalization));
-            observe_handoff_publication(
+            observe_handoff_vote(
                 &context,
                 &mut relayed,
                 &mut fixture.batcher,
@@ -4802,7 +4854,8 @@ mod tests {
                 HANDOFF_ACTOR_METRICS,
                 &[
                     ("Held", 1),
-                    ("PublishedAfterCertification", 1),
+                    ("RelayedBeforeCertification", 1),
+                    ("VotedAfterCertification", 1),
                     ("CandidateReturned", 1),
                     ("Requested", 1),
                 ],
@@ -4817,7 +4870,7 @@ mod tests {
     fn test_pipelined_handoff_waiting_build_overlaps_certification_sync() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             let mut relayed = fixture.observer();
             fixture.respond_wait();
             wait_for_handoff_event(&context, "WaitReturned").await;
@@ -4874,7 +4927,7 @@ mod tests {
     fn test_pipelined_handoff_wait_response_during_certification_sync() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             let certified = fixture.certify_parent(&context).await;
             let release = fixture.block_certification(certified).await;
             fixture.respond_wait();
@@ -4906,7 +4959,7 @@ mod tests {
     fn test_pipelined_handoff_wait_response_after_certification_sync() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             let certified = fixture.certify_parent(&context).await;
             fixture.finish_certification(certified).await;
             assert_eq!(fixture.requests_for(View::new(3)), 1);
@@ -4928,7 +4981,7 @@ mod tests {
     fn test_pipelined_handoff_waiting_request_exits_view() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             fixture.respond_wait();
             wait_for_handoff_event(&context, "WaitReturned").await;
             let certified = fixture.certify_parent(&context).await;
@@ -4973,7 +5026,7 @@ mod tests {
     fn test_pipelined_handoff_parent_nullify_cancels_pending_build() {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             let certified = fixture.certify_parent(&context).await;
 
             // The parent's certification times out while its certification and the
@@ -5010,7 +5063,7 @@ mod tests {
     fn test_pipelined_handoff_failed_parent_certification_cancels_pending_build() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             let certified = fixture.certify_parent(&context).await;
             certified.send(false).unwrap();
 
@@ -5039,7 +5092,7 @@ mod tests {
     fn test_pipelined_handoff_late_parent_nullification_keeps_build() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             let mut relayed = fixture.observer();
             let certified = fixture.certify_parent(&context).await;
             fixture.finish_certification(certified).await;
@@ -5076,7 +5129,8 @@ mod tests {
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
                 &[
-                    ("PublishedAfterCertification", 1),
+                    ("RelayedAfterCertification", 1),
+                    ("VotedAfterCertification", 1),
                     ("CandidateReturned", 1),
                     ("Requested", 1),
                 ],
@@ -5092,7 +5146,7 @@ mod tests {
     fn test_pipelined_handoff_not_reissued_after_parent_nullify_on_restart() {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             wait_for_local_nullify(&context, &mut fixture.batcher, View::new(2)).await;
 
             let restarted_requests: ProposeRequests = Arc::new(Mutex::new(Vec::new()));
@@ -5101,7 +5155,7 @@ mod tests {
                     &context,
                     VoterOptions {
                         propose_requests: Some(restarted_requests.clone()),
-                        handoff: HandoffPolicy::Stage,
+                        handoff: Handoff::Stage(()),
                         ..Default::default()
                     },
                 )
@@ -5147,10 +5201,11 @@ mod tests {
     fn test_pipelined_handoff_held_build_rejects_conflicting_parent() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             let mut relayed = fixture.observer();
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
+            observe_handoff_relay(&context, &mut relayed, fixture.candidate.digest).await;
 
             // The conflicting notarization must exclude the local voter, which already
             // voted for the original parent.
@@ -5186,7 +5241,100 @@ mod tests {
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
-                &[("Held", 1), ("CandidateReturned", 1), ("Requested", 2)],
+                &[
+                    ("Held", 1),
+                    ("RelayedBeforeCertification", 1),
+                    ("CandidateReturned", 1),
+                    ("Requested", 2),
+                ],
+                &[("AncestrySuperseded", 1)],
+            );
+        });
+    }
+
+    /// Pins the request contract for one view: at most two prepare requests and one ordinary
+    /// proposal request. The second prepare follows only the notarization of an equivocating
+    /// outgoing leader's other block at the parent view, which replaces the parent this node
+    /// voted for, and the ordinary request follows the replacement's certification after the
+    /// second prepare answers `Wait`. Nothing follows the ordinary request.
+    #[test_traced]
+    fn test_pipelined_handoff_request_contract() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
+            fixture.respond();
+            wait_for_handoff_event(&context, "Held").await;
+
+            // The conflicting notarization excludes the local voter, which already voted for
+            // the original parent.
+            let mut conflicting_parent = fixture.parent.clone();
+            conflicting_parent.payload = Sha256::hash(&[b"conflicting parent"]);
+            let (_, notarization) = build_notarization(
+                &peers(&fixture.schemes, fixture.local_index),
+                &conflicting_parent,
+                fixture.quorum(),
+            );
+            fixture
+                .mailbox
+                .recovered(Certificate::Notarization(notarization));
+            let certified = take_certification_request(
+                &context,
+                &fixture.certification_requests,
+                conflicting_parent.view(),
+            )
+            .await;
+            wait_for_handoff_abandoned(&context, "AncestrySuperseded").await;
+
+            // The second prepare names the replacement parent. Decline it.
+            let (_, response) = take_proposal_response(&context, &fixture.handoff_responses).await;
+            response
+                .send(Handoff::Wait)
+                .expect("second prepare must remain open");
+            wait_for_handoff_event(&context, "WaitReturned").await;
+
+            // Certifying the replacement turns the waiting request into one ordinary proposal.
+            fixture.finish_certification(certified).await;
+            let deadline = context.current() + Duration::from_secs(1);
+            while fixture.requests_for(View::new(3)) < 3 {
+                assert!(
+                    context.current() < deadline,
+                    "ordinary request did not follow the replacement's certification"
+                );
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            context.sleep(SETTLE).await;
+
+            let contexts: Vec<_> = fixture
+                .propose_requests
+                .lock()
+                .iter()
+                .filter(|request| request.view() == View::new(3))
+                .cloned()
+                .collect();
+            assert_eq!(contexts.len(), 3, "two prepares and one ordinary proposal");
+            assert_eq!(contexts[0].parent, (View::new(2), fixture.parent.payload));
+            assert_eq!(
+                contexts[1].parent,
+                (View::new(2), conflicting_parent.payload)
+            );
+            assert_eq!(
+                contexts[2].parent,
+                (View::new(2), conflicting_parent.payload)
+            );
+            assert!(
+                fixture.handoff_responses.lock().is_empty(),
+                "the ordinary request must not reach the prepare path"
+            );
+            assert_handoff_metrics(
+                &context.encode(),
+                HANDOFF_ACTOR_METRICS,
+                &[
+                    ("Requested", 2),
+                    ("CandidateReturned", 1),
+                    ("Held", 1),
+                    ("RelayedBeforeCertification", 1),
+                    ("WaitReturned", 1),
+                ],
                 &[("AncestrySuperseded", 1)],
             );
         });
@@ -5196,10 +5344,11 @@ mod tests {
     fn test_pipelined_handoff_held_build_rejects_parent_nullification() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             let mut relayed = fixture.observer();
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
+            observe_handoff_relay(&context, &mut relayed, fixture.candidate.digest).await;
             let certified = fixture.certify_parent(&context).await;
 
             let (_, nullification) = build_nullification(
@@ -5234,7 +5383,12 @@ mod tests {
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
-                &[("Held", 1), ("CandidateReturned", 1), ("Requested", 1)],
+                &[
+                    ("Held", 1),
+                    ("RelayedBeforeCertification", 1),
+                    ("CandidateReturned", 1),
+                    ("Requested", 1),
+                ],
                 &[("AncestrySuperseded", 1)],
             );
         });
@@ -5244,10 +5398,11 @@ mod tests {
     fn test_pipelined_handoff_held_build_exits_view() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             let mut relayed = fixture.observer();
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
+            observe_handoff_relay(&context, &mut relayed, fixture.candidate.digest).await;
             let certified = fixture.certify_parent(&context).await;
 
             let (_, nullification) = build_nullification(
@@ -5272,7 +5427,12 @@ mod tests {
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
-                &[("Held", 1), ("CandidateReturned", 1), ("Requested", 1)],
+                &[
+                    ("Held", 1),
+                    ("RelayedBeforeCertification", 1),
+                    ("CandidateReturned", 1),
+                    ("Requested", 1),
+                ],
                 &[("ViewExit", 1)],
             );
         });
@@ -5282,10 +5442,11 @@ mod tests {
     fn test_pipelined_handoff_held_build_becomes_ineligible_at_leader_timeout() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             let mut relayed = fixture.observer();
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
+            observe_handoff_relay(&context, &mut relayed, fixture.candidate.digest).await;
             let certified = fixture.certify_parent(&context).await;
 
             let release = fixture.block_certification(certified).await;
@@ -5301,7 +5462,12 @@ mod tests {
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
-                &[("Held", 1), ("CandidateReturned", 1), ("Requested", 1)],
+                &[
+                    ("Held", 1),
+                    ("RelayedBeforeCertification", 1),
+                    ("CandidateReturned", 1),
+                    ("Requested", 1),
+                ],
                 &[("IneligibleAtRecording", 1)],
             );
         });
@@ -5314,7 +5480,7 @@ mod tests {
     fn test_pipelined_handoff_held_build_is_volatile_on_restart() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture = HandoffFixture::new(&mut context, HandoffPolicy::Stage).await;
+            let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
 
@@ -5323,7 +5489,7 @@ mod tests {
                 .restart(
                     &context,
                     VoterOptions {
-                        handoff: HandoffPolicy::Stage,
+                        handoff: Handoff::Stage(()),
                         handoff_responses: Some(restarted_responses.clone()),
                         ..Default::default()
                     },
@@ -5365,7 +5531,7 @@ mod tests {
                 &mut context,
                 VoterOptions {
                     drop_proposals: true,
-                    handoff: HandoffPolicy::Publish,
+                    handoff: Handoff::Publish(()),
                     ..Default::default()
                 },
             )
@@ -5461,7 +5627,7 @@ mod tests {
             let mut fixture = HandoffFixture::start(
                 &mut context,
                 VoterOptions {
-                    handoff: HandoffPolicy::Publish,
+                    handoff: Handoff::Publish(()),
                     stall_proposals: !closed,
                     ..Default::default()
                 },
@@ -5623,7 +5789,7 @@ mod tests {
                     local_index,
                     propose_requests: Some(propose_requests.clone()),
                     handoff_responses: Some(handoff_responses.clone()),
-                    handoff: HandoffPolicy::Publish,
+                    handoff: Handoff::Publish(()),
                     certifier: hold(View::new(2), certification_requests.clone()),
                     ..Default::default()
                 },

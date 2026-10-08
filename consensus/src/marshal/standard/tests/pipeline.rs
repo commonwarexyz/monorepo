@@ -1,5 +1,8 @@
 use super::*;
-use crate::{Application, Viewable, marshal::ancestry::Ancestry};
+use crate::{
+    Application, Viewable,
+    marshal::ancestry::{Ancestry, Parent},
+};
 use commonware_p2p::Receiver;
 
 /// Which of the two concurrent steps completes first.
@@ -15,7 +18,7 @@ enum First {
 /// build each wait on a test-controlled gate.
 ///
 /// A second build request panics because the retained handoff must never be rebuilt.
-/// `policies` counts how often the handoff policy is evaluated.
+/// `prepares` counts how often a prepare request reaches the application.
 #[derive(Clone)]
 struct PipelineApp {
     verify_started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
@@ -23,7 +26,7 @@ struct PipelineApp {
     build_started: Arc<Mutex<Option<oneshot::Sender<Ctx>>>>,
     build_release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     build_completed: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    policies: Arc<AtomicUsize>,
+    prepares: Arc<AtomicUsize>,
     block: B,
 }
 
@@ -33,9 +36,19 @@ impl Application<Runtime> for PipelineApp {
     type SigningScheme = S;
     type Input = ();
 
-    fn handoff_policy(&self, _: &Ctx) -> HandoffPolicy {
-        self.policies.fetch_add(1, Ordering::SeqCst);
-        HandoffPolicy::Stage
+    async fn prepare(
+        &mut self,
+        context: (Runtime, Ctx),
+        parent: impl Parent<B>,
+        input: (),
+    ) -> Handoff<B> {
+        self.prepares.fetch_add(1, Ordering::SeqCst);
+        let Some(ancestry) = parent.ancestry().await else {
+            return Handoff::Wait;
+        };
+        self.propose(context, ancestry, input)
+            .await
+            .map_or(Handoff::Wait, Handoff::Stage)
     }
 
     async fn propose(
@@ -162,14 +175,14 @@ fn retained_pipeline_handoff(first: First) {
         let (build_tx, build_rx) = oneshot::channel();
         let (build_release_tx, build_release_rx) = oneshot::channel();
         let (completed_tx, completed_rx) = oneshot::channel();
-        let policies = Arc::new(AtomicUsize::new(0));
+        let prepares = Arc::new(AtomicUsize::new(0));
         let app = PipelineApp {
             verify_started: Arc::new(Mutex::new(Some(verify_tx))),
             verify_release: Arc::new(Mutex::new(Some(verify_release_rx))),
             build_started: Arc::new(Mutex::new(Some(build_tx))),
             build_release: Arc::new(Mutex::new(Some(build_release_rx))),
             build_completed: Arc::new(Mutex::new(Some(completed_tx))),
-            policies: policies.clone(),
+            prepares: prepares.clone(),
             block,
         };
 
@@ -282,9 +295,9 @@ fn retained_pipeline_handoff(first: First) {
         }
 
         assert_eq!(
-            policies.load(Ordering::SeqCst),
+            prepares.load(Ordering::SeqCst),
             1,
-            "one handoff request evaluates the policy once"
+            "one handoff request reaches the application once"
         );
 
         let proposal = loop {
