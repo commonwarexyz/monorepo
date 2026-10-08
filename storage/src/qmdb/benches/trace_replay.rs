@@ -68,7 +68,7 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{full, mmb},
-    qmdb::current::VariableConfig,
+    qmdb::{current::VariableConfig, floor::Proportional},
     translator::EightCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -290,7 +290,7 @@ fn main() {
                 init_concurrency: init_conc,
             };
         let init_start = Instant::now();
-        let mut db = Db::init(ctx.child("db"), cfg).await.unwrap();
+        let mut db = Db::init(ctx.child("db"), cfg, None).await.unwrap();
         eprintln!(
             "INIT init_concurrency={} elapsed={:.2}s",
             init_conc,
@@ -360,7 +360,7 @@ fn main() {
                         total_writes += 1;
                     }
                     let mt = Instant::now();
-                    let m = wb.merkleize(&db, None).await.unwrap();
+                    let m = wb.merkleize(&db, None, &mut Proportional).await.unwrap();
                     merkleize_ns += mt.elapsed().as_nanos();
                     let at = Instant::now();
                     (db, _) = db.apply_batch(m).await.unwrap();
@@ -396,7 +396,7 @@ fn main() {
                         })
                         .collect();
                     let mt = Instant::now();
-                    let m = staged.merkleize(updates, Vec::new(), None, &db).await.unwrap();
+                    let m = staged.merkleize(updates, Vec::new(), None, &db, &mut Proportional).await.unwrap();
                     merkleize_ns += mt.elapsed().as_nanos();
                     let at = Instant::now();
                     (db, _) = db.apply_batch(m).await.unwrap();
