@@ -16,7 +16,61 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     cfg_if! {
         if #[cfg(target_os = "linux")] {
-            use std::os::fd::AsRawFd;
+            use std::{
+                io::IoSlice,
+                os::fd::{AsFd as _, AsRawFd, BorrowedFd},
+            };
+
+            /// Read into `buf` at `offset` with one `preadv2(2)` call, returning the number of bytes
+            /// read.
+            pub(crate) fn preadv2(
+                fd: BorrowedFd<'_>,
+                buf: &mut [u8],
+                offset: libc::off_t,
+                flags: libc::c_int,
+            ) -> io::Result<usize> {
+                let iovec = libc::iovec {
+                    iov_base: buf.as_mut_ptr().cast(),
+                    iov_len: buf.len(),
+                };
+                // SAFETY: `fd` is borrowed, so it stays open for the call. `iovec` points at `buf`,
+                // which is exclusively borrowed and exactly `iov_len` bytes long, so the kernel may
+                // write into all of it.
+                let ret = unsafe { libc::preadv2(fd.as_raw_fd(), &iovec, 1, offset, flags) };
+                if ret < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(ret as usize)
+            }
+
+            /// Write `bufs` at `offset` with one `pwritev2(2)` call, returning the number of bytes
+            /// written.
+            pub(crate) fn pwritev2(
+                fd: BorrowedFd<'_>,
+                bufs: &[IoSlice<'_>],
+                offset: libc::off_t,
+                flags: libc::c_int,
+            ) -> io::Result<usize> {
+                let count = libc::c_int::try_from(bufs.len())
+                    .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+                // SAFETY: `fd` is borrowed, so it stays open for the call. `IoSlice` is
+                // ABI-compatible with `libc::iovec` on Unix, so `bufs` is an array of `count`
+                // iovecs, each pointing at a slice borrowed for the call and exactly as long as it
+                // claims. The kernel only reads them.
+                let ret = unsafe {
+                    libc::pwritev2(
+                        fd.as_raw_fd(),
+                        bufs.as_ptr().cast::<libc::iovec>(),
+                        count,
+                        offset,
+                        flags,
+                    )
+                };
+                if ret < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(ret as usize)
+            }
 
             /// Make what a prior process wrote crash-durable before any storage structure reads by
             /// flushing the whole filesystem containing `dir` with `syncfs(2)`.
@@ -42,32 +96,17 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 let mut flags = libc::RWF_DONTCACHE;
                 let mut done = 0;
                 while done < len {
-                    let rest = &mut buf[done..];
-                    let iovec = libc::iovec {
-                        iov_base: rest.as_mut_ptr().cast(),
-                        iov_len: rest.len(),
-                    };
                     let offset = libc::off_t::try_from(done)
                         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-                    // SAFETY: `file` owns a valid fd for this call. `iovec` describes `rest`, a
-                    // slice borrowed exclusively for the duration of the call.
-                    let ret =
-                        unsafe { libc::preadv2(file.as_raw_fd(), &iovec, 1, offset, flags) };
-                    if ret < 0 {
-                        let err = io::Error::last_os_error();
-                        if err.kind() == io::ErrorKind::Interrupted {
-                            continue;
-                        }
-                        if err.raw_os_error() == Some(libc::EOPNOTSUPP) && flags != 0 {
+                    match preadv2(file.as_fd(), &mut buf[done..], offset, flags) {
+                        Ok(0) => break,
+                        Ok(read) => done += read,
+                        Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                        Err(err) if err.raw_os_error() == Some(libc::EOPNOTSUPP) && flags != 0 => {
                             flags = 0;
-                            continue;
                         }
-                        return Err(err);
+                        Err(err) => return Err(err),
                     }
-                    if ret == 0 {
-                        break;
-                    }
-                    done += ret as usize;
                 }
                 buf.truncate(done);
                 Ok(buf)
@@ -81,32 +120,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 let mut flags = libc::RWF_DONTCACHE;
                 let mut done = 0;
                 while done < buf.len() {
-                    let rest = &buf[done..];
-                    let iovec = libc::iovec {
-                        iov_base: rest.as_ptr().cast_mut().cast(),
-                        iov_len: rest.len(),
-                    };
                     let offset = libc::off_t::try_from(done)
                         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-                    // SAFETY: `file` owns a valid fd for this call. `iovec` describes `rest`, a
-                    // slice that outlives the call and that the kernel only reads.
-                    let ret =
-                        unsafe { libc::pwritev2(file.as_raw_fd(), &iovec, 1, offset, flags) };
-                    if ret < 0 {
-                        let err = io::Error::last_os_error();
-                        if err.kind() == io::ErrorKind::Interrupted {
-                            continue;
-                        }
-                        if err.raw_os_error() == Some(libc::EOPNOTSUPP) && flags != 0 {
+                    let rest = [IoSlice::new(&buf[done..])];
+                    match pwritev2(file.as_fd(), &rest, offset, flags) {
+                        Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                        Ok(written) => done += written,
+                        Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                        Err(err) if err.raw_os_error() == Some(libc::EOPNOTSUPP) && flags != 0 => {
                             flags = 0;
-                            continue;
                         }
-                        return Err(err);
+                        Err(err) => return Err(err),
                     }
-                    if ret == 0 {
-                        return Err(io::ErrorKind::WriteZero.into());
-                    }
-                    done += ret as usize;
                 }
                 Ok(())
             }
