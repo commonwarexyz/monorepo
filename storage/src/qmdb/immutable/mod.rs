@@ -663,9 +663,7 @@ where
         &self,
         batch: &batch::MerkleizedBatch<F, H::Digest, K, V, S>,
     ) -> Result<(), Error<F>> {
-        batch
-            .bounds
-            .validate_apply_to(self.commitment(), self.inactivity_floor_loc)
+        batch.bounds.validate_apply_to(self.commitment())
     }
 
     /// Apply a [`batch::MerkleizedBatch`] to the database.
@@ -674,24 +672,6 @@ where
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
     /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::chain`] for
     /// more details).
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::StaleBatch`] if the batch is detected as stale (see
-    ///   [`crate::qmdb::chain`] for more details).
-    /// - [`Error::FloorRegressed`] if any commit in the chain (the tip or any
-    ///   unapplied ancestor) declares an inactivity floor below the previous
-    ///   commit's floor (or, for the oldest unapplied commit, below the
-    ///   database's current floor).
-    /// - [`Error::FloorBeyondSize`] if any commit in the chain (the tip or any
-    ///   unapplied ancestor) declares an inactivity floor that exceeds its
-    ///   own commit operation's location. The maximum valid floor for a
-    ///   commit is its own location; a floor past the commit would permit
-    ///   pruning the commit itself.
-    ///
-    /// [`batch::UnmerkleizedBatch::merkleize`] already enforces both floor rules, so a batch it
-    /// produced never fails them here. Apply re-checks them as a guard, before any journal
-    /// mutation.
     ///
     /// Returns the range of locations written.
     ///
@@ -718,7 +698,7 @@ where
                 .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
         }
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.bounds.ancestors[i].state.size <= db_size {
+            if batch.bounds.ancestors[i].size <= db_size {
                 continue;
             }
             for (key, entry) in ancestor_diff.iter() {

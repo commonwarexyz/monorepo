@@ -1533,14 +1533,7 @@ where
             .collect()
         });
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
-        let ancestors: Vec<_> = self
-            .ancestors
-            .iter()
-            .map(|a| chain::AncestorBounds {
-                floor: a.bounds.inactivity_floor,
-                state: a.commitment(),
-            })
-            .collect();
+        let ancestors: Vec<_> = self.ancestors.iter().map(|a| a.commitment()).collect();
 
         let batch = Arc::new(MerkleizedBatch {
             journal_batch: journal,
@@ -3436,9 +3429,7 @@ where
         &self,
         batch: &MerkleizedBatch<F, H::Digest, U, S>,
     ) -> Result<(), crate::qmdb::Error<F>> {
-        batch
-            .bounds
-            .validate_apply_to(self.commitment(), self.inactivity_floor_loc)
+        batch.bounds.validate_apply_to(self.commitment())
     }
 
     /// Apply a batch to the database, returning the range of written operations.
@@ -3497,7 +3488,7 @@ where
                 let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
                 let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
                 for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-                    if batch.bounds.ancestors[i].state.size <= db_size {
+                    if batch.bounds.ancestors[i].size <= db_size {
                         applied.push(ancestor_diff.as_slice());
                     } else {
                         pending.push(ancestor_diff.as_slice());

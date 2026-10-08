@@ -333,17 +333,9 @@ where
         let mut ancestors = Vec::new();
         for batch in &live_ancestors {
             ancestor_diffs.push(Arc::clone(&batch.diff));
-            ancestors.push(chain::AncestorBounds {
-                floor: batch.bounds.inactivity_floor,
-                state: batch.commitment(),
-            });
+            ancestors.push(batch.commitment());
         }
-        let db = chain::merkleizable(
-            db,
-            db.commitment(),
-            boundary,
-            ancestors.iter().map(|ancestor| ancestor.state),
-        )?;
+        let db = chain::merkleizable(db, db.commitment(), boundary, ancestors.iter().copied())?;
         let start_floor = self.floor(&*db);
 
         // Build operations: one Set per key, then Commit. `self.mutations` is a BTreeMap, so
@@ -361,11 +353,7 @@ where
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = base + ops.len() as u64;
-        chain::validate_merkleize_floor::<F, H::Digest>(
-            start_floor,
-            inactivity_floor,
-            total_size - 1,
-        )?;
+        chain::validate_merkleize_floor(start_floor, inactivity_floor, total_size - 1)?;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
 
         // Leaf and node hashing dominate merkleization, so run them as one job through the

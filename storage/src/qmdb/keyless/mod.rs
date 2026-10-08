@@ -496,9 +496,7 @@ where
         &self,
         batch: &batch::MerkleizedBatch<F, H::Digest, V, S>,
     ) -> Result<(), Error<F>> {
-        batch
-            .bounds
-            .validate_apply_to(self.commitment(), self.inactivity_floor_loc)
+        batch.bounds.validate_apply_to(self.commitment())
     }
 
     /// Apply a [`batch::MerkleizedBatch`] to the database.
@@ -507,21 +505,6 @@ where
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
     /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::chain`] for
     /// more details).
-    ///
-    /// Every commit operation in the batch chain (each unapplied ancestor's commit plus the
-    /// tip's) must satisfy two per-commit invariants:
-    ///
-    /// 1. The floor is monotonically non-decreasing across the chain, starting from the
-    ///    database's current inactivity floor.
-    /// 2. The floor is at most the commit operation's own location (`total_size - 1` at that
-    ///    point). A floor past the commit would let a later `prune(floor)` remove the last
-    ///    readable commit from the journal.
-    ///
-    /// Violations return [`Error::FloorRegressed`] or [`Error::FloorBeyondSize`] identifying
-    /// the offending floor and the bound it crossed (the prior validated floor, or the commit
-    /// location, respectively). [`batch::UnmerkleizedBatch::merkleize`] already enforces both
-    /// invariants, so a batch it produced never fails them here. Apply re-checks them as a guard,
-    /// before any journal mutation.
     ///
     /// Returns the range of locations written.
     ///
