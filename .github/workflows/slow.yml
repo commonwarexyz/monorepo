@@ -20,7 +20,7 @@ env:
 
 jobs:
   Tests:
-    name: "Tests (os: ${{ matrix.os }}, variant: ${{ matrix.variant }})"
+    name: "${{ matrix.os }} / ${{ matrix.variant }}"
     strategy:
       fail-fast: false
       matrix:
@@ -34,13 +34,14 @@ jobs:
           - os: macos-latest
             variant: default
             flags: ""
-    uses: ./.github/workflows/slow-tests.yml
+    uses: ./.github/workflows/reusable-slow-tests.yml
     with:
       os: ${{ matrix.os }}
       variant: ${{ matrix.variant }}
       flags: ${{ matrix.flags }}
     secrets: inherit
 
+  # Stable aggregate check for all slow-test configurations.
   Tests-Gate:
     name: "Slow-Tests"
     runs-on: ubuntu-latest
