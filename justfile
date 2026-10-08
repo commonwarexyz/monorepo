@@ -165,7 +165,8 @@ dylint:
 # Run all fuzz tests in a given directory.
 #
 # `partition` is "N/M", run partition N of M, where targets are hash-distributed across M jobs.
-fuzz fuzz_dir max_time='60' max_mem='4000':
+# If `minimize` is true, each target's corpus is minimized after its run.
+fuzz fuzz_dir max_time='60' max_mem='4000' minimize='false':
     #!/usr/bin/env bash
     set -euo pipefail
     targets=$(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}} | python3 .github/scripts/hash_partition.py {{partition}})
@@ -178,6 +179,9 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     cargo {{nightly_version}} fuzz build --fuzz-dir {{fuzz_dir}}
     for target in $targets; do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
+        if [ "{{minimize}}" = "true" ]; then
+            cargo {{nightly_version}} fuzz cmin $target --fuzz-dir {{fuzz_dir}} -- -rss_limit_mb={{max_mem}}
+        fi
         rm -f {{fuzz_dir}}/target/*/release/$target
     done
 
