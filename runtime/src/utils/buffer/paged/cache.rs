@@ -1,8 +1,10 @@
 //! A page cache for caching _logical_ pages of [Blob] data in memory. The cache is unaware of the
 //! physical page format used by the blob, which is left to the blob implementation.
 
-use super::{CHECKSUM_SIZE, STORAGE_PAGE_SIZE, get_page_from_blob};
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
+use super::{CHECKSUM_SIZE, get_page_from_blob};
+use crate::{
+    Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions, STORAGE_PAGE_SIZE,
+};
 use ahash::AHashMap;
 use commonware_utils::{Widen, cache, sync::RwLock};
 use futures::{

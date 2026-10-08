@@ -3,7 +3,7 @@ use crate::{Context, SyncCompletion};
 use commonware_codec::{Codec, Copying, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, Handle, IoBufMut, ReadOptions, WriteOptions,
+    Blob, BufMut, Error as RError, Handle, IoBufMut, ReadOptions, STORAGE_PAGE_SIZE, WriteOptions,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
@@ -13,13 +13,6 @@ use tracing::{debug, warn};
 
 /// The names of the two blobs that store metadata.
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
-
-/// Largest encoded store that an in-place overwrite writes whole, instead of writing the changed
-/// values, version, and checksum separately.
-///
-/// This conservatively bounds the unchanged bytes rewritten per update (one 4 KiB page when blob
-/// data starts page-aligned).
-pub(super) const FULL_OVERWRITE_LIMIT: usize = 4_096;
 
 /// Information about a value in a [Wrapper].
 struct Info {
@@ -447,7 +440,9 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             // every write requests cache bypass.
             let data = std::mem::take(&mut target.data).freeze();
 
-            let full_write = data.len() <= FULL_OVERWRITE_LIMIT;
+            // A store no larger than one storage page is written whole: its changed values,
+            // version, and checksum share that page, so one write replaces several.
+            let full_write = data.len() as u64 <= STORAGE_PAGE_SIZE;
             if full_write {
                 // This write includes every changed byte, so a non-pipelined sync can request
                 // durability with it.

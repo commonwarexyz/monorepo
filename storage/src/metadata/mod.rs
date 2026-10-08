@@ -32,9 +32,10 @@
 //! # Writing Updates
 //!
 //! When keys and encoded value sizes are stable, [Metadata] updates the target blob in place. A
-//! store of at most 4 KiB is written whole, in one write. Larger stores write only the changed
-//! values, version, and checksum, so large collections with infrequent changes stay cheap to
-//! update. Any other update rewrites the entire blob.
+//! store no larger than one storage page ([commonware_runtime::STORAGE_PAGE_SIZE]) is written
+//! whole, in one write. Larger stores write only the changed values, version, and checksum, so
+//! large collections with infrequent changes stay cheap to update. Any other update rewrites the
+//! entire blob.
 //!
 //! # Example
 //!
@@ -91,14 +92,15 @@ pub struct Config<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{storage::FULL_OVERWRITE_LIMIT, *};
+    use super::*;
     use bytes::Bytes;
     use commonware_codec::{FixedSize, RangeCfg};
     use commonware_cryptography::crc32;
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob, Metrics as _, ReadOptions, Runner, Storage, Supervisor as _, WriteOptions,
+        Blob, Metrics as _, ReadOptions, Runner, STORAGE_PAGE_SIZE, Storage, Supervisor as _,
+        WriteOptions,
         deterministic::{self, FaultConfig, PartialWriteMode, WriteConfig},
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, Recordings, WriteFaultContext,
@@ -226,8 +228,8 @@ mod tests {
 
     /// Length of the value that makes a single-key store encode to `store_len` bytes: version,
     /// key, 2-byte value length prefix, value, and checksum.
-    fn single_key_value_len(store_len: usize) -> usize {
-        store_len - u64::SIZE - U64::SIZE - 2 - crc32::Digest::SIZE
+    fn single_key_value_len(store_len: u64) -> usize {
+        store_len as usize - u64::SIZE - U64::SIZE - 2 - crc32::Digest::SIZE
     }
 
     /// Initialize a single-key store with both copies populated, so an equal-size update
@@ -245,7 +247,7 @@ mod tests {
     #[rstest::rstest]
     #[test_traced]
     fn test_full_overwrite_limit(
-        #[values(FULL_OVERWRITE_LIMIT, FULL_OVERWRITE_LIMIT + 1)] store_len: usize,
+        #[values(STORAGE_PAGE_SIZE, STORAGE_PAGE_SIZE + 1)] store_len: u64,
         #[values(false, true)] pipelined: bool,
     ) {
         deterministic::Runner::default().start(|context| async move {
@@ -262,7 +264,7 @@ mod tests {
             } else {
                 metadata = metadata.sync().await.unwrap();
             }
-            let writes = if store_len > FULL_OVERWRITE_LIMIT {
+            let writes = if store_len > STORAGE_PAGE_SIZE {
                 vec![WriteOptions::DONT_CACHE; 3]
             } else if pipelined {
                 vec![WriteOptions::DONT_CACHE]
@@ -277,7 +279,7 @@ mod tests {
             drop(metadata);
             // The store encodes to exactly `store_len` bytes.
             let (_, len) = context.open("test", b"left").await.unwrap();
-            assert_eq!(len, store_len as u64);
+            assert_eq!(len, store_len);
             let metadata =
                 Metadata::<_, U64, Vec<u8>>::init(context.child("second"), single_key_config())
                     .await
@@ -289,7 +291,7 @@ mod tests {
     #[rstest::rstest]
     #[test_traced]
     fn test_overwrite_survives_crash(
-        #[values(FULL_OVERWRITE_LIMIT, FULL_OVERWRITE_LIMIT + 1)] store_len: usize,
+        #[values(STORAGE_PAGE_SIZE, STORAGE_PAGE_SIZE + 1)] store_len: u64,
         #[values(false, true)] pipelined: bool,
     ) {
         let value_len = single_key_value_len(store_len);
@@ -322,7 +324,7 @@ mod tests {
         #[case] mode: PartialWriteMode,
         #[case] retention_rate: Probability,
         #[case] update_survives: bool,
-        #[values(FULL_OVERWRITE_LIMIT, FULL_OVERWRITE_LIMIT + 1)] store_len: usize,
+        #[values(STORAGE_PAGE_SIZE, STORAGE_PAGE_SIZE + 1)] store_len: u64,
         #[values(2, 3)] durable: u8,
     ) {
         // A second key (8-byte key, 1-byte length prefix, 8-byte value) never changes.

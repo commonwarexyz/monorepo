@@ -952,8 +952,8 @@ mod tests {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();
 
-            // A logical page size whose physical page is exactly one 4096-byte storage page.
-            const PHYSICAL_PAGE_SIZE: u64 = 4096;
+            // A logical page size whose physical page is exactly one storage page.
+            const PHYSICAL_PAGE_SIZE: u64 = crate::STORAGE_PAGE_SIZE;
             let logical = crate::buffer::paged::page_size(PHYSICAL_PAGE_SIZE as u32);
             let mut registry = Registry::default();
             let cache = crate::buffer::paged::CacheRef::new(

@@ -670,8 +670,8 @@ mod tests {
         let config = Config::new(storage_directory.clone(), Layout::ALL);
         let storage = Storage::new(config, test_pool());
 
-        // A logical page size whose physical page is exactly one 4096-byte storage page.
-        const PHYSICAL_PAGE_SIZE: u64 = 4096;
+        // A logical page size whose physical page is exactly one storage page.
+        const PHYSICAL_PAGE_SIZE: u64 = crate::STORAGE_PAGE_SIZE;
         let logical = crate::buffer::paged::page_size(PHYSICAL_PAGE_SIZE as u32);
         let cache = crate::buffer::paged::CacheRef::new(
             test_pool(),
