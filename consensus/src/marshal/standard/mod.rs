@@ -3616,14 +3616,16 @@ mod tests {
                     "{kind:?}: failed application builds should not be timed"
                 );
 
-                // A failed build closes the handoff response as it closes the ordinary one.
+                // A failed build answers Wait, so consensus can still request an ordinary
+                // proposal once the parent certifies.
                 let failing_app = MockVerifyingApp::new().with_handoff(HandoffPolicy::Stage);
                 let mut failing =
                     Wrapper::new(kind, context.child("failed"), failing_app, marshal.clone());
                 let handoff_rx = failing.handoff(non_boundary_context.clone()).await;
-                assert!(
-                    handoff_rx.await.is_err(),
-                    "{kind:?}: handoff response should close when application returns no block"
+                assert_eq!(
+                    handoff_rx.await.expect("handoff decision missing"),
+                    Handoff::Wait,
+                    "{kind:?}: a failed handoff build must answer Wait"
                 );
 
                 // Dropping a handoff response must cancel the ordinary build it forwards.
@@ -3777,13 +3779,10 @@ mod tests {
                     leader: me.clone(),
                     parent: (View::new(1), tip.digest()),
                 };
+                let child =
+                    B::new::<Sha256>(handoff_context.clone(), tip.digest(), Height::new(2), 200);
                 let mut app = MockVerifyingApp::new().with_handoff(HandoffPolicy::Stage);
-                app.propose_result = Some(B::new::<Sha256>(
-                    handoff_context.clone(),
-                    tip.digest(),
-                    Height::new(2),
-                    200,
-                ));
+                app.propose_result = Some(child.clone());
                 let mut deferred = Wrapper::new(
                     WrapperKind::Deferred,
                     context.child(label),
@@ -3791,9 +3790,14 @@ mod tests {
                     marshal.clone(),
                 );
                 let response = deferred.handoff(handoff_context).await.await;
+                let expected = if built {
+                    Handoff::Stage(child.digest())
+                } else {
+                    Handoff::Wait
+                };
                 assert_eq!(
-                    response.is_ok(),
-                    built,
+                    response.expect("handoff decision missing"),
+                    expected,
                     "{label}: a handoff build must require a parent linked to its context"
                 );
             }

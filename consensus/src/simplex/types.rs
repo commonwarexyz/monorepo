@@ -31,8 +31,11 @@ pub struct Context<D: Digest, P: PublicKey> {
     /// certified view as long as the participant possesses nullifications covering every
     /// skipped term (a nullification covers the view it was created for and the remainder
     /// of that term); any uncovered view may eventually be finalized and skipping it would
-    /// result in a fork. The parent remains valid even if a later nullification in its own
-    /// term covers the parent view.
+    /// result in a fork. A certified parent remains valid even if a later nullification in
+    /// its own term covers the parent view.
+    ///
+    /// A pipelined handoff request instead names the previous view as its parent before that
+    /// view certifies (see [`crate::CertifiableAutomaton::handoff`]).
     pub parent: (View, D),
 }
 

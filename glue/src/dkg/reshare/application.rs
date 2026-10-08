@@ -5,7 +5,7 @@ use crate::dkg::{
     types::Payload,
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, CertifiableBlock,
+    Application as ConsensusApplication, CertifiableBlock, HandoffPolicy,
     marshal::ancestry::Ancestry,
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
@@ -119,6 +119,10 @@ where
     type Context = A::Context;
     type Block = A::Block;
     type Input = I;
+
+    fn handoff_policy(&self, context: &Self::Context) -> HandoffPolicy {
+        self.inner.handoff_policy(context)
+    }
 
     #[tracing::instrument(
         name = "dkg.reshare.application.propose",
@@ -322,6 +326,7 @@ mod tests {
         proposal_entered: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         verify_count: Arc<Mutex<usize>>,
         verify_result: bool,
+        handoff: HandoffPolicy,
     }
 
     impl RecordingApp {
@@ -332,6 +337,7 @@ mod tests {
                 proposal_entered: Arc::new(Mutex::new(None)),
                 verify_count: Arc::new(Mutex::new(0)),
                 verify_result: true,
+                handoff: HandoffPolicy::Wait,
             }
         }
 
@@ -367,6 +373,10 @@ mod tests {
         type Context = TestContext;
         type Block = TestBlock;
         type Input = Input<(), TestBlsVariant, PrivateKey>;
+
+        fn handoff_policy(&self, _: &Self::Context) -> HandoffPolicy {
+            self.handoff
+        }
 
         async fn propose(
             &mut self,
@@ -539,6 +549,34 @@ mod tests {
             genesis.height().next(),
             0,
         )
+    }
+
+    /// The wrapper forwards the inner application's handoff policy, so an inner application
+    /// that opts into pipelined handoffs keeps that choice behind the reshare adapter.
+    #[test]
+    fn handoff_policy_forwards_inner_decision() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = midpoint_parent();
+            for policy in [
+                HandoffPolicy::Publish,
+                HandoffPolicy::Stage,
+                HandoffPolicy::Wait,
+            ] {
+                let inner = RecordingApp {
+                    handoff: policy,
+                    ..RecordingApp::accepting()
+                };
+                let app = wrapper_with_inner(&context, EpochInfoResponse::Unavailable, inner);
+                assert_eq!(
+                    <TestWrapper as ConsensusApplication<deterministic::Context>>::handoff_policy(
+                        &app,
+                        &block_context(&parent, 2),
+                    ),
+                    policy
+                );
+            }
+        });
     }
 
     #[test]

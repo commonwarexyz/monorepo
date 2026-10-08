@@ -208,8 +208,9 @@ pub(crate) async fn forward<T, U>(
 /// Answers a handoff request through `automaton`'s ordinary proposal path.
 ///
 /// [`HandoffPolicy::Wait`] resolves the receiver immediately. Otherwise, the built
-/// candidate is sent in the response the policy names, and closing the receiver
-/// cancels the build.
+/// candidate is sent in the response the policy names. A build that yields no block
+/// answers [`Handoff::Wait`], so consensus can still request an ordinary proposal once
+/// the parent certifies. Closing the receiver cancels the build.
 pub(crate) async fn handoff<E, A>(
     context: &E,
     automaton: &mut A,
@@ -221,7 +222,7 @@ where
     E: Spawner + Metrics,
     A: Automaton,
 {
-    let (tx, rx) = oneshot::channel();
+    let (mut tx, rx) = oneshot::channel();
     let respond = match policy {
         HandoffPolicy::Publish => Handoff::Publish,
         HandoffPolicy::Stage => Handoff::Stage,
@@ -234,7 +235,13 @@ where
     context
         .child("handoff")
         .with_attribute("round", round)
-        .spawn(move |_| forward(tx, proposal, move |payload| Some(respond(payload))));
+        .spawn(move |_| async move {
+            let response = select! {
+                _ = tx.closed() => return,
+                result = proposal => result.map_or(Handoff::Wait, respond),
+            };
+            tx.send_lossy(response);
+        });
     rx
 }
 

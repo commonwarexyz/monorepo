@@ -188,11 +188,11 @@ impl<
         let outbound_messages = context.family("outbound_messages", "number of outbound messages");
         let handoff_events = context.family(
             "handoff_events",
-            "number of handoff lifecycle events; one request can count several",
+            "number of handoff lifecycle events, where one request can count several",
         );
         let handoff_abandoned = context.family(
             "handoff_abandoned",
-            "number of handoffs abandoned before publication",
+            "number of handoff requests, candidates, and builds abandoned before publication",
         );
         let notarization_latency =
             context.histogram("notarization_latency", "notarization latency", LATENCY);

@@ -247,10 +247,10 @@ Chou</a></div>
         rest of the term through Simplex’s normal nullification
         path.</p>
         <p>The term boundary is also a leader handoff, so by default
-        optimistic work stops there. The first view of a new term must
-        start from certified ancestry. Together, these rules let Simplex
-        views pipeline without changing the evidence required for
-        finalization.</p>
+        optimistic work stops there. Validators verify the first view of
+        a new term only on certified ancestry. Together, these rules let
+        Simplex views pipeline without changing the evidence required
+        for finalization.</p>
         <p>A <em>pipelined handoff</em> lets the incoming leader prepare
         its proposal before the parent certifies. The application may
         also permit early publication, which trusts the outgoing leader

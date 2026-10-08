@@ -458,11 +458,13 @@ mod tests {
         )
     }
 
-    /// Certifies view 1 and drives the local validator through its notarize
+    /// Certifies view 1 and drives the local validator at `local_index` through its notarize
     /// vote for view 2, leaving the outgoing tip uncertified for handoff tests.
+    #[allow(clippy::too_many_arguments)]
     async fn prepare_pipelined_handoff_tip(
         context: &mut deterministic::Context,
         schemes: &[ed25519::Scheme],
+        local_index: usize,
         outgoing: &PublicKey,
         voter_mailbox: &mut Mailbox<ed25519::Scheme, Sha256Digest>,
         batcher_receiver: &mut mailbox::Receiver<batcher::Message<ed25519::Scheme, Sha256Digest>>,
@@ -492,7 +494,8 @@ mod tests {
                 (proposal_1.round, genesis, 0u64).encode(),
             ),
         );
-        let (_, notarization_1) = build_notarization(schemes, &proposal_1, quorum);
+        let (_, notarization_1) =
+            build_notarization(&peers(schemes, local_index), &proposal_1, quorum);
         voter_mailbox.recovered(Certificate::Notarization(notarization_1));
 
         let mut certified_view_1 = false;
@@ -3985,7 +3988,7 @@ mod tests {
             );
             let built_elector: RoundRobinElector<ed25519::Scheme> =
                 elector.clone().build(schemes[0].participants());
-            // Views 1 and 2 form term 1; view 3 starts term 2.
+            // Views 1 and 2 form term 1. View 3 starts term 2.
             let outgoing_idx = built_elector.elect(Round::new(epoch, View::new(1)), ());
             let outgoing = participants[usize::from(outgoing_idx)].clone();
             let local_index = usize::from(built_elector.elect(Round::new(epoch, View::new(3)), ()));
@@ -4303,6 +4306,7 @@ mod tests {
             let parent = prepare_pipelined_handoff_tip(
                 context,
                 &schemes,
+                local_index,
                 &outgoing,
                 &mut mailbox,
                 &mut batcher,
@@ -4773,8 +4777,11 @@ mod tests {
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
 
-            let (_, finalization) =
-                build_finalization(&fixture.schemes, &fixture.parent, fixture.quorum());
+            let (_, finalization) = build_finalization(
+                &peers(&fixture.schemes, fixture.local_index),
+                &fixture.parent,
+                fixture.quorum(),
+            );
             fixture
                 .mailbox
                 .recovered(Certificate::Finalization(finalization));
@@ -4861,7 +4868,7 @@ mod tests {
     }
 
     /// A Wait response that arrives while the parent's certification sync is blocked
-    /// is not consumed until the loop resumes; it then dispatches its ordinary
+    /// is not consumed until the loop resumes. It then dispatches its ordinary
     /// replacement.
     #[test_traced]
     fn test_pipelined_handoff_wait_response_during_certification_sync() {
@@ -4927,7 +4934,7 @@ mod tests {
             let certified = fixture.certify_parent(&context).await;
 
             let (_, nullification) = build_nullification(
-                &fixture.schemes,
+                &peers(&fixture.schemes, fixture.local_index),
                 Round::new(Epoch::new(333), View::new(3)),
                 fixture.quorum(),
             );
@@ -5196,7 +5203,7 @@ mod tests {
             let certified = fixture.certify_parent(&context).await;
 
             let (_, nullification) = build_nullification(
-                &fixture.schemes,
+                &peers(&fixture.schemes, fixture.local_index),
                 Round::new(Epoch::new(333), View::new(2)),
                 fixture.quorum(),
             );
@@ -5244,7 +5251,7 @@ mod tests {
             let certified = fixture.certify_parent(&context).await;
 
             let (_, nullification) = build_nullification(
-                &fixture.schemes,
+                &peers(&fixture.schemes, fixture.local_index),
                 Round::new(Epoch::new(333), View::new(3)),
                 fixture.quorum(),
             );
@@ -5431,12 +5438,22 @@ mod tests {
         });
     }
 
-    /// Runs a pipelined handoff whose application stalls or drops proposal responses,
-    /// as configured by `options`, and then nullifies the captured parent while the
-    /// incoming term-start view is still live. The voter must issue a replacement request
-    /// on the certified fallback before the leader timeout.
-    fn reissue_handoff_after_parent_nullification(options: VoterOptions) {
-        let close_response = options.drop_proposals;
+    /// How the application leaves the handoff request unanswered in
+    /// [`reissue_handoff_after_parent_nullification`].
+    enum Unanswered {
+        /// Every proposal response stays open.
+        Stalled,
+        /// The handoff response closes, and ordinary requests are answered.
+        Closed,
+    }
+
+    /// Runs a pipelined handoff whose application leaves the request `unanswered`, and then
+    /// nullifies the captured parent while the incoming term-start view is still live. The
+    /// voter must issue a replacement request on the certified fallback before the leader
+    /// timeout. A closed response forfeits only its captured context, so the replacement
+    /// proposes and votes on the fallback.
+    fn reissue_handoff_after_parent_nullification(unanswered: Unanswered) {
+        let closed = matches!(unanswered, Unanswered::Closed);
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             // Certify view 1 so it remains a usable fallback after view 2 is
@@ -5445,7 +5462,8 @@ mod tests {
                 &mut context,
                 VoterOptions {
                     handoff: HandoffPolicy::Publish,
-                    ..options
+                    stall_proposals: !closed,
+                    ..Default::default()
                 },
             )
             .await;
@@ -5464,14 +5482,17 @@ mod tests {
 
             // Nothing observable marks the voter consuming a closed response, so give
             // it time to do so before the parent resolves.
-            if close_response {
+            if closed {
+                let (_, response) =
+                    take_proposal_response(&context, &fixture.handoff_responses).await;
+                drop(response);
                 context.sleep(SETTLE).await;
             }
 
             // Nullifying the captured parent enters view 3. The abandoned
             // request must be replaced immediately with one on certified view 1.
             let (_, nullification_2) = build_nullification(
-                &fixture.schemes,
+                &peers(&fixture.schemes, fixture.local_index),
                 Round::new(Epoch::new(333), View::new(2)),
                 fixture.quorum(),
             );
@@ -5489,6 +5510,35 @@ mod tests {
             }
             let expected = [(View::new(3), View::new(2)), (View::new(3), View::new(1))];
             assert_eq!(request_parents(&fixture.propose_requests), expected);
+
+            // After a closed response, view 3 votes for the replacement proposal on view 1
+            // before its leader timeout.
+            if closed {
+                let deadline = context.current() + Duration::from_secs(1);
+                loop {
+                    select! {
+                        message = fixture.batcher.recv() => {
+                            match message.expect("batcher must remain open") {
+                                batcher::Message::Constructed(Vote::Notarize(vote))
+                                    if vote.view() == View::new(3) =>
+                                {
+                                    assert_eq!(vote.proposal.parent, View::new(1));
+                                    break;
+                                }
+                                batcher::Message::Constructed(Vote::Nullify(nullify))
+                                    if nullify.view() == View::new(3) =>
+                                {
+                                    panic!("view 3 timed out instead of proposing on view 1");
+                                }
+                                _ => {}
+                            }
+                        },
+                        _ = context.sleep_until(deadline) => {
+                            panic!("view 3 did not propose on view 1");
+                        }
+                    }
+                }
+            }
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
@@ -5502,10 +5552,7 @@ mod tests {
     /// superseded while the incoming term-start view is still live.
     #[test_traced]
     fn test_pipelined_handoff_reissues_stalled_proposal_after_parent_nullification() {
-        reissue_handoff_after_parent_nullification(VoterOptions {
-            stall_proposals: true,
-            ..Default::default()
-        });
+        reissue_handoff_after_parent_nullification(Unanswered::Stalled);
     }
 
     /// A handoff response that closes before its parent resolves forfeits the
@@ -5513,10 +5560,7 @@ mod tests {
     /// offer the proposal opportunity on the certified fallback.
     #[test_traced]
     fn test_pipelined_handoff_reissues_closed_proposal_after_parent_nullification() {
-        reissue_handoff_after_parent_nullification(VoterOptions {
-            drop_proposals: true,
-            ..Default::default()
-        });
+        reissue_handoff_after_parent_nullification(Unanswered::Closed);
     }
 
     /// A view 4 handoff build pending on the uncertified final view of a three-view outgoing
@@ -5609,7 +5653,8 @@ mod tests {
 
             // View 1 certifies, and we vote for views 2 and 3. Our vote for the term's
             // final view starts a handoff build for view 4, which the application holds.
-            let (_, notarization_1) = build_notarization(&schemes, &proposals[0], quorum);
+            let (_, notarization_1) =
+                build_notarization(&peers(&schemes, local_index), &proposals[0], quorum);
             mailbox.recovered(Certificate::Notarization(notarization_1));
             loop {
                 if matches!(
@@ -5887,7 +5932,7 @@ mod tests {
             // Nullifying view 3 enters view 4 with the request retained, and our leader
             // timeout then nullifies view 4.
             let (_, nullification_3) =
-                build_nullification(&schemes, Round::new(epoch, View::new(3)), quorum);
+                build_nullification(&peers, Round::new(epoch, View::new(3)), quorum);
             mailbox.recovered(Certificate::Nullification(nullification_3));
             wait_for_local_nullify(&context, &mut batcher, View::new(4)).await;
 
@@ -5967,6 +6012,7 @@ mod tests {
             let proposal_2 = prepare_pipelined_handoff_tip(
                 &mut context,
                 &schemes,
+                local_index,
                 &outgoing,
                 &mut mailbox,
                 &mut batcher_receiver,
@@ -5977,8 +6023,11 @@ mod tests {
 
             // The follower holds a nullification of the tip that the incoming
             // leader built on, so it enters view 3 without the tip's certificate.
-            let (_, nullification_2) =
-                build_nullification(&schemes, Round::new(epoch, View::new(2)), quorum);
+            let (_, nullification_2) = build_nullification(
+                &peers(&schemes, local_index),
+                Round::new(epoch, View::new(2)),
+                quorum,
+            );
             mailbox.recovered(Certificate::Nullification(nullification_2));
 
             let proposal_3 = Proposal::new(

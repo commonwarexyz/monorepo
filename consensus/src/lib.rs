@@ -181,6 +181,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// This trusts the outgoing leader not to equivocate and to complete its term: the
         /// proposal is usable only if every uncertified view it builds on certifies.
+        ///
+        /// Validators admit the early vote only once they have entered the parent's term, and
+        /// consensus does not resend it. If the quorum needs a validator still in an earlier term,
+        /// the incoming term times out.
         Publish(D),
         /// Stage the candidate until its parent certifies or finalizes.
         Stage(D),
@@ -203,23 +207,26 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// With [`Handoff::Wait`], consensus issues an ordinary [`Automaton::propose`] for the same
         /// context once the parent certifies, unless it has already voted to nullify this view.
         ///
-        /// Closing the response abandons the local proposal opportunity for this view once the
-        /// parent certifies or finalizes, without a retry. If a replacement parent supersedes the
-        /// parent first, consensus can then request a proposal on the replacement, unless it has
+        /// Closing the response forfeits the local proposal opportunity for this view once the
+        /// parent certifies or finalizes, and the view then times out as a missing proposal.
+        ///
+        /// A replacement parent can supersede the request's parent before it certifies. Consensus
+        /// then drops the request and can request a proposal on the replacement, unless it has
         /// voted to nullify this view.
         ///
-        /// Return the receiver promptly and do any work behind it. Parent certification does
-        /// not cancel this request, and while the response is pending, consensus requests no
-        /// other proposal for this view. Consensus drops the receiver when it abandons the
-        /// context, so stop pending work when the receiver closes.
+        /// Return the receiver promptly and do any work behind it. Parent certification does not
+        /// cancel this request, and while the response is pending, consensus requests no other
+        /// proposal for this view.
+        ///
+        /// Consensus drops the receiver when it abandons the context, so stop pending work when
+        /// the receiver closes.
         ///
         /// Consensus also drops the receiver once the parent can no longer be built on before it
         /// certifies, as after a nullification in the parent's term, or once it votes to nullify
-        /// the view it is waiting in, at or below the parent, since the application may verify
-        /// other blocks only after this build completes. Unless consensus has voted to nullify this
-        /// view, an ordinary [`Automaton::propose`] for the same context follows if the parent
-        /// certifies, or consensus can request a proposal on a replacement parent once one is
-        /// selectable.
+        /// the view it is waiting in, at or below the parent. An application that verifies other
+        /// blocks only after this build completes could otherwise keep that parent or view from
+        /// certifying. The request then waits as if the application had returned
+        /// [`Handoff::Wait`].
         fn handoff(
             &mut self,
             _context: Self::Context,
@@ -394,6 +401,9 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// has verified the parent's contents. The parent may later fail certification,
         /// which discards the candidate.
         ///
+        /// A prepared build that yields no block answers [`Handoff::Wait`], so consensus can
+        /// request an ordinary proposal once the parent certifies.
+        ///
         /// Parent certification does not cancel a prepared build. Consensus cancels it once the
         /// parent can no longer be built on before it certifies, as after a nullification in the
         /// parent's term, or once it votes to nullify the view it is waiting in, at or below the
@@ -411,6 +421,9 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         ///
         /// This method runs synchronously on the proposal path. Do not block on I/O.
         /// If readiness is uncertain, return [`HandoffPolicy::Wait`].
+        ///
+        /// A wrapper around another application must forward this method, since the default
+        /// would otherwise replace the inner application's choice with [`HandoffPolicy::Wait`].
         fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
             HandoffPolicy::Wait
         }

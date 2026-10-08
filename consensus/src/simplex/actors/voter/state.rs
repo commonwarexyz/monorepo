@@ -973,8 +973,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             // A term start on an uncertified parent is a pipelined handoff. Skip it while we
             // wait in a view at or below that parent that we voted to nullify, without
             // claiming the build request: if the parent certifies after all, the view becomes
-            // an ordinary candidate. Build cancellation cannot replace this check, since the
-            // actor can consume a response that is ready on issue before it next checks.
+            // an ordinary candidate. A response that is ready on issue can be consumed before
+            // the actor reconciles pending builds, so the request must not be issued at all.
             let is_handoff = view.is_term_start(self.term_length())
                 && !self.parent_certified((parent_view, parent_payload));
             if is_handoff && self.gave_up_below(parent_view) {
@@ -1601,9 +1601,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return;
         }
 
-        // Before the outgoing view notarizes, a pipelined handoff can build only on
-        // our own vote (see [`Self::optimistic_ancestry_payload`]), so receiving the
-        // proposal is not enough. Its notarization elects the incoming leader instead.
+        // Before the outgoing view notarizes, a pipelined handoff can build only on our own
+        // vote (see [`Self::optimistic_ancestry_payload`]). Stamp the incoming leader only after
+        // we broadcast that vote. Otherwise the outgoing view's notarization elects the leader.
         if !self
             .views
             .get(&view)
@@ -1813,7 +1813,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// A term-start proposal outside this gate needs none: validators other than the
     /// proposer verify a term-start proposal only on explicitly certified ancestry, so
     /// its notarization includes a vote from an honest validator that certified the
-    /// parent.
+    /// parent. This assumes a committee of at least two participants.
+    ///
+    /// In a one-participant committee, a node that did not vote, such as an observer, may
+    /// certify a pipelined term-start child before its parent certifies anywhere. Finalization
+    /// still requires the sole validator's finalize vote, which this gate holds until the
+    /// parent certifies.
     fn required_certification_parent(&self, proposal: &Proposal<D>) -> Option<View> {
         let view = proposal.view();
         self.previous_in_term(view).or_else(|| {
@@ -4825,6 +4830,9 @@ mod tests {
                 Sha256Digest::from([119u8; 32]),
             );
             assert!(!state.proposed(&child_context, child.payload));
+
+            // A build recorded despite the rejected parent must not be voted for either.
+            assert!(state.record_proposed(child));
             assert!(
                 state.construct_notarize(View::new(2)).is_none(),
                 "failed-certified parent must block a locally proposed optimistic child"

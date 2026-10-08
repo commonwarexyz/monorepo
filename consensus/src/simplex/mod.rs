@@ -134,6 +134,9 @@
 //!   `optimistic_views` views ahead of certified ancestry within a term (configured alongside the
 //!   term length, see [`elector::Terms::stable`]); certification and `finalize` votes always wait
 //!   for explicit parent certification (see [Optimistic Validation](#optimistic-validation)).
+//! * Let a term's incoming leader build, and optionally publish and vote on, its first proposal
+//!   before the outgoing term's final view certifies (see [Pipelined Handoff](#pipelined-handoff)).
+//!   Other validators verify that proposal only on explicitly certified ancestry.
 //! * If an entered view remains unfinalized for the stall timeout (configured alongside the term
 //!   length, see [`elector::Terms`]) and we are still in the same term, we locally time out the
 //!   current view and vote `nullify`. In practice, this tracks the oldest unfinalized view we have
@@ -250,16 +253,18 @@
 //!
 //! Handoff requests require a [`elector::Scheduled`] elector, which knows the incoming leader
 //! before the certificate that unlocks the term exists. A [`elector::Dynamic`] elector never
-//! pipelines handoffs. The incoming leader must also have voted for the outgoing term's final
-//! view or hold its notarization, and the outgoing term must have no nullification.
-//! Otherwise, the leader uses the ordinary proposal path.
+//! pipelines handoffs. The incoming leader must also hold the outgoing term's final view as
+//! optimistic ancestry: its notarization, or the leader's own vote for it and for each uncertified
+//! view below it down to a notarized one (see [Optimistic Validation](#optimistic-validation)).
+//! The outgoing term must have no nullification or failed certification. Otherwise, the leader
+//! uses the ordinary proposal path.
 //!
 //! Consensus handles each handoff response as follows:
 //!
 //! * [`crate::Handoff::Wait`]: request an ordinary proposal once the parent certifies.
 //! * [`crate::Handoff::Stage`]: hold the candidate until the parent certifies or finalizes.
 //! * [`crate::Handoff::Publish`]: permit early relay and the proposer's own notarize vote.
-//! * Closed response: abandon the local proposal opportunity once the parent certifies or
+//! * Closed response: time out the view as a missing proposal once the parent certifies or
 //!   finalizes.
 //!
 //! Consensus checks ordinary proposal eligibility before publication. Parent certification
@@ -279,8 +284,8 @@
 //!
 //! Consensus discards pending, waiting, held, and closed requests on view exit. When a replacement
 //! parent supersedes their ancestry, consensus discards them and requests a proposal on the
-//! replacement once the rules above permit it. Restart also discards pending requests and held
-//! candidates.
+//! replacement once the rules above permit it. Restart also discards all of them, and the voter
+//! can then issue a fresh request.
 //!
 //! Marshal applications opt in through [`crate::Application::handoff_policy`], which returns
 //! [`crate::HandoffPolicy::Publish`], [`crate::HandoffPolicy::Stage`], or the default
@@ -288,9 +293,9 @@
 //! synchronous decision from available information. It cannot revoke this decision.
 //!
 //! `Publish` and `Stage` use the ordinary construction path, which may reuse an existing block
-//! without calling the application builder. With `Stage`, construction overlaps parent
-//! certification while consensus holds publication. An application can choose it for any handoff
-//! whose outgoing leader it does not trust.
+//! without calling the application builder. A build that yields no block answers `Wait`. With
+//! `Stage`, construction overlaps parent certification while consensus holds publication. An
+//! application can choose it for any handoff whose outgoing leader it does not trust.
 //!
 //! With [`crate::Handoff::Publish`], rotating leaders can pipeline every view. The leader
 //! distributes each proposal in parallel with its parent's votes, allowing network-bound view time
@@ -304,6 +309,15 @@
 //! uncertified view it builds on certifies, and with stable leaders that can include several views
 //! of the outgoing term. If one of them never certifies, validators cannot use the proposal, and
 //! the usual timeout path nullifies the incoming term.
+//!
+//! If the outgoing term fails, `Publish` costs more than `Stage` or `Wait`. Having voted for the
+//! proposal, the leader cannot rebuild on another parent. Validators that hold the proposal also
+//! wait for the certification timeout, because the leader timeout ends once a proposal arrives.
+//!
+//! Early publication also relies on validators keeping pace. A validator admits a term-start vote
+//! only once it has entered the outgoing term, and the leader does not resend its vote, so a
+//! validator still in an earlier term drops the vote that carries the proposal. If the quorum
+//! needs such a validator, the incoming term times out.
 //!
 //! ### Optimistic Finality
 //!
@@ -436,7 +450,8 @@
 //!
 //! * `Requested`: a handoff request reached the automaton. It counts requests, not unique views.
 //! * `WaitReturned`: the automaton returned [`crate::Handoff::Wait`], including default
-//!   responses. Consensus can still abandon a waiting request later.
+//!   responses and marshal builds that yielded no block. Consensus can still abandon a waiting
+//!   request later.
 //! * `CandidateReturned`: the automaton returned a candidate.
 //! * `Held`: consensus retained a candidate for parent certification. Releasing a held candidate
 //!   does not count it again.
@@ -452,7 +467,8 @@
 //!
 //! * `ViewExit`: the request's view ended.
 //! * `AncestrySuperseded`: the captured ancestry became invalid while a replacement parent was
-//!   selectable, so consensus can request a proposal on the replacement instead.
+//!   selectable, so consensus can request a proposal on the replacement instead, unless it has
+//!   voted to nullify the view.
 //! * `ParentNullify`: a pending build was cancelled after a local nullify vote for the view the
 //!   leader waits in, at or below the parent.
 //! * `AncestryInvalidated`: a pending build was cancelled because its captured ancestry became
@@ -570,7 +586,8 @@
 //! any are broadcast (even if there is nothing to broadcast). The proposal payload relay is not a
 //! consensus message and is not gated on this sync: to lower view latency, it is requested as soon
 //! as the automaton returns a payload, which is safe because extra payload bytes (unlike votes)
-//! cannot form a conflicting certificate (see [`Plan::Propose`]).
+//! cannot form a conflicting certificate (see [`Plan::Propose`]). A staged handoff candidate is
+//! held until its parent certifies or finalizes, and its relay is requested once it does.
 //!
 //! ## Automaton Failure Semantics
 //!

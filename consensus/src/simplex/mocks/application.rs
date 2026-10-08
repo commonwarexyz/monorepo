@@ -133,7 +133,7 @@ pub fn genesis<H: Hasher>(epoch: Epoch) -> H::Digest {
 
 type Latency = (f64, f64);
 
-/// Observer invoked on every `Message::Propose` request. Used by tests to
+/// Observer invoked on every `Message::Propose` and `Message::Handoff` request. Used by tests to
 /// detect spurious propose calls.
 type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Send + 'static>;
 
@@ -291,10 +291,11 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.drop_proposals = drop;
     }
 
-    /// When set, `Message::Propose` requests are held open indefinitely: the
-    /// response sender is parked in `pending_proposes`, keeping the oneshot
-    /// alive so the caller's `receiver` never resolves. This simulates a
-    /// propose that is still in flight at the moment the voter crashes.
+    /// When set, `Message::Propose` requests, and `Message::Handoff` requests that a non-Wait
+    /// policy would answer, are held open indefinitely: the response sender is parked in
+    /// `pending_proposes` or `pending_handoffs`, keeping the oneshot alive so the caller's
+    /// `receiver` never resolves. This simulates a propose that is still in flight at the
+    /// moment the voter crashes.
     pub const fn set_stall_proposals(&mut self, stall: bool) {
         self.stall_proposals = stall;
     }

@@ -613,8 +613,10 @@ where
 
                 // Deferred verification votes before it checks that a block's parent field
                 // matches the parent named by its consensus context, so an uncertified
-                // handoff parent may be unlinked. Build only on a linked parent. The genesis
-                // parent has no context parent to match.
+                // handoff parent may be unlinked. Build only on a linked parent. A parent at
+                // view zero is the epoch's genesis block, which needs no link check. The first
+                // epoch's genesis has no context parent to match, and a later epoch's genesis
+                // is the previous epoch's finalized boundary block.
                 //
                 // The coding variant needs no such check: it fetches each parent by the
                 // commitment in its child's consensus context, and its ancestry stream ends
