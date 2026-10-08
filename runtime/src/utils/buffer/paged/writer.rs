@@ -1250,7 +1250,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             logical_size,
             partial_page,
             prefetch,
-            page_size,
+            self.cache_ref.clone(),
+            self.id,
             read_options,
             malformed,
         ));
@@ -2108,6 +2109,55 @@ mod tests {
                 assert_eq!(replay.copy_to_bytes(20).as_ref(), &data[..20]);
                 replay.seek_to(0).unwrap();
             }
+        });
+    }
+
+    /// A recoverable replay validates every full page it reads, so it leaves those pages in the
+    /// cache instead of handing them back only to the OS's page cache. A partial tail page is not
+    /// page-aligned and is left uncached.
+    #[test_traced("DEBUG")]
+    fn test_replay_recoverable_populates_page_cache() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"replay_populates_cache")
+                .await
+                .unwrap();
+            let blob = Arc::new(blob);
+            let page = PAGE_SIZE.get() as usize;
+            let total = page * 2 + 10; // two full pages plus a partial tail
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let (writer, _) = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap()
+                .append(&data)
+                .await
+                .unwrap();
+            writer.sync().await.unwrap();
+
+            // Reopen with a fresh, cold cache to mirror a crash-recovery scan.
+            let physical_size = (PAGE_SIZE.get() as u64 + CHECKSUM_SIZE) * 3;
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let recovery = Recovery::open(blob, physical_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let mut probe = vec![0u8; page];
+            assert!(!recovery.try_read_sync_into(&mut probe, 0));
+
+            let (recovery, mut replay) = recovery
+                .replay_recoverable(NZUsize!(BUFFER_SIZE), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            assert!(!replay.ensure(total + 1).await.unwrap());
+            assert_eq!(replay.remaining(), total);
+
+            // Both full pages are now served from cache; the partial tail is skipped.
+            assert!(recovery.try_read_sync_into(&mut probe, 0));
+            assert_eq!(probe, data[..page]);
+            assert!(recovery.try_read_sync_into(&mut probe, page as u64));
+            assert_eq!(probe, data[page..2 * page]);
+            assert!(!recovery.try_read_sync_into(&mut probe, 2 * page as u64));
         });
     }
 

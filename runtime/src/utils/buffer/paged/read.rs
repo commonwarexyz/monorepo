@@ -1,9 +1,9 @@
-use super::Checksum;
+use super::{CacheRef, Checksum};
 use crate::{Blob, Error, IoBuf, ReadOptions};
 use bytes::{BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{Buf, FixedSize};
 use commonware_utils::Widen;
-use std::{collections::VecDeque, num::NonZeroU16, sync::Arc};
+use std::{collections::VecDeque, sync::Arc};
 use tracing::{error, warn};
 
 /// Buffered pages from storage or a frozen logical tail.
@@ -50,6 +50,10 @@ pub(super) struct PageReader<B: Blob> {
     blob_page: u64,
     /// Number of pages to prefetch at once.
     prefetch_count: usize,
+    /// Page cache to populate with pages validated while filling a batch.
+    cache_ref: CacheRef,
+    /// Cache key identifying the blob being read.
+    blob_id: u64,
     /// Options applied to every blob read.
     read_options: ReadOptions,
     /// Handling of a stored page that is not well-formed.
@@ -69,6 +73,9 @@ impl<B: Blob> PageReader<B> {
     /// A frozen `partial_page` contains exactly the logical bytes of the final partial page.
     /// Its physical page is included in `physical_blob_size` but is not read from storage.
     /// Ending at an earlier malformed page discards the frozen page.
+    ///
+    /// Every full page validated while filling a batch is written into `cache_ref` under
+    /// `blob_id`, so a replay warms the same cache ordinary reads use instead of leaving it cold.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         blob: Arc<B>,
@@ -76,11 +83,12 @@ impl<B: Blob> PageReader<B> {
         logical_blob_size: u64,
         partial_page: Option<IoBuf>,
         prefetch_count: usize,
-        page_size: NonZeroU16,
+        cache_ref: CacheRef,
+        blob_id: u64,
         read_options: ReadOptions,
         malformed: Malformed,
     ) -> Self {
-        let page_size = page_size.get() as usize;
+        let page_size = cache_ref.page_size().get() as usize;
         let physical_page_size = page_size + Checksum::SIZE;
         let physical_pages = physical_blob_size / physical_page_size as u64;
         let logical_pages = if logical_blob_size == 0 {
@@ -109,6 +117,8 @@ impl<B: Blob> PageReader<B> {
             partial_page: partial_page.map(Bytes::from),
             blob_page: 0,
             prefetch_count,
+            cache_ref,
+            blob_id,
             read_options,
             malformed,
         }
@@ -243,6 +253,27 @@ impl<B: Blob> PageReader<B> {
                 break;
             }
         }
+
+        // Cache every validated page that is logically full; a page exposing fewer bytes sits at
+        // the blob's current end and is not page-aligned for the cache.
+        let full_pages = if pages > 0 && last_len == self.page_size {
+            pages
+        } else {
+            pages.saturating_sub(1)
+        };
+        if full_pages > 0 {
+            let physical_page_size = self.physical_page_size;
+            let page_size = self.page_size;
+            self.cache_ref.cache_pages(
+                self.blob_id,
+                (0..full_pages).map(|idx| {
+                    let start = idx * physical_page_size;
+                    &physical_buf.as_ref()[start..start + page_size]
+                }),
+                self.blob_page * page_size as u64,
+            );
+        }
+
         self.blob_page += Widen::widen(pages);
         if pages == 0 {
             return Ok(None);
@@ -538,6 +569,7 @@ mod tests {
     use bytes::Buf as _;
     use commonware_macros::test_traced;
     use commonware_utils::{NZU16, NZUsize};
+    use std::num::NonZeroU16;
 
     #[test]
     fn test_replay_buf_bytes_share_pages() {
