@@ -32,6 +32,18 @@ impl Backend {
     }
 }
 
+/// Adds a point in Niels form, deferring the final coordinate products.
+#[inline(always)]
+const fn add_niels(point: G, rhs: Niels) -> GCompleted {
+    // The steps of `G::add` with `Z2 = 1`. The Niels form supplies `Y2 - X2`, `Y2 + X2`, and
+    // `2d*T2`, so `C` takes one multiplication and `D = 2*Z1` takes none.
+    let a = point.y.sub(point.x).mul(rhs.diff);
+    let b = point.y.add(point.x).mul(rhs.sum);
+    let c = point.t.mul(rhs.t2d);
+    let d = point.z.add(point.z);
+    GCompleted::from_products(a, b, c, d)
+}
+
 /// Applies a scalar field operation independently to every lane.
 fn map_f(a: FVec, f: impl Fn(F) -> F) -> FVec {
     FVec::transpose(a.untranspose().map(f))
@@ -99,17 +111,39 @@ impl super::Backend for Backend {
 
     #[inline(always)]
     fn double(self, point: GProjective) -> GCompleted {
-        point.double()
+        let a = point.x.square();
+        let b = point.y.square();
+        let c = point.z.square();
+        let c = c.add(c);
+        let e = point.x.add(point.y).square().sub(a).sub(b);
+        let g = b.sub(a);
+        let f = g.sub(c);
+        let h = a.neg().sub(b);
+        GCompleted {
+            x: e,
+            y: h,
+            z: g,
+            t: f,
+        }
     }
 
     #[inline(always)]
     fn to_projective(self, point: GCompleted) -> GProjective {
-        point.to_projective()
+        GProjective {
+            x: point.x.mul(point.t),
+            y: point.z.mul(point.y),
+            z: point.t.mul(point.z),
+        }
     }
 
     #[inline(always)]
     fn to_extended(self, point: GCompleted) -> G {
-        point.to_extended()
+        G {
+            x: point.x.mul(point.t),
+            y: point.z.mul(point.y),
+            t: point.x.mul(point.y),
+            z: point.t.mul(point.z),
+        }
     }
 
     #[inline(always)]
@@ -119,17 +153,23 @@ impl super::Backend for Backend {
 
     #[inline(always)]
     fn add_cached(self, point: G, cached: ProjectiveNiels, negate: bool) -> GCompleted {
-        point.add_projective_niels(if negate { cached.negate() } else { cached })
+        let rhs = if negate { cached.negate() } else { cached };
+        // The steps of `G::add` up to its final products, with `2d*T2` precomputed.
+        let a = point.y.sub(point.x).mul(rhs.diff);
+        let b = point.y.add(point.x).mul(rhs.sum);
+        let c = point.t.mul(rhs.t2d);
+        let zz = point.z.mul(rhs.z);
+        GCompleted::from_products(a, b, c, zz.add(zz))
     }
 
     #[inline(always)]
     fn add_niels(self, point: G, niels: &Niels, negate: bool) -> GCompleted {
-        point.add_niels_completed(if negate { niels.negate() } else { *niels })
+        add_niels(point, if negate { niels.negate() } else { *niels })
     }
 
     #[inline(always)]
     fn add_selected(self, point: G, row: &[Niels; 8], digit: i8) -> GCompleted {
-        point.add_niels_completed(basepoint::select(row, digit))
+        add_niels(point, basepoint::select(row, digit))
     }
 }
 
@@ -154,7 +194,7 @@ impl super::msm::Backend for Backend {
                     incoming.x = incoming.x.neg();
                     incoming.t2d = incoming.t2d.neg();
                 }
-                [current.add_mixed(incoming)]
+                [msm::Lanes::add_mixed(self, current, incoming)]
             },
             buckets,
             nb,
@@ -207,7 +247,17 @@ impl msm::Lanes<1> for Backend {
 
     #[inline(always)]
     fn add_mixed(self, point: G, affine: GAffine) -> G {
-        point.add_mixed(affine)
+        super::Backend::to_extended(
+            self,
+            add_niels(
+                point,
+                Niels {
+                    sum: affine.y.add(affine.x),
+                    diff: affine.y.sub(affine.x),
+                    t2d: affine.t2d,
+                },
+            ),
+        )
     }
 
     #[inline(always)]

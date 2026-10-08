@@ -402,7 +402,10 @@ fn backend_at_bounds() {
             // Compare every output coordinate with the scalar formula and its field bound.
             for (actual, expected) in [
                 (lanes.add(loaded, loaded), point.add(point)),
-                (lanes.add_mixed(loaded, mixed), point.add_mixed(affine)),
+                (
+                    lanes.add_mixed(loaded, mixed),
+                    msm::Lanes::add_mixed(super::portable::Backend::new(), point, affine),
+                ),
                 (lanes.double(loaded), point.double()),
             ] {
                 for actual in lanes.store(actual) {
@@ -632,41 +635,47 @@ fn completed_point_operations_match_extended() {
             assert_g_eq(actual, expected, property);
         };
 
-        let doubled = p.to_projective().double();
-        assert_matches(doubled.to_extended(), p.double(), "double to extended");
+        let portable = super::portable::Backend::new();
+        let doubled = portable.double(portable.project(p));
         assert_matches(
-            doubled.to_projective().to_extended(),
+            portable.to_extended(doubled),
+            p.double(),
+            "double to extended",
+        );
+        assert_matches(
+            portable.to_projective(doubled).to_extended(),
             p.double(),
             "double to projective",
         );
-        assert_matches(
-            p.to_projective().mul_by_cofactor().to_extended(),
-            p.mul_by_cofactor(),
-            "cofactor",
-        );
-        assert_eq!(
-            p.to_projective().mul_by_cofactor().is_identity(),
-            p.mul_by_cofactor().is_identity()
-        );
+        let mut cofactored = portable.project(p);
+        for _ in 0..3 {
+            cofactored = portable.to_projective(portable.double(cofactored));
+        }
+        assert_matches(cofactored.to_extended(), p.mul_by_cofactor(), "cofactor");
+        assert_eq!(cofactored.is_identity(), p.mul_by_cofactor().is_identity());
 
         let sum = p.add(q);
         let difference = p.add(q.negate());
         for (actual, expected, property) in [
-            (p.add_projective_niels(q.to_projective_niels()), sum, "sum"),
+            (portable.add_cached(p, portable.cache(q), false), sum, "sum"),
             (
-                p.add_projective_niels(q.to_projective_niels().negate()),
+                portable.add_cached(p, portable.cache(q), true),
                 difference,
                 "difference",
             ),
-            (p.add_niels_completed(niels(q)), sum, "Niels sum"),
+            (portable.add_niels(p, &niels(q), false), sum, "Niels sum"),
             (
-                p.add_niels_completed(niels(q).negate()),
+                portable.add_niels(p, &niels(q), true),
                 difference,
                 "Niels difference",
             ),
         ] {
-            assert_matches(actual.to_extended(), expected, property);
-            assert_matches(actual.to_projective().to_extended(), expected, property);
+            assert_matches(portable.to_extended(actual), expected, property);
+            assert_matches(
+                portable.to_projective(actual).to_extended(),
+                expected,
+                property,
+            );
         }
     }
 
@@ -1009,12 +1018,12 @@ impl WithBackend for PointMatches {
         let check = |actual: B::Completed, expected: GCompleted, property: &str| {
             assert_g_same(
                 backend.store(backend.to_extended(actual)),
-                expected.to_extended(),
+                portable.to_extended(expected),
                 property,
             );
             assert_projective_same(
                 backend.store_projective(backend.to_projective(actual)),
-                expected.to_projective(),
+                portable.to_projective(expected),
                 property,
             );
         };
@@ -1373,7 +1382,11 @@ fn bucket_fill_matches_scalar_sum_for_every_geometry() {
                                 point.x = point.x.neg();
                                 point.t2d = point.t2d.neg();
                             }
-                            current[lane].add_mixed(point)
+                            msm::Lanes::add_mixed(
+                                super::portable::Backend::new(),
+                                current[lane],
+                                point,
+                            )
                         })
                     },
                     buckets.as_flattened_mut(),

@@ -296,8 +296,9 @@ impl Backend {
         self.carry(out)
     }
 
-    /// [`G::add_projective_niels`] up to its final products: `A, B, C, D` from one multiplication
-    /// of `[Y1 - X1, Y1 + X1, T1, Z1]` by `[Y2 - X2, Y2 + X2, 2d*T2, 2*Z2]`, then `E = B - A`,
+    /// [`Backend::add_cached`](crate::curve::Backend::add_cached) up to its final products:
+    /// `A, B, C, D` from one multiplication of `[Y1 - X1, Y1 + X1, T1, Z1]` by
+    /// `[Y2 - X2, Y2 + X2, 2d*T2, 2*Z2]`, then `E = B - A`,
     /// `H = B + A`, `F = D - C`, and `G = D + C`, rearranged as the final operands.
     #[inline(always)]
     fn add_operands(self, p: &Rows, q: &Rows) -> CompletedPoint {
@@ -325,7 +326,7 @@ impl Backend {
         CompletedPoint(left, right)
     }
 
-    /// [`GProjective::double`] up to its final products.
+    /// [`G::double`] up to its final products.
     ///
     /// One multiplication squares `[X, Y, Z, X + Y]` to `[A, B, Z^2, K]`. The operands then hold
     /// `E' = A + B - K`, `F' = A - B + 2Z^2`, `G' = A - B`, and `H' = A + B`, which are

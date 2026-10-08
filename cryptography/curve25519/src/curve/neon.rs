@@ -923,7 +923,11 @@ fn mixed_pair_matches_scalar() {
                             point.x = point.x.neg();
                             point.t2d = point.t2d.neg();
                         }
-                        let expected = current[lane].add_mixed(point);
+                        let expected = msm::Lanes::add_mixed(
+                            crate::curve::portable::Backend::new(),
+                            current[lane],
+                            point,
+                        );
                         for (actual, expected) in [
                             (actual[lane].x, expected.x),
                             (actual[lane].y, expected.y),
