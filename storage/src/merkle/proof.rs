@@ -877,10 +877,7 @@ impl<F: Family> RangePlan<F> {
 /// The plan of a proof of one element: a [RangePlan] over `location..location + 1`, which is what
 /// a proof of a single element reads.
 #[derive(Debug)]
-pub struct ElementPlan<F: Family> {
-    location: Location<F>,
-    range: RangePlan<F>,
-}
+pub struct ElementPlan<F: Family>(RangePlan<F>);
 
 impl<F: Family> ElementPlan<F> {
     /// Plan a proof of the element at `location` in a structure of `leaves` leaves.
@@ -894,28 +891,25 @@ impl<F: Family> ElementPlan<F> {
         let end = location
             .checked_add(1)
             .ok_or(super::Error::LocationOverflow(location))?;
-        Ok(Self {
-            location,
-            range: RangePlan::new(leaves, location..end)?,
-        })
+        Ok(Self(RangePlan::new(leaves, location..end)?))
     }
 
     /// The proven element's location.
     pub const fn location(&self) -> Location<F> {
-        self.location
+        self.0.range.start
     }
 
     /// Every position the proof reads, in strictly increasing order, as a batched storage read
     /// requires.
     pub fn positions(&self) -> Vec<Position<F>> {
-        self.range.positions()
+        self.0.positions()
     }
 }
 
 /// The same plan as a range plan over `location..location + 1`.
 impl<F: Family> From<ElementPlan<F>> for RangePlan<F> {
     fn from(plan: ElementPlan<F>) -> Self {
-        plan.range
+        plan.0
     }
 }
 
@@ -988,29 +982,23 @@ impl<F: Family> Blueprint<F> {
         // Peaks before the range fold into one prefix accumulator when they are inactive or the
         // bagging is forward. Under backward bagging the active ones are folded only after the
         // overlapping peaks, so they cannot be combined ahead of time and stay individual.
-        let mut fold_prefix = Vec::new();
-        let mut prefix_active_peaks = Vec::new();
-        for (index, peak) in before.into_iter().enumerate() {
-            if index < inactive_peaks || bagging == Bagging::ForwardFold {
-                fold_prefix.push(peak);
-            } else {
-                prefix_active_peaks.push(peak);
-            }
-        }
+        let first_after = before.len() + overlapping.len();
+        let fold_count = match bagging {
+            Bagging::ForwardFold => before.len(),
+            Bagging::BackwardFold => inactive_peaks.min(before.len()),
+        };
+        let mut fold_prefix = before;
+        let prefix_active_peaks = fold_prefix.split_off(fold_count);
 
         // Backward bagging starts its fold at the newest peak, so the active peaks after the
         // range collapse into one suffix accumulator. The inactive boundary indexes the global
         // peak order, so the after-peaks continue the count past the prefix and overlapping peaks.
-        let first_after = fold_prefix.len() + prefix_active_peaks.len() + overlapping.len();
-        let mut after_peaks = Vec::new();
-        let mut suffix_peaks = Vec::new();
-        for (offset, pos) in after.into_iter().enumerate() {
-            if bagging == Bagging::BackwardFold && first_after + offset >= inactive_peaks {
-                suffix_peaks.push(pos);
-            } else {
-                after_peaks.push(pos);
-            }
-        }
+        let individual_count = match bagging {
+            Bagging::ForwardFold => after.len(),
+            Bagging::BackwardFold => inactive_peaks.saturating_sub(first_after).min(after.len()),
+        };
+        let mut after_peaks = after;
+        let suffix_peaks = after_peaks.split_off(individual_count);
 
         // Layout order of the fetched digests; `sibling_start` and `split_proof_digests` rely on
         // it.
