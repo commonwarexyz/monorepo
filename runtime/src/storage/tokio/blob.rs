@@ -18,6 +18,8 @@ use commonware_utils::{
 use std::os::fd::AsFd as _;
 #[cfg(not(target_os = "linux"))]
 use std::os::fd::AsRawFd as _;
+#[cfg(all(test, target_os = "linux"))]
+use std::sync::atomic::AtomicU64;
 #[cfg(test)]
 use std::sync::mpsc;
 use std::{
@@ -112,6 +114,9 @@ struct Hooks {
     after_sync: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
     /// Pause the next start_sync worker after publishing its completion.
     after_start_sync: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
+    /// Number of reads served through the `O_DIRECT` descriptor.
+    #[cfg(target_os = "linux")]
+    direct_reads: AtomicU64,
 }
 
 #[cfg(test)]
@@ -303,6 +308,13 @@ impl Blob {
         self.shared.tracker.skipped()
     }
 
+    /// Number of reads served through the `O_DIRECT` descriptor, so a test can tell a direct read
+    /// from one that fell back to buffered I/O.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn direct_reads(&self) -> u64 {
+        self.shared.test.direct_reads.load(Ordering::Relaxed)
+    }
+
     /// Whether a read of `len` bytes at file offset `offset` with `options` can bypass the page
     /// cache with direct I/O, given an aligned buffer.
     #[allow(clippy::missing_const_for_fn)]
@@ -399,6 +411,8 @@ impl Blob {
                 break;
             }
         }
+        #[cfg(test)]
+        file.test.direct_reads.fetch_add(1, Ordering::Relaxed);
         Ok(true)
     }
 
@@ -804,6 +818,46 @@ mod tests {
             Storage::new(Config::new(directory.clone(), layouts), pool),
             directory,
         )
+    }
+
+    /// An `O_DIRECT` read must see the latest buffered write even when nothing was synced. The
+    /// direct descriptor is a separate open file description, but dirty pages belong to the inode,
+    /// and Linux flushes them before a direct read (`kiocb_write_and_wait` in `__iomap_dio_rw`).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_direct_read_sees_latest_unsynced_write() {
+        let (storage, directory) =
+            storage_for_reopen_test("direct_read_unsynced_write", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+
+        // The V1 header's data offset is one alignment unit, so offset 0 and this length are both
+        // direct-eligible.
+        const LEN: usize = DIRECT_ALIGNMENT;
+        let pattern_a = vec![0xAAu8; LEN];
+        let pattern_b = vec![0xBBu8; LEN];
+
+        blob.write_at(0, pattern_a, WriteOptions::default())
+            .await
+            .unwrap();
+        // Overwrite with no sync between the writes and the read.
+        blob.write_at(0, pattern_b.clone(), WriteOptions::default())
+            .await
+            .unwrap();
+
+        let before = blob.direct_reads();
+        let read = blob.read_at(0, LEN, ReadOptions::DONT_CACHE).await.unwrap();
+        assert_eq!(
+            read.coalesce().as_ref(),
+            pattern_b.as_slice(),
+            "direct read did not see the latest unsynced write"
+        );
+        assert!(
+            blob.direct_reads() > before,
+            "read did not take the O_DIRECT path"
+        );
+
+        drop(blob);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[tokio::test]
