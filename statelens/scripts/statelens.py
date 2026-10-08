@@ -23,6 +23,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -36,6 +37,10 @@ SL = Path("statelens")
 AGENTS = ("claude", "codex")
 KINDS = ("issue", "design", "comment", "spec", "paper", "kb")
 SOURCE_KINDS = ("human",) + KINDS
+# SPEC section 18.4: target states are also extracted from tests and plain text, and a
+# card may name either as its source_kind (section 18.3, lint rule 5).
+STATE_KINDS = KINDS + ("test", "text")
+CARD_SOURCE_KINDS = SOURCE_KINDS + ("test", "text")
 # SPEC section 4.2: the registries and the scope values each of them allows.
 SUBSYSTEMS = ("simplex", "marshal", "qmdb")
 SCOPES = {
@@ -70,14 +75,28 @@ SOURCES = {
 ALL_SCOPES = tuple(dict.fromkeys(scope for name in SUBSYSTEMS for scope in SCOPES[name]))
 REQUIRED_KEYS = ("id", "title", "source_kind", "source_ref", "scope")
 REQUIRED_SECTIONS = ("Statement", "Rationale", "Evidence")
+CARD_SECTIONS = REQUIRED_SECTIONS + ("History", "Knobs")
 # Invariants derived from the knowledge base live in a local registry that git ignores,
 # because nothing derived from a finding may reach a commit (R-KB-6); campaigns bind
 # both, and IDs are unique across both.
 LOCAL_INVARIANTS = "invariants.local"
+# Target-state cards (SPEC section 18.3): a registry of their own, for the consensus
+# subsystems only, with a local part for sources that are not public (section 18.4).
+LOCAL_STATES = "target-states.local"
+STATE_SUBSYSTEMS = ("simplex", "marshal")
 FILE_NAMES = {
     "invariants": re.compile(r"^INV-\d{4,}\.md$"),
     LOCAL_INVARIANTS: re.compile(r"^INV-\d{4,}\.md$"),
     "false-invariants": re.compile(r"^FALSE-\d{4,}\.md$"),
+    "target-states": re.compile(r"^TS-\d{4,}\.md$"),
+    LOCAL_STATES: re.compile(r"^TS-\d{4,}\.md$"),
+}
+CARD_TREES = ("target-states", LOCAL_STATES)
+# SPEC section 4.1: one global counter per ID prefix, over the trees that use it.
+ID_TREES = {
+    "INV": ("invariants", LOCAL_INVARIANTS),
+    "FALSE": ("false-invariants",),
+    "TS": CARD_TREES,
 }
 
 FINDING_STATES = ("valid", "tested", "triaged", "intake", "invalid")
@@ -353,6 +372,46 @@ BIN_KEYS = ("test", "doc", "bench", "required-features")
 # The line of the runtime template where its consensus-only tests start; they run to the
 # end of the file, and a profile outside the consensus crate drops them (edit Q1).
 RUNTIME_CONSENSUS_ONLY = "// [statelens] consensus only:"
+# SPEC section 9.6: the read side of the runtime module. Scaffolds call it; instrumentation
+# never does (section 7.5), and synthesis adds no call of it under the editable roots
+# (guard 3 of section 18.6.1).
+READ_SIDE = (
+    "watch",
+    "unwatch",
+    "tick",
+    "mark",
+    "current_run",
+    "truncated",
+    "seen",
+    "sites",
+    "observations",
+    "note",
+)
+RUNTIME_ALIAS = re.compile(
+    r"\bstatelens\s+as\s+([A-Za-z_][A-Za-z0-9_]*)"
+    r"|\bstatelens\s*::\s*\{[^}]*?\bself\s+as\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
+
+# SPEC section 5.5: where synthesis declares `target_states` in the fuzz package's crate
+# root, as an anchored edit (file, anchor, "after", text) (section 18.6.2).
+SIMPLEX_SCAFFOLD = (
+    "consensus/fuzz/simplex/src/lib.rs",
+    "pub mod state_cov;",
+    "after",
+    "pub mod target_states;",
+)
+MARSHAL_SCAFFOLD = (
+    "consensus/fuzz/marshal/src/lib.rs",
+    "pub mod scenarios;",
+    "after",
+    '#[cfg(feature = "mocks")]\npub mod target_states;',
+)
+# A scaffold's thin target, `<base>_tsNNNN_statelens` (SPEC section 18.7).
+SCAFFOLD_NAME = re.compile(r"^(?P<base>[a-z][a-z0-9_]*)_ts(?P<number>\d{4,})_statelens$")
+# The unit of synthesis is the pair (card, base): its key, `TS-NNNN_<base>`, names its
+# reach outputs and records, and its module is `tsNNNN_<base>` (SPEC section 18.6.2).
+PAIR_KEY = re.compile(r"^(?P<card>TS-\d{4,})_(?P<base>[a-z][a-z0-9_]*)$")
+MODULE_NAME = re.compile(r"^ts(?P<number>\d{4,})_(?P<base>[a-z][a-z0-9_]*)$")
 
 # SPEC section 5.5. Each profile names the registries it binds and the crate it
 # instruments: where the runtime module goes (`runtime`), the module that declares it
@@ -360,6 +419,8 @@ RUNTIME_CONSENSUS_ONLY = "// [statelens] consensus only:"
 # the fuzz package whose targets it derives variants from, its anchored edits and its
 # tests. `component_filter` selects the tests that run after the gate and are reported,
 # not gated, or is None. `replay_env` goes before NIGHTLY_VERSION in the replay command.
+# `scaffold` is the declaration of `target_states` that synthesis inserts, or None for a
+# profile Target-State Synthesis refuses.
 PROFILES = {
     "simplex": {
         "registries": ("simplex",),
@@ -378,6 +439,7 @@ PROFILES = {
         "test_filter": SIMPLEX_TEST_FILTER,
         "component_filter": COMPONENT_TEST_FILTER,
         "replay_env": "CONSENSUS_FUZZ_LOG=1",
+        "scaffold": SIMPLEX_SCAFFOLD,
     },
     "marshal": {
         "registries": ("simplex", "marshal"),
@@ -403,6 +465,7 @@ PROFILES = {
         "test_filter": SIMPLEX_TEST_FILTER + " | test(/^marshal::/)",
         "component_filter": COMPONENT_TEST_FILTER,
         "replay_env": "",
+        "scaffold": MARSHAL_SCAFFOLD,
     },
     "qmdb": {
         "registries": ("qmdb",),
@@ -424,6 +487,7 @@ PROFILES = {
         "test_filter": "test(/^qmdb::/)",
         "component_filter": None,
         "replay_env": "",
+        "scaffold": None,
     },
 }
 
@@ -616,18 +680,31 @@ def cargo(toolchain):
     return ["cargo"] + ([f"+{toolchain}"] if toolchain else [])
 
 
+# The rendering nextest_run parses, forced by flags, which override what the environment
+# and nextest's user config set (NEXTEST_STATUS_LEVEL, CARGO_TERM_COLOR and the like). A
+# passing test's output is never shown, and a failing test's comes before the summary.
+NEXTEST_RENDERING = (
+    "--color",
+    "never",
+    "--message-format",
+    "human",
+    "--status-level",
+    "pass",
+    "--final-status-level",
+    "fail",
+    "--success-output",
+    "never",
+    "--failure-output",
+    "immediate",
+)
+
+
 def nextest_command(toolchain, crate, expression):
-    return cargo(toolchain) + [
-        "nextest",
-        "run",
-        "-p",
-        f"commonware-{crate}",
-        "--lib",
-        "--no-fail-fast",
-        "--ignore-default-filter",
-        "-E",
-        expression,
-    ]
+    return (
+        cargo(toolchain)
+        + ["nextest", "run", "-p", f"commonware-{crate}", "--lib", "--no-fail-fast"]
+        + ["--ignore-default-filter", *NEXTEST_RENDERING, "-E", expression]
+    )
 
 
 def gate_test_command(toolchain, profile):
@@ -654,6 +731,65 @@ def failed_tests(lines):
             if name not in names:
                 names.append(name)
     return names
+
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+# A test's status line: a retry prefixes `TRY <n>`, a counter `(<i>/<n>)` may follow the
+# duration, and the test's name is the last word.
+NEXTEST_STATUS = re.compile(r"^\s*(?:TRY \d+ )?([A-Z][A-Z0-9 +-]*?) \[[^\]]*\] .*?(\S+)\s*$")
+NEXTEST_PASSING = ("PASS", "LEAK")
+NEXTEST_FAILING = re.compile(r"FAIL|FAIL \+ LEAK|LEAK-FAIL|XFAIL|TIMEOUT|ABORT|SIG[A-Z0-9]+")
+NEXTEST_SUMMARY = re.compile(r"^\s*Summary \[[^\]]*\] (?:(\d+)/)?(\d+) tests? run: (.*)$")
+NEXTEST_COUNT = re.compile(r"(\d+) (passed|exec failed|failed|timed out)")
+
+
+def nextest_run(text, code):
+    """The tests one run of the test gate passed and failed, from its log, checked against
+    nextest's own summary line (SPEC section 18.6.1, guard 5).
+
+    Returns ({"passed": set, "failed": set}, None), or (None, problem) when the log cannot be
+    trusted: no single summary line, as after a build failure; a run that stopped early or
+    ran no test; status lines the summary's counts do not match; or an exit code the failures
+    do not explain. `code` None stands for a nonzero exit code that was not recorded. The
+    failed tests are the ones nextest lists after its summary, where no test output reaches.
+    """
+    lines = [ANSI_ESCAPE.sub("", line) for line in text.splitlines()]
+    found = [index for index, line in enumerate(lines) if NEXTEST_SUMMARY.match(line)]
+    if len(found) != 1:
+        return None, "no nextest summary line" if not found else "more than one summary line"
+    at = found[0]
+    finished, total, tail = NEXTEST_SUMMARY.match(lines[at]).groups()
+    if finished is not None and finished != total:
+        return None, f"the run stopped after {finished} of {total} tests"
+    if int(total) == 0:
+        return None, "the run ran no test"
+    counts = collections.Counter()
+    for number, kind in NEXTEST_COUNT.findall(tail):
+        counts[kind] += int(number)
+    failures = counts["failed"] + counts["exec failed"] + counts["timed out"]
+    if counts["passed"] + failures != int(total):
+        return None, f"the summary does not add up: {lines[at].strip()}"
+    last = {}
+    for line in lines[:at]:
+        match = NEXTEST_STATUS.match(line)
+        if match:
+            last[match.group(2)] = match.group(1)
+    failed = set()
+    for line in lines[at + 1 :]:
+        match = NEXTEST_STATUS.match(line)
+        if match and NEXTEST_FAILING.fullmatch(match.group(1)):
+            failed.add(match.group(2))
+    passed = {name for name, status in last.items() if status in NEXTEST_PASSING} - failed
+    if (len(passed), len(failed)) != (counts["passed"], failures):
+        return None, (
+            f"{len(passed)} passed and {len(failed)} failed by the status lines, "
+            f"{counts['passed']} and {failures} by the summary"
+        )
+    if code == 0 and failed:
+        return None, f"exit code 0 with {len(failed)} failed test(s)"
+    if code != 0 and not failed:
+        return None, f"exit code {code if code is not None else 'nonzero'} with no failed test"
+    return {"passed": passed, "failed": failed}, None
 
 
 def agent_name(config, flag):
@@ -725,28 +861,52 @@ def agent_command(config, agent, phase, repo):
     return command + ["-"]
 
 
-def run_logged(command, log_path, cwd, stdin_text=None, echo=True):
+def run_logged(command, log_path, cwd, stdin_text=None, echo=True, timeout=None, env=None):
     """Runs a command, copying its output to the console and to `log_path`.
 
     With `echo` false the output goes to the log only, for a tool whose own
-    logging is noise to an operator. Returns the exit code and the last
-    `ERROR_LINES` lines of output.
+    logging is noise to an operator. The command runs in its own process group.
+    With `timeout`, a command still running after that many seconds is killed
+    with everything it started, whether or not its own process still runs, and
+    its code is None (SPEC section 18.8). An interrupt, or any other exception
+    while it runs, kills it the same way before it propagates, so what the
+    caller does next never races it. `env` replaces the environment. Returns the
+    exit code and the last `ERROR_LINES` lines of output.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     tail = collections.deque(maxlen=ERROR_LINES)
+    killed = threading.Event()
     with open(log_path, "w", encoding="utf-8") as log:
         log.write("$ " + shlex.join(command) + "\n")
         log.flush()
         process = subprocess.Popen(
             command,
             cwd=cwd,
+            env=env,
             stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
+            # Its own process group, so a kill reaches what it started, which would
+            # otherwise hold the output pipe open or write after an interrupt restored
+            # the tree. The terminal's interrupt then reaches the script alone.
+            start_new_session=True,
         )
+
+        def kill():
+            # The whole group, whether or not the command's own process still runs: a
+            # process it started may outlive it holding the output pipe.
+            killed.set()
+            with contextlib.suppress(OSError):
+                os.killpg(process.pid, signal.SIGKILL)
+
+        timer = None
+        if timeout is not None:
+            timer = threading.Timer(timeout, kill)
+            timer.daemon = True
+            timer.start()
         if stdin_text is not None:
 
             def feed():
@@ -761,14 +921,27 @@ def run_logged(command, log_path, cwd, stdin_text=None, echo=True):
                         pass
 
             threading.Thread(target=feed, daemon=True).start()
-        for line in process.stdout:
-            if echo:
-                sys.stdout.write(line)
-                sys.stdout.flush()
-            log.write(line)
-            tail.append(line.rstrip("\n"))
-        process.stdout.close()
-        code = process.wait()
+        try:
+            for line in process.stdout:
+                if echo:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                log.write(line)
+                tail.append(line.rstrip("\n"))
+            process.stdout.close()
+            code = process.wait()
+        except BaseException:
+            # The interrupt did not reach the command in its own group: kill it, with
+            # everything it started, and reap it before the caller restores anything.
+            kill()
+            process.wait()
+            raise
+        finally:
+            if timer is not None:
+                timer.cancel()
+        if killed.is_set():
+            code = None
+            log.write(f"statelens: killed after {timeout} s\n")
     return code, list(tail)
 
 
@@ -834,23 +1007,33 @@ def registry_files(sl_dir):
 
 
 def lint_file(path):
-    """Checks one invariant file against SPEC section 4.6, rules 1 to 8 and 10."""
+    """Checks one registry file against SPEC section 4.6, rules 1 to 8 and 10 to 13.
+
+    A target-state card (section 18.3) is a file of a card tree or, misplaced, one named
+    `TS-*`; rules 12 and 13 apply to cards only.
+    """
     problems = []
     parent = path.resolve().parent
     registry = parent.name if parent.name in SUBSYSTEMS else None
+    card = parent.parent.name in CARD_TREES or path.name.startswith("TS-")
     if parent.name in FILE_NAMES:
+        allowed = STATE_SUBSYSTEMS if parent.name in CARD_TREES else SUBSYSTEMS
         problems.append(
             f"lies directly in {parent.name}/; move it to {parent.name}/<subsystem>/, "
-            f"where <subsystem> is one of: {', '.join(SUBSYSTEMS)}"
+            f"where <subsystem> is one of: {', '.join(allowed)}"
         )
     else:
         pattern = FILE_NAMES.get(parent.parent.name)
-        if registry is None or pattern is None or not pattern.match(path.name):
+        known = STATE_SUBSYSTEMS if parent.parent.name in CARD_TREES else SUBSYSTEMS
+        if registry not in known or pattern is None or not pattern.match(path.name):
             problems.append(
                 "file name must be INV-NNNN.md in invariants/<subsystem>/ or "
                 f"{LOCAL_INVARIANTS}/<subsystem>/, or FALSE-NNNN.md in "
                 "false-invariants/<subsystem>/, where <subsystem> is one of: "
                 + ", ".join(SUBSYSTEMS)
+                + f"; or TS-NNNN.md in target-states/<subsystem>/ or {LOCAL_STATES}/"
+                "<subsystem>/, where <subsystem> is one of: "
+                + ", ".join(STATE_SUBSYSTEMS)
             )
     data = path.read_bytes()
     try:
@@ -882,8 +1065,9 @@ def lint_file(path):
     if front.get("id") and front["id"] != path.stem:
         problems.append(f"id {front['id']} does not match the file name")
     kind = front.get("source_kind")
-    if kind and kind not in SOURCE_KINDS:
-        problems.append(f"source_kind must be one of: {', '.join(SOURCE_KINDS)}")
+    kinds = CARD_SOURCE_KINDS if card else SOURCE_KINDS
+    if kind and kind not in kinds:
+        problems.append(f"source_kind must be one of: {', '.join(kinds)}")
     scope = front.get("scope")
     if scope:
         allowed = SCOPES[registry] if registry else ALL_SCOPES
@@ -903,7 +1087,8 @@ def lint_file(path):
         elif current is not None:
             sections[current].append(line)
     positions = []
-    for name in REQUIRED_SECTIONS:
+    required = CARD_SECTIONS if card else REQUIRED_SECTIONS
+    for name in required:
         if name not in sections:
             problems.append(f"missing section: ## {name}")
         elif not any(line.strip() for line in sections[name]):
@@ -911,7 +1096,16 @@ def lint_file(path):
         else:
             positions.append(order.index(name))
     if positions != sorted(positions):
-        problems.append("sections Statement, Rationale and Evidence must be in this order")
+        problems.append(
+            f"sections {', '.join(required[:-1])} and {required[-1]} must be in this order"
+        )
+    if card:
+        events = None
+        if any(line.strip() for line in sections.get("History", ())):
+            events, found = history_problems(sections["History"])
+            problems += found
+        if any(line.strip() for line in sections.get("Knobs", ())):
+            problems += knobs_problems(sections["Knobs"], events)
     repo = git_toplevel(path.resolve().parent)
     body, excerpts = split_excerpts(text)
     problems += line_reference_problems(body, repo)
@@ -922,6 +1116,237 @@ def lint_file(path):
                 f"citations; regenerate it with `just excerpts {path.name}` (rule 11)"
             )
     return problems
+
+
+# Rules 12 and 13 (SPEC section 18.3): the History and Knobs of a target-state card.
+HISTORY_EVENT = re.compile(r"^E(\d+)\.(?:\s+(.*))?$")
+HISTORY_ACTOR = re.compile(r"^([A-Za-z][A-Za-z0-9]*):")
+HISTORY_ENTITIES = re.compile(r"^(Check|Holds) \(([^)]*)\)")
+HISTORY_ENTITY = re.compile(r"^([A-Za-z][A-Za-z0-9]*)(?: as E(\d+))?$")
+HISTORY_ORDER = re.compile(r"^E(\d+) and E(\d+) in either order\.?$")
+EVENT_NAME = re.compile(r"\bE(\d+)\b")
+KNOB_HEADER = ["Knob", "Event", "Domain", "Source value"]
+KNOB_LIMIT = 16
+
+
+def history_problems(lines):
+    """Rule 12: the History's events, their Check and Holds lines, and the Order line.
+
+    Returns (the number of events, problems).
+    """
+    events, _, problems = history_parse(lines)
+    return len(events), problems
+
+
+# A History event (SPEC section 18.3): its actor, `harness` or a replica's name, and the
+# entities of its Check or Holds line as (name, k of `as Ek` or None).
+HistoryEvent = collections.namedtuple("HistoryEvent", "actor entities")
+# A card's History: its ID, its events E1 to En, and the pairs `Order:` frees, as
+# frozensets of two event numbers.
+History = collections.namedtuple("History", "id events free")
+
+
+def history_parse(lines):
+    """Parses a card's History and checks rule 12: (events, free pairs, problems).
+
+    An event is `E<k>. <actor>: ...` at the start of a line; an indented line starting
+    with `Check` or `Holds` belongs to the event above it, and any other indented line
+    continues the line above it. Each event is a HistoryEvent; `free` holds the pairs of
+    the Order: line.
+    """
+    problems = []
+    events = []
+    order = None
+    last = None
+    for raw in lines:
+        text = raw.strip()
+        if not text:
+            continue
+        if raw[0] in " \t":
+            if text.startswith(("Check", "Holds")):
+                word = text[:5]
+                if order is not None:
+                    problems.append(f"a {word} line follows the Order: line, which must be last")
+                elif not events:
+                    problems.append(f"a {word} line comes before E1.")
+                else:
+                    match = HISTORY_ENTITIES.match(text)
+                    if not match:
+                        problems.append(
+                            f"E{len(events)}'s {word} line does not start with the entities it "
+                            f"binds in parentheses, as in `{word} (R, v as E1): ...`"
+                        )
+                    events[-1]["lines"].append((word, match.group(2) if match else None))
+                last = "line"
+            elif text.startswith("Order:"):
+                problems.append("the Order: line starts at the beginning of a line, not indented")
+            elif last is None:
+                problems.append(f"the indented line `{text[:40]}` comes before E1.")
+            elif last == "order":
+                order += " " + text
+            continue
+        if raw.startswith("Order:"):
+            if order is not None:
+                problems.append("the History has more than one Order: line")
+            order = raw[len("Order:"):].strip()
+            last = "order"
+            continue
+        match = HISTORY_EVENT.match(raw.rstrip())
+        if not match:
+            problems.append(
+                f"`{text[:40]}` is neither an event `E<k>. <actor>: ...`, an indented Check, "
+                "Holds or continuation line, nor the Order: line"
+            )
+            continue
+        number, expected = int(match.group(1)), len(events) + 1
+        if order is not None:
+            problems.append(f"E{number}. follows the Order: line, which must be last")
+        if number != expected:
+            problems.append(
+                f"E{number}. where E{expected}. comes next: events are numbered E1. to En. "
+                "without a gap"
+            )
+        actor = HISTORY_ACTOR.match(match.group(2) or "")
+        if not actor:
+            problems.append(
+                f"E{expected}. does not start with its actor and a colon: `harness:` or the "
+                "name of the honest replica that acts"
+            )
+        events.append({"actor": actor.group(1) if actor else None, "lines": []})
+        last = "event"
+    if not events:
+        problems.append("the History has no event; number them from E1.")
+    names = []
+    parsed = []
+    for index, event in enumerate(events, 1):
+        word = "Holds" if index == len(events) else "Check"
+        found = [kind for kind, _ in event["lines"]]
+        if found != [word]:
+            problems.append(
+                f"E{index}. needs exactly one indented {word} line, and has: "
+                + (", ".join(found) or "none")
+            )
+        own = set()
+        listed = []
+        for kind, entities in event["lines"]:
+            if entities is None:
+                continue
+            if not entities.strip():
+                problems.append(f"E{index}.'s {kind} line has an empty entity list")
+                continue
+            for item in (part.strip() for part in entities.split(",")):
+                entity = HISTORY_ENTITY.match(item)
+                if not entity:
+                    problems.append(
+                        f"E{index}.'s {kind} line lists `{item}`; an entity is a name, "
+                        "optionally followed by ` as E<k>`"
+                    )
+                    continue
+                name, earlier = entity.group(1), entity.group(2)
+                own.add(name)
+                listed.append((name, int(earlier) if earlier else None))
+                if earlier is None:
+                    continue
+                earlier = int(earlier)
+                if not 1 <= earlier < index:
+                    problems.append(f"E{index}.: `{item}` names E{earlier}, not an earlier event")
+                elif name not in names[earlier - 1]:
+                    problems.append(
+                        f"E{index}.: `{item}`, but E{earlier}.'s entity list does not hold {name}"
+                    )
+        names.append(own)
+        actor = event["actor"]
+        if actor and actor != "harness" and event["lines"] and actor not in own:
+            problems.append(
+                f"E{index}.'s actor {actor} is neither harness nor a name in its own entity list"
+            )
+        if actor and actor != "harness" and not actor[0].isupper():
+            problems.append(
+                f"E{index}.'s actor {actor} is a replica, whose name starts with a capital "
+                "letter: the reach check tells replicas apart by it"
+            )
+        parsed.append(HistoryEvent(actor, tuple(listed)))
+    free = set()
+    if order is not None:
+        for part in (part.strip() for part in order.split(";")):
+            pair = HISTORY_ORDER.match(part)
+            if not pair:
+                problems.append(f"Order: `{part}` is not `Ei and Ej in either order`")
+                continue
+            for number in (int(pair.group(1)), int(pair.group(2))):
+                if not 1 <= number <= len(events):
+                    problems.append(f"Order: names E{number}, which the History does not define")
+            free.add(frozenset((int(pair.group(1)), int(pair.group(2)))))
+    return parsed, free, [f"{problem} (rule 12)" for problem in problems]
+
+
+def card_history(text):
+    """The History of a card's text (SPEC section 18.3), with its ID. A card whose History
+    breaks rule 12 is a usage error; synthesis lints its cards first."""
+    values, end = front_matter(text)
+    card = (values or {}).get("id", "")
+    body = text.split("\n")[end + 1 :] if end is not None else text.split("\n")
+    lines, inside = [], False
+    for line in body:
+        if line.startswith("## "):
+            inside = line[3:].strip() == "History"
+        elif inside:
+            lines.append(line)
+    events, free, problems = history_parse(lines)
+    if not re.fullmatch(r"TS-\d{4,}", card) or problems:
+        raise Abort(1, f"card {card or '?'}: " + "; ".join(problems or ["no TS- id"]))
+    return History(card, events, free)
+
+
+def table_cells(line):
+    """The stripped cells of a Markdown table row, or None when `line` is not one."""
+    text = line.strip()
+    if len(text) < 2 or not (text.startswith("|") and text.endswith("|")):
+        return None
+    return [cell.strip() for cell in text[1:-1].split("|")]
+
+
+def knobs_problems(lines, events):
+    """Rule 13: `None.`, or the knob table: its header, 1 to 16 rows with no empty cell,
+    and Event cells that name only events of the History, which has `events` of them."""
+    rows = [line.strip() for line in lines if line.strip()]
+    if rows == ["None."]:
+        return []
+    if table_cells(rows[0]) != KNOB_HEADER:
+        return [
+            "Knobs must be the line `None.` or a table with the header "
+            "`| Knob | Event | Domain | Source value |` (rule 13)"
+        ]
+    problems = []
+    separator = table_cells(rows[1]) if len(rows) > 1 else None
+    if separator and len(separator) == 4 and all(re.fullmatch(r":?-+:?", c) for c in separator):
+        body = rows[2:]
+    else:
+        problems.append("the Knobs table needs the line `|---|---|---|---|` under its header")
+        body = rows[1:]
+    if not 1 <= len(body) <= KNOB_LIMIT:
+        problems.append(
+            f"the Knobs table has {len(body)} row(s); it takes 1 to {KNOB_LIMIT}, one byte each"
+        )
+    for row in body:
+        cells = table_cells(row)
+        if cells is None or len(cells) != 4:
+            problems.append(f"Knobs row `{row[:40]}` does not have the four cells of the header")
+            continue
+        if not all(cells):
+            problems.append(f"Knobs row `{row[:40]}` has an empty cell")
+        if not events or not cells[1]:
+            continue
+        named = [int(number) for number in EVENT_NAME.findall(cells[1])]
+        if not named:
+            problems.append(f"knob {cells[0]}: the Event cell `{cells[1]}` names no event")
+        for number in named:
+            if not 1 <= number <= events:
+                problems.append(
+                    f"knob {cells[0]}: the Event cell names E{number}, which the History "
+                    "does not define"
+                )
+    return [f"{problem} (rule 13)" for problem in problems]
 
 
 # Rule 10 (SPEC section 4.6). A line number means something only at one commit, so it
@@ -1166,14 +1591,15 @@ def cmd_lint(args):
     return 3 if count else 0
 
 
-def next_invariant_id(sl_dir):
-    """1 + the highest INV number over all registries, local ones included (SPEC 4.1)."""
+def next_id(sl_dir, prefix):
+    """1 + the highest number of `prefix` (INV, FALSE or TS) over every tree that uses it,
+    local ones included (SPEC section 4.1)."""
     paths = []
-    for top in ("invariants", LOCAL_INVARIANTS):
+    for top in ID_TREES[prefix]:
         root = sl_dir / top
-        paths += list(root.glob("INV-*.md")) + list(root.glob("*/INV-*.md"))
+        paths += list(root.glob(f"{prefix}-*.md")) + list(root.glob(f"*/{prefix}-*.md"))
     numbers = [id_number(path) for path in paths]
-    return f"INV-{max(numbers, default=0) + 1:04d}"
+    return f"{prefix}-{max(numbers, default=0) + 1:04d}"
 
 
 def registry_invariants(sl_dir, registry, with_false=False):
@@ -1185,6 +1611,44 @@ def registry_invariants(sl_dir, registry, with_false=False):
         roots.append((sl_dir / "false-invariants" / registry, "FALSE-*.md"))
     paths = [path for root, pattern in roots for path in root.glob(pattern)]
     return sorted(paths, key=lambda path: (path.name.startswith("FALSE-"), id_number(path)))
+
+
+def select_invariants(profile, registries, invariants, selection):
+    """The `(registry, path)` pairs of `invariants` that `--invariants` names, in the
+    order they were collected (SPEC section 7.1). Each item of `selection` is a
+    comma-separated list of `<registry>/INV-NNNN` ids (`FALSE-NNNN` when those are
+    collected); a bare `INV-NNNN` is accepted only when the profile binds one registry.
+    An id of another registry, one no file provides, or a list that names nothing is a
+    setup failure that lists what can be selected."""
+    available = [f"{registry}/{path.stem}" for registry, path in invariants]
+    listing = "available: " + (", ".join(available) or "none")
+    wanted = set()
+    for item in selection:
+        for name in filter(None, (part.strip() for part in item.split(","))):
+            if "/" not in name:
+                if len(registries) != 1:
+                    raise Abort(
+                        2,
+                        f"--invariants: {name} is a bare id, but the {profile} profile binds "
+                        f"{len(registries)} registries ({', '.join(registries)}); write "
+                        f"<registry>/{name}",
+                    )
+                name = f"{registries[0]}/{name}"
+            registry = name.split("/", 1)[0]
+            if registry not in registries:
+                raise Abort(
+                    2,
+                    f"--invariants: the {profile} profile does not bind the {registry} "
+                    f"registry; {listing}",
+                )
+            if name not in available:
+                raise Abort(2, f"--invariants: no invariant file provides {name}; {listing}")
+            wanted.add(name)
+    if not wanted:
+        raise Abort(2, f"--invariants: the list selects no invariant; {listing}")
+    return [
+        (registry, path) for registry, path in invariants if f"{registry}/{path.stem}" in wanted
+    ]
 
 
 def paper_text(repo, sl_dir, source):
@@ -1209,8 +1673,17 @@ def paper_text(repo, sl_dir, source):
     return output
 
 
-def extraction_count(number):
+def extraction_count(number, states=False):
     """The COUNT placeholder: what `--number` asks of the analyst (SPEC section 6.2)."""
+    if states:
+        if number is None:
+            return "Write as many cards as the sources justify; zero is a valid result."
+        return (
+            f"Write {number} card(s): the {number} target states the sources justify best, "
+            f"whose reaching would matter most. If they justify fewer than {number}, write "
+            f"fewer and say why in your reply. Never invent or split a target state to reach "
+            f"{number}."
+        )
     if number is None:
         return "Write as many invariants as the sources justify; zero is a valid result."
     return (
@@ -1220,20 +1693,135 @@ def extraction_count(number):
     )
 
 
-def extraction_destination(kind, registry):
-    """Where Phase 1 writes: the local registry for findings (R-KB-6), else the registry."""
+def extraction_destination(kind, registry, states=False, local=False):
+    """Where Phase 1 writes: the local registry for findings (R-KB-6), else the registry.
+
+    Cards go to the local card registry when `local`, which `private_reason` decides.
+    """
+    if states:
+        return SL / (LOCAL_STATES if local else "target-states") / registry
     return SL / (LOCAL_INVARIANTS if kind == "kb" else "invariants") / registry
 
 
-def kb_extraction_sources(sl_dir, registry, roots):
-    """The SOURCES of a `kb` extraction: every finding in the registry's module scope."""
+def local_path(repo, source):
+    """A source as a path: relative ones from the repository root, `~` expanded."""
+    path = Path(source).expanduser()
+    return path if path.is_absolute() else repo / path
+
+
+def private_reason(repo, kind, sources, local):
+    """Why an extraction's cards go to the local card registry, or None (SPEC 18.4).
+
+    Routing is by disclosure, not location: a finding or a text is not public, nor is a
+    path outside the repository, nor a source the operator marks with --local, such as a
+    private advisory or a private repository. An issue is a URL or `owner/repo#N`.
+    """
+    if local:
+        return "the run was given --local"
+    if kind in ("kb", "text"):
+        return f"a {kind} source is not public"
+    if kind == "issue":
+        return None
+    for source in sources:
+        if "://" in source:
+            continue
+        location = re.sub(r"(#.*|:\d+(?:-\d+)?)$", "", source)
+        if not inside_repo(repo, local_path(repo, location)):
+            return f"{source} lies outside the repository"
+    return None
+
+
+def check_test_sources(repo, registry, sources):
+    """A `test` source is `path:line` or `path:start-end` in a file under the registry's
+    source or its profile's fuzz package, where its tests are (SPEC section 18.4). The
+    file exists at HEAD, where a card pins its citations (lint rule 10): an untracked or
+    merely staged test could never be cited."""
+    roots = (SOURCES[registry], PROFILES[registry]["package"])
+    for source in sources:
+        match = re.fullmatch(r"(.+):(\d+)(?:-(\d+))?", source)
+        target = local_path(repo, match.group(1)).resolve() if match else None
+        if target is not None and target.is_file() and any(
+            (repo / root).resolve() in target.parents for root in roots
+        ):
+            first, last = int(match.group(2)), int(match.group(3) or match.group(2))
+            if 1 <= first <= last <= len(target.read_text(errors="replace").splitlines()):
+                relative = target.relative_to(repo.resolve()).as_posix()
+                if git_file(repo, "HEAD", relative) is None:
+                    raise Abort(
+                        1,
+                        f"{source} is not in HEAD, the commit a card cites its test at; "
+                        "commit the file first, or give the test as a `text` source",
+                    )
+                continue
+        raise Abort(
+            1,
+            f"{source} is not `path:line` or `path:start-end` within a file under "
+            f"{roots[0]}/ or {roots[1]}/, where the tests of the {registry} registry are",
+        )
+
+
+def text_file(repo, source):
+    """The file a `text` source names, or None when the source is a literal."""
+    try:
+        path = local_path(repo, source)
+        return path if path.is_file() else None
+    except (OSError, ValueError):
+        return None
+
+
+def text_sources(repo, sl_dir, sources, stamp):
+    """The SOURCES lines of a `text` extraction (SPEC section 18.4).
+
+    A source that names a file is read where it is. Any other is a literal, written to
+    `extract/<stamp>-text.txt` for the agent to read; that copy is never a card's
+    source_ref. A literal without a space is refused, because it is far more likely a
+    mistyped path, or the first word of a text that was not quoted.
+    """
+    literals = [source for source in sources if text_file(repo, source) is None]
+    for source in literals:
+        if not any(character.isspace() for character in source.strip()):
+            raise Abort(1, f"{source} is not a file; quote a text so that it is one argument")
+    lines = []
+    for source in sources:
+        if source not in literals:
+            lines.append(source)
+            continue
+        suffix = f"-{literals.index(source) + 1}" if len(literals) > 1 else ""
+        copy = sl_dir / "extract" / f"{stamp}-text{suffix}.txt"
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_text(source.strip() + "\n")
+        lines.append(
+            f"a text given on the command line, saved at {copy.relative_to(repo)}; its "
+            "source_ref is `text: <title>`, never this path"
+        )
+    return lines
+
+
+def kb_directory(repo, source):
+    """True when a `kb` source names a directory, a corpus root, rather than a finding."""
+    try:
+        return local_path(repo, source).is_dir()
+    except (OSError, ValueError):
+        return False
+
+
+def kb_extraction_sources(sl_dir, registry, roots, finding=None):
+    """The SOURCES of a `kb` extraction: every finding in the registry's module scope, or
+    with `finding` the one with that identifier, as `kb show` resolves it (SPEC 18.4)."""
     entries, _ = kb_index(sl_dir, roots)
     found = [
         entry
         for entry in entries
         if entry["kind"] == "finding"
         and any(module_matches(module, registry) for module in entry["modules"])
+        and (finding is None or entry["identifier"] == finding)
     ]
+    if not found and finding is not None:
+        raise Abort(
+            1,
+            f"no finding with identifier {finding} in scope for the {registry} registry in "
+            + ", ".join(str(root) for root in roots),
+        )
     if not found:
         raise Abort(
             2,
@@ -1252,27 +1840,35 @@ def kb_extraction_sources(sl_dir, registry, roots):
     return lines
 
 
-def extract_values(repo, sl_dir, kind, registry, sources, number=None):
+def extract_values(
+    repo, sl_dir, kind, registry, sources, number=None, states=False, local=False, finding=None
+):
     """Placeholder values of the Phase 1 prompt (SPEC section 6.2, step 5).
 
-    For `kb` the sources are corpus roots, and the prompt lists the findings in scope.
+    For `kb` the sources are corpus roots, and the prompt lists the findings in scope, or
+    the one `finding`. With `states` the values are those of a target-state extraction
+    (section 18.4): the TS counter, the card template and the card tree, the local one
+    when `local`.
     """
     if kind == "kb":
-        lines = kb_extraction_sources(sl_dir, registry, [Path(source) for source in sources])
+        lines = kb_extraction_sources(
+            sl_dir, registry, [Path(source) for source in sources], finding
+        )
     else:
         lines = []
         for source in sources:
             text = paper_text(repo, sl_dir, source) if kind == "paper" else None
             suffix = f" (text: {text.relative_to(repo)})" if text else ""
             lines.append(f"- {source}{suffix}")
+    template = "target-state.md" if states else "invariant.md"
     return {
         "KIND": kind,
-        "NEXT_ID": next_invariant_id(sl_dir),
-        "TEMPLATE": (sl_dir / "templates" / "invariant.md").read_text().rstrip("\n"),
+        "NEXT_ID": next_id(sl_dir, "TS" if states else "INV"),
+        "TEMPLATE": (sl_dir / "templates" / template).read_text().rstrip("\n"),
         "SOURCES": "\n".join(lines),
         "REGISTRY": registry,
-        "DESTINATION": str(extraction_destination(kind, registry)),
-        "COUNT": extraction_count(number),
+        "DESTINATION": str(extraction_destination(kind, registry, states, local)),
+        "COUNT": extraction_count(number, states),
         "QUERY": kb_query_help(registry, search=search_ready(sl_dir)),
         "CONTEXT": subsystem_prompt(sl_dir, registry, "analyst"),
         "SOURCE_ROOT": SOURCES[registry],
@@ -1344,15 +1940,37 @@ def check_comment_sources(repo, registry, sources):
 
 
 def cmd_extract(args):
-    """Phase 1 (SPEC section 6.2)."""
+    """Phase 1 (SPEC section 6.2), or with --states target-state cards (section 18.4)."""
     repo = repo_root()
     sl_dir = repo / SL
+    states = getattr(args, "states", False)
+    local = getattr(args, "local", False)
+    if args.kind in ("test", "text") and not states:
+        raise Abort(
+            1,
+            f"the {args.kind} kind is for target states; run `just extract-states "
+            f"{args.kind} ...`",
+        )
+    if local and not states:
+        raise Abort(1, f"--local sends target-state cards to {LOCAL_STATES}/; it needs --states")
+    if states and args.registry not in STATE_SUBSYSTEMS:
+        raise Abort(
+            1,
+            f"Target-State Synthesis has no {args.registry} registry; use one of: "
+            + ", ".join(STATE_SUBSYSTEMS),
+        )
     config = load_config(sl_dir)
     agent = resolve_agent(config, args.agent)
     if args.number is not None and args.number < 1:
         raise Abort(1, "--number must be at least 1")
+    stamp = utc_now().strftime("%Y%m%dT%H%M%SZ")
     sources = list(args.sources)
+    finding = None
     if args.kind == "kb":
+        if states and len(sources) == 1 and not kb_directory(repo, sources[0]):
+            # With --states a kb source may be one finding identifier (SPEC 18.4); its
+            # roots are STATELENS_KB, as for `kb show`.
+            finding, sources = sources[0], []
         # The roots given, else STATELENS_KB. The agent reads the findings through the
         # `kb` commands, which must see the same corpus, so its environment names it.
         value = ":".join(sources) if sources else config.get("STATELENS_KB", "")
@@ -1363,12 +1981,31 @@ def cmd_extract(args):
         raise Abort(1, f"extract {args.kind} needs at least one source")
     elif args.kind == "comment":
         check_comment_sources(repo, args.registry, sources)
-    trees = (sl_dir / "invariants", sl_dir / LOCAL_INVARIANTS)
-    registry = repo / extraction_destination(args.kind, args.registry)
+    elif args.kind == "test":
+        check_test_sources(repo, args.registry, sources)
+    elif args.kind == "text":
+        sources = text_sources(repo, sl_dir, sources, stamp)
+    reason = private_reason(repo, args.kind, args.sources, local) if states else None
+    noun = "card" if states else "invariant"
+    tops = CARD_TREES if states else ("invariants", LOCAL_INVARIANTS)
+    # Every registry tree is watched, the other kind's too: an edit to one is a problem
+    # whichever kind this run writes, and the ignored local trees escape the worktree check.
+    watched = tops + tuple(
+        top for top in ("invariants", LOCAL_INVARIANTS) + CARD_TREES if top not in tops
+    )
+    trees = tuple(sl_dir / top for top in watched)
+    registry = repo / extraction_destination(args.kind, args.registry, states, bool(reason))
     registry.mkdir(parents=True, exist_ok=True)
     before = {path: digest for tree in trees for path, digest in files_under(tree).items()}
-    values = extract_values(repo, sl_dir, args.kind, args.registry, sources, args.number)
-    prompt = compose(sl_dir, "analyst.md", f"analyst-{args.kind}.md", values)
+    values = extract_values(
+        repo, sl_dir, args.kind, args.registry, sources, args.number,
+        states=states, local=bool(reason), finding=finding,
+    )
+    if states:
+        # One prompt for every kind, rendered alone (SPEC section 18.4).
+        prompt = render((sl_dir / "prompts" / "state-analyst.md").read_text(), values)
+    else:
+        prompt = compose(sl_dir, "analyst.md", f"analyst-{args.kind}.md", values)
     tree_before = worktree_state(repo)
     changed = unpinnable(tree_before)
     if changed:
@@ -1378,13 +2015,13 @@ def cmd_extract(args):
             f"not match: {', '.join(changed[:5])}" + (" ..." if len(changed) > 5 else "")
         )
 
-    stamp = utc_now().strftime("%Y%m%dT%H%M%SZ")
     log = sl_dir / "extract" / f"{stamp}-{args.kind}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     (sl_dir / "extract" / f"{stamp}-{args.kind}.prompt.md").write_text(prompt)
+    read = f"finding {finding}" if finding else f"{len(sources)} {args.kind} source(s)"
     say(
-        f"extract: {agent} reads {len(sources)} {args.kind} source(s) for the "
-        f"{args.registry} registry, from {values['NEXT_ID']}; log {log.relative_to(repo)}"
+        f"extract: {agent} reads {read} for {registry.relative_to(sl_dir)}/, from "
+        f"{values['NEXT_ID']}; log {log.relative_to(repo)}"
     )
     phase = "kb" if args.kind == "kb" else 1
     code, _ = run_logged(agent_command(config, agent, phase, repo), log, repo, stdin_text=prompt)
@@ -1396,7 +2033,8 @@ def cmd_extract(args):
     problems = 0
     for path, digest in sorted(before.items()):
         if after.get(path) != digest:
-            print(f"{path}: the agent modified or deleted an existing invariant")
+            kind = "card" if path.name.startswith("TS-") else "invariant"
+            print(f"{path}: the agent modified or deleted an existing {kind}")
             problems += 1
     for path in new:
         if path.parent != registry:
@@ -1405,25 +2043,20 @@ def cmd_extract(args):
     written = [path for path in new if path.parent == registry]
     if args.number is not None and len(written) > args.number:
         print(
-            f"{registry.relative_to(repo)}: the agent wrote {len(written)} invariants, more "
+            f"{registry.relative_to(repo)}: the agent wrote {len(written)} {noun}s, more "
             f"than the {args.number} asked for"
         )
         problems += 1
-    # Anything the agent touched outside the invariant tree. The tree itself is
-    # left to the checks above, which say more about it than this one can, and
+    # Anything the agent touched outside the registry's trees. The trees themselves
+    # are left to the checks above, which say more about them than this one can, and
     # this run's own log and prompt are named rather than assumed to be ignored,
     # so the check does not depend on a .gitignore being right.
     tree_after = worktree_state(repo)
-    ours = (
-        str(SL / "invariants") + "/",
-        str(SL / LOCAL_INVARIANTS) + "/",
-        str(SL / "extract") + "/",
-        str(SL / "campaign") + "/",
-    )
+    ours = tuple(str(SL / top) + "/" for top in watched + ("extract", "campaign"))
     for path in sorted(set(tree_before) | set(tree_after)):
         if path.startswith(ours) or tree_before.get(path) == tree_after.get(path):
             continue
-        print(f"{path}: the agent changed a file outside invariants/")
+        print(f"{path}: the agent changed a file outside {tops[0]}/")
         problems += 1
     # The agent pins the lines it cites; the script copies them in, so no excerpt is
     # retyped by hand (SPEC section 4.3).
@@ -1434,8 +2067,19 @@ def cmd_extract(args):
     for path in new:
         say(f"new: {path.relative_to(sl_dir)}: {title_of(path)}")
     if args.number is not None:
-        say(f"extract: {len(written)} of the {args.number} invariant(s) asked for")
-    if new:
+        say(f"extract: {len(written)} of the {args.number} {noun}(s) asked for")
+    if new and states:
+        say(
+            "Every card is used by the next synthesis of its profile. "
+            "Review, edit or delete these files first."
+        )
+        if reason:
+            say(
+                f"These are in {LOCAL_STATES}/, which git ignores, because {reason}: never "
+                "commit them as they are; to share one, rewrite it without private detail "
+                "and move it by hand (D55)."
+            )
+    elif new:
         say(
             "Every file in a registry is used by the next campaign that binds it. "
             "Review, edit or delete these files first."
@@ -1446,7 +2090,7 @@ def cmd_extract(args):
                 "which git ignores: never commit them as they are (R-KB-6)."
             )
     else:
-        say("extract: the agent wrote no invariants")
+        say(f"extract: the agent wrote no {noun}s")
     return 3 if problems else 0
 
 
@@ -4123,9 +4767,8 @@ def clean_plan(repo):
     empties it; only `git rm` removes it. A generated file git does not report,
     because it is ignored, is still ours to delete.
     """
-    created, edited = campaign_artifacts(repo)
-    roots = sorted({root for profile in PROFILES.values() for root in profile["roots"]})
-    scope = roots + [path for path in edited if path not in roots]
+    created, _edited = campaign_artifacts(repo)
+    roots, scope = clean_scope(repo)
     in_head = {
         path
         for path in git(
@@ -4146,7 +4789,31 @@ def clean_plan(repo):
         if (repo / path).exists():
             delete.add(path)
             restore.discard(path)
+    # target_states/ is synthesis's whole, never in HEAD, and a campaign refuses a checkout
+    # that has one: the files git ignores there, such as a module named `target`, go too.
+    ignored = git(
+        repo, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--",
+        *scaffold_dirs(),
+    )
+    delete.update(path for path in ignored.split("\0") if path and (repo / path).is_file())
     return sorted(delete), sorted(restore), roots
+
+
+def clean_scope(repo):
+    """(the directories `clean` covers, every path it covers) (SPEC section 5.4).
+
+    The directories are the editable roots and the fuzz packages synthesis writes to
+    (section 18.6), whole: git reports no path it ignores, so the `corpus/`, `artifacts/`
+    and `coverage/` there are never in scope. The paths add the files a campaign edits
+    elsewhere.
+    """
+    _created, edited = campaign_artifacts(repo)
+    roots = {root for settings in PROFILES.values() for root in settings["roots"]}
+    roots |= {
+        settings["package"] + "/" for settings in PROFILES.values() if settings["scaffold"]
+    }
+    roots = sorted(roots)
+    return roots, roots + [path for path in edited if not path.startswith(tuple(roots))]
 
 
 def llvm_tools(toolchain):
@@ -4280,7 +4947,8 @@ def coverage_selection(repo, args):
         targets.append(name)
     if profile is None:
         profile = "simplex"
-    known = profile_targets(repo, profile)
+    # A profile covers its scaffolds with its variants (SPEC section 18.9).
+    known = profile_targets(repo, profile) + scaffold_targets(repo, profile)
     unknown = [name for name in targets if name not in known]
     if unknown:
         raise Abort(
@@ -4382,8 +5050,12 @@ def cmd_targets(args):
     `just fuzz <profile>` reads this rather than parsing a campaign summary, so
     the recipe and the campaign cannot disagree about what was built. `--match`
     narrows them, and a pattern that names none is an error, not an empty run.
+    With `--state-reaching` it lists the scaffolds of the selected pairs (card, base)
+    instead.
     """
     repo = repo_root()
+    if args.state_reaching:
+        return state_reaching_targets(repo, args.profile, args.match or [])
     targets = profile_targets(repo, args.profile)
     chosen = select_targets(targets, args.match or [])
     if not chosen:
@@ -4397,11 +5069,37 @@ def cmd_targets(args):
     return 0
 
 
+def state_reaching_targets(repo, profile, patterns):
+    """The scaffolds of the selected pairs whose thin target exists (SPEC section 18.9).
+
+    `just fuzz <profile> --state-reaching` calls this before the campaign, so that a
+    selection that is empty or has a card with a lint problem fails at once, and again
+    after synthesis for the scaffolds to run. Only their names go to standard output.
+    """
+    sl_dir = repo / SL
+    selection = select_scaffolds(repo, sl_dir, profile, patterns)
+    cards = sorted({pair.path for pair in selection.pairs})
+    if lint_paths(cards, registry_files(sl_dir)):
+        raise Abort(1, "a selected card has lint problems (above); fix them before synthesis")
+    for pair in selection.pairs:
+        if pair.scaffold:
+            print(pair.scaffold)
+    return 0
+
+
 def campaign_profile(sl_dir):
     """The profile the campaign in this checkout ran with, from its `meta.json`."""
     try:
         return json.loads((sl_dir / "campaign" / "meta.json").read_text())["profile"]
     except (OSError, ValueError, KeyError):
+        return None
+
+
+def campaign_invariants(sl_dir):
+    """The ids the campaign in this checkout bound, from its `meta.json`, or None."""
+    try:
+        return set(json.loads((sl_dir / "campaign" / "meta.json").read_text())["invariants"])
+    except (OSError, ValueError, KeyError, TypeError):
         return None
 
 
@@ -4440,7 +5138,9 @@ def cmd_clean(args):
     """Undo what a campaign wrote, so a checkout can be reused (SPEC section 5.4)."""
     repo = repo_root()
     created, restore, roots = clean_plan(repo)
-    if not created and not restore:
+    # A target_states/ that holds no file, an empty directory say, still blocks a campaign.
+    stale = [path for path in scaffold_dirs() if (repo / path).exists()]
+    if not created and not restore and not stale:
         say("clean: nothing to undo; this checkout has no campaign artifacts")
         return 0
     say("clean: this restores the paths below to HEAD, losing any edit of your own in them")
@@ -4487,11 +5187,10 @@ def cmd_clean(args):
             directory = parent
     left = [
         f"{status} {path}" for status, path in porcelain_entries(
-            git(repo, "status", "--porcelain", "-z", "-uall", "--", *(
-                roots + [one for one in campaign_artifacts(repo)[1] if one not in roots]
-            ))
+            git(repo, "status", "--porcelain", "-z", "-uall", "--", *clean_scope(repo)[1])
         )
     ]
+    left += [f"?? {path}" for path in scaffold_dirs() if (repo / path).exists()]
     if left:
         say("clean: these paths still differ from HEAD, so the checkout is not reusable:")
         for row in left[:20]:
@@ -4750,6 +5449,29 @@ def blank_inert(text, strings=False):
             blank = False
         out.append(re.sub(r"[^\n]", " ", token) if blank else token)
     return "".join(out)
+
+
+def runtime_calls(text, names):
+    """How often Rust `text` reaches each function of `names` through the runtime module.
+
+    Code outside the module reaches a function of it by path, `statelens::seen`, through
+    an alias the file gives the module, `rt::seen` after `statelens as rt` or
+    `statelens::{self as rt}`, or by importing it, `statelens::{seen, ...}`; each counts
+    once. A bare `seen(` does not count, because the read side's names are common words.
+    Comments and string literals do not count.
+    """
+    code = blank_inert(text, strings=True)
+    counts = collections.Counter()
+    aliases = [one or two for one, two in RUNTIME_ALIAS.findall(code)]
+    for prefix in dict.fromkeys(["statelens"] + aliases):
+        pattern = rf"\b{re.escape(prefix)}\s*::\s*(?:([A-Za-z_][A-Za-z0-9_]*)|\{{([^}}]*)\}})"
+        for match in re.finditer(pattern, code):
+            if match.group(1):
+                items = [match.group(1)]
+            else:
+                items = [item.split()[0] for item in match.group(2).split(",") if item.strip()]
+            counts.update(item for item in items if item in names)
+    return counts
 
 
 IMPL_HEADER = re.compile(
@@ -5061,15 +5783,22 @@ def cmd_lint_plan(args):
     """
     repo = repo_root()
     sl_dir = repo / SL
-    profile = args.profile or campaign_profile(sl_dir) or "simplex"
+    recorded = campaign_profile(sl_dir)
+    profile = args.profile or recorded or "simplex"
     if profile not in PROFILES:
         raise Abort(1, f"campaign/meta.json names an unknown profile {profile!r}; pass --profile")
     paths = [Path(path) for path in args.paths] if args.paths else [repo / PLAN]
     registries = PROFILES[profile]["registries"]
+    # A campaign run with `--invariants` has sections for the ids it selected only, so
+    # the campaign's profile, named or not, expects what its meta.json lists; another
+    # profile expects every registry invariant.
+    bound = campaign_invariants(sl_dir) if profile == recorded else None
     expected = [
         path
         for path in registry_files(sl_dir)
-        if path.parent.name in registries and path.stem.startswith("INV-")
+        if path.parent.name in registries
+        and path.stem.startswith("INV-")
+        and (bound is None or path.stem in bound)
     ]
     assertions = subsystem_assertions(repo)
     count = 0
@@ -5106,6 +5835,16 @@ def profile_manifest(profile):
     return f"{PROFILES[profile]['package']}/Cargo.toml"
 
 
+def target_states_dir(profile):
+    """Where synthesis writes the scaffold modules of `profile` (SPEC section 18.6)."""
+    return f"{PROFILES[profile]['package']}/src/target_states"
+
+
+def scaffold_dirs():
+    """The target_states/ directory of every profile synthesis writes to."""
+    return [target_states_dir(name) + "/" for name in PROFILES if PROFILES[name]["scaffold"]]
+
+
 def profile_sources(repo, profile):
     """The existing targets `profile` derives StateLens variants from.
 
@@ -5125,6 +5864,1156 @@ def profile_sources(repo, profile):
 def profile_targets(repo, profile):
     """The StateLens targets a campaign of `profile` builds (SPEC section 5.5)."""
     return [f"{stem}_statelens" for stem in profile_sources(repo, profile)]
+
+
+def card_module(card_id):
+    """The module name part of a card: `ts0003` for TS-0003 (section 18.7)."""
+    return "ts" + card_id.split("-", 1)[1]
+
+
+def pair_key(card_id, base):
+    """The key of the pair (card, base), `TS-0003_<base>` (section 18.6.2)."""
+    return f"{card_id}_{base}"
+
+
+def pair_module(card_id, base):
+    """The module of the pair, `ts0003_<base>` (section 18.7)."""
+    return f"{card_module(card_id)}_{base}"
+
+
+def scaffold_name(card_id, base):
+    """The thin target, and scaffold name, of the pair, `<base>_ts0003_statelens`."""
+    return f"{base}_{card_module(card_id)}_statelens"
+
+
+def scaffold_targets(repo, profile):
+    """The scaffolds whose thin target exists in `profile`'s package, by name (SPEC 18.7)."""
+    return sorted(
+        path.stem
+        for path in (repo / profile_fuzz_dir(profile)).glob(f"{profile}_*_statelens.rs")
+        if SCAFFOLD_NAME.match(path.stem)
+    )
+
+
+def scaffold_bases(repo, profile):
+    """The candidate bases of `profile`: its targets but those with `fuzz_mutator!` (D63)."""
+    directory = repo / profile_fuzz_dir(profile)
+    return [
+        stem
+        for stem in profile_sources(repo, profile)
+        if "fuzz_mutator!" not in (directory / f"{stem}.rs").read_text(errors="replace")
+    ]
+
+
+# One selected pair (SPEC section 18.6.2): its card and the card's path, its base, its key
+# and module, its scaffold's name, that scaffold when its thin target exists, else None,
+# and why synthesis skips it, or None.
+ScaffoldPair = collections.namedtuple("ScaffoldPair", "card path base key module name scaffold skip")
+# The selected pairs, in card order then base order, and how many cards the profile has in
+# each tree.
+ScaffoldSelection = collections.namedtuple("ScaffoldSelection", "pairs tracked local")
+
+
+def select_scaffolds(repo, sl_dir, profile, patterns):
+    """The pairs (card, base) `patterns` select, for `synthesize` and `targets
+    --state-reaching`.
+
+    A pattern `TS-...` names cards by ID. Any other pattern names a base when it matches,
+    as `select_targets` matches, the base, its variant or the card's scaffold on it, with
+    or without `_statelens`; with none, every candidate base is selected. A card is
+    selected when no card pattern was given or one names it, and it yields one pair per
+    base selected for it. Nothing selected is a usage error (exit code 1). A pair that
+    has a report in `campaign/reach/` is skipped, with the reason in `skip`; `--redo` is
+    what synthesizes it again (SPEC section 18.6.2).
+    """
+    if not PROFILES[profile]["scaffold"]:
+        raise Abort(
+            1, f"Target-State Synthesis refuses the {profile} profile; use simplex or marshal"
+        )
+    tracked, local = (list((sl_dir / top / profile).glob("TS-*.md")) for top in CARD_TREES)
+    cards = sorted(tracked + local, key=lambda path: (id_number(path), str(path)))
+    if not cards:
+        raise Abort(
+            1,
+            f"no target-state cards in {SL}/target-states/{profile}/ or "
+            f"{SL}/{LOCAL_STATES}/{profile}/; write them with `just extract-states`",
+        )
+    bases = scaffold_bases(repo, profile)
+    if not bases:
+        raise Abort(
+            1, f"the {profile} profile has no candidate base in {profile_fuzz_dir(profile)}"
+        )
+    named = [pattern for pattern in patterns if pattern.startswith("TS-")]
+    others = [pattern for pattern in patterns if not pattern.startswith("TS-")]
+    existing = scaffold_targets(repo, profile)
+    reports = sl_dir / "campaign" / "reach"
+    selected = []
+    for path in cards:
+        card = path.stem
+        if named and not any(fnmatch.fnmatchcase(card, pattern) for pattern in named):
+            continue
+        module = card_module(card)
+        chosen = [
+            base
+            for base in bases
+            if not others
+            or any(
+                fnmatch.fnmatchcase(name, pattern)
+                for pattern in others
+                for name in (
+                    base,
+                    f"{base}_statelens",
+                    f"{base}_{module}",
+                    f"{base}_{module}_statelens",
+                )
+            )
+        ]
+        for base in chosen:
+            key, name = pair_key(card, base), scaffold_name(card, base)
+            scaffold = name if name in existing else None
+            skip = None
+            if (reports / f"{key}.md").is_file():
+                if scaffold:
+                    skip = f"{card} on {base} was synthesized as {scaffold}; use --redo"
+                else:
+                    skip = f"{card} on {base} was synthesized without a scaffold; use --redo"
+            selected.append(
+                ScaffoldPair(card, path, base, key, pair_module(card, base), name, scaffold, skip)
+            )
+    if not selected:
+        raise Abort(
+            1,
+            f"no {profile} card and candidate base match {' and '.join(patterns)}; the cards "
+            f"are {', '.join(path.stem for path in cards)} and the bases {', '.join(bases)}",
+        )
+    return ScaffoldSelection(selected, len(tracked), len(local))
+
+
+# SPEC section 18.8: the reach check. The helper of section 18.7 prints these lines in a
+# replay; the script parses them, recomputes every witness record and decides the verdict.
+# REACH_LINE is the SPEC's pattern, verbatim.
+REACH_LINE = re.compile(
+    r"^\[statelens-reach\] (TS-\d{4,}) (?:E(\d+)/(\d+) (held|missed|unverifiable|withheld)\b "
+    r"?(.*)|entry ([^\[\s]+)\[([^\]\s]*)\]=(\S+) seq=(\d+)|restart (\S+) seq=(\d+) run=(\d+)|"
+    r"trace (\S+)|handoff (holds|lost) mark=(\d+) next=(\d+:\d+|-)|reach (\d+)/(\d+) "
+    r"control=([01])|phase (prefix|continuation)|panic (\S+) ?(.*)|truncated seq=(\d+)|done)$"
+)
+REACH_HELD = re.compile(r"^(exact|intrinsic|construction) bind=(\S+) (.*) read=(\d+)$")
+REACH_EXACT = re.compile(r"exact=([^\[\s]+)\[([^\]\s]*)\]=(\S+) seq=(\d+|-)")
+REACH_OBS = re.compile(r"obs=(\d+):(\d+):(\d+|-):([^@\s]+)@([^\s:]+:\d+:\d+):(\d+):(\d+)")
+REACH_ACTION = re.compile(r"action=([^\[\s]+)\[([^\]\s]*)\] seq=(\d+)")
+REACH_EVIDENCE = {"exact": REACH_EXACT, "intrinsic": REACH_OBS, "construction": REACH_ACTION}
+# One item of `bind=`, `name=value@Ek`; `?` is the value of an entity a witness leaves
+# unbound, and `inc<s>` the incarnation the restart at position s began.
+REACH_BIND = re.compile(r"([A-Za-z][A-Za-z0-9]*)=([^,@\[\]\s]+)@E(\d+)")
+INCARNATION = re.compile(r"inc(\d+)")
+# The module header a scaffold opens with (section 18.7).
+MODULE_TITLE = re.compile(r"^//! (TS-\d{4,}) on (\S+)\s*$")
+MODULE_FIELD = re.compile(r"^//! (Shape|Knobs|Stages|Control|Injections|Missing):\s*(.*)$")
+# A label a module passes to the read side; comments are blanked first.
+MODULE_LABEL = re.compile(r"\b(?:seen|sites)\s*\(\s*\"([^\"\\]+)\"")
+# Crash attribution: the libFuzzer and sanitizer reports, Rust's panic location, and a
+# symbolized stack frame, of which the first outside the runtime libraries is the location.
+PANICKED_AT = re.compile(r"panicked at (?:'.*', )?(\S+:\d+:\d+):?\s*$")
+SANITIZER_ERROR = re.compile(r"ERROR: (\w+Sanitizer)\b")
+STACK_FRAME = re.compile(r"^\s*#\d+ 0x[0-9a-fA-F]+ in .+? (\S+:\d+(?::\d+)?)\s*$")
+RUNTIME_FRAME = re.compile(
+    r"/rustc/|library/(?:std|core|alloc)/|compiler-rt|sanitizer_common|/(?:[almt]san|ubsan)/"
+)
+SCAFFOLD_ERROR = "[statelens-scaffold] "
+DIFF_HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+CRASH = "CRASH (finding candidate)"
+# The verdicts of the reach check, best first, as synthesis keeps a version (section
+# 18.6.2): a crash is always kept; NOT BUILT and GATE FAILED are not replays' verdicts.
+VERDICT_ORDER = (
+    CRASH,
+    "REACHED",
+    "UNVERIFIED",
+    "PARTIAL",
+    "UNREACHED",
+    "NO REPORT",
+    "SCAFFOLD ERROR",
+)
+# The verdict line of a report whose card kept a scaffold: the verdict, its k and its
+# annotations (section 18.6.2, Finish, revalidation).
+REPORT_VERDICT = re.compile(
+    r"^- Verdict: (" + "|".join(re.escape(verdict) for verdict in VERDICT_ORDER) + r")"
+    r"(?: (\d+)/\d+)?(?: \((.*)\))?$",
+    re.M,
+)
+# The run and replay lines of a report whose card kept a scaffold: a revalidation rewrites
+# them for the scaffold's latest check (section 18.6.2, Finish).
+REPORT_RUN_BLOCK = re.compile(r"## Run and replay\n\n```\n.*?\n```", re.S)
+# The feedback table of section 18.8: what each signal asks the next attempt to fix.
+FEEDBACK_FIXES = {
+    "veto": "That, as reported",
+    "first": "The setup: configuration, pinned and dependent fields, roles, elector or shape",
+    "middle": (
+        "The event's content, recipient, channel or order; the trace's a, b and sites against "
+        "what the stage expects"
+    ),
+    "last": "Knob domains, timing, and what keeps the state pending at handoff",
+    "cannot": (
+        "Nothing in the scaffold, unless an edit the contract allows, or another shape, "
+        "gives the capability; otherwise a human adds it"
+    ),
+    "unverifiable": (
+        "A witness that binds the relation: an intrinsic site for an existential line, "
+        "otherwise an exact observable keyed by the bound entities, with positions where "
+        "order matters"
+    ),
+    "weak": (
+        "Withhold the event without which En cannot hold for these entities, or report that "
+        "the History is not causal"
+    ),
+    "control": (
+        "Name, or withhold, a later harness event before En; in the control run, drive every "
+        "later event, the handoff check and the base's oracles"
+    ),
+    "no report": "Use the helper, and never return before the base's oracles",
+    "scaffold": "The reason the helper named",
+}
+
+
+def reach_lines(text, card):
+    """The `[statelens-reach]` lines of `card` in a replay's output, parsed, in order.
+
+    Each is a dict with its `type` (stage, entry, restart, trace, handoff, reach, phase,
+    panic, truncated or done, or unparsed for a line of the card that matches no form), its
+    fields, and `text`, the line after the card ID. Lines of other cards are skipped.
+    """
+    found = []
+    prefix = f"[statelens-reach] {card} "
+    for line in text.splitlines():
+        line = line.rstrip("\r")
+        if not line.startswith(prefix):
+            continue
+        match = REACH_LINE.match(line)
+        if not match:
+            found.append({"type": "unparsed", "text": line[len(prefix) :]})
+            continue
+        group = match.group
+        if group(2) is not None:
+            item = {
+                "type": "stage",
+                "k": int(group(2)),
+                "n": int(group(3)),
+                "outcome": group(4),
+                "rest": group(5),
+            }
+        elif group(6) is not None:
+            item = {
+                "type": "entry",
+                "observable": group(6),
+                "key": group(7),
+                "value": group(8),
+                "seq": int(group(9)),
+            }
+        elif group(10) is not None:
+            replicas = set() if group(10) == "-" else set(group(10).split(","))
+            item = {
+                "type": "restart",
+                "replicas": replicas,
+                "seq": int(group(11)),
+                "run": int(group(12)),
+            }
+        elif group(13) is not None:
+            item = {"type": "trace"}
+        elif group(14) is not None:
+            following = None if group(16) == "-" else tuple(map(int, group(16).split(":")))
+            item = {
+                "type": "handoff",
+                "holds": group(14) == "holds",
+                "mark": int(group(15)),
+                "next": following,
+            }
+        elif group(17) is not None:
+            item = {
+                "type": "reach",
+                "k": int(group(17)),
+                "n": int(group(18)),
+                "control": group(19) == "1",
+            }
+        elif group(20) is not None:
+            item = {"type": "phase", "phase": group(20)}
+        elif group(21) is not None:
+            item = {"type": "panic", "location": group(21), "message": group(22)}
+        elif group(23) is not None:
+            item = {"type": "truncated", "seq": int(group(23))}
+        else:
+            item = {"type": "done"}
+        item["text"] = line[len(prefix) :]
+        found.append(item)
+    return found
+
+
+def reach_pairs(key):
+    """The `name=value` pairs of an exact item's key or an action's entities."""
+    pairs = []
+    for item in key.split(","):
+        name, sep, value = item.partition("=")
+        if sep and name:
+            pairs.append((name, value))
+    return pairs
+
+
+def reach_items(pattern, text):
+    """The groups of each item of `pattern` in `text`, which holds them separated by single
+    spaces, or None when it holds anything else."""
+    items, position = [], 0
+    while position < len(text):
+        match = pattern.match(text, position)
+        if not match:
+            return None
+        items.append(match.groups())
+        position = match.end()
+        if position < len(text):
+            if text[position] != " ":
+                return None
+            position += 1
+    return items
+
+
+def held_record(rest):
+    """The witness record of a `held` line, from its text after `held` (SPEC section 18.8),
+    or None when that does not match.
+
+    `bind` maps each entity to its value and `by` to the event that bound it, and `bad`
+    is set when an item of `bind=` is malformed or repeated. `items` holds the evidence
+    items, or None when the evidence is not a sequence of its kind's items; `pairs` the
+    `name=value` pairs of the exact keys or the action; `obs` the observations; and
+    `position` the largest position the evidence carries, or None, also for an `exact`
+    witness with an unstamped item, whose entry may come after any other.
+    """
+    match = REACH_HELD.match(rest)
+    if not match:
+        return None
+    kind, bind_text, evidence, read = match.groups()
+    record = {
+        "kind": kind,
+        "bind": {},
+        "by": {},
+        "bad": False,
+        "evidence": evidence,
+        "read": int(read),
+        "items": reach_items(REACH_EVIDENCE[kind], evidence),
+        "pairs": [],
+        "obs": [],
+        "position": None,
+    }
+    for item in bind_text.split(","):
+        bound = REACH_BIND.fullmatch(item)
+        if not bound or bound.group(1) in record["bind"]:
+            record["bad"] = True
+            continue
+        record["bind"][bound.group(1)] = bound.group(2)
+        record["by"][bound.group(1)] = int(bound.group(3))
+    positions = []
+    for item in record["items"] or ():
+        if kind == "exact":
+            record["pairs"] += reach_pairs(item[1])
+            positions.append(0 if item[3] == "-" else int(item[3]))
+        elif kind == "intrinsic":
+            run, seq, me, label, site = item[:5]
+            record["obs"].append(
+                {"run": int(run), "seq": int(seq), "me": me, "label": label, "site": site}
+            )
+            positions.append(int(seq))
+        else:
+            record["pairs"] += reach_pairs(item[1])
+            positions.append(int(item[2]))
+    unstamped = kind == "exact" and 0 in positions
+    positions = [position for position in positions if position]
+    record["position"] = max(positions) if positions and not unstamped else None
+    return record
+
+
+def replica_entities(history):
+    """The entities of a History that name replicas: every actor but `harness`, and every
+    name that starts with a capital letter, as `R` and `B` do (SPEC section 18.3)."""
+    names = {event.actor for event in history.events if event.actor not in (None, "harness")}
+    for event in history.events:
+        names.update(name for name, _ in event.entities if name[0].isupper())
+    return names
+
+
+def witness_rule(k, record, history, records, entries, replicas):
+    """The first rule of SPEC section 18.7 that the record of held stage `k` breaks, among
+    those that need no position: `bind`, `as`, `evidence`, `intrinsic` and `construction`;
+    or None.
+
+    `records` maps each held stage to its record, `entries` holds the `entry` lines printed
+    before stage k's line as (observable, key, value, seq), and `replicas` the entities that
+    name replicas.
+    """
+    event = history.events[k - 1]
+    bind = record["bind"]
+    if record["bad"] or any(name not in bind for name, _ in event.entities):
+        return "bind"
+    for name, earlier in event.entities:
+        source = records.get(earlier) if earlier else None
+        if earlier and (bind[name] == "?" or not source or source["bind"].get(name) != bind[name]):
+            return "as"
+    kind = record["kind"]
+    if record["items"] is None:
+        return "intrinsic" if kind == "intrinsic" else "evidence"
+    if kind in ("exact", "construction"):
+        named = collections.defaultdict(set)
+        for name, value in record["pairs"]:
+            named[name].add(value)
+        keyed = False
+        for name, _ in event.entities:
+            value = bind[name]
+            if named[name] and named[name] != {value}:
+                return "evidence"
+            keyed = keyed or bool(named[name])
+            # An incarnation is witnessed by its `restart` line (the `incarnation` rule).
+            if not named[name] and value != "?" and not INCARNATION.fullmatch(value):
+                return "evidence"
+        if not keyed:
+            return "evidence"
+        if kind == "exact":
+            for observable, key, value, seq in record["items"]:
+                if seq != "-" and (observable, key, value, int(seq)) not in entries:
+                    return "evidence"
+    if kind == "intrinsic":
+        if len(record["obs"]) != 1:
+            return "intrinsic"
+        valued = [name for name, _ in event.entities if bind[name] != "?"]
+        me = record["obs"][0]["me"]
+        # A site without a replica, `me=-`, witnesses no replica.
+        if len(valued) > 1 or any(
+            name not in replicas or bind[name] != me or me == "-" for name in valued
+        ):
+            return "intrinsic"
+    if kind == "construction" and (k == len(history.events) or event.actor != "harness"):
+        return "construction"
+    return None
+
+
+def reach_replay(text, history, shape=None, control=False):
+    """Recomputes the stage lines of one replay of the scaffold of `history` (SPEC 18.8).
+
+    `shape` is the module's, A or B, or None when its header names none, and `control`
+    marks the control run. Returns a dict: `lines` (reach_lines); `stages`, mapping each
+    k that has an outcome to its stage, whose `outcome` (held, missed, unverifiable or
+    withheld) and `detail` are those after the checks, `helper` the outcome its line
+    printed, or None without one, `record` its witness record and `trace` the trace
+    lines after a miss; `held` and `first_miss`; `handoff`, the helper's handoff line,
+    and `holds`, whether the handoff holds after the recheck; `reach`, `done`, `restarts`,
+    `truncated`, the smallest position a `truncated` line names, or None without one,
+    `sites`, the `label@site` of every observation a witness cites, `annotations`; and
+    `problems`, which make the replay report nothing usable.
+    """
+    n = len(history.events)
+    lines = reach_lines(text, history.id)
+    stages, entries, restarts, problems = {}, [], [], []
+    others = set(re.findall(r"^\[statelens-reach\] (TS-\d{4,}) ", text, re.M)) - {history.id}
+    if others:
+        problems.append(f"the scaffold reports as {', '.join(sorted(others))}, not {history.id}")
+    handoff = reach = last = None
+    done = False
+    for index, line in enumerate(lines):
+        kind = line["type"]
+        if kind == "trace":
+            if last is not None and last["helper"] == "missed":
+                last["trace"].append(line["text"])
+            continue
+        last = None
+        if kind == "stage":
+            k = line["k"]
+            if line["n"] != n:
+                problems.append(
+                    f"E{k}/{line['n']}: the scaffold opened {line['n']} stages; the card has {n}"
+                )
+            # A repeated line is the panic hook's copy of the first.
+            elif 1 <= k <= n and k not in stages:
+                stage = {
+                    "helper": line["outcome"],
+                    "outcome": line["outcome"],
+                    "detail": line["rest"],
+                    "index": index,
+                    "text": line["text"],
+                    "record": held_record(line["rest"]) if line["outcome"] == "held" else None,
+                    "entries": set(entries),
+                    "trace": [],
+                }
+                stages[k] = stage
+                last = stage
+        elif kind == "entry":
+            entries.append((line["observable"], line["key"], line["value"], line["seq"]))
+        elif kind == "restart":
+            restarts.append(line)
+        elif kind == "handoff" and handoff is None:
+            handoff = dict(line, index=index)
+        elif kind == "reach" and reach is None:
+            reach = line
+            if line["n"] != n:
+                problems.append(f"reach {line['k']}/{line['n']}: the card has {n} stages")
+        elif kind == "done":
+            done = True
+    cut = min((line["seq"] for line in lines if line["type"] == "truncated"), default=None)
+    records = {k: stage["record"] for k, stage in stages.items() if stage["record"]}
+    replicas = replica_entities(history)
+    starts = {restart["seq"] for restart in restarts}
+
+    def downgrade(stage, reason):
+        stage["outcome"], stage["detail"] = "unverifiable", reason
+
+    def ordered(j, k):
+        return j != k and frozenset((j, k)) not in history.free
+
+    def restarted(low, high, replica=None):
+        return [
+            restart["seq"]
+            for restart in restarts
+            if low < restart["seq"] < high and (replica is None or replica in restart["replicas"])
+        ]
+
+    # The handoff holds only when En is held by the line right before it, read in the
+    # handoff call: its mark directly follows the read (section 18.8). Otherwise En is missed.
+    final = stages.get(n)
+    if final and final["helper"] == "held":
+        record = final["record"]
+        if not (
+            handoff
+            and handoff["holds"]
+            and record
+            and handoff["index"] == final["index"] + 1
+            and handoff["mark"] == record["read"] + 1
+        ):
+            final["outcome"] = "missed"
+            final["detail"] = "handoff lost" + (
+                f" (mark={handoff['mark']}, read={record['read']})" if handoff and record else ""
+            )
+    # From the first observation the trace dropped at TRACE_CAP on, what it holds is
+    # incomplete (section 9.6): a witness read at or after that position, and En when the
+    # cut comes at or before the handoff mark, cannot hold, wherever the line is printed.
+    if cut is not None:
+        for stage in stages.values():
+            record = stage["record"]
+            if stage["outcome"] == "held" and record and record["read"] >= cut:
+                downgrade(stage, "(trace truncated)")
+        if final and final["outcome"] == "held" and handoff["mark"] >= cut:
+            downgrade(final, "(trace truncated)")
+    for k in range(1, n + 1):
+        stage = stages.get(k)
+        if stage and stage["outcome"] == "held":
+            rule = (
+                witness_rule(k, stage["record"], history, records, stage["entries"], replicas)
+                if stage["record"]
+                else "evidence"
+            )
+            if rule:
+                downgrade(stage, f"witness rejected: {rule}")
+    # Both stages of an ordered pair need a position, and so do a line that binds a
+    # restarted replica and the earlier stages its `as Ek` links it to.
+    need = {k for k in range(1, n + 1) if any(ordered(j, k) for j in range(1, n + 1))}
+    named = set().union(*(restart["replicas"] for restart in restarts))
+    for k, record in records.items():
+        event = history.events[k - 1]
+        if {record["bind"].get(name) for name, _ in event.entities if name in replicas} & named:
+            need.add(k)
+            need.update(earlier for _, earlier in event.entities if earlier)
+    for k in sorted(need):
+        stage = stages.get(k)
+        if stage and stage["outcome"] == "held" and stage["record"]["position"] is None:
+            downgrade(stage, "(no position)")
+    position = {k: record["position"] for k, record in records.items()}
+    annotations = []
+    for k, record in sorted(records.items()):
+        event, here = history.events[k - 1], record["position"]
+        linked = {earlier for _, earlier in event.entities if earlier}
+        if here is not None and any(
+            position.get(j) is not None and restarted(*sorted((position[j], here))) for j in linked
+        ):
+            annotations.append("relation across restart")
+        stage = stages[k]
+        if stage["outcome"] != "held":
+            continue
+        if here is None:
+            # Without a position only the incarnation's existence can be checked.
+            if any(
+                (inc := INCARNATION.fullmatch(value)) and int(inc.group(1)) not in starts
+                for value in record["bind"].values()
+            ):
+                downgrade(stage, "witness rejected: incarnation")
+            continue
+        rule = None
+        if any(
+            ordered(j, k) and position.get(j) is not None and here <= position[j]
+            for j in range(1, k)
+        ):
+            rule = "order"
+        elif record["kind"] == "intrinsic":
+            seen = record["obs"][0]
+            for j in range(1, k):
+                other = records.get(j)
+                if other and other["kind"] == "intrinsic" and other["obs"]:
+                    run, seq = other["obs"][0]["run"], other["obs"][0]["seq"]
+                    if run != seen["run"] and not restarted(*sorted((seq, seen["seq"]))):
+                        rule = "run"
+        if rule is None:
+            for value in record["bind"].values():
+                inc = INCARNATION.fullmatch(value)
+                if inc and (int(inc.group(1)) not in starts or int(inc.group(1)) > here):
+                    rule = "incarnation"
+            # Only an entity of the line names the incarnation a relation crosses into.
+            values = {record["bind"].get(name) for name, _ in event.entities}
+            bound = {record["bind"][name] for name, _ in event.entities if name in replicas}
+            for replica in bound - {"?"}:
+                for j in linked:
+                    if position.get(j) is None:
+                        continue
+                    inside = restarted(*sorted((position[j], here)), replica)
+                    if inside and f"inc{max(inside)}" not in values:
+                        rule = "incarnation"
+        if rule:
+            downgrade(stage, f"witness rejected: {rule}")
+    # Shape A: En counts only with a later observation of an honest replica in its run.
+    if shape == "A" and final and final["outcome"] == "held":
+        record, following = final["record"], handoff["next"]
+        if (
+            record["position"] is None
+            or following is None
+            or following[1] <= record["position"]
+            or (record["obs"] and following[0] != record["obs"][0]["run"])
+        ):
+            downgrade(final, "(no continuation)")
+    missed = False
+    for k in range(1, n + 1):
+        stage = stages.get(k)
+        if stage is None:
+            if not missed:
+                stages[k] = {
+                    "helper": None,
+                    "outcome": "unverifiable",
+                    "detail": "(no line)",
+                    "record": None,
+                    "text": None,
+                    "trace": [],
+                }
+            continue
+        if stage["outcome"] == "withheld" and not control:
+            downgrade(stage, "(withheld outside the control run)")
+        missed = missed or stage["outcome"] == "missed"
+    outcomes = {k: stage["outcome"] for k, stage in stages.items()}
+    return {
+        "lines": lines,
+        "stages": stages,
+        "held": sum(outcome == "held" for outcome in outcomes.values()),
+        "first_miss": min((k for k, o in outcomes.items() if o == "missed"), default=None),
+        "handoff": handoff,
+        "holds": bool(final and final["outcome"] == "held"),
+        "reach": reach,
+        "done": done,
+        "restarts": restarts,
+        "truncated": cut,
+        "sites": sorted(
+            {
+                f"{seen['label']}@{seen['site']}"
+                for record in records.values()
+                for seen in record["obs"]
+            }
+        ),
+        "annotations": list(dict.fromkeys(annotations)),
+        "problems": problems,
+    }
+
+
+def module_header(text):
+    """The header a scaffold module opens with (SPEC section 18.7).
+
+    Returns a dict: `card` and `base` from its first line; `shape`, A or B or None;
+    `control`, the number of the event `Control: withholds Ek` names, `n/a`, the line's
+    text when it says neither, or None without a Control: line; `missing`, the
+    capabilities of its Missing: line; and `fields`, every field's text. A `//!` line
+    that starts no field continues the one above it.
+    """
+    header = {"card": None, "base": None, "shape": None, "control": None, "missing": []}
+    fields, field = {}, None
+    for line in text.splitlines():
+        if not line.startswith("//!"):
+            if line.strip():
+                break
+            continue
+        title, match = MODULE_TITLE.match(line), MODULE_FIELD.match(line)
+        if title and header["card"] is None:
+            header["card"], header["base"], field = title.group(1), title.group(2), None
+        elif match:
+            field = match.group(1) if match.group(1) not in fields else None
+            if field:
+                fields[field] = match.group(2).strip()
+        elif field and line[3:].strip():
+            fields[field] += " " + line[3:].strip()
+    shape = re.match(r"([AB])\b", fields.get("Shape", ""))
+    header["shape"] = shape.group(1) if shape else None
+    control = fields.get("Control")
+    if control is not None:
+        value = control.strip().rstrip(".")
+        withheld = re.fullmatch(r"withholds E(\d+)", value)
+        header["control"] = int(withheld.group(1)) if withheld else value
+    missing = fields.get("Missing", "").strip().rstrip(".")
+    if missing and missing.lower() != "none":
+        header["missing"] = [item.strip() for item in missing.split(";") if item.strip()]
+    header["fields"] = fields
+    return header
+
+
+def unbound_labels(module, labels):
+    """The labels `module` passes to `seen` or `sites` that `labels`, every `sl_probe!`
+    label and `sl_implies!` ID under the editable roots, does not hold (SPEC 18.8)."""
+    found = MODULE_LABEL.findall(blank_inert(module))
+    return [label for label in dict.fromkeys(found) if label not in labels]
+
+
+def frame_location(lines):
+    """The location of the first symbolized stack frame outside the runtime libraries."""
+    for line in lines:
+        frame = STACK_FRAME.match(line)
+        if frame and not RUNTIME_FRAME.search(frame.group(1)):
+            return frame.group(1)
+    return None
+
+
+def replay_failure(code, text, card, n, shape=None):
+    """How a reach replay failed (SPEC section 18.8, crash attribution), or None when it
+    passed: its exit code is 0. A code of None is the script's kill.
+
+    Returns a dict: `kind` (timeout, oom, leak, sanitizer or panic), `message`, `location`
+    (the panic's, or the first frame outside the runtime libraries of a report's stack, or
+    None), `phase` (prefix, continuation or unknown), and `scaffold`, the reason of the
+    helper's scaffold error when the first panic is one at a location in
+    `target_states/mod.rs`, else None.
+    """
+    if code == 0:
+        return None
+    lines = text.splitlines()
+    # A `panic` line of the helper may quote a `[statelens][` message: first_panic skips it.
+    other = [line for line in lines if not line.startswith("[statelens-reach] ")]
+    sanitizer = next(
+        (
+            line.strip()
+            for line in other
+            if SANITIZER_ERROR.search(line) and "ERROR: LeakSanitizer" not in line
+        ),
+        None,
+    )
+
+    def marker(needle):
+        return next((line.strip() for line in other if needle in line), None)
+
+    if code is None or marker("ERROR: libFuzzer: timeout"):
+        kind = "timeout"
+        message = marker("ERROR: libFuzzer: timeout") or marker("statelens: killed after")
+    elif marker("ERROR: libFuzzer: out-of-memory"):
+        kind, message = "oom", marker("ERROR: libFuzzer: out-of-memory")
+    elif marker("ERROR: LeakSanitizer"):
+        kind, message = "leak", marker("ERROR: LeakSanitizer")
+    elif sanitizer:
+        kind, message = "sanitizer", sanitizer
+    else:
+        kind, message = "panic", first_panic(other)
+    # The first panic: the helper's `panic` line, which it prints before the default hook
+    # prints `panicked at`, or that line and the message on the next.
+    location = panic = panic_index = None
+    for index, line in enumerate(lines):
+        helper = REACH_LINE.match(line)
+        if helper and helper.group(21) is not None and panic_index is None:
+            panic_index, panic = index, helper.group(22)
+            if helper.group(21) != "-":
+                location = helper.group(21)
+                break
+            continue
+        default = PANICKED_AT.search(line)
+        if default:
+            location = default.group(1)
+            if panic is None:
+                panic = lines[index + 1].strip() if index + 1 < len(lines) else ""
+            break
+    if kind != "panic":
+        location = frame_location(other)
+    scaffold = None
+    if kind == "panic" and panic and panic.startswith(SCAFFOLD_ERROR):
+        if location and location.rsplit(":", 2)[0].endswith("target_states/mod.rs"):
+            scaffold = panic[len(SCAFFOLD_ERROR) :].split(" ", 1)
+            scaffold = scaffold[1] if len(scaffold) > 1 else ""
+    if kind == "panic" and not message:
+        message = panic or f"exit code {code}"
+    return {
+        "kind": kind,
+        "message": message,
+        "location": location,
+        "phase": failure_phase(lines, card, n, shape, panic_index),
+        "scaffold": scaffold,
+    }
+
+
+def failure_phase(lines, card, n, shape, panic_index):
+    """The phase a replay failed in (SPEC section 18.7): for a panic the helper reported,
+    the `phase` line it printed, and in Shape A `continuation` when the evaluation it ran
+    found En held; otherwise the last `phase` line, which in Shape A says only that the
+    failure came after the handoff. `unknown` without one."""
+    phases = [
+        (index, match.group(20))
+        for index, match in ((index, REACH_LINE.match(line)) for index, line in enumerate(lines))
+        if match and match.group(1) == card and match.group(20)
+    ]
+    if panic_index is not None:
+        if shape == "A":
+            held = f"[statelens-reach] {card} E{n}/{n} held "
+            after = any(line.startswith(held) for line in lines[panic_index:])
+            return "continuation" if after else "prefix"
+        later = [phase for index, phase in phases if index > panic_index]
+        earlier = [phase for index, phase in phases if index < panic_index]
+        return (later or earlier[-1:] or ["unknown"])[0]
+    last = phases[-1][1] if phases else "unknown"
+    if shape == "A" and last != "continuation":
+        return "unknown"
+    return last
+
+
+def diff_added_lines(diff):
+    """Maps each file a unified diff changes to the new-side numbers of the lines it adds;
+    a moved line is added where it lands."""
+    added, path, old, new, line = {}, None, 0, 0, 0
+    for raw in diff.splitlines():
+        if old > 0 or new > 0:
+            tag = raw[:1]
+            if tag == "\\":
+                continue
+            if tag == "+":
+                added.setdefault(path, set()).add(line)
+                line, new = line + 1, new - 1
+            elif tag == "-":
+                old -= 1
+            else:
+                line, old, new = line + 1, old - 1, new - 1
+            continue
+        if raw.startswith("+++ "):
+            name = raw[4:].split("\t")[0].strip()
+            path = None if name == "/dev/null" else name[2:] if name.startswith("b/") else name
+            continue
+        hunk = DIFF_HUNK.match(raw)
+        if hunk and path:
+            old = int(hunk.group(1) or 1)
+            line, new = int(hunk.group(2)), int(hunk.group(3) or 1)
+    return added
+
+
+def location_in_diff(location, added):
+    """Whether `location`, `file:line[:col]`, is a line `added` (diff_added_lines) holds.
+    The file may be relative to the repository, to the package, or absolute."""
+    match = re.fullmatch(r"(.+?):(\d+)(?::\d+)?", location or "")
+    if not match:
+        return False
+    path, number = match.group(1).removeprefix("./"), int(match.group(2))
+    return any(
+        number in lines
+        and (path == changed or path.endswith("/" + changed) or changed.endswith("/" + path))
+        for changed, lines in added.items()
+    )
+
+
+def stage_lines(replay):
+    """The stage lines of a reach_replay, as printed, in order."""
+    return [line["text"] for line in replay["lines"] if line["type"] == "stage"]
+
+
+def stage_values(stage, names=None):
+    """The values a stage's witness record binds, by entity, or {} without one."""
+    record = stage and stage.get("record")
+    values = dict(record["bind"]) if record else {}
+    return values if names is None else {name: values.get(name) for name in names}
+
+
+def control_status(history, header, canonical, control):
+    """The control of SPEC section 18.8, from the canonical run's and the control run's
+    reach_replay: (status, reason), the status being ok, vacuous, weak, missing, n/a
+    (accepted) or n/a refused."""
+    n = len(history.events)
+    value = header["control"]
+    if value is None:
+        return "missing", "the module has no Control: line"
+    harness = [k for k in range(1, n) if history.events[k - 1].actor == "harness"]
+    if value == "n/a":
+        if harness:
+            return "n/a refused", f"Control: n/a, but E{harness[0]} is a harness event before E{n}"
+        for k, stage in sorted(canonical["stages"].items()):
+            kind = stage["record"]["kind"] if stage["record"] else None
+            if stage["helper"] == "held" and kind not in ("exact", "construction"):
+                return "n/a refused", f"Control: n/a, but E{k}'s witness is {kind}"
+        return "n/a", None
+    if not isinstance(value, int):
+        return "vacuous", f"the Control: line `{value}` names no withheld event"
+    if not 1 <= value < n or history.events[value - 1].actor != "harness":
+        return "vacuous", f"E{value} is not a harness event before E{n}"
+    if control is None:
+        return "vacuous", "the control did not run"
+    incomplete = control["problems"] + [
+        f"no {line} line" for line in ("reach", "done") if not control[line]
+    ]
+    if incomplete:
+        return "vacuous", "the control run is incomplete: " + "; ".join(incomplete)
+    stages = control["stages"]
+    if stages.get(value, {}).get("helper") != "withheld":
+        return "vacuous", f"the control run printed no withheld line for E{value}"
+    for j in range(1, value):
+        if stages.get(j, {}).get("outcome") == "missed":
+            return "vacuous", f"E{j} missed in the control run"
+        if stage_values(stages.get(j)) != stage_values(canonical["stages"].get(j)):
+            return "vacuous", f"E{j} binds other values in the control run than in the canonical"
+    # Another omission after Ek could explain the final miss by itself.
+    for j in range(value + 1, n):
+        stage = stages.get(j)
+        if not stage or stage["helper"] is None:
+            return "vacuous", f"E{j} has no line in the control run"
+        if stage["helper"] == "withheld":
+            return "vacuous", f"E{j} is withheld in the control run too"
+    last, theirs = stages.get(n), canonical["stages"].get(n)
+    if not last or last["helper"] not in ("held", "missed"):
+        return "vacuous", f"E{n} has neither a held nor a missed line in the control run"
+    event = history.events[n - 1]
+    names = [name for name, _ in event.entities]
+    # Only an entity both witnesses bind to a value tells the states apart; one a witness
+    # leaves out of bind=, or binds to `?`, is no evidence of another state, and neither
+    # is a value the control witness's own evidence contradicts: its key, or the earlier
+    # stage it cites as `as Ej`, names another.
+    control_bind, canonical_bind = stage_values(last, names), stage_values(theirs, names)
+    if last["record"]:
+        for name, value in last["record"]["pairs"]:
+            if control_bind.get(name) not in (None, "?", value):
+                control_bind[name] = None
+        for name, earlier in event.entities:
+            source = stages.get(earlier, {}).get("record") if earlier else None
+            if source and control_bind[name] not in (None, "?", source["bind"].get(name)):
+                control_bind[name] = None
+    apart = any(
+        control_bind[name] not in (None, "?")
+        and canonical_bind[name] not in (None, "?")
+        and control_bind[name] != canonical_bind[name]
+        for name in names
+    )
+    if (
+        theirs
+        and theirs["helper"] == "held"
+        and last["helper"] == "held"
+        and last["outcome"] != "missed"
+        and not apart
+    ):
+        return "weak", f"E{n} holds in the control run for the bound entities"
+    return "ok", None
+
+
+def reach_verdict(
+    history, module, canonical, control=None, final=None, stray=None, diff=None, labels=None
+):
+    """The verdict of a scaffold version's reach check (SPEC section 18.8).
+
+    `module` is the scaffold module's text; `canonical`, `control` and `final` are each
+    replay's (exit code, output), or None when it did not run, the code being None when
+    the script killed it. `stray` names a crash file a run of the agent's left (section
+    18.6.2), `diff` is the card's diff, and `labels` every probe label and `sl_implies!`
+    ID under the editable roots. Returns a dict: `verdict`, `k`, `n`, `annotations`,
+    `reasons`, `control` and `control_reason`, `crash` (replay_failure of the replay that
+    failed, with its `replay`), `scaffold_error`, `header` and `replays`.
+    """
+    header = module_header(module or "")
+    n = len(history.events)
+    replays, failures = {}, []
+    for name, replay in (("canonical", canonical), ("control", control), ("final", final)):
+        if replay is None:
+            continue
+        code, text = replay
+        replays[name] = reach_replay(text, history, header["shape"], control=name == "control")
+        failure = replay_failure(code, text, history.id, n, header["shape"])
+        if failure:
+            failures.append(dict(failure, replay=name))
+    base = replays.get("canonical")
+    crashes = [failure for failure in failures if failure["scaffold"] is None]
+    result = {
+        "card": history.id,
+        "n": n,
+        "k": base["held"] if base else 0,
+        "header": header,
+        "replays": replays,
+        "crash": crashes[0] if crashes else None,
+        "scaffold_error": None,
+        "control": None,
+        "control_reason": None,
+        "reasons": [],
+    }
+    reasons = result["reasons"]
+    if crashes or stray:
+        result["verdict"] = CRASH
+        for failure in crashes:
+            reasons.append(
+                f"{failure['kind']} in the {failure['replay']} replay, phase {failure['phase']}, "
+                f"at {failure['location'] or 'an unknown location'}: {failure['message']}"
+            )
+        if stray:
+            reasons.append(f"a run of the agent's left {stray}")
+    elif failures:
+        result["verdict"] = "SCAFFOLD ERROR"
+        result["scaffold_error"] = failures[0]["scaffold"]
+        reasons.append(f"[statelens-scaffold] {failures[0]['scaffold']}")
+    elif base is None or base["reach"] is None or not base["done"] or base["problems"]:
+        result["verdict"] = "NO REPORT"
+        if base is None:
+            reasons.append("the canonical input was not replayed")
+        else:
+            reasons += base["problems"]
+            if base["reach"] is None:
+                reasons.append("the replay printed no reach line")
+            if not base["done"]:
+                reasons.append("the replay printed no done line")
+    else:
+        status, reason = control_status(history, header, base, replays.get("control"))
+        result["control"], result["control_reason"] = status, reason
+        stages = base["stages"]
+        first = base["first_miss"]
+        if first:
+            result["verdict"] = "UNREACHED" if first == 1 else "PARTIAL"
+            # k counts the stages held before the miss, as a version is kept by.
+            result["k"] = sum(stages[k]["outcome"] == "held" for k in range(1, first))
+            for k in range(1, first):
+                if stages[k]["outcome"] != "held":
+                    reasons.append(f"E{k} {stages[k]['outcome']} {stages[k]['detail']}".rstrip())
+            detail = stages[first]["detail"]
+            reasons.append(f"E{first} missed" + (f": {detail}" if detail else ""))
+        else:
+            for k, stage in sorted(stages.items()):
+                if stage["outcome"] != "held":
+                    reasons.append(f"E{k} {stage['outcome']} {stage['detail']}".rstrip())
+            if reason:
+                reasons.append(reason)
+            if reasons:
+                result["verdict"] = "UNVERIFIED"
+            else:
+                result["verdict"], result["k"] = "REACHED", n
+    annotations = []
+    later = replays.get("final")
+    if base and later and not any(failure["replay"] == "final" for failure in failures):
+        if stage_lines(base) != stage_lines(later):
+            annotations.append("nondeterministic")
+    status = result["control"]
+    if status == "weak":
+        annotations.append("weak")
+    if status in ("n/a", "n/a refused"):
+        annotations.append("control n/a")
+    if status == "missing":
+        annotations.append("control missing")
+    if labels is not None:
+        annotations += [f"unbound label {label}" for label in unbound_labels(module or "", labels)]
+    annotations += [f"missing: {capability}" for capability in header["missing"]]
+    if base:
+        annotations += base["annotations"]
+    if stray:
+        annotations.append("stray failure")
+    crash = result["crash"]
+    if crash and diff and location_in_diff(crash["location"], diff_added_lines(diff)):
+        annotations.append(f"location in {history.id} diff")
+    result["annotations"] = annotations
+    return result
+
+
+def verdict_text(result):
+    """A verdict as the console and the report print it, with its annotations."""
+    verdict = result["verdict"]
+    if verdict in ("REACHED", "UNVERIFIED", "PARTIAL", "UNREACHED"):
+        verdict = f"{verdict} {result['k']}/{result['n']}"
+    if result["annotations"]:
+        verdict += f" ({', '.join(result['annotations'])})"
+    return verdict
+
+
+def verdict_key(result, attempt):
+    """Sorts built versions best first, as synthesis keeps one (SPEC section 18.6.2): by
+    verdict, then by the stages held, then the later attempt."""
+    return (VERDICT_ORDER.index(result["verdict"]), -result["k"], -attempt)
+
+
+def report_verdict(text):
+    """The verdict of a reach report whose card kept a scaffold: a dict of `verdict`, `k`,
+    `annotations` and `text`, the line after `- Verdict: `; None for NOT BUILT, GATE
+    FAILED or no verdict line."""
+    found = REPORT_VERDICT.search(text)
+    if not found:
+        return None
+    return {
+        "verdict": found[1],
+        "k": int(found[2] or 0),
+        "annotations": found[3].split(", ") if found[3] else [],
+        "text": found[0][len("- Verdict: ") :],
+    }
+
+
+def crash_text(crash):
+    """A report's `- Crash:` line for the reach check's crash attribution `crash`."""
+    return (
+        f"- Crash: {crash['kind']} in the {crash['replay']} replay, phase {crash['phase']}, "
+        f"at {crash['location'] or 'an unknown location'}: {crash['message']}"
+    )
+
+
+def stands_worse(before, result):
+    """Whether a kept scaffold's revalidation `result` stands worse than `before`, its
+    report_verdict (section 18.6.2, Finish): a crash gained or lost, a verdict later in the
+    order a version is kept by, or fewer stages held under the same verdict."""
+
+    def rank(verdict, k):
+        counted = verdict in ("REACHED", "UNVERIFIED", "PARTIAL", "UNREACHED")
+        return VERDICT_ORDER.index(verdict), -k if counted else 0
+
+    if (before["verdict"] == CRASH) != (result["verdict"] == CRASH):
+        return True
+    return rank(result["verdict"], result["k"]) > rank(before["verdict"], before["k"])
+
+
+def reach_feedback(result):
+    """The reach check's part of the next attempt's FEEDBACK (SPEC section 18.8): the
+    verdict and why, the stage and trace lines, and what each signal asks for. None for a
+    CRASH (finding candidate), which stops refinement."""
+    verdict = result["verdict"]
+    if verdict == CRASH:
+        return None
+    card, n = result["card"], result["n"]
+    out = [f"Verdict: {verdict_text(result)}"] + [f"- {reason}" for reason in result["reasons"]]
+    shown = ("stage", "trace", "truncated", "handoff", "reach", "unparsed")
+    replays = [("canonical", result["replays"].get("canonical"))]
+    if result["control"] in ("vacuous", "weak"):
+        replays.append(("control", result["replays"].get("control")))
+    for name, replay in replays:
+        lines = [line for line in (replay or {}).get("lines", ()) if line["type"] in shown]
+        if lines:
+            out += ["", f"The lines of the {name} replay:"]
+            out += [f"[statelens-reach] {card} {line['text']}" for line in lines]
+    fixes = []
+    if verdict == "SCAFFOLD ERROR":
+        fixes.append((f"SCAFFOLD ERROR: {result['scaffold_error']}", FEEDBACK_FIXES["scaffold"]))
+    elif verdict == "NO REPORT":
+        fixes.append(("NO REPORT", FEEDBACK_FIXES["no report"]))
+    else:
+        stages = result["replays"]["canonical"]["stages"]
+        for k, stage in sorted(stages.items()):
+            if stage["outcome"] == "missed":
+                part = "first" if k == 1 else "last" if k == n else "middle"
+                if stage["detail"].startswith("cannot:"):
+                    part = "cannot"
+                signal = f"E{k} missed" + (f" ({stage['detail']})" if stage["detail"] else "")
+                fixes.append((signal, FEEDBACK_FIXES[part]))
+                break
+            if stage["outcome"] != "held":
+                signal = f"E{k} {stage['outcome']} {stage['detail']}".rstrip()
+                fixes.append((signal, FEEDBACK_FIXES["unverifiable"]))
+        status = result["control"]
+        if status == "weak":
+            fixes.append(("weak control", FEEDBACK_FIXES["weak"]))
+        elif status in ("vacuous", "missing", "n/a refused"):
+            fixes.append((f"{status} control: {result['control_reason']}", FEEDBACK_FIXES["control"]))
+    if fixes:
+        out += ["", "What to fix:"] + [f"- {signal}: {fix}" for signal, fix in fixes]
+    return "\n".join(out)
 
 
 def simplex_types(repo):
@@ -5338,14 +7227,18 @@ def bin_entries(block):
     return entries
 
 
-def variant_bin_block(blocks, stem, manifest=None):
-    """The [[bin]] block of a StateLens variant (SPEC section 8.3, edit M2)."""
+def variant_bin_block(blocks, stem, manifest=None, name=None):
+    """The [[bin]] block of a StateLens variant (SPEC section 8.3, edit M2).
+
+    `name` renames it to another target than the variant, `<stem>_statelens`: a
+    scaffold's block is its base's, renamed the same way (Appendix B.2).
+    """
     owners = []
     for block in blocks:
         entries = bin_entries(block)
-        name = entries.get("name", ("", ""))[0]
+        owner = entries.get("name", ("", ""))[0]
         path = entries.get("path", ("", ""))[0]
-        if name == stem or path == f"fuzz_targets/{stem}.rs":
+        if owner == stem or path == f"fuzz_targets/{stem}.rs":
             owners.append(entries)
     if len(owners) != 1:
         raise Abort(
@@ -5353,7 +7246,7 @@ def variant_bin_block(blocks, stem, manifest=None):
             f"materialize: expected one [[bin]] block for {stem} in {manifest}, "
             f"found {len(owners)}",
         )
-    variant = f"{stem}_statelens"
+    variant = name or f"{stem}_statelens"
     lines = ["", "[[bin]]", f'name = "{variant}"', f'path = "fuzz_targets/{variant}.rs"']
     for key in BIN_KEYS:
         if key in owners[0]:
@@ -5442,6 +7335,8 @@ class Campaign:
     search = False
     # Bindings a later audit batch's edits escaped: id -> (batch, files).
     unreviewed = None
+    # The `--invariants` lists, when the operator chose what to bind.
+    selection = None
 
     def __init__(self, args):
         self.repo = repo_root()
@@ -5452,6 +7347,7 @@ class Campaign:
         self.agent = agent_name(self.config, args.agent)
         self.profile_name = args.profile
         self.profile = PROFILES[args.profile]
+        self.selection = args.invariants
         self.stop_after = args.stop_after
         self.test_toolchain = self.config["STATELENS_TEST_TOOLCHAIN"]
         self.fuzz_toolchain = self.config["STATELENS_FUZZ_TOOLCHAIN"] or pinned_nightly(self.repo)
@@ -5672,13 +7568,15 @@ class Campaign:
             for path in sorted((self.repo / profile_fuzz_dir(name)).glob("*_statelens.rs"))
         ]
         created = list(CREATED_PATHS)
+        # The thin targets of scaffolds match the glob as well (SPEC section 7.1).
         created += [str(path.relative_to(self.repo)) for path in variants]
+        created += scaffold_dirs()
         for path in created:
             if (self.repo / path).exists():
                 raise Abort(
                     2,
-                    f"{path} exists: an earlier campaign instrumented this checkout; "
-                    "use a fresh clone",
+                    f"{path} exists: an earlier campaign or synthesis instrumented this "
+                    "checkout; use a fresh clone",
                 )
         status = git(self.repo, "status", "--porcelain", "--untracked-files=no", "-z")
         for path in porcelain_paths(status):
@@ -5706,6 +7604,11 @@ class Campaign:
             # Every *.md is linted, so lint rule 1 reports a misnamed file.
             for top in tops:
                 checked += sorted((self.sl_dir / top / registry).glob("*.md"), key=by_id)
+        available = len(self.invariants)
+        if self.selection:
+            self.invariants = select_invariants(
+                self.profile_name, self.profile["registries"], self.invariants, self.selection
+            )
         paths = [path for _, path in self.invariants]
         if lint_paths(checked, registry_files(self.sl_dir)):
             say("warning: some invariant files have format problems (see above)")
@@ -5739,6 +7642,7 @@ class Campaign:
             "fuzz_toolchain": self.fuzz_toolchain,
             "started": utc_now().isoformat(timespec="seconds"),
             "invariants": ids,
+            "invariants_available": available,
             "targets": self.targets,
         }
         (self.dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
@@ -5755,8 +7659,12 @@ class Campaign:
                 ids="; ".join(groups),
             )
         )
+        if self.selection:
+            counted = f"{len(ids)} of {available} invariant(s) bound ({'; '.join(groups)})"
+        else:
+            counted = f"{len(ids)} invariant(s)"
         say(
-            f"campaign: profile {self.profile_name}, {len(ids)} invariant(s), "
+            f"campaign: profile {self.profile_name}, {counted}, "
             f"{len(self.targets)} target(s) at {self.base[:10]} with {self.agent}"
         )
 
@@ -6044,7 +7952,8 @@ class Campaign:
         return statuses
 
     def check_scope(self):
-        """Every change since materialize must be under an editable root (SPEC 7.5)."""
+        """Every change since materialize must be under an editable root, and none may
+        call the read side of the runtime module (SPEC 7.5)."""
         current = self.snapshot()
         changed = sorted(
             path
@@ -6058,6 +7967,26 @@ class Campaign:
                 raise Abort(2, f"instrumentation edited {path}")
             if path.startswith(self.profile["warn"]):
                 say(f"warning: instrumentation edited {path}")
+            added = self.read_side_calls(path)
+            if added:
+                raise Abort(
+                    2, f"instrumentation calls the read side: {path} ({', '.join(added)})"
+                )
+
+    def read_side_calls(self, path):
+        """The read-side functions `path` reaches more often than at the base commit.
+
+        Materialize adds no such call under the editable roots, so the base commit's
+        content is the baseline's; the runtime module itself defines them.
+        """
+        target = self.repo / path
+        if path == self.profile["runtime"] or not path.endswith(".rs") or not target.is_file():
+            return []
+        before = git_file(self.repo, self.base, path)
+        added = runtime_calls(target.read_text(errors="replace"), READ_SIDE) - runtime_calls(
+            "\n".join(before or []), READ_SIDE
+        )
+        return sorted(added)
 
     def record(self):
         """Updates the plan summary and writes instrumentation.diff."""
@@ -6386,6 +8315,2464 @@ def unreviewed_note(unreviewed):
     )
 
 
+# SPEC section 18.6: Target-State Synthesis. A replay is killed after this many seconds,
+# longer than libFuzzer's default `-timeout` of 1,200 s (section 18.8).
+REPLAY_TIMEOUT = 1500
+# Files a run of a scaffold leaves (section 18.6.2, step 2.2); all but the last are failures.
+STRAY_NAME = re.compile(r"^(?:crash|oom|timeout|leak|slow-unit)-")
+STRAY_FAILURE = re.compile(r"^(?:crash|oom|timeout|leak)-")
+# The undoes that owe a revalidation when they undo shared code (section 18.6.2, --redo and
+# Last check), and the rollback of a card restored after its revalidation rewrote reports
+# (Finish), with the tag of that revalidation's replay directories and build logs.
+UNDO_TAGS = {
+    "--redo": "after-redo",
+    "the last check": "after-last-check",
+    "a rollback": "after-rollback",
+}
+# Guard 3 of section 18.6.1: the runtime functions that write ghost state or counters, which
+# only the helper and the scaffolds' thin targets may call anew; the literals of the helper's
+# lines; the assertion and probe macros; and the module attribute that would redirect a
+# module declaration to another file.
+GHOST_WRITES = (
+    "with_ghost",
+    "with_global",
+    "record",
+    "note",
+    "violation",
+    "reset",
+    "clear_compromised",
+)
+# The read side's calls only the helper makes: `tick` advances the event sequence, and
+# `watch` and `unwatch` drop the trace and forget a truncation the helper has not seen yet.
+HELPER_ONLY = ("tick", "watch", "unwatch")
+GUARDED_CALLS = tuple(dict.fromkeys(GHOST_WRITES + ("set_compromised",) + HELPER_ONLY + READ_SIDE))
+REACH_LITERALS = ("[statelens-reach]", "[statelens-scaffold]")
+SL_CALL = re.compile(r"\bsl_(?:probe|assert|implies)!\s*\(")
+# The label of an `sl_probe!` call and the ID of an `sl_implies!` call: the first string
+# literal of each, after the replica.
+SL_LABEL = re.compile(r'\bsl_(?:probe|implies)!\s*\([^;"]*"([^"\\]+)"')
+MOD_STATELENS = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+statelens\s*;")
+PATH_ATTRIBUTE = re.compile(r"#\s*\[\s*path\b")
+# Guard 3: what no edit adds outside the helper. A print could forge a helper line however
+# its literal is spelled, a panic hook could swallow an assertion's panic, and an included
+# file or a `#[path]` module could hold code the guards never read. Text checks only, so
+# they stop the plain forms; review of the card's diff covers the rest (section 18.11).
+HIDDEN_CODE = (
+    ("a print macro", re.compile(r"\be?print(?:ln)?\s*!")),
+    ("a stdout or stderr handle", re.compile(r"\b(?:stdout|stderr)\s*\(")),
+    ("a raw file descriptor", re.compile(r"\bfrom_raw_fd\b")),
+    ("a panic hook", re.compile(r"\b(?:set_hook|take_hook)\b")),
+    ("an include macro", re.compile(r"\binclude(?:_str|_bytes)?\s*!")),
+    ("a #[path] attribute", PATH_ATTRIBUTE),
+)
+SUMMARY_RESULT = re.compile(r"^statelens: result\s+(.*?)\s*$", re.M)
+TSS_MARKER = "// [statelens] tss:"
+# The feedback of a first attempt (section 18.6.2).
+FIRST_ATTEMPT = "none: first attempt"
+
+
+def synthesis_stamp():
+    return utc_now().strftime("%Y%m%dT%H%M%SZ")
+
+
+def host_triple(toolchain):
+    """The host triple of `toolchain`, where cargo-fuzz puts its builds."""
+    rustc = ["rustc"] + ([f"+{toolchain}"] if toolchain else [])
+    try:
+        version = subprocess.run(rustc + ["-vV"], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise Abort(2, f"cannot ask {' '.join(rustc)} for its host triple: {error}")
+    for line in version.splitlines():
+        if line.startswith("host: "):
+            return line[len("host: ") :].strip()
+    raise Abort(2, f"{' '.join(rustc)} -vV did not report a host triple")
+
+
+def fuzz_binary(repo, package, host, target):
+    """The fuzz build of `target`, in CARGO_TARGET_DIR, which cargo reads relative to the
+    checkout the build runs in, or else in the workspace's target directory or the
+    package's (SPEC section 18.8), or None. With the variable set, only its directory is
+    checked, so an older build elsewhere is never taken for this one."""
+    custom = os.environ.get("CARGO_TARGET_DIR")
+    roots = [repo / custom] if custom else [repo / "target", repo / package / "target"]
+    for root in roots:
+        candidate = root / host / "release" / target
+        if os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def first_run(text, card):
+    """A replay's output with the `[statelens-reach]` lines of `card` of one run of the
+    input kept: libFuzzer runs a passing input a second time to look for leaks, inside the
+    same replay, and the second run repeats every line (SPEC section 18.8).
+
+    A run opens with the `phase prefix` line Stages::new prints; the panic hook reprints
+    the phase after its `panic` line, so a `phase prefix` line after a `panic` line of its
+    run opens none. The run kept is the one that printed a `panic` line, else the first,
+    so a later run never completes an earlier one's report, and a failure in a later run
+    is read in that run's phase. Every other line is kept.
+    """
+    prefix = f"[statelens-reach] {card} "
+    tagged, run, opened, panicked, failed = [], 0, False, False, None
+    for line in text.splitlines():
+        if not line.startswith(prefix):
+            tagged.append((None, line))
+            continue
+        rest = line[len(prefix) :].strip()
+        if rest == "phase prefix" and opened and not panicked:
+            run += 1
+        opened = True
+        if rest.startswith("panic "):
+            panicked = True
+            if failed is None:
+                failed = run
+        tagged.append((run, line))
+    kept = 0 if failed is None else failed
+    out = [line for run, line in tagged if run is None or run == kept]
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
+def campaign_labels(repo, profile):
+    """Every `sl_probe!` label and `sl_implies!` ID under the editable roots of `profile`,
+    as (label, `path:line`), from one scan (SPEC section 18.6.2, LABELS)."""
+    settings = PROFILES[profile]
+    found = []
+    for root in settings["roots"]:
+        for path in sorted((repo / root).rglob("*.rs")):
+            relative = path.relative_to(repo).as_posix()
+            if relative == settings["runtime"]:
+                continue
+            code = blank_inert(path.read_text(errors="replace"))
+            for match in SL_LABEL.finditer(code):
+                line = code.count("\n", 0, match.start()) + 1
+                found.append((match.group(1), f"{relative}:{line}"))
+    return found
+
+
+def sl_calls(text):
+    """The `sl_probe!`, `sl_assert!` and `sl_implies!` calls of Rust `text`, as a multiset
+    of their texts with whitespace and trailing commas dropped, so a call that only moves
+    or is reformatted is the same call (guard 3 of SPEC section 18.6.1)."""
+    code = blank_inert(text)
+    structure = blank_inert(text, strings=True)
+    calls = collections.Counter()
+    for match in SL_CALL.finditer(code):
+        depth, index = 0, match.end() - 1
+        while index < len(structure):
+            char = structure[index]
+            if char in "([{":
+                depth += 1
+            elif char in ")]}":
+                depth -= 1
+                if not depth:
+                    break
+            index += 1
+        call = re.sub(r"\s+", "", code[match.start() : index + 1])
+        calls[re.sub(r",([)\]}])", r"\1", call)] += 1
+    return calls
+
+
+def module_declarations(text):
+    """Every declaration of the runtime module in `text`, with the attribute lines directly
+    above it."""
+    lines = text.split("\n")
+    found = []
+    for index, line in enumerate(lines):
+        if MOD_STATELENS.match(line):
+            start = index
+            while start > 0 and lines[start - 1].strip().startswith("#["):
+                start -= 1
+            found.append(tuple(item.strip() for item in lines[start : index + 1]))
+    return found
+
+
+def diff_added_text(diff):
+    """Maps each file a unified diff changes to the multiset of the non-blank lines it adds,
+    stripped of surrounding whitespace."""
+    added, path, old, new = {}, None, 0, 0
+    for raw in diff.splitlines():
+        if old > 0 or new > 0:
+            tag = raw[:1]
+            if tag == "+":
+                if path and raw[1:].strip():
+                    added.setdefault(path, collections.Counter())[raw[1:].strip()] += 1
+                new -= 1
+            elif tag == "-":
+                old -= 1
+            elif tag != "\\":
+                old, new = old - 1, new - 1
+            continue
+        if raw.startswith("+++ "):
+            name = raw[4:].split("\t")[0].strip()
+            path = None if name == "/dev/null" else name[2:] if name.startswith("b/") else name
+            continue
+        hunk = re.match(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", raw)
+        if hunk and path:
+            old, new = int(hunk.group(1) or 1), int(hunk.group(2) or 1)
+    return added
+
+
+def file_diff(path, old, new):
+    """A git-style unified diff of one file, from content `old` to `new` (bytes, or None
+    for a file that does not exist), which `git apply` reads."""
+    head = f"diff --git a/{path} b/{path}\n"
+    if old is None:
+        head += "new file mode 100644\n"
+    elif new is None:
+        head += "deleted file mode 100644\n"
+    try:
+        before = (old or b"").decode("utf-8").splitlines(keepends=True)
+        after = (new or b"").decode("utf-8").splitlines(keepends=True)
+    except UnicodeDecodeError:
+        return head + f"Binary files a/{path} and b/{path} differ\n"
+    lines = difflib.unified_diff(
+        before,
+        after,
+        "/dev/null" if old is None else f"a/{path}",
+        "/dev/null" if new is None else f"b/{path}",
+    )
+    body = "".join(
+        line if line.endswith("\n") else line + "\n\\ No newline at end of file\n" for line in lines
+    )
+    return head + body
+
+
+def tree_diff(before, after):
+    """The diff between two snapshots, path -> bytes, of the synthesis scope."""
+    return "".join(
+        file_diff(path, before.get(path), after.get(path))
+        for path in sorted(set(before) | set(after))
+        if before.get(path) != after.get(path)
+    )
+
+
+def diff_sections(diff):
+    """The per-file sections of a diff `tree_diff` wrote, as (path, text)."""
+    sections = []
+    for part in re.split(r"(?m)^(?=diff --git a/)", diff):
+        match = re.match(r"diff --git a/(\S+) b/", part)
+        if match:
+            sections.append((match.group(1), part))
+    return sections
+
+
+def diff_hunks(text):
+    """The hunks of one file's diff, as (header, lines)."""
+    hunks = []
+    for line in text.splitlines():
+        if line.startswith("@@"):
+            hunks.append((line, []))
+        elif hunks:
+            hunks[-1][1].append(line)
+    return hunks
+
+
+def fuzz_target_parts(text):
+    """The closure parameters, the closure header line and the body of the one
+    `fuzz_target!` of a target (Appendix B.1), or None. A one-line target's body is its
+    expression as a statement."""
+    lines = [line.rstrip() for line in text.split("\n")]
+    starts = [index for index, line in enumerate(lines) if VARIANT_START.match(line)]
+    if len(starts) == 1:
+        start = starts[0]
+        indent = VARIANT_START.match(lines[start]).group(1)
+        closing = f"{indent}}});"
+        end = next((i for i in range(start + 1, len(lines)) if lines[i] == closing), None)
+        if end is None:
+            return None
+        params = re.match(r"^\s*fuzz_target!\(\|([^|]+)\|", lines[start]).group(1)
+        return params, lines[start].strip(), "\n".join(lines[start + 1 : end])
+    one = [index for index, line in enumerate(lines) if VARIANT_ONE_LINE.match(line)]
+    if len(starts) == 0 and len(one) == 1:
+        _indent, params, expression = VARIANT_ONE_LINE.match(lines[one[0]]).groups()
+        return params, f"fuzz_target!(|{params}|", expression + ";"
+    return None
+
+
+def statements(body):
+    """The statements of a block body, without comments, each with its whitespace dropped."""
+    code = blank_inert(body, strings=True)
+    return [re.sub(r"\s+", "", part) for part in code.split(";") if part.strip()]
+
+
+def remove_bin_blocks(text, names):
+    """`text`, a manifest, without the [[bin]] blocks whose name `names` matches as a shell
+    pattern, each with the blank line before it (Appendix B.2 writes one)."""
+    lines = text.split("\n")
+    index = 0
+    while index < len(lines):
+        if lines[index].strip() != "[[bin]]":
+            index += 1
+            continue
+        end = index + 1
+        while end < len(lines) and not lines[end].strip().startswith("["):
+            end += 1
+        name = bin_entries(lines[index + 1 : end]).get("name", ("", ""))[0]
+        if not fnmatch.fnmatchcase(name, names):
+            index = end
+            continue
+        while end - 1 > index and not lines[end - 1].strip():
+            end -= 1
+        start = index - 1 if index > 0 and not lines[index - 1].strip() else index
+        del lines[start:end]
+        index = start
+    return "\n".join(lines)
+
+
+def base_runner(profile, base, body):
+    """Whether the runner of `base` is hooked (Appendices B.3 to B.5 and F), for the agent."""
+    if profile == "marshal":
+        if base.endswith("_scenarios"):
+            return "hooked: the wedge scenario runs a real Byzantine engine (Appendix F)"
+        if "twins" in base:
+            return "hooked: the Twins runner (Appendix B.3)"
+    else:
+        if re.search(r"\bfuzz_twins_audit\b|\bTwins(?:Campaign|Mutator)\b", body):
+            return "hooked: the Twins runner (Appendix B.3)"
+        if re.search(r"\bChaosTwins\b", body):
+            return "hooked: the Chaos-Twins runner (Appendix B.5)"
+        if re.search(r"\bByzzfuzz\b", body):
+            return "hooked: the ByzzFuzz runner (Appendix B.5)"
+        if re.search(r"\bfuzz_audit\w*::<", body):
+            return "hooked: the audited Standard runner (Appendix B.5)"
+    return "not hooked: it runs no engine under a Byzantine identity, so it needs no hook"
+
+
+class Synthesis:
+    """Target-State Synthesis (SPEC section 18.6), on the checkout a campaign instrumented."""
+
+    def __init__(self, args):
+        self.repo = repo_root()
+        self.sl_dir = self.repo / SL
+        self.config = load_config(self.sl_dir)
+        self.agent = agent_name(self.config, args.agent)
+        self.patterns = args.match or []
+        self.redo = args.redo
+        self.dir = self.sl_dir / "campaign"
+        self.reach = self.dir / "reach"
+        try:
+            self.meta = json.loads((self.dir / "meta.json").read_text())
+        except (OSError, ValueError):
+            self.meta = None
+        profile = args.profile or (self.meta or {}).get("profile")
+        if profile in PROFILES and not PROFILES[profile]["scaffold"]:
+            raise Abort(
+                1, f"Target-State Synthesis refuses the {profile} profile; use simplex or marshal"
+            )
+        if self.meta is None or self.meta.get("profile") not in PROFILES:
+            raise Abort(
+                2,
+                f"no campaign in this checkout names its profile ({SL}/campaign/meta.json); "
+                "run `just campaign` first",
+            )
+        if self.meta["profile"] != profile:
+            raise Abort(
+                2,
+                f"the campaign in this checkout ran the {self.meta['profile']} profile, not "
+                f"{profile}; synthesize with the campaign's profile",
+            )
+        self.profile_name = profile
+        self.profile = PROFILES[profile]
+        self.package = self.profile["package"]
+        self.manifest = profile_manifest(profile)
+        self.states = target_states_dir(profile)
+        self.mod_rs = f"{self.states}/mod.rs"
+        self.lib_rs, self.anchor, _position, declaration = self.profile["scaffold"]
+        self.declaration = declaration.split("\n")
+        # SPEC section 18.6.1, Where: the editable roots and the fuzz package.
+        self.scope = tuple(self.profile["roots"]) + (self.package + "/",)
+        # Guard 2: the files the script owns whole.
+        self.owned = (self.manifest, "Cargo.lock", self.mod_rs)
+        self.base = self.meta.get("base") or ""
+        self.fuzz_toolchain = self.meta.get("fuzz_toolchain") or pinned_nightly(self.repo)
+        self.test_toolchain = self.meta.get("test_toolchain") or ""
+        self.runtime_path = (
+            f"commonware_{self.profile['crate']}::{self.profile['module']}::statelens"
+        )
+        self.baseline_dir = self.reach / "baseline"
+        # The S0 of the pair in progress, kept on disk until the pair ends (`keep_pending`).
+        self.pending = self.reach / "pending"
+        self.empty = self.reach / "empty"
+        # The revalidation an undo of shared code owes (`owe`), on disk from before the undo
+        # until it completes, so a synthesis that stops first leaves it to the next; and the
+        # one a pair's revalidation owes from before it rewrites a report until the pair's
+        # report is written, for a restore of the pair's edits in between (`revalidate`).
+        self.owed = self.reach / "revalidation.json"
+        self.host = None
+        self.labels = []
+        self.b_files, self.b_worktree, self.run_state = set(), {}, {}
+        self.declared, self.written = False, set()
+        # What the guards compare against, read once per run before any agent runs: the
+        # agent can write SL/campaign/, which git ignores, so no guard re-reads it, and
+        # `seal` writes these back after every run of the agent.
+        self.b_data, self.written_data = {}, {}
+        self.campaign_added, self.campaign_diff, self.tests_record = {}, None, None
+        # Guard 5's inventory, {"passed": set, "failed": set}, kept with B.
+        self.tests = None
+        self.campaign_result = None
+        # The pair in progress, for `preserve`: its card, key, module, S0, attempt, step,
+        # the strays snapshot of a running agent, stray failures, whether its version is
+        # kept, and replay codes.
+        self.live = None
+        # The kept scaffolds a pair's shared edits revalidate: pair key -> its scaffold, its
+        # card, base and module, its History and its report's text, read once per run and
+        # kept up to date in memory.
+        self.standing = {}
+
+    def rel(self, path):
+        return Path(path).relative_to(self.repo).as_posix()
+
+    # Preconditions (section 18.6.2).
+
+    def check_campaign(self):
+        """The preconditions that read meta.json, reported before the agent CLI is checked."""
+        head = git(self.repo, "rev-parse", "HEAD").strip()
+        if self.base != head:
+            raise Abort(
+                2,
+                f"campaign/meta.json names the base {self.base[:10] or 'none'}, but HEAD is "
+                f"{head[:10]}; synthesize on the checkout the campaign instrumented",
+            )
+        false = [
+            str(item) for item in self.meta.get("invariants", ()) if str(item).startswith("FALSE-")
+        ]
+        if false:
+            raise Abort(
+                2,
+                f"the campaign bound {', '.join(false)}, and a false invariant panics in every "
+                "scaffold; run a campaign without STATELENS_FALSE_INVARIANTS=1",
+            )
+
+    def check_preconditions(self):
+        """The other preconditions, after the usage errors, the agent CLI first."""
+        check_agent_cli(self.agent)
+        summary = self.dir / "summary.txt"
+        found = SUMMARY_RESULT.search(summary.read_text()) if summary.is_file() else None
+        result = found.group(1) if found else None
+        if result not in ("READY", "PANIC (tests)"):
+            raise Abort(
+                2,
+                f"the campaign ended {result or 'without a summary'}; synthesis needs a campaign "
+                "that ended READY or PANIC (tests)",
+            )
+        self.campaign_result = result
+        runtime = self.repo / self.profile["runtime"]
+        if not runtime.is_file() or "pub fn watch(" not in runtime.read_text(errors="replace"):
+            raise Abort(2, "this checkout predates the read side or was cleaned; use a fresh clone")
+        if not (self.dir / "plan.md").is_file():
+            raise Abort(2, f"{PLAN} is missing; use a fresh clone and run a campaign")
+        if shutil.which("cargo-fuzz") is None:
+            raise Abort(2, "cargo-fuzz is not on PATH; see the prerequisites in README.md")
+
+    # Snapshots: every file git does not ignore under the scope, and Cargo.lock, with the
+    # ignored Rust files cargo compiles (guard 3 vetoes those).
+
+    def scope_files(self):
+        listed = git(
+            self.repo,
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            *self.scope,
+            "Cargo.lock",
+        )
+        return sorted(
+            {path for path in listed.split("\0") if path and (self.repo / path).is_file()}
+            | set(self.ignored_sources())
+        )
+
+    def ignored_sources(self):
+        """The Rust files git ignores where cargo compiles them, under the editable roots
+        and the package's src/ and fuzz_targets/: `target` in the repository's .gitignore
+        ignores a module named `target`. Its build output, corpus and artifacts lie
+        elsewhere in the package."""
+        listed = git(
+            self.repo,
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--",
+            *self.profile["roots"],
+            f"{self.package}/src/",
+            f"{self.package}/fuzz_targets/",
+        )
+        return sorted(
+            path
+            for path in listed.split("\0")
+            if path.endswith(".rs") and (self.repo / path).is_file()
+        )
+
+    def snapshot(self):
+        return {path: (self.repo / path).read_bytes() for path in self.scope_files()}
+
+    def prune(self, directory):
+        """Removes `directory` and its parents while they are empty, below the scope."""
+        tops = {(self.repo / root).resolve() for root in self.scope}
+        while directory.is_dir() and directory.resolve() not in tops:
+            if not inside_repo(self.repo, directory) or any(directory.iterdir()):
+                return
+            parent = directory.parent
+            directory.rmdir()
+            directory = parent
+
+    def write(self, path, content):
+        """Writes `content` (bytes) to `path`, or deletes it for None. A symbolic link is an
+        edit's, never a file of the scope: one at `path` is removed, not written through,
+        and nothing is written below a directory one replaced, with a warning, since guard 1
+        names that directory."""
+        target = self.repo / path
+        if target.parent.resolve() != (self.repo.resolve() / path).parent:
+            say(f"warning: {path} lies behind a symbolic link; it was not restored")
+            return
+        removed = target.is_symlink()
+        if removed:
+            target.unlink()
+        if content is None:
+            if target.is_file():
+                target.unlink()
+                removed = True
+            if removed:
+                self.prune(target.parent)
+            return
+        if not target.is_file() or target.read_bytes() != content:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+
+    def restore(self, snapshot, version=None):
+        """Rewrites the files of `snapshot` and deletes the files created in scope since;
+        with `version`, the paths it changed (bytes, or None for deleted) are then as it
+        has them. A file already as wanted is left alone, so cargo does not rebuild it."""
+        wanted = dict(snapshot)
+        for path, content in (version or {}).items():
+            if content is None:
+                wanted.pop(path, None)
+            else:
+                wanted[path] = content
+        for path in self.scope_files():
+            if path not in wanted:
+                self.write(path, None)
+        for path, content in wanted.items():
+            self.write(path, content)
+        self.own()
+
+    # The baseline B (section 18.6.2, once per campaign) and the script's own files.
+
+    def load_baseline(self):
+        state_path = self.baseline_dir / "state.json"
+        if not state_path.is_file():
+            if (self.repo / self.states).exists():
+                raise Abort(
+                    2,
+                    f"{self.states} exists, but the synthesis baseline "
+                    f"{self.rel(self.baseline_dir)} does not; use a fresh clone",
+                )
+            partial = self.reach / "baseline.partial"
+            if partial.exists():
+                shutil.rmtree(partial)
+            files = self.snapshot()
+            for path, content in files.items():
+                target = partial / "files" / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+            self.b_files, self.b_data = set(files), dict(files)
+            self.b_worktree = worktree_state(self.repo)
+            self.declared, self.written, self.written_data = False, set(), {}
+            (partial / "written").mkdir(parents=True, exist_ok=True)
+            self.save_state(partial)
+            self.take_tests(partial)
+            if self.baseline_dir.exists():
+                shutil.rmtree(self.baseline_dir)
+            partial.rename(self.baseline_dir)
+            say(f"synthesis: baseline of {len(files)} file(s) in {self.rel(self.baseline_dir)}")
+            return
+        self.load_tests()
+        state = json.loads(state_path.read_text())
+        self.b_files = set(state["files"])
+        self.b_worktree = {path: tuple(value) for path, value in state["worktree"].items()}
+        self.declared = state["declared"]
+        self.written = set(state["written"])
+        self.b_data = {
+            path: (self.baseline_dir / "files" / path).read_bytes() for path in self.b_files
+        }
+        self.written_data = {
+            path: (self.baseline_dir / "written" / path).read_bytes() for path in self.written
+        }
+
+    def save_state(self, directory=None):
+        state = {
+            "files": sorted(self.b_files),
+            "worktree": {path: list(value) for path, value in sorted(self.b_worktree.items())},
+            "declared": self.declared,
+            "written": sorted(self.written),
+        }
+        (directory or self.baseline_dir).joinpath("state.json").write_text(
+            json.dumps(state, indent=1) + "\n"
+        )
+
+    def b_content(self, path):
+        return self.b_data.get(path)
+
+    def expected(self, path):
+        """What the script last wrote to one of its own files, or else its content in B."""
+        if path in self.written:
+            return self.written_data[path]
+        return self.b_content(path)
+
+    def own(self, *paths):
+        """Records the current content of the script's own files as what it last wrote,
+        in memory for the guards and on disk for the next synthesis."""
+        for path in paths or self.owned:
+            target = self.repo / path
+            if not target.is_file():
+                continue
+            content = target.read_bytes()
+            copy = self.baseline_dir / "written" / path
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_bytes(content)
+            self.written.add(path)
+            self.written_data[path] = content
+        self.save_state()
+
+    # Guard 5's inventory: the tests the gate passed and failed on the tree as the campaign
+    # left it, validated by nextest_run and kept with B in tests.json.
+
+    def campaign_tests(self):
+        """The inventory from the campaign's gate log, `logs/test.log`, or (None, problem)
+        when the log is missing, was written by another command or does not validate."""
+        log = self.dir / "logs" / "test.log"
+        if not log.is_file():
+            return None, "missing"
+        head, _, body = log.read_text(errors="replace").partition("\n")
+        if head != "$ " + shlex.join(gate_test_command(self.test_toolchain, self.profile_name)):
+            return None, "not written by this test gate's command"
+        # The campaign records no exit code; one that ended PANIC (tests) had a nonzero one.
+        return nextest_run(body, 0 if self.campaign_result == "READY" else None)
+
+    def save_tests(self, directory, tests, source):
+        self.tests = tests
+        record = {key: sorted(tests[key]) for key in ("passed", "failed")}
+        record["source"] = self.rel(source)
+        self.tests_record = (json.dumps(record, indent=1) + "\n").encode()
+        (directory / "tests.json").write_bytes(self.tests_record)
+
+    def take_tests(self, directory):
+        """Takes the inventory with B: from the campaign's gate log when it validates, or
+        else from one run of the gate on the tree as the campaign left it. Output that cannot
+        be validated, and a failed test after a campaign that ended READY, stop synthesis."""
+        tests, problem = self.campaign_tests()
+        log = self.dir / "logs" / "test.log"
+        if problem:
+            say(
+                f"synthesis: {self.rel(log)} is unusable ({problem}); running the test gate on "
+                "the tree as the campaign left it"
+            )
+            log = self.dir / "logs" / "test-baseline.log"
+            command = gate_test_command(self.test_toolchain, self.profile_name)
+            code, _ = run_logged(command, log, self.repo, echo=False)
+            tests, problem = nextest_run(log.read_text(errors="replace"), code)
+            if problem:
+                raise Abort(
+                    2,
+                    f"the test gate's output on the tree as the campaign left it is unusable "
+                    f"({problem}); see {self.rel(log)}",
+                )
+            if self.campaign_result == "READY" and tests["failed"]:
+                # The campaign's own gate passed every test on this tree: a failure here is
+                # a flaky or killed test, which the inventory must not excuse for every card.
+                raise Abort(
+                    2,
+                    f"the campaign ended READY, but the test gate failed "
+                    f"{', '.join(sorted(tests['failed']))} on the tree it left (a flaky or "
+                    f"killed test); see {self.rel(log)} and run synthesis again",
+                )
+        self.save_tests(directory, tests, log)
+        say(
+            f"synthesis: test inventory of {len(tests['passed'])} passed and "
+            f"{len(tests['failed'])} failed test(s) from {self.rel(log)}"
+        )
+
+    def load_tests(self):
+        """Loads the inventory kept with B. A baseline without one stops synthesis: the
+        campaign's gate log may have changed since, so the inventory is not taken anew."""
+        path = self.baseline_dir / "tests.json"
+        if not path.is_file():
+            raise Abort(
+                2,
+                f"the synthesis baseline has no test inventory, {self.rel(path)}; use a fresh "
+                "clone",
+            )
+        try:
+            self.tests_record = path.read_bytes()
+            record = json.loads(self.tests_record)
+            self.tests = {key: {str(name) for name in record[key]} for key in ("passed", "failed")}
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise Abort(2, f"{self.rel(path)} is unreadable ({error}); use a fresh clone")
+
+    def load_campaign(self):
+        """The campaign's files the guards compare against, read once per run."""
+        diff = self.dir / "instrumentation.diff"
+        self.campaign_diff = diff.read_bytes() if diff.is_file() else None
+        if self.campaign_diff is not None:
+            self.campaign_added = diff_added_text(self.campaign_diff.decode(errors="replace"))
+
+    def seal(self):
+        """Writes back, with a warning, each record the guards compare with that is not as
+        held in memory: the files of B, what the script last wrote to its own files, the
+        test inventory and the instrumentation diff. The agent, and the code it wrote, can
+        write SL/campaign/, so this runs after its every run and when the synthesis ends,
+        and the next synthesis loads them unchanged."""
+        records = {self.baseline_dir / "files" / path: self.b_data[path] for path in self.b_files}
+        records.update(
+            (self.baseline_dir / "written" / path, self.written_data[path]) for path in self.written
+        )
+        records[self.baseline_dir / "tests.json"] = self.tests_record
+        records[self.dir / "instrumentation.diff"] = self.campaign_diff
+        for target, content in records.items():
+            if (target.read_bytes() if target.is_file() else None) == content:
+                continue
+            say(f"warning: the agent changed {self.rel(target)}; it was written back")
+            if content is None:
+                target.unlink()
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+        self.save_state()
+
+    def load_standing(self):
+        """The kept scaffolds of the campaign, for revalidation (section 18.6.2, Finish): the
+        pair of each thin target in the package, its card's History and its report, read
+        once per run before any agent runs, since the reports lie in SL/campaign/."""
+        cards = {
+            path.stem: path
+            for top in CARD_TREES
+            for path in (self.sl_dir / top / self.profile_name).glob("TS-*.md")
+        }
+        self.standing = {}
+        for scaffold in scaffold_targets(self.repo, self.profile_name):
+            found = SCAFFOLD_NAME.match(scaffold)
+            card_id, base = "TS-" + found["number"], found["base"]
+            key = pair_key(card_id, base)
+            report = self.reach / f"{key}.md"
+            text = report.read_text(errors="replace") if report.is_file() else ""
+            try:
+                history = card_history(cards[card_id].read_text())
+            except (KeyError, Abort):
+                history = None
+            if history is None or report_verdict(text) is None:
+                say(
+                    f"warning: {scaffold} has no card or no report with its verdict, so no "
+                    "pair's edits revalidate it; the last check still builds it"
+                )
+                continue
+            self.standing[key] = {
+                "scaffold": scaffold,
+                "card": card_id,
+                "base": base,
+                "module": pair_module(card_id, base),
+                "history": history,
+                "report": text,
+            }
+
+    def write_owned(self, path, content):
+        self.write(path, content)
+        self.own(path)
+
+    # Guards 1 to 3 against B (section 18.6.1).
+
+    def outside_scope(self):
+        """Guard 1: the paths outside the scope that differ from B. A path under statelens/
+        is compared with the state this run started from instead, because the operator
+        edits cards and prompts between syntheses."""
+        current = worktree_state(self.repo)
+        changed = []
+        for path in sorted(set(current) | set(self.b_worktree) | set(self.run_state)):
+            if path == "Cargo.lock" or path.startswith(self.scope):
+                continue
+            reference = self.run_state if path.startswith(f"{SL}/") else self.b_worktree
+            if reference.get(path) != current.get(path):
+                changed.append(path)
+        return changed
+
+    def declaration_at_anchor(self, lines):
+        found = [index for index, line in enumerate(lines) if line == self.anchor]
+        if len(found) != 1:
+            return False
+        start = found[0] + 1
+        return lines[start : start + len(self.declaration)] == self.declaration
+
+    def fix_declaration(self, fallback=None):
+        """Writes the declaration of `target_states` back as the script wrote it."""
+        target = self.repo / self.lib_rs
+        lines = target.read_text().split("\n") if target.is_file() else []
+        size = len(self.declaration)
+        index = 0
+        while index < len(lines):
+            if lines[index : index + size] == self.declaration:
+                del lines[index : index + size]
+            elif lines[index].strip() == "pub mod target_states;":
+                del lines[index]
+            else:
+                index += 1
+        if self.declared:
+            found = [index for index, line in enumerate(lines) if line == self.anchor]
+            if len(found) != 1:
+                # The anchor itself was edited: the file as the pair found it.
+                if fallback is not None:
+                    self.write(self.lib_rs, fallback)
+                return
+            lines[found[0] + 1 : found[0] + 1] = self.declaration
+        self.write(self.lib_rs, "\n".join(lines).encode())
+
+    def script_files(self, restore=False, s0=None):
+        """Guard 2: (path, finding) for every change to the script's own files and to any
+        manifest in scope; with `restore`, each is written back."""
+        findings = []
+        for path in self.owned:
+            want = self.expected(path)
+            target = self.repo / path
+            have = target.read_bytes() if target.is_file() else None
+            if have != want:
+                findings.append(
+                    (
+                        path,
+                        f"guard 2: {path} is the script's and was restored; leave the package "
+                        "manifest, Cargo.lock and target_states/mod.rs as you found them",
+                    )
+                )
+                if restore:
+                    self.write(path, want)
+        for path in sorted(set(self.scope_files()) | self.b_files):
+            if not path.endswith("Cargo.toml") or path == self.manifest:
+                continue
+            if not path.startswith(self.scope):
+                continue
+            target = self.repo / path
+            have = target.read_bytes() if target.is_file() else None
+            if have != self.b_content(path):
+                findings.append(
+                    (
+                        path,
+                        f"guard 2: {path} changed; no Cargo.toml may change, and it was restored",
+                    )
+                )
+                if restore:
+                    self.write(path, self.b_content(path))
+        lib = self.repo / self.lib_rs
+        lines = lib.read_text(errors="replace").split("\n") if lib.is_file() else []
+        before = (self.b_content(self.lib_rs) or b"").decode(errors="replace").split("\n")
+        count = sum(line.strip() == "pub mod target_states;" for line in lines)
+        expected = sum(line.strip() == "pub mod target_states;" for line in before)
+        if self.declared:
+            good = count == expected + 1 and self.declaration_at_anchor(lines)
+        else:
+            good = count == expected
+        if not good:
+            findings.append(
+                (
+                    self.lib_rs,
+                    f"guard 2: the declaration of target_states in {self.lib_rs} is the "
+                    "script's and was restored",
+                )
+            )
+            if restore:
+                self.fix_declaration((s0 or {}).get(self.lib_rs))
+        if restore and findings:
+            self.own()
+        return findings
+
+    def thin_problems(self, path):
+        """Why a scaffold's thin target is not of the shape of Appendix B.6, if it is not."""
+        relative = self.rel(path)
+        match = SCAFFOLD_NAME.match(path.stem)
+        base, module = match["base"], f"ts{match['number']}_{match['base']}"
+        source = self.repo / profile_fuzz_dir(self.profile_name) / f"{base}.rs"
+        if not source.is_file():
+            return [f"{relative}: its base {base} is not a target of {self.package}"]
+        wanted = fuzz_target_parts(source.read_text(errors="replace"))
+        if wanted is None:
+            return [f"{relative}: the fuzz_target! of its base {base} cannot be read"]
+        text = path.read_text(errors="replace")
+        code = blank_inert(text)
+        parts = fuzz_target_parts(code)
+        shape = (
+            f"{relative}: its fuzz_target! must be the block of Appendix B.6, with the "
+            f"closure parameter of {base} ({wanted[0]}) and exactly three statements: "
+            f"{self.runtime_path}::reset(); {module}::fuzz with the generic arguments of "
+            f"{base}'s entry; {self.runtime_path}::clear_compromised();"
+        )
+        if (
+            code.count("fuzz_target!") != 1
+            or parts is None
+            or not VARIANT_START.match(
+                next(line.rstrip() for line in code.split("\n") if "fuzz_target!" in line)
+            )
+        ):
+            return [shape]
+        params, _header, body = parts
+        if re.sub(r"\s+", "", params) != re.sub(r"\s+", "", wanted[0]):
+            return [shape]
+        found = statements(body)
+        name = re.sub(r"\s+", "", params).split(":", 1)[0]
+        call = re.fullmatch(
+            rf"(?:[A-Za-z_][A-Za-z0-9_]*::)*{module}::fuzz(::<.*>)?\({re.escape(name)},?\)",
+            found[1] if len(found) == 3 else "",
+        )
+        generics = turbofish_arguments(wanted[2])
+        if (
+            len(found) != 3
+            or found[0] != f"{self.runtime_path}::reset()"
+            or found[2] != f"{self.runtime_path}::clear_compromised()"
+            or not call
+            or [re.sub(r"\s+", "", item) for item in turbofish_arguments(found[1])]
+            != [re.sub(r"\s+", "", item) for item in generics]
+        ):
+            return [shape]
+        return []
+
+    def shaped_thin_targets(self):
+        directory = self.repo / profile_fuzz_dir(self.profile_name)
+        return {
+            self.rel(path)
+            for path in directory.glob("*_statelens.rs")
+            if SCAFFOLD_NAME.match(path.stem) and not self.thin_problems(path)
+        }
+
+    def integrity(self):
+        """Guard 3: (path, finding) for every breach of instrumentation integrity."""
+        findings = []
+        roots = tuple(self.profile["roots"])
+        shaped = self.shaped_thin_targets()
+        for path in sorted(set(self.scope_files()) | self.b_files):
+            if not path.endswith(".rs"):
+                continue
+            target = self.repo / path
+            now = target.read_text(errors="replace") if target.is_file() else ""
+            before = (self.b_content(path) or b"").decode(errors="replace")
+            if now == before:
+                continue
+            added, removed = sl_calls(now) - sl_calls(before), sl_calls(before) - sl_calls(now)
+            if added or removed:
+                calls = [f"removed {call}" for call in sorted(removed.elements())]
+                calls += [f"added {call}" for call in sorted(added.elements())]
+                findings.append(
+                    (
+                        path,
+                        f"guard 3: {path}: an sl_probe!, sl_assert! or sl_implies! call was "
+                        f"added, removed or changed ({'; '.join(calls)}); revert it",
+                    )
+                )
+            more = runtime_calls(now, GUARDED_CALLS) - runtime_calls(before, GUARDED_CALLS)
+            banned = set()
+            if path != self.mod_rs and path not in shaped:
+                banned |= {name for name in GHOST_WRITES if more[name]}
+            if more["set_compromised"] and not path.startswith(self.states + "/"):
+                banned.add("set_compromised")
+            if path != self.mod_rs:
+                banned |= {name for name in HELPER_ONLY if more[name]}
+            if path.startswith(roots):
+                banned |= {name for name in READ_SIDE if more[name]}
+            if banned:
+                findings.append(
+                    (
+                        path,
+                        f"guard 3: {path} adds a call of {', '.join(sorted(banned))}, which the "
+                        "edit contract does not allow there; remove it",
+                    )
+                )
+            if path != self.mod_rs:
+                code_now, code_before = blank_inert(now), blank_inert(before)
+                for literal in REACH_LITERALS:
+                    if code_now.count(literal) > code_before.count(literal):
+                        findings.append(
+                            (
+                                path,
+                                f"guard 3: {path} holds the literal {literal}, which only the "
+                                "helper prints; remove it",
+                            )
+                        )
+                code_now = blank_inert(now, strings=True)
+                code_before = blank_inert(before, strings=True)
+                hidden = [
+                    name
+                    for name, pattern in HIDDEN_CODE
+                    if len(pattern.findall(code_now)) > len(pattern.findall(code_before))
+                ]
+                if hidden:
+                    findings.append(
+                        (
+                            path,
+                            f"guard 3: {path} adds {', '.join(hidden)}; only the helper prints, "
+                            "and no edit installs a panic hook or includes another file, so "
+                            "remove it, also from code copied from elsewhere",
+                        )
+                    )
+        for path in self.ignored_sources():
+            findings.append(
+                (
+                    path,
+                    f"guard 3: git ignores {path}, but cargo compiles it, out of sight of git "
+                    "status and of a fresh clone; rename it (the repository ignores any path "
+                    "named target)",
+                )
+            )
+        runtime = self.profile["runtime"]
+        target = self.repo / runtime
+        if (target.read_bytes() if target.is_file() else None) != self.b_content(runtime):
+            findings.append(
+                (
+                    runtime,
+                    f"guard 3: the runtime module {runtime} changed; it must stay byte-identical, "
+                    "so observation code lives elsewhere; revert it",
+                )
+            )
+        parent = runtime.rsplit("/", 1)[0] + "/mod.rs"
+        declared = self.repo / parent
+        now = declared.read_text(errors="replace") if declared.is_file() else ""
+        if module_declarations(now) != module_declarations(
+            (self.b_content(parent) or b"").decode(errors="replace")
+        ):
+            findings.append(
+                (
+                    parent,
+                    f"guard 3: the declaration of the runtime module in {parent}, or an "
+                    "attribute line directly above it, changed; revert it",
+                )
+            )
+        # Guard 1 already covers a path outside the scope; statelens/ is not the campaign's.
+        for path, needed in sorted(self.campaign_added.items()):
+            if not path.startswith(self.scope):
+                continue
+            target = self.repo / path
+            text = target.read_text(errors="replace") if target.is_file() else ""
+            have = collections.Counter(line.strip() for line in text.split("\n") if line.strip())
+            lost = needed - have
+            if lost:
+                shown = sorted(lost)[:3]
+                findings.append(
+                    (
+                        path,
+                        f"guard 3: {path} lost {sum(lost.values())} line(s) the campaign "
+                        f"added (campaign/instrumentation.diff), such as {shown[0]!r}: a "
+                        "ghost update, a field marked // [statelens] or a runner hook; "
+                        "restore them",
+                    )
+                )
+        return findings
+
+    def review_hunks(self, card_id, s0, own):
+        """The hunks of the pair's diff against S0, outside its module and thin target, that
+        review must see: (unmarked, beside). Guard 4: those without the marker comment,
+        which names the card, since a hunk is attributed to a pair by its own diff.
+        Beside instrumentation: those whose changed lines are, or directly neighbor, an sl_*
+        call or a line the campaign added, since such an edit can disable an assertion it
+        leaves unchanged, by `if false` or a `cfg`, which guard 3 does not see."""
+        marker = TSS_MARKER + card_id
+        unmarked, beside = [], []
+        current = self.snapshot()
+        for path in sorted(set(s0) | set(current)):
+            if path in own or path in self.owned or s0.get(path) == current.get(path):
+                continue
+            added = self.campaign_added.get(path, {})
+
+            def instrumented(line):
+                text = line[1:].strip()
+                return bool(SL_CALL.search(text) or (re.search(r"\w", text) and text in added))
+
+            for header, lines in diff_hunks(file_diff(path, s0.get(path), current.get(path))):
+                if not any(marker in line for line in lines if line[:1] in ("+", " ")):
+                    unmarked.append(f"{path} {header}")
+                near = {
+                    j
+                    for i, line in enumerate(lines)
+                    if line[:1] in ("+", "-")
+                    for j in (i - 1, i, i + 1)
+                    if 0 <= j < len(lines) and lines[j][:1] in ("+", "-", " ")
+                }
+                if any(instrumented(lines[j]) for j in near):
+                    beside.append(f"{path} {header}")
+        return unmarked, beside
+
+    # The script's own edits (section 18.6.2).
+
+    def declare(self):
+        target = self.repo / self.lib_rs
+        lines = target.read_text().split("\n")
+        if not self.declaration_at_anchor(lines):
+            found = [index for index, line in enumerate(lines) if line == self.anchor]
+            if len(found) != 1:
+                raise Abort(
+                    2,
+                    f"synthesize: expected one line {self.anchor!r} in {self.lib_rs}, found "
+                    f"{len(found)}; update the scaffold anchor in scripts/statelens.py",
+                )
+            lines[found[0] + 1 : found[0] + 1] = self.declaration
+            target.write_text("\n".join(lines))
+        if not self.declared:
+            self.declared = True
+            self.save_state()
+
+    def write_mod(self, add):
+        """target_states/mod.rs: the helper template and a `pub mod` line for every module
+        in the directory and `add`. The template keeps its code in a private module of its
+        own, since a scaffold module, a child of this one, sees this one's private items."""
+        directory = self.repo / self.states
+        modules = {add}
+        if directory.is_dir():
+            modules |= {
+                path.stem for path in directory.glob("ts*.rs") if MODULE_NAME.fullmatch(path.stem)
+            }
+        template = read_sl_file(self.repo, SL / "runtime" / "target_states.rs").rstrip("\n")
+        lines = "".join(f"pub mod {module};\n" for module in sorted(modules))
+        self.write_owned(self.mod_rs, (template + "\n\n" + lines).encode())
+
+    def drop_module(self, module):
+        target = self.repo / self.mod_rs
+        if target.is_file():
+            lines = target.read_text().split("\n")
+            kept = [line for line in lines if line.strip() != f"pub mod {module};"]
+            if kept != lines:
+                self.write_owned(self.mod_rs, "\n".join(kept).encode())
+
+    def undo(self, pair, diff, what):
+        """Reverse-applies a pair's diff for `what`, `--redo` or the last check, then drops its
+        [[bin]] block, by its exact name so a sibling pair's stays, and its line from
+        target_states/mod.rs (section 18.6.2, --redo). Once the diff is known to
+        reverse-apply, and before it does, the revalidation the undo owes is recorded
+        (`owe`). A diff that applies forward instead was already undone, by an undo an
+        interrupt stopped before the pair's reports moved, and is not applied again."""
+        sections = diff_sections(diff)
+        patch = "".join(
+            text for path, text in sections if path not in (self.manifest, self.mod_rs)
+        )
+
+        def git_apply(*args):
+            return subprocess.run(
+                ["git", "apply", *args],
+                input=patch,
+                cwd=self.repo,
+                capture_output=True,
+                text=True,
+            )
+
+        if patch.strip():
+            done = git_apply("-R", "--check")
+            if done.returncode != 0 and git_apply("--check").returncode == 0:
+                say(f"warning: {pair.key}: its edits were already undone, by an undo that stopped")
+            else:
+                if done.returncode == 0:
+                    paths = (path for path, _ in sections)
+                    self.owe(what, pair.key, self.shared_paths(pair, paths))
+                    done = git_apply("-R")
+                if done.returncode != 0:
+                    detail = (done.stderr.strip().splitlines() or ["no detail"])[-1]
+                    raise Abort(
+                        2,
+                        f"the diff of {pair.key} does not apply in reverse ({detail}); restore "
+                        "the checkout by hand or use a fresh clone",
+                    )
+        manifest = self.repo / self.manifest
+        text = manifest.read_text()
+        kept = remove_bin_blocks(text, pair.name)
+        if kept != text:
+            self.write_owned(self.manifest, kept.encode())
+        self.drop_module(pair.module)
+        self.own()
+
+    def redo_pairs(self, pairs):
+        """Undoes each selected pair that has a report and moves its reports, and the crash
+        files fuzzing wrote for its scaffold, aside (section 18.6.2, --redo). `undo` records
+        the revalidation an undo of shared code owes before it applies the diff."""
+        stamp = synthesis_stamp()
+        for pair in reversed(pairs):
+            report = self.reach / f"{pair.key}.md"
+            if not report.is_file():
+                continue
+            diff = self.reach / f"{pair.key}.diff"
+            text = diff.read_text() if diff.is_file() else ""
+            self.undo(pair, text, "--redo")
+            self.archive(pair.key, stamp)
+            say(f"{pair.key}: --redo undid its edits; its reports are now {pair.key}.{stamp}.*")
+            # The crash files fuzzing wrote for the undone version go with it; the corpus stays.
+            directory = self.repo / self.package / "artifacts" / pair.name
+            if directory.is_dir():
+                destination = self.reach / f"{pair.key}.{stamp}" / "artifacts" / pair.name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(directory), str(destination))
+                say(f"{pair.key}: --redo moved {self.rel(directory)}/ to {self.rel(destination)}/")
+
+    def archive(self, key, stamp):
+        """Moves a pair's outputs to TS-NNNN_<base>.<stamp>.md, .diff and / (section
+        18.6.2, --redo), and rewrites the paths its report and its attempts' notes give
+        under TS-NNNN_<base>/, so their run and replay lines still name the moved files."""
+        for suffix in (".md", ".diff", ""):
+            source = self.reach / f"{key}{suffix}"
+            if source.exists():
+                source.rename(self.reach / f"{key}.{stamp}{suffix}")
+        moved = self.reach / f"{key}.{stamp}"
+        notes = [self.reach / f"{key}.{stamp}.md"]
+        notes += sorted(moved.glob("attempt-*/replay.txt"))
+        notes += sorted(moved.glob("attempt-*/interrupted.txt"))
+        for path in notes:
+            if path.is_file():
+                text = path.read_text(errors="replace")
+                path.write_text(text.replace(f"/reach/{key}/", f"/reach/{key}.{stamp}/"))
+
+    # One pair (section 18.6.2, per pair).
+
+    def bases_text(self, bases):
+        blocks = bin_blocks((self.repo / self.manifest).read_text())
+        out = []
+        for base in bases:
+            text = (self.repo / profile_fuzz_dir(self.profile_name) / f"{base}.rs").read_text(
+                errors="replace"
+            )
+            parts = fuzz_target_parts(text)
+            features = "none"
+            for block in blocks:
+                entries = bin_entries(block)
+                if entries.get("name", ("", ""))[0] == base and "required-features" in entries:
+                    features = entries["required-features"][1].split("=", 1)[1].strip()
+            if parts is None:
+                out.append(f"- `{base}`: its fuzz_target! cannot be read")
+                continue
+            params, header, body = parts
+            entry = " ".join(body.split())
+            kind = params.split(":", 1)[1].strip() if ":" in params else params
+            out.append(
+                f"- `{base}`: closure `{header}`, entry `{entry}`, required-features "
+                f"{features}, input type `{kind}`, {base_runner(self.profile_name, base, body)}"
+            )
+        return "\n".join(out)
+
+    def labels_text(self):
+        if not self.labels:
+            return "(none: the campaign installed no probe)"
+        return "\n".join(f"- `{label}` at {where}" for label, where in self.labels)
+
+    def build_command(self, scaffold):
+        return cargo(self.fuzz_toolchain) + ["fuzz", "build", "--fuzz-dir", self.package, scaffold]
+
+    def prompt(self, pair, n, attempt, feedback):
+        check = cargo(self.test_toolchain) + [
+            "check",
+            "-p",
+            f"commonware-{self.profile['crate']}",
+            "--lib",
+            "--tests",
+        ]
+        values = {
+            "BASE": self.base,
+            "PLAN": PLAN,
+            "CHECK": shlex.join(check),
+            "RUNTIME": self.profile["runtime"],
+            "RUNTIME_MODULE": f"crate::{self.profile['module']}::statelens",
+            "FUZZ_PACKAGE": self.package,
+            "CARD_ID": pair.card,
+            "CARD": pair.path.read_text().rstrip("\n"),
+            "STAGES": str(n),
+            "MODULE": f"{self.states}/{pair.module}.rs",
+            "SCAFFOLD": pair.name,
+            "BASE_TARGET": pair.base,
+            "BASE_DETAILS": self.bases_text([pair.base]),
+            "LABELS": self.labels_text(),
+            "BUILD": shlex.join(self.build_command(pair.name)),
+            "ATTEMPT": str(attempt),
+            "FEEDBACK": feedback,
+            "SUBSYSTEM_RULES": subsystem_prompt(self.sl_dir, self.profile_name, "synthesize"),
+        }
+        return render((self.sl_dir / "prompts" / "synthesize.md").read_text(), values)
+
+    def run_agent(self, key, attempt, prompt):
+        name = f"synthesize-{key}-{attempt}"
+        (self.dir / "prompts").mkdir(parents=True, exist_ok=True)
+        (self.dir / "prompts" / f"{name}.md").write_text(prompt)
+        log = self.dir / "logs" / f"{name}.log"
+        say(f"{key}: attempt {attempt}, running {self.agent}; log {self.rel(log)}")
+        command = agent_command(self.config, self.agent, 2, self.repo)
+        try:
+            code, _ = run_logged(command, log, self.repo, stdin_text=prompt)
+        except OSError as error:
+            log.write_text(f"statelens: could not start the agent: {error}\n")
+            code = -1
+        finally:
+            # An interrupted run included: its agent may have written SL/campaign/.
+            self.seal()
+        return code, log
+
+    def strays(self, module):
+        """The files a run of the scaffold may leave (step 2.2): untracked crash files
+        anywhere, and the entries of the corpus and artifacts directories of the card's
+        scaffolds, `module` its `tsNNNN`; a sibling pair's entries count only when new."""
+        found = set()
+        listed = git(self.repo, "ls-files", "-z", "--others", "--exclude-standard")
+        for path in listed.split("\0"):
+            if path and STRAY_NAME.match(path.rsplit("/", 1)[-1]):
+                found.add(path)
+        for kind in ("corpus", "artifacts"):
+            for directory in (self.repo / self.package / kind).glob(f"*_{module}_statelens"):
+                found.update(self.rel(item) for item in directory.rglob("*") if item.is_file())
+        return found
+
+    def sweep(self, pair, attempt, before):
+        """Moves what a run of the scaffold left during an attempt to its swept/ directory;
+        returns the moved files and those that are failures, finding candidates."""
+        module = card_module(pair.card)
+        target = self.reach / pair.key / f"attempt-{attempt}" / "swept"
+        moved, failures = [], []
+        for path in sorted(self.strays(module) - before):
+            destination = target / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(self.repo / path), str(destination))
+            say(f"warning: a run of the scaffold left {path}; moved to {self.rel(destination)}")
+            moved.append(self.rel(destination))
+            if STRAY_FAILURE.match(path.rsplit("/", 1)[-1]):
+                failures.append(self.rel(destination))
+        for kind in ("corpus", "artifacts"):
+            for directory in (self.repo / self.package / kind).glob(f"*_{module}_statelens"):
+                if directory.is_dir() and not any(item.is_file() for item in directory.rglob("*")):
+                    shutil.rmtree(directory)
+        return moved, failures
+
+    def scaffold_checks(self, pair, s0):
+        """Step 2.4, besides guards 2 and 3: the pair's thin target, no new thin target of
+        the card on another base, the module header, the cryptography check of D15 and the
+        guard rule. Returns (thin target, vetoes)."""
+        targets = self.repo / profile_fuzz_dir(self.profile_name)
+        own = sorted(targets.glob(f"*_{card_module(pair.card)}_statelens.rs"))
+        expected = targets / f"{pair.name}.rs"
+        vetoes, thin = [], None
+        if expected.is_file():
+            thin = expected
+        else:
+            vetoes.append(
+                f"write the thin target {profile_fuzz_dir(self.profile_name)}/{pair.name}.rs"
+            )
+        for path in own:
+            if path != expected and self.rel(path) not in s0:
+                vetoes.append(
+                    f"{self.rel(path)} is a thin target of this card on another base; this "
+                    f"scaffold is {pair.name}"
+                )
+        for path in sorted(targets.glob("*_statelens.rs")):
+            if SCAFFOLD_NAME.match(path.stem):
+                vetoes += self.thin_problems(path)
+        module_path = self.repo / self.states / f"{pair.module}.rs"
+        if not module_path.is_file():
+            vetoes.append(f"the module {self.rel(module_path)} does not exist")
+            return thin, vetoes
+        text = module_path.read_text(errors="replace")
+        header = module_header(text)
+        if header["card"] != pair.card or header["base"] != pair.base or not header["shape"]:
+            vetoes.append(
+                f"the module must open with the header of the prompt: `//! {pair.card} on "
+                f"{pair.base}`, then `//! Shape: A` or `//! Shape: B`"
+            )
+        code = blank_inert(text, strings=True)
+        if header["shape"] == "B" and not re.search(r"\bset_compromised\s*\(", code):
+            vetoes.append(
+                "a Shape B module calls set_compromised with the replicas it runs as real "
+                "engines under a Byzantine identity, empty if none, before any engine starts"
+            )
+        if self.profile_name == "simplex":
+            for name, cert_mock in sorted(simplex_types(self.repo).items()):
+                if not cert_mock and re.search(rf"\b{re.escape(name)}\b", code):
+                    vetoes.append(
+                        f"the module names {name}, whose Simplex impl does not use the cert_mock "
+                        "certificate scheme (D15)"
+                    )
+        if thin:
+            try:
+                if self.profile_name == "simplex":
+                    check_simplex_cert_mock(self.repo, [thin.stem])
+                else:
+                    check_marshal_cert_mock(self.repo, [thin.stem])
+            except Abort as error:
+                vetoes.append(f"cryptography check (D15): {error}")
+        return thin, vetoes
+
+    def build(self, scaffold, name):
+        command = self.build_command(scaffold)
+        log = self.dir / "logs" / f"fuzz-build-{scaffold}-{name}.log"
+        say(f"build: {shlex.join(command)}")
+        code, tail = run_logged(command, log, self.repo, echo=False)
+        # A build of a version that passed guard 2 may update Cargo.lock: that is the script's.
+        self.own("Cargo.lock")
+        binary = None
+        if code == 0:
+            if self.host is None:
+                self.host = host_triple(self.fuzz_toolchain)
+            binary = fuzz_binary(self.repo, self.package, self.host, scaffold)
+            if binary is None:
+                tail = tail + [f"statelens: the build left no binary {scaffold} for {self.host}"]
+        return binary, command, tail, log
+
+    def replay(self, card_id, binary, directory, control=False):
+        """One replay of the empty input (section 18.8): (exit code or None, output)."""
+        if directory.exists():
+            shutil.rmtree(directory)
+        directory.mkdir(parents=True)
+        # SL/campaign/ is the agent's to write too: the canonical input is empty every time.
+        self.empty.write_bytes(b"")
+        env = dict(os.environ)
+        env.pop("STATELENS_BYZANTINE", None)
+        env.pop("STATELENS_REACH_CONTROL", None)
+        env["STATELENS_REACH"] = "1"
+        if control:
+            env["STATELENS_REACH_CONTROL"] = "1"
+        log = directory / "replay.log"
+        code, _ = run_logged(
+            [str(binary), str(self.empty)],
+            log,
+            directory,
+            echo=False,
+            timeout=REPLAY_TIMEOUT,
+            env=env,
+        )
+        return code, first_run(log.read_text(errors="replace"), card_id)
+
+    def attempt(self, pair, history, s0, attempt, feedback):
+        """Steps 2.1 to 2.7 of one attempt. Returns its record."""
+        module = pair.module
+        # The agent finds the manifest as in S0; step 2.5 adds the scaffold's block.
+        self.write_owned(self.manifest, s0.get(self.manifest))
+        sa, sa_state = self.snapshot(), worktree_state(self.repo)
+        sa_strays = self.strays(card_module(pair.card))
+        live = self.live
+        live.update(
+            attempt=attempt,
+            step="the agent's run",
+            before=sa_strays,
+            failures=[],
+            kept=False,
+            replays={},
+            scaffold=None,
+        )
+        prompt = self.prompt(pair, len(history.events), attempt, feedback)
+        code, log = self.run_agent(pair.key, attempt, prompt)
+        swept, failures = self.sweep(pair, attempt, sa_strays)
+        live.update(step="the checks", before=None, failures=failures)
+        if failures:
+            # The version a stray failure came from, for its triage, kept before anything
+            # else runs.
+            self.keep_version(pair.key, attempt, s0, self.snapshot())
+        step = {
+            "attempt": attempt,
+            "changed": self.snapshot() != sa or worktree_state(self.repo) != sa_state,
+            "swept": swept,
+            "failures": failures,
+            "version": None,
+            "vetoes": [],
+            "build": None,
+            "unmarked": [],
+            "beside": [],
+        }
+        if attempt and not step["changed"] and not failures:
+            # The tree is the one the previous attempt was judged on: the pair ends (step 2.8).
+            step["outcome"] = "no change, which ends the pair"
+            return step
+        outside = self.outside_scope()
+        if outside:
+            raise Abort(2, f"synthesis edited {outside[0]}; use a fresh clone")
+        vetoes = [finding for _, finding in self.script_files(restore=True, s0=s0)]
+        vetoes += [finding for _, finding in self.integrity()]
+        thin, more = self.scaffold_checks(pair, s0)
+        vetoes += more
+        own = {f"{self.states}/{module}.rs"} | ({self.rel(thin)} if thin else set())
+        step["unmarked"], step["beside"] = self.review_hunks(pair.card, s0, own)
+        if code != 0:
+            vetoes.insert(0, f"the agent exited with code {code}; see {self.rel(log)}")
+        step["vetoes"] = vetoes
+        if vetoes:
+            step["outcome"] = (
+                "NOT BUILT ("
+                + ("the agent failed" if code != 0 else f"{len(vetoes)} veto(es)")
+                + ")"
+            )
+            return step
+        scaffold, base = pair.name, pair.base
+        manifest = s0[self.manifest].decode()
+        block = variant_bin_block(bin_blocks(manifest), base, self.manifest, name=scaffold)
+        manifest = (manifest if manifest.endswith("\n") else manifest + "\n") + block
+        self.write_owned(self.manifest, manifest.encode())
+        live.update(step="the build", scaffold=scaffold)
+        binary, command, tail, build_log = self.build(scaffold, attempt)
+        if binary is None:
+            step["build"] = (command, tail, build_log)
+            step["outcome"] = "NOT BUILT (build failed)"
+            return step
+        # The version as built, kept before any replay: a failure a replay shows stays
+        # reproducible when synthesis stops before the attempt ends.
+        current = self.snapshot()
+        diff = self.keep_version(pair.key, attempt, s0, current)
+        directory = self.reach / pair.key / f"attempt-{attempt}"
+        live["step"] = "the canonical replay"
+        canonical = self.replay(pair.card, binary, directory / "canonical")
+        live["replays"]["canonical"] = canonical[0]
+        live["step"] = "the control replay"
+        control = self.replay(pair.card, binary, directory / "control", control=True)
+        live["replays"]["control"] = control[0]
+        live["step"] = "the reach check"
+        module_text = (self.repo / self.states / f"{module}.rs").read_text(errors="replace")
+        stray = failures[0] if failures else None
+        result = reach_verdict(
+            history,
+            module_text,
+            canonical,
+            control,
+            stray=stray,
+            diff=diff,
+            labels={label for label, _ in self.labels},
+        )
+        if step["unmarked"]:
+            result["annotations"].append("unmarked edit")
+        if step["beside"]:
+            result["annotations"].append("edit beside instrumentation")
+        step["version"] = {
+            "attempt": attempt,
+            "files": {
+                path: current.get(path)
+                for path in set(s0) | set(current)
+                if s0.get(path) != current.get(path)
+            },
+            "scaffold": scaffold,
+            "base": base,
+            "module": module_text,
+            "canonical": canonical,
+            "control": control,
+            "diff": diff,
+            "stray": stray,
+            "unmarked": step["unmarked"],
+            "beside": step["beside"],
+            "result": result,
+        }
+        step["outcome"] = verdict_text(result)
+        return step
+
+    def keep_version(self, key, attempt, s0, current):
+        """Keeps the version `current` beside the attempt's replays and swept files, so a
+        failure stays reproducible after a restore: `attempt-<a>/version/`, a copy of every
+        file it created or changed, which also holds what a diff cannot, and
+        `attempt-<a>/version.diff`, its diff against S0. Returns the diff."""
+        directory = self.reach / key / f"attempt-{attempt}"
+        copies = directory / "version"
+        if copies.exists():
+            shutil.rmtree(copies)
+        copies.mkdir(parents=True)
+        for path, content in current.items():
+            if s0.get(path) != content:
+                target = copies / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+        diff = tree_diff(s0, current)
+        (directory / "version.diff").write_text(diff)
+        if self.live:
+            self.live["kept"] = True
+        return diff
+
+    def preserve(self, error):
+        """Before an exception, an interrupt included, restores S0 (section 18.6.2, Per
+        pair): sweeps what a run of the scaffold left during a running agent, keeps the
+        version a stray failure came from unless it is kept, and writes
+        `attempt-<a>/interrupted.txt`: the step that stopped, the version, and each replay
+        that finished, with the `run` and `replay` lines of one that failed and of one that
+        stopped after it left a crash file, and the crash files of a revalidation that stopped.
+        The replays' crash files and logs stay where they ran."""
+        live = self.live
+        if not live or live.get("attempt") is None:
+            return
+        card_id, key, attempt = live["card"], live["key"], live["attempt"]
+        try:
+            if live["before"] is not None:
+                # The attempt's stray failures are what its swept/ holds, not what this sweep
+                # returns: the sweep the attempt ran may have stopped after a move.
+                self.sweep(live["pair"], attempt, live["before"])
+                live["before"] = None
+                swept = self.reach / key / f"attempt-{attempt}" / "swept"
+                live["failures"] = sorted(
+                    self.rel(path)
+                    for path in swept.rglob("*")
+                    if path.is_file() and STRAY_FAILURE.match(path.name)
+                )
+            if live["failures"] and not live["kept"]:
+                self.keep_version(key, attempt, live["s0"], self.snapshot())
+            cause = (
+                "an interrupt"
+                if isinstance(error, KeyboardInterrupt)
+                else f"{type(error).__name__}: {error}"
+            )
+            lines = [
+                f"{card_id} on {live['base']} attempt {attempt}: synthesis stopped during "
+                f"{live['step']} ({cause}), and the pair's edits were restored to the tree "
+                "before the pair.",
+            ]
+            if live["kept"]:
+                lines.append(
+                    "The version is version.diff, against that tree, and version/, a copy of "
+                    "every file it created or changed: apply version.diff (`git apply`) and add "
+                    f"`pub mod {live['module']};` to target_states/mod.rs first."
+                )
+            else:
+                lines.append("No version was kept: none was replayed or left a stray failure.")
+            lines += [f"Stray failure (finding candidate): {path}" for path in live["failures"]]
+            directory = self.reach / key / f"attempt-{attempt}"
+            for name, code in live["replays"].items():
+                if code == 0:
+                    lines.append(f"The {name} replay exited with code 0; its log is {name}/replay.log.")
+                    continue
+                how = "was killed" if code is None else f"exited with code {code}"
+                crash = self.replay_input(directory / name)
+                lines.append(
+                    f"The {name} replay {how}, a failure; its log and any crash file are in "
+                    f"{name}/. Its run and replay lines:"
+                )
+                lines += self.run_lines(live["scaffold"], crash, name == "control")
+            # The replay that stopped may have left its crash file before it returned.
+            for name in ("canonical", "control", "final"):
+                if name in live["replays"] or live["step"] != f"the {name} replay":
+                    continue
+                crash = self.replay_input(directory / name)
+                if crash != self.empty:
+                    lines.append(
+                        f"The {name} replay stopped after it left {crash.name}, a failure; its "
+                        f"log and the crash file are in {name}/. Its run and replay lines:"
+                    )
+                    lines += self.run_lines(live["scaffold"], crash, name == "control")
+            revalidation = live.get("revalidation")
+            if revalidation and live["step"].startswith("the revalidation of "):
+                other = live["step"][len("the revalidation of ") :]
+                lines.append(
+                    f"It stopped while revalidating {other}, whose replays are in "
+                    f"{self.rel(revalidation)}/."
+                )
+                lines += [
+                    f"That revalidation left {self.rel(path)}, a failure of {other}'s scaffold."
+                    for path in sorted(revalidation.glob("*/*"))
+                    if STRAY_FAILURE.match(path.name)
+                ]
+            directory.mkdir(parents=True, exist_ok=True)
+            note = directory / "interrupted.txt"
+            note.write_text("\n".join(lines) + "\n")
+            say(f"{key}: stopped during {live['step']}; see {self.rel(note)}")
+        except Exception as problem:
+            say(f"warning: {key}: could not preserve attempt-{attempt}/: {problem}")
+
+    def feedback(self, step, steps):
+        """The next attempt's FEEDBACK (section 18.8)."""
+        out = [f"Attempt {step['attempt']}: {step['outcome']}"]
+        if step["vetoes"]:
+            out += ["", "Vetoes and guard findings; this version was not built:"]
+            out += [f"- {veto}" for veto in step["vetoes"]]
+        if step["build"]:
+            command, tail, _log = step["build"]
+            out += ["", f"The build failed: {shlex.join(command)}", "Its last lines:"]
+            out += ["    " + line for line in tail]
+        if step["version"]:
+            reach = reach_feedback(step["version"]["result"])
+            if reach:
+                out += ["", reach]
+        if step["unmarked"]:
+            out += ["", "Guard 4: these hunks lack the marker comment and are reported for review:"]
+            out += [f"- unmarked edit: {hunk}" for hunk in step["unmarked"]]
+        if step["swept"]:
+            out += ["", "A run of the scaffold left files, moved aside; never run the scaffold:"]
+            out += [f"- {path}" for path in step["swept"]]
+        out += ["", "The attempts so far:"]
+        out += [f"- attempt {item['attempt']}: {item['outcome']}" for item in steps]
+        return "\n".join(out)
+
+    def synthesize(self, pair):
+        """Synthesizes one pair; returns its outcome. On any exception, an interrupt
+        included, what the attempt holds is preserved first, then the pair's edits are
+        restored and its line is dropped from target_states/mod.rs. Its S0 stays in pending/
+        until then, or until its report is written, for a synthesis killed before either.
+        The revalidation record its revalidation wrote (`revalidate`) is deleted when its
+        report is written, and stays when its edits are restored."""
+        module = pair.module
+        text = pair.path.read_text()
+        history = card_history(text)
+        if (self.reach / pair.key).exists():
+            self.archive(pair.key, synthesis_stamp())
+        self.write_mod(module)
+        s0 = self.snapshot()
+        self.keep_pending(pair.key, s0)
+        self.live = {
+            "pair": pair,
+            "card": pair.card,
+            "base": pair.base,
+            "key": pair.key,
+            "module": module,
+            "s0": s0,
+            "attempt": None,
+        }
+        try:
+            steps, versions, strays = [], [], []
+            feedback = FIRST_ATTEMPT
+            for attempt in range(REPAIR_ATTEMPTS + 1):
+                step = self.attempt(pair, history, s0, attempt, feedback)
+                steps.append(step)
+                strays += step["failures"]
+                if step["version"]:
+                    versions.append(step["version"])
+                verdict = step["version"]["result"]["verdict"] if step["version"] else None
+                if verdict in ("REACHED", CRASH) or step["failures"] or not step["changed"]:
+                    break
+                feedback = self.feedback(step, steps)
+            outcome = self.finish(pair, history, s0, steps, versions, strays)
+        except BaseException as error:
+            try:
+                self.preserve(error)
+            finally:
+                self.restore(s0)
+                self.drop_module(module)
+                shutil.rmtree(self.pending, ignore_errors=True)
+            if self.owed.exists():
+                say(
+                    f"synthesis: {pair.key}'s edits were restored after its revalidation "
+                    "may have rewritten reports; the next synthesis revalidates every scaffold "
+                    f"before any pair ({self.rel(self.owed)})"
+                )
+            raise
+        finally:
+            self.live = None
+        # The report is written: the pair has ended, and no restore of its edits follows. The
+        # record holds nothing but this pair's, since `revalidate_owed` deleted it before any
+        # pair; a synthesis killed before this line keeps the pair (`recover`) and only
+        # revalidates once more.
+        self.owed.unlink(missing_ok=True)
+        shutil.rmtree(self.pending, ignore_errors=True)
+        return outcome
+
+    def keep_pending(self, key, s0):
+        """Keeps `s0` in pending/ until the pair ends: its key, its file list and a copy of
+        each file not as in B. Written aside and renamed, so pending/ is whole or absent."""
+        partial = self.reach / "pending.partial"
+        for directory in (partial, self.pending):
+            if directory.exists():
+                shutil.rmtree(directory)
+        for path, content in s0.items():
+            if content != self.b_data.get(path):
+                target = partial / "files" / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+        partial.mkdir(parents=True, exist_ok=True)
+        state = {"pair": key, "files": sorted(s0)}
+        (partial / "state.json").write_text(json.dumps(state, indent=1) + "\n")
+        partial.rename(self.pending)
+
+    def recover(self):
+        """Once per run, before the guards (section 18.6.2): a pending/ whose pair has no
+        report is the S0 of a synthesis that stopped without restoring that pair's edits,
+        killed for example. Restores it and drops the pair's line from target_states/mod.rs,
+        with a warning; then deletes pending/. A revalidation record the pair's revalidation
+        wrote stays, for `revalidate_owed`."""
+        if not self.pending.exists():
+            return
+        try:
+            state = json.loads((self.pending / "state.json").read_text())
+            key, files = state["pair"], state["files"]
+            found = PAIR_KEY.fullmatch(key)
+            if not found:
+                raise ValueError(f"no pair key: {key!r}")
+            s0 = {}
+            for path in files:
+                parts = path.split("/")
+                if not (path == "Cargo.lock" or path.startswith(self.scope)) or any(
+                    part in ("", ".", "..") for part in parts
+                ):
+                    raise ValueError(f"a path outside the scope: {path!r}")
+                copy = self.pending / "files" / path
+                s0[path] = copy.read_bytes() if copy.is_file() else self.b_data[path]
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            raise Abort(2, f"{self.rel(self.pending)} is unreadable ({error}); use a fresh clone")
+        if not (self.reach / f"{key}.md").is_file():
+            self.restore(s0)
+            self.drop_module(pair_module(found["card"], found["base"]))
+            say(
+                f"warning: {key}: a synthesis stopped without restoring the pair's edits; "
+                "they were restored"
+            )
+        shutil.rmtree(self.pending)
+
+    def finish(self, pair, history, s0, steps, versions, strays):
+        """Step 3: keep a version, check it, build it again, replay it once more, rerun the
+        test gate when it changed the system under test, and write the report."""
+        module = pair.module
+        title = (front_matter(pair.path.read_text())[0] or {}).get("title", "")
+        crashes = [version for version in versions if version["result"]["verdict"] == CRASH]
+        if crashes:
+            kept = crashes[-1]
+        elif versions:
+            kept = min(
+                versions, key=lambda version: verdict_key(version["result"], version["attempt"])
+            )
+        else:
+            kept = None
+        outcome = {
+            "pair": pair,
+            "history": history,
+            "title": title,
+            "kept": kept,
+            "steps": steps,
+            "strays": strays,
+            "result": None,
+            "scaffold": None,
+            "gate": None,
+            "notes": [],
+            "handover": None,
+        }
+
+        def not_built(note=None):
+            self.restore(s0)
+            self.drop_module(module)
+            outcome["verdict"] = "NOT BUILT" + (" (stray failure)" if strays else "")
+            if note:
+                outcome["notes"].append(note)
+
+        live = self.live
+        live["step"] = "the finish"
+        if kept is None:
+            not_built()
+        else:
+            # The kept version's attempt; its version was kept before its replays.
+            live.update(
+                attempt=kept["attempt"],
+                before=None,
+                failures=list(strays),
+                kept=True,
+                replays={"canonical": kept["canonical"][0], "control": kept["control"][0]},
+                scaffold=kept["scaffold"],
+            )
+            self.restore(s0, kept["files"])
+            outside = self.outside_scope()
+            if outside:
+                raise Abort(2, f"synthesis edited {outside[0]}; use a fresh clone")
+            problems = self.script_files(restore=True, s0=s0) + self.integrity()
+            if problems:
+                not_built(f"the kept version failed a guard: {problems[0][1]}")
+            else:
+                live["step"] = "the final build"
+                binary, _command, _tail, log = self.build(kept["scaffold"], "final")
+                if binary is None:
+                    not_built(f"the kept version did not build again; see {self.rel(log)}")
+                else:
+                    directory = self.reach / pair.key / f"attempt-{kept['attempt']}" / "final"
+                    live["step"] = "the final replay"
+                    final = self.replay(pair.card, binary, directory)
+                    live["replays"]["final"] = final[0]
+                    live["step"] = "the finish"
+                    result = reach_verdict(
+                        history,
+                        kept["module"],
+                        kept["canonical"],
+                        kept["control"],
+                        final,
+                        stray=kept["stray"],
+                        diff=kept["diff"],
+                        labels={label for label, _ in self.labels},
+                    )
+                    if kept["unmarked"]:
+                        result["annotations"].append("unmarked edit")
+                    if kept["beside"]:
+                        result["annotations"].append("edit beside instrumentation")
+                    if strays and result["verdict"] != CRASH:
+                        # A later attempt left one and was not built: still a candidate.
+                        result["annotations"].append("stray failure")
+                    outcome["result"] = result
+                    outcome["verdict"] = verdict_text(result)
+                    outcome["scaffold"] = kept["scaffold"]
+                    if result["verdict"] == CRASH:
+                        # The failure's run and replay lines, kept with the version that
+                        # failed (section 18.8), so the finding survives a restore.
+                        outcome["handover"] = self.handover(outcome)
+                        attempt_dir = self.reach / pair.key / f"attempt-{kept['attempt']}"
+                        (attempt_dir / "replay.txt").write_text(
+                            "\n".join(outcome["handover"]) + "\n"
+                        )
+                    roots = tuple(self.profile["roots"])
+                    if any(path.startswith(roots) for path in kept["files"]):
+                        live["step"] = "the test gate"
+                        broken, log = self.gate(pair.key)
+                        live["step"] = "the finish"
+                        outcome["gate"] = (broken, log)
+                        if broken:
+                            self.restore(s0)
+                            self.drop_module(module)
+                            outcome["scaffold"] = None
+                            outcome["verdict"] = "GATE FAILED" + (
+                                f" (finding candidate in attempt-{kept['attempt']}/)"
+                                if result["verdict"] == CRASH
+                                else " (stray failure)"
+                                if strays
+                                else ""
+                            )
+                            outcome["notes"].append(
+                                f"the version the gate restored is attempt-{kept['attempt']}/"
+                                "version.diff, against the tree before the pair"
+                            )
+                    if outcome["scaffold"]:
+                        self.revalidate(pair, s0, kept, outcome)
+        outcome["diff"] = tree_diff(s0, self.snapshot()) if outcome["scaffold"] else ""
+        (self.reach / f"{pair.key}.diff").write_text(outcome["diff"])
+        self.write_report(outcome)
+        return outcome
+
+    def gate(self, key):
+        """Guard 5: the test gate again; returns the tests that fail or no longer run and
+        that the inventory does not record as failing, and the log. Output nextest_run
+        cannot validate fails the gate."""
+        command = gate_test_command(self.test_toolchain, self.profile_name)
+        log = self.dir / "logs" / f"test-{key}.log"
+        say(f"{key}: the kept version changed the system under test; running the test gate")
+        code, _ = run_logged(command, log, self.repo, echo=False)
+        run, problem = nextest_run(log.read_text(errors="replace"), code)
+        if problem:
+            return [f"(unusable output: {problem})"], log
+        known = self.tests["failed"]
+        missing = (self.tests["passed"] | known) - run["passed"] - run["failed"]
+        return sorted((run["failed"] | missing) - known), log
+
+    def revalidate(self, pair, s0, kept, outcome):
+        """Revalidation (section 18.6.2, Finish): pairs share one tree, so when the kept
+        version changed a file other than the pair's thin target, the manifest, mod.rs and
+        Cargo.lock (`shared_paths`), which its own module always is, every other kept
+        scaffold, the card's other pairs included, is built and replayed again. The first
+        that no longer builds, stands worse than its report or gains or loses a crash
+        restores the pair's edits, records NOT BUILT naming it, and is checked once more
+        without them; otherwise each report takes its new verdict. Before the first report
+        changes, the revalidation a restore of the pair's edits would then owe is recorded
+        (`owe`), as `a rollback` of the pair; `synthesize` deletes it once the pair's report
+        is written, and a restore before then, by an exception or by `recover`, leaves it."""
+        now = self.snapshot()
+        shared = self.shared_paths(
+            pair, (path for path in set(s0) | set(now) if s0.get(path) != now.get(path))
+        )
+        others = sorted(other for other in self.standing if other != pair.key)
+        if not shared or not others:
+            return
+        cause = f"{pair.key} changed {', '.join(shared)}"
+        say(
+            f"{pair.key}: the kept version changed {', '.join(shared)}; revalidating "
+            f"{', '.join(others)}"
+        )
+        tag = f"after-{pair.key}"
+        checked = []
+        for other in others:
+            before = report_verdict(self.standing[other]["report"])
+            result, problem = self.check_scaffold(other, tag)
+            if problem:
+                break
+            checked.append((other, before, result))
+        else:
+            self.owe("a rollback", pair.key, shared)
+            for other, before, result in checked:
+                self.restate(other, f"Revalidation after {pair.key}", cause, before, result)
+            outcome["notes"].append(
+                f"revalidated {', '.join(others)}: the kept version changed {', '.join(shared)}"
+            )
+            self.live["step"] = "the finish"
+            return
+        self.restore(s0)
+        self.drop_module(pair.module)
+        outcome["scaffold"] = None
+        tags = [f"breaks {other}"]
+        if outcome["result"]["verdict"] == CRASH:
+            tags.append(f"finding candidate in attempt-{kept['attempt']}/")
+        elif outcome["strays"]:
+            tags.append("stray failure")
+        outcome["verdict"] = f"NOT BUILT ({', '.join(tags)})"
+        outcome["notes"].append(
+            f"{problem}, so the pair's edits were restored; the version is "
+            f"attempt-{kept['attempt']}/version.diff, against the tree before the pair"
+        )
+        # Its report holds again on the tree before the pair, unless something else broke it.
+        tag = f"without-{pair.key}"
+        result, still = self.check_scaffold(other, tag)
+        if still:
+            say(f"warning: {other}: {still}, also with {pair.key}'s edits restored")
+            if result:
+                cause = f"{pair.key}'s edits, which broke it, were restored"
+                self.restate(other, f"Revalidation without {pair.key}", cause, before, result)
+        outcome["notes"].append(
+            f"{other} with the pair's edits restored: {still or verdict_text(result)}"
+        )
+        self.live["step"] = "the finish"
+
+    def shared_paths(self, pair, paths):
+        """The paths of `paths` other than the pair's thin target, the package manifest,
+        target_states/mod.rs and Cargo.lock: a change to one of them can change another
+        pair's scaffold (section 18.6.2, Finish). The pair's own module is one of them: the
+        modules are public siblings of one crate, so one can use another's items, which no
+        text scan can rule out; the thin target is a crate of its own, which no module can
+        use. A sibling pair's thin target counts as shared."""
+        own = {self.manifest, self.mod_rs, "Cargo.lock"}
+        thin = f"{profile_fuzz_dir(self.profile_name)}/{pair.name}.rs"
+        return sorted(path for path in set(paths) if path not in own and path != thin)
+
+    def owe(self, what, key, shared):
+        """Records in `revalidation.json`, before `what` undoes a pair whose diff changed the
+        shared paths `shared`, the revalidation that undo owes (section 18.6.2, --redo); for
+        `a rollback`, before a pair's revalidation rewrites reports, the one a restore of its
+        edits would owe (Finish). Written aside and renamed, so the record is whole or absent."""
+        if not shared:
+            return
+        owed = self.read_owed() or {"what": [], "undone": {}}
+        if what not in owed["what"]:
+            owed["what"].append(what)
+        owed["undone"][key] = shared
+        partial = self.owed.with_name(self.owed.name + ".partial")
+        partial.write_text(json.dumps(owed, indent=1, sort_keys=True) + "\n")
+        partial.replace(self.owed)
+
+    def read_owed(self):
+        """The revalidation `revalidation.json` records, or None; one that cannot be read
+        exits with code 2."""
+        if not self.owed.exists():
+            return None
+        try:
+            owed = json.loads(self.owed.read_text())
+            undos = owed["what"]
+            if not (isinstance(undos, list) and undos and all(u in UNDO_TAGS for u in undos)):
+                raise ValueError(f"unknown undo {undos!r}")
+            for key, paths in owed["undone"].items():
+                if not (isinstance(paths, list) and all(isinstance(p, str) for p in paths)):
+                    raise ValueError(f"the paths of {key} are not a list of paths")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            raise Abort(2, f"{self.rel(self.owed)} is unreadable ({error}); use a fresh clone")
+        return owed
+
+    def revalidate_owed(self):
+        """Completes the revalidation `revalidation.json` records, this run's `--redo`'s or
+        one an earlier synthesis did not finish or left with a rollback, then deletes the
+        record (section 18.6.2, Once per run). A revalidation that stops leaves it, for the
+        next synthesis."""
+        owed = self.read_owed()
+        if owed is None:
+            return
+        what = " and ".join(owed["what"])
+        try:
+            self.revalidate_undone(owed["undone"], what, UNDO_TAGS[owed["what"][0]])
+        except BaseException:
+            say(
+                f"synthesis: the revalidation after {what} stopped; the next synthesis "
+                f"completes it before any pair ({self.rel(self.owed)})"
+            )
+            raise
+        # Code the revalidation replayed may have removed it.
+        self.owed.unlink(missing_ok=True)
+
+    def revalidate_undone(self, undone, what, tag):
+        """Revalidation after an undo (section 18.6.2): `--redo` and the last check undo a
+        pair's diff, its module and shared edits included, and a rollback restored a pair's
+        edits after its revalidation rewrote reports, so every kept scaffold is built and
+        replayed again, and its report takes the new verdict. No pair
+        is rolled back for it. A scaffold that no longer builds is recorded NOT BUILT (no
+        longer builds) and is not revalidated again; the last check's build still sees it.
+        `undone` maps each undone pair's key to its shared paths."""
+        changed = {key: paths for key, paths in sorted(undone.items()) if paths}
+        others = sorted(self.standing)
+        if not changed or not others:
+            return
+        cause = f"{what} undid " + "; ".join(
+            f"{key}, which changed {', '.join(paths)}" for key, paths in changed.items()
+        )
+        say(f"synthesis: {cause}; revalidating {', '.join(others)}")
+        # No pair is in progress: `preserve` has no attempt to keep.
+        self.live = {"step": None}
+        try:
+            for other in others:
+                before = report_verdict(self.standing[other]["report"])
+                result, problem = self.check_scaffold(other, tag)
+                if problem:
+                    say(f"warning: {other}: {problem}")
+                heading = f"Revalidation after {what}"
+                self.restate(other, heading, cause, before, result, problem)
+                if result is None:
+                    del self.standing[other]
+        finally:
+            self.live = None
+
+    def check_scaffold(self, key, tag):
+        """Builds the kept scaffold of the pair `key` again and replays it, canonical,
+        control and final, in `TS-NNNN_<base>/<tag>/`, or `<tag>.<stamp>/` when that
+        exists, and keeps that directory in its entry. Returns (result, problem): the reach
+        check's result, None when it does not build, and why it stands worse than its
+        report, or None."""
+        entry = self.standing[key]
+        scaffold = entry["scaffold"]
+        self.live.update(step=f"the revalidation of {key}", revalidation=None)
+        binary, _command, _tail, log = self.build(scaffold, tag)
+        if binary is None:
+            return None, f"{key}'s scaffold {scaffold} no longer builds; see {self.rel(log)}"
+        directory = self.reach / key / tag
+        if directory.exists():
+            # An earlier revalidation's, after a --redo, which a report may name: it stays.
+            directory = directory.with_name(f"{tag}.{synthesis_stamp()}")
+        entry["replays"] = directory
+        # For `preserve`: where an interrupted revalidation left its replays.
+        self.live["revalidation"] = directory
+        replays = [
+            self.replay(entry["card"], binary, directory / name, control=name == "control")
+            for name in ("canonical", "control", "final")
+        ]
+        before = report_verdict(entry["report"])
+        # A crash file an agent's run left stays its finding candidate (section 18.8).
+        stray = None
+        if before["verdict"] == CRASH and "stray failure" in before["annotations"]:
+            stray = "the file its report names"
+        path = self.repo / self.states / f"{entry['module']}.rs"
+        result = reach_verdict(
+            entry["history"],
+            path.read_text(errors="replace") if path.is_file() else "",
+            *replays,
+            stray=stray,
+            labels={label for label, _ in self.labels},
+        )
+        if stands_worse(before, result):
+            return result, (
+                f"{key}'s scaffold {scaffold} went from {before['text']} to "
+                f"{verdict_text(result)}; see {self.rel(directory)}/"
+            )
+        return result, None
+
+    def restate(self, key, heading, cause, before, result, problem=None):
+        """Writes a revalidation into a kept scaffold's report: the new verdict on its
+        Verdict line, and a section with the cause, the verdict before, the reasons, where
+        the replays are and, for a CRASH, its crash line; the report's run and replay lines
+        are rewritten for this check, the scaffold's latest, so they reproduce its failure
+        or carry the placeholder. A scaffold that no longer builds, `result` None, is NOT
+        BUILT (no longer builds), with `problem` as its reason."""
+        entry = self.standing[key]
+        now = verdict_text(result) if result else "NOT BUILT (no longer builds)"
+        text = REPORT_VERDICT.sub(lambda _found: f"- Verdict: {now}", entry["report"], count=1)
+        lines = [
+            f"## {heading}",
+            "",
+            f"- Cause: {cause}",
+            f"- Before: {before['text']}",
+            f"- Now: {now}",
+        ]
+        if result:
+            lines += [f"- Reason: {reason}" for reason in result["reasons"]]
+            lines.append(f"- Replays: {self.rel(entry['replays'])}/")
+            crash = result["crash"]
+            if crash:
+                lines.append(crash_text(crash))
+            # A CRASH without a crash of its own is the stray failure the lines name already.
+            if crash or result["verdict"] != CRASH:
+                crash_file = (
+                    self.replay_input(entry["replays"] / crash["replay"]) if crash else None
+                )
+                control = bool(crash) and crash["replay"] == "control"
+                run, replay = self.run_lines(entry["scaffold"], crash_file, control)
+                text = REPORT_RUN_BLOCK.sub(
+                    lambda _found: f"## Run and replay\n\n```\n{run}\n{replay}\n```",
+                    text,
+                    count=1,
+                )
+        else:
+            lines.append(f"- Reason: {problem}")
+        entry["report"] = text.rstrip("\n") + "\n\n" + "\n".join(lines) + "\n"
+        (self.reach / f"{key}.md").write_text(entry["report"])
+
+    # Reports and the console.
+
+    def crash_line(self, outcome):
+        """What the console says of a kept CRASH (finding candidate), and the replay's
+        crash file and whether it is the control's."""
+        result = outcome["result"]
+        kept = outcome["kept"]
+        directory = self.reach / outcome["pair"].key / f"attempt-{kept['attempt']}"
+        crash = result["crash"]
+        if crash is None:
+            stray = kept["stray"]
+            return (
+                f"a run of the agent's left {stray}, a finding candidate",
+                self.repo / stray,
+                False,
+            )
+        replay = crash["replay"]
+        crash_file = self.replay_input(directory / replay)
+        if replay == "control":
+            note = (
+                "failed in the control replay (STATELENS_REACH_CONTROL=1); the canonical input "
+                "does not reproduce it"
+            )
+        else:
+            note = (
+                f"failed in the {replay} replay: the scaffold fails on its canonical input, which "
+                "libFuzzer runs first, so its run line reproduces the failure at once"
+            )
+        return note, crash_file, replay == "control"
+
+    def replay_input(self, directory):
+        """The crash file a replay left in `directory`; every replay runs the empty input,
+        so without a crash file it is the input."""
+        files = sorted(directory.iterdir()) if directory.is_dir() else []
+        files = [path for path in files if STRAY_FAILURE.match(path.name)]
+        return files[0] if files else self.empty
+
+    def write_report(self, outcome):
+        pair, result, kept = outcome["pair"], outcome["result"], outcome["kept"]
+        header = result["header"] if result else module_header(kept["module"] if kept else "")
+        rows = [
+            ("Card", f"{self.rel(pair.path)} ({outcome['title']})"),
+            ("Profile", self.profile_name),
+            ("Base commit", self.base),
+            ("Shape", header.get("shape") or "-"),
+            ("Base", pair.base),
+            ("Scaffold", outcome["scaffold"] or "none"),
+            ("Verdict", outcome["verdict"]),
+        ]
+        lines = [f"# {pair.card} on {pair.base}: {outcome['title']}", ""] + [
+            f"- {key}: {value}" for key, value in rows
+        ]
+        lines += [f"- Note: {note}" for note in outcome["notes"]]
+        if result:
+            lines += [f"- Reason: {reason}" for reason in result["reasons"]]
+            if result["control"]:
+                lines.append(
+                    f"- Control: {result['control']}"
+                    + (f" ({result['control_reason']})" if result["control_reason"] else "")
+                )
+            canonical = result["replays"].get("canonical") or {}
+            handoff = canonical.get("handoff")
+            lines.append(f"- Handoff: {handoff['text'] if handoff else 'no handoff line'}")
+            crash = result["crash"]
+            if crash:
+                lines.append(crash_text(crash))
+            lines += [
+                "",
+                "## Stages",
+                "",
+                "| Stage | Outcome | Detail | Witness | Record |",
+                "|---|---|---|---|---|",
+            ]
+            for k, stage in sorted(canonical.get("stages", {}).items()):
+                record = stage.get("record")
+                kind = record["kind"] if record else "-"
+                bind = (
+                    ",".join(f"{name}={value}" for name, value in record["bind"].items())
+                    if record
+                    else "-"
+                )
+                cell = (stage.get("detail") or "-").replace("|", "/")
+                lines.append(f"| E{k} | {stage['outcome']} | {cell} | {kind} | {bind} |")
+            sites = canonical.get("sites") or []
+            lines += ["", "## Labels and sites read", ""]
+            lines += [f"- {site}" for site in sites] or ["- none"]
+        lines += ["", "## Attempts", ""]
+        lines += [f"- attempt {step['attempt']}: {step['outcome']}" for step in outcome["steps"]]
+        for step in outcome["steps"]:
+            for veto in step["vetoes"]:
+                lines.append(f"  - attempt {step['attempt']}: {veto}")
+            for hunk in step["unmarked"]:
+                lines.append(f"  - attempt {step['attempt']}: unmarked edit: {hunk}")
+            for hunk in step["beside"]:
+                lines.append(f"  - attempt {step['attempt']}: edit beside instrumentation: {hunk}")
+        if outcome["strays"]:
+            lines += ["", "## Stray failures (finding candidates)", ""]
+            lines += [f"- {path}" for path in outcome["strays"]]
+        if outcome["gate"]:
+            broken, log = outcome["gate"]
+            lines += ["", "## Test gate", "", f"- Log: {self.rel(log)}"]
+            lines += [f"- Failed or no longer runs: {name}" for name in broken] or ["- passed"]
+        if outcome["scaffold"]:
+            run, replay = self.handover(outcome)
+            lines += ["", "## Run and replay", "", "```", run, replay, "```"]
+        elif outcome["handover"]:
+            run, replay = outcome["handover"]
+            lines += [
+                "",
+                "## Run and replay",
+                "",
+                f"The pair's edits were restored: apply attempt-{kept['attempt']}/version.diff "
+                f"(`git apply`) and add `pub mod {pair.module};` to "
+                "target_states/mod.rs first.",
+                "",
+                "```",
+                run,
+                replay,
+                "```",
+            ]
+        if result:
+            for name, replay in sorted(result["replays"].items()):
+                shown = [
+                    f"[statelens-reach] {pair.card} {line['text']}" for line in replay["lines"]
+                ]
+                lines += (
+                    ["", f"## The {name} replay", "", "```"] + (shown or ["(no lines)"]) + ["```"]
+                )
+        text = "\n".join(lines) + "\n"
+        (self.reach / f"{pair.key}.md").write_text(text)
+        # The report as written is what a later pair's revalidation compares with.
+        if outcome["scaffold"]:
+            self.standing[pair.key] = {
+                "scaffold": outcome["scaffold"],
+                "card": pair.card,
+                "base": pair.base,
+                "module": pair.module,
+                "history": outcome["history"],
+                "report": text,
+            }
+        else:
+            self.standing.pop(pair.key, None)
+
+    def handover(self, outcome, scaffold=None):
+        """The `run` and `replay` lines of a scaffold (section 18.6.2, Console)."""
+        scaffold = scaffold or outcome["scaffold"]
+        crash_file, control = None, False
+        result = outcome["result"] if outcome else None
+        if result and result["verdict"] == CRASH:
+            _note, crash_file, control = self.crash_line(outcome)
+        return self.run_lines(scaffold, crash_file, control)
+
+    def run_lines(self, scaffold, crash_file=None, control=False):
+        """The `run` line of a scaffold and the `replay` line of `crash_file`, by default a
+        placeholder in its artifacts directory; `control` for a file of the control run.
+        The paths are quoted for the shell, so a line runs as printed from a checkout whose
+        path holds a space; the placeholder stays as it is."""
+        here = f"cd {shlex.quote(str(self.repo / SL))} && "
+        nightly = f"NIGHTLY_VERSION={self.fuzz_toolchain}"
+        if crash_file is None:
+            artifacts = self.repo / self.package / "artifacts" / scaffold
+            crash_file = shlex.quote(str(artifacts)) + "/<crash file>"
+        else:
+            crash_file = shlex.quote(str(crash_file))
+        env = ["STATELENS_REACH=1"] + (["STATELENS_REACH_CONTROL=1"] if control else [])
+        env += [part for part in (self.profile["replay_env"], nightly) if part]
+        run = f"{here}{nightly} just run {scaffold}"
+        replay = f"{here}{' '.join(env)} just run {scaffold} {crash_file}"
+        return run, replay
+
+    # Driver.
+
+    def last_check(self, outcomes):
+        """Guards 1 to 3 once more over the whole tree (section 18.6.2, Last check)."""
+        outside = self.outside_scope()
+        if outside:
+            raise Abort(2, f"synthesis edited {outside[0]}; use a fresh clone")
+        for _path, finding in self.script_files(restore=True):
+            say(f"warning: last check: {finding}")
+        failing = {path for path, _ in self.integrity()}
+        if not failing:
+            return
+        for outcome in reversed(outcomes):
+            if not outcome["scaffold"]:
+                continue
+            pair = outcome["pair"]
+            # The diff as this run wrote it: the reach directory is the agent's to write.
+            diff = outcome["diff"]
+            paths = [path for path, _ in diff_sections(diff)]
+            if not failing & set(paths):
+                continue
+            self.undo(pair, diff, "the last check")
+            outcome["scaffold"] = None
+            outcome["verdict"] = "NOT BUILT"
+            outcome["notes"].append(
+                "the last check over the whole tree failed guard 3; the version is "
+                f"attempt-{outcome['kept']['attempt']}/version.diff"
+            )
+            outcome["diff"] = ""
+            (self.reach / f"{pair.key}.diff").write_text("")
+            self.write_report(outcome)
+            say(f"{pair.card:<10} {outcome['verdict']} (last check)   no scaffold on {pair.base}")
+        for path, _finding in self.integrity():
+            self.write(path, self.b_content(path))
+        self.own()
+        self.revalidate_owed()
+
+    def last_build(self):
+        """The last check's rebuild (section 18.6.2, Last check): every scaffold in the
+        package, of this synthesis or an earlier one, is built once more on the tree as
+        synthesis leaves it, also when the run synthesized no pair, so a scaffold an earlier
+        synthesis recorded NOT BUILT (no longer builds), or one a helper template edited
+        since broke, is never handed over while it does not build; one that does not build
+        exits with code 2, naming it."""
+        for scaffold in scaffold_targets(self.repo, self.profile_name):
+            binary, _command, _tail, log = self.build(scaffold, "last")
+            if binary is None:
+                raise Abort(
+                    2,
+                    f"the last check: the scaffold {scaffold} does not build; see "
+                    f"{self.rel(log)}, and undo the pair whose edits broke it with --redo or "
+                    "use a fresh clone",
+                )
+
+    def run(self):
+        self.check_campaign()
+        selection = select_scaffolds(self.repo, self.sl_dir, self.profile_name, self.patterns)
+        self.check_preconditions()
+        cards = sorted({pair.path for pair in selection.pairs})
+        if lint_paths(cards, registry_files(self.sl_dir)):
+            raise Abort(2, "a selected card has lint problems (above); fix them before synthesis")
+        say(f"{'cards':<10} {selection.tracked} tracked, {selection.local} local")
+        self.run_state = worktree_state(self.repo)
+        self.reach.mkdir(parents=True, exist_ok=True)
+        self.load_baseline()
+        self.load_campaign()
+        try:
+            return self.run_pairs(selection)
+        finally:
+            # Code the agent wrote also runs after its last run: replays and the test gate.
+            self.seal()
+
+    def run_pairs(self, selection):
+        self.recover()
+        problems = self.outside_scope()
+        problems += [path for path, _ in self.script_files()]
+        problems += [path for path, _ in self.integrity()]
+        if problems:
+            raise Abort(
+                2,
+                f"the checkout differs from the synthesis baseline: {problems[0]}; use a fresh "
+                "clone",
+            )
+        if self.redo:
+            self.redo_pairs([pair for pair in selection.pairs if pair.skip])
+        self.load_standing()
+        self.declare()
+        self.empty.write_bytes(b"")
+        self.labels = campaign_labels(self.repo, self.profile_name)
+        # Before any pair, whatever is selected: an earlier synthesis's included.
+        self.revalidate_owed()
+        outcomes = []
+        for pair in selection.pairs:
+            if pair.skip and not self.redo:
+                say(f"{pair.card:<10} skipped: {pair.skip}")
+                continue
+            outcome = self.synthesize(pair)
+            outcomes.append(outcome)
+            scaffold = outcome["scaffold"] or f"no scaffold on {pair.base}"
+            line = f"{pair.card:<10} {outcome['verdict']}   {scaffold}"
+            if outcome["scaffold"] and outcome["result"]["verdict"] == CRASH:
+                line += "; " + self.crash_line(outcome)[0]
+            elif outcome["strays"] and not (
+                outcome["result"] and outcome["result"]["verdict"] == CRASH
+            ):
+                line += f"; a run of the agent's left {outcome['strays'][0]}, a finding candidate"
+            say(line)
+        self.last_check(outcomes)
+        self.last_build()
+        final = select_scaffolds(self.repo, self.sl_dir, self.profile_name, self.patterns)
+        scaffolds = [pair for pair in final.pairs if pair.scaffold]
+        say(
+            f"{'synthesis':<10} {len(outcomes)} pair(s), {len(scaffolds)} scaffold(s); reports in "
+            f"{SL}/campaign/reach/"
+        )
+        current = {outcome["scaffold"]: outcome for outcome in outcomes if outcome["scaffold"]}
+        for pair in scaffolds:
+            run, replay = self.handover(current.get(pair.scaffold), pair.scaffold)
+            say(f"{'run':<10} {run}")
+            say(f"{'replay':<10} {replay}")
+        return 0 if scaffolds else 3
+
+
 def first_panic(lines):
     """Returns the first StateLens violation, or else the first panic message."""
     for line in lines:
@@ -6410,24 +10797,26 @@ def main(argv):
     commands = parser.add_subparsers(dest="command", required=True)
     lint = commands.add_parser(
         "lint",
-        help="check invariant files",
+        help="check invariant files and target-state cards",
         description=(
-            "Check invariant files (SPEC section 4.6). Without PATH, checks every file in "
-            "invariants/ and false-invariants/. Exit code 0 when clean, 3 on problems."
+            "Check invariant files and target-state cards (SPEC sections 4.6 and 18.3). "
+            "Without PATH, checks every file in invariants/, invariants.local/, "
+            "false-invariants/, target-states/ and target-states.local/. Exit code 0 when "
+            "clean, 3 on problems."
         ),
     )
-    lint.add_argument("paths", nargs="*", metavar="PATH", help="an invariant file")
+    lint.add_argument("paths", nargs="*", metavar="PATH", help="an invariant file or a card")
     excerpts = commands.add_parser(
         "excerpts",
-        help="write the cited source lines into invariant files",
+        help="write the cited source lines into invariant files and cards",
         description=(
-            "Write the Source excerpts section of invariant files from their pinned citations "
-            "(SPEC section 4.3). Without PATH, every file in invariants/ and "
-            "false-invariants/. With --check, only report the files whose section is missing "
+            "Write the Source excerpts section of invariant files and target-state cards "
+            "from their pinned citations (SPEC section 4.3). Without PATH, every file lint "
+            "checks by default. With --check, only report the files whose section is missing "
             "or out of date (exit code 3)."
         ),
     )
-    excerpts.add_argument("paths", nargs="*", metavar="PATH", help="an invariant file")
+    excerpts.add_argument("paths", nargs="*", metavar="PATH", help="an invariant file or a card")
     excerpts.add_argument("--check", action="store_true", help="report, do not write")
     extract = commands.add_parser(
         "extract",
@@ -6435,7 +10824,9 @@ def main(argv):
         description=(
             "Run the agent on sources of one kind and write new invariants to "
             "invariants/<registry>/, or for kb, which reads knowledge-base findings, to the "
-            f"git-ignored {LOCAL_INVARIANTS}/<registry>/ (SPEC section 6)."
+            f"git-ignored {LOCAL_INVARIANTS}/<registry>/ (SPEC section 6). With --states, "
+            "write target-state cards to target-states/<registry>/, or to the git-ignored "
+            f"{LOCAL_STATES}/<registry>/ when the source is not public (SPEC section 18.4)."
         ),
     )
     extract.add_argument("--agent", choices=AGENTS, help="agent CLI (default: STATELENS_AGENT)")
@@ -6454,12 +10845,27 @@ def main(argv):
             "fewer (default: as many as they justify)"
         ),
     )
-    extract.add_argument("kind", choices=KINDS, help="source kind")
+    extract.add_argument(
+        "--states",
+        action="store_true",
+        help="write target-state cards instead; the registry is simplex or marshal",
+    )
+    extract.add_argument(
+        "--local",
+        action="store_true",
+        help=f"with --states, write to the git-ignored {LOCAL_STATES}/ (a private source)",
+    )
+    extract.add_argument(
+        "kind", choices=STATE_KINDS, help="source kind; test and text need --states"
+    )
     extract.add_argument(
         "sources",
         nargs="*",
         metavar="SOURCE",
-        help="a source (SPEC section 6.1); for kb, a corpus root (default: STATELENS_KB)",
+        help=(
+            "a source (SPEC sections 6.1 and 18.4); for kb, a corpus root (default: "
+            "STATELENS_KB), or with --states one finding identifier"
+        ),
     )
     lint_examples = commands.add_parser(
         "lint-examples",
@@ -6508,9 +10914,9 @@ def main(argv):
         "clean",
         help="undo what a campaign wrote to this checkout",
         description=(
-            "Delete the files a campaign created and restore the paths it edits to HEAD, "
-            "so a checkout can be reused (SPEC section 5.4). Prints what it would do and "
-            "needs --yes to act."
+            "Delete the files a campaign or a synthesis created and restore the paths they "
+            "edit to HEAD, so a checkout can be reused (SPEC section 5.4). Prints what it "
+            "would do and needs --yes to act."
         ),
     )
     clean.add_argument("--yes", action="store_true", help="actually do it")
@@ -6613,8 +11019,8 @@ def main(argv):
             "Replay each StateLens target's corpus under coverage instrumentation and "
             "write an HTML report per target plus one merged over all of them (SPEC "
             "section 7.13). Names a profile (`simplex`, `marshal`, `qmdb`) or single targets; "
-            "with neither, every target of the default profile. A target with no corpus "
-            "is skipped."
+            "with neither, every target of the default profile. A profile's targets are its "
+            "variants and its scaffolds. A target with no corpus is skipped."
         ),
     )
     coverage.add_argument(
@@ -6641,7 +11047,11 @@ def main(argv):
     targets = commands.add_parser(
         "targets",
         help="the StateLens targets a profile builds, one per line",
-        description="Used by `just fuzz <profile>` to run every target of a profile.",
+        description=(
+            "Used by `just fuzz <profile>` to run every target of a profile. With "
+            "--state-reaching, the scaffolds of the selected target-state cards instead "
+            "(SPEC section 18.9)."
+        ),
     )
     targets.add_argument(
         "--profile",
@@ -6653,7 +11063,15 @@ def main(argv):
         "--match",
         action="append",
         metavar="GLOB",
-        help="only the targets this shell pattern names, by variant or original name (repeatable)",
+        help=(
+            "only the targets this shell pattern names, by variant or original name; with "
+            "--state-reaching, a TS-NNNN pattern names a card and any other a base (repeatable)"
+        ),
+    )
+    targets.add_argument(
+        "--state-reaching",
+        action="store_true",
+        help="list the scaffolds of the selected cards whose thin target exists",
     )
     ast = commands.add_parser(
         "ast",
@@ -6712,7 +11130,49 @@ def main(argv):
         default="simplex",
         help="what the campaign binds, instruments, builds and tests (default: simplex)",
     )
+    campaign.add_argument(
+        "--invariants",
+        action="append",
+        metavar="LIST",
+        help=(
+            "bind only these invariants: comma-separated <registry>/INV-NNNN ids, or bare "
+            "INV-NNNN ids when the profile binds one registry (repeatable)"
+        ),
+    )
     campaign.add_argument("--stop-after", choices=STOP_STEPS, help="stop after this step")
+    synthesize = commands.add_parser(
+        "synthesize",
+        help=(
+            "write, build and check one scaffold per target-state card and base (after a "
+            "campaign)"
+        ),
+        description=(
+            "On the checkout a campaign of the profile instrumented, have the agent write one "
+            "scaffold per selected card and base, a fuzz target that drives the card's History "
+            "on that base target, and check it with fixed replays (SPEC section 18.6). Exit "
+            "code 0 when a scaffold exists for the selection, 1 usage or nothing selected, 2 a "
+            "failed precondition or an edit outside the edit contract, 3 no scaffold built."
+        ),
+    )
+    synthesize.add_argument(
+        "--agent", choices=AGENTS, help="agent CLI (default: STATELENS_AGENT)"
+    )
+    synthesize.add_argument(
+        "--profile",
+        choices=tuple(PROFILES),
+        help="simplex or marshal (default: the profile in campaign/meta.json)",
+    )
+    synthesize.add_argument(
+        "--match",
+        action="append",
+        metavar="GLOB",
+        help="a TS-NNNN pattern names cards, any other pattern names bases (repeatable)",
+    )
+    synthesize.add_argument(
+        "--redo",
+        action="store_true",
+        help="undo and synthesize again the selected pairs (card, base) that have a report",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -6744,6 +11204,8 @@ def main(argv):
             return cmd_lint_plan(args)
         if args.command == "lint-prompts":
             return cmd_lint_prompts(args)
+        if args.command == "synthesize":
+            return Synthesis(args).run()
         return Campaign(args).run()
     except Abort as error:
         say(f"error: {error}")
@@ -6753,5 +11215,14 @@ def main(argv):
         return 130
 
 
+def interrupt(_signum, _frame):
+    """A supervisor's SIGTERM or a closed terminal's SIGHUP takes the interrupt's path: the
+    command that runs, in its own process group, is killed with what it started, and a
+    pair's edits are restored, instead of the script dying and the command living on."""
+    raise KeyboardInterrupt
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, interrupt)
+    signal.signal(signal.SIGHUP, interrupt)
     sys.exit(main(sys.argv[1:]))

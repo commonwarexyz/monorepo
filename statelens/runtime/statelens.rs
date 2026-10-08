@@ -19,7 +19,12 @@
 //!   replicas ([Global], [with_global]). It lives for one run: [reset] and every
 //!   fresh deterministic runtime clear it, while a runtime resumed from a
 //!   checkpoint (a crash-restart) keeps it;
-//! - discretization helpers: [bucket], [delta], [flag], [pack] and [disc].
+//! - discretization helpers: [bucket], [delta], [flag], [pack] and [disc];
+//! - the read side, for the target-state scaffolds only: while a scaffold
+//!   [watch]es, an ordered trace of the probe observations of one input ([Seen],
+//!   [seen], [sites], [observations], [truncated]), and one event sequence per
+//!   input that orders those observations and the scaffold helper's events
+//!   ([tick], [mark]). Instrumentation never calls it.
 //!
 //! Environment switches, each read once per process:
 //! - `STATELENS_BYZANTINE` sets what instrumentation does for a compromised
@@ -58,6 +63,7 @@ thread_local! {
     static COMPROMISED: RefCell<BTreeSet<u32>> = const { RefCell::new(BTreeSet::new()) };
     static GHOSTS: RefCell<BTreeMap<u32, Ghost>> = const { RefCell::new(BTreeMap::new()) };
     static GLOBAL: RefCell<Global> = RefCell::new(Global::default());
+    static TRACE: RefCell<Trace> = const { RefCell::new(Trace::new()) };
 }
 
 /// What instrumentation does at a site reached by a compromised replica.
@@ -176,16 +182,17 @@ fn table() -> *mut u8 {
         .cast_mut()
 }
 
-/// Prepares a fuzz input: zeroes the counter table, forgets the compromised set
-/// and clears the ghost state. In a fuzzing build it also registers the table
-/// with libFuzzer on first use, unless `STATELENS_FEEDBACK=0`.
+/// Prepares a fuzz input: zeroes the counter table, forgets the compromised set,
+/// clears the ghost state, and drops the probe trace, so the event sequence and
+/// the run counter start again at 0. In a fuzzing build it also registers the
+/// table with libFuzzer on first use, unless `STATELENS_FEEDBACK=0`.
 ///
 /// Called by the StateLens fuzz target before every input.
 pub fn reset() {
     #[cfg(fuzzing)]
     {
-        static REGISTERED: std::sync::Once = std::sync::Once::new();
-        REGISTERED.call_once(|| {
+        static REGISTERED: OnceLock<()> = OnceLock::new();
+        REGISTERED.get_or_init(|| {
             if std::env::var("STATELENS_FEEDBACK").map_or(true, |value| value != "0") {
                 TABLE.register();
             }
@@ -196,25 +203,34 @@ pub fn reset() {
     unsafe { core::ptr::write_bytes(table(), 0, COUNTERS) };
     clear_compromised();
     forget_ghosts();
+    clear_trace();
 }
 
 /// Forgets all ghost state.
-///
-/// Registered as the deterministic runtime's fresh-run hook, so history from an
-/// earlier, independent run on this thread (for example another seed of the same
-/// test) does not leak into the next run. A runtime resumed from a checkpoint (a
-/// crash-restart) keeps the history.
 fn forget_ghosts() {
     GHOSTS.with(|ghosts| ghosts.borrow_mut().clear());
     GLOBAL.with(|global| *global.borrow_mut() = Global::default());
 }
 
-/// Registers [forget_ghosts] with the deterministic runtime, once per process.
-fn register_fresh_run_hook() {
-    static REGISTERED: std::sync::Once = std::sync::Once::new();
-    REGISTERED.call_once(|| {
-        let _ = commonware_runtime::deterministic::STATELENS_FRESH_RUN.set(forget_ghosts);
+/// Starts an independent run: forgets all ghost state, then counts the runtime
+/// instance of the input.
+///
+/// Registered as the deterministic runtime's fresh-run hook, so history from an
+/// earlier, independent run on this thread (for example another seed of the same
+/// test) does not leak into the next run. A runtime resumed from a checkpoint (a
+/// crash-restart) keeps the history and the run number.
+fn fresh_run() {
+    forget_ghosts();
+    TRACE.with(|trace| {
+        let mut trace = trace.borrow_mut();
+        trace.run = trace.run.saturating_add(1);
     });
+}
+
+/// Registers [fresh_run] with the deterministic runtime; only the first call of the
+/// process sets it.
+fn register_fresh_run_hook() {
+    let _ = commonware_runtime::deterministic::STATELENS_FRESH_RUN.set(fresh_run);
 }
 
 /// Hashes a probe site label at compile time (FNV-1a, 64 bits).
@@ -357,11 +373,256 @@ pub fn with_global<R>(me: Option<Participant>, f: impl FnOnce(&mut Global) -> R)
     Some(GLOBAL.with(|global| f(&mut global.borrow_mut())))
 }
 
+/// Most observations the trace of one input keeps.
+pub const TRACE_CAP: usize = 1 << 20;
+
+/// One probe observation of a watched input. Its fields are private, so only the
+/// runtime makes or changes one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Seen {
+    label: &'static str,
+    site: &'static str,
+    me: Option<u32>,
+    a: u32,
+    b: u32,
+    seq: u64,
+    run: u32,
+}
+
+impl Seen {
+    /// The `sl_probe!` label, or the invariant ID of an `sl_implies!` site.
+    pub const fn label(self) -> &'static str {
+        self.label
+    }
+
+    /// The call site, `concat!(file!(), ":", line!(), ":", column!())`.
+    pub const fn site(self) -> &'static str {
+        self.site
+    }
+
+    /// The participant index of the observing replica.
+    pub const fn me(self) -> Option<u32> {
+        self.me
+    }
+
+    /// The first recorded value; `pre` at an `sl_implies!` site.
+    pub const fn a(self) -> u32 {
+        self.a
+    }
+
+    /// The second recorded value; `pre && post` at an `sl_implies!` site.
+    pub const fn b(self) -> u32 {
+        self.b
+    }
+
+    /// The position of the observation in the event sequence of the input, from 1.
+    pub const fn seq(self) -> u64 {
+        self.seq
+    }
+
+    /// The runtime instance of the input that made it, from 1.
+    pub const fn run(self) -> u32 {
+        self.run
+    }
+}
+
+/// The read side's state on this thread: the trace of one input, its event
+/// sequence and its run counter.
+struct Trace {
+    /// Whether a scaffold watches, so observations are kept and the sequence advances.
+    watching: bool,
+    /// The position of the first observation dropped because the trace held
+    /// [TRACE_CAP], if any.
+    truncated: Option<u64>,
+    /// The last position issued in the input.
+    seq: u64,
+    /// The runtime instance current on this thread, counted by [fresh_run].
+    run: u32,
+    /// The observations, in order of their positions.
+    seen: Vec<Seen>,
+}
+
+impl Trace {
+    const fn new() -> Self {
+        Self {
+            watching: false,
+            truncated: None,
+            seq: 0,
+            run: 0,
+            seen: Vec::new(),
+        }
+    }
+}
+
+/// Drops the trace, sets the run counter and the event sequence to 0, and
+/// registers the fresh-run hook, so the first runtime of the input has run 1.
+///
+/// [reset] calls it. Self-tests call it instead of [reset], because it touches
+/// only the thread-local trace, run counter and sequence.
+fn clear_trace() {
+    register_fresh_run_hook();
+    TRACE.with(|trace| *trace.borrow_mut() = Trace::new());
+}
+
+/// Starts an empty trace for this input. The event sequence goes on from its
+/// current value.
+pub fn watch() {
+    TRACE.with(|trace| {
+        let mut trace = trace.borrow_mut();
+        trace.watching = true;
+        trace.truncated = None;
+        trace.seen = Vec::new();
+    });
+}
+
+/// Stops keeping observations and drops the trace.
+pub fn unwatch() {
+    TRACE.with(|trace| {
+        let mut trace = trace.borrow_mut();
+        trace.watching = false;
+        trace.truncated = None;
+        trace.seen = Vec::new();
+    });
+}
+
+/// Advances the event sequence and returns its new value, which is greater than
+/// every position issued earlier in the input. While not watching it returns 0
+/// and advances nothing.
+///
+/// Only the scaffold helper calls it.
+pub fn tick() -> u64 {
+    TRACE.with(|trace| {
+        let mut trace = trace.borrow_mut();
+        if !trace.watching {
+            return 0;
+        }
+        trace.seq = trace.seq.saturating_add(1);
+        trace.seq
+    })
+}
+
+/// The last position issued in the input, to an observation or by a [tick],
+/// without advancing the sequence; 0 before the first.
+pub fn mark() -> u64 {
+    TRACE.with(|trace| trace.borrow().seq)
+}
+
+/// The runtime instance current on this thread, from 1; 0 before the first
+/// runtime of the input.
+pub fn current_run() -> u32 {
+    TRACE.with(|trace| trace.borrow().run)
+}
+
+/// The position of the first observation the trace dropped because it held
+/// [TRACE_CAP], or `None` while it has dropped none. A dropped observation still
+/// advances the sequence, so what the trace holds from that position on is
+/// incomplete.
+pub fn truncated() -> Option<u64> {
+    TRACE.with(|trace| trace.borrow().truncated)
+}
+
+/// The earliest observation at or after position `since`, of the run current at
+/// the call, with `label`, at `site` when one is given, that `f` accepts. `None`
+/// while not watching.
+///
+/// Find a site with [sites], never as a literal: edits move lines.
+pub fn seen(
+    label: &str,
+    site: Option<&str>,
+    since: u64,
+    mut f: impl FnMut(&Seen) -> bool,
+) -> Option<Seen> {
+    let (mut index, run) = TRACE.with(|trace| {
+        let trace = trace.borrow();
+        trace.watching.then(|| {
+            (
+                trace.seen.partition_point(|seen| seen.seq < since),
+                trace.run,
+            )
+        })
+    })?;
+    loop {
+        // `f` runs outside the borrow, so it may read the trace itself.
+        let candidate = TRACE.with(|trace| {
+            let trace = trace.borrow();
+            let rest = trace.seen.get(index..)?;
+            let offset = rest.iter().position(|seen| {
+                seen.run == run && seen.label == label && site.is_none_or(|site| site == seen.site)
+            })?;
+            Some((rest[offset], index + offset + 1))
+        });
+        let (candidate, next) = candidate?;
+        if f(&candidate) {
+            return Some(candidate);
+        }
+        index = next;
+    }
+}
+
+/// The sites at which the trace holds `label`, in order of their first observation.
+pub fn sites(label: &str) -> Vec<&'static str> {
+    TRACE.with(|trace| {
+        let mut sites = Vec::new();
+        for seen in trace
+            .borrow()
+            .seen
+            .iter()
+            .filter(|seen| seen.label == label)
+        {
+            if !sites.contains(&seen.site) {
+                sites.push(seen.site);
+            }
+        }
+        sites
+    })
+}
+
+/// Every observation at or after position `since`, of every run, oldest first.
+pub fn observations(since: u64) -> Vec<Seen> {
+    TRACE.with(|trace| {
+        let trace = trace.borrow();
+        let start = trace.seen.partition_point(|seen| seen.seq < since);
+        trace.seen[start..].to_vec()
+    })
+}
+
+/// While watching, advances the event sequence and appends an observation with
+/// the new value as its position, unless the trace holds [TRACE_CAP]
+/// observations, in which case [truncated] keeps the position of the first one it
+/// dropped. Only the macros call it, inside the guard, after [record].
+#[doc(hidden)]
+pub fn note(me: Option<Participant>, label: &'static str, site: &'static str, a: u32, b: u32) {
+    TRACE.with(|trace| {
+        let mut trace = trace.borrow_mut();
+        if !trace.watching {
+            return;
+        }
+        trace.seq = trace.seq.saturating_add(1);
+        if trace.seen.len() >= TRACE_CAP {
+            if trace.truncated.is_none() {
+                trace.truncated = Some(trace.seq);
+            }
+            return;
+        }
+        let seen = Seen {
+            label,
+            site,
+            me: me.map(|me| me.get()),
+            a,
+            b,
+            seq: trace.seq,
+            run: trace.run,
+        };
+        trace.seen.push(seen);
+    });
+}
+
 /// Records a state probe for replica `me`: `sl_probe!(me, "label", a, b)`.
 ///
 /// `a` and `b` must convert into `u32` with `Into` (`bool`, `u8`, `u16`, `u32`),
 /// so raw `u64` views or counts must go through [bucket] or [delta] first. The
-/// site is `label` plus the call location, so every call site is distinct.
+/// site is `label` plus the call location, so every call site is distinct. While
+/// a scaffold watches, the observation is also appended to the trace.
 #[allow(unused_macros)]
 macro_rules! sl_probe {
     ($me:expr, $label:literal, $a:expr, $b:expr $(,)?) => {{
@@ -379,6 +640,19 @@ macro_rules! sl_probe {
             let a: u32 = ::core::convert::Into::<u32>::into($a);
             let b: u32 = ::core::convert::Into::<u32>::into($b);
             $crate::simplex::statelens::record(SITE, a, b);
+            $crate::simplex::statelens::note(
+                me,
+                $label,
+                ::core::concat!(
+                    ::core::file!(),
+                    ":",
+                    ::core::line!(),
+                    ":",
+                    ::core::column!()
+                ),
+                a,
+                b,
+            );
         }
     }};
 }
@@ -398,7 +672,8 @@ macro_rules! sl_assert {
 /// Asserts "if `pre` then `post`" for invariant `id` and records the probe
 /// `(pre, post)`: `sl_implies!(me, "INV-0001", pre, post, "format", args...)`.
 ///
-/// `post` is evaluated only when `pre` holds.
+/// `post` is evaluated only when `pre` holds. While a scaffold watches, the
+/// observation is also appended to the trace, before a violation panics.
 #[allow(unused_macros)]
 macro_rules! sl_implies {
     ($me:expr, $id:literal, $pre:expr, $post:expr, $($arg:tt)+) => {{
@@ -416,6 +691,19 @@ macro_rules! sl_implies {
             let pre: bool = $pre;
             let post: bool = pre && ($post);
             $crate::simplex::statelens::record(SITE, u32::from(pre), u32::from(post));
+            $crate::simplex::statelens::note(
+                me,
+                $id,
+                ::core::concat!(
+                    ::core::file!(),
+                    ":",
+                    ::core::line!(),
+                    ":",
+                    ::core::column!()
+                ),
+                u32::from(pre),
+                u32::from(post),
+            );
             if pre && !post {
                 $crate::simplex::statelens::violation(me, $id, ::core::format_args!($($arg)+));
             }
@@ -546,6 +834,207 @@ mod tests {
         assert!(GHOSTS.with(|ghosts| ghosts.borrow().contains_key(&4)));
         let _runner = commonware_runtime::deterministic::Runner::seeded(0);
         assert!(GHOSTS.with(|ghosts| ghosts.borrow().is_empty()));
+    }
+
+    // The read-side tests call `clear_trace`, never `reset`, which zeroes the
+    // counter table the other tests share under plain `cargo test`.
+
+    #[test]
+    fn test_read_side_is_off_unless_watched() {
+        clear_trace();
+        crate::simplex::statelens::sl_probe!(None, "unwatched", true, 1u8);
+        assert_eq!(tick(), 0, "no position while not watching");
+        assert_eq!(mark(), 0);
+        assert!(observations(0).is_empty());
+        assert_eq!(seen("unwatched", None, 0, |_| true), None);
+        watch();
+        crate::simplex::statelens::sl_probe!(None, "watched", true, 2u8);
+        let trace = observations(0);
+        assert_eq!(trace.len(), 1);
+        let only = trace[0];
+        assert_eq!(
+            (only.label(), only.me(), only.a(), only.b()),
+            ("watched", None, 1, 2)
+        );
+        assert_eq!((only.seq(), only.run()), (1, 0));
+        let site: Vec<&str> = only.site().rsplitn(3, ':').collect();
+        assert_eq!(site.len(), 3, "the site is file:line:column");
+        assert_eq!(site[2], file!());
+        assert!(site[0].parse::<u32>().is_ok() && site[1].parse::<u32>().is_ok());
+        unwatch();
+        assert!(observations(0).is_empty());
+        assert_eq!(tick(), 0);
+        crate::simplex::statelens::sl_probe!(None, "watched", true, 2u8);
+        assert_eq!(mark(), 1, "unwatch keeps the sequence");
+        watch();
+        assert!(observations(0).is_empty(), "watch starts an empty trace");
+        assert_eq!(tick(), 2, "the sequence goes on from its current value");
+        clear_trace();
+    }
+
+    #[test]
+    fn test_ticks_and_observations_share_one_sequence() {
+        clear_trace();
+        watch();
+        let first = tick();
+        let second = tick();
+        assert_eq!(
+            (first, second),
+            (1, 2),
+            "two ticks get distinct, ordered positions"
+        );
+        crate::simplex::statelens::sl_probe!(Some(Participant::new(0)), "shared", true, 0u8);
+        let third = tick();
+        crate::simplex::statelens::sl_probe!(None, "shared", false, 0u8);
+        let positions: Vec<u64> = observations(0).iter().map(|seen| seen.seq()).collect();
+        assert_eq!(positions, vec![3, 5]);
+        assert_eq!(third, 4);
+        assert_eq!(mark(), 5, "mark is the last position");
+        assert_eq!(mark(), 5, "mark does not advance");
+        assert_eq!(observations(5).len(), 1);
+        assert_eq!(tick(), 6);
+        clear_trace();
+        assert_eq!(mark(), 0, "clear_trace starts the sequence again");
+        assert_eq!(tick(), 0, "and stops watching");
+        watch();
+        assert_eq!(tick(), 1, "positions are unique within one input only");
+        clear_trace();
+    }
+
+    #[test]
+    fn test_seen_finds_the_earliest_match() {
+        clear_trace();
+        clear_compromised();
+        watch();
+        for value in 0u8..3 {
+            crate::simplex::statelens::sl_probe!(Some(Participant::new(1)), "earliest", value, 0u8);
+        }
+        crate::simplex::statelens::sl_probe!(Some(Participant::new(2)), "earliest", 1u8, 0u8);
+        crate::simplex::statelens::sl_probe!(None, "other", 1u8, 0u8);
+        let found = sites("earliest");
+        assert_eq!(found.len(), 2, "one site per call");
+        assert_eq!(sites("other").len(), 1);
+        assert!(sites("absent").is_empty());
+        let first = seen("earliest", None, 0, |_| true).expect("first");
+        assert_eq!((first.seq(), first.a(), first.site()), (1, 0, found[0]));
+        let later = seen("earliest", None, 2, |_| true).expect("at or after");
+        assert_eq!((later.seq(), later.a()), (2, 1));
+        let accepted = seen("earliest", None, 0, |seen| seen.a() == 1).expect("accepted");
+        assert_eq!(accepted.seq(), 2);
+        let at_site = seen("earliest", Some(found[1]), 0, |seen| seen.a() == 1).expect("site");
+        assert_eq!((at_site.seq(), at_site.me()), (4, Some(2)));
+        assert_eq!(seen("earliest", Some(found[0]), 4, |_| true), None);
+        assert_eq!(seen("earliest", None, 0, |seen| seen.a() == 7), None);
+        assert_eq!(seen("absent", None, 0, |_| true), None);
+        clear_trace();
+    }
+
+    #[test]
+    fn test_guarded_replicas_are_not_observed() {
+        clear_trace();
+        set_compromised([1]);
+        watch();
+        crate::simplex::statelens::sl_probe!(Some(Participant::new(1)), "guarded", true, 0u8);
+        crate::simplex::statelens::sl_implies!(
+            Some(Participant::new(1)),
+            "INV-TEST",
+            true,
+            false,
+            "skipped by the guard"
+        );
+        crate::simplex::statelens::sl_probe!(Some(Participant::new(0)), "guarded", true, 0u8);
+        let trace = observations(0);
+        assert_eq!(trace.len(), 1);
+        assert_eq!(
+            (trace[0].me(), trace[0].seq()),
+            (Some(0), 1),
+            "a skipped hit takes no position"
+        );
+        clear_compromised();
+        clear_trace();
+    }
+
+    #[test]
+    fn test_implies_notes_its_pair() {
+        clear_trace();
+        watch();
+        crate::simplex::statelens::sl_implies!(None, "INV-PAIR", false, evaluated(), "never");
+        crate::simplex::statelens::sl_implies!(None, "INV-PAIR", true, true, "holds");
+        let violated = std::panic::catch_unwind(|| {
+            crate::simplex::statelens::sl_implies!(None, "INV-PAIR", true, false, "broken");
+        });
+        assert!(violated.is_err());
+        let pairs: Vec<(u32, u32)> = observations(0)
+            .iter()
+            .filter(|seen| seen.label() == "INV-PAIR")
+            .map(|seen| (seen.a(), seen.b()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![(0, 0), (1, 1), (1, 0)],
+            "the violation is in the trace"
+        );
+        clear_trace();
+    }
+
+    #[test]
+    fn test_trace_cap() {
+        clear_trace();
+        watch();
+        for _ in 0..TRACE_CAP {
+            note(None, "cap", "cap.rs:1:1", 0, 0);
+        }
+        assert_eq!(truncated(), None);
+        note(None, "cap", "cap.rs:1:1", 1, 0);
+        let first = TRACE_CAP as u64 + 1;
+        assert_eq!(
+            truncated(),
+            Some(first),
+            "an observation past the cap is dropped, and its position kept"
+        );
+        assert_eq!(TRACE.with(|trace| trace.borrow().seen.len()), TRACE_CAP);
+        assert_eq!(mark(), first, "a dropped observation takes a position");
+        assert_eq!(tick(), first + 1);
+        note(None, "cap", "cap.rs:1:1", 2, 0);
+        assert_eq!(truncated(), Some(first), "the first dropped position stays");
+        assert_eq!(mark(), first + 2);
+        assert_eq!(seen("cap", None, 0, |seen| seen.a() != 0), None);
+        unwatch();
+        assert_eq!(truncated(), None, "unwatch forgets the cut");
+        watch();
+        assert_eq!(truncated(), None, "watch starts an uncut trace");
+        clear_trace();
+        assert_eq!(truncated(), None);
+    }
+
+    #[test]
+    fn test_fresh_runtime_counts_runs() {
+        clear_trace();
+        clear_compromised();
+        assert_eq!(current_run(), 0);
+        watch();
+        crate::simplex::statelens::sl_probe!(None, "runs", true, 0u8);
+        let _first = commonware_runtime::deterministic::Runner::seeded(0);
+        assert_eq!(current_run(), 1, "the first runtime of an input has run 1");
+        crate::simplex::statelens::sl_probe!(None, "runs", true, 1u8);
+        let _second = commonware_runtime::deterministic::Runner::seeded(1);
+        crate::simplex::statelens::sl_probe!(None, "runs", true, 2u8);
+        let runs: Vec<(u32, u32)> = observations(0)
+            .iter()
+            .map(|seen| (seen.run(), seen.b()))
+            .collect();
+        assert_eq!(runs, vec![(0, 0), (1, 1), (2, 2)], "the trace spans runs");
+        let current = seen("runs", None, 0, |_| true).expect("current run");
+        assert_eq!(
+            (current.run(), current.b()),
+            (2, 2),
+            "seen reads the current run"
+        );
+        clear_trace();
+        assert_eq!(current_run(), 0);
+        let _third = commonware_runtime::deterministic::Runner::seeded(2);
+        assert_eq!(current_run(), 1);
+        clear_trace();
     }
 }
 

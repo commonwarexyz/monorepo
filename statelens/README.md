@@ -9,8 +9,10 @@ components) and qmdb (`storage/src/qmdb`: the log-based databases and their sync
 engine). It works in three phases: an LLM agent (Claude Code or Codex) discovers
 invariants in issues, design documents, code comments, formal specifications, papers and
 knowledge-base findings (Phase 1); a campaign lets the agent instrument the code and
-generates the StateLens fuzz targets (Phase 2); and you run those targets (Phase 3). See
-[PRD.md](docs/PRD.md) for the goals and [SPEC.md](docs/SPEC.md) for the details.
+generates the StateLens fuzz targets (Phase 2); and you run those targets (Phase 3). For
+simplex and marshal, Target-State Synthesis also writes, per reviewed target state and base
+target, a fuzz target that drives that base into the state. See [PRD.md](docs/PRD.md) for the goals and
+[SPEC.md](docs/SPEC.md) for the details.
 
 ## Run campaigns safely
 
@@ -188,14 +190,16 @@ just campaign --profile marshal        # marshal profile
 just campaign --profile qmdb           # qmdb profile
 just campaign --agent codex            # another agent (or STATELENS_AGENT=codex just campaign)
 just campaign --stop-after build       # stop after materialize, instrument or build
+just campaign --invariants INV-0001,INV-0002                              # bind only these
+just campaign --profile marshal --invariants simplex/INV-0001,marshal/INV-0024
 ```
 
 **`just campaign` starts an agent with full access to this machine.** Run it in a fresh
 clone on a dedicated machine or container, and throw the clone away afterwards.
 
 Two conveniences: `just fuzz <target>` runs a campaign and then fuzzes one of its targets,
-inferring the profile from the target name; and `just clean` undoes what a campaign wrote,
-so a checkout can be reused. After fixing an instrumented checkout by hand, `just test`
+inferring the profile from the target name; and `just clean` undoes what a campaign or a
+synthesis wrote, so a checkout can be reused. After fixing an instrumented checkout by hand, `just test`
 runs only the campaign's test gate on it, for the profile in `campaign/meta.json`, then
 the component tests the gate leaves out (reported, not gated), before
 you fuzz it with `just fuzz <profile> --skip-campaign`. Note that in `consensus/fuzz/` and at the
@@ -241,6 +245,18 @@ The campaign refuses to start when a required tool is missing, when tracked file
 `statelens/` have uncommitted changes, or when an earlier campaign already
 instrumented the checkout. Uncommitted registry edits are used.
 
+`--invariants LIST` binds only the invariants a comma-separated list names, each written
+`<registry>/INV-NNNN`, or as a bare `INV-NNNN` when the profile binds one registry (the
+`marshal` profile binds two, so there every id names its registry); the flag may be
+repeated. The list is applied after the registries are collected, so a local invariant and,
+under `STATELENS_FALSE_INVARIANTS=1`, a false one (`simplex/FALSE-0001`) can be selected
+too, and the bound set keeps the registries' order. An id of a registry the profile does
+not bind, or that no file provides, stops the campaign (exit 2) with the ids available, as
+does a list that selects nothing. `campaign/meta.json` records the selected ids under
+`invariants` and the number available under `invariants_available`, the plan lists the
+selected ones only, and `just check-plan` expects sections for those. The beacon probes are
+added as always: they are feedback, not oracles.
+
 ## Phase 3: run fuzz targets
 
 In the instrumented checkout, run the `run` commands of a `READY` summary for the targets
@@ -252,19 +268,25 @@ same, and `just fuzz <target>` runs the campaign first.
 them one after another; `--parallel` runs them together and writes each one's output to
 `campaign/logs/<target>.run.log`; `--tmux` runs them together in one tmux window each, so
 their output stays live and separate. Nothing bounds a run unless you pass
-`-max_total_time`, so a target runs until it stops. The sequential form warns about that,
-because there the first target would be the only one to run. With several targets at once,
+`-max_total_time` or `-runs`, so a target runs until it stops. The sequential form warns about
+that, because there the first target would be the only one to run. With several targets at once,
 divide `-fork` between them rather than giving each the whole machine. `--skip-campaign`
 fuzzes the targets a campaign already built in this checkout, whatever its result -- the way
 to keep going after a campaign that built its targets and then stopped, since a new campaign
 refuses an instrumented checkout. Each target starts from whatever corpus its directory
-holds, as without the flag. `--targets GLOB`, which you may repeat, keeps only the targets a
-shell pattern names, by the variant's name or the original target's; a pattern that names
-none stops before the campaign, listing what the profile builds:
+holds, as without the flag. `--fuzz-targets GLOB`, which you may repeat, keeps only the targets
+a shell pattern names, by the variant's name or the original target's; a pattern that names
+none stops before the campaign, listing what the profile builds. `--state-reaching` runs the
+profile's scaffolds instead, one per selected card and base, and `--state-targets` selects its
+cards (see Target-State Synthesis). `--invariants LIST`, which you may repeat, goes to the campaign, which then binds
+only the invariants it names (see Phase 2); it is refused with `--skip-campaign`, which runs
+no campaign, and with a single target. A double-dash flag `just fuzz` does not know is refused
+rather than passed to libFuzzer, whose own flags take one dash:
 
 ```
 just fuzz simplex --tmux -- -fork=5
-just fuzz simplex --tmux --targets "simplex_cert_mock_twins_*" -- -fork=4
+just fuzz simplex --tmux --fuzz-targets "simplex_cert_*" -- -fork=4
+just fuzz simplex --invariants INV-0001,INV-0002 -- -max_total_time=3600
 just fuzz marshal --skip-campaign --parallel --tmux
 just fuzz simplex --parallel -- -max_total_time=600 -fork=5
 STATELENS_JOBS=4 just fuzz marshal --parallel -- -max_total_time=600
@@ -334,6 +356,236 @@ A `qmdb` campaign builds 17 variants, one per `qmdb_*` target in
 `storage/fuzz/fuzz_targets/`. qmdb has no replicas, so nothing is compromised, every site is
 checked, and `STATELENS_BYZANTINE` has no effect.
 
+## Target-State Synthesis
+
+Some states need a specific history that random inputs rarely produce: a replica that
+nullified a view and then certifies a notarization of it, or one that restarted from its
+journal after every online replica crashed. For `simplex` and `marshal`, Target-State
+Synthesis turns a description of such a state into a reviewed card, and after a campaign has
+an agent write one scaffold per card and base: a fuzz target built on an existing target, its
+base, that scripts the card's history, leaves the values the history does not fix to libFuzzer
+as knobs, and reports which events of the history it reached. qmdb is refused. SPEC.md chapter
+18 has the details.
+
+### Cards
+
+```
+just extract-states --registry simplex test consensus/src/simplex/mod.rs:3260
+just extract-states --registry marshal test consensus/src/marshal/standard/mod.rs:7027
+just extract-states --registry marshal issue https://github.com/commonwarexyz/monorepo/pull/4317
+just extract-states text "A replica signs a nullify vote for view v, then ..."
+just extract-states --registry simplex text /path/to/notes.txt
+just extract-states --registry marshal --local issue <owner>/<private repository>#<N>
+just extract-states --registry marshal kb <finding id>
+```
+
+The kinds are those of Phase 1 and two more. `test` takes `path:line` or `path:start-end` of a
+test under the registry's source or its profile's fuzz package; the history follows the calls
+that build the state, and the test's assertions are dropped. `text` takes a file or a literal,
+and the agent confirms every event against the code. `--registry` is `simplex` (the default) or
+`marshal`, and `--number` works as in Phase 1. The agent writes
+`target-states/<registry>/TS-NNNN.md` in the format of
+[templates/target-state.md](templates/target-state.md): a Statement about honest replicas, the
+Evidence, a History of events `E1` to `En`, each with its actor and what is observable once it
+happened, and the Knobs. A card is a goal to reach, never an oracle. As for an invariant, its
+citations are pinned to a commit, and the script writes its Source excerpts.
+
+**Every card is used by the next synthesis of its profile**, so review the new cards first:
+edit them, delete the ones you do not want, and run `just check-invariants`, which lints the
+cards with the invariants.
+
+A card goes to `target-states.local/<registry>/`, which git ignores, when its source is not
+public: a `kb` or `text` source, a path outside the repository, or any run with `--local`, for
+a private advisory or repository. To share one, rewrite it without the private detail and move
+it into `target-states/<registry>/` yourself. A campaign and a synthesis run in a fresh clone,
+which has no ignored files, so copy the local trees you have into it before the campaign:
+
+```
+git clone <repository> <clone>
+cd <development checkout>/statelens
+cp -R invariants.local target-states.local <clone>/statelens/
+```
+
+`just synthesize` prints how many cards are tracked and how many local, so a missing copy shows.
+
+### Synthesis
+
+In the checkout a campaign instrumented, once it ended `READY` or `PANIC (tests)`:
+
+```
+just synthesize                                         # every card of the campaign's profile, on every base
+just synthesize --match TS-0003 --match TS-0004         # these cards, on every base
+just synthesize --match "simplex_cert_mock_chaos*"      # every card, on these bases only
+just synthesize --match simplex_cert_mock_chaos_ts0003  # TS-0003 on one base
+just synthesize --match TS-0003 --redo                  # undo TS-0003's scaffolds and write them again
+just synthesize --agent codex
+```
+
+**`just synthesize` starts an agent with full access to this machine**, as a campaign does, in
+the same disposable clone.
+
+The unit of synthesis is a pair of a card and a base, one of the profile's targets: for
+simplex all but `simplex_cert_mock_mallory`, whose custom mutator a scaffold cannot reuse (20
+bases), and for marshal every target (13). A card is synthesized on every base unless `--match`
+names some: a `TS-NNNN` pattern names cards, any other pattern names bases, by any name a
+variant or scaffold of theirs has, so `simplex_cert_mock_chaos_ts0003` pins TS-0003 to one
+base and `"simplex_cert_mock_twins_*"` gives each card eight pairs. Pairs run one at a time, and
+the agent chooses no base. For each pair, the agent writes a module,
+`<package>/src/target_states/tsNNNN_<base>.rs`, and a thin target, `<base>_tsNNNN_statelens`,
+whose name carries the base. The script writes `target_states/mod.rs`, the helper through which
+a scaffold reports its stages, its declaration and the `[[bin]]` block, and builds. The
+scaffold keeps its base's input type, `run` recipe and libFuzzer flags, and has no seed corpus:
+the empty input decodes to the card's source history, and the script replays it with
+`STATELENS_REACH=1`, then once more without one harness event of the history, the control run,
+which shows that the state depends on that history. The verdict and its stage lines drive up to
+three further attempts. The agent never runs its scaffold; only these replays judge it.
+
+Each pair costs up to four runs of the agent with their builds and replays, a test gate when
+the kept version edited the profile's code, and, because the modules are public siblings in
+one crate, a build and three replays of every other scaffold that stands, the card's other
+pairs included. A card on all 20 simplex bases is 20 such syntheses, each revalidating every
+scaffold that stands. Bound it with base patterns: `<base>_tsNNNN` pins a card to one base,
+and `--fuzz-targets` does the same for `just fuzz --state-reaching`.
+
+Synthesis never instruments: it adds no probe, assertion or ghost state. The agent may edit the
+profile's code (`consensus/src/simplex/`, and `consensus/src/marshal/` for `marshal`) and its
+fuzz package to expose or observe what exists, never to change what the protocol does, and
+marks each such edit with `// [statelens] tss:TS-NNNN`; an edit without the mark is annotated
+`unmarked edit`, and one next to a probe, an assertion or another line the campaign added is
+annotated `edit beside instrumentation`, since an `if false` around an assertion leaves the
+assertion itself unchanged. The script vetoes a version that changes the campaign's
+instrumentation, the runtime module or a manifest, or adds a print, a panic hook, an included
+file or a Rust file git ignores, with feedback to the next attempt. An edit anywhere else stops
+synthesis with exit code 2 and the advice to use a fresh clone, and every later synthesis
+refuses the checkout while the edit remains. The first synthesis after a campaign records the
+tree in `campaign/reach/baseline/`, and every later one is checked against it. After every run
+of the agent, and when the synthesis ends, the script writes back, with a warning, what changed
+in that record, in its test inventory or in `campaign/instrumentation.diff`. Ctrl-C kills the
+agent and what it started before the pair's edits are restored; a SIGTERM or a SIGHUP to the
+script does the same. A synthesis killed outright during a pair, rather than stopped with
+Ctrl-C, leaves the pair's edits in the tree; the next synthesis first
+restores the tree as it was before that pair, with a warning. When the kept
+version changed the profile's code, the test gate runs again, and a test that the campaign's
+gate passed and that now fails restores the pair's edits (GATE FAILED). Whether an edit
+preserves what the protocol does rests on the prompt, that gate and you: review
+`campaign/reach/TS-NNNN_<base>.diff`.
+
+A pair that has a report is skipped, saying so, so a second synthesis goes straight to the new
+cards and bases; a card's other pairs are untouched. `--redo` reverse-applies each selected
+pair's diff, moves its reports aside as `TS-NNNN_<base>.<stamp>.*`, with their run and replay
+lines rewritten to name the moved files, moves the crash files fuzzing wrote for its scaffold
+to `TS-NNNN_<base>.<stamp>/artifacts/` (the corpus stays), and synthesizes the pair again.
+Every other scaffold, the card's other pairs included, is first rebuilt and replayed, since the
+undone diff takes away the pair's module, a public sibling of the other modules in one crate,
+and its report takes the new verdict. That revalidation is recorded in
+`campaign/reach/revalidation.json` before the undo, so one you interrupt is completed by the
+next synthesis, before any pair; until then, the reports keep their earlier verdicts. A `--redo`
+you interrupt after the undo and before the reports move finishes when you run it again.
+
+```
+statelens: cards      <n> tracked, <m> local
+statelens: TS-NNNN    skipped: TS-NNNN on <base> was synthesized as <scaffold>; use --redo
+statelens: TS-NNNN    <verdict>[ (<annotation>, ...)]   <scaffold | no scaffold on <base>>
+statelens: synthesis  <k> pair(s), <s> scaffold(s); reports in statelens/campaign/reach/
+statelens: run        cd <repo>/statelens && NIGHTLY_VERSION=<fuzz toolchain> just run <scaffold>
+statelens: replay     cd <repo>/statelens && STATELENS_REACH=1 [<replay env> ]NIGHTLY_VERSION=<fuzz toolchain> just run <scaffold> <repo>/<package>/artifacts/<scaffold>/<crash file>
+```
+
+One `TS-NNNN` line per pair, and one `run` and `replay` pair of lines per scaffold that exists.
+
+| Exit code | Result |
+|---|---|
+| 0 | at least one scaffold exists for the selection |
+| 1 | usage error, `qmdb`, or no card and base selected |
+| 2 | a failed precondition (no campaign of the profile at `HEAD`, a false invariant bound, a result other than `READY` or `PANIC (tests)`, no `plan.md`, a checkout instrumented before the read side existed or cleaned, a missing tool, a selected card with a lint problem), a missing or unreadable synthesis record in `campaign/reach/`, a checkout that differs from the baseline, an edit out of scope, a missing anchor, or a `--redo` that does not apply |
+| 3 | no scaffold built: every selected pair ended NOT BUILT or GATE FAILED |
+
+### Reports and verdicts
+
+`campaign/reach/` holds, per pair, `TS-NNNN_<base>.md`: the shape, base and scaffold, the
+verdict and its annotations, each stage's outcome and witness, the handoff, the attempts and the
+crash attribution, and the `run` and `replay` lines; `TS-NNNN_<base>.diff`, every edit of the
+kept version, the script's included, which is what to review; and
+`TS-NNNN_<base>/attempt-<a>/`, the replays of each attempt with their logs and crash files, in
+`swept/` the crash files a run of the agent left, in `version.diff` the version the attempt
+built or the run used, and for a CRASH its `run` and `replay` lines in `replay.txt`, so a
+finding stays reproducible after GATE FAILED restores the pair's edits.
+
+| Verdict | Meaning |
+|---|---|
+| `REACHED n/n` | Every event of the history was witnessed, the state held at the handoff, and the control run did not reach it |
+| `UNVERIFIED k/n` | No event was missed, but one could not be verified, a witness was rejected, or the control was vacuous, weak or missing |
+| `PARTIAL k/n` | An event after the first was missed, or the state was lost before the handoff; `k` counts the events held before it |
+| `UNREACHED 0/n` | The first event was missed: the setup is wrong, or a capability is missing (`cannot:`) |
+| `NO REPORT` | The scaffold printed no report: it did not use the helper, or returned before its base's oracles |
+| `CRASH (finding candidate)` | A replay failed: a panic, a violated invariant, a harness oracle, a sanitizer report, out of memory, a leak or a timeout; or a run of the agent left a crash file (`stray failure`) |
+| `SCAFFOLD ERROR` | The helper rejected the scaffold (`[statelens-scaffold]`) before any engine started |
+| `NOT BUILT` | No version passed the vetoes and built, or the kept version broke another standing scaffold (`breaks TS-MMMM_<b>`, the card's other pairs included); the pair's edits are restored |
+| `GATE FAILED` | The kept version made a test of the gate fail; its edits are restored |
+
+The other annotations include `nondeterministic` (the last replay of the canonical input
+differed), `control missing`, `missing: <capability>`, `location in TS-NNNN diff`, and
+`stray failure` beside another verdict when a later attempt left a crash file but was not
+built; the console line then names the file.
+
+Every scaffold that builds is fuzzed, whatever its verdict: only NOT BUILT and GATE FAILED
+leave a pair without one. A verdict judges one input; how often fuzzed inputs reach the state
+shows only when you fuzz. A CRASH (finding candidate) stops the pair's refinement, and that
+version is kept and fuzzed as it is, never replaced by one that avoids the failure. Triage it
+like any crash (see Investigating a panic): where it failed is context only, and
+`location in TS-NNNN diff` says the failing line is one the pair's diff added or moved, which
+does not make it the scaffold's fault. When triage does show a fault of the scaffold, run the
+pair again with `--redo --match <base>_tsNNNN`, or the whole card with `--redo --match TS-NNNN`.
+
+### Fuzzing the scaffolds
+
+```
+just fuzz simplex --parallel --tmux --state-reaching --state-targets TS-0004 --fuzz-targets "simplex_cert_*"
+just fuzz simplex --tmux --state-reaching --state-targets TS-0003 --skip-campaign
+just fuzz simplex --state-reaching --state-targets TS-0004 --fuzz-targets "simplex_cert_mock_twins_*" --invariants "simplex/INV-0001,simplex/INV-0002" -- -max_total_time=3600
+just fuzz marshal --parallel --state-reaching -- -max_total_time=600
+just run simplex_cert_mock_ts0004_statelens -- -fork=4
+```
+
+`just fuzz <profile> --state-reaching` runs a campaign, unless `--skip-campaign`, then
+`synthesize`, then the scaffolds of the selection and never the variants, in turn, with
+`--parallel` or with `--tmux`, as `just fuzz <profile>` runs variants; the tmux session is
+`statelens-<profile>-reach`, with a window per scaffold, one per card and base, named after the
+scaffold without `_statelens` (`simplex_cert_mock_ts0004`). `--state-targets` names cards
+(`TS-0003`) and `--fuzz-targets` names the bases the scaffolds are written on, by any name a
+variant or scaffold of theirs has; both may be repeated, and a pattern of the other flag's form
+is refused, as is `--state-targets` without `--state-reaching`. Without `--fuzz-targets` every
+base of the profile is used, so `just fuzz simplex --tmux --state-reaching` with three cards
+opens up to 60 windows. The first command above opens one window per `simplex_cert_*` base of
+TS-0004; the third synthesizes TS-0004 on each of the eight `simplex_cert_mock_twins_*` bases
+and runs the eight scaffolds in turn, each with `-max_total_time=3600`:
+`simplex_cert_mock_twins_campaign_ts0004_statelens`, its `_audit`, `_hb` and `_state_cov`
+siblings (`simplex_cert_mock_twins_campaign_audit_ts0004_statelens` and so on), and the four
+`simplex_cert_mock_twins_mutator*_ts0004_statelens`. The recipe's messages count scaffolds
+("8 scaffold(s), one tmux window each"). A selection with no card, or with a card that has a
+lint problem, fails before the campaign, and a failed synthesis stops the command. With a
+single target, or with `qmdb`, `--state-reaching` is refused. As for a variant, libFuzzer gets
+only the arguments you pass after `--`, and crashes land in `<package>/artifacts/<scaffold>/`.
+libFuzzer runs the empty input, the canonical one, first, so a scaffold that fails on its
+card's own history fails at once.
+
+Replay a scaffold's crash with its `replay` line, which sets `STATELENS_REACH=1`, so the replay
+also prints the `[statelens-reach]` stage lines: how far through the history that input got
+before it failed. A failure the control run found replays with `STATELENS_REACH_CONTROL=1` as
+well, which its `replay` line adds.
+
+```
+cd <repo>/statelens
+STATELENS_REACH=1 CONSENSUS_FUZZ_LOG=1 NIGHTLY_VERSION=<fuzz toolchain> just run \
+  simplex_cert_mock_ts0004_statelens \
+  <repo>/consensus/fuzz/simplex/artifacts/simplex_cert_mock_ts0004_statelens/<crash file>
+```
+
+`just coverage` covers a profile's scaffolds with its variants, and takes a scaffold's name.
+`just clean` deletes `target_states/`, the files git ignores there included, and the thin
+targets and restores what synthesis edited in the fuzz packages, leaving their corpora, crash
+files and coverage reports, and `campaign/reach/`, alone.
+
 ## Coverage
 
 When a run is over, `just coverage` says what its corpus actually reaches. It takes a
@@ -356,7 +608,8 @@ For each target that has a corpus it replays that corpus under coverage instrume
   `benches/` in qmdb);
 - `<target>.workspace.txt`, the same without dependencies or the standard library.
 
-A target with no corpus is skipped, so run this after the targets you care about, in the
+A scaffold counts as a target of its profile, and its name works like a variant's. A target
+with no corpus is skipped, so run this after the targets you care about, in the
 same instrumented checkout that produced them. Replaying a corpus costs about as much as
 the run did, so a profile with many targets takes a while; name a single target to keep it
 short. `llvm-cov` comes from the fuzz toolchain, so that toolchain needs

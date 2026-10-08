@@ -29,7 +29,8 @@ orchestration script, and the acceptance procedures.
 
 The following were built and exercised in a scratch checkout of the commit above:
 
-- `runtime/statelens.rs` (Appendix A): 10 unit tests pass inside `commonware-consensus`
+- `runtime/statelens.rs` (Appendix A): its 10 unit tests of the time pass inside
+  `commonware-consensus` (19 now, with those of `provider_me` and the read side, section 18.1)
   with the workspace's `warnings = "deny"` on stable, and the `cfg(fuzzing)` path
   compiles on the CI-pinned nightly. The file is `rustfmt`-clean with the repository
   configuration.
@@ -117,7 +118,8 @@ at commit `86eed8302c`, with Claude:
 The audit pass was added after a review of a `simplex` campaign found a binding labelled
 `bound` whose action is committed in a handler the instrumentation never observed (section
 11, D48). The `lint-plan` and `lint-prompts` commands of section 5.4 are also covered by the
-script tests of section 5.9.
+script tests of section 5.9, as is the invariant selection of section 7.1 step 4 (D69), which
+no campaign with a real agent has exercised yet.
 
 ---
 
@@ -166,6 +168,7 @@ them; the last column names the PRD requirement.
 | D57 | The simplex profile derives a variant from every `simplex_*` target, as the marshal and qmdb profiles do, rather than from a curated list. Every runner that runs a real engine under a Byzantine identity therefore publishes that identity: the Twins runner (edit 6), and the ByzzFuzz, Chaos-Twins, audited Standard and Mallory runners (edits 9 to 12, Appendix B.5). The other drivers run none: Standard and FaultyNet make their Byzantine nodes `Disrupter`s, Mallory's Byzantine roles are adversary actors, and Chaos has no Byzantine node. Mallory's Honest-role node becomes Byzantine only through an amnesia restart, which its hook publishes. | G4, G5, R-S-NF-2 |
 | D58 | `kb search` fuses two rankings by reciprocal rank: BM25 over words and identifier parts, and the cosine similarity of embeddings from a small pretrained model run on the CPU, all-MiniLM-L6-v2 unless `STATELENS_SEARCH_MODEL` names another. A small model misses exact identifiers, which BM25 finds, and BM25 misses paraphrase, which the model finds. The vectors are one flat file of 32-bit floats searched by brute force, which answers in milliseconds at this size, so there is no vector database. The script still imports with the standard library alone: numpy and sentence-transformers are loaded only to embed, and without them the search ranks by words. The index reads the code and the documentation at HEAD through git, so a hit's `path:line@commit` holds in an instrumented checkout and instrumentation never enters the index. | R-KB-9 |
 | D48 | The instrument step ends with an audit pass over its own bindings, after the beacon probes so that no agent edits the audited tree, by the same agent and under the same rules, and the plan carries a `Sites` ledger the pass and `lint-plan` both read. A first pass writes a binding and its own status in one go, and nothing there compares the two, so a binding that watches where an action is decided rather than where it is committed passes as `bound`. | R-INS-8, R-P2-2 |
+| D69 | A campaign binds every invariant of its profile's registries unless `--invariants` names a subset. The selection filters the set section 7.1 step 4 collects, so the order, the local registry and the false invariants are as without it, an id must name an invariant the profile would have bound, and beacon probes are not selectable, because they are feedback and not oracles. `meta.json` records the ids bound and the number available, and `lint-plan` expects sections for the ids bound whenever its profile is the campaign's, named or not. | R-P2-1, R-P2-5 |
 
 D24 to D30 concern marshal only; they are in section 8.2. D49 to D54 concern qmdb only; they
 are in section 17.2. D59 to D68 concern Target-State Synthesis; they are in section 18.2.
@@ -190,8 +193,8 @@ statelens/
     marshal/                     the marshal invariants
     qmdb/                        the qmdb invariants; a `.gitkeep` while it is empty
   target-states/                 the target-state cards; every TS-*.md is active (section 18.3)
-    simplex/                     a `.gitkeep` while it is empty
-    marshal/                     TS-0001.md, the worked card of section 18.3
+    simplex/                     TS-0003.md and TS-0004.md; a `.gitkeep` while it is empty
+    marshal/                     TS-0001.md, the worked card of section 18.3, and TS-0002.md
   target-states.local/           cards from sources that are not public, ignored by git (section 18.4)
   false-invariants/
     simplex/FALSE-0001.md        deliberately false invariant for AC-6 (Appendix C)
@@ -217,8 +220,8 @@ statelens/
     instrument-audit.md          Phase 2, audit the bindings (section 13.15)
     discover-flow.md             method for tracing state across functions (section 13.16)
     repair.md                    Phase 2, compile repair (section 13.10)
-    state-analyst.md             Phase 1, target states (section 18.4)
-    synthesize.md                synthesis, shared rules (section 18.7)
+    state-analyst.md             Phase 1, target states (sections 18.4 and 13.20)
+    synthesize.md                synthesis, shared rules (sections 18.7 and 13.21)
     subsystems/
       simplex-analyst.md         Phase 1, Simplex part (section 13.11)
       marshal-analyst.md         Phase 1, marshal part (section 13.12)
@@ -226,8 +229,8 @@ statelens/
       marshal-instrument.md      Phase 2, marshal rules (section 13.14)
       qmdb-analyst.md            Phase 1, qmdb part (section 13.17)
       qmdb-instrument.md         Phase 2, qmdb rules (section 13.18)
-      simplex-synthesize.md      synthesis, Simplex part (section 18.7)
-      marshal-synthesize.md      synthesis, marshal part (section 18.7)
+      simplex-synthesize.md      synthesis, Simplex part (sections 18.7 and 13.22)
+      marshal-synthesize.md      synthesis, marshal part (sections 18.7 and 13.23)
   runtime/
     statelens.rs                 runtime support module of every profile (Appendix A)
     target_states.rs             scaffold helper, copied to `<package>/src/target_states/mod.rs` (Appendix H)
@@ -424,7 +427,8 @@ Each registry has a deliberately false invariant, on which a working campaign mu
 `SL/false-invariants/marshal/FALSE-0002.md` (Appendix E, AC-10) and
 `SL/false-invariants/qmdb/FALSE-0003.md` (Appendix G, AC-19). They follow the registry
 format with an ID prefix of `FALSE`. A campaign binds those of its profile's subsystems,
-and only when `STATELENS_FALSE_INVARIANTS=1`.
+and only when `STATELENS_FALSE_INVARIANTS=1`; `--invariants` then selects one as
+`<registry>/FALSE-NNNN` like any other invariant (section 7.1 step 4).
 
 ---
 
@@ -527,9 +531,17 @@ set positional-arguments := true
 extract-invariants *args:
     python3 scripts/statelens.py extract "$@"
 
-# Instrument this checkout and build the StateLens targets: just campaign [--agent A] [--profile P]
+# Turn sources into target-state cards: just extract-states [--registry R] [--number N] [--local] <kind> <source>...
+extract-states *args:
+    python3 scripts/statelens.py extract --states "$@"
+
+# Instrument this checkout and build the StateLens targets: just campaign [--agent A] [--profile P] [--invariants LIST]...
 campaign *args:
     python3 scripts/statelens.py campaign "$@"
+
+# Write, build and check a scaffold per target-state card and base, after a campaign: just synthesize [--agent A] [--profile P] [--match GLOB]... [--redo]
+synthesize *args:
+    python3 scripts/statelens.py synthesize "$@"
 
 # Run only the campaign's test gate on this checkout: just test [--profile P]
 test *args:
@@ -553,34 +565,71 @@ run target *args:
         cd ../consensus/fuzz && just run "$@" ;;
     esac
 
-# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--targets GLOB]... [--skip-campaign] [--parallel] [--tmux] [-- -fork=8]
+# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--fuzz-targets GLOB]... [--state-targets GLOB]... [--invariants LIST]... [--skip-campaign] [--parallel] [--tmux] [--state-reaching] [-- -fork=8]
 fuzz target *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    # A profile name runs every target the profile builds, or with --targets the
-    # ones a shell pattern names; a target name runs that one. Every StateLens
+    # A profile name runs every target the profile builds, or with --fuzz-targets
+    # the ones a shell pattern names; a target name runs that one. Every StateLens
     # variant is derived from a target of its own package, so it keeps that
     # package's prefix, and a name that is neither is refused rather than sent to
-    # another profile by default.
+    # another profile by default. With --state-reaching, simplex and marshal run
+    # their scaffolds instead of their variants: a synthesis follows the campaign,
+    # --state-targets names the cards (TS-0003) and --fuzz-targets the bases the
+    # scaffolds are written on, one scaffold per card and base (every base of the
+    # profile without --fuzz-targets).
     target="$1"
     shift
     # Leading flags are ours; everything after them, or after `--`, is libFuzzer's.
+    # libFuzzer's own flags take one dash, so an unknown double-dash flag before
+    # `--` is refused rather than passed on.
     # --skip-campaign fuzzes the targets a campaign already built in this checkout,
     # whatever its result, because a campaign refuses an instrumented checkout.
+    # --invariants LIST goes to the campaign, which binds only the invariants it
+    # names, so it needs a campaign and a profile.
+    # Both pattern flags reach the listing and the synthesis as --match, whose one
+    # rule they split: a TS-NNNN pattern names a card, any other a fuzz target.
+    fuzz_targets() {
+        case "$1" in
+          TS-*) echo "just fuzz: --fuzz-targets names fuzz targets; a card is --state-targets $1" >&2
+                exit 1 ;;
+        esac
+        narrowed=yes; patterns+=(--match "$1")
+    }
+    state_targets() {
+        case "$1" in
+          TS-*) ;;
+          *) echo "just fuzz: --state-targets names cards (TS-NNNN); a fuzz target is --fuzz-targets $1" >&2
+             exit 1 ;;
+        esac
+        cards=yes; patterns+=(--match "$1")
+    }
     parallel=no
     windows=no
     campaign=yes
     narrowed=no
+    cards=no
+    reaching=no
+    selected=no
     patterns=()
+    invariants=()
     while [ $# -gt 0 ]; do
       case "$1" in
         --skip-campaign)        campaign=no; shift ;;
         --parallel|--parallels) parallel=yes; shift ;;
         --tmux)                 parallel=yes; windows=yes; shift ;;
-        --targets=*)            narrowed=yes; patterns+=(--match "${1#--targets=}"); shift ;;
-        --targets)              [ $# -ge 2 ] || { echo "just fuzz: --targets needs a pattern" >&2; exit 1; }
-                                narrowed=yes; patterns+=(--match "$2"); shift 2 ;;
+        --state-reaching)       reaching=yes; shift ;;
+        --fuzz-targets=*)       fuzz_targets "${1#--fuzz-targets=}"; shift ;;
+        --fuzz-targets)         [ $# -ge 2 ] || { echo "just fuzz: --fuzz-targets needs a pattern" >&2; exit 1; }
+                                fuzz_targets "$2"; shift 2 ;;
+        --state-targets=*)      state_targets "${1#--state-targets=}"; shift ;;
+        --state-targets)        [ $# -ge 2 ] || { echo "just fuzz: --state-targets needs a pattern" >&2; exit 1; }
+                                state_targets "$2"; shift 2 ;;
+        --invariants=*)         selected=yes; invariants+=(--invariants "${1#--invariants=}"); shift ;;
+        --invariants)           [ $# -ge 2 ] || { echo "just fuzz: --invariants needs a list of ids" >&2; exit 1; }
+                                selected=yes; invariants+=(--invariants "$2"); shift 2 ;;
         --)                     shift; break ;;
+        --*)                    echo "just fuzz: unknown flag $1" >&2; exit 1 ;;
         *)                      break ;;
       esac
     done
@@ -594,29 +643,73 @@ fuzz target *args:
       *) echo "just fuzz: $target is not a profile or a simplex_/marshal_/qmdb_ target" >&2
          exit 1 ;;
     esac
+    if [ "$reaching" = yes ] && [ "$every" = no ]; then
+        echo "just fuzz: --state-reaching narrows a profile; name simplex or marshal" >&2
+        echo "           (one scaffold runs with just run <scaffold>)" >&2
+        exit 1
+    fi
+    if [ "$reaching" = yes ] && [ "$profile" = qmdb ]; then
+        echo "just fuzz: --state-reaching takes simplex or marshal; qmdb has no target states" >&2
+        exit 1
+    fi
+    if [ "$cards" = yes ] && [ "$reaching" = no ]; then
+        echo "just fuzz: --state-targets needs --state-reaching" >&2
+        exit 1
+    fi
     if [ "$every" = no ] && [ "$narrowed" = yes ]; then
-        echo "just fuzz: --targets narrows a profile; name simplex, marshal or qmdb" >&2
+        echo "just fuzz: --fuzz-targets narrows a profile; name simplex, marshal or qmdb" >&2
+        exit 1
+    fi
+    if [ "$selected" = yes ] && [ "$campaign" = no ]; then
+        echo "just fuzz: --invariants selects what a campaign binds; drop --skip-campaign" >&2
+        exit 1
+    fi
+    if [ "$selected" = yes ] && [ "$every" = no ]; then
+        echo "just fuzz: --invariants selects what a campaign binds; name simplex, marshal or qmdb" >&2
         exit 1
     fi
     # The targets are listed before the campaign runs, so that a pattern naming
-    # none fails at once rather than after it. A read loop, not `mapfile`: that is
-    # bash 4, and macOS ships bash 3.2, which also calls an empty array unbound.
-    names=()
-    if [ "$every" = yes ]; then
-        if ! listing=$(python3 scripts/statelens.py targets --profile "$profile" ${patterns[@]+"${patterns[@]}"}); then
+    # none fails at once rather than after it; with --state-reaching, so do a
+    # selection of no card and a selected card with a lint problem. A read loop,
+    # not `mapfile`: that is bash 4, and macOS ships bash 3.2, which also calls an
+    # empty array unbound.
+    listed=()
+    if [ "$reaching" = yes ]; then
+        listed=(--state-reaching)
+    fi
+    list() {
+        local listing
+        names=()
+        if ! listing=$(python3 scripts/statelens.py targets --profile "$profile" ${listed[@]+"${listed[@]}"} ${patterns[@]+"${patterns[@]}"}); then
             echo "$listing" >&2
             exit 1
         fi
         while IFS= read -r name; do
-            [ -n "$name" ] && names+=("$name")
+            if [ -n "$name" ]; then names+=("$name"); fi
         done <<< "$listing"
+    }
+    if [ "$every" = yes ]; then
+        list
     fi
     if [ "$campaign" = yes ]; then
-        just campaign --profile "$profile"
+        just campaign --profile "$profile" ${invariants[@]+"${invariants[@]}"}
     fi
     if [ "$every" = no ]; then
         just run "$target" "$@"
         exit 0
+    fi
+    # Synthesis writes a scaffold per selected card and base; a failure stops the
+    # recipe with its exit code. Then only the scaffolds run, never the variants,
+    # one window or run per scaffold, and the messages below count scaffolds.
+    kind=target
+    if [ "$reaching" = yes ]; then
+        python3 scripts/statelens.py synthesize --profile "$profile" ${patterns[@]+"${patterns[@]}"}
+        list
+        if [ "${#names[@]}" -eq 0 ]; then
+            echo "just fuzz: no scaffold for this selection; see the reports in campaign/reach/" >&2
+            exit 1
+        fi
+        kind=scaffold
     fi
     here="$(pwd)"
     cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
@@ -625,15 +718,17 @@ fuzz target *args:
         command -v tmux >/dev/null 2>&1 || {
             echo "just fuzz: --tmux needs tmux on PATH" >&2; exit 1; }
         session="statelens-$profile"
+        if [ "$reaching" = yes ]; then session="$session-reach"; fi
         tmux has-session -t "$session" 2>/dev/null && {
             echo "just fuzz: tmux session $session already exists; kill it first with" >&2
             echo "           tmux kill-session -t $session" >&2; exit 1; }
-        echo "just fuzz: ${#names[@]} target(s), one tmux window each, ${cores} core(s)" >&2
+        echo "just fuzz: ${#names[@]} ${kind}(s), one tmux window each, ${cores} core(s)" >&2
         for at in $(seq 0 $(( ${#names[@]} - 1 ))); do
             name="${names[$at]}"
             # The window stays open after the run so its result can be read.
             body="cd '$here' && just run '$name' $*; echo; echo '[$name finished; enter closes this window]'; read _"
-            # Named after the target it was derived from, which is what
+            # Named after the target it was derived from, or for a scaffold its
+            # base and card (simplex_cert_mock_ts0004), which is what
             # distinguishes the windows from each other.
             window="${name%_statelens}"
             if [ "$at" -eq 0 ]; then
@@ -655,12 +750,12 @@ fuzz target *args:
     if [ "$parallel" = no ]; then
         # Sequential and unbounded means the first target never ends and the
         # rest never start, so say so rather than quietly imposing a limit.
-        if [[ "$*" != *-max_total_time=* ]]; then
-            echo "just fuzz: no -max_total_time, so target 1 of ${#names[@]} runs until it" >&2
+        if [[ "$*" != *-max_total_time=* && "$*" != *-runs=[0-9]* ]]; then
+            echo "just fuzz: no -max_total_time, so $kind 1 of ${#names[@]} runs until it" >&2
             echo "           stops and the rest wait. Use --parallel, --tmux, or pass" >&2
             echo "           -- -max_total_time=<seconds>." >&2
         fi
-        echo "just fuzz: ${#names[@]} $profile target(s), in turn" >&2
+        echo "just fuzz: ${#names[@]} $profile ${kind}(s), in turn" >&2
         for name in "${names[@]}"; do
             echo "just fuzz: === $name ===" >&2
             just run "$name" "$@"
@@ -675,8 +770,8 @@ fuzz target *args:
     [ "$jobs" -gt "${#names[@]}" ] && jobs=${#names[@]}
     logs="campaign/logs"
     mkdir -p "$logs"
-    echo "just fuzz: ${#names[@]} $profile target(s), $jobs at a time, ${cores} core(s)" >&2
-    echo "just fuzz: output goes to $logs/<target>.run.log" >&2
+    echo "just fuzz: ${#names[@]} $profile ${kind}(s), $jobs at a time, ${cores} core(s)" >&2
+    echo "just fuzz: output goes to $logs/<$kind>.run.log" >&2
     failed=()
     index=0
     while [ "$index" -lt "${#names[@]}" ]; do
@@ -701,7 +796,7 @@ fuzz target *args:
             "$(printf '%s\n' "${failed[@]:-}" | grep -qxF "$name" && echo FAILED || echo ok)" >&2
     done
     if [ "${#failed[@]}" -gt 0 ]; then
-        echo "just fuzz: ${#failed[@]} target(s) failed; see $logs/<target>.run.log" >&2
+        echo "just fuzz: ${#failed[@]} ${kind}(s) failed; see $logs/<$kind>.run.log" >&2
         exit 1
     fi
 
@@ -729,7 +824,7 @@ code query name *args:
 ast query *args:
     python3 scripts/statelens.py ast "$@"
 
-# Undo what a campaign wrote to this checkout: just clean [--yes]
+# Undo what a campaign or a synthesis wrote to this checkout: just clean [--yes]
 clean *args:
     python3 scripts/statelens.py clean "$@"
 
@@ -758,9 +853,6 @@ check-prompts *args:
     python3 scripts/statelens.py lint-prompts "$@"
 ~~~
 
-Target-State Synthesis adds the recipes `extract-states` and `synthesize` and changes `fuzz`:
-section 18.9 describes the changes, and this copy is updated with the file.
-
 ### 5.4 `scripts/statelens.py`
 
 Standard library only; Python 3.9 compatible. The script finds the repository root with
@@ -771,20 +863,20 @@ prefixed with `statelens:`.
 |---|---|---|
 | `lint` | `lint [PATH...]` | 0 clean, 3 problems |
 | `excerpts` | `excerpts [--check] [PATH...]`; writes the Source excerpts section of each invariant file (default: every registry file and every card, section 18.3) from its pinned citations (section 4.3). With `--check` it writes nothing and lists the files whose section is missing or stale | 0 done, 3 stale files under `--check` |
-| `extract` | `extract [--agent A] [--registry R] [--number N] [--states] [--local] KIND [SOURCE...]`, where `R` is `simplex` (default), `marshal` or `qmdb`; `N` bounds how many invariants the run writes (D56); `kb` reads knowledge-base findings and writes to the local registry (D55). With `--states` it writes target-state cards instead (section 18.4): `R` is `simplex` or `marshal`, `KIND` may also be `test` or `text`, a `kb` source may be one finding identifier, and `--local` sends the cards to the local card registry | 0 done (including zero files), 1 usage, 2 agent failed, 3 problems: a lint problem, an existing invariant modified, a write outside the registry, or a change anywhere else in the worktree |
+| `extract` | `extract [--agent A] [--registry R] [--number N] [--states] [--local] KIND [SOURCE...]`, where `R` is `simplex` (default), `marshal` or `qmdb`; `N` bounds how many invariants the run writes (D56); `kb` reads knowledge-base findings and writes to the local registry (D55). With `--states` it writes target-state cards instead (section 18.4): `R` is `simplex` or `marshal`, `KIND` may also be `test` or `text`, a `kb` source may be one finding identifier, and `--local` sends the cards to the local card registry; `--local` without `--states` is a usage error | 0 done (including zero files), 1 usage, 2 agent failed, 3 problems: a lint problem, an existing invariant modified, a write outside the registry, or a change anywhere else in the worktree |
 | `kb` | `kb modules [--registry R]`, `kb find [--registry R] TERM...`, `kb grep [--registry R] TEXT`, `kb cites [--registry R] PATH`, `kb show [--registry R] IDENTIFIER [SECTION]` (section 5.6), and `kb search [--registry R] [--path P]... [--source S]... [--tests] [-k N] QUESTION...` (section 5.10) | 0 done, including no hits, 1 usage, an identifier out of the registry's scope, a section that is not state-bearing, a section asked of a document, or no search index, 2 no readable corpus root, for every query but `search` |
 | `search-index` | `search-index [--rebuild]`; builds or updates the index of `kb search` (section 5.10) | 0 built with the model, 2 built without it, so that `kb search` ranks by words only |
 | `lint-examples` | `lint-examples [PATH...]`; with no path it checks every `*.md` in `examples/` | 0 clean, 3 problems |
-| `lint-plan` | `lint-plan [--profile P] [PATH...]`; with no path it checks `SL/campaign/plan.md`, and with no `--profile` it takes the profile from `SL/campaign/meta.json`, else `simplex`, so the bare command the audit prompt gives checks the campaign's own registries. A section per registry invariant of the profile; a valid `Status`; the fields that status needs (section 11); a `Sites` ledger whose entries each name a source and say `checked` or `not checked`, and leave nothing unchecked when the status is `bound`; an assertion naming the invariant in the function of every entry marked `checked`; and, for every invariant the plan claims to bind, an `sl_assert!` or `sl_implies!` call in the instrumented code that names it. It judges the claims the plan makes; a commit site the ledger never names is what the audit pass (section 7.3) is for | 0 clean, 3 problems |
+| `lint-plan` | `lint-plan [--profile P] [PATH...]`; with no path it checks `SL/campaign/plan.md`, and with no `--profile` it takes the profile from `SL/campaign/meta.json`, else `simplex`, and expects a section only for the invariants that file lists under `invariants`, so the bare command the audit prompt gives checks what the campaign bound, a selection (section 7.1 step 4) included; `--profile` naming the campaign's profile does the same, and another profile expects every registry invariant of that profile. A section per expected invariant; a valid `Status`; the fields that status needs (section 11); a `Sites` ledger whose entries each name a source and say `checked` or `not checked`, and leave nothing unchecked when the status is `bound`; an assertion naming the invariant in the function of every entry marked `checked`; and, for every invariant the plan claims to bind, an `sl_assert!` or `sl_implies!` call in the instrumented code that names it. It judges the claims the plan makes; a commit site the ledger never names is what the audit pass (section 7.3) is for | 0 clean, 3 problems |
 | `lint-prompts` | `lint-prompts [--write]`; compares every file in `prompts/` with its copy in section 13. `--write` refreshes the copies from the files and reports what it could not fix | 0 clean, 3 problems |
 | `code` | `code build [--subsystem S]`, and `code defs|refs|callers|callees NAME [--tests] [--all]` (section 5.7) | 0 done, 1 usage, no index, or no symbol matching NAME |
 | `coverage` | `coverage [--profile P] [TARGET...]`; replays the corpus of each StateLens target under coverage instrumentation and writes an HTML report per target plus a merged one (section 7.13). A positional name is a profile or a target, as `just fuzz` reads it; a scaffold's name is accepted like a variant's, and a profile covers its scaffolds with its variants (section 18.9). A target with no corpus is skipped | 0 done, 1 usage or an unknown target, 2 no corpus anywhere, no `llvm-tools-preview`, or a failed coverage run |
-| `targets` | `targets [--profile P] [--state-reaching] [--match GLOB]...`; the StateLens targets `P` builds, one per line, which is what `just fuzz <profile>` reads rather than parsing a campaign summary. `--match` keeps the targets a shell pattern names, by variant name or by the original target's, and is what `just fuzz <profile> --targets GLOB` passes. With `--state-reaching` it lists the scaffolds of the selected cards instead, and a `TS-NNNN` pattern names a card (section 18.9) | 0 done, 1 a pattern that names no target; with `--state-reaching`, 0 done, also with no scaffold yet, 1 no card and base selected or a selected card with a lint problem |
-| `synthesize` | `synthesize [--agent A] [--profile P] [--match GLOB]... [--redo]`, where `P` is `simplex` or `marshal`, by default the profile of `SL/campaign/meta.json`; writes, builds and checks one scaffold per selected card on a checkout a campaign of `P` instrumented (section 18.6) | 0 at least one scaffold exists for the selection, 1 usage or nothing selected, 2 a failed precondition, an edit outside the edit contract's scope, a missing anchor, or a `--redo` that does not apply, 3 no scaffold built |
+| `targets` | `targets [--profile P] [--state-reaching] [--match GLOB]...`; the StateLens targets `P` builds, one per line, which is what `just fuzz <profile>` reads rather than parsing a campaign summary. `--match` keeps the targets a shell pattern names, by variant name or by the original target's, and is what `just fuzz <profile> --fuzz-targets GLOB` passes. With `--state-reaching` it lists the scaffolds of the selected pairs (card, base) instead, and a `TS-NNNN` pattern names a card; `just fuzz` forwards `--state-targets` and `--fuzz-targets` alike as `--match`, having checked each pattern's form (section 18.9) | 0 done, 1 a pattern that names no target; with `--state-reaching`, 0 done, also with no scaffold yet, 1 no card and base selected or a selected card with a lint problem |
+| `synthesize` | `synthesize [--agent A] [--profile P] [--match GLOB]... [--redo]`, where `P` is `simplex` or `marshal`, by default the profile of `SL/campaign/meta.json`; writes, builds and checks one scaffold per selected card on each selected base, every candidate base with no base pattern, on a checkout a campaign of `P` instrumented (section 18.6) | 0 at least one scaffold exists for the selection, 1 usage or nothing selected, 2 a failed precondition, an edit outside the edit contract's scope, a missing anchor, or a `--redo` that does not apply, 3 no scaffold built |
 | `test-gate` | `test-gate [--profile P]`; runs the test gate's command (section 7.7) on the checkout as it stands, then, for a profile that has them, the component tests, which are reported and not gated. With no `--profile` it takes the profile from `SL/campaign/meta.json` | 0 gate passed, 1 no profile, 4 gate failed |
 | `ast` | `ast sites NAME [PATH...] [--writes-only] [--tests]`, `ast notes [--pattern RE] [PATH...] [--tests]`; a `PATH` is a file or a directory (section 5.8) | 0 done, including no sites, 1 usage or rust-analyzer absent |
-| `clean` | `clean [--yes]`; without `--yes` it prints what it would undo and changes nothing. Files a campaign or an instrumenter added are deleted and paths that exist in `HEAD` are restored from it, the two told apart by asking `git ls-tree` rather than by reading a status code. Status is asked with `--untracked-files=all`, so a wholly untracked directory is named as its files rather than collapsed to one entry that is not a file to delete, and a directory that is left empty is removed while nothing in it is deleted unseen. With `--yes` it checks afterwards that nothing in scope still differs from `HEAD`. The scope includes the fuzz packages, where synthesis writes (section 18.6), but not the `corpus/`, `artifacts/` and `coverage/` that git ignores there | 0 done, including a preview, which is not a failure; 1 something in scope still differs from `HEAD`, so the checkout is not reusable |
-| `campaign` | `campaign [--agent A] [--profile P] [--stop-after STEP]`, where `P` is `simplex` (default), `marshal` or `qmdb` | 0 ready (the StateLens targets are built and the test gate passed) or stopped after a step, 1 usage, 2 setup or agent failure (including a missing tool or a checkout that is not fresh), 3 build failed, 4 test gate failed; codes 5 and 6 are no longer used (D23) |
+| `clean` | `clean [--yes]`; without `--yes` it prints what it would undo and changes nothing. Files a campaign or an instrumenter added are deleted and paths that exist in `HEAD` are restored from it, the two told apart by asking `git ls-tree` rather than by reading a status code. Status is asked with `--untracked-files=all`, so a wholly untracked directory is named as its files rather than collapsed to one entry that is not a file to delete, and a directory that is left empty is removed while nothing in it is deleted unseen. With `--yes` it checks afterwards that nothing in scope still differs from `HEAD`. The scope includes the simplex and marshal fuzz packages, where synthesis writes (section 18.6), but not the `corpus/`, `artifacts/` and `coverage/` that git ignores there; under the simplex and marshal `src/target_states/`, which synthesis writes whole and a campaign refuses, it also deletes the files git ignores, and with `--yes` it reports such a directory that remains as a difference (exit 1) | 0 done, including a preview, which is not a failure; 1 something in scope still differs from `HEAD`, so the checkout is not reusable |
+| `campaign` | `campaign [--agent A] [--profile P] [--invariants LIST]... [--stop-after STEP]`, where `P` is `simplex` (default), `marshal` or `qmdb`, and `LIST` is a comma-separated list of the invariants to bind instead of every invariant of the profile's registries, each `<registry>/INV-NNNN`, or a bare `INV-NNNN` when the profile binds one registry (section 7.1 step 4) | 0 ready (the StateLens targets are built and the test gate passed) or stopped after a step, 1 usage, 2 setup or agent failure (including a missing tool, a checkout that is not fresh, or a selection that names no invariant the profile collects), 3 build failed, 4 test gate failed; codes 5 and 6 are no longer used (D23) |
 
 `--stop-after` accepts `materialize`, `index`, `instrument` or `build`. It exists for
 development and acceptance testing and is not a campaign parameter in the PRD sense. A
@@ -1102,10 +1194,13 @@ builds an index with a fake embedder, so no model is needed, and checks what eac
 contributes, what an update embeds again, and what a query may reach. Target-State Synthesis
 adds `TargetStateLint` (rules 12 and 13), `ExtractStates` (the new kinds, routing by
 disclosure, the post-checks), `ScaffoldSelection` (patterns, the skip rule, `--redo`),
-`SynthesisGuards` (guards 1 to 6 of section 18.6.1, with stub agents), `SynthesisManifest`
-(the renamed `[[bin]]` block) and `ReachVerdict` (the lines of section 18.8, each witness
-rejection rule, the control, the verdicts and crash attribution), and extends `Cleaning`,
-`JustfileProfiles` and `PromptCopies`. Tests write to
+`Synthesize` (guards 1 to 6 of section 18.6.1, with stub agents, the test inventory, an
+interrupted synthesis, revalidation after a card, `--redo` and the last check, an interrupted
+revalidation completed by the next synthesis, and the last check's build), `SynthesisManifest` (the
+renamed `[[bin]]` block) and `ReachCheck` (the lines of section 18.8, each witness rejection
+rule, truncation, the control, the verdicts and crash attribution), and extends `Cleaning`,
+`JustfileProfiles`, `PromptCopies` and `TestGate` (the forced nextest rendering and the
+validation of a run's output). Tests write to
 temporary directories only, never to `SL/`, and their fixture repositories commit unsigned,
 so a global signing configuration cannot fail them.
 
@@ -1221,8 +1316,10 @@ from these kinds and from `test` and `text` (section 18.4).
    `STATELENS_KB`, refresh the index, and take the findings whose `module` is in the
    registry's filter; none is an error (exit code 2). The agent's `kb` commands read the
    same roots, so the script sets `STATELENS_KB` to them for the agent.
-2. Record the content hash of every file under `SL/invariants/` and
-   `SL/invariants.local/`, in all registries, and
+2. Record the content hash of every file of the four registry trees, `SL/invariants/`,
+   `SL/invariants.local/`, `SL/target-states/` and `SL/target-states.local/` (section 18.3),
+   in all registries, whichever kind the run writes, because the local trees are ignored by
+   git and so escape the worktree snapshot; and
    record the same whole-worktree snapshot Phase 2 takes for its scope check (section 7.5):
    every path `git status --porcelain --untracked-files=all` lists, with a hash of its
    content. A Phase 1 agent may write anywhere in the tree it runs in, and that tree is the
@@ -1250,13 +1347,13 @@ from these kinds and from `test` and `text` (section 18.4).
    prompt on standard input. Log to
    `SL/extract/<UTC timestamp>-<kind>.log`.
 7. New files = files that did not exist in step 2. Report any pre-existing file whose
-   hash changed as a problem ("agent modified or deleted an existing invariant"), any new file
-   outside the destination ("agent wrote outside the registry"), and, with `--number N`,
-   more than N new files. Compare the
-   worktree snapshot too, and report every path the agent changed outside the invariant tree
-   ("agent changed a file outside invariants/"), excepting this subproject's own `extract/`
-   and `campaign/`, which the script writes itself and names rather than trusting a
-   `.gitignore` to hide.
+   hash changed as a problem ("agent modified or deleted an existing invariant", or card),
+   any new file outside the destination ("agent wrote outside the registry"), and, with
+   `--number N`, more than N new files. Compare the
+   worktree snapshot too, and report every path the agent changed outside the four registry
+   trees ("agent changed a file outside invariants/"), excepting this subproject's own
+   `extract/` and `campaign/`, which the script writes itself and names rather than
+   trusting a `.gitignore` to hide.
 8. Write the Source excerpts section of each new file that pins a citation (section 4.3),
    then lint the new files (section 4.6).
 9. Print each new file with its title, the count against `--number` when given, and the
@@ -1295,14 +1392,28 @@ A campaign runs in place in the checkout (D10); `repo` is its root
    - `git status --porcelain --untracked-files=no` lists no path outside `SL/`.
 2. `base = git rev-parse HEAD`.
 3. Recreate `SL/campaign/` with `logs/`, `prompts/` and `meta.json`: `base`, `agent`,
-   `model`, `profile`, test and fuzz toolchains, start time, invariant IDs, and `targets`
-   (the StateLens targets the campaign builds).
+   `model`, `profile`, test and fuzz toolchains, start time, the IDs bound (`invariants`)
+   and the number collected before any selection (`invariants_available`, step 4), and
+   `targets` (the StateLens targets the campaign builds).
 4. The invariants to bind are those of the profile's registries, in the order of section
    5.5. For each registry they are `SL/invariants/<subsystem>/*.md` and
    `SL/invariants.local/<subsystem>/*.md`, sorted by ID, then
-   `SL/false-invariants/<subsystem>/*.md` when `STATELENS_FALSE_INVARIANTS=1`. Uncommitted files are included. Lint them (section 4.6) and print any problem as a
-   warning.
-5. Create `SL/campaign/plan.md` with this content, then fill in the values:
+   `SL/false-invariants/<subsystem>/*.md` when `STATELENS_FALSE_INVARIANTS=1`. Uncommitted
+   files are included. With `--invariants LIST`, given once or more, keep of them only the
+   ids the lists name, in the same order (D69). A list is comma-separated and blank items
+   are ignored; an id is `<registry>/INV-NNNN`, or `<registry>/FALSE-NNNN` when the false
+   invariants are collected; a bare `INV-NNNN` is qualified with the profile's only registry,
+   and refused when the profile binds two (`--invariants: INV-0001 is a bare id, but the
+   marshal profile binds 2 registries (simplex, marshal); write <registry>/INV-0001`). An id
+   of a registry the profile does not bind, an id no collected file provides, and a
+   selection that keeps nothing each exit with code 2, with a message that ends in
+   `available: <registry>/<ID>, ...`. The selection changes this step's result and nothing
+   else: the batches and the audit of section 7.3 cover the ids kept, and the beacon step
+   (section 7.4) runs as always, because probes are feedback, not oracles. Lint every file
+   of these directories (section 4.6), selected or not, and print any problem as a warning.
+5. Create `SL/campaign/plan.md` with this content, then fill in the values; `<count>` and
+   the lists per registry are the invariants step 4 bound, so with a selection the selected
+   ones only, and a registry none of them belongs to reads `none`:
 
 ~~~markdown
 # StateLens instrumentation plan
@@ -1319,6 +1430,11 @@ A campaign runs in place in the checkout (D10); `repo` is its root
 | Label | File and function | a | b | Beacon |
 |---|---|---|---|---|
 ~~~
+
+6. Print the setup line `campaign: profile <profile>, <n> invariant(s), <t> target(s) at
+   <base> with <agent>`, with the first ten characters of `base`. With a selection the count
+   reads `<k> of <n> invariant(s) bound (<registry>: <ID, ID, ...>; ...)` instead, where `<n>`
+   is the number step 4 collected before the selection and `<k>` the number it kept.
 
 All steps run with working directory `repo` unless stated otherwise. The campaign never
 commits, stages, stashes or resets anything, apart from `git add --intent-to-add` on the
@@ -1435,8 +1551,8 @@ code and the search index.
 ### 7.5 Step 4: finalize the plan and check scope
 
 1. Parse `plan.md`: headings `### <ID>: <title>` and lines `- Status: bound|partial|unbound`.
-2. For every registry ID without a heading, append a section with `Status: unbound` and
-   `Notes: not processed by the agent`.
+2. For every bound ID (section 7.1 step 4) without a heading, append a section with
+   `Status: unbound` and `Notes: not processed by the agent`.
 3. Run the plan lint of section 5.4 over `plan.md` and print each problem as a warning.
    The plan is the agent's own account of what it bound, so a problem here is reported to
    the operator rather than failing the campaign.
@@ -1447,9 +1563,17 @@ code and the search index.
      updates for the new `sancov` dependency;
    - under a warn-only path of the profile produces a warning;
    - with an added call of the read side of section 9.6 (`watch`, `unwatch`, `tick`, `mark`,
-     `truncated`, `seen`, `sites`, `observations` or `note` of the runtime module), outside
-     the runtime module itself, aborts the campaign with exit code 2 ("instrumentation calls
-     the read side: <path>"), because the read side is for scaffolds.
+     `current_run`, `truncated`, `seen`, `sites`, `observations` or `note` of the runtime
+     module), outside the runtime module itself, aborts the campaign with exit code 2
+     ("instrumentation calls the read side: <path> (<names>)"), because the read side is for
+     scaffolds. A call counts when the code reaches the function through the runtime module:
+     by path (`statelens::seen`), through an alias the file gives the module (`rt::seen` after
+     `statelens as rt` or `statelens::{self as rt}`), or by importing it by name
+     (`statelens::{seen, ...}`), each once.
+     Comments and string literals do not count, and neither does a bare `seen(`, because the
+     read side's names are common words; a glob import of the module escapes the check
+     (section 18.11). The counts are compared with the file at `base`, since materialize
+     adds no such call under the editable roots.
 5. Run `git add --intent-to-add` on every untracked file under the editable roots (files
    the agents created; no content is staged), so that `git diff` and the counts include
    them. Then count the deleted lines under the editable roots (`git diff --numstat`),
@@ -1506,10 +1630,14 @@ that limit visible.
 ~~~
 cargo +<test toolchain> nextest run -p commonware-consensus --lib --no-fail-fast \
   --ignore-default-filter \
+  --color never --message-format human --status-level pass --final-status-level fail \
+  --success-output never --failure-output immediate \
   -E '(test(/^simplex::tests::/) & not test(/::test_twins/)) | test(/^simplex::statelens::/)'
 ~~~
 
-Log to `SL/campaign/logs/test.log`. On failure, print the `FAIL` lines and every
+Log to `SL/campaign/logs/test.log`. The reporter flags fix the output synthesis parses (section
+18.6.1, guard 5); a flag overrides `NEXTEST_STATUS_LEVEL`, `CARGO_TERM_COLOR` and nextest's
+user configuration. On failure, print the `FAIL` lines and every
 `[statelens][` line, write the summary (section 7.9), and exit with code 4. The whole
 gate is 240 tests and took 125 s on 16 cores at the verified commit. The `marshal`
 profile adds the marshal tests (section 8.3, step 6). The `qmdb` profile runs the qmdb
@@ -1535,6 +1663,8 @@ campaign runs
 ~~~
 cargo +<test toolchain> nextest run -p commonware-consensus --lib --no-fail-fast \
   --ignore-default-filter \
+  --color never --message-format human --status-level pass --final-status-level fail \
+  --success-output never --failure-output immediate \
   -E 'test(/^simplex::/) & not test(/^simplex::tests::/) & not test(/^simplex::statelens::/)'
 ~~~
 
@@ -1598,6 +1728,12 @@ batch edited what they rest on. A clean
 lint does not clear the second reason. The `components` line reports the component tests
 of section 7.7, which run after a passed gate and never change the result.
 
+The `<n>` of the `invariants` line counts the plan's sections, which section 7.5 step 2
+completes for every invariant the campaign bound, so with `--invariants` (section 7.1 step
+4) it is the selected invariants, and the status counts describe them alone. The number
+available is in `meta.json` and in the setup line `<k> of <n> invariant(s) bound` of section
+7.1 step 6, which the summary does not repeat.
+
 ### 7.10 Phase 3: running a target
 
 Phase 3 is manual (D23). The operator runs the StateLens fuzz targets that a `READY`
@@ -1612,8 +1748,8 @@ NIGHTLY_VERSION=<fuzz toolchain> just run simplex_cert_mock_twins_mutator_statel
 ~~~
 
 `just fuzz <profile>` (section 5.3) runs every target of a profile this way, in turn, in
-parallel batches or in tmux windows, `--targets GLOB` narrows it to the targets a shell
-pattern names, and `just fuzz <target>` runs one.
+parallel batches or in tmux windows, `--fuzz-targets GLOB` narrows it to the targets a
+shell pattern names, and `just fuzz <target>` runs one.
 
 - The operator chooses which targets to run and adds libFuzzer arguments as needed, for
   example `-fork=<N>` to use N cores, or `-max_total_time=<s>` to bound the run.
@@ -1773,6 +1909,8 @@ Step 6, test gate (section 7.7):
 ~~~
 cargo +<test toolchain> nextest run -p commonware-consensus --lib --no-fail-fast \
   --ignore-default-filter \
+  --color never --message-format human --status-level pass --final-status-level fail \
+  --success-output never --failure-output immediate \
   -E '(test(/^simplex::tests::/) & not test(/::test_twins/)) | test(/^simplex::statelens::/) | test(/^marshal::/)'
 ~~~
 
@@ -1983,39 +2121,72 @@ together. The counter table and the features of section 9.3 are unchanged.
 /// Most observations the trace of one input keeps.
 pub const TRACE_CAP: usize = 1 << 20;
 
-/// One probe observation of a watched input.
+/// One probe observation of a watched input. Its fields are private, so only the
+/// runtime makes or changes one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct Seen {
+    label: &'static str,
+    site: &'static str,
+    me: Option<u32>,
+    a: u32,
+    b: u32,
+    seq: u64,
+    run: u32,
+}
+
+impl Seen {
     /// The `sl_probe!` label, or the invariant ID of an `sl_implies!` site.
-    pub label: &'static str,
+    pub const fn label(self) -> &'static str {
+        self.label
+    }
+
     /// The call site, `concat!(file!(), ":", line!(), ":", column!())`.
-    pub site: &'static str,
+    pub const fn site(self) -> &'static str {
+        self.site
+    }
+
     /// The participant index of the observing replica.
-    pub me: Option<u32>,
-    /// The recorded values; `(pre, pre && post)` at an `sl_implies!` site.
-    pub a: u32,
-    pub b: u32,
+    pub const fn me(self) -> Option<u32> {
+        self.me
+    }
+
+    /// The first recorded value; `pre` at an `sl_implies!` site.
+    pub const fn a(self) -> u32 {
+        self.a
+    }
+
+    /// The second recorded value; `pre && post` at an `sl_implies!` site.
+    pub const fn b(self) -> u32 {
+        self.b
+    }
+
     /// The position of the observation in the event sequence of the input, from 1.
-    pub seq: u64,
+    pub const fn seq(self) -> u64 {
+        self.seq
+    }
+
     /// The runtime instance of the input that made it, from 1.
-    pub run: u32,
+    pub const fn run(self) -> u32 {
+        self.run
+    }
 }
 ~~~
 
 | Item | Behavior |
 |---|---|
-| `pub fn watch()` | Starts an empty trace for this input. The event sequence goes on from its current value. |
-| `pub fn unwatch()` | Stops keeping observations and drops the trace. |
+| `pub fn watch()` | Starts an empty trace for this input. The event sequence goes on from its current value. Only the scaffold helper, `target_states/mod.rs`, calls it (guard 3, section 18.6.1). |
+| `pub fn unwatch()` | Stops keeping observations and drops the trace. Only the scaffold helper calls it (guard 3, section 18.6.1). |
 | `pub fn tick() -> u64` | Advances the event sequence and returns its new value, which is greater than every position issued earlier in the input, to an observation or by a `tick`. While not watching it returns 0 and advances nothing. Only the scaffold helper, `target_states/mod.rs`, calls it (guard 3, section 18.6.1); a recording wrapper stamps an entry through the helper's `stamp` (section 18.7). |
 | `pub fn mark() -> u64` | The last position issued in the input, to an observation or by a `tick`, without advancing the sequence; 0 before the first. |
-| `pub fn truncated() -> bool` | Whether the trace has dropped an observation because it held `TRACE_CAP`. A dropped observation still advances the sequence, so positions stay unique and ordered. |
+| `pub fn current_run() -> u32` | The runtime instance current on this thread, from 1; 0 before the first runtime of the input. The helper reads it for a `restart` line and for the `run` a stamp or an action records (section 18.7). |
+| `pub fn truncated() -> Option<u64>` | The position of the first observation the trace dropped because it held `TRACE_CAP`, or `None` while it has dropped none; a later drop does not move it, and `watch`, `unwatch` and `clear_trace` reset it. A dropped observation still advances the sequence, so positions stay unique and ordered, and what the trace holds from that position on is incomplete. |
 | `pub fn seen(label: &str, site: Option<&str>, since: u64, f: impl FnMut(&Seen) -> bool) -> Option<Seen>` | The earliest observation at or after position `since`, of the `run` current at the call, with `label`, at `site` when one is given, that `f` accepts. `None` while not watching. |
 | `pub fn sites(label: &str) -> Vec<&'static str>` | The sites at which the trace holds `label`, in order of their first observation. A scaffold finds a site this way, never as a literal, because synthesis edits move lines. |
 | `pub fn observations(since: u64) -> Vec<Seen>` | Every observation at or after position `since`, of every `run`, oldest first. |
-| `#[doc(hidden)] pub fn note(me: Option<Participant>, label: &'static str, site: &'static str, a: u32, b: u32)` | While watching, advances the event sequence and appends an observation with the new value as its `seq`, unless the trace holds `TRACE_CAP` observations. Only the macros call it. |
+| `#[doc(hidden)] pub fn note(me: Option<Participant>, label: &'static str, site: &'static str, a: u32, b: u32)` | While watching, advances the event sequence and appends an observation with the new value as its `seq`, unless the trace holds `TRACE_CAP` observations; `truncated` then keeps the position of the first one it drops. Only the macros call it. |
 
-`Seen` has no public constructor, so only the runtime makes one.
+`Seen` has private fields and no public constructor, so only the runtime makes or changes one;
+a scaffold reads it through its getters.
 
 **Wiring.** `sl_probe!` and `sl_implies!` call `note` after `record`, inside the guard, with
 their call site; `sl_implies!` does so before its violation branch, so a violating observation
@@ -2046,16 +2217,17 @@ test per probe hit. Watching costs one increment and one `Seen` per hit, at most
 `Seen` per input, freed by `unwatch` or `reset`. No I/O, lock, await or randomness (R-INS-3).
 
 **Instrumentation never calls it.** The read side is for scaffolds: the Runtime API section of
-prompt 13.7 gains a line saying so, and its copy in section 13.7 is updated with the file; the
-scope check of section 7.5 refuses instrumentation that calls it, and so does synthesis guard 3
-(section 18.6.1).
+prompt 13.7 says so; the scope check of section 7.5 refuses instrumentation that calls it, and
+so does synthesis guard 3 (section 18.6.1).
 
 **Placement.** The code goes before the line `// [statelens] consensus only:`, so the qmdb copy
 (edit Q1) has it as well, and its doc comments name no `simplex::` path, which the script test
 of the qmdb copy rejects. Its self-tests never call `reset()`, which zeroes the table that
 the other tests share under plain `cargo test`; they call `clear_trace()`, which touches only
-the thread-local trace, run counter and sequence. Appendix A, and the test counts of sections 1.2
-and 17.1, are updated with the template.
+the thread-local trace, run counter and sequence. The read side adds 7 self-tests, so the
+consensus copy has 19 and the qmdb copy 17 (section 18.1). `reset()` and the fresh-run hook's
+registration use `OnceLock`, because the workspace's clippy configuration disallows
+`std::sync::Once`.
 
 ---
 
@@ -2177,7 +2349,9 @@ Notes:
   leaves the flag out, so the CLI's own default applies; a value is passed through
   unchecked, because each CLI owns its levels and is the one to reject a wrong one. Both
   go into `SL/campaign/meta.json`, so a campaign records what produced it.
-- The script checks that the chosen CLI is on `PATH` before any other work.
+- The script checks that the chosen CLI is on `PATH` before any other work, except that
+  `synthesize` first reports usage errors and the preconditions that read
+  `SL/campaign/meta.json` (section 18.6.2).
 - `extract kb` runs Phase 1 with the corpus reachable only through the `kb` commands of
   section 5.6: `claude` gets `Read Grep Glob Write Edit WebFetch` and
   `"Bash(python3 statelens/scripts/statelens.py kb:*)"` instead of `gh` and `curl`, and
@@ -2557,6 +2731,9 @@ the fuzzer when an execution reached a new internal state.
   move the field to reach it.
 - Assertion messages start with the invariant title and include the values involved,
   for example `"no finalize after nullify: view={} nullified={}"`.
+- Never call the read side of the runtime (`watch`, `unwatch`, `tick`, `mark`,
+  `current_run`, `truncated`, `seen`, `sites`, `observations` or `note`): it is for
+  scaffolds, and the campaign stops at its scope check when instrumentation calls it.
 
 ## Discretization rules
 
@@ -3540,6 +3717,711 @@ source proves, what the tools prove, what a finding explains, and what you are g
 - Write nothing for a finding about tooling, tests, documentation or another crate.
 ~~~
 
+### 13.20 `prompts/state-analyst.md`
+
+~~~markdown
+# StateLens state analyst: extract target states
+
+You are a senior security engineer who specializes in the kind of system that Context
+describes. Read the sources listed at the end and write target-state cards for the
+`{{REGISTRY}}` registry of StateLens in this repository.
+
+## Context
+
+{{CONTEXT}}
+- Every card in `{{DESTINATION}}/` is used by the next synthesis of this profile. After a
+  fuzzing campaign, an agent turns each card into a dedicated fuzz target, a scaffold, that
+  drives the card's History on an existing fuzz target, checks each event as it happens, hands
+  off at the target state, and lets the fuzzer and the target's oracles run on from there. A
+  History the protocol cannot produce wastes that work; a vague one cannot be driven or
+  checked.
+
+## What a target state is
+
+- A state of honest replicas that only a specific history of events reaches: for example,
+  "the replica is certifying a notarized proposal of a view it voted to nullify". It is
+  worth reaching when a bug would show there, such as the precondition of a fixed bug, the
+  state a test sets up, or a race a comment warns about, and random schedules rarely get
+  there.
+- It is never a property and never an oracle: no "shall", and no expected outcome. What the
+  replica does next is judged by the assertions and oracles of the fuzz target, not by the
+  card.
+- Every event is one the protocol and the adversary in Context can produce. A Byzantine
+  replica signs only with its own key: it may equivocate or lie in what it signs, but never
+  forges an honest replica's vote or certificate. The fuzz targets use a mock certificate
+  scheme, so a History never depends on a property of a real signature scheme.
+- One state per card. Writing zero cards is a valid result.
+
+## How to read the sources
+
+- `test`: the source is `path:line` or `path:start-end` inside a test under
+  `{{SOURCE_ROOT}}` or in the profile's fuzz package. Read the enclosing test, its helpers
+  and the code it drives. The History follows the calls that build the state; the test's
+  checks on that state become `Check` and `Holds` lines, and its assertions on the outcome
+  are dropped. A message the test puts straight into a mailbox, a resolver or a journal
+  becomes the protocol event that delivers the same input: the request it answers, the peer
+  that sends it, the crash it stands for. `source_ref` is `path:line@{{COMMIT}} (<test
+  name>)`.
+- `text`: a file, or a literal that the script wrote to a file for you. `source_ref` is
+  `text: <a short title you give it>`, or the path of the file the operator gave, never the
+  copy the script made under `extract/`. Evidence quotes the passages that define the
+  History verbatim, at most about 40 lines, and summarizes the rest. Confirm every event
+  against the code, and drop one you cannot confirm.
+- `issue`: read the issue or pull request completely: description, comments, linked issues,
+  and the diff of the fix. Use `gh issue view <ref> --comments`, `gh pr view <ref>
+  --comments` and `gh pr diff <ref>` when `gh` is available; otherwise the GitHub REST API
+  with `curl`, or your web fetch tool. `source_ref` is the URL followed by `(merged as
+  <commit>)`, or `(head <commit>)` for a pull request not merged yet (`gh pr view <ref>
+  --json mergeCommit,headRefOid`). For a fix, the target state is the precondition the bug
+  needed, not its bad outcome, and the tests the pull request adds are the main material.
+  Evidence quotes the decisive sentences and pins the code the History runs against, as it
+  reads at `{{COMMIT}}`.
+- `kb`: the findings of a private knowledge base, listed under Sources, or one finding.
+  Read them only through these commands, run from the root of the repository:
+
+{{QUERY}}
+
+  Start with `show <identifier>`, then read the state-bearing sections (`Root Cause`,
+  `Lifecycle Events`, `Exploitation Or Trigger Conditions`, `Context`) and the code as it is
+  today. A finding's state is evidence, not truth. `source_ref` is `finding <identifier>`.
+  Evidence describes the state in the terms of Context, without reproduction steps or
+  exploit code.
+- `comment`: files or directories under `{{SOURCE_ROOT}}`, optionally with `:line` or
+  `:start-end`. Look for situations the author warns about or relies on: "before", "after",
+  "while", "races", "cannot happen because". `source_ref` is `path:line@{{COMMIT}}`.
+- `design`, `spec`, `paper`: the protocol situation the source describes. `source_ref`
+  names the document and its section, `path:line@{{COMMIT}}` of the property or action, or
+  the paper's title, page and section. When a text extraction is listed next to a PDF, read
+  the extraction.
+- For every kind, confirm each event against the code at `{{COMMIT}}`: the History is what
+  this implementation does, not what the source assumed.
+
+## What is essential
+
+- An event belongs to the History only if the state would differ without it: would a check
+  on the state change? Everything else the source chooses is incidental (rule S7 of
+  `consensus/fuzz/marshal/src/scenarios/specs/SPEC.md`): an arbitrary view, height, payload,
+  leader, timestamp, delay or order.
+- An incidental value becomes a knob, with the source's value first, or is dropped. Give a
+  knob at least two values, each of which keeps the History possible; at most 16 knobs.
+- An order the source picked arbitrarily becomes an `Order:` pair. An ordering knob varies
+  only an order that `Order:` frees.
+- A timing domain straddles the timeout it matters for: one value below it and one above.
+- A knob never varies what the History makes essential.
+
+## History
+
+- Events `E1.` to `En.`, numbered from 1 without a gap, each at the start of a line. `En` is
+  the event that brings about the target state.
+- Each event starts with its actor and a colon: `harness` for what the fuzz harness does
+  (configure the replicas, deliver or hold back a message, partition, crash, restart, or act
+  as a Byzantine replica: "as B, sends R ..."), or the name of the honest replica that acts.
+- Name the entities by short names: replicas (`R`, `B`, `Z`), views (`v`, `p1`), heights
+  (`h`), payloads (`d`), epochs (`e`), incarnations (`i`). A name is a letter followed by
+  letters or digits. A replica's name starts with a capital letter and every other entity's
+  with a small one, because the reach check tells replicas apart by it; so an honest
+  replica that is an event's actor has a capitalized name.
+- After each of `E1` to `E(n-1)` comes one line indented by four spaces, `Check (<entities>):
+  <what is observable once the event happened>`; after `En` one such line, `Holds
+  (<entities>): <the target state as it holds at the handoff>`. The list names every entity
+  the line relates; the actor of an event that a replica performs is in its list. Write `x as
+  Ek` for an entity that event `Ek` bound, which must be in `Ek`'s list; a name without `as`
+  is existential, "for some x".
+- Write each line as something a harness observable or a probe can show at that moment:
+  what a replica holds, signed, sent, requested or is doing, keyed by the entities, with
+  their relations. For pending work, the `Holds` line says the work is still pending at the
+  handoff.
+- An event that restarts a replica binds the new incarnation, and a later line about that
+  replica names it, as in `Holds (R as E1, i as E4): in incarnation i, R ...`.
+- A line may continue on further lines indented by four spaces that start with neither
+  `Check` nor `Holds`.
+- An optional last line, `Order: Ei and Ej in either order`, with more pairs separated by
+  `;`, frees those pairs; every other pair happens in numbered order.
+- No probe label, because labels change with every campaign, and no implementation
+  identifier outside Observation hints. Never an event the protocol cannot produce.
+
+## Statement
+
+One sentence, "While <conditions>, the replica <is doing or holds> <state>.", about honest
+replicas, in the terms of Context, with no implementation identifiers.
+
+## Output
+
+- Read `statelens/target-states/marshal/TS-0001.md` first: it is the model card. Its
+  `## Source excerpts` section is generated; do not write one.
+- Write one file per target state: `{{DESTINATION}}/<ID>.md`.
+- {{COUNT}}
+- Use IDs starting at `{{NEXT_ID}}` and increasing by one with no gaps.
+- Follow the template below exactly: the same front matter keys and section headings, in
+  the same order. Delete the optional section if you do not use it. Set `source_kind:
+  {{KIND}}`, and the scope values of the registry, listed in Context.
+- The card is the record of its source: synthesis reads only the card and the code, and no
+  raw input is kept. Put what is essential into the card: the decisive sentences quoted,
+  the code pinned, every event confirmed.
+- A line number means something only at one commit. Write every line you cite as
+  `path:line@{{COMMIT}}` or `path:start-end@{{COMMIT}}`, with the path from the repository
+  root, at most about 40 lines per range, and cite the whole block you rely on. Never write a
+  bare "line N". Observation hints name functions, types, tests and INV ids, never lines.
+- `{{DESTINATION}}` was chosen from the source's disclosure: a card from a private source
+  goes to a registry that git ignores. Write every card as though it might be read anyway.
+- Plain ASCII only. Wrap lines at 100 characters.
+- Do not modify or delete existing files, create other files, or write code.
+
+When you finish, reply with a list of the files you wrote (ID, title, one line of evidence),
+or with the reason you wrote none.
+
+## Template
+
+```markdown
+{{TEMPLATE}}
+```
+
+## Sources
+
+Kind: `{{KIND}}`
+
+{{SOURCES}}
+~~~
+
+### 13.21 `prompts/synthesize.md`
+
+~~~markdown
+# StateLens synthesizer: write a state-reaching fuzz target
+
+You are writing a scaffold: a dedicated fuzz target that drives the History of one
+target-state card on an existing fuzz target of this repository, its base, witnesses each of
+its events with the probes a StateLens campaign installed and with harness observables, hands
+off at the target state, and lets the fuzzer and the base's oracles run on from there.
+
+## Where you are
+
+- This checkout is a throwaway clone at commit `{{BASE}}`, instrumented in place by a
+  StateLens campaign. Your changes are never merged; a human reviews the pair's diff. The
+  repository conventions in AGENTS.md and CLAUDE.md about public API stability, documentation,
+  benchmarks, dependencies, commits and pull requests do not apply here. The rules in this
+  prompt take precedence.
+- Do not commit. Do not run the tests, the scaffold, any fuzz target or the fuzzer: build
+  only (section Building). The script replays your scaffold itself.
+- Read `{{RUNTIME}}`, the runtime module of the campaign, `{{RUNTIME_MODULE}}`: its probes,
+  and its read side (`seen`, `sites`, `observations`, `truncated`, `mark` and the `Seen`
+  type, whose fields you read through its getters, such as `s.a()`), which a scaffold uses
+  to ask which probes fired during its input. From the fuzz package it is
+  `commonware_consensus::simplex::statelens`.
+- Read `{{FUZZ_PACKAGE}}/src/target_states/mod.rs`, the helper the script wrote, for the
+  exact signatures of the items this prompt names, and `{{PLAN}}`, the campaign's plan, for
+  what each probe records (its beacon table) and which invariants are bound where.
+- The probe labels and `sl_implies!` invariant IDs of this campaign, with where each is,
+  from one scan. Lines move as you edit, so a scaffold looks a site up at run time with
+  `sites(label)` and never writes one as a literal:
+
+{{LABELS}}
+
+## Task: card {{CARD_ID}}, attempt {{ATTEMPT}} (attempts run from 0 to 3)
+
+The card, with its {{STAGES}} History events; its Source excerpts show the code it was
+written against:
+
+===== {{CARD_ID}} =====
+{{CARD}}
+===== end of {{CARD_ID}} =====
+
+Write:
+
+- the module `{{MODULE}}`, which holds everything the scaffold needs: its `fuzz` entry, its
+  stages, and any recording wrapper;
+- the thin target `{{FUZZ_PACKAGE}}/fuzz_targets/{{SCAFFOLD}}.rs`, on the base
+  `{{BASE_TARGET}}` described below; exactly one thin target for this card on this base,
+  and none on another base;
+- any edit under the edit contract below that the scaffold needs elsewhere, each marked.
+
+The script owns the package manifest, `Cargo.lock`, `target_states/mod.rs` (the helper,
+followed by one `pub mod` line per module, yours included) and the line of the package's
+`src/lib.rs` that declares `target_states`. It adds your scaffold's `[[bin]]` block, the
+base's block with `name` and `path` renamed, after your attempt.
+
+The base, `{{BASE_TARGET}}`: its name, the `fuzz_target!` closure header and entry call,
+`required-features`, input type, and whether its runner is hooked:
+
+{{BASE_DETAILS}}
+
+## Edit contract
+
+This is requirement R-TS-SYN-3, the one contract for every edit a synthesis makes:
+
+> Scaffold synthesis operates on a disposable copy of the repository, following the same
+> assumption as StateLens. The generator may modify source code when necessary to expose
+> state, make existing functionality callable, add fuzz-only accessors or wrappers, or support
+> scaffold execution and verification. Such modifications must not change the production
+> behavior or protocol semantics of the system under test.
+>
+> Allowed examples include:
+> - widening visibility of existing functions, fields, or types;
+> - adding fuzz-only getters or read-side accessors;
+> - adding re-exports;
+> - adding wrappers around existing operations;
+> - adding campaign/runtime observation code;
+> - adding compile-time fuzz-only hooks that expose existing behavior;
+> - restructuring code only where the transformation is demonstrably semantics-preserving.
+>
+> The generator must not modify production consensus logic, including:
+> - state-transition rules;
+> - branch conditions or protocol predicates;
+> - ordering of protocol operations;
+> - certificate or vote validation rules;
+> - message handling semantics;
+> - timeout behavior;
+> - persistence/recovery semantics;
+> - error handling that affects execution;
+> - state mutations used by the production implementation.
+>
+> The principle is:
+> - Allowed: change how existing behavior is exposed or observed
+> - Forbidden: change what the protocol does
+>
+> Because synthesis runs on a disposable copy, generated modifications do not need to be
+> suitable for upstream production code. They only need to preserve the behavior of the
+> production logic being fuzzed.
+
+How it applies here:
+
+- Where: the paths the subsystem rules below name, which are the system under test and the
+  profile's fuzz package. The fuzz package reaches `consensus/fuzz/core/` only through its
+  own `src/`. Any other path is out of scope.
+- Observation code is read-only code the scaffold calls: getters, accessors, recording
+  wrappers, witness helpers. It never adds a counter feature, an assertion or ghost state;
+  those come only from the campaign. Synthesis never instruments.
+
+The script checks every attempt against the tree as the campaign left it, so a change an
+earlier attempt made counts as if you made it now:
+
+1. Scope: a change outside those paths, other than to `Cargo.lock`, stops the synthesis and
+   restores the pair's edits; the operator then needs a fresh clone.
+2. Manifests: no dependency change in any `Cargo.toml`. An edit to a file the script owns is
+   restored, and your version is not built.
+3. Instrumentation integrity: every `sl_probe!`, `sl_assert!` and `sl_implies!` call stays
+   as it is (moving one within its file is fine); every line the campaign's instrumentation
+   added stays, so no ghost update, `// [statelens]` field or runner hook is removed or
+   changed; the runtime module stays byte-identical, and its declaration and the attributes
+   above it stay, with no `#[path]` attribute added; no call of `with_ghost`, `with_global`,
+   `record`, `note`, `violation`, `reset` or `clear_compromised` is added outside the helper
+   and the thin targets; no `set_compromised` outside `target_states/`; no `tick`, `watch` or
+   `unwatch` outside the helper; no call of the read side in the system under test; no `[statelens-reach]` or
+   `[statelens-scaffold]` literal outside the helper; outside the helper, no print macro
+   (`print!`, `println!`, `eprint!`, `eprintln!`), `stdout()` or `stderr()`, `from_raw_fd`,
+   panic hook (`set_hook`, `take_hook`), `include!`, `include_str!`, `include_bytes!` or
+   `#[path]` attribute, also in code you copy from elsewhere; and no Rust file in a path git
+   ignores, such as a module or directory named `target`, which the repository ignores. A
+   breach is not built, and it stays a breach in every later attempt until you revert it.
+4. Marker: every changed hunk outside your module and thin target carries the comment
+   `// [statelens] tss:{{CARD_ID}}`. An unmarked hunk is reported for review, and so is a
+   hunk that changes or neighbors an `sl_*!` call or a line the campaign added.
+5. Test gate: when the kept version changed the system under test, the campaign's tests run
+   again; a test that passed in the campaign and now fails or no longer runs restores the
+   pair's edits and records GATE FAILED.
+6. Restore: a pair with no version built, or GATE FAILED, has its edits restored.
+
+## Shapes
+
+Pick one and record it in the module header.
+
+- Shape A, pinned input, preferred where it fits: the base input's fields fix every event
+  before `En`. `fuzz` splits and picks the knobs, opens the stages and checks the budget,
+  pins those fields, resets the fields that depend on them, calls the base's entry by path
+  with its generics, then evaluates `E1` to `E(n-1)` over the trace and the harness
+  observables, calls `Stages::handoff` with the evaluation of `En`, and last `Stages::done`.
+  The base's own schedule runs, no driver code is copied, and its oracles are untouched.
+  Register the evaluation with `Stages::on_panic`, so a crash still reports what the trace
+  shows.
+- Shape B, online prefix, where Shape A cannot express the History: `fuzz` splits and picks
+  the knobs, opens the stages and checks the budget, calls `set_compromised`, pins the
+  fields, sets the base up, drives `E1` to `E(n-1)` online, calls `Stages::handoff` with a
+  read of `En`'s witness, hands off to the base's free-running phase and oracles, and calls
+  `Stages::done` after the last oracle. Call the base's setup by path; where only a
+  monolithic driver can host the prefix, copy that driver verbatim into the module and cite
+  it as `path::item@{{BASE}}`.
+
+`pub fn fuzz` takes the base's input type and the generic parameters of the base's entry, in
+order. The module opens with this header, which the script reads:
+
+```rust
+//! {{CARD_ID}} on {{BASE_TARGET}}
+//! Shape: A | B
+//! Knobs: raw_bytes[0..k]: [0] <knob>, [1] <knob>, ...
+//! Stages: E1 <witness kind and what it reads>; E2 ...; ...
+//! Control: withholds Ek | n/a
+//! Injections: <each injection, with the INV ids whose ghost history it bypasses> | none
+//! Missing: <each missing capability> | none
+```
+
+The thin target is the base's file with two changes: the `use` lines name your module
+instead of the base's entry, and the body of its one `fuzz_target!`, whose closure parameter
+stays the base's, is exactly these three statements:
+
+```rust
+    fuzz_target!(|input: <the base's input type>| {
+        commonware_consensus::simplex::statelens::reset();
+        <module>::fuzz::<the base entry's generic arguments>(input);
+        commonware_consensus::simplex::statelens::clear_compromised();
+    });
+```
+
+The first generic argument names the `cert_mock` scheme, as in the base, and the module names
+no Simplex type with another scheme.
+
+## Knobs
+
+- The card's Knobs table lists them. `Knobs::split` takes the first K <= 16 bytes of the base
+  input's own `raw_bytes`, zero-padded, as the first statement of `fuzz`; `Knobs::pick`
+  takes the next one as `domain[byte % domain.len()]`, with the source value at index 0, so
+  the empty input, the canonical input, replays the source's History.
+- Each knob decodes to a valid value by construction: derive a view so that the required
+  leader leads it, rather than hoping. An ordering knob indexes the orders `Order:` allows,
+  the source order first.
+- Pick every knob before any engine starts, then call `Stages::new("{{CARD_ID}}", {{STAGES}})`
+  and `Stages::budget`, which takes the knobs, so none is picked later. Do both before you pin
+  a field or perform any other action: until `Stages::new` nothing watches, so `Witness::act`
+  takes position 0 and its stage has no position. The input type, the run recipe and the
+  libFuzzer flags stay the base's; there is no seed corpus.
+- Then pin the fields the History fixes, through `Witness::act` when a stage witnesses the
+  pin, and reset the fields that depend on them as the base's decoder sets them under the pin
+  (the subsystem rules name them).
+- `Knobs::split`, `Knobs::pick` and `Stages::budget` raise the only errors attributed to a
+  scaffold, before any engine starts: more than 16 knobs, more picked than split, a domain
+  with fewer than two values, a prefix budget over the runtime deadline.
+
+## Stages and witnesses
+
+One stage per History event, `E1` to `En`, evaluated in the order you drive them. Bind the
+card's entities to the concrete values you chose or observed, and record for each stage one
+witness that establishes its whole `Check` or `Holds` line, its relations to earlier events
+included. The kinds:
+
+- `exact`: harness observables, one per part of the line, each keyed by the bound entities:
+  a reporter map keyed by view or digest, a resolver or buffer recorder, a recording wrapper
+  in your module, a network intercept record, or a local query without side effects. A query
+  that subscribes, hints, fetches or verifies is not a witness: it would create or satisfy
+  the state it checks. A map read after the run shows presence only; an entry carries a
+  position only when a recording wrapper stamped it with `stamp` as it recorded it. A
+  recording wrapper records synchronously and forwards every call and reply unchanged and at
+  once: no await, delay, spawn, drop or reordering of its own.
+- `intrinsic`: one probe observation, found with `seen` and a label from the list above, at a
+  site whose two values come from one receiver. It identifies the replica `me` and the
+  relation among that object's fields at that instant, and no view, digest or other
+  identity, so it witnesses only a line whose entities other than one replica are all
+  existential, and binds those to `?`. Two
+  observations at different sites witness nothing together, and an observation whose
+  subject its own site does not fix is no witness.
+- `construction`: a harness action you performed through `Witness::act` or
+  `Witness::act_async`, which take the action's position right before they perform it, and
+  that cannot fail silently, such as a pinned elector or a certificate you built. It proves
+  only that the action happened, never what a replica did with it, and only for an event
+  whose actor is `harness`, never for `En`; in Shape A, only for an action before the base's
+  entry is called. `act_async` takes a closure that makes the future: pass the call itself,
+  never a future you made earlier, because some mailbox methods act when called, not when
+  awaited.
+
+A stage that no available witness binds is `unverifiable` with its reason, never held, and
+never approximated; for `En`, record it with `Stages::unverifiable` before you call
+`Stages::handoff`. Record stages only through the helper: `Stages::held(k, witness)` for
+`E1` to `E(n-1)`, `Stages::missed`, `Stages::unverifiable` and `Stages::withheld`, and
+`Stages::handoff` for `En`. Read the trace from `Stages::since()`. Never print anything:
+the helper prints every line the script reads.
+
+A witness record is checked again by the script, which downgrades a held stage to
+`unverifiable` (`witness rejected: <rule>`) when:
+
+- `as`: an `x as Ek` value differs from the value `Ek` bound, or is `?`;
+- `bind`: an entity of the line is missing from the binding, written `name=value@Ek,...`;
+- `evidence`: an `exact` or `construction` witness does not name every entity of the line
+  with its bound value in its keys, written `name=value,...`, or an `exact` item's stamp is
+  not that of an entry line with the same observable, key and value;
+- `order`: a stage's position is not greater than that of an earlier stage it must follow,
+  by the numbered order less the pairs `Order:` frees;
+- `run`: a probe observation's runtime instance differs from that of an earlier stage's
+  observation, with no marked restart between them;
+- `incarnation`: a relation across a marked restart of a replica the line binds, whose
+  binding does not name the incarnation that restart began, or names one that no restart
+  began or that begins after the line's evidence;
+- `intrinsic`: an intrinsic witness cites more than one observation, or binds a value other
+  than `?` to an entity other than its replica, or a replica other than the observation's,
+  which a site without a replica never matches;
+- `construction`: a construction witness for `En`, or for an event whose actor is not
+  `harness`.
+
+Both stages of an ordered pair need a position: a probe observation, a stamped entry, or a
+construction action. Presence-only evidence cannot order anything, so such a stage is
+`unverifiable (no position)`; an `exact` witness has a position only when every item is
+stamped. Values hold no space, comma, `@`, `[` or `]`; write a binding as `R=2@E1,v=5@E1`.
+
+A held stage adds a feature that rewards inputs that get further. The first miss closes the
+scripted prefix, except in the control run: drive no further event, call `Stages::handoff`,
+which reports the handoff lost, and continue into the base's free-running phase and every
+oracle.
+
+Incarnations: mark every restart you drive with `restart(&[replicas])`, which returns `s`,
+and bind the incarnation it began as `inc<s>`. In Shape A, add a marked call of `restart` to
+the base's restart code (the subsystem rules name the known sites). A line that relates a
+replica across a restart names the incarnation.
+
+## Handoff and recovery
+
+Handoff comes first; recovery is part of the continuation.
+
+- Shape B drives `E1` to `E(n-1)` online, polling in simulated time, with a simulated-time
+  deadline per stage: passing it is a miss, never a wait. Race every await on a reply of the
+  system under test against the deadline with `commonware_macros::select!`; a dropped reply
+  is a miss.
+- `Stages::handoff` takes a plain closure that reads `En`'s witness and builds it inside the
+  call, with no await or yield, and no value read before the call. The helper takes a
+  position, calls it, and takes the handoff mark: the handoff holds only when nothing came
+  between the read and the mark. If `En` does not hold then, it is missed, even if it held
+  earlier. The positions date the read, not what it read, so give `En` an `exact` witness
+  where one exists; an `intrinsic` one cites the latest observation at its site for its
+  replica, found with `observations`, because `seen` returns the earliest and an older one
+  may no longer hold.
+- For a state defined by pending work or a withheld delivery, an `exact` observable shows
+  the work still pending at the handoff: requested, and neither answered nor closed. Nothing
+  the prefix does may complete, cancel or abandon it: never await its reply, drop its reply
+  channel, or stop or restart its owner before the handoff.
+- The continuation starts with every fault the prefix opened still in place: a crashed
+  replica down, a partition, a held message. Release each no later than the base's first
+  heal (GST), and start the base's liveness measurement after both. Network cuts go through
+  the base's own fault input, as pinned partition fields, or are composed with the base's
+  current cut; never heal the network yourself. Release crashed replicas and held messages at
+  the handoff plus `d`, a knob in [0, the base's fault phase); a base without GST releases
+  them before its liveness wait.
+- The runtime deadline is the base's, which the subsystem rules give, plus the stage deadlines
+  plus the largest release delay, which `Stages::budget` checks; for a base without one, pass
+  `Duration::MAX`.
+- Shape A imposes no cleanup, and its handoff is implicit: `En`'s witness, read in the handoff
+  call after the run, counts only if it has a position and the trace holds a later
+  observation of an honest replica in the same runtime instance.
+
+## Control
+
+The header names one withheld event, `Control: withholds Ek`, with k < n and `harness` as its
+actor, chosen so that `En` cannot hold for the bound entities without it. Read
+`STATELENS_REACH_CONTROL` only through `control()`; when it is set, skip `Ek`'s action, call
+`Stages::withheld(k)`, and still drive every later event, the handoff check and the base's
+oracles, so `En` gets an outcome. Write `Control: n/a` only when the card has no `harness`
+event before `En` and every witness is `exact` or `construction`.
+
+## Oracles
+
+The base's free-running phase and every oracle run, called by path or copied verbatim, never
+removed or weakened. In Shape A the base's oracles run inside its entry as they are, and a
+History whose continuation they would not measure takes Shape B. In Shape B, re-base the
+base's progress target on the handoff, in the measure the subsystem rules give for that base.
+`Stages::done` follows the last oracle; returning before it reads as an oracle that never ran.
+Stage checks are not oracles.
+
+## Fabrication and the guard
+
+- Events go through the network or the harness verbs. A scripted vote goes out only on its
+  signer's own channel (INV-0008). A certificate you build names an honest signer only for a
+  proposal that replica signed or would sign.
+- List every injection, such as a journal seed, a floor start, a resolver delivery or a
+  mailbox call, under `//! Injections:` with the INV ids whose ghost history it bypasses. The
+  module never writes ghost state and never calls `record`.
+- Shape B calls `commonware_consensus::simplex::statelens::set_compromised` with the indices
+  it runs as real engines under a Byzantine identity, empty if none, before any engine
+  starts; when the set is not empty, also check that every scheme's own index matches its
+  position in `participants`, as the hooked runners do. Code copied from a hooked runner
+  keeps its hook. Shape A relies on the base's hooked runner.
+
+## Missing capabilities
+
+A stage that needs what the edit contract cannot give, such as a new dependency, a change to
+what the protocol does, or an item of `consensus/fuzz/core/` that is not public, is never
+approximated: record it with `Stages::missed(k, "cannot: <capability>")`, list it under
+`//! Missing:`, keep the prefix up to that stage and hand off; for `En`, record that miss
+before you call `Stages::handoff`. A human adds the capability.
+
+The prefix and witness code you write never panics on data of the system under test: no
+`unwrap`, `expect` or index that its output decides, and no harness verb that panics on its
+reply; a miss instead. Code copied verbatim from the base, and every oracle, keep their
+panics: after the handoff a miss records nothing.
+
+## Building
+
+Build the scaffold with
+
+    {{BUILD}}
+
+until it builds with no errors and no warnings. If it reports that the package has no such
+target, because the script writes the `[[bin]]` block only after your attempt, add that block
+for the build (the base's block with `name` and `path` renamed) and remove it again before you
+finish, leaving the manifest exactly as you found it. If you changed the system under test,
+also run `{{CHECK}}`.
+
+Never run the scaffold, any fuzz target, `cargo fuzz run` or `just run`: the script's replays
+of fixed inputs are the only runs that judge a version, and a crash file any other run leaves
+is treated as a finding. An attempt that changes no file ends the pair.
+
+## Feedback
+
+{{FEEDBACK}}
+
+What each signal asks for:
+
+- A veto, a guard, a build failure or a failed agent run: fix that, as reported.
+- A miss with `cannot: <capability>`: nothing in the scaffold, unless an edit the contract
+  allows, or another shape, gives the capability; otherwise a human adds it.
+- `E1` missed: the setup: configuration, pinned and dependent fields, roles, elector or
+  shape.
+- A middle `Ek` missed: the event's content, recipient, channel or order; compare the
+  trace's values and sites with what the stage expects.
+- `En` missed, or the handoff lost: the knob domains, the timing, and what keeps the state
+  pending at the handoff.
+- `unverifiable`, or `witness rejected`: a witness that binds the relation: an intrinsic
+  site for an existential line, otherwise an exact observable keyed by the bound entities,
+  with positions where order matters.
+- `weak` (the control still reaches `En` for the bound entities): withhold the event without
+  which `En` cannot hold for them, or say in your reply that the History is not causal.
+- A vacuous or missing control: name, or withhold, a later harness event before `En`; in the
+  control run, drive every later event, the handoff check and the base's oracles.
+- NO REPORT: use the helper, and never return before the base's oracles.
+- SCAFFOLD ERROR: the reason the helper named.
+
+Your earlier attempts' files are still in place: change them rather than start over, unless
+the feedback asks for another shape.
+
+## Subsystem rules
+
+{{SUBSYSTEM_RULES}}
+
+## Reply
+
+Reply with: the shape; the witness of each stage; the knob layout; the injections; and the
+missing capabilities.
+~~~
+
+### 13.22 `prompts/subsystems/simplex-synthesize.md`
+
+~~~markdown
+### Simplex (`consensus/src/simplex/`, `consensus/fuzz/simplex/`)
+
+- Paths you may change: `consensus/src/simplex/`, the system under test, whose tests the
+  script reruns when you change it, and the fuzz package `consensus/fuzz/simplex/`.
+- Bases: every `simplex_*` target but Mallory, whose custom mutator a scaffold cannot reuse.
+  Shape A fits a History that the fields of `FuzzInput` fix: the partition, the
+  configuration, the certify choice and the block filter. The Chaos, ByzzFuzz and Twins
+  schedules are drawn from the random stream that `raw_bytes` seeds, so no field pins them,
+  and a History about them takes Shape B. The `_state_cov` and `_hb` targets add coverage
+  tables, which cost throughput.
+- Dependent fields of `FuzzInput`, reset as its decoder sets them when you pin what they
+  depend on: `degraded_network` depends on `partition` and `configuration`, `certify` on
+  `configuration`, `block_filter` on `configuration` and on the fault bound drawn from
+  `required_containers`, the fault rounds of `strategy` on `required_containers`, and
+  `optimistic_views` on `term_length`.
+- Usable without an edit, because a module under `crate::target_states` sees the private
+  items of the crate root: `run_standard_once`, `run_audited_standard_once_with`,
+  `run_twins`, `MockTwinsBackend`, `configure_block_filter`, `spawn_disrupter_with_relay`
+  and `install_chaos_panic_hook`, and `chaos::runner::run`. Also the public items of
+  `consensus/fuzz/core`, among them `setup_network`, `bounded_fuzz_runtime_config`,
+  `fuzz_runtime_timeout`, `spawn_filtered_honest_validator`, `run_twins_with_backend`, which
+  is hooked, and the partition helpers `apply_partition`, `link_peers` and
+  `scheduled_partition`; and the mock reporter's maps keyed by view (`leaders`,
+  `notarizations`, `nullifies`, `nullifications`, `certifications`, `finalizations`), read
+  after the run for presence, or through a recording wrapper for order.
+- With a marked edit: `chaos::runner::{run_with, restart_durable, enact, check_safety}` and
+  the internals of `chaos::twins`; under `consensus/src/simplex/`, an accessor such as one
+  for the private fields of `mocks::twins::RoundScenario`, which only `cases` builds.
+- Known restart sites, which get a marked call of `restart` when a scaffold runs them:
+  `chaos::runner::restart_durable` (Chaos) and `chaos::twins::restart_honest`
+  (Chaos-Twins). The list is guidance, not a complete one.
+- `start_validator_engine` in `consensus/fuzz/core` is private and starts every engine from
+  `Floor::Genesis`; a History that needs another floor copies it into the module with the
+  floor as a parameter.
+- The Chaos-Twins runner's gate is the pattern for a stage: wait for a replica's own state
+  before acting, and do not act in the wrong state.
+- The fault phase of `consensus/fuzz/core` is `FAULT_PHASE`, 30 s, so a release delay is a
+  knob in [0 s, 30 s).
+- Progress and deadline: `run_standard_once`, `run_audited_standard_once_with` and `run_twins`
+  run under `bounded_fuzz_runtime_config`, whose deadline is
+  `fuzz_runtime_timeout(input.required_containers, <prefix views>)`, with 0 prefix views, or
+  `twins_prefix_views(..)` for `run_twins`; the Chaos, Chaos-Twins and ByzzFuzz runners set
+  none. Each base keeps its own liveness measure, which a Shape B continuation counts from the
+  handoff, and keeps the base's condition for measuring at all: `run_standard_once` and
+  `run_audited_standard_once_with` wait only when `should_bound_standard_liveness(&input)`
+  holds, that is a `Connected` partition (`Static` and `Adaptive` fail it), a valid
+  configuration and `BlockFilterChoice::None`; otherwise they sleep `MAX_SLEEP_DURATION` and
+  assert no liveness, so FaultyNet, whose partition `fuzz` always sets to `Adaptive`, never
+  waits. Where they wait, every reporter's latest finalized view must reach
+  `input.required_containers`, so the target is the latest finalized view at the handoff plus
+  `input.required_containers`; the audited driver leaves the notarize-omission victim out of
+  that wait and instead checks after the invariants that its pending finalize recoveries drain
+  (`unresolved_finalize_recoveries`, one `MAX_SLEEP_DURATION` sleep,
+  `check_finalize_recoveries_drained`), a check the continuation keeps; the Twins campaign
+  counts `input.required_containers` finalizations of views after the Twins prefix
+  (`observe_liveness`), so count only views after the handoff as well; the Twins mutator checks
+  no liveness, so add none; Chaos, ByzzFuzz and Chaos-Twins measure from their own heal or
+  recovery, which follows the handoff, so their targets stay as they are: the larger of
+  `input.required_containers` and one view past the finalized view at the heal (Chaos: the
+  highest, `liveness_target`; ByzzFuzz: each node's own, `reach_gst_and_check_liveness`), and
+  for Chaos-Twins one view past the highest at its recovery.
+- The scheme: the thin target names `SimplexCertificateMock` or another `cert_mock`
+  instantiation of `consensus/fuzz/core`, as the base does.
+- Missing, reported as `cannot:`: journal seeding, because the package has no
+  `commonware-storage` dependency and no dependency may be added.
+~~~
+
+### 13.23 `prompts/subsystems/marshal-synthesize.md`
+
+~~~markdown
+### Marshal (`consensus/src/marshal/`, `consensus/fuzz/marshal/`)
+
+- Paths you may change: `consensus/src/simplex/` and `consensus/src/marshal/`, the system
+  under test, whose tests the script reruns when you change it, and the fuzz package
+  `consensus/fuzz/marshal/`.
+- Shape A first: `marshal_e2e_standard_deferred_cert_mock_scenarios`, whose
+  `NotarizationBlockSplitScenarioInput` fixes a scripted `template` and its pre-GST
+  `actions`, with the wedge's real Byzantine engine behind the runner's hook. The
+  `*_twins_split_header` targets draw their Twins case from the stream `raw_bytes` seeds:
+  `run_twins_with_backend` samples `twins::cases` from it and `case_selector` only indexes
+  that sample, so no field pins the case, and a History about it takes Shape B; a fixed case
+  needs a marked constructor for the private fields of `mocks::twins::Scenario` and
+  `RoundScenario`, which only `cases` builds.
+- Shape B uses, without an edit, the `pub(crate)` items of `scenarios`: the harness
+  `FuzzScenarioStandardHarness`, its verbs and `finish`, `RecordingBuffer`,
+  `ScenarioHandoff`, `RecordingResolver` and `init_injectable`; and
+  `marshal::end_to_end::twins`. With a marked visibility edit: `scenarios::runner::run`,
+  whose journal seeding before the engines start is how Simplex engines start from a
+  reconstructed state, and the private modules `scenarios::{adversary, elector, strategy}`
+  and `end_to_end::{input, runner, scenario}`.
+- The scenario-prefix runner starts no engine during its prefix, so a History whose events
+  need running engines, such as TS-0001's, takes an end-to-end base.
+- Known restart site, which gets a marked call of `restart` when a scaffold runs it: the
+  `StoreOp::Restart` arm of `marshal::store` (`marshal_actor_standard_store_cert_mock`),
+  which restarts the marshal actor. The list is guidance, not a complete one.
+- Of the scenario SPEC, `consensus/fuzz/marshal/src/scenarios/specs/SPEC.md`, rules S1, S2,
+  S4, S7, I1 to I3 and I5 apply; S3 becomes the handoff check; S5 and R9 become `cannot:`;
+  S0 and S6 do not apply, because the card and the module header cite the source, and I4
+  does not, because the edit contract allows marked edits. Add no `ScenarioKind` variant.
+- Only the victim, `Node::B`, has an injectable resolver, with one armed delivery at a time,
+  and in `N4F1C3` node 0 has no marshal. The harness verbs that panic when the system under
+  test does not answer (`await_wrapper` after 5 s, `verified` and `certified` on a write that
+  is not durable) and the polls of the existing scenario prefixes, bounded to 64 rounds, are
+  not used where a reply of the system under test decides: race the reply against the stage
+  deadline instead.
+- The fault phase is 12 s in the scenario-prefix runner and `FAULT_PHASE`, 30 s, in the
+  end-to-end disrupter runner, so a release delay is a knob below the base's. Heights stop at
+  the epoch ceiling (`BLOCKS_PER_EPOCH`): leave enough height below it after the handoff for
+  the liveness measurement.
+- Progress and deadline: no marshal base sets a runtime deadline, so `Stages::budget` takes
+  `Duration::MAX`. Each base measures finalized heights against its own baseline, which a
+  Shape B continuation counts from the handoff: the scenarios target, one block past each
+  correct node's height at GST (`check_scenario_progress`); Twins, `input.trailing_blocks`
+  blocks of views after the prefix (`wait_for_liveness`); the scenario-prefix runner, one
+  block past each honest node's height at its heal, `input.required_containers` only ending
+  the fault phase early; the disrupter and poison targets (`run_liveness_phases`),
+  `input.required_containers`, or after a fault phase that ends without it, the larger of
+  that and one block past each honest node's height at the heal; the store target checks no
+  liveness.
+- The scheme: every type argument of the thin target's call names a Simplex type with the
+  `cert_mock` certificate scheme, such as `SimplexCertificateMock`, as the base does.
+~~~
+
 ---
 
 ## 14. Acceptance procedures
@@ -3559,6 +4441,7 @@ source proves, what the tools prove, what a finding explains, and what you are g
 | AC-16 | A campaign with an invariant whose action is committed in a handler, then the same campaign with `STATELENS_AUDIT=0`. | With the pass: the invariant's `Sites` ledger names the commit site, the `Status` matches the ledger, and the `audit` and `plan` lines report it. Without it: no `audit` line, and the campaign still reaches `READY`. |
 | AC-17 | `just check-plan` on a plan whose `bound` section leaves a commit site unchecked, and on a clean one; `just check-prompts` after editing a prompt, and after `--write`. | Exit 3 naming the section or the prompt, and exit 0 when clean. |
 | AC-21 | With `STATELENS_KB` set to a findings corpus: `just extract-invariants --registry qmdb --number 3 kb`; then `just extract-invariants --registry qmdb comment <corpus root>`. | The first writes at most 3 new files, all in `invariants.local/qmdb/`, which `git status` does not list, and `just check-invariants` reports no problem for them. The second exits 1 and names the `kb` command instead. |
+| AC-29 | On a fresh clone: `just campaign --profile marshal --invariants INV-0002`, `just campaign --invariants simplex/INV-9999`, `just campaign --invariants qmdb/INV-0001` and `just campaign --invariants ""`; then `just fuzz simplex --invariants INV-0002 --skip-campaign` and `just fuzz simplex_cert_mock --invariants INV-0002`; then `just campaign --invariants INV-0002 --stop-after instrument`. On another fresh clone, `just fuzz simplex --invariants INV-0002 -- -max_total_time=60`. | The four campaigns exit with code 2 and `SETUP FAILED` before any agent runs and leave the checkout fresh; the first names the `<registry>/INV-NNNN` form, the others end with `available: simplex/INV-0001, ...`. The two `just fuzz` refusals exit with code 1 and run nothing. The campaign that follows binds INV-0002 and nothing else: `SL/campaign/meta.json` has `"invariants": ["INV-0002"]` and the number of simplex invariants collected under `invariants_available`, the setup line reads `1 of <n> invariant(s) bound (simplex: INV-0002)`, `plan.md` reads `Invariants: 1 (simplex: INV-0002)` and has that one invariant section, the beacon prompts are rendered as without the flag, and `just check-plan` reports no missing section. The last runs `just campaign --profile simplex --invariants INV-0002` and then the variants. |
 | R-NF-3 | Same duration and flags: `simplex_cert_mock_twins_mutator_statelens` in an instrumented checkout, and `simplex_cert_mock_twins_mutator` in an uninstrumented checkout at the same commit. | exec/s from `-print_final_stats=1` are reported side by side; a slowdown above 2x is recorded as an instrumentation problem. |
 
 Section 8.6 gives the procedures for AC-9 to AC-13, and for R-NF-3 on the marshal
@@ -3596,7 +4479,8 @@ to AC-28, for Target-State Synthesis.
    - with `STATELENS_KB` set to a findings corpus, the queries of section 5.6, then AC-14
      and AC-15;
    - `just check-plan` and `just check-prompts` on the instrumented checkout, then AC-16
-     and AC-17.
+     and AC-17;
+   - on a fresh clone, the refusals and the campaign of AC-29.
 6. Then Target-State Synthesis (chapter 18), in this order: the read side (section 9.6) with
    its self-tests, the scope check of section 7.5 and the line of prompt 13.7; the card
    registry, its lint and TS-0001; extraction and `prompts/state-analyst.md`; the helper
@@ -3672,7 +4556,8 @@ script, without an agent and so without instrumentation:
   `data: &[u8]`, and `qmdb_current_mmb_prune_grow` is a one-line target (Appendix B.1). The
   generated runtime module and variants are `rustfmt`-clean.
 - `cargo +stable check -p commonware-storage --lib --tests` passes, and the runtime's 10
-  unit tests pass inside `commonware-storage` as `qmdb::statelens::tests::*`.
+  unit tests pass inside `commonware-storage` as `qmdb::statelens::tests::*`; with the read
+  side of section 9.6 they are 17 (section 18.1).
 - The test gate of section 17.3 passed: 2,289 tests, 428 of them in the `slow` group, in
   101 s on 16 cores.
 - `cargo fuzz build` of `qmdb_current_mmb_prune_grow_statelens` and
@@ -3745,7 +4630,10 @@ Step 6, test gate (section 7.7):
 
 ~~~
 cargo +<test toolchain> nextest run -p commonware-storage --lib --no-fail-fast \
-  --ignore-default-filter -E 'test(/^qmdb::/)'
+  --ignore-default-filter \
+  --color never --message-format human --status-level pass --final-status-level fail \
+  --success-output never --failure-output immediate \
+  -E 'test(/^qmdb::/)'
 ~~~
 
 The filter takes every qmdb test, the `slow` group included, and the runtime's own tests,
@@ -3816,25 +4704,24 @@ This chapter specifies Target-State Synthesis (PRD chapter 11) for the `simplex`
 `marshal` profiles. Phase 1 turns a test, an issue or pull request, a comment, a report or a
 text into a reviewed card: one target state of honest replicas, and the history of events that
 reaches it (sections 18.3 and 18.4). After a campaign, `synthesize` has an agent write one
-scaffold per card, a dedicated fuzz target built on an existing target, its base. The scaffold
-fixes the card's essential setup and history, leaves the uncertain values to libFuzzer as
-knobs, and reports which events of the history it reached, witnessed by the probes the
-campaign installed and by harness observables (sections 18.6 to 18.8). A reach check replays
+scaffold per card and base, a dedicated fuzz target built on an existing target, its base: the
+unit of synthesis is the pair (card, base), and a card is synthesized on every selected base.
+The scaffold fixes the card's essential setup and history, leaves the uncertain values to
+libFuzzer as knobs, and reports which events of the history it reached, witnessed by the
+probes the campaign installed and by harness observables (sections 18.6 to 18.8). A reach check replays
 each scaffold on fixed inputs, and its verdict drives up to three refinements. Every scaffold
 that passes the vetoes and builds, and that the test gate does not restore (guard 5 of section
 18.6.1), is fuzzed with `just fuzz <profile> --state-reaching` (section 18.9). qmdb is
 refused.
 
-The files this chapter adds, and its changes to `runtime/statelens.rs` and the justfile, come
-after this text. Their verbatim copies -- the prompts in sections 13.20 to 13.23, the helper
-template in Appendix H, and the updated section 5.3 and Appendix A -- are added to this
-document with the files; until then this chapter specifies them. `templates/target-state.md`
-is given verbatim in section 18.3.
+The files this chapter adds, and its changes to `runtime/statelens.rs` and the justfile, are
+reproduced verbatim elsewhere in this document: the prompts in sections 13.20 to 13.23, the
+helper template in Appendix H, the justfile in section 5.3 and the runtime in Appendix A.
+`templates/target-state.md` and TS-0001 are given verbatim in section 18.3.
 
 ### 18.1 What was verified
 
-At commit `37e01e1036`, by reading the code and the libraries it uses. Nothing in this
-chapter has been built or run yet.
+At commit `37e01e1036`, by reading the code and the libraries it uses:
 
 - A module declared in a fuzz package's crate root sees the root's private items. In
   `consensus/fuzz/simplex/src/lib.rs`, `run_standard_once`, `run_audited_standard_once_with`,
@@ -3863,6 +4750,37 @@ chapter has been built or run yet.
 - PR #4317 was merged as `85f85284d7`, an ancestor of `37e01e1036`, and the citations of the
   card in section 18.3 hold at `37e01e1036cb`.
 
+With the implementation, at commit `8a0d2cef73`, in scratch worktrees the script materialized
+for the `simplex` and `qmdb` profiles, without an agent and so without instrumentation:
+
+- The runtime with its read side checks and passes `clippy -D warnings` in
+  `commonware-consensus` and `commonware-storage` on stable, and its self-tests pass: 19 in
+  the consensus copy (`simplex::statelens::`), 12 of them from before the read side, and 17
+  in the qmdb copy, also with `--test-threads=1`.
+- The helper, copied into both fuzz packages with the declarations of section 5.5 and a
+  throwaway scaffold per package that uses every item of section 18.7 (Shape A on a base
+  entry, Shape B with `Witness::act_async` from a spawned task), checks with no error or
+  warning. Under `STATELENS_REACH=1` it printed 43 lines, every one matching the patterns of
+  section 18.8, and each scaffold error of section 18.7 fired with its message.
+- A thin target of that scaffold, built with `cargo fuzz build` on the CI-pinned nightly
+  and replayed on the empty file: the canonical replay printed `handoff lost` after a missed
+  stage, since no probe exists without instrumentation; the control replay printed
+  `withheld`, kept the prefix open and printed `handoff holds` and `control=1`; a planted
+  panic printed the helper's lines and then libFuzzer's, and the process aborted with exit
+  code 77; an empty knob domain raised the scaffold error at a location in
+  `target_states/mod.rs`. libFuzzer runs a passing input a second time inside the same
+  replay, to look for leaks, so a passing replay printed its lines twice; a failing one
+  printed them once (section 18.8).
+- `synthesize` end to end, with a stub agent that wrote a Shape A scaffold of TS-0004 on
+  `simplex_cert_mock`, after `campaign --stop-after materialize` and a READY summary written
+  by hand: the fuzz build took about 2 minutes, the verdict was `UNREACHED 0/4`, a second run
+  skipped the card, `--redo` undid it and synthesized it again, and `clean --yes` left
+  nothing behind.
+
+Not verified: a synthesis with a real agent or after a real campaign, AC-24 to AC-28 as
+written, any marshal synthesis, and whether the Phase 1 permissions of section 12 let the
+agent read a `text` file outside the repository (as for `design` and `paper`).
+
 ### 18.2 Decisions
 
 | ID | Decision | PRD requirement |
@@ -3870,13 +4788,13 @@ chapter has been built or run yet.
 | D59 | Target states are a registry of their own: `SL/target-states/<subsystem>/TS-NNNN.md` for `simplex` and `marshal`, and the git-ignored `SL/target-states.local/<subsystem>/`. One global `TS` counter covers both (as D18), every card is active, and a card has no status field (as D1). A card is a reachability goal, never an oracle, and names no probe label, because labels change with every campaign. The registry reuses the invariant files' machinery: file names, lint and excerpts. | R-TS-REG-1 to R-TS-REG-4 |
 | D60 | Phase 1 writes cards with `extract --states`, one prompt, `state-analyst.md`, for every kind, and the subsystem's analyst part. The kinds are those of section 6.1 plus `test` and `text`. A card goes to the local registry when its source is not public: `kb`, `text`, a path outside the repository, or a run with `--local`. The card is the record of its source: synthesis reads only the card and the code, and no raw input is archived. | R-TS-P1-1 to R-TS-P1-3 |
 | D61 | The runtime template gains a read side (section 9.6): an ordered trace of the guarded probe observations of one input, off unless a scaffold watches, with the call site and the runtime instance of each; the fresh-run hook counts runtime instances. One event sequence per input gives every observation and every helper event (`tick`) its own position, so positions are unique and strictly ordered. Instrumentation never calls it. The counter table and the features are unchanged. | R-TS-FB-1, R-INS-3, R-INS-5 |
-| D62 | `synthesize` is a step of its own, run after a campaign of the same profile on the checkout it instrumented. It never instruments: it adds no probe, assertion or ghost state. Its edits follow the edit contract (R-TS-SYN-3, section 18.6.1), whose guards 1 to 3 compare the tree with a baseline that the campaign's first synthesis takes and every later one reuses. Its agent runs with Phase 2 permissions (D4), as a second role with its own scope (amends R-INS-7). Cards are synthesized one at a time, because they share one crate. qmdb is refused. | R-TS-SYN-1 to R-TS-SYN-4 |
-| D63 | Scaffolds are written, not derived: an exception to D5, D24, D57 and Appendix B.1. Per card the agent writes a module `<package>/src/target_states/tsNNNN.rs` and a thin target `<base>_tsNNNN_statelens.rs` (Appendix B.6); the script owns `target_states/mod.rs` (the helper template and the `pub mod` lines), its anchored declaration in `<package>/src/lib.rs`, and the `[[bin]]` block, the base's renamed (Appendix B.2). The name keeps the `<profile>_` prefix and the `_statelens` suffix, so `just run`, the refusal of section 7.1, `clean` and `--targets` keep working. Bases with `fuzz_mutator!` are excluded. D15 and the Byzantine guard apply. | R-TS-SC-1, R-TS-SYN-4, R-P2-4 |
+| D62 | `synthesize` is a step of its own, run after a campaign of the same profile on the checkout it instrumented. It never instruments: it adds no probe, assertion or ghost state. Its edits follow the edit contract (R-TS-SYN-3, section 18.6.1), whose guards 1 to 3 compare the tree with a baseline that the campaign's first synthesis takes and every later one reuses. Its agent runs with Phase 2 permissions (D4), as a second role with its own scope (amends R-INS-7). Pairs of a card and a base are synthesized one at a time, because they share one crate. qmdb is refused. | R-TS-SYN-1 to R-TS-SYN-4 |
+| D63 | Scaffolds are written, not derived: an exception to D5, D24, D57 and Appendix B.1. Per pair (card, base) the agent writes a module `<package>/src/target_states/tsNNNN_<base>.rs` and a thin target `<base>_tsNNNN_statelens.rs` (Appendix B.6): a card yields one scaffold per selected base, and the agent chooses no base; the script owns `target_states/mod.rs` (the helper template and the `pub mod` lines), its anchored declaration in `<package>/src/lib.rs`, and the `[[bin]]` block, the base's renamed (Appendix B.2), which it writes after the agent's attempt; the agent adds the same block only for its own build and removes it again (section 18.7). The name keeps the `<profile>_` prefix and the `_statelens` suffix, so `just run`, the refusal of section 7.1, `clean` and `--fuzz-targets` keep working. Bases with `fuzz_mutator!` are excluded. D15 and the Byzantine guard apply. | R-TS-SC-1, R-TS-SYN-4, R-P2-4 |
 | D64 | Knobs are the first K <= 16 bytes of the base input's own `raw_bytes`, zero-padded. A knob is `domain[byte % len]` with the source value as `domain[0]`, so the empty input is the canonical input and decodes to the source history. The input type, the `run` recipe and the libFuzzer flags are the base's; there is no seed corpus. | R-TS-SC-2, R-TS-NF-1 |
 | D65 | One stage per History event. A stage is held only through a witness record that binds every entity of its line, from an `exact`, `intrinsic` or `construction` witness, and the script recomputes the records and rejects those that do not establish the line. Positions come from the event sequence (D61), and the helper takes them itself, for a stamped entry and for an action it performs, so order checks are strict, and an incarnation is named by the position of the restart that began it. A held stage adds the feature `(site_hash("TS-NNNN"), k, 0)`. The first miss closes the scripted prefix, except in the control run, and the input continues into the base's free-running phase and every oracle. Handoff comes before recovery: the target state is witnessed at the handoff instant, by a fresh read of `En`'s witness inside the handoff call, with every fault the prefix opened still in place, and those faults are released in the continuation, no later than the base's first heal. | R-TS-SC-3, R-TS-SC-4, R-TS-FB-2 |
 | D66 | The reach check replays fixed inputs and does not fuzz: the canonical empty input, a control run that withholds one harness event, and a final canonical replay, each in individual-file mode with no corpus and no flags (a carve-out from D23 and R-P3-1). The agent builds its scaffold but never runs it: only these replays judge a version, and a crash file any other run leaves is kept as a finding candidate. Verdicts are reported only: every scaffold that passes the vetoes and builds, and that guard 5 does not restore, is fuzzed. Every failure of a replay is a finding candidate. Where it happened is diagnostic context only; the one failure attributed to the scaffold is an error the helper itself raises with `[statelens-scaffold]`, before any engine starts. | R-TS-SYN-5, R-TS-SYN-6 |
-| D67 | Up to `REPAIR_ATTEMPTS` (3) further agent attempts per card, driven by the verdict and its stage lines. Automatic repair covers only explicitly identified scaffold errors and the outcomes that are not failures. A finding candidate stops refinement for its card, and that version is kept and fuzzed, never replaced by one that avoids the failure; if guard 5 restores it, its failure stays a finding candidate. Otherwise the best built version is kept. This is not iterative state discovery: there is no frontier. | R-TS-SYN-7 |
-| D68 | `just fuzz simplex --state-reaching` and `just fuzz marshal --state-reaching` run the campaign (unless `--skip-campaign`), `synthesize`, and then the scaffolds only, through the existing sequential, `--parallel` and `--tmux` branches, in the session `statelens-<profile>-reach`. `--targets` selects candidate bases and card ids, and each card yields one scaffold. Unknown flags are refused (amends R-P2-5). | R-TS-P3-1, R-TS-P3-2 |
+| D67 | Up to `REPAIR_ATTEMPTS` (3) further agent attempts per pair, driven by the verdict and its stage lines. Automatic repair covers only explicitly identified scaffold errors and the outcomes that are not failures. A finding candidate stops refinement for its pair, and that version is kept and fuzzed, never replaced by one that avoids the failure; if guard 5 restores it, its failure stays a finding candidate. Otherwise the best built version is kept. This is not iterative state discovery: there is no frontier. | R-TS-SYN-7 |
+| D68 | `just fuzz simplex --state-reaching` and `just fuzz marshal --state-reaching` run the campaign (unless `--skip-campaign`), `synthesize`, and then the scaffolds only, through the existing sequential, `--parallel` and `--tmux` branches, in the session `statelens-<profile>-reach`. `--state-targets` selects card ids (`TS-0003`) and `--fuzz-targets` candidate bases, both repeatable and both forwarded as `--match`; a pattern of the other flag's form is refused, `--state-targets` needs `--state-reaching`, and each selected card yields one scaffold per selected base, every candidate base without `--fuzz-targets`. Unknown flags are refused (amends R-P2-5). | R-TS-P3-1, R-TS-P3-2 |
 
 ### 18.3 Target-state registry
 
@@ -3909,20 +4827,23 @@ hand. Every card is active: a synthesis of profile `P` uses every card of
 | `## History` | yes | The events that reach the state, below. |
 | `## Knobs` | yes | `None.`, or the table below. |
 | `## Observation hints` | no | Functions, types, tests and INV ids that implement or watch the events. No line numbers and no probe labels. |
-| `## Source excerpts` | generated | As in section 4.3. |
+| `## Source excerpts` | generated | As in section 4.3, with the same note, which says "this invariant". |
 
 **History.** Events `E1.` to `En.`, numbered from 1 without a gap. Each starts with its actor
 and a colon: `harness` for what the scaffold does (configure, deliver, crash, script a
 Byzantine replica), or the name of the honest replica that acts. It names the entities it
 involves by short names: replicas (`R`, `B`), views (`v`, `p1`), payloads (`d`), certificates
-and incarnations. Each of `E1` to `E(n-1)` is followed by one indented `Check` line, what is
+and incarnations. A replica's name starts with a capital letter and every other entity's with a
+small one: the reach check treats an actor other than `harness`, and an entity whose name
+starts with a capital letter, as a replica (section 18.8). Each of `E1` to `E(n-1)` is followed by one indented `Check` line, what is
 observable once the event happened; `En` is followed by one indented `Holds` line, the target
 state as it holds at handoff. Each such line starts with the entities it binds, in parentheses.
 `x as Ek` is the value event `Ek` bound to `x`; a name without `as` is existential, "for some
 x", and the stage that witnesses the line binds it. An optional last line, `Order: Ei and Ej
-in either order`, with more pairs separated by `;`, frees those pairs; every other pair of
-events happens in numbered order. A line may continue on lines indented by four spaces that
-start with neither `Check` nor `Holds`. For example:
+in either order`, with more pairs, each of that form, separated by `;`, and an optional final
+period, frees those pairs; every other pair of events happens in numbered order. A line may
+continue on indented lines (the template indents by four spaces) that start with neither
+`Check` nor `Holds`. For example:
 
 ~~~
 E4. harness: as B, sends R a notarize vote for payload d in view v under a header that
@@ -3945,13 +4866,20 @@ rules apply to cards only:
 
 12. History: events numbered `E1.` to `En.` without a gap, n >= 1, each at the start of a line,
     starting with an actor and a colon, the actor being `harness` or a name in the event's own
-    entity list; exactly one indented `Check (` line after each of `E1` to `E(n-1)` and one
+    entity list that starts with a capital letter, as a replica's does; exactly one indented
+    `Check (` line after each of `E1` to `E(n-1)` and one
     indented `Holds (` line after `En`; every entity list non-empty, each entry a name
     (`[A-Za-z][A-Za-z0-9]*`) optionally followed by ` as E<k>`; every `as Ek` names an earlier
     event whose own entity list holds that name; and at most one `Order:` line, the last,
-    naming only defined events.
+    starting at the beginning of a line,
+    whose pairs, separated by `;`, each read `Ei and Ej in either order`, a final period
+    allowed, and name only defined events. A line indented by any whitespace that starts with
+    neither `Check` nor `Holds` continues the line above it, unless it starts with `Order:`,
+    which is a problem. Whether an entity other than an actor that names a replica starts
+    with a capital letter is for review.
 13. Knobs: `None.`, or a table with exactly the header `| Knob | Event | Domain | Source value |`
-    and 1 to 16 rows with no empty cell, whose Event cells name only defined events.
+    and a separator row of four cells, such as `|---|---|---|---|`, and 1 to 16 rows of four cells with no empty
+    cell, whose Event cells each name at least one event and only defined events.
 
 `just check-invariants` lints the cards with the invariants, with the same exit codes. Whether
 a domain holds two values, a line is observable, or a History is causal is for review.
@@ -4054,8 +4982,8 @@ E4. harness: as B, sends R a notarize vote for payload d in view v under a heade
     Check (R as E1, v as E1, d, p1 as E2): R is verifying the proposal of d for v under
     the header that names p1.
 E5. R: rejects that proposal and signs a nullify vote for v.
-    Check (R as E1, v as E1, d as E4): R's verification of d for v under the header that
-    names p1 failed, and R broadcast its nullify vote for v.
+    Check (R as E1, v as E1, d as E4, p1 as E2): R's verification of d for v under the header
+    that names p1 failed, and R broadcast its nullify vote for v.
 E6. harness: delivers to R a notarization of d for v under a header that names p2, signed
     by B and the two other honest replicas.
     Check (R as E1, v as E1, d as E4, p2 as E2): R holds that notarization and did not sign
@@ -4069,7 +4997,7 @@ Order: E5 and E6 in either order.
 | Knob | Event | Domain | Source value |
 |---|---|---|---|
 | p1, p2, v | E1-E3 | (1, 2, 3), (2, 3, 4), (5, 6, 7); the elector is pinned so that B leads v | (1, 2, 3) |
-| E5 against E6 | E5-E6 | E5 first; E6 first, while R's verification is still pending | E5 first |
+| E5 against E6 | E5-E6 | E5 first; E6 first, while R's verification is still pending, so R drops the stale rejection and signs its nullify vote on a timeout | E5 first |
 | block of v | E4 | before E4; after E6; never, so R fetches it | before E4 |
 | pause between harness actions | E3-E6 | 250, 0, 500, 1000 ms | 250 ms |
 
@@ -4079,12 +5007,13 @@ inline adapters; State::add_notarization and the certification candidates of the
 state. INV-0044 (E5), INV-0047 (E7), INV-0013 (after E7).
 ~~~
 
-The first cards are TS-0001; TS-0002, extracted from the `test` source
-`consensus/src/marshal/standard/mod.rs:7027`, inside
+The first cards, written by hand as `extract-states` writes a card, are TS-0001; TS-0002, from
+the `test` source `consensus/src/marshal/standard/mod.rs:7027`, inside
 `test_standard_finalized_delivery_rejects_epoch_mismatch`; TS-0003, from the `test` source
 `consensus/src/simplex/mod.rs:3260`, `all_crash_after_nullify`; and TS-0004, a simplex card
-extracted from a `text` and moved to the tracked registry by hand: R votes nullify in v, a
-notarization of v reaches R, and R dispatches certification of v. TS-0004 is expected to be
+from a `text`, which would go to the local registry and is tracked by hand: R votes nullify in
+v, a notarization of v reaches R, and R dispatches certification of v. TS-0002 to TS-0004 pin
+their citations at `8a0d2cef732b`. TS-0004 is expected to be
 REACHED, with an `exact` witness for its last event (section 18.10) and seq-stamped evidence
 for R's nullify vote too, from a transparent recording wrapper around R's reporter or vote
 sender in `target_states/`: the reporter's `nullifies` map read after the run gives presence
@@ -4097,19 +5026,20 @@ only, which cannot order the vote (section 18.7).
 differences.
 
 **Kinds.** Those of section 6.1, and two that only `--states` accepts; without it they exit
-with code 1, as `--states` does with `--registry qmdb`:
+with code 1, as `--local` does without `--states`, and `--states` with `--registry qmdb`:
 
 | Kind | Source syntax | How the agent reads it |
 |---|---|---|
-| `test` | `path:line` or `path:start-end` under the registry's source (section 6.1) or the fuzz package of its profile (section 5.5); any other path exits with code 1 | The enclosing test, its helpers and the code it drives. The History follows the calls that build the state, and the test's assertions on the outcome are dropped. An incidental choice becomes a knob or is dropped (rule S7 of `consensus/fuzz/marshal/src/scenarios/specs/SPEC.md`). A message the test puts straight into a mailbox becomes the protocol event that delivers the same input. |
-| `text` | A file, or a literal that the script writes to `SL/extract/<UTC timestamp>-text.txt` for the agent to read | `source_ref` is `text: <title>` or the file's path, never the copy in `extract/`. Evidence quotes the passages that define the History verbatim, at most about 40 lines, and summarizes the rest. Every event is confirmed against the code or dropped. |
+| `test` | `path:line` or `path:start-end` in a file under the registry's source (section 6.1) or the fuzz package of its profile (section 5.5); any other path, a line outside the file, a start after the end, or a file that `HEAD` does not have exits with code 1: a card cites its test at the commit the agent pins, so an untracked or merely staged test is committed first or given as `text` | The enclosing test, its helpers and the code it drives. The History follows the calls that build the state, and the test's assertions on the outcome are dropped. An incidental choice becomes a knob or is dropped (rule S7 of `consensus/fuzz/marshal/src/scenarios/specs/SPEC.md`). A message the test puts straight into a mailbox becomes the protocol event that delivers the same input. |
+| `text` | A file, or a literal that the script writes to `SL/extract/<UTC timestamp>-text.txt`, or `-text-<n>.txt` when a run has several, for the agent to read. A source that is not a file and holds no whitespace exits with code 1 ("quote a text"): it is a mistyped path or a text that was not quoted | `source_ref` is `text: <title>` or the file's path, never the copy in `extract/`. Evidence quotes the passages that define the History verbatim, at most about 40 lines, and summarizes the rest. Every event is confirmed against the code or dropped. |
 
 For the other kinds: an `issue` card's `source_ref` is the URL with the merge commit, or with
 the head commit of a pull request not merged yet, which is extracted again after the merge to
 pin its tests. Its Evidence pins the code the History runs against, normally `HEAD`; for a fix,
 the target state is the precondition the bug needed, and the tests the pull request adds are
 the main material. With `--states` a `kb` source may also be one finding identifier, resolved
-as `kb show` resolves it. A `comment`, `design`, `spec` or `paper` source describes a protocol
+as `kb show` resolves it; an unknown identifier, or one out of the registry's scope, exits with
+code 1, as `kb show` does. A `comment`, `design`, `spec` or `paper` source describes a protocol
 situation, each event of which is confirmed against the code.
 
 **Routing by disclosure.** A card goes to `SL/target-states.local/<registry>/` when its source
@@ -4135,7 +5065,7 @@ prints how many cards are tracked and how many local.
 
 **Prompt.** `prompts/state-analyst.md`, rendered alone with the placeholders of section 6.2
 step 5, where `TEMPLATE` is `templates/target-state.md`, `NEXT_ID` comes from the `TS`
-counter, `DESTINATION` is the card tree, and `CONTEXT` is
+counter, `DESTINATION` is the card tree, `COUNT` is worded for cards, and `CONTEXT` is
 `prompts/subsystems/<registry>-analyst.md`. Its sections cover what a target state is (a state
 of honest replicas that only a specific history reaches, never a property and never an
 oracle); how to read each kind (the table above); what is essential and what incidental (would
@@ -4146,11 +5076,11 @@ for); the History format (an actor per event, the entities and their relations i
 hints, never an event the protocol cannot produce); and the output (one file per state in
 `DESTINATION`, IDs from `NEXT_ID`, at most `COUNT`, citations pinned at `COMMIT`, no Source
 excerpts, modelled on `SL/target-states/marshal/TS-0001.md`; zero cards is a valid result). Its
-verbatim copy is section 13.20, added with the file.
+verbatim copy is section 13.20.
 
-**Checks.** Steps 7 to 9 of section 6.2, over the card trees: an existing card modified, a new
-file outside the destination, more than `--number` new files, and a worktree change outside
-`SL/target-states/`, `SL/target-states.local/`, `SL/extract/` and `SL/campaign/` are problems.
+**Checks.** Steps 7 to 9 of section 6.2, over the four registry trees: an existing card or
+invariant modified, a new file outside the destination, more than `--number` new files, and a
+worktree change outside those trees, `SL/extract/` and `SL/campaign/` are problems.
 The new cards get their Source excerpts and are linted with rules 1 to 13, and the reminder
 reads "Every card is used by the next synthesis of its profile. Review, edit or delete these
 files first.", with the note of section 6.2 step 9 for local cards. The exit codes are those of
@@ -4180,51 +5110,95 @@ procedures refer to R-TS-SYN-3 rather than restate what an edit may do.
   wrappers, witness helpers. It never adds a counter feature, an assertion or ghost state; those
   come only from the campaign.
 - **Guards.** The script enforces these six. Whether an edit preserves what the protocol does
-  is enforced by the prompt, which quotes R-TS-SYN-3 and the guards, by the test gate, and by
-  review of the card's diff. Guards 1 to 3 are evaluated on the cumulative difference between
-  the tree and the baseline `B`, which the campaign's first synthesis takes and stores, and
-  every later synthesis of the campaign loads, so it never changes (section 18.6.2): before
-  any card, after every attempt, again on the kept version right before it is built for
-  fuzzing, and once more over the whole tree when synthesis finishes. No guard is evaluated
-  against an attempt's snapshot, so a change an earlier attempt, or an earlier synthesis, left
-  in place is judged in every later attempt as if that attempt had made it.
+  is enforced by the prompt, which quotes R-TS-SYN-3 and restates the guards in the agent's
+  terms, by the test gate, and by review of the pair's diff. Guards 1 to 3 are evaluated on the
+  cumulative difference between the tree and the baseline `B`, which the campaign's first
+  synthesis takes and stores, and every later synthesis of the campaign loads, so it never
+  changes (section 18.6.2). `B`, its test inventory (guard 5), the content the script last
+  wrote to its own files and the campaign's `instrumentation.diff` lie in `SL/campaign/`, which
+  git ignores and an agent can write, so a synthesis reads them once, before `--redo` and
+  before any pair, and compares only with those copies in memory. After every run of the agent,
+  an interrupted one included, and when the synthesis ends, since the scaffolds the agent wrote
+  run in the replays and the test gate after its last run, the script writes back from those
+  copies, with a warning, each of these files that changed, and rewrites the baseline's index,
+  `state.json`, so the next synthesis loads them unchanged. The guards are evaluated: before any
+  card, after every attempt, again on the kept version right before it is built for fuzzing, and
+  once more over the whole tree when synthesis finishes. No guard is evaluated against an
+  attempt's snapshot, so a change an earlier attempt, or an earlier synthesis, left in place is
+  judged in every later attempt as if that attempt had made it.
   1. Scope: a change outside the paths above and `Cargo.lock` stops synthesis with exit code 2
-     ("synthesis edited <path>; use a fresh clone"), after the card's edits inside them are
-     restored.
-  2. Manifests: no dependency changes, in any `Cargo.toml`. The package manifest, `Cargo.lock`,
-     `target_states/mod.rs` and the declaration line in `<package>/src/lib.rs` are the
-     script's, and are compared with the content the script itself last wrote there, which it
-     stores with `B`, or with `B` where it wrote nothing; an agent's edits to them are
-     restored, with feedback, and the version is not built.
+     ("synthesis edited <path>; use a fresh clone"), after the pair's edits inside them are
+     restored. A path under `SL/` is compared with its state when the run started rather than
+     with `B`, because the operator edits cards and prompts between syntheses; every other
+     path is compared with `B`.
+  2. Manifests: no `Cargo.toml` under the paths above changes, so no dependency is added. The
+     package manifest, `Cargo.lock`, `target_states/mod.rs` and the declaration of
+     `target_states` in `<package>/src/lib.rs` are the script's, and are compared with the
+     content the script itself last wrote there, which it stores with `B`, or with `B` where
+     it wrote nothing; a `Cargo.lock` that the script's own build updated counts as the
+     script's write, and the declaration is compared by its structure: its lines directly
+     after the anchor, and no other `pub mod target_states;` line. Any other `Cargo.toml` is
+     compared with `B`. An agent's edits to these files are restored, with feedback, and the
+     version is not built; the declaration is restored by inserting it again.
   3. Instrumentation integrity: no `sl_probe!`, `sl_assert!` or `sl_implies!` call added,
-     removed or changed, compared per file with `B` as the multiset of call texts, so a call
-     that only moves within its file is unchanged; every non-blank line that
-     `SL/campaign/instrumentation.diff` adds still in its file, compared per file as a
+     removed or changed, compared per file with `B` as the multiset of call texts, without
+     whitespace or a trailing comma, so a call that only moves within its file, or is only
+     reformatted, is unchanged; every non-blank line that `SL/campaign/instrumentation.diff`
+     adds to a file under the paths above still in its file, compared per file as a
      multiset with surrounding whitespace ignored, so no ghost update, field marked
      `// [statelens]` or runner hook (Appendices B.5 and F) is removed or changed; the
      runtime module byte-identical to `B`, because the witness checks rely on its trace, so
      observation code lives elsewhere, and its declaration, with the attribute lines directly
-     above it, as in `B`, with no `#[path` attribute added under the editable roots; no call
+     above it, as in `B`; no call
      of `with_ghost`, `with_global`, `record`, `note`, `violation`, `reset` or
      `clear_compromised` added outside `target_states/mod.rs` and the scaffold thin targets,
      each of the shape step 2.4 checks, under the editable roots or in the fuzz package; no
-     call of `set_compromised` added outside `target_states/`; no call of `tick` added outside
-     `target_states/mod.rs`; no call of the read side (section 9.6) added under the editable
-     roots; and no `[statelens-reach]` or `[statelens-scaffold]` literal outside
-     `target_states/mod.rs`. A breach is a veto, with feedback. The script does not restore
+     call of `set_compromised` added outside `target_states/`; no call of `tick`, `watch` or
+     `unwatch` added outside `target_states/mod.rs`, because a new trace would drop the
+     truncation the helper checks; no call of the read side (section 9.6) added under the
+     editable roots; no `[statelens-reach]` or `[statelens-scaffold]` literal, outside comments,
+     added outside `target_states/mod.rs`; no print macro (`print!`, `println!`, `eprint!`,
+     `eprintln!`), `stdout(` or `stderr(` handle, `from_raw_fd`, panic hook (`set_hook`,
+     `take_hook`), include macro (`include!`, `include_str!`, `include_bytes!`) or `#[path`
+     attribute, outside comments and string literals, added to a Rust file other than
+     `target_states/mod.rs`, because a print can forge a helper line however its literal is
+     spelled, a panic hook can swallow an assertion's panic, and an included file or a
+     `#[path]` module can hold code the guards never read; and no Rust file that git ignores
+     under the editable roots or the package's `src/` and `fuzz_targets/`, because cargo
+     compiles it out of sight of git: the repository's `.gitignore` ignores every path named
+     `target`, so a module named `target` is one. A call counts when the code reaches the
+     function through the runtime module, as section 7.5 step 4 defines it, and the counts
+     are compared per file with `B`. These are text checks; section 18.11 says what they
+     miss. A breach is a veto, with feedback. The script does not restore
      it, and it stays a breach, vetoed again with the same feedback, in every later attempt
      that still contains it, until the agent reverts it.
-  4. Marker: every changed hunk of the card's diff against `S0` outside the card's module and
+  4. Marker: every changed hunk of the pair's diff against `S0` outside the pair's module and
      thin target carries the comment `// [statelens] tss:TS-NNNN`. A hunk without it is
-     annotated `unmarked edit`, for review.
-  5. Test gate: when the kept version of a card changed a file under the editable roots, the
-     script runs the profile's test gate (section 7.7) again; a test that passed in the
-     campaign's gate (`SL/campaign/logs/test.log`) and now fails or no longer runs restores the
-     card's edits and records GATE FAILED.
-  6. Restore: on NOT BUILT and GATE FAILED the card's edits are restored on every path. `just
-     clean` restores the editable roots and the fuzz packages, but not the `corpus/`,
-     `artifacts/` and `coverage/` that git ignores there, so it also deletes `target_states/`
-     and the thin targets.
+     annotated `unmarked edit`, for review. A hunk whose changed lines are, or directly
+     neighbor, an `sl_probe!`, `sl_assert!` or `sl_implies!` call or a line the campaign
+     added is annotated `edit beside instrumentation`, for review, because such an edit can
+     disable an assertion it leaves unchanged, with `if false` or a `cfg`, which guard 3 does
+     not see.
+  5. Test gate: when the kept version of a pair changed a file under the editable roots, the
+     script runs the profile's test gate (section 7.7) again. The run passes only when its
+     output is usable and every test that fails, or that the inventory names and no longer
+     runs, is one the inventory records as failing; otherwise the pair's edits are restored
+     and GATE FAILED is recorded. Output is usable when, with ANSI escapes stripped, it has
+     exactly one nextest `Summary` line for a complete run of at least one test; its passed
+     count, and its failed, exec failed and timed out counts together, add up to the run
+     count and equal the tests whose last status line before the summary passes and the tests
+     nextest lists as failing after it; and the exit code is 0 exactly when no test failed. A
+     build failure, a cancelled run or any other unusable output fails the gate. The
+     inventory is the tests the gate passed and failed on the tree as the campaign left it,
+     taken with `B` (section 18.6.2).
+  6. Restore: on NOT BUILT and GATE FAILED the pair's edits are restored on every path. An
+     interrupt or another error also restores them, once the command it stopped is killed
+     with everything it started, and after the attempt's version, its replay outputs and a
+     note naming the step that stopped are kept (section 18.6.2). A synthesis
+     killed before it restored them is undone by the next one (section 18.6.2, Once per run).
+     `just clean` restores the editable roots and the simplex and marshal fuzz packages, but
+     not the `corpus/`, `artifacts/` and `coverage/` that git ignores there, so it also deletes
+     `target_states/`, the files git ignores there included, and the thin targets.
 
 #### 18.6.2 The step
 
@@ -4233,7 +5207,8 @@ procedures refer to R-TS-SYN-3 rather than restate what an edit may do.
 `SL/campaign/meta.json`.
 
 **Preconditions.** A usage error, `--profile qmdb` among them, exits with code 1, and a
-failed precondition with code 2:
+failed precondition with code 2. Usage errors and the preconditions that read `meta.json` are
+reported before the agent CLI is checked, an exception to section 12:
 
 - `SL/campaign/meta.json` names the profile, its `base` equals `HEAD`, and its invariants
   include no `FALSE-` ID, because a false invariant panics in every scaffold;
@@ -4242,7 +5217,9 @@ failed precondition with code 2:
   "this checkout predates the read side or was cleaned; use a fresh clone";
 - `SL/campaign/plan.md` exists;
 - the agent CLI and `cargo-fuzz` are on `PATH`;
-- the selection below is not empty (otherwise exit code 1), and its cards are lint-clean.
+- the selection below is not empty (otherwise exit code 1), and its cards are lint-clean;
+- `<package>/src/target_states/` does not exist unless `SL/campaign/reach/baseline/` does,
+  since an instrumented checkout without a baseline cannot be judged.
 
 The fuzz toolchain is the one `meta.json` records. Synthesis never instruments: it adds no
 probe, assertion or ghost state.
@@ -4250,91 +5227,187 @@ probe, assertion or ghost state.
 **Selection.** One function serves `synthesize` and `targets --state-reaching` (section 18.9).
 
 - The cards are every `TS-*.md` of `SL/target-states/<profile>/` and
-  `SL/target-states.local/<profile>/`; synthesis prints `cards: <n> tracked, <m> local`.
+  `SL/target-states.local/<profile>/`; synthesis prints how many are tracked and how many
+  local (the `cards` line of the console below).
 - The candidate bases are the profile's targets (section 5.5), less those whose file contains
   `fuzz_mutator!`.
-- A pattern `TS-NNNN` names a card. Any other pattern names a base when it matches, as
-  `select_targets` matches, one of `<base>`, `<base>_statelens`, `<base>_tsNNNN` and
-  `<base>_tsNNNN_statelens`; with no such pattern every candidate base is selected. A card is
-  selected when no `TS-` pattern was given or one names it, and at least one base is selected.
-  The selected bases are its candidates, of which the agent picks one.
-- A card with a report, `SL/campaign/reach/TS-NNNN.md`, is skipped when the base of its
-  scaffold is selected, or its verdict was NOT BUILT or GATE FAILED. A card synthesized on a base
-  not selected prints "TS-NNNN was synthesized on <base>; use --redo" and is skipped too.
-- `--redo` first reverse-applies the diff of each selected card that has a scaffold,
-  `SL/campaign/reach/TS-NNNN.diff`, and drops the card's line from `target_states/mod.rs`; a
-  diff that does not apply cleanly exits with code 2. It then moves the card's reports to
-  `TS-NNNN.<stamp>.md`, `TS-NNNN.<stamp>.diff` and `TS-NNNN.<stamp>/`, so a preserved failure
-  is never deleted.
+- A pattern that starts with `TS-` is a shell pattern over card IDs (`TS-0003`, `TS-000*`).
+  Any other pattern names a base, for each card, when it matches, as `select_targets`
+  matches, one of `<base>`, `<base>_statelens`, `<base>_tsNNNN` and `<base>_tsNNNN_statelens`,
+  so `<base>_tsNNNN` selects that base for that card only; with no such pattern every
+  candidate base is selected. A card is selected when no `TS-` pattern was given or one names
+  it, and at least one base is selected for it. Each selected base makes a pair (card, base)
+  with it, and the pair is the unit of synthesis: a card on b selected bases yields b
+  scaffolds, and the agent chooses no base. The pairs run in card order, then in the order of
+  the bases' files.
+- A pair is named `TS-NNNN_<base>` wherever the script keeps something per pair: reports,
+  attempt directories, revalidation directories, the keys of `revalidation.json` and the
+  pending snapshot. A pair has a scaffold when its thin target `<base>_tsNNNN_statelens.rs`
+  exists; a report without one is the NOT BUILT or GATE FAILED case. A pair with a report,
+  `SL/campaign/reach/TS-NNNN_<base>.md`, is skipped, printing `skipped:` and one of "TS-NNNN
+  on <base> was synthesized as <scaffold>; use --redo" and "TS-NNNN on <base> was synthesized
+  without a scaffold; use --redo"; the card's other pairs are synthesized as usual.
+- `--redo` first reverse-applies the diff of each selected pair that has a report,
+  `SL/campaign/reach/TS-NNNN_<base>.diff`, in reverse selection order, less its sections for
+  the package manifest and `target_states/mod.rs`; a diff that does not apply cleanly exits
+  with code 2, unless it applies forward: an undo that an interrupt stopped before the pair's
+  reports moved already reverse-applied it, so it is not applied again, with a warning. It
+  then removes the pair's `[[bin]]` block from the manifest, by the scaffold's exact name, so
+  a sibling pair's block survives, and its line from `target_states/mod.rs`, because a block
+  that a later pair's block follows does not reverse-apply. It then moves the pair's reports
+  to `TS-NNNN_<base>.<stamp>.md`, `TS-NNNN_<base>.<stamp>.diff` and `TS-NNNN_<base>.<stamp>/`,
+  so a preserved failure is never deleted, and rewrites every path under
+  `SL/campaign/reach/TS-NNNN_<base>/` in the moved report and in its attempts' `replay.txt`
+  and `interrupted.txt` to `TS-NNNN_<base>.<stamp>/`, so their lines still name the files they
+  kept. It also moves `<package>/artifacts/<scaffold>/` of the pair's scaffold, the crash
+  files fuzzing wrote for the undone version, to `TS-NNNN_<base>.<stamp>/artifacts/<scaffold>/`;
+  the scaffold's corpus stays. Then it synthesizes the pair again. An attempt directory
+  `TS-NNNN_<base>/` left without a report, by an interrupted synthesis, is moved and rewritten
+  the same way before the pair is synthesized. When an undone diff changed a file other than
+  its thin target, the package manifest, `target_states/mod.rs` and `Cargo.lock`, its own
+  module included, since the modules are public siblings of one crate and one can use
+  another's items, while the thin target is a crate of its own, which no module can use, the
+  script records the revalidation it owes in `SL/campaign/reach/revalidation.json`, under the
+  pair's name, once `git apply -R --check` accepts that diff and before it reverse-applies it,
+  and every scaffold whose report records a verdict (Once per run), the card's other pairs
+  included, is then, before any pair, built, logged to
+  `SL/campaign/logs/fuzz-build-<scaffold>-after-redo.log`, and replayed, canonical, control
+  and final, in `SL/campaign/reach/TS-MMMM_<b>/after-redo/`, and its report takes the new
+  verdict under `## Revalidation after --redo`, as revalidation does (Finish), with a warning
+  when it stands worse. No pair is rolled back for it. A scaffold that no longer builds gets
+  the verdict `NOT BUILT (no longer builds)`, with a warning; it is not revalidated again, and
+  the last check's build exits with code 2 unless a later pair's edits make it build. The
+  record is deleted once every scaffold is revalidated. A synthesis that stops before then, by
+  an interrupt or any other error, leaves the record, and says so when it stops during the
+  revalidation, so the next synthesis completes the revalidation before any pair, whatever it
+  selects and with or without `--redo`; until then, the reports keep their earlier verdicts.
 
 **Once per campaign.** The first synthesis after a campaign, the one that finds no
-`SL/campaign/reach/baseline/`, takes the baseline `B` before any card: the content of every
-file that git does not ignore under the editable roots and the fuzz package, and `Cargo.lock`,
-the file set of `S0` below, with the worktree state of section 6.2 step 2. It writes `B` to
+`SL/campaign/reach/baseline/`, takes the baseline `B` before any pair: the content of every
+file that git does not ignore under the editable roots and the fuzz package, of every Rust
+file that git ignores under the editable roots and the package's `src/` and `fuzz_targets/`
+(guard 3 vetoes those), and of `Cargo.lock`, the file set of `S0` below, with the worktree state of section 6.2 step 2. It writes `B` to
 `SL/campaign/reach/baseline/`, where the script also keeps the content it last wrote to each
 of its own files (guard 2), updated on every such write. Every later synthesis of the
 campaign, `--redo` included, loads `B` from there, so `B` never changes; a new campaign
 recreates `SL/campaign/`, which discards it. Guards 1 to 3 are evaluated against `B` (section
-18.6.1).
+18.6.1). With `B` it takes guard 5's test inventory, `SL/campaign/reach/baseline/tests.json`:
+the tests passed and failed in the campaign's `logs/test.log` when that log begins with this
+gate's command line and its output is usable (section 18.6.1, guard 5; a campaign that ended
+`READY` exited 0, one that ended `PANIC (tests)` did not). Otherwise it runs the test gate once
+on the tree as the campaign left it, logged to `SL/campaign/logs/test-baseline.log`, and keeps
+that run's inventory; unusable output there exits with code 2 before any pair. When the
+campaign ended `READY`, a test that fails in that run contradicts the campaign's own gate, a
+flaky or killed test, and it also exits with code 2 before any pair, so the inventory never
+excuses it. A baseline without `tests.json` exits with code 2.
 
-**Once per run.** Before `--redo` reverse-applies a diff and before any card, the script checks
+**Once per run.** First, a `SL/campaign/reach/pending/` whose pair has no report is the `S0` of
+a synthesis that stopped without restoring that pair's edits, killed for example: the script
+restores it and drops the pair's line from `target_states/mod.rs`, with a warning, then deletes
+`pending/`, and a revalidation record the pair wrote (Finish) stays; one whose pair has a
+report is only deleted, and one that cannot be read, or names no pair, exits with code 2. Then, before `--redo` reverse-applies a diff and before any pair, the script checks
 guards 1 to 3 against `B`; a failure exits with code 2 ("the checkout differs from the
-synthesis baseline: <path>; use a fresh clone"), so a breach an earlier synthesis left
-behind, such as an out-of-scope edit or a killed attempt's, never passes. The script then
-inserts the declaration of section 5.5 after the profile's anchor, unless it is there; a
-missing or repeated anchor exits with code 2. It writes `SL/campaign/reach/empty`, a file of 0
-bytes.
+synthesis baseline: <path>; use a fresh clone"), so a breach an earlier synthesis left behind,
+such as an out-of-scope edit, never passes. The script then inserts the declaration of section
+5.5 after the profile's anchor, unless it is there; a missing or repeated anchor exits with
+code 2. It writes `SL/campaign/reach/empty`, a file of 0 bytes. After `--redo` and before any
+pair, it reads the report of every scaffold in the package whose card exists, for revalidation
+(Finish), and keeps them in memory, each under its pair's name; a scaffold without a card or
+without a report that records a verdict is not revalidated, with a warning. It then completes
+the revalidation `revalidation.json` records, this run's `--redo`'s or one an earlier synthesis
+left, after an undo or a rollback (Finish), and deletes the record; a record that cannot be
+read exits with code 2. A record that holds more than one kind, `--redo` with the last check or with a
+rollback, revalidates once, under a joined heading such as `## Revalidation after the last
+check and --redo`.
 
-**Per card.** Cards run one after another, because they share one crate. For each, in a block
-that, on an interrupt, restores `S0` and drops the card's line from `target_states/mod.rs`
-before exiting:
+**Per pair.** Pairs run one after another, because they share one crate; two pairs of one
+card are two transactions, each with its own module, thin target, attempts, build, replays,
+verdict and report. For each, in a block that, on an interrupt or any other error, first kills
+the command that was running (the agent, a build, a replay or the test gate) with everything
+it started, then preserves what the attempt holds, then restores `S0` and drops the pair's
+line from `target_states/mod.rs` before exiting; a revalidation record the pair wrote (Finish)
+stays, with a line that says so. Every command the script runs is in its own process group, so the kill reaches what the
+command started and the terminal's interrupt reaches the script alone, which kills the
+command; a `SIGTERM` or a `SIGHUP` to the script takes the same path. Preserving does three
+things. It sweeps what a run of the scaffold left while the agent ran (step 2.2). It keeps the
+version a stray failure came from, unless it is already kept; when synthesis stops during an
+attempt's run or its sweep, the attempt's stray failures are the failures in its `swept/`,
+those a sweep that stopped had already moved included. It writes
+`SL/campaign/reach/TS-NNNN_<base>/attempt-<a>/interrupted.txt`: the step that stopped and why, where the
+kept version is, and the exit code of each replay that finished, with the `run` and `replay`
+lines of one that failed, and of one that stopped after it left a crash file, and, when a
+revalidation (step 3) stopped, its directory and the crash files its replays left there. The
+replays' crash files and logs stay in `attempt-<a>/`; during step 3, `<a>` is the kept
+version's attempt:
 
 1. Write `target_states/mod.rs`: the template `SL/runtime/target_states.rs`, then a
-   `pub mod tsNNNN;` line for every module in the directory and this card's. Then snapshot
-   `S0`: the content of every file that git does not ignore under the editable roots and the
-   fuzz package, and `Cargo.lock`. Restoring a snapshot rewrites those files and deletes the
-   files created under the same paths since, ignored ones excepted. `S0` is what the card's
-   restores return to and what its diff is taken against; no guard is evaluated against it.
+   `pub mod tsNNNN_<base>;` line for every module in the directory and this pair's. Then snapshot
+   `S0`: the file set of `B` above. Restoring a snapshot rewrites those files and deletes the
+   files created under the same paths since, ignored ones other than those Rust files excepted;
+   a symbolic link an edit put at one of those paths is removed, never written through, and
+   nothing is written below a directory a link replaced, with a warning, since guard 1 names
+   that directory. `S0` is what the pair's restores return to and what its diff is taken against; no guard is
+   evaluated against it. `S0` is kept in `SL/campaign/reach/pending/`, the pair's name, its file
+   list and a copy of each file that differs from `B`, written aside and renamed so that it is
+   whole or absent, until the pair's report is written or its edits are restored.
 2. For attempt `a` from 0 to `REPAIR_ATTEMPTS` (3):
-   1. Snapshot `Sa`, with the worktree state of section 6.2 step 2 and the files step 2.2
-      sweeps. `Sa` serves only the sweep and the stop rule of step 2.8; no guard is evaluated
-      against it. Render `prompts/synthesize.md` with the placeholders below, and run the agent
-      with the Phase 2 invocation (section 12); the prompt and the log are
-      `SL/campaign/prompts/synthesize-TS-NNNN-<a>.md` and
-      `SL/campaign/logs/synthesize-TS-NNNN-<a>.log`. A non-zero exit is a failed attempt and
-      becomes feedback; it does not stop synthesis.
+   1. Write the package manifest as it was in `S0`, so the agent always finds it without a
+      scaffold block. Snapshot `Sa`, with the worktree state of section 6.2 step 2 and the
+      files step 2.2 sweeps. `Sa` serves only the sweep and the stop rule of step 2.8; no
+      guard is evaluated against it. Render `prompts/synthesize.md` with the placeholders
+      below, and run the agent with the Phase 2 invocation (section 12); the prompt and the
+      log are `SL/campaign/prompts/synthesize-TS-NNNN_<base>-<a>.md` and
+      `SL/campaign/logs/synthesize-TS-NNNN_<base>-<a>.log`. A non-zero exit is a failed attempt and
+      becomes feedback; it does not stop synthesis. Its tree is still swept and checked, so
+      guard 1 still stops synthesis, and its version is vetoed, never built.
    2. Sweep what a run of the scaffold left during the attempt, the files of these kinds that
       `Sa` does not list: untracked `crash-*`, `oom-*`, `timeout-*`, `leak-*` and `slow-unit-*`
       files anywhere in the worktree, and entries of `<package>/corpus/<scaffold>/` and
       `<package>/artifacts/<scaffold>/`, which git ignores, so the scope check cannot see
-      them. They are moved, never deleted, to `SL/campaign/reach/TS-NNNN/attempt-<a>/swept/`, with a warning. The
+      them, and, since the sweep looks for every `*_tsNNNN_statelens` of the card, those of
+      a sibling pair's scaffold that the run left. They are moved, never deleted, to
+      `SL/campaign/reach/TS-NNNN_<base>/attempt-<a>/swept/`, with a warning. The
       agent never runs its scaffold (section 18.7), so a `crash-*`, `oom-*`, `timeout-*` or
       `leak-*` file among them is a finding candidate, annotated `stray failure`: refinement
-      of the card stops after this attempt, and the attempt's verdict is CRASH (finding
+      of the pair stops after this attempt, and the attempt's verdict is CRASH (finding
       candidate) when its version passes the vetoes and builds; otherwise the file stays a
       finding candidate in `swept/`.
-   3. Check guards 1 to 3 on the cumulative difference between the tree and `B`, and guard 4
-      on the card's diff against `S0`.
+   3. An attempt after the first that changed no file and left no stray failure is not
+      checked or built again: its tree is the one the previous attempt was judged on, and it
+      ends the pair (step 2.8), recorded as "no change, which ends the pair". Otherwise check
+      guards 1 to 3 on the cumulative difference between the tree and `B`, and guard 4 on the
+      pair's diff against `S0`.
    4. Vetoes. Each becomes feedback, and the version is not built: guard 2 or 3, against `B`,
-      so a guard 3 breach an earlier attempt made is vetoed again while it remains; not exactly
-      one thin target `<base>_tsNNNN_statelens.rs` with a candidate as `<base>`, or a scaffold
-      thin target in the package, this card's or an earlier card's, whose `fuzz_target!` body
-      is not the three statements of Appendix B.6; the cryptography check of D15 (section
-      7.2, or section 8.4 for marshal) failing for the thin target, or the module naming a
-      Simplex type whose scheme is not `cert_mock`; and the guard rule of section 18.7 failing: a Shape B module that never
-      calls `set_compromised`, or a Shape A module on a base that runs a real engine under a
-      Byzantine identity without a hook.
+      so a guard 3 breach an earlier attempt made is vetoed again while it remains; no thin
+      target `<base>_tsNNNN_statelens.rs` for the pair's base, or a new thin target of the card
+      on another base, or a scaffold thin target in the package, this pair's or another's,
+      whose `fuzz_target!` body is not the three statements of Appendix B.6; no module
+      `tsNNNN_<base>.rs`, or a module whose header does not name the card, the pair's base and
+      a shape; the cryptography
+      check of D15 (section 7.2, or section 8.4 for marshal) failing for the thin target, or,
+      for simplex, the module naming a Simplex type whose scheme is not `cert_mock`; and a
+      Shape B module that never calls `set_compromised` (the guard rule of section 18.7). The
+      Shape A half of that rule needs no veto: a Shape A module calls its base's entry, whose
+      runner keeps the hook the campaign installed (Appendices B.3 to B.5 and F), because
+      guard 3 keeps every line the campaign added. `BASE_DETAILS` tells the agent whether the
+      pair's base is hooked, from the runner its `fuzz_target!` calls.
    5. Manifest: the script writes the package manifest as it was in `S0`, with the scaffold's
       block, the base's renamed (Appendix B.2).
    6. Build: `cargo +<fuzz toolchain> fuzz build --fuzz-dir <package> <scaffold>`, logged to
       `SL/campaign/logs/fuzz-build-<scaffold>-<a>.log`. A failure becomes feedback: the command
-      and its last 150 lines.
-   7. Reach check (section 18.8). The version, every path it changed since `S0`, is kept with
-      its verdict. Only a version that passed guards 1 to 3 against `B` gets here, so only such
-      a version can be kept.
-   8. Stop at REACHED, at a CRASH (finding candidate), after an attempt that changed no file,
-      and after the last attempt. Otherwise the feedback of section 18.8 goes to the next
-      attempt.
+      and its last 150 lines. The agent runs the same command during its attempt (section
+      18.7); since the manifest has no scaffold block then, the prompt tells it to add the
+      block for its build and remove it again, leaving the manifest as it found it, which
+      guard 2 checks.
+   7. Reach check (section 18.8). Before the canonical replay, the script keeps the version as
+      built in `attempt-<a>/`: `version.diff`, its diff against `S0`, and `version/`, a copy of
+      every file it created or changed. An attempt that left a stray failure keeps the version
+      it left the same way, right after the sweep. The version, every path it changed since
+      `S0`, is kept with its verdict. Only a version that passed guards 1 to 3 against `B` gets
+      here, so only such a version can be kept.
+   8. Stop at REACHED, at a CRASH (finding candidate), after an attempt that left a stray
+      failure (step 2.2), after an attempt that changed no file, and after the last attempt.
+      Otherwise the feedback of section 18.8 goes to the next attempt.
 3. Finish:
    - A CRASH (finding candidate) keeps the version that failed (D67). Otherwise the best built
      version is kept: by verdict, REACHED, UNVERIFIED, PARTIAL, UNREACHED, NO REPORT, then
@@ -4342,26 +5415,82 @@ before exiting:
      restored: `S0`, then every path it changed. Guards 1 to 3 are checked against `B` once
      more, right before the build for fuzzing; a guard 2 or 3 failure, which the checks of
      step 2.3 make impossible, restores `S0` and records NOT BUILT. The kept version is then
-     built again, and its canonical input replayed once more, in `attempt-<a>/final/`: stage
-     lines that differ from the stored ones are annotated `nondeterministic`, and a failure is
-     a CRASH (finding candidate) as well.
+     built again, and a build that fails restores `S0` and records NOT BUILT. Its canonical
+     input is replayed once more, in `attempt-<a>/final/`: stage lines that differ from the
+     stored ones are annotated `nondeterministic`, and a failure is a CRASH (finding
+     candidate) as well.
    - Guard 5: when the kept version changed a file under the editable roots, the test gate
-     runs, logged to `SL/campaign/logs/test-TS-NNNN.log`, and a test that passed in the
-     campaign's gate and now fails or no longer runs restores `S0` and records GATE FAILED;
-     the files a failed replay left stay in `attempt-<a>/`. A kept CRASH (finding candidate)
+     runs, logged to `SL/campaign/logs/test-TS-NNNN_<base>.log`, and a run that fails guard 5
+     (section 18.6.1) restores `S0` and records GATE FAILED; the report names each failing or
+     no longer running test, or `(unusable output: <reason>)`. The files a failed replay left
+     stay in `attempt-<a>/`, beside the version that failed, `version.diff`, which the report
+     names, and `version/`. A kept CRASH (finding candidate)
      stays one: the verdict reads `GATE FAILED (finding candidate in attempt-<a>/)`, on the
      console as well.
+   - Revalidation: the pairs share one tree, so when the kept version, still kept after guard
+     5, changed a file other than its thin target, the package manifest, `target_states/mod.rs`
+     and `Cargo.lock`, its own module included, since the modules are public siblings of one
+     crate and one can use another's items, while the thin target is a crate of its own, which
+     no module can use, every other scaffold in the package, of this synthesis or an earlier
+     one, the card's other pairs included, whose card exists and whose report records a
+     verdict (Once per run), is built again, logged to
+     `SL/campaign/logs/fuzz-build-<scaffold>-after-TS-NNNN_<base>.log`, and replayed,
+     canonical, control and final (section 18.8), in
+     `SL/campaign/reach/TS-MMMM_<b>/after-TS-NNNN_<base>/`. A scaffold stands worse when it no longer
+     builds, when it gains or loses CRASH (finding candidate), or when its verdict comes later
+     in the order of the first bullet, or holds fewer stages under the same verdict (k counts
+     for REACHED, UNVERIFIED, PARTIAL and UNREACHED only). At the first that stands worse,
+     `S0` is restored, the pair's line is dropped from `target_states/mod.rs`, and the verdict
+     is `NOT BUILT (breaks TS-MMMM_<b>)`, with `, finding candidate in attempt-<a>/` over a
+     kept CRASH (finding candidate) or `, stray failure` when an attempt left one; the report
+     says why and names `attempt-<a>/version.diff`. That scaffold is then built and replayed
+     once more in `TS-MMMM_<b>/without-TS-NNNN_<base>/`, and the pair's report records the
+     result; a verdict that still stands worse is written to that scaffold's report, under
+     `## Revalidation without TS-NNNN_<base>`, with a warning. Otherwise each revalidated
+     report takes the new verdict on its `Verdict` line and a section `## Revalidation after
+     TS-NNNN_<base>`: the cause, the verdict
+     before and now, the reasons, the replays' directory and, for a CRASH (finding candidate),
+     its crash line; the report's `## Run and replay` lines are rewritten for the scaffold's
+     latest check, so they reproduce that failure, with `STATELENS_REACH_CONTROL=1` for the
+     control replay, or carry the placeholder when it has none. Before the first of those
+     reports changes, the script records in `revalidation.json` the revalidation a restore of
+     the pair's edits would owe, as `a rollback` of the pair, the way `--redo` records an
+     undo, and it deletes the record once the pair's report is written. A restore after that
+     point, by an interrupt, any other error or the recovery of a killed synthesis (Once per
+     run), leaves the record, and the next synthesis revalidates every scaffold before any
+     pair, in `TS-MMMM_<b>/after-rollback/`, under `## Revalidation after a rollback`; until
+     then, those reports keep the verdicts the restored edits gave them. A kept version always
+     changes its module, so a pair revalidates every other scaffold that stands, the card's
+     other pairs included; only a pair with none revalidates nothing. A revalidation directory
+     that exists stays as it is,
+     since a report may name it; the new replays go to `<directory>.<stamp>/`, which the
+     report's section names.
    - When no version built, every attempt vetoed or failing to build, `S0` is restored and the
-     verdict is NOT BUILT.
-   - `target_states/mod.rs` loses the line of a card that has no scaffold.
-   - The script writes `SL/campaign/reach/TS-NNNN.md` and `SL/campaign/reach/TS-NNNN.diff`.
+     verdict is NOT BUILT, or `NOT BUILT (stray failure)` when an attempt left one.
+   - `target_states/mod.rs` loses the line of a pair that has no scaffold.
+   - The script writes `SL/campaign/reach/TS-NNNN_<base>.md` and
+     `SL/campaign/reach/TS-NNNN_<base>.diff`.
 
-**Last check.** When every card is done, guards 1 to 3 are checked once more over the whole
+**Last check.** When every pair is done, guards 1 to 3 are checked once more over the whole
 tree against `B`, every kept version together. A guard 1 failure exits with code 2. A guard 2
-or 3 failure, which should be impossible, restores each card whose diff touches the failing
-file to its `S0`, by reverse-applying the diffs as `--redo` does, in reverse synthesis order,
-and records it NOT BUILT; a failing path that no card's diff touches is written back from `B`.
-So nothing is fuzzed with a changed assertion, probe or runtime module.
+failure, which should be impossible, writes the script's files back, with a warning. A guard 3
+failure, which should be impossible too, restores each pair whose diff touches the failing
+file to its `S0`, by undoing the pair as `--redo` does, in reverse synthesis order, and records
+it NOT BUILT, printing its line again with `(last check)`, and its report names its
+`attempt-<a>/version.diff`; a failing path that no pair's diff touches is written back from
+`B`. An undone diff, which takes the pair's module away, is revalidated as `--redo` does, in
+`TS-MMMM_<b>/after-last-check/`, under `## Revalidation after the last check`, and recorded in
+`revalidation.json` before the undo in the same way. So no version is
+fuzzed with an assertion or probe call, a line the campaign added, or the runtime module
+changed in its text; what these text checks miss is in section 18.11.
+Every scaffold in the package, of this synthesis or an earlier one, is then built once more,
+also when the run synthesized no pair, logged to
+`SL/campaign/logs/fuzz-build-<scaffold>-last.log`; one that does not build exits with code 2
+("the last check: the scaffold <scaffold> does not build; see <log>, and undo the pair whose
+edits broke it with --redo or use a fresh clone"). This catches a break that no pair's diff
+shows, such as a helper template changed between syntheses, and a scaffold an earlier
+synthesis recorded `NOT BUILT (no longer builds)`, which is never handed over while it does
+not build.
 
 **Placeholders.** `BASE`, `PLAN`, `CHECK`, `RUNTIME`, `RUNTIME_MODULE` and `FUZZ_PACKAGE`, as
 in section 7.3 step 3, and:
@@ -4369,89 +5498,125 @@ in section 7.3 step 3, and:
 | Placeholder | Value |
 |---|---|
 | `CARD_ID`, `CARD` | The card's ID, and its text with its Source excerpts |
-| `STAGES` | n, the number of History events |
-| `MODULE` | `<package>/src/target_states/tsNNNN.rs` |
-| `TARGET_RULE` | `<base>_tsNNNN_statelens`, with `<base>` one of the candidates |
-| `BASES` | Per candidate: its name, the closure header and the entry call of its `fuzz_target!`, its `required-features`, its input type, and whether its runner is hooked (Appendices B.3 to B.5 and F) |
+| `STAGES` | n, the number of History events, as a bare integer |
+| `MODULE` | `<package>/src/target_states/tsNNNN_<base>.rs`, the pair's module |
+| `SCAFFOLD` | `<base>_tsNNNN_statelens`, the pair's thin target |
+| `BASE_TARGET` | The pair's base |
+| `BASE_DETAILS` | For that base: its name, the closure header and the entry call of its `fuzz_target!`, its `required-features`, its input type, and whether its runner is hooked (Appendices B.3 to B.5 and F) |
 | `LABELS` | Every `sl_probe!` label and `sl_implies!` ID under the editable roots, with its `path:line`, from one scan |
-| `BUILD` | The build command of step 2.6 |
+| `BUILD` | The build command of step 2.6, with the scaffold's name |
 | `ATTEMPT`, `FEEDBACK` | The attempt number, and the feedback of section 18.8, or "none: first attempt" |
 | `SUBSYSTEM_RULES` | The content of `prompts/subsystems/<profile>-synthesize.md` |
 
 **Outputs.** In the checkout, never committed and removed by `clean`: the modules,
 `target_states/mod.rs`, the thin targets, the `[[bin]]` blocks, the declaration line and the
-cards' other edits. In `SL/campaign/reach/`, which git ignores: `TS-NNNN.md`, with the card and
-its title, the shape, base and scaffold, the verdict and its annotations, each stage's outcome,
-witness kind and record, the handoff, the attempts and their verdicts, the crash attribution,
-the labels and sites read, and the run and replay lines; `TS-NNNN.diff`, the kept version
-against `S0`, the script's own edits included; and `TS-NNNN/attempt-<a>/`, the replays of each
-attempt (section 18.8) and the files step 2.2 swept; and `baseline/`, the baseline `B` and the
-content the script last wrote to its own files. Prompts and logs go to
-`SL/campaign/prompts/` and `SL/campaign/logs/`.
+pairs' other edits. In `SL/campaign/reach/`, per pair: `TS-NNNN_<base>.md`, titled `TS-NNNN on
+<base>: <title>`, with the card and its title, the shape, base and scaffold, the verdict and
+its annotations, each stage's outcome, witness kind and record, the handoff, the attempts and
+their verdicts, the crash attribution, the labels and sites read, the run and replay lines of
+its latest check, and its revalidations; `TS-NNNN_<base>.diff`, the kept version against `S0`,
+the script's own edits included, and empty when the pair's edits were restored;
+`TS-NNNN_<base>/attempt-<a>/`, the replays of each attempt (section 18.8), the files
+step 2.2 swept, `version.diff`, the attempt's version against `S0`, and `version/`, a copy of
+every file it created or changed, which holds what a diff cannot, such as a binary file. Both
+are written before the first replay of every version that built, and right after the sweep
+for one that left a stray failure, so a failure stays reproducible after a restore or an
+interrupt. `interrupted.txt` is written for an attempt during which synthesis stopped, and,
+for a kept CRASH (finding candidate), `replay.txt`, its `run` and `replay` lines;
+`TS-NNNN_<base>/after-TS-MMMM_<b>/`, `TS-NNNN_<base>/without-TS-MMMM_<b>/`,
+`TS-NNNN_<base>/after-redo/`, `TS-NNNN_<base>/after-last-check/` and
+`TS-NNNN_<base>/after-rollback/`, the replays of a revalidation (Finish, `--redo` and Last
+check), each `<directory>.<stamp>/` when it exists already. And once: `baseline/`, the
+baseline `B`, guard 5's test inventory `tests.json`, and the content the script last wrote to
+its own files; `revalidation.json`, the revalidation an undo owes, or a restore of a pair whose
+revalidation rewrote reports (Finish), keyed by the pair's name and removed when it completes
+or when that pair's report is written; and `pending/`, the `S0` of the pair in progress, with
+the pair's name, removed when the pair ends. Prompts and logs go to `SL/campaign/prompts/` and
+`SL/campaign/logs/`, named `synthesize-TS-NNNN_<base>-<a>` and `test-TS-NNNN_<base>`.
 
-**Console.** One line per card, then a `run` and a `replay` line per scaffold, none with a
-libFuzzer argument:
+**Console.** One line per pair, then a `run` and a `replay` line per scaffold of the
+selection, a skipped pair's included, none with a libFuzzer argument:
 
 ~~~
 statelens: cards      <n> tracked, <m> local
-statelens: TS-NNNN    <verdict>[ (<annotation>, ...)]   <scaffold | no scaffold>
-statelens: synthesis  <k> card(s), <s> scaffold(s); reports in statelens/campaign/reach/
+statelens: TS-NNNN    skipped: TS-NNNN on <base> was synthesized as <scaffold>; use --redo
+statelens: TS-NNNN    <verdict>[ (<annotation>, ...)]   <scaffold | no scaffold on <base>>[; <crash note>]
+statelens: synthesis  <k> pair(s), <s> scaffold(s); reports in statelens/campaign/reach/
 statelens: run        cd <repo>/statelens && NIGHTLY_VERSION=<fuzz toolchain> just run <scaffold>
 statelens: replay     cd <repo>/statelens && STATELENS_REACH=1 [<replay env> ]NIGHTLY_VERSION=<fuzz toolchain> just run <scaffold> <repo>/<package>/artifacts/<scaffold>/<crash file>
 ~~~
 
 `<replay env>` is the profile's, as in section 7.9, and the crash file is one that fuzzing
-wrote. The line of a CRASH (finding candidate) names the replay that failed, and its `replay`
-line takes the crash file kept in `SL/campaign/reach/TS-NNNN/attempt-<a>/`. For a canonical
+wrote. `<k>` counts the pairs synthesized in this run and `<s>` every scaffold of the
+selection; the card's ID opens each pair's line, and its base ends it, in the scaffold's name
+or after `no scaffold on`. The line of a CRASH (finding candidate) names, in its crash note,
+the replay that failed, and its `replay` line takes the crash file kept in
+`SL/campaign/reach/TS-NNNN_<base>/attempt-<a>/`, or `SL/campaign/reach/empty`, the input every replay
+runs, when the replay left no crash file. For a canonical
 replay the line adds that the scaffold fails on its canonical input, which libFuzzer runs
 first, so its `run` line reproduces the failure at once. For the control run the `replay`
 line also sets `STATELENS_REACH_CONTROL=1`, and the line says that the canonical input does
-not reproduce it. For a `stray failure` it names the swept file.
+not reproduce it. For a `stray failure` it names the swept file, also when the pair's
+verdict is not CRASH (finding candidate), because the attempt that left the file was not
+built: "a run of the agent's left <file>, a finding candidate". A `<repo>` or crash-file path
+that holds a space is quoted for the shell, so each line runs as printed.
 
-**Exit codes.** 0 when at least one scaffold exists for the selection; 1 usage, or nothing
-selected; 2 a failed precondition, a checkout that differs from `B` before any card, guard 1, a
-missing or repeated anchor, or a `--redo` that does not apply; 3 no scaffold built, every
-selected card ending NOT BUILT or GATE FAILED.
+**Exit codes.** 0 when at least one scaffold exists for the selection, a skipped pair's
+included; 1 usage, or nothing selected; 2 a failed precondition, a checkout that differs from
+`B` before any pair, a test inventory that cannot be taken or read (Once per campaign), a
+`pending/` or `revalidation.json` that cannot be read (Once per run), guard 1, a missing or repeated anchor, a
+`--redo` that does not apply, or a scaffold the last check cannot build; 3 no scaffold built,
+every selected pair ending NOT BUILT or GATE FAILED.
 
-**Clean.** `clean` (section 5.4) adds the fuzz packages to its scope, so it deletes
-`target_states/` and the thin targets and restores every file edited there; the `corpus/`,
-`artifacts/` and `coverage/` that git ignores there stay, and the editable roots were in
-scope already. `SL/campaign/reach/` stays, as all of `campaign/` does.
+**Clean.** `clean` (section 5.4) adds the simplex and marshal fuzz packages to its scope, while
+`storage/fuzz` keeps the file-level scope of a qmdb campaign, so it deletes `target_states/`,
+the files git ignores there included, and the thin targets and restores every file edited
+there; the `corpus/`, `artifacts/` and `coverage/` that git ignores there stay, and the
+editable roots were in scope already. `SL/campaign/reach/` stays, as all of `campaign/` does.
 
 ### 18.7 Scaffold contract
 
 Prompt `synthesize.md` gives these rules to the agent, and its subsystem parts the simplex and
-marshal rules below; their verbatim copies are sections 13.21 to 13.23, added with the files.
-Its sections: where the agent is; the task; the edit contract (R-TS-SYN-3 quoted, and guards
-1 to 6); shapes; knobs; stages and witnesses; handoff and recovery; the control; oracles;
-fabrication and the guard; missing capabilities; building (build with `BUILD`; never run the
-scaffold or the fuzzer: the script's reach check is the only replay); the feedback; the
-subsystem rules; and
-the reply (shape, base, the witness of each stage, knob layout, injections, missing
-capabilities).
+marshal rules below; their verbatim copies are sections 13.21 to 13.23. It sends the agent to
+`target_states/mod.rs` for the exact signatures of the helper. Its sections: where the agent
+is; the task, which names the pair's module (`MODULE`), its thin target (`SCAFFOLD`) and its
+one base (`BASE_TARGET`, `BASE_DETAILS`), so the agent chooses no base; the edit contract
+(R-TS-SYN-3 quoted, and guards 1 to 6 restated in the agent's
+terms, since the guards' own text cites sections the agent cannot see); shapes; knobs; stages
+and witnesses; handoff and recovery; the control; oracles; fabrication and the guard; missing
+capabilities; building (build with `BUILD`, the full command for the pair's scaffold, adding
+the scaffold's `[[bin]]` block, the base's
+with `name` and `path` renamed, for that build when cargo reports no such target and removing
+it again, because the script writes the block only after the attempt and guard 2 restores an
+agent's edit to the manifest; never run the scaffold or the fuzzer: the script's reach check
+is the only replay); the feedback; the subsystem rules; and the reply (shape, the witness of
+each stage, knob layout, injections, missing capabilities).
 
 **Shapes.** The agent picks one and records it in the module header.
 
 - **Shape A, pinned input**, preferred where it fits: the base input's fields fix every event
   before `En`, for example the scenario `template` and `actions` of
-  `NotarizationBlockSplitScenarioInput`, the rounds and case of `MarshalTwinsInput`, or the
-  partition, configuration and certify choice of `FuzzInput`. `fuzz` splits the knobs, pins
-  the fields, resets the fields that depend on them, calls `Stages::new`, calls the base's entry
-  by path with its generics, then evaluates `E1` to `E(n-1)` over the trace and the harness
-  observables, calls `Stages::handoff` with the evaluation of `En`, and last `Stages::done`.
-  The base's own schedule runs, no driver code is copied, and its oracles are untouched.
-- **Shape B, online prefix**, where Shape A cannot express the History: `fuzz` splits the
-  knobs, pins the fields, calls `Stages::new` and `set_compromised`, sets the base up, drives
-  `E1` to `E(n-1)`, calls `Stages::handoff` with the read of `En`'s witness, hands off to the
-  base's free-running phase and oracles, and calls `Stages::done` after the last oracle. The
-  base's setup is called by path; where only a monolithic driver can host the prefix, that
-  driver is copied verbatim into the module, citing `path::item@commit`.
+  `NotarizationBlockSplitScenarioInput`, or the partition, configuration and certify choice of
+  `FuzzInput`. `fuzz` splits and picks the knobs, calls `Stages::new` and `Stages::budget`,
+  pins the fields, resets the fields that depend on them, calls the base's entry by path with
+  its generics, then evaluates `E1` to `E(n-1)` over the trace and the harness observables,
+  calls `Stages::handoff` with the evaluation of `En`, and last `Stages::done`. The base's own
+  schedule runs, no driver code is copied, and its oracles are untouched.
+- **Shape B, online prefix**, where Shape A cannot express the History: `fuzz` splits and picks
+  the knobs, calls `Stages::new`, `Stages::budget` and `set_compromised`, pins the fields, sets
+  the base up, drives `E1` to `E(n-1)`, calls `Stages::handoff` with the read of `En`'s
+  witness, hands off to the base's free-running phase and oracles, and calls `Stages::done`
+  after the last oracle. The base's setup is called by path; where only a monolithic driver can
+  host the prefix, that driver is copied verbatim into the module, citing `path::item@commit`.
 
-**Naming and entry.** The module is `<package>/src/target_states/tsNNNN.rs` and the scaffold
-`<base>_tsNNNN_statelens`; its thin target (Appendix B.6) calls `tsNNNN::fuzz`. `pub fn fuzz`
+**Naming and entry.** For the pair (card, base) the module is
+`<package>/src/target_states/tsNNNN_<base>.rs` and the scaffold `<base>_tsNNNN_statelens`; its
+thin target (Appendix B.6) calls `tsNNNN_<base>::fuzz`. Both names carry the base, so the pairs
+of one card are distinct modules of one crate and distinct targets of one package. `pub fn fuzz`
 takes the base's input type and the generic parameters of the base's entry, in order. Its
 first statements split and pick the knobs, and `Stages::new` and `Stages::budget`, which takes
-the knobs, come before any engine starts. The module opens with this header, which the script
+the knobs, come before any engine starts and before any action a stage witnesses: while nothing
+watches, `Witness::act` takes position 0. The module opens with this header, which the script
 reads:
 
 ~~~rust
@@ -4464,7 +5629,9 @@ reads:
 //! Missing: <each missing capability> | none
 ~~~
 
-A module without a `Control:` line has no control (section 18.8).
+A module without a `Control:` line has no control (section 18.8). A header that names another
+base than the pair's, like a second thin target of the card on another base, is vetoed
+(section 18.6.2 step 2.4).
 
 **Knobs** (D64). `Knobs::split` takes the first K <= 16 bytes of the base input's own
 `raw_bytes`, zero-padded, and leaves the rest, which stays non-empty if it was. Knob i is
@@ -4474,8 +5641,9 @@ construction (a view is derived so that the required leader leads it), and an or
 indexes the orders `Order:` allows, the source order first. The fields the History fixes are
 pinned, and the fields that depend on them are reset as the base's decoder sets them under the
 pin: in `FuzzInput`, `degraded_network` depends on `partition` and `configuration`, `certify`
-on `configuration`, and `block_filter` on `configuration` and on the fault bound drawn from
-`required_containers`. The input type,
+on `configuration`, `block_filter` on `configuration` and on the fault bound drawn from
+`required_containers`, the fault rounds of `strategy` on `required_containers`, and
+`optimistic_views` on `term_length` (`consensus/fuzz/core/src/lib.rs`). The input type,
 the `run` recipe and the libFuzzer flags are the base's, and there is no seed corpus.
 
 **Stages and witnesses** (D65). One stage per History event, `E1` to `En`, evaluated in the
@@ -4496,45 +5664,61 @@ certification for some view in which R had already built or restored its own nul
 It witnesses neither a nullification certificate nor the `v` of an earlier event, and a
 nullification observed at one site followed by a certification observed at another witnesses
 nothing. A probe observation whose subject is not fixed by its own site is not a witness. A
-stage whose entities or relations no available witness binds is `unverifiable`, not missed,
-and so is a stage read after the trace dropped an observation at `TRACE_CAP` (`truncated()`,
-section 9.6; `unverifiable (trace truncated)`).
+stage whose entities or relations no available witness binds is `unverifiable`, not missed (for
+`En`, recorded with `Stages::unverifiable` before `Stages::handoff`), and so is a stage whose
+witness is read at or after the position of the first observation the trace dropped at
+`TRACE_CAP` (`truncated()`, section 9.6; `unverifiable (trace truncated)`), which adds no
+feature.
 
 **Witness records.** A stage is held only through the helper, `Stages::held(k, witness)` for
 `E1` to `E(n-1)` and `Stages::handoff` for `En`, which prints the record (section 18.8) with
 `read=`, the position the witness took when it was built: its read for an `exact` or
 `intrinsic` witness, and for a `construction` witness the position `Witness::act` took for the
-action. The scaffold never prints a `[statelens-reach]` line itself (guard 3). A record
+action. The scaffold prints nothing itself (guard 3): only the helper prints the lines the
+script reads. A record
 carries `bind=`, every entity of the line with its value and the event that bound it, such as
 `R=2@E1,v=5@E1`, and the evidence, which names the entities it is keyed by as
 `<name>=<value>`: for an `exact` witness, per observable,
 the entities of its key, the value read and the entry's position when it has one; for a
 `construction` witness the action, the entities it fixes and the action's position; for an
 `intrinsic` witness its observation, which identifies only the replica `me`, so it binds every
-other entity to `?`. A stage's position is the largest position its evidence carries.
+other entity to `?`. A stage's position is the largest position its evidence carries; an
+`exact` witness with an item that has no stamp has none, since that entry may come after any
+other.
 Positions are unique (section 9.6), so the script compares them strictly. It recomputes each
 record and makes a held stage `unverifiable`, with `witness rejected: <rule>`, `<rule>` being
 the name in parentheses, when:
 
-- an `x as Ek` value differs from the value `Ek` bound to `x`, or is `?` (`as`);
+- an `x as Ek` value differs from the value `Ek` bound to `x`, or is `?`, or `Ek` bound no
+  value, having no `held` line (`as`);
 - an entity of the line's list is missing from `bind=` (`bind`);
-- an `exact` or `construction` witness does not name an entity of the line with its `bind=`
-  value in its evidence, or an `exact` item's `seq=` is not that of an earlier `entry` line
-  with the same observable, key and value (`evidence`);
+- an `exact` or `construction` witness does not name every entity of the line whose `bind=`
+  value is not `?` with that value, in an `exact` item's key or the action's list, names one
+  of them there with another value, or names none; an incarnation `inc<s>` is exempt, since
+  the `incarnation` rule checks it, and the value an `exact` item read does not count; or an
+  `exact` item's `seq=` is not that of an earlier `entry` line with the same observable, key
+  and value (`evidence`);
 - a stage's position is not greater than that of an earlier stage it must follow, by the
   numbered order less the pairs `Order:` frees (`order`);
 - a probe observation's `run` differs from that of an earlier stage's observation, with no
   `restart` line between them (`run`);
 - for a replica the line binds, a `restart` line of that replica lies between the line's
   position and that of an earlier stage an `as Ek` links it to, and `bind=` gives no entity
-  the incarnation `inc<s>` that the last restart of that replica in that span began; or
-  `bind=` gives an entity an incarnation `inc<s>` that no `restart` line's `seq=` names, or
-  that begins after the line's position (`incarnation`, below);
+  of the line the incarnation `inc<s>` that the last restart of that replica in that span
+  began; or
+  `bind=` gives an entity an incarnation `inc<s>` that no `restart` line's `seq=` names, which
+  needs no position, or that begins after the line's position (`incarnation`, below);
 - an `intrinsic` witness cites more than one observation, or `bind=` gives a value other than
   `?` to an entity of its line other than one replica, or gives that replica a value other
-  than the observation's `me` (`intrinsic`);
+  than the observation's `me`, which a site without a replica, `me` `-`, never matches
+  (`intrinsic`);
 - a `construction` witness is used for `En`, or for an event whose actor in the card's History
   is not `harness` (`construction`).
+
+A record that breaks several rules is rejected for the first in this order: `bind`, `as`,
+`evidence`, `intrinsic`, `construction`, then the position check below (`no position`), then
+`order`, `run` and `incarnation`. Which entities are replicas follows the naming convention of
+section 18.3.
 
 Both stages of an ordered pair need a position, in either shape: a stage that the numbered
 order or the `Order:` line requires to follow an earlier stage, and every earlier stage it
@@ -4577,13 +5761,18 @@ that no call marks it cannot see (section 18.11).
   predates that tick. In addition, no probe observation may take a position between the read
   (`read=`) and the mark (`mark=`). Every observation and helper event takes a position, so the
   helper reports `handoff holds` only when `mark=` is `read=` + 1, which shows both, and the
-  script rechecks it from the lines (section 18.8). For a state defined by pending work or a
+  script rechecks it from the lines (section 18.8). Those positions date the read, not what
+  it read: an `intrinsic` witness built inside the call may cite an old observation that a
+  later one at the same site, of the same replica, contradicts. So `En` takes an `exact`
+  witness where one exists, and an `intrinsic` one cites the latest observation at its site
+  for its replica, found with `observations` rather than `seen`, which returns the earliest
+  (section 18.11). For a state defined by pending work or a
   withheld delivery, an `exact` observable shows the operation still pending at that instant,
   the request recorded and neither answered nor closed (rule S3 of the scenario SPEC: the
   defining state is present at handoff). Nothing the prefix does may complete, cancel or
   abandon that work: the scaffold never awaits its reply, drops its reply channel, or stops or
-  restarts its owner before the handoff. If `En` does not hold at handoff it is missed, even if
-  it held earlier, and the continuation still runs.
+  restarts its owner before the handoff. If `En` does not hold at handoff it is missed (`not
+  held at handoff`), even if it held earlier, and the continuation still runs.
 - The continuation starts with every fault the prefix opened still in place: a crashed replica
   down, a partition, a held message. Recovery is part of the continuation and never precedes
   handoff. Every such fault is released no later than the base's first heal (GST), and the
@@ -4591,12 +5780,16 @@ that no call marks it cannot see (section 18.11).
   input, as pinned partition fields that the base installs and heals, or are composed with the
   base's current cut; the scaffold never heals the network on its own. Crashed replicas and
   withheld messages are released at handoff plus `d`, a knob in [0, the base's fault phase):
-  12 s in the marshal scenario runner, 30 s (`FAULT_PHASE`) in `consensus/fuzz/core`. A base
-  without GST releases them before its liveness wait starts.
-- The runtime deadline is the base's `fuzz_runtime_timeout(..)` plus the stage deadlines plus
-  the largest release delay.
-- A marshal prefix that leaves too little height below the epoch ceiling for the liveness
-  measurement is annotated `liveness unmeasurable`.
+  12 s in the marshal scenario-prefix runner, 30 s (`FAULT_PHASE`) in `consensus/fuzz/core`,
+  which the marshal end-to-end disrupter runner uses. A base without GST releases them before
+  its liveness wait starts.
+- The runtime deadline is the base's (`fuzz_runtime_timeout(..)` for the simplex Standard,
+  audited and Twins drivers; the Chaos and ByzzFuzz runners and every marshal base set none,
+  and a scaffold of one passes `Duration::MAX` to `Stages::budget` instead) plus the stage
+  deadlines plus the largest release delay.
+- A marshal prefix leaves enough height below the epoch ceiling (`BLOCKS_PER_EPOCH`) for the
+  liveness measurement after the handoff; the subsystem rules say so. The script cannot
+  measure that height, so it is for review of the module (section 18.11).
 - Shape A imposes no cleanup, and its handoff is implicit: `En`'s witness, read in the handoff
   call after the run, counts only if it has a position and the trace holds a later guarded
   observation of an honest replica in the same `run`, which `Stages::handoff` prints as
@@ -4605,17 +5798,17 @@ that no call marks it cannot see (section 18.11).
 **Control.** The module header names one withheld event, `Ek`, with k < n and `harness` as its
 actor. The scaffold reads `STATELENS_REACH_CONTROL` only through the helper's `control()`, and
 when it is set skips `Ek`'s action and records `Ek` as withheld. In the control run a miss
-does not close the prefix: the scaffold still drives every later event and the handoff check,
-so `En` gets a line. Where the card has no `harness` event before `En`, the header says
-`Control: n/a`, which section 18.8 accepts only when every witness is `exact` or
-`construction`.
+does not close the prefix: the scaffold still drives every later event, the handoff check and
+the base's oracles, so `En` gets a line and the run prints its `reach` and `done` lines. Where
+the card has no `harness` event before `En`, the header says `Control: n/a`, which section 18.8
+accepts only when every witness is `exact` or `construction`.
 
 **Oracles.** The base's free-running phase and every oracle run, called by path or copied
-verbatim, never removed or weakened. Progress targets are re-based on the handoff: `required`
-is the progress at handoff plus `input.required_containers`, and the timeout
-`fuzz_runtime_timeout(required, <prefix views>)`; without that the canonical run would have
-nothing left to do, since `MIN_REQUIRED_CONTAINERS` is 1. `done` follows the last oracle.
-Stage checks and verdicts are not oracles.
+verbatim, never removed or weakened. In Shape A the base's oracles run inside its entry
+unchanged, so a History whose continuation they would not measure takes Shape B. In Shape B,
+progress targets are re-based on the handoff, in the base's own measure, which the Simplex and
+Marshal rules below give; without that the canonical run could have nothing left to do.
+`done` follows the last oracle. Stage checks and verdicts are not oracles.
 
 **No fabrication** (rule I5 of the scenario SPEC). Events go through the network or the harness
 verbs. A scripted vote goes out only on its signer's own channel (INV-0008). A certificate the
@@ -4633,13 +5826,16 @@ A relies on the base's hooked runner (Appendices B.3 to B.5 and F).
 dependency, a change to what the protocol does, or an item of `consensus/fuzz/core/` that is
 not public, is never approximated: the scaffold records the stage as missed with
 `cannot: <capability>`, lists it under `//! Missing:`, keeps the prefix up to that stage and
-hands off. A human adds the capability with an ordinary commit.
+hands off. For `En` it records that miss before it calls `Stages::handoff`, which then reports
+the handoff lost. A human adds the capability with an ordinary commit.
 
-**No scaffold panics.** Scaffold code never panics on SUT data: no `unwrap`, `expect` or index
-that SUT output decides, and no harness verb that panics on a SUT reply; a miss instead. The
-only panics it raises are the helper's scaffold errors, below.
+**Panics.** The prefix and witness code a scaffold adds never panics on SUT data: no `unwrap`,
+`expect` or index that SUT output decides, and no harness verb that panics on a SUT reply; a
+miss instead. The only panics it adds are the helper's scaffold errors, below; the base's
+oracles and the code copied verbatim from its driver keep theirs, since a miss after the
+handoff records nothing.
 
-**Simplex** (`subsystems/simplex-synthesize.md`, section 13.22 with the file).
+**Simplex** (`subsystems/simplex-synthesize.md`, section 13.22).
 
 - Bases: every `simplex_*` target but Mallory. Shape A fits a History that the fields of
   `FuzzInput` fix (partition, configuration, certify choice, block filter). The chaos, ByzzFuzz
@@ -4664,15 +5860,39 @@ only panics it raises are the helper's scaffold errors, below.
   `Floor::Genesis`; a History that needs another floor copies it into the module with the floor
   as a parameter. The Chaos-Twins runner's gate is the pattern for a stage: wait for a replica's
   own state before acting, and do not act in the wrong state.
+- Progress and deadline: `run_standard_once`, `run_audited_standard_once_with` and `run_twins`
+  run under `bounded_fuzz_runtime_config`, whose deadline is
+  `fuzz_runtime_timeout(input.required_containers, <prefix views>)`, with 0 prefix views, or
+  `twins_prefix_views(..)` for `run_twins`; the Chaos, Chaos-Twins and ByzzFuzz runners set
+  none. Each base keeps its own liveness measure, which a Shape B continuation counts from the
+  handoff (Oracles, above), and the base's condition for measuring at all: the standard and
+  audited drivers wait only under `should_bound_standard_liveness` (a `Connected` partition, a
+  valid configuration and `BlockFilterChoice::None`) and otherwise sleep `MAX_SLEEP_DURATION`
+  with no liveness assertion, so FaultyNet, whose partition is always `Adaptive`, never waits;
+  where they wait, the target is the latest finalized view at the handoff plus
+  `input.required_containers`; the audited driver excludes the notarize-omission victim from
+  that wait and keeps its post-invariant recovery-drain check
+  (`unresolved_finalize_recoveries`, `check_finalize_recoveries_drained`); the Twins campaign
+  counts `input.required_containers` finalizations of views after the Twins prefix
+  (`observe_liveness`), and only views after the handoff count; the Twins mutator checks no
+  liveness, and none is added; Chaos, ByzzFuzz and Chaos-Twins measure from their own heal or
+  recovery, which follows the handoff, so their targets stay: the larger of
+  `input.required_containers` and one view past the finalized view at the heal, the highest
+  node's for Chaos (`liveness_target`) and each node's own for ByzzFuzz
+  (`reach_gst_and_check_liveness`), and one view past the highest at its recovery for
+  Chaos-Twins.
 - Missing, reported as `cannot:`: journal seeding, because the package has no
   `commonware-storage` dependency and guard 2 forbids adding one.
 
-**Marshal** (`subsystems/marshal-synthesize.md`, section 13.23 with the file).
+**Marshal** (`subsystems/marshal-synthesize.md`, section 13.23).
 
 - Shape A first: `marshal_e2e_standard_deferred_cert_mock_scenarios`, whose
   `NotarizationBlockSplitScenarioInput` fixes a scripted template and its pre-GST actions, with
-  the wedge's real Byzantine engine behind the hook of Appendix F; and the
-  `*_twins_split_header` targets, whose `MarshalTwinsInput` fixes the rounds and the case.
+  the wedge's real Byzantine engine behind the hook of Appendix F. The `*_twins_split_header`
+  targets draw their Twins case from the stream `raw_bytes` seeds (`run_twins_with_backend`
+  samples `twins::cases` from it; `case_selector` only indexes that sample), so no field pins
+  the case, and a History about it takes Shape B; a fixed case needs a marked constructor for
+  the private fields of `mocks::twins::Scenario` and `RoundScenario`.
 - Shape B uses, without an edit, the `pub(crate)` items of `scenarios` named in section 18.1
   (the harness, its verbs and `finish`) and `marshal::end_to_end::twins`. With a marked
   visibility edit: `scenarios::runner::run`, whose journal seeding before the engines start is
@@ -4691,39 +5911,71 @@ only panics it raises are the helper's scaffold errors, below.
   variant is added.
 - Only the victim, `Node::B`, has an injectable resolver, with one armed delivery at a time,
   and in `N4F1C3` node 0 has no marshal. The harness verbs that panic when the SUT does not
-  answer (`await_wrapper` after 5 s, `verified` and `certified` on a write that is not durable,
-  the polls bounded to 64 rounds) are not used where a SUT reply decides; the scaffold races
-  the reply against its stage deadline instead.
+  answer (`await_wrapper` after 5 s, `verified` and `certified` on a write that is not durable),
+  and the polls of the existing scenario prefixes in `scenarios.rs`, bounded to 64 rounds, are
+  not used where a SUT reply decides; the scaffold races the reply against its stage deadline
+  instead.
+- Progress and deadline: no marshal base sets a runtime deadline, so `Stages::budget` takes
+  `Duration::MAX`. Each base measures finalized heights against its own baseline, which a
+  Shape B continuation counts from the handoff: the scenarios target, one block past each
+  correct node's height at GST (`check_scenario_progress`); Twins, `input.trailing_blocks`
+  blocks of views after the prefix (`wait_for_liveness`); the scenario-prefix runner, one block
+  past each honest node's height at its heal, `input.required_containers` only ending the fault
+  phase early; the disrupter and poison targets (`run_liveness_phases`),
+  `input.required_containers`, or after a fault phase that ends without it, the larger of that
+  and one block past each honest node's height at the heal; the store target checks no
+  liveness.
 
 **Helper template.** `SL/runtime/target_states.rs`, copied to `<package>/src/target_states/mod.rs`
 (section 18.6), calls the runtime module of the profile's crate by path, is `rustfmt`-clean, and
-is never compiled on a committed branch. Its verbatim copy is Appendix H, added with the file.
+is never compiled on a committed branch. Its verbatim copy is Appendix H. Its state, like the
+trace's, is per thread: the thread that calls `Stages::new` owns the stages. Its code lies in
+a private module, `imp`, of `mod.rs`, which re-exports the items below: a scaffold module is
+a child of `target_states`, and a child module may use every private item of its parent, so
+code in `mod.rs` itself would let a scaffold print a `[statelens-reach]` line through the
+helper's own printer, or build a `Witness` or a `Stamp` field by field; the private items of
+`imp` are out of its reach. Its self-tests (`imp::tests`, `#[cfg(test)]`) fill the trace to
+`TRACE_CAP`, change state past it, and check the `truncated` line, `unverifiable (trace
+truncated)` for a later stage and for `En` with no feature, and `handoff lost`, and a handoff
+that holds without a cut, an `En` recorded `unverifiable` before the handoff, which keeps its
+reason and loses the handoff, and, with `STATELENS_REACH` unset, a miss that records no `trace`
+line and a handoff that records `next=-`; they run with
+`cargo +stable nextest run -p <package> --lib target_states::` in a checkout synthesis wrote
+`mod.rs` to. Under `cfg(test)` the helper also records each line it prints and each feature it
+adds in thread-local lists the tests read.
 
 | Item | Behavior |
 |---|---|
-| `Knobs::split(raw: &mut Vec<u8>, k: usize) -> Knobs` | Takes the first `k` bytes of `raw`, zero-padded, and leaves the rest; a tail left empty from a non-empty `raw` becomes `[0]`. |
-| `Knobs::pick<T: Copy>(&mut self, domain: &[T]) -> T` | The next knob: `domain[byte % domain.len()]`. |
+| `Knobs::split(card: &'static str, raw: &mut Vec<u8>, k: usize) -> Knobs` | First forgets the stages an earlier input left on its thread, so a scaffold error before `Stages::new` prints none of them. Takes the first `k` bytes of `raw`, zero-padded, and leaves the rest; a tail left empty from a non-empty `raw` becomes `[0]`. It takes the card's ID because it runs before `Stages::new`, and its scaffold errors name the card. |
+| `Knobs::pick<T: Copy>(&mut self, domain: &[T]) -> T` | The next knob: `domain[byte % domain.len()]`. It cannot return a value for an empty domain, so a domain of fewer than two values is a scaffold error. |
 | `control() -> bool` | Whether `STATELENS_REACH_CONTROL=1`, read once. |
-| `Stages::new(card: &'static str, n: u32) -> Stages` | Calls `watch()`, opens the prefix phase and prints `phase prefix`, and installs the panic hook below, once per process. Lines print only under `STATELENS_REACH=1`, read once. |
+| `Stages::new(card: &'static str, n: u32) -> Stages` | Calls `watch()`, opens the prefix phase and prints `phase prefix`, and installs the panic hook below, once per process. Lines print only under `STATELENS_REACH=1`, read once; the work that only feeds them, the trace lines of a miss and the handoff's `next=`, runs only then. |
 | `Stages::budget(&self, knobs: Knobs, prefix: Duration, runtime: Duration)` | Called before any engine starts, and takes the knobs, so none is picked later: the stage deadlines plus the largest release delay, against the runtime deadline. |
-| `stamp(observable: &str, key: &str, value: &str) -> Stamp` | A recording wrapper's call as it records an entry: takes a `tick()`, prints `entry` with it, and returns it as an opaque `Stamp` that only `stamp` makes; the script checks every stamp an `exact` item carries against its `entry` line anyway (section 18.8). Returns a stamp of position 0 and prints nothing while not watching. A free function, so a wrapper can call it. |
-| `Witness::exact(bind, reads: &[(observable, key, value, stamp: Option<Stamp>)])`, `Witness::intrinsic(bind, seen: Seen)` | A witness and its bindings, `bind` written `name=value@Ek,...`, and each `key` naming the entities it fixes as `name=value,...`. Each takes a `tick()` when it is built, its `read=`. |
-| `Witness::act(bind, action, perform: impl FnOnce() -> T) -> (T, Witness)`, `Witness::act_async(bind, action, perform: impl Future<Output = T>) -> (T, Witness)` | The only way to make a `construction` witness: takes a `tick()`, the action's position and the witness's `read=`, right before it calls or awaits `perform`, which performs the action, and returns `perform`'s result with the witness, so the position is the action's and everything the action causes comes after it. `action` names the verb and the entities it fixes as `verb[name=value,...]`. |
-| `Stages::held(&mut self, k: u32, witness: Witness) -> bool` | Stage `k` held: prints the record with the witness's `read=`, records the stage feature, and moves `since()` to the stage's position + 1, or to its `read=` + 1 when it has none. Stages may be recorded in any order. A call for stage n, which only `Stages::handoff` records, for a stage that already has an outcome, for an event number outside 1 to n, or once the prefix is closed does nothing and returns `false`. |
-| `Stages::missed(&mut self, k: u32, detail: &str)`, `unverifiable(&mut self, k: u32, reason: &str)`, `withheld(&mut self, k: u32)` | The other outcomes, with the same calls doing nothing. The first miss closes the prefix, except in the control run, and prints up to 64 trace lines from the stage's start. |
+| `stamp(observable: &str, key: &str, value: &str) -> Stamp` | A recording wrapper's call as it records an entry: takes a `tick()`, prints `entry` with it, and returns it as an opaque `Stamp` that only `stamp` makes, with the `run` current when it was taken; `Stamp::seq()` reads its position and cannot make one. The script checks every stamp an `exact` item carries against its `entry` line anyway (section 18.8). Returns a stamp of position 0 and prints nothing while not watching. A free function, so a wrapper can call it. |
+| `Witness::exact(bind, reads: &[(observable, key, value, stamp: Option<Stamp>)])`, `Witness::intrinsic(bind, seen: Seen)` | A witness and its bindings, `bind` written `name=value@Ek,...`, and each `key` naming the entities it fixes as `name=value,...`. Each takes a `tick()` when it is built, its `read=`. An `exact` witness's position is its latest stamp's, and it has none when an item has no stamp; an `intrinsic` witness's is its observation's `seq`. |
+| `Witness::act(bind, action, perform: impl FnOnce() -> T) -> (T, Witness)`, `Witness::act_async(bind, action, perform: P) -> impl Future<Output = (T, Witness)> + use<T, F, P>`, with `P: FnOnce() -> F` and `F: Future<Output = T>` | The only way to make a `construction` witness: takes a `tick()`, the action's position and the witness's `read=`, right before it calls `perform`, which performs the action, and returns `perform`'s result with the witness, so the position is the action's and everything the action causes comes after it. `act_async` takes its tick when its future is first polled, and only then calls `perform` and awaits the future it returns, so an action that takes effect when it is called, as a mailbox method that queues its message at the call does, still comes after its position; its future borrows neither `bind` nor `action`. `action` names the verb and the entities it fixes as `verb[name=value,...]`; a bare verb is printed `verb[]`. Before `Stages::new` nothing watches: the position is 0, and the stage has none. |
+| `Stages::held(&mut self, k: u32, witness: Witness) -> bool` | Stage `k` held: prints the record with the witness's `read=`, records the stage feature, and moves `since()` forward to the stage's position + 1, or to its `read=` + 1 when it has none, never back. Stages may be recorded in any order. A call for stage n, which only `Stages::handoff` records, for a stage that already has an outcome, for an event number outside 1 to n, or once the prefix is closed does nothing and returns `false`. A witness whose `read=` is at or after the position `truncated()` returns makes the stage `unverifiable (trace truncated)` instead, with no feature. Returns `true` only when it recorded the stage held. |
+| `Stages::missed(&mut self, k: u32, detail: &str)`, `unverifiable(&mut self, k: u32, reason: &str)`, `withheld(&mut self, k: u32)` | The other outcomes, with the same calls doing nothing, except that `missed` records stage n when its detail starts with `cannot:`, and `unverifiable` records stage n, for an `En` that no available witness binds; after either, `Stages::handoff` calls no `read` and prints `handoff lost`. The first miss closes the prefix, except in the control run, and prints up to 64 trace lines from the stage's start. A miss recorded once `truncated()` returns a position is `unverifiable (trace truncated)` instead and closes nothing, unless its detail starts with `cannot:`. |
 | `Stages::open(&self) -> bool`, `Stages::since(&self) -> u64` | Whether the prefix is open; the position from which the next stage reads the trace. |
 | `restart(replicas: &[u32]) -> u64` | Takes a `tick()`, `s`, as an incarnation boundary of `replicas`, prints it, and returns `s`, which names the incarnation it began, `inc<s>`: two restarts never share it, even with no observation between them. Returns 0 and prints nothing while not watching. A free function, so a base's restart code can call it. |
-| `Stages::handoff(&mut self, read: impl FnOnce() -> Option<Witness>)` | Decides the handoff itself. It takes a `tick()`; then, when stage n has no outcome and the prefix is open, calls `read`, a plain closure that cannot await or yield, and records `En` held with the witness it returns, printing its record, or missed (`not held at handoff`) on `None`; then it takes the handoff mark, a `tick()`, `mark=`. The handoff holds when `En` was held in this call and `mark=` is its `read=` + 1: the witness was built inside the call, after the first tick, and no observation or other event came between the read and the mark. Prints `handoff holds|lost mark=<m> next=<run>:<seq>|-`, where `next` is the first observation after `En`'s position in its `run` (Shape A, section 18.7), then `phase continuation` and the `reach` line; closes the prefix and calls `unwatch()`. |
-| `Stages::on_panic(&mut self, evaluate: fn())` | Shape A: the evaluation of the stages, which the panic hook runs over the trace so far. |
+| `Stages::handoff(&mut self, read: impl FnOnce() -> Option<Witness>)` | Decides the handoff itself. It takes a `tick()`; then, when stage n has no outcome and the prefix is open, calls `read`, a plain closure that cannot await or yield; then it takes the handoff mark, a `tick()`, `mark=`, and records `En` held with the witness `read` returned, printing its record, or missed (`not held at handoff`) on `None`. Once the trace dropped an observation at or before `mark=`, `En` is `unverifiable (trace truncated)` instead, whatever `read` returned, and the handoff is lost. The handoff holds when `En` was held in this call and `mark=` is its `read=` + 1: the witness was built inside the call, after the first tick, and no observation or other event came between the read and the mark. Prints `handoff holds|lost mark=<m> next=<run>:<seq>|-`, where `next` is the first observation after `En`'s position, in the `run` of that position, of a replica that is not compromised (Shape A, section 18.7), then `phase continuation` and the `reach` line; closes the prefix and calls `unwatch()`. A second call does nothing. |
+| `Stages::on_panic(&mut self, evaluate: fn(&mut Stages))` | Shape A: the evaluation of the stages, which the panic hook runs over the trace so far, handing it a `Stages` handle so that it records the stages through the helper. |
 | `Stages::done(&mut self)` | Prints `done`. |
 
-The panic hook is chained in front of the one libfuzzer-sys installed. It first prints `panic`
-with the location and the first line of the message of the panic it handles, then the phase,
+**Truncation.** Once `truncated()` returns a position `s`, the helper prints `truncated seq=<s>`
+once per input, at its first event after the cut: a position it takes or a stage it records, so
+the line precedes every stage line evaluated after the cut.
+
+The panic hook is chained in front of the one libfuzzer-sys installed. For a panic on the
+thread that called `Stages::new`, under `STATELENS_REACH=1`, it first prints `panic` with the
+location and the first line of the message of the panic it handles, then the phase,
 the stage lines recorded so far and, in Shape A, those the registered evaluation finds in the
 trace; a stage whose witness the hook cannot read prints `unverifiable (crashed)`. Then the
 libfuzzer-sys hook prints the panic location and aborts; a panic inside the evaluation aborts
 at once, after the `panic` line. The phase is `prefix` before the handoff and `continuation`
-after it; in Shape A, `continuation` once `En` is found held. A failure that is not a panic
+after it; in Shape A, `continuation` once `En` is found held. The hook prints the phase before
+it runs the evaluation, so in Shape A the script reads the phase as `continuation` when an
+`En` `held` line follows the `panic` line. A failure that is not a panic
 takes the last `phase` line printed; in Shape A, whose stages are evaluated after the run, the
 phase of one during the run is unknown.
 
@@ -4733,8 +5985,9 @@ engine starts, so the conditions depend only on the scaffold's own code and knob
 on SUT output: more than 16 knobs, or more knobs picked than split; an empty domain, or one
 with a single value; and a budget whose prefix exceeds the runtime deadline. These functions
 are not `#[track_caller]`, so the panic's location is in `target_states/mod.rs`. Every other
-helper call checks without panicking, as the table says. Section 18.8 classes such a failure
-as SCAFFOLD ERROR.
+helper call checks without panicking, as the table says. `Knobs::split` and `Knobs::pick` run
+before `Stages::new`, so their errors print no `[statelens-reach]` line, only the message and
+location libfuzzer-sys prints. Section 18.8 classes such a failure as SCAFFOLD ERROR.
 
 ### 18.8 Reach check
 
@@ -4742,31 +5995,35 @@ The reach check replays fixed inputs and does not fuzz (D66). Each attempt repla
 canonical input and then runs the control; the kept version replays the canonical input once
 more (section 18.6.2).
 
-**A replay.** The binary is the fuzz build's release output, `target/<host>/release/<scaffold>`
-or `<package>/target/<host>/release/<scaffold>`, both checked as `coverage` checks its build.
-It runs in individual-file mode on `SL/campaign/reach/empty`, with
-`SL/campaign/reach/TS-NNNN/attempt-<a>/<replay>/` as its working directory, `<replay>` being
-`canonical`, `control` or, for the kept version's last replay, `final`: libFuzzer reads no
-corpus and gets no flag from the script, and a crash file lands in that directory, beside the
-replay's log, `replay.log`. The environment sets `STATELENS_REACH=1`, and `STATELENS_REACH_CONTROL=1` for the control
-run only, and leaves `STATELENS_BYZANTINE` unset, so the guard skips compromised replicas. The
-script kills a replay after 1,500 s, longer than libFuzzer's default `-timeout` of 1,200 s,
-and classes the kill as `timeout`.
+**A replay.** The binary is the fuzz build's release output:
+`$CARGO_TARGET_DIR/<host>/release/<scaffold>` when `CARGO_TARGET_DIR` is set, a relative value
+taken from the checkout's root, where the build runs, and otherwise
+`target/<host>/release/<scaffold>` or `<package>/target/<host>/release/<scaffold>`, both
+checked as `coverage` checks its build. It runs in individual-file mode on
+`SL/campaign/reach/empty`, with `SL/campaign/reach/TS-NNNN_<base>/attempt-<a>/<replay>/` as its
+working directory, `<replay>` being `canonical`, `control` or, for the kept version's last
+replay, `final`: libFuzzer reads no corpus and gets no flag from the script, and a crash file
+lands in that directory, beside the replay's log, `replay.log`. The environment sets
+`STATELENS_REACH=1`, and `STATELENS_REACH_CONTROL=1` for the control run only, and leaves
+`STATELENS_BYZANTINE` unset, so the guard skips compromised replicas. The script kills a replay,
+with everything it started, after 1,500 s, whether or not the replay's own process still runs,
+longer than libFuzzer's default `-timeout` of 1,200 s, and classes the kill as `timeout`.
 
 **Lines.** The helper prints, and the script parses:
 
 ~~~
 [statelens-reach] TS-NNNN E<k>/<n> held <kind> bind=<name>=<value>@E<j>[,...] <evidence> read=<s>
-[statelens-reach] TS-NNNN E<k>/<n> missed <detail>
-[statelens-reach] TS-NNNN E<k>/<n> unverifiable <reason>
+[statelens-reach] TS-NNNN E<k>/<n> missed[ <detail>]
+[statelens-reach] TS-NNNN E<k>/<n> unverifiable[ <reason>]
 [statelens-reach] TS-NNNN E<k>/<n> withheld
 [statelens-reach] TS-NNNN entry <observable>[<name>=<value>,...]=<value> seq=<s>
-[statelens-reach] TS-NNNN restart <replica>[,...] seq=<s> run=<r>
+[statelens-reach] TS-NNNN restart <replica>[,...]|- seq=<s> run=<r>
 [statelens-reach] TS-NNNN trace <run>:<seq>:<me>:<label>@<site>:<a>:<b>
+[statelens-reach] TS-NNNN truncated seq=<s>
 [statelens-reach] TS-NNNN handoff holds|lost mark=<m> next=<run>:<seq>|-
-[statelens-reach] TS-NNNN reach <k>/<n> control=0|1
 [statelens-reach] TS-NNNN phase prefix|continuation
-[statelens-reach] TS-NNNN panic <file>:<line>:<col> <first line of the message>
+[statelens-reach] TS-NNNN reach <k>/<n> control=0|1
+[statelens-reach] TS-NNNN panic <file>:<line>:<col>|-[ <first line of the message>]
 [statelens-reach] TS-NNNN done
 ~~~
 
@@ -4779,17 +6036,28 @@ sequence (section 9.6): an `entry` line's `seq=` is the position `stamp` took fo
 `Witness::act` took right before it performed the action, so a construction stage has a
 position like any other; a `restart` line's `seq=` is the position
 of the boundary, which names the incarnation `inc<s>`; `read=` is the position the witness
-took when it was built; and `mark=` is the handoff's own. A value holds no space, comma, `@`,
-`[` or `]`, and `?` is the value of an entity a witness does not identify; `<me>` is `-` for a
-site without a replica, and `<site>` is `<file>:<line>:<column>`.
-`missed cannot: <capability>` is a missing capability. Up to 64 `trace` lines follow a miss,
-from the start of the missed stage. `reach` counts the stages the helper recorded as held;
-`control=1` marks the control run. `done` follows the last oracle. The prefix
-`[statelens-reach]` keeps these lines apart from `[statelens][`, which `first_panic` and
-section 7.9 read. A line matches
+took when it was built; and `mark=` is the handoff's own. `truncated seq=` is the position of
+the first observation the trace dropped at `TRACE_CAP` (section 9.6), printed once. The helper
+keeps the fields apart.
+It first drops the whitespace at the ends of a key, of an action's entity list and of
+`bind=`, and next to each `,` and `=` in them and each `@` in `bind=`, so `R=2@E1, v=5@E1`
+binds `v`, and trims a verb. Then in an observable or a verb it writes whitespace, `,`, `@`,
+`=`, `[` and `]` as `_`, in a value the same except `=`, and an empty one of these as `-`; a
+key writes whitespace, `@`, `[` and `]` as `_`, keeps its `,` and `=` and may be empty; and in
+`bind=` the remaining whitespace becomes `_`. `?` is the value of an entity a witness does not identify;
+`<me>` is `-` for a site without a replica, and `<site>` is `<file>:<line>:<column>`. An `exact`
+witness with no read leaves its evidence empty, so two spaces come before `read=`. `missed
+cannot: <capability>` is a missing capability, and `missed not held at handoff` the handoff's
+own miss. Up to 64 `trace` lines follow a miss, from the start of the missed stage. A handoff
+prints its `handoff`, `phase continuation` and `reach` lines in that order. `reach` counts the
+stages the helper recorded as held; `control=1` marks the control run. `done` follows the last
+oracle. A `panic` line names `-` when the panic has no location. The prefix
+`[statelens-reach]` keeps these lines apart from `[statelens][`, which section 7.9 reads, but a
+`panic` line can quote a `[statelens][INV-...]` message, so the script drops the
+`[statelens-reach]` lines before it calls `first_panic`. A line matches
 
 ~~~
-^\[statelens-reach\] (TS-\d{4,}) (?:E(\d+)/(\d+) (held|missed|unverifiable|withheld)\b ?(.*)|entry ([^\[\s]+)\[([^\]\s]*)\]=(\S+) seq=(\d+)|restart (\S+) seq=(\d+) run=(\d+)|trace (\S+)|handoff (holds|lost) mark=(\d+) next=(\d+:\d+|-)|reach (\d+)/(\d+) control=([01])|phase (prefix|continuation)|panic (\S+) ?(.*)|done)$
+^\[statelens-reach\] (TS-\d{4,}) (?:E(\d+)/(\d+) (held|missed|unverifiable|withheld)\b ?(.*)|entry ([^\[\s]+)\[([^\]\s]*)\]=(\S+) seq=(\d+)|restart (\S+) seq=(\d+) run=(\d+)|trace (\S+)|handoff (holds|lost) mark=(\d+) next=(\d+:\d+|-)|reach (\d+)/(\d+) control=([01])|phase (prefix|continuation)|panic (\S+) ?(.*)|truncated seq=(\d+)|done)$
 ~~~
 
 and the rest of a `held` line matches `^(exact|intrinsic|construction) bind=(\S+) (.*) read=(\d+)$`,
@@ -4800,19 +6068,48 @@ an `exact` item `exact=([^\[\s]+)\[([^\]\s]*)\]=(\S+) seq=(\d+|-)`, an `intrinsi
 line that directly precedes the `handoff` line and that only the handoff call prints, its
 witness is not rejected, and the handoff's `mark=` is that line's `read=` + 1, so the witness
 was read inside the handoff call and no observation or other event came between the read and
-the mark. In Shape A, `En` is `unverifiable (no continuation)` when its witness has no
-position, or `next=` is `-` or not after that position, or, for a probe observation, of
-another `run`. A stage without a line, when no stage before it
-missed, is `unverifiable (no line)`.
+the mark. When the timing fails, because `En`'s `held` line is not the one directly before
+the `handoff` line, `mark=` is not its `read=` + 1, or the helper printed `handoff lost`, `En`
+is missed (`handoff lost`) and the verdict is PARTIAL; when the timing holds but `En`'s
+witness is rejected, `En` is `unverifiable`. When the replay printed a `truncated seq=<s>`
+line, anywhere among the card's lines, the script takes the smallest `<s>` and, after the
+timing check and before the witness rules, makes every stage still held whose `held` line's
+`read=` is `<s>` or later `unverifiable (trace truncated)`, and `En` too when `handoff holds`
+with a `mark=` of `<s>` or later; the handoff then does not hold, so the verdict cannot be
+REACHED. A cut after the handoff mark changes nothing. In Shape A, `En` is `unverifiable (no
+continuation)` when its witness has no position, or `next=` is `-` or not after that
+position, or, for a probe observation, of another `run`. A stage without a line, when no
+stage before it missed, is `unverifiable (no line)`, and a `withheld` line in the canonical
+run is `unverifiable` too. A stage or `reach` line whose `n` is not the card's, and lines
+printed under another card's ID, make the replay NO REPORT.
+
+libFuzzer runs a passing input a second time in the same replay, to look for leaks, so a
+passing replay prints its lines twice; a failing one prints them once. The script reads the
+card's lines of one run of the input and ignores the rest: a run opens with the `phase prefix`
+line `Stages::new` prints, and the panic hook reprints the phase after its `panic` line, so a
+`phase prefix` line that a `panic` line of its run precedes opens none. It keeps the run that
+printed a `panic` line, else the first, so a later run never completes an earlier one's report
+and a failure in a later run is read in that run's phase.
 
 **The control run.** It replays the canonical input with `STATELENS_REACH_CONTROL=1`, and the
 scaffold withholds the event the header names, which prints `withheld`. The control is vacuous
 when its `Ek` is not a `harness` event before `En`, when the run prints no `withheld` line for
-`Ek`, when a stage before `Ek` misses or binds other values than in the canonical run, or when
-`En` has neither a `held` nor a `missed` line. It is `weak` when `En` is held for the bound
-entities. `Control: n/a` is accepted only when the card has no `harness` event before `En` and
-every witness is `exact` or `construction`. A module without a `Control:` line has no control,
-annotated `control missing`.
+`Ek`, when a stage before `Ek` misses or binds other values than in the canonical run, when a
+stage after `Ek` and before `En` has no line or is withheld too, since that omission could
+explain the miss by itself, when `En` has neither a `held` nor a `missed` line, or when the
+run is not a complete report: it printed no `reach` or no `done` line, or lines under another
+card's ID or another `n`. It is `weak` when `En` is held for the bound entities, which ignores
+witness rejections in the control run, since they usually come from the withheld event. An
+entity the control's witness leaves out of `bind=`, or binds to `?`, does not tell the states
+apart, and neither does a value the control witness's own key, or the earlier stage it cites
+as `as Ej`, contradicts: the control is weak unless an entity both witnesses bind to a value,
+one the control's own evidence does not contradict, has another value in the control run. A
+`Control:` line that names neither `withholds Ek` nor `n/a` is vacuous, and so is a control
+with no replay.
+`Control: n/a` is accepted only when the card has no `harness` event before `En` and every
+witness is `exact` or `construction`, and is annotated `control n/a` either way. A module
+without a `Control:` line has no control, annotated `control missing`. A vacuous control has
+no annotation; the report gives its reason.
 
 **Verdicts.** From the canonical run, its control and the kept version's last replay:
 
@@ -4820,13 +6117,13 @@ annotated `control missing`.
 |---|---|
 | REACHED n/n | Every stage held and no witness rejected, `handoff holds` and `done`; the control is not vacuous and does not hold `En` for the bound entities, or is `n/a` where that is accepted |
 | UNVERIFIED k/n | No stage missed, but a stage is `unverifiable` or a witness was rejected; or the control is vacuous, `weak` or missing; or `Control: n/a` where it is not accepted. `k` counts the stages held. |
-| PARTIAL k/n | `k` stages precede the first miss, with 0 < k < n; `handoff lost` misses `En` |
+| PARTIAL k/n | A stage after `E1` is the first to miss; `k` counts the stages held before it, and the report lists the earlier stages that did not hold; `handoff lost` misses `En` |
 | UNREACHED 0/n | `E1` missed |
-| NO REPORT | The replay did not fail but printed no `reach` or no `done` line: the helper was not used, or the scaffold returned before the base's oracles |
-| CRASH (finding candidate) | A replay failed, below, unless the failure is the next row's, or a run of the agent's left a crash file (`stray failure`, section 18.6.2). The report gives its kind, phase, location and stage lines. |
+| NO REPORT | The replay did not fail but printed no `reach` or no `done` line: the helper was not used, or the scaffold returned before the base's oracles; or its lines name another card or another `n` |
+| CRASH (finding candidate) | A replay failed, below, unless the failure is the next row's, or a run of the agent's left a crash file (`stray failure`, section 18.6.2). Any failure other than a scaffold error makes the version CRASH, even beside one. The report gives its kind, phase, location and stage lines. |
 | SCAFFOLD ERROR | The replay's first panic is the helper's `[statelens-scaffold]` error (section 18.7), at a location in `target_states/mod.rs` |
-| NOT BUILT | No version passed the vetoes and built |
-| GATE FAILED | The kept version's edits under the editable roots made a test of the gate fail, or no longer run, that the campaign's gate passed (guard 5); over a kept CRASH, `GATE FAILED (finding candidate in attempt-<a>/)` |
+| NOT BUILT | No version passed the vetoes and built; as `NOT BUILT (breaks TS-MMMM_<b>)`, the kept version made the standing scaffold of TS-MMMM on `<b>`, a pair of the same card included, stand worse, and its edits were restored (section 18.6.2, Finish) |
+| GATE FAILED | The kept version's edits under the editable roots made a test of the gate fail, or no longer run, that the inventory does not record as failing, or the gate's output was unusable (guard 5); over a kept CRASH, `GATE FAILED (finding candidate in attempt-<a>/)` |
 
 The script computes `k` after rejecting witnesses; the `reach` line is the helper's count,
 before them. Verdicts are reported only. Every card with a kept version, every verdict but NOT
@@ -4835,93 +6132,133 @@ BUILT and GATE FAILED, has a scaffold, and `--state-reaching` fuzzes it.
 **Crash attribution.** A failure of a replay, canonical, control or final, in either phase, is a
 panic, a `[statelens][INV-...]` or `[statelens][BYZANTINE]` message, a harness oracle's
 failure, a sanitizer report, an out-of-memory or leak report, a runtime timeout or stall, or
-the script's kill. Every one is kept in `SL/campaign/reach/TS-NNNN/attempt-<a>/`, with its
-crash file, its log, its replay line and the version that failed, and every one but a
-scaffold error is a finding candidate, which a human triages as any crash (R-P3-2). Its kind
+the script's kill. Every one is kept in `SL/campaign/reach/TS-NNNN_<base>/attempt-<a>/`, with its
+crash file, its log, its replay line (`replay.txt` for a kept one, `interrupted.txt` when
+synthesis stopped before the attempt ended) and the version that failed (`version.diff` and
+`version/`), kept before its replays start, and every one but a scaffold error is a finding
+candidate, which a human triages as any crash (R-P3-2). Its kind
 comes from the log: `timeout` (`ERROR: libFuzzer: timeout`, or the kill), `oom` (`ERROR:
 libFuzzer: out-of-memory`), `leak` (`ERROR: LeakSanitizer`), `sanitizer` (another sanitizer's
-`ERROR:`), and otherwise `panic`, with the line `first_panic` picks. The report gives the
-phase, from the `phase` lines (section 18.7), and the location: the one the helper's `panic`
+`ERROR:`), and otherwise `panic`, with the line `first_panic` picks, or the message `exit code
+N` when a replay exits non-zero with no message the script recognizes. The report gives the
+phase, from the `phase` lines (section 18.7), `unknown` for a Shape A failure that is not a
+panic unless the last `phase` line is `continuation`, and the location: the one the helper's
+`panic`
 line or the chained default panic hook prints, `panicked at <file>:<line>:<col>`, which for an
 invariant is the SUT line, because `violation` is `#[track_caller]`; or else the first frame
-outside the standard library of the sanitizer's stack. It also says whether the card's diff
+outside the standard library of the sanitizer's stack. It also says whether the pair's diff
 added or moved that line, with the annotation `location in TS-NNNN diff`.
 
-Where a failure happened is diagnostic context only. A line the card's diff added or moved does
+Where a failure happened is diagnostic context only. A line the pair's diff added or moved does
 not make the failure the scaffold's: a production assertion moved into an exposed helper, or
 an accessor that exposes corruption made earlier, fails for the SUT's reasons. The only failure
-attributed to the scaffold is the helper's own `[statelens-scaffold]` error, SCAFFOLD ERROR. A
-CRASH (finding candidate) stops refinement for its card, and that version is the one kept and
+attributed to the scaffold is the helper's own `[statelens-scaffold]` error, SCAFFOLD ERROR,
+recognized by the message prefix and a location in `target_states/mod.rs` (the card ID in the
+message is not checked); the same message raised elsewhere is a CRASH. A
+CRASH (finding candidate) stops refinement for its pair, and that version is the one kept and
 fuzzed (section 18.6.2), unless guard 5 restores it, which leaves it a finding candidate; if
-triage shows a fault of the scaffold, the operator synthesizes the card again with `--redo`.
+triage shows a fault of the scaffold, the operator synthesizes the pair again with
+`--redo --match <base>_tsNNNN`, or the whole card with `--redo --match TS-NNNN`.
 
 **Annotations.** `nondeterministic` (the last replay's stage lines differ from the stored
 ones), `weak`, `control n/a` and `control missing` (the control), `unbound label <label>` (a
-label the module passes to `seen` that no `sl_probe!` or `sl_implies!` site under the editable
-roots names), `missing: <capability>` (from the header), `unmarked edit` (guard 4), `liveness
-unmeasurable` and `relation across restart` (section 18.7), `stray failure` (section 18.6.2),
-and `location in TS-NNNN diff`.
+label the module passes to `seen` or `sites` that no `sl_probe!` or `sl_implies!` site under
+the editable roots names), `missing: <capability>` (from the header, one per item separated by
+`;`), `unmarked edit` and `edit beside instrumentation` (guard 4), `relation across restart`
+(section 18.7), `stray failure` (section 18.6.2), and `location in TS-NNNN diff`.
 
-**Feedback.** The next attempt's `FEEDBACK` holds the verdict, its stage and trace lines, the
-vetoes and guard findings, the build's last lines, and the verdicts of the earlier attempts,
-with what each signal asks for:
+**Feedback.** The next attempt's `FEEDBACK` holds the verdict, its stage, `truncated` and trace
+lines, the vetoes and guard findings, the build's last lines, and the verdicts of the earlier
+attempts, with what each signal asks for:
 
 | Signal | What to fix |
 |---|---|
 | A veto, a guard, a build failure, or the agent's exit code | That, as reported |
-| `E1` missed | The setup: configuration, pinned and dependent fields, roles, elector, base or shape |
+| `Ek` missed with `cannot: <capability>` | Nothing in the scaffold, unless an edit the contract allows, or another shape, gives the capability; otherwise a human adds it |
+| `E1` missed | The setup: configuration, pinned and dependent fields, roles, elector or shape |
 | A middle `Ek` missed | The event's content, recipient, channel or order; the trace's `a`, `b` and sites against what the stage expects |
 | `En` missed, or `handoff lost` | Knob domains, timing, and what keeps the state pending at handoff |
 | `unverifiable`, or `witness rejected` | A witness that binds the relation: an intrinsic site for an existential line, otherwise an exact observable keyed by the bound entities, with positions where order matters |
 | `weak`, with bound witnesses | Withhold the event without which `En` cannot hold for these entities, or report that the History is not causal |
-| A vacuous or missing control | Name, or withhold, a later harness event before `En`; in the control run, drive every later event and the handoff check |
+| A vacuous or missing control | Name, or withhold, a later harness event before `En`; in the control run, drive every later event, the handoff check and the base's oracles |
 | NO REPORT | Use the helper, and never return before the base's oracles |
 | SCAFFOLD ERROR | The reason the helper named |
 
-Automatic repair covers only these. A CRASH (finding candidate) gets no feedback, because
-refinement stops (D67).
+A miss with `cannot:` takes its own row wherever its stage is; the `E1`, middle and `En` rows
+are for the other misses. The `cannot` row does not send the agent to another base: a base
+that has the capability is a pair of its own (section 18.6.2). Automatic repair covers only
+these. A CRASH (finding candidate) gets no feedback, because refinement stops (D67).
 
 ### 18.9 Running
 
 **`just fuzz <profile> --state-reaching`** (D68). For
-`just fuzz simplex --parallel --tmux --state-reaching --targets "simplex_cert_*"`:
+`just fuzz simplex --parallel --tmux --state-reaching --state-targets TS-0004 --fuzz-targets "simplex_cert_*"`:
 
 1. The flag loop takes `--state-reaching`, and refuses any other flag that starts with `--`
    before `--` ("just fuzz: unknown flag <flag>", exit code 1); without that refusal
    `--state-reaching` falls to `*) break` and reaches libFuzzer with every flag after it.
-   `--targets` becomes `--match 'simplex_cert_*'`, and no libFuzzer argument is left.
+   `--state-targets TS-0004` and `--fuzz-targets "simplex_cert_*"` become `--match TS-0004
+   --match 'simplex_cert_*'`, in the order given, and no libFuzzer argument is left. Each
+   pattern flag takes the `=` form too and may be repeated; a value missing after one ("just
+   fuzz: --fuzz-targets needs a pattern", "just fuzz: --state-targets needs a pattern"), a
+   `TS-` pattern given to `--fuzz-targets` ("just fuzz: --fuzz-targets names fuzz targets; a
+   card is --state-targets <pattern>"), any other pattern given to `--state-targets` ("just
+   fuzz: --state-targets names cards (TS-NNNN); a fuzz target is --fuzz-targets <pattern>")
+   and `--state-targets` without `--state-reaching` ("just fuzz: --state-targets needs
+   --state-reaching") each exit with code 1.
    `--state-reaching` with a single target ("just fuzz: --state-reaching narrows a profile;
-   name simplex or marshal"; one scaffold runs with `just run <scaffold>`) or with `qmdb`
-   exits with code 1.
-2. `statelens.py targets --profile simplex --state-reaching --match 'simplex_cert_*'` exits with
-   code 1 when no card and base are selected or a selected card has a lint problem, so a bad
-   selection fails before the campaign. Otherwise it lists the scaffolds that exist, if any.
-3. `just campaign --profile simplex`, unless `--skip-campaign`. A failed campaign stops the
-   recipe, as it does without the flag.
-4. `statelens.py synthesize --profile simplex --match 'simplex_cert_*'`. A non-zero exit code
-   stops the recipe: 2, among them guard 1 and a checkout that differs from `B`, or 3, no
-   scaffold built.
+   name simplex or marshal", followed by "(one scaffold runs with just run <scaffold>)") or
+   with `qmdb` ("just fuzz: --state-reaching takes simplex or marshal; qmdb has no target
+   states") exits with code 1. `--invariants LIST` and `--invariants=LIST`, given once or
+   more, are kept for the campaign; a value missing after `--invariants` ("just fuzz:
+   --invariants needs a list of ids"), the flag with `--skip-campaign` ("just fuzz:
+   --invariants selects what a campaign binds; drop --skip-campaign") and the flag with a
+   single target ("just fuzz: --invariants selects what a campaign binds; name simplex,
+   marshal or qmdb") each exit with code 1 before anything is listed or run.
+2. `statelens.py targets --profile simplex --state-reaching --match TS-0004 --match
+   'simplex_cert_*'` exits with code 1 when no card and base are selected or a selected card
+   has a lint problem, so a bad selection fails before the campaign. Otherwise it lists the
+   scaffolds of the selected pairs (card, base) that exist, if any.
+3. `just campaign --profile simplex`, followed by each `--invariants LIST` given, unless
+   `--skip-campaign`. A failed campaign stops the recipe, as it does without the flag.
+4. `statelens.py synthesize --profile simplex --match TS-0004 --match 'simplex_cert_*'`, one
+   scaffold per selected pair (section 18.6.2). A non-zero exit code stops the recipe: 2, among
+   them guard 1 and a checkout that differs from `B`, or 3, no scaffold built.
 5. `targets --state-reaching` lists the scaffolds of the selection again; an empty list exits
-   with code 1 and points to `SL/campaign/reach/`.
+   with code 1 ("just fuzz: no scaffold for this selection; see the reports in
+   campaign/reach/").
 6. The tmux, sequential and parallel branches of section 5.3 run unchanged over that list: the
    tmux session is `statelens-simplex-reach`, refused if it exists; each window is named
-   `${name%_statelens}`, for example `simplex_cert_mock_chaos_ts0003`; logs go to
+   `${name%_statelens}`, for example `simplex_cert_mock_ts0004`; logs go to
    `SL/campaign/logs/<scaffold>.run.log`; and each runs `just run <scaffold>` with the
    libFuzzer arguments given after `--`, none here.
 
-With TS-0003 and TS-0004 selected, the command opens two windows. No variant runs with
-`--state-reaching`, and without it nothing changes.
+The command opens one window per `simplex_cert_*` base of TS-0004, one per scaffold that
+built: every simplex base but Mallory matches, 20 at `HEAD`. `--fuzz-targets simplex_cert_mock`
+opens one, `simplex_cert_mock_ts0004`; with `--state-targets "TS-000*"` or no
+`--state-targets`, and the cards TS-0003 and TS-0004 present, every pair of both cards gets a
+window. No variant runs with `--state-reaching`, and without it nothing changes. For
+`just fuzz simplex --state-reaching --state-targets TS-0004 --fuzz-targets "simplex_cert_mock_twins_*" --invariants "simplex/INV-0001,simplex/INV-0002" -- -max_total_time=3600`,
+step 3 runs `just campaign --profile simplex --invariants simplex/INV-0001,simplex/INV-0002`,
+which binds those two invariants (section 7.1 step 4), TS-0004 is synthesized on each of the
+eight `simplex_cert_mock_twins_*` bases, `simplex_cert_mock_twins_campaign` and
+`simplex_cert_mock_twins_mutator` with their `_audit`, `_hb` and `_state_cov` siblings, and the
+eight scaffolds, `<base>_ts0004_statelens` each, for example
+`simplex_cert_mock_twins_campaign_ts0004_statelens`, run in turn, each with
+`-max_total_time=3600`; the recipe's messages count scaffolds (`8 simplex scaffold(s), in
+turn`).
 
 **justfile.** New recipes `extract-states` (`python3 scripts/statelens.py extract --states
 "$@"`) and `synthesize` (`python3 scripts/statelens.py synthesize "$@"`). In `fuzz`, the header
-comment gains `[--state-reaching]`, and the flag loop, the refusals, the listing, the synthesis,
-the second listing and the session name are as above. The verbatim copy in section 5.3 is
-updated with the file.
+comment lists `[--fuzz-targets GLOB]...`, `[--state-targets GLOB]...`, `[--state-reaching]` and
+`[--invariants LIST]...`, the last of which the `campaign` header also lists, and the flag
+loop, the two pattern functions, the refusals, the listing, the synthesis, the second listing
+and the session name are as above. Section 5.3 reproduces the file.
 
 **`targets --state-reaching`.** `targets [--profile P] --state-reaching [--match GLOB]...`
-prints the scaffolds of the selection of section 18.6.2 whose thin target exists, one per
-line. It exits with code 1 when no card and base are selected or a selected card has a lint
-problem, and with code 0 otherwise, also when no scaffold exists yet.
+prints the scaffolds of the selected pairs of section 18.6.2 whose thin target exists, one per
+line, in selection order. It exits with code 1 when no card and base are selected or a selected
+card has a lint problem, and with code 0 otherwise, also when no scaffold exists yet.
 
 **Run and replay.** A scaffold is a fuzz target of its package: `just run <scaffold>` runs it,
 and libFuzzer runs the empty input, the canonical input, first. Its `run` line carries no
@@ -4942,11 +6279,11 @@ the profile after a campaign that ended `READY` or `PANIC (tests)`.
 | AC | Procedure | Pass condition |
 |---|---|---|
 | AC-22 | `just check-invariants` with TS-0001 committed. For each agent: `just extract-states --registry marshal test consensus/src/marshal/standard/mod.rs:7027`; `just extract-states --registry simplex test consensus/src/simplex/mod.rs:3260`; `just extract-states --registry simplex text "<a paragraph describing TS-0004>"`; `just extract-states --registry marshal issue https://github.com/commonwarexyz/monorepo/pull/4317`; and, with `STATELENS_KB` set, `just extract-states --registry marshal kb <finding id>`. Then the refusals: a `test` path outside the roots, `--registry qmdb`, and `just extract-invariants test <path>`. Last, a `test` extraction with `--local`. | No lint problem. Each extraction writes lint-clean cards with a pinned `source_ref`; the `issue` card is deleted as a duplicate of TS-0001. The refusals exit with code 1. The `text`, `kb` and `--local` cards are written only to `target-states.local/`, which `git status` does not list. Once TS-0002 to TS-0004 are committed (TS-0004 moved by hand), `just check-invariants` reports no problem. |
-| AC-23 | The runtime self-tests in the test gate (section 7.7). Then a campaign whose stub instrumenter adds a call of `seen` under the editable roots. | The self-tests pass: watching; `tick` and the observations sharing one strictly increasing sequence, so that two ticks with no observation between them, and observations and ticks interleaved, get distinct, ordered positions; `mark` returning the last position without advancing; `clear_trace`, which `reset` calls, starting the sequence again, so positions are unique within one input only; `seen` finding the earliest match at or after a position, `site` and `run`, a guarded replica absent from the trace, the pairs `sl_implies!` notes, the cap, past which `truncated()` holds and the sequence still advances, `sites`, and the run counter of the fresh-run hook. The campaign stops in the scope check with exit code 2, naming the file. |
-| AC-24 | `just synthesize --profile simplex --match TS-0003 --match TS-0004`. Then one stub agent per guard of section 18.6.1: an edit outside the scope, then `just synthesize` once more, and then that edit undone with `git checkout`; a dependency added to the package manifest; an `sl_probe!` added; a two-attempt stub, each of whose attempts writes a valid module and thin target, whose first attempt removes or alters an `sl_assert!` call and whose second makes an unrelated edit and leaves that change in place, and a variant whose second attempt reverts the change; a ghost update deleted, and the `set_compromised` call of the Chaos-Twins hook (Appendix B.5) changed; a `#[path]` attribute on the runtime module's declaration; the runtime module changed; a `[statelens-reach]` literal in the module; a marked accessor under `consensus/src/simplex/` that keeps the test gate passing, and one that fails it; an unmarked hunk in the fuzz package. Then a stub that never builds, with one card selected, and one that exits with a non-zero code. | The scaffolds build, and the console prints their verdicts and `run` and `replay` lines without libFuzzer arguments; TS-0004 is REACHED. No `corpus/` or `artifacts/` entry exists for them, and `git status` lists only paths section 18.6.1 allows. The stubs: exit code 2 with the card's edits restored, and the next synthesis exits with code 2 before any card, naming the path; the manifest restored with feedback; vetoes for the probe, the runtime module and the literal; the two-attempt stub vetoed in every attempt with the same guard 3 feedback, the stub changing nothing after its second attempt, which ends the card, NOT BUILT, and the `sl_assert!` call as in `B` after the card, while its variant's second attempt builds; vetoes for the ghost update, the hook and the `#[path]` attribute; the test gate run again, passing and then GATE FAILED with the edit restored; `unmarked edit`; NOT BUILT and exit code 3, with the card's files restored and every variant still building; and a failed attempt after which the other card is synthesized. |
-| AC-25 | The procedure of AC-24 for TS-0001 and TS-0002 on a `marshal` checkout, with `--profile marshal`. Then a stub scaffold of TS-0001 that builds `E7`'s witness while R's certification is outstanding, and passes it to `Stages::handoff` only after that certification has completed. | As AC-24 for the real agent. TS-0001's report shows the pending-state handoff check: `handoff holds`, with `E7` witnessed by an `exact` observable that shows R's certification still outstanding at the handoff instant. The stub's report shows `handoff lost`, with a `mark=` greater than `E7`'s `read=` + 1, and PARTIAL 6/7. |
-| AC-26 | Two canonical replays of each scaffold of AC-24 and AC-25. Stub scaffolds, one per witness rejection rule of section 18.7: an `as Ek` value that differs, and one that `Ek` bound to `?`; an entity missing from `bind=`; an `exact` key without an entity of the line; positions against the History's order; a foreign `run`; a relation across a `restart` line whose incarnation the line does not bind; an `intrinsic` witness with a wrong `me`, one citing two observations, and one giving a view a value; a `construction` witness for `En`, and one for an event whose actor is not `harness`. Two stubs of an ordered pair with presence-only evidence: one for the later stage, and one for the earlier stage while the later is stamped. A stub that performs two harness actions A and then B, with no probe observation between them, for events the History orders A before B, each with a `construction` witness; and one that performs B before A. A stub that restarts one replica twice with no probe observation between the restarts, and whose later line, related by an `as Ek` to a stage before both restarts, names the incarnation the first restart began while its evidence lies after the second. Stubs with a vacuous control, a `weak` control, no `Control:` line, and `Control: n/a` with an `intrinsic` witness. A stub that prints `[statelens-reach]` itself, and one that prints `[statelens-scaffold]` itself. Stubs whose prefix raises an invariant's panic, panics on a line the card's diff added or moved, makes a sanitizer report in an accessor it added, and fails in the control run only. A stub agent that runs its scaffold and leaves a crash file. A stub with an empty knob domain. A stub with a missed stage. | The two replays print the same stage lines. Each rejection stub is UNVERIFIED with `witness rejected: <its rule>`, each presence-only stub UNVERIFIED with `unverifiable (no position)`, and each control stub UNVERIFIED. The two actions get distinct positions, A's smaller, and both stages hold in the first stub; the second is UNVERIFIED with `witness rejected: order`. The two restarts print distinct `seq=` values, so two incarnations, and the stub that names the first is UNVERIFIED with `witness rejected: incarnation`. The printing stubs are vetoed. Each failing stub is CRASH (finding candidate), with refinement stopped after that attempt and its crash file in `attempt-<a>/`; `just run <scaffold>` reproduces the first three, the second and third carry `location in TS-NNNN diff`, and the fourth's `replay` line sets `STATELENS_REACH_CONTROL=1`. The stray crash file is in `attempt-<a>/swept/`, and that attempt is CRASH (finding candidate) with `stray failure`. The empty domain is SCAFFOLD ERROR, and refinement continues. The missed stage prints `handoff lost`, `reach k/n` and then `done`. |
-| AC-27 | On a checkout of AC-24: `just fuzz simplex --parallel --tmux --state-reaching --targets "simplex_cert_*" --skip-campaign`; the same with `--targets TS-0003` and with `--targets "nothing*"`; then `just fuzz simplex --bogus`, `just fuzz qmdb --state-reaching` and `just fuzz simplex_cert_mock --state-reaching`. | The first opens the session `statelens-simplex-reach` with one window per scaffold on a `simplex_cert_*` base and none for a variant, each running `just run <scaffold>` with no added argument. `TS-0003` opens one window; `nothing*` fails before synthesis. The last three exit with code 1. |
+| AC-23 | The runtime self-tests in the test gate (section 7.7), and the helper's self-tests (section 18.7) in a checkout synthesis wrote `mod.rs` to. Then a campaign whose stub instrumenter adds a call of `seen` under the editable roots. | The self-tests pass: watching; `tick` and the observations sharing one strictly increasing sequence, so that two ticks with no observation between them, and observations and ticks interleaved, get distinct, ordered positions; `mark` returning the last position without advancing; `clear_trace`, which `reset` calls, starting the sequence again, so positions are unique within one input only; `seen` finding the earliest match at or after a position, `site` and `run`, a guarded replica absent from the trace, the pairs `sl_implies!` notes, the cap, past which `truncated()` returns the position of the first dropped observation, which a later drop does not move and `watch` and `unwatch` reset, and the sequence still advances, `sites`, and the run counter of the fresh-run hook. The helper's self-tests pass: after a state change past the cap, `truncated seq=<s>` once, `unverifiable (trace truncated)` with no feature for a later stage and for `En`, and `handoff lost`; without a cut, `handoff holds`; an `En` recorded `unverifiable` before the handoff keeps its reason and loses the handoff; with `STATELENS_REACH` unset, a miss records no `trace` line and the handoff records `next=-`. The campaign stops in the scope check with exit code 2, naming the file. |
+| AC-24 | `just synthesize --profile simplex --match simplex_cert_mock_chaos_ts0003 --match simplex_cert_mock_ts0004`, which pins each card to one base, the family of PRD section 11.4, so the selection is the two pairs (TS-0003, `simplex_cert_mock_chaos`) and (TS-0004, `simplex_cert_mock`). Then one stub agent per guard of section 18.6.1: an edit outside the scope, then `just synthesize` once more, and then that edit undone with `git checkout`; a dependency added to the package manifest; an `sl_probe!` added; a two-attempt stub, each of whose attempts writes a valid module and thin target, whose first attempt removes or alters an `sl_assert!` call and whose second makes an unrelated edit and leaves that change in place, and a variant whose second attempt reverts the change; a ghost update deleted, and the `set_compromised` call of the Chaos-Twins hook (Appendix B.5) changed; a `#[path]` attribute on the runtime module's declaration; the runtime module changed; a `[statelens-reach]` literal in the module; a `statelens::watch()` call in the module; an `eprintln!` call, a `set_hook` call and an `include!` in the module; a module under a directory named `target`; a marked accessor under `consensus/src/simplex/` that keeps the test gate passing, and one that fails it; an unmarked hunk in the fuzz package; a marked `if false` around an unchanged `sl_assert!` call. Then a stub that never builds, with one pair selected, and one that exits with a non-zero code. Then, with `NEXTEST_STATUS_LEVEL=fail` and `CARGO_TERM_COLOR=always` set, the marked accessor that fails the test gate again, and one that keeps the crate building but a test of the gate from compiling; and, on a fresh checkout whose campaign `logs/test.log` was removed before the first synthesis, the passing accessor. Then three two-pair stubs, over the two pairs above: one whose second pair changes the first pair's module so that its thin target no longer builds, one whose second pair adds a marked accessor under `consensus/src/simplex/`, followed by `just synthesize --redo --match simplex_cert_mock_ts0004`, interrupted (`SIGINT`) during TS-0003's revalidation replays, and then `just synthesize --match simplex_cert_mock_ts0004` with a stub that writes only TS-0004's module and thin target, and one whose second pair writes only its own module and thin target. Then one card on two bases, `just synthesize --profile simplex --match TS-0004 --match simplex_cert_mock --match simplex_cert_mock_faulty_net`, on a checkout without TS-0004's reports, with a stub that writes a module and thin target per pair; then the same command again; then `just synthesize --redo --match simplex_cert_mock_ts0004`. | The scaffolds, `simplex_cert_mock_chaos_ts0003_statelens` and `simplex_cert_mock_ts0004_statelens`, build, and the console prints their verdicts, one `TS-NNNN` line per pair, and `run` and `replay` lines without libFuzzer arguments; TS-0004 is REACHED. No `corpus/` or `artifacts/` entry exists for them, and `git status` lists only paths section 18.6.1 allows. The stubs: exit code 2 with the pair's edits restored, and the next synthesis exits with code 2 before any pair, naming the path; the manifest restored with feedback; vetoes for the probe, the runtime module, the literal, the `watch` call, the print, the panic hook, the include and the ignored module; the two-attempt stub vetoed in every attempt with the same guard 3 feedback, the stub changing nothing after its second attempt, which ends the pair, NOT BUILT, and the `sl_assert!` call as in `B` after the pair, while its variant's second attempt builds; vetoes for the ghost update, the hook and the `#[path]` attribute; the test gate run again, passing and then GATE FAILED with the edit restored; `unmarked edit`; `edit beside instrumentation`; NOT BUILT and exit code 3, with the pair's files restored and every variant still building; and a failed attempt after which the other pair is synthesized. Under the changed nextest settings, the failing accessor is GATE FAILED naming the failing test, and the one that breaks a test's build is GATE FAILED with `(unusable output: no nextest summary line)`; `SL/campaign/reach/baseline/tests.json` lists the gate's tests; without the campaign log, the gate runs once on the tree as the campaign left it, logged to `logs/test-baseline.log`, before any pair, and the accessor passes the gate. The first two-pair stub is `NOT BUILT (breaks TS-0003_simplex_cert_mock_chaos)` with its edits restored and TS-0003's verdict and report, `TS-0003_simplex_cert_mock_chaos.md`, unchanged; the accessor's pair keeps its scaffold and TS-0003's report gains `## Revalidation after TS-0004_simplex_cert_mock`, and after the `--redo`, which removes the accessor, is interrupted with exit code 130, leaving TS-0003's verdict unchanged and `SL/campaign/reach/revalidation.json`, the next synthesis adds `## Revalidation after --redo`, before TS-0004 is synthesized again, and deletes that record; the third revalidates TS-0003 too, under `## Revalidation after TS-0004_simplex_cert_mock`; the last check builds every scaffold. The card on two bases gives two scaffolds, `simplex_cert_mock_ts0004_statelens` and `simplex_cert_mock_faulty_net_ts0004_statelens`, two reports and two diffs, `TS-0004_simplex_cert_mock.*` and `TS-0004_simplex_cert_mock_faulty_net.*`, two `pub mod` lines in `target_states/mod.rs`, a `run` line each, and the second pair revalidates the first, whose report gains `## Revalidation after TS-0004_simplex_cert_mock_faulty_net`; the second command prints two `skipped: TS-0004 on <base> was synthesized as <scaffold>; use --redo` lines, one per pair; the `--redo` of one pair moves `TS-0004_simplex_cert_mock.*` to `TS-0004_simplex_cert_mock.<stamp>.*`, leaves the other pair's thin target and `[[bin]]` block in place, and its report gains `## Revalidation after --redo`. |
+| AC-25 | The procedure of AC-24 for TS-0001 and TS-0002 on a `marshal` checkout, with `--profile marshal` and the pairs (TS-0001, `marshal_e2e_standard_deferred_cert_mock_twins_split_header`) and (TS-0002, `marshal_e2e_standard_deferred_cert_mock_poison`), the families of PRD section 11.4, selected as `--match <base>_ts0001 --match <base>_ts0002`; the card on two bases uses `marshal_e2e_standard_deferred_cert_mock_poison` and `marshal_e2e_coding_cert_mock_poison`. Then a stub scaffold of TS-0001 that builds `E7`'s witness while R's certification is outstanding, and passes it to `Stages::handoff` only after that certification has completed. | As AC-24 for the real agent. TS-0001's report shows the pending-state handoff check: `handoff holds`, with `E7` witnessed by an `exact` observable that shows R's certification still outstanding at the handoff instant. The stub's report shows `handoff lost`, with a `mark=` greater than `E7`'s `read=` + 1, and PARTIAL 6/7. |
+| AC-26 | Two canonical replays of each scaffold of AC-24 and AC-25. Stub scaffolds, one per witness rejection rule of section 18.7: an `as Ek` value that differs, and one that `Ek` bound to `?`; an entity missing from `bind=`; an `exact` key without an entity of the line; positions against the History's order; a foreign `run`; a relation across a `restart` line whose incarnation the line does not bind; an `intrinsic` witness with a wrong `me`, one citing two observations, and one giving a view a value; a `construction` witness for `En`, and one for an event whose actor is not `harness`. Two stubs of an ordered pair with presence-only evidence: one for the later stage, and one for the earlier stage while the later is stamped. A stub that performs two harness actions A and then B, with no probe observation between them, for events the History orders A before B, each with a `construction` witness; and one that performs B before A. A stub that restarts one replica twice with no probe observation between the restarts, and whose later line, related by an `as Ek` to a stage before both restarts, names the incarnation the first restart began while its evidence lies after the second. Stubs with a vacuous control, a `weak` control, no `Control:` line, and `Control: n/a` with an `intrinsic` witness. A stub that prints `[statelens-reach]` itself, and one that prints `[statelens-scaffold]` itself. Stubs whose prefix raises an invariant's panic, panics on a line the pair's diff added or moved, makes a sanitizer report in an accessor it added, and fails in the control run only. A stub agent that runs its scaffold and leaves a crash file. A stub with an empty knob domain. A stub with a missed stage. A stub that fills the trace to `TRACE_CAP`, changes the state past the cap, and reads in the handoff the latest observation the trace kept. A stub whose canonical replay fails, with synthesis interrupted (`SIGINT`) during the control replay. | The two replays print the same stage lines. Each rejection stub is UNVERIFIED with `witness rejected: <its rule>`, each presence-only stub UNVERIFIED with `unverifiable (no position)`, and each control stub UNVERIFIED. The two actions get distinct positions, A's smaller, and both stages hold in the first stub; the second is UNVERIFIED with `witness rejected: order`. The two restarts print distinct `seq=` values, so two incarnations, and the stub that names the first is UNVERIFIED with `witness rejected: incarnation`. The printing stubs are vetoed. Each failing stub is CRASH (finding candidate), with refinement stopped after that attempt and its crash file in `attempt-<a>/`; `just run <scaffold>` reproduces the first three, the second and third carry `location in TS-NNNN diff`, and the fourth's `replay` line sets `STATELENS_REACH_CONTROL=1`. The stray crash file is in `attempt-<a>/swept/`, and that attempt is CRASH (finding candidate) with `stray failure`. The empty domain is SCAFFOLD ERROR, and refinement continues. The missed stage prints `handoff lost`, `reach k/n` and then `done`. The truncation stub prints `truncated seq=<s>` and is UNVERIFIED with `unverifiable (trace truncated)`; the same lines with `En` held, `read=` at or after `<s>` and `handoff holds` are UNVERIFIED too. The interrupted synthesis exits with code 130 with the pair's edits restored, and `TS-NNNN_<base>/attempt-<a>/` holds the canonical crash file and log, `version.diff`, which `git apply --check` accepts on the tree before the pair, `version/`, and `interrupted.txt`, which names the pair, the control replay as the step that stopped and gives the canonical replay's `run` and `replay` lines. |
+| AC-27 | On a checkout of AC-24: `just fuzz simplex --parallel --tmux --state-reaching --state-targets TS-0004 --fuzz-targets "simplex_cert_*" --skip-campaign`; the same with `--fuzz-targets simplex_cert_mock`, with `--fuzz-targets "simplex_cert_mock_twins_*"`, with `--state-targets "TS-000*"` and with `--fuzz-targets "nothing*"`; then `just fuzz simplex --bogus`, `just fuzz simplex --state-targets TS-0003`, `just fuzz simplex --state-reaching --fuzz-targets TS-0003`, `just fuzz simplex --state-reaching --state-targets "simplex_cert_*"`, `just fuzz qmdb --state-reaching` and `just fuzz simplex_cert_mock --state-reaching`. | The first opens the session `statelens-simplex-reach` with one window per `simplex_cert_*` base of TS-0004 whose scaffold built, 20 pairs at `HEAD`, and none for a variant, each running `just run <scaffold>` with no added argument, the message saying `20 scaffold(s), one tmux window each`; `simplex_cert_mock` opens one window, `simplex_cert_mock_ts0004`; `simplex_cert_mock_twins_*` opens eight, `simplex_cert_mock_twins_campaign_ts0004` to `simplex_cert_mock_twins_mutator_state_cov_ts0004`; `TS-000*` opens one window per scaffold of TS-0003's and TS-0004's pairs; `nothing*` fails before synthesis. The last six exit with code 1. |
 | AC-28 | `just clean --yes` on a checkout of AC-24 or AC-25; then `just campaign` on a checkout that has `<package>/src/target_states/`. For a scaffold that runs a real engine under a Byzantine identity (a non-empty `set_compromised` in Shape B, or a Shape A base whose hook compromises one), a canonical replay with `STATELENS_BYZANTINE=panic`. | After `clean` every path in its scope, the fuzz packages included, matches `HEAD`, and no `target_states/` or thin target is left. The campaign exits with code 2. The replay panics with `[statelens][BYZANTINE]`; with no such scaffold, this check is recorded as not applicable. |
 | R-TS-NF-3 | With the same duration and flags, each scaffold and its base's variant, in the same instrumented checkout. | The exec/s values are reported side by side. |
 
@@ -4968,12 +6305,33 @@ the profile after a campaign that ended `READY` or `PANIC (tests)`.
 - The knobs are the first bytes of `raw_bytes`, the last field of the input, so a mutation that
   changes how many bytes the earlier fields take shifts which bytes become knobs. This is
   accepted.
-- Agents are not deterministic, so two syntheses of one card differ. A card costs at most four
-  agent runs, their builds and replays, and a test gate when it changed the editable roots.
+- Agents are not deterministic, so two syntheses of one pair differ. A pair costs at most four
+  agent runs, their builds and replays, a test gate when it changed the editable roots, and a
+  build and three replays of every other scaffold that stands, since a module can use a
+  sibling module.
+- A card on b selected bases is b pairs, each with its own attempts, builds, replays and gate,
+  and each kept pair revalidates every other standing scaffold, the card's other pairs
+  included: a card on all 20 simplex bases (21 targets less Mallory; marshal has 13) costs up
+  to 20 syntheses and 20 x (S - 1) revalidation builds with three replays each, S being the
+  scaffolds that stand when each pair finishes. `--fuzz-targets`, or `<base>_tsNNNN` patterns
+  to `synthesize`, bound it. Accepted: the scaffolds of one card on different bases are
+  different fuzz targets, and which base reaches the state is what the pairs find out.
+- Revalidation compares an earlier scaffold with the verdict its report records, read at the
+  start of each synthesis, and `--redo` undoes a pair by its `TS-NNNN_<base>.diff` as it reads
+  it; a report or diff an agent of an earlier synthesis rewrote is not detected.
+  A change outside every pair's diff, such as a helper template edited between syntheses, is
+  not replayed: only the last check's build sees it. An undo by `--redo` or by the last check,
+  and a restore of a pair's edits after its revalidation rewrote reports, are revalidated the
+  same way; one an interrupt stops, or that a restore leaves, is completed by the next
+  synthesis, and until then the reports keep their earlier verdicts, or those the restored
+  edits gave them. A synthesis killed after a pair's report is written and before its record is
+  deleted revalidates once more, naming a rollback that did not happen. No pair is rolled back
+  for an undo, and a scaffold it leaves unbuildable is recorded `NOT BUILT (no longer builds)`
+  even when a later pair of the same run makes it build again, until a `--redo` of its pair.
 - The guards check where edits are, what they leave of the instrumentation, and their markers,
   against the baseline the campaign's first synthesis took. Whether an edit preserves what the
   protocol does rests on the prompt, the test gate, which runs the engine-level tests only
-  (D2), and review of `campaign/reach/TS-NNNN.diff`.
+  (D2), and review of `campaign/reach/TS-NNNN_<base>.diff`.
 - Injections escape ghost history (section 8.7) and can raise false alarms; the module header
   lists them.
 - A state internal to a Byzantine replica cannot be witnessed under the guard.
@@ -4982,15 +6340,53 @@ the profile after a campaign that ended `READY` or `PANIC (tests)`.
 - A test that drives one actor through its mailbox, as TS-0002's does, becomes a History of the
   protocol events that deliver the same inputs (section 18.4), which a cluster may reach rarely,
   or only with a capability the harness lacks, reported as `cannot:`.
-- `TRACE_CAP` can cut a long Shape A run short; a stage after the cut is `unverifiable (trace
-  truncated)`. Positions keep advancing past the cut, so the order of what is kept stays exact.
+- `TRACE_CAP` can cut a long Shape A run short; a stage whose witness is read at or after the
+  cut, and `En` when the cut comes at or before the handoff mark, is `unverifiable (trace
+  truncated)` and adds no feature, and the handoff is lost. Positions keep advancing past the cut, so the order of what is kept stays exact.
 - The helper checks when `En`'s witness was built, inside the handoff call, not where its
   values came from: a closure that builds it from values read before the call is not detected
-  by the positions. The prompt forbids it, and review of the module is what catches it.
+  by the positions. The prompt forbids it, and review of the module is what catches it. The
+  same holds for an `intrinsic` witness of `En` that cites an old observation, which a later
+  observation at its site of the same replica contradicts: the reach lines carry no trace
+  that would show it, so the prompt asks for an `exact` witness of `En` where one exists, or
+  the latest observation, and review checks it.
 - Likewise, the helper takes the positions of stamped entries and of actions itself, but
   whether a stamping wrapper sits on the path of the system under test and stamps an entry
   when it records it, and whether the `perform` a scaffold passes to `Witness::act` performs
   the action the witness names, is left to review of the module.
+- The scope check of section 7.5 and guard 3 count a call of a runtime function only when the
+  code reaches it through the runtime module, by path, alias (`as rt`, `{self as rt}`) or named
+  import. A glob import of the module followed by a bare call escapes both; review of the
+  instrumentation diff and of the pair's diff is what catches it.
+- Guard 3 compares text. It stops the plain forms of a forged reach line, a panic hook, an
+  included file and an ignored module, not every spelling: a write to a file opened at
+  `/dev/stderr`, or a call of another crate's function that prints, escapes it. An edit that
+  disables an assertion it leaves unchanged, with `if false`, a `cfg` or an early `return`,
+  passes guard 3; the annotation `edit beside instrumentation` points review at such hunks
+  when they touch the instrumented lines, and review of `campaign/reach/TS-NNNN_<base>.diff`
+  is what catches the rest.
+- `B`, its test inventory, the content the script last wrote to its own files, and the
+  campaign's `instrumentation.diff` lie in `SL/campaign/`, which git ignores and a synthesis
+  agent can write. A synthesis reads them once, before any agent runs, and holds them in
+  memory, so no attempt can change what that run compares with, and after every run of the
+  agent and when the synthesis ends the script writes back what changed there; only a
+  synthesis killed before it ends leaves such an edit, in these files or in
+  `SL/campaign/reach/pending/`, for the next synthesis to read.
+- A synthesis killed outright (`SIGKILL`) cannot kill its agent, which runs in its own process
+  group and may keep writing; the next synthesis restores `S0` (section 18.6.2, Once per run)
+  and should start only after that agent has ended.
+- A dangling symbolic link, or one to a directory, that an edit leaves in the scope is not
+  listed and survives a restore; nothing compiles or reads it.
+- An archived `run` or `replay` line names the scaffold, which after `--redo` holds the
+  replacement version or none, so an archived failure replays only after its `version.diff`
+  is applied.
+- Guard 1 compares `SL/` with its state at the start of each synthesis, not with `B`, so a
+  change an earlier synthesis made there is not detected.
+- The helper's state is per thread, as the trace is: a panic on a thread other than the one
+  that called `Stages::new` prints no stage lines, and neither does a scaffold error raised
+  before `Stages::new`.
+- Whether a marshal prefix leaves enough height below the epoch ceiling for the liveness
+  measurement is not measured; review of the module checks it.
 
 ---
 
@@ -5018,7 +6414,12 @@ the profile after a campaign that ended `READY` or `PANIC (tests)`.
 //!   replicas ([Global], [with_global]). It lives for one run: [reset] and every
 //!   fresh deterministic runtime clear it, while a runtime resumed from a
 //!   checkpoint (a crash-restart) keeps it;
-//! - discretization helpers: [bucket], [delta], [flag], [pack] and [disc].
+//! - discretization helpers: [bucket], [delta], [flag], [pack] and [disc];
+//! - the read side, for the target-state scaffolds only: while a scaffold
+//!   [watch]es, an ordered trace of the probe observations of one input ([Seen],
+//!   [seen], [sites], [observations], [truncated]), and one event sequence per
+//!   input that orders those observations and the scaffold helper's events
+//!   ([tick], [mark]). Instrumentation never calls it.
 //!
 //! Environment switches, each read once per process:
 //! - `STATELENS_BYZANTINE` sets what instrumentation does for a compromised
@@ -5057,6 +6458,7 @@ thread_local! {
     static COMPROMISED: RefCell<BTreeSet<u32>> = const { RefCell::new(BTreeSet::new()) };
     static GHOSTS: RefCell<BTreeMap<u32, Ghost>> = const { RefCell::new(BTreeMap::new()) };
     static GLOBAL: RefCell<Global> = RefCell::new(Global::default());
+    static TRACE: RefCell<Trace> = const { RefCell::new(Trace::new()) };
 }
 
 /// What instrumentation does at a site reached by a compromised replica.
@@ -5175,16 +6577,17 @@ fn table() -> *mut u8 {
         .cast_mut()
 }
 
-/// Prepares a fuzz input: zeroes the counter table, forgets the compromised set
-/// and clears the ghost state. In a fuzzing build it also registers the table
-/// with libFuzzer on first use, unless `STATELENS_FEEDBACK=0`.
+/// Prepares a fuzz input: zeroes the counter table, forgets the compromised set,
+/// clears the ghost state, and drops the probe trace, so the event sequence and
+/// the run counter start again at 0. In a fuzzing build it also registers the
+/// table with libFuzzer on first use, unless `STATELENS_FEEDBACK=0`.
 ///
 /// Called by the StateLens fuzz target before every input.
 pub fn reset() {
     #[cfg(fuzzing)]
     {
-        static REGISTERED: std::sync::Once = std::sync::Once::new();
-        REGISTERED.call_once(|| {
+        static REGISTERED: OnceLock<()> = OnceLock::new();
+        REGISTERED.get_or_init(|| {
             if std::env::var("STATELENS_FEEDBACK").map_or(true, |value| value != "0") {
                 TABLE.register();
             }
@@ -5195,25 +6598,34 @@ pub fn reset() {
     unsafe { core::ptr::write_bytes(table(), 0, COUNTERS) };
     clear_compromised();
     forget_ghosts();
+    clear_trace();
 }
 
 /// Forgets all ghost state.
-///
-/// Registered as the deterministic runtime's fresh-run hook, so history from an
-/// earlier, independent run on this thread (for example another seed of the same
-/// test) does not leak into the next run. A runtime resumed from a checkpoint (a
-/// crash-restart) keeps the history.
 fn forget_ghosts() {
     GHOSTS.with(|ghosts| ghosts.borrow_mut().clear());
     GLOBAL.with(|global| *global.borrow_mut() = Global::default());
 }
 
-/// Registers [forget_ghosts] with the deterministic runtime, once per process.
-fn register_fresh_run_hook() {
-    static REGISTERED: std::sync::Once = std::sync::Once::new();
-    REGISTERED.call_once(|| {
-        let _ = commonware_runtime::deterministic::STATELENS_FRESH_RUN.set(forget_ghosts);
+/// Starts an independent run: forgets all ghost state, then counts the runtime
+/// instance of the input.
+///
+/// Registered as the deterministic runtime's fresh-run hook, so history from an
+/// earlier, independent run on this thread (for example another seed of the same
+/// test) does not leak into the next run. A runtime resumed from a checkpoint (a
+/// crash-restart) keeps the history and the run number.
+fn fresh_run() {
+    forget_ghosts();
+    TRACE.with(|trace| {
+        let mut trace = trace.borrow_mut();
+        trace.run = trace.run.saturating_add(1);
     });
+}
+
+/// Registers [fresh_run] with the deterministic runtime; only the first call of the
+/// process sets it.
+fn register_fresh_run_hook() {
+    let _ = commonware_runtime::deterministic::STATELENS_FRESH_RUN.set(fresh_run);
 }
 
 /// Hashes a probe site label at compile time (FNV-1a, 64 bits).
@@ -5356,11 +6768,256 @@ pub fn with_global<R>(me: Option<Participant>, f: impl FnOnce(&mut Global) -> R)
     Some(GLOBAL.with(|global| f(&mut global.borrow_mut())))
 }
 
+/// Most observations the trace of one input keeps.
+pub const TRACE_CAP: usize = 1 << 20;
+
+/// One probe observation of a watched input. Its fields are private, so only the
+/// runtime makes or changes one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Seen {
+    label: &'static str,
+    site: &'static str,
+    me: Option<u32>,
+    a: u32,
+    b: u32,
+    seq: u64,
+    run: u32,
+}
+
+impl Seen {
+    /// The `sl_probe!` label, or the invariant ID of an `sl_implies!` site.
+    pub const fn label(self) -> &'static str {
+        self.label
+    }
+
+    /// The call site, `concat!(file!(), ":", line!(), ":", column!())`.
+    pub const fn site(self) -> &'static str {
+        self.site
+    }
+
+    /// The participant index of the observing replica.
+    pub const fn me(self) -> Option<u32> {
+        self.me
+    }
+
+    /// The first recorded value; `pre` at an `sl_implies!` site.
+    pub const fn a(self) -> u32 {
+        self.a
+    }
+
+    /// The second recorded value; `pre && post` at an `sl_implies!` site.
+    pub const fn b(self) -> u32 {
+        self.b
+    }
+
+    /// The position of the observation in the event sequence of the input, from 1.
+    pub const fn seq(self) -> u64 {
+        self.seq
+    }
+
+    /// The runtime instance of the input that made it, from 1.
+    pub const fn run(self) -> u32 {
+        self.run
+    }
+}
+
+/// The read side's state on this thread: the trace of one input, its event
+/// sequence and its run counter.
+struct Trace {
+    /// Whether a scaffold watches, so observations are kept and the sequence advances.
+    watching: bool,
+    /// The position of the first observation dropped because the trace held
+    /// [TRACE_CAP], if any.
+    truncated: Option<u64>,
+    /// The last position issued in the input.
+    seq: u64,
+    /// The runtime instance current on this thread, counted by [fresh_run].
+    run: u32,
+    /// The observations, in order of their positions.
+    seen: Vec<Seen>,
+}
+
+impl Trace {
+    const fn new() -> Self {
+        Self {
+            watching: false,
+            truncated: None,
+            seq: 0,
+            run: 0,
+            seen: Vec::new(),
+        }
+    }
+}
+
+/// Drops the trace, sets the run counter and the event sequence to 0, and
+/// registers the fresh-run hook, so the first runtime of the input has run 1.
+///
+/// [reset] calls it. Self-tests call it instead of [reset], because it touches
+/// only the thread-local trace, run counter and sequence.
+fn clear_trace() {
+    register_fresh_run_hook();
+    TRACE.with(|trace| *trace.borrow_mut() = Trace::new());
+}
+
+/// Starts an empty trace for this input. The event sequence goes on from its
+/// current value.
+pub fn watch() {
+    TRACE.with(|trace| {
+        let mut trace = trace.borrow_mut();
+        trace.watching = true;
+        trace.truncated = None;
+        trace.seen = Vec::new();
+    });
+}
+
+/// Stops keeping observations and drops the trace.
+pub fn unwatch() {
+    TRACE.with(|trace| {
+        let mut trace = trace.borrow_mut();
+        trace.watching = false;
+        trace.truncated = None;
+        trace.seen = Vec::new();
+    });
+}
+
+/// Advances the event sequence and returns its new value, which is greater than
+/// every position issued earlier in the input. While not watching it returns 0
+/// and advances nothing.
+///
+/// Only the scaffold helper calls it.
+pub fn tick() -> u64 {
+    TRACE.with(|trace| {
+        let mut trace = trace.borrow_mut();
+        if !trace.watching {
+            return 0;
+        }
+        trace.seq = trace.seq.saturating_add(1);
+        trace.seq
+    })
+}
+
+/// The last position issued in the input, to an observation or by a [tick],
+/// without advancing the sequence; 0 before the first.
+pub fn mark() -> u64 {
+    TRACE.with(|trace| trace.borrow().seq)
+}
+
+/// The runtime instance current on this thread, from 1; 0 before the first
+/// runtime of the input.
+pub fn current_run() -> u32 {
+    TRACE.with(|trace| trace.borrow().run)
+}
+
+/// The position of the first observation the trace dropped because it held
+/// [TRACE_CAP], or `None` while it has dropped none. A dropped observation still
+/// advances the sequence, so what the trace holds from that position on is
+/// incomplete.
+pub fn truncated() -> Option<u64> {
+    TRACE.with(|trace| trace.borrow().truncated)
+}
+
+/// The earliest observation at or after position `since`, of the run current at
+/// the call, with `label`, at `site` when one is given, that `f` accepts. `None`
+/// while not watching.
+///
+/// Find a site with [sites], never as a literal: edits move lines.
+pub fn seen(
+    label: &str,
+    site: Option<&str>,
+    since: u64,
+    mut f: impl FnMut(&Seen) -> bool,
+) -> Option<Seen> {
+    let (mut index, run) = TRACE.with(|trace| {
+        let trace = trace.borrow();
+        trace.watching.then(|| {
+            (
+                trace.seen.partition_point(|seen| seen.seq < since),
+                trace.run,
+            )
+        })
+    })?;
+    loop {
+        // `f` runs outside the borrow, so it may read the trace itself.
+        let candidate = TRACE.with(|trace| {
+            let trace = trace.borrow();
+            let rest = trace.seen.get(index..)?;
+            let offset = rest.iter().position(|seen| {
+                seen.run == run && seen.label == label && site.is_none_or(|site| site == seen.site)
+            })?;
+            Some((rest[offset], index + offset + 1))
+        });
+        let (candidate, next) = candidate?;
+        if f(&candidate) {
+            return Some(candidate);
+        }
+        index = next;
+    }
+}
+
+/// The sites at which the trace holds `label`, in order of their first observation.
+pub fn sites(label: &str) -> Vec<&'static str> {
+    TRACE.with(|trace| {
+        let mut sites = Vec::new();
+        for seen in trace
+            .borrow()
+            .seen
+            .iter()
+            .filter(|seen| seen.label == label)
+        {
+            if !sites.contains(&seen.site) {
+                sites.push(seen.site);
+            }
+        }
+        sites
+    })
+}
+
+/// Every observation at or after position `since`, of every run, oldest first.
+pub fn observations(since: u64) -> Vec<Seen> {
+    TRACE.with(|trace| {
+        let trace = trace.borrow();
+        let start = trace.seen.partition_point(|seen| seen.seq < since);
+        trace.seen[start..].to_vec()
+    })
+}
+
+/// While watching, advances the event sequence and appends an observation with
+/// the new value as its position, unless the trace holds [TRACE_CAP]
+/// observations, in which case [truncated] keeps the position of the first one it
+/// dropped. Only the macros call it, inside the guard, after [record].
+#[doc(hidden)]
+pub fn note(me: Option<Participant>, label: &'static str, site: &'static str, a: u32, b: u32) {
+    TRACE.with(|trace| {
+        let mut trace = trace.borrow_mut();
+        if !trace.watching {
+            return;
+        }
+        trace.seq = trace.seq.saturating_add(1);
+        if trace.seen.len() >= TRACE_CAP {
+            if trace.truncated.is_none() {
+                trace.truncated = Some(trace.seq);
+            }
+            return;
+        }
+        let seen = Seen {
+            label,
+            site,
+            me: me.map(|me| me.get()),
+            a,
+            b,
+            seq: trace.seq,
+            run: trace.run,
+        };
+        trace.seen.push(seen);
+    });
+}
+
 /// Records a state probe for replica `me`: `sl_probe!(me, "label", a, b)`.
 ///
 /// `a` and `b` must convert into `u32` with `Into` (`bool`, `u8`, `u16`, `u32`),
 /// so raw `u64` views or counts must go through [bucket] or [delta] first. The
-/// site is `label` plus the call location, so every call site is distinct.
+/// site is `label` plus the call location, so every call site is distinct. While
+/// a scaffold watches, the observation is also appended to the trace.
 #[allow(unused_macros)]
 macro_rules! sl_probe {
     ($me:expr, $label:literal, $a:expr, $b:expr $(,)?) => {{
@@ -5378,6 +7035,19 @@ macro_rules! sl_probe {
             let a: u32 = ::core::convert::Into::<u32>::into($a);
             let b: u32 = ::core::convert::Into::<u32>::into($b);
             $crate::simplex::statelens::record(SITE, a, b);
+            $crate::simplex::statelens::note(
+                me,
+                $label,
+                ::core::concat!(
+                    ::core::file!(),
+                    ":",
+                    ::core::line!(),
+                    ":",
+                    ::core::column!()
+                ),
+                a,
+                b,
+            );
         }
     }};
 }
@@ -5397,7 +7067,8 @@ macro_rules! sl_assert {
 /// Asserts "if `pre` then `post`" for invariant `id` and records the probe
 /// `(pre, post)`: `sl_implies!(me, "INV-0001", pre, post, "format", args...)`.
 ///
-/// `post` is evaluated only when `pre` holds.
+/// `post` is evaluated only when `pre` holds. While a scaffold watches, the
+/// observation is also appended to the trace, before a violation panics.
 #[allow(unused_macros)]
 macro_rules! sl_implies {
     ($me:expr, $id:literal, $pre:expr, $post:expr, $($arg:tt)+) => {{
@@ -5415,6 +7086,19 @@ macro_rules! sl_implies {
             let pre: bool = $pre;
             let post: bool = pre && ($post);
             $crate::simplex::statelens::record(SITE, u32::from(pre), u32::from(post));
+            $crate::simplex::statelens::note(
+                me,
+                $id,
+                ::core::concat!(
+                    ::core::file!(),
+                    ":",
+                    ::core::line!(),
+                    ":",
+                    ::core::column!()
+                ),
+                u32::from(pre),
+                u32::from(post),
+            );
             if pre && !post {
                 $crate::simplex::statelens::violation(me, $id, ::core::format_args!($($arg)+));
             }
@@ -5545,6 +7229,207 @@ mod tests {
         assert!(GHOSTS.with(|ghosts| ghosts.borrow().contains_key(&4)));
         let _runner = commonware_runtime::deterministic::Runner::seeded(0);
         assert!(GHOSTS.with(|ghosts| ghosts.borrow().is_empty()));
+    }
+
+    // The read-side tests call `clear_trace`, never `reset`, which zeroes the
+    // counter table the other tests share under plain `cargo test`.
+
+    #[test]
+    fn test_read_side_is_off_unless_watched() {
+        clear_trace();
+        crate::simplex::statelens::sl_probe!(None, "unwatched", true, 1u8);
+        assert_eq!(tick(), 0, "no position while not watching");
+        assert_eq!(mark(), 0);
+        assert!(observations(0).is_empty());
+        assert_eq!(seen("unwatched", None, 0, |_| true), None);
+        watch();
+        crate::simplex::statelens::sl_probe!(None, "watched", true, 2u8);
+        let trace = observations(0);
+        assert_eq!(trace.len(), 1);
+        let only = trace[0];
+        assert_eq!(
+            (only.label(), only.me(), only.a(), only.b()),
+            ("watched", None, 1, 2)
+        );
+        assert_eq!((only.seq(), only.run()), (1, 0));
+        let site: Vec<&str> = only.site().rsplitn(3, ':').collect();
+        assert_eq!(site.len(), 3, "the site is file:line:column");
+        assert_eq!(site[2], file!());
+        assert!(site[0].parse::<u32>().is_ok() && site[1].parse::<u32>().is_ok());
+        unwatch();
+        assert!(observations(0).is_empty());
+        assert_eq!(tick(), 0);
+        crate::simplex::statelens::sl_probe!(None, "watched", true, 2u8);
+        assert_eq!(mark(), 1, "unwatch keeps the sequence");
+        watch();
+        assert!(observations(0).is_empty(), "watch starts an empty trace");
+        assert_eq!(tick(), 2, "the sequence goes on from its current value");
+        clear_trace();
+    }
+
+    #[test]
+    fn test_ticks_and_observations_share_one_sequence() {
+        clear_trace();
+        watch();
+        let first = tick();
+        let second = tick();
+        assert_eq!(
+            (first, second),
+            (1, 2),
+            "two ticks get distinct, ordered positions"
+        );
+        crate::simplex::statelens::sl_probe!(Some(Participant::new(0)), "shared", true, 0u8);
+        let third = tick();
+        crate::simplex::statelens::sl_probe!(None, "shared", false, 0u8);
+        let positions: Vec<u64> = observations(0).iter().map(|seen| seen.seq()).collect();
+        assert_eq!(positions, vec![3, 5]);
+        assert_eq!(third, 4);
+        assert_eq!(mark(), 5, "mark is the last position");
+        assert_eq!(mark(), 5, "mark does not advance");
+        assert_eq!(observations(5).len(), 1);
+        assert_eq!(tick(), 6);
+        clear_trace();
+        assert_eq!(mark(), 0, "clear_trace starts the sequence again");
+        assert_eq!(tick(), 0, "and stops watching");
+        watch();
+        assert_eq!(tick(), 1, "positions are unique within one input only");
+        clear_trace();
+    }
+
+    #[test]
+    fn test_seen_finds_the_earliest_match() {
+        clear_trace();
+        clear_compromised();
+        watch();
+        for value in 0u8..3 {
+            crate::simplex::statelens::sl_probe!(Some(Participant::new(1)), "earliest", value, 0u8);
+        }
+        crate::simplex::statelens::sl_probe!(Some(Participant::new(2)), "earliest", 1u8, 0u8);
+        crate::simplex::statelens::sl_probe!(None, "other", 1u8, 0u8);
+        let found = sites("earliest");
+        assert_eq!(found.len(), 2, "one site per call");
+        assert_eq!(sites("other").len(), 1);
+        assert!(sites("absent").is_empty());
+        let first = seen("earliest", None, 0, |_| true).expect("first");
+        assert_eq!((first.seq(), first.a(), first.site()), (1, 0, found[0]));
+        let later = seen("earliest", None, 2, |_| true).expect("at or after");
+        assert_eq!((later.seq(), later.a()), (2, 1));
+        let accepted = seen("earliest", None, 0, |seen| seen.a() == 1).expect("accepted");
+        assert_eq!(accepted.seq(), 2);
+        let at_site = seen("earliest", Some(found[1]), 0, |seen| seen.a() == 1).expect("site");
+        assert_eq!((at_site.seq(), at_site.me()), (4, Some(2)));
+        assert_eq!(seen("earliest", Some(found[0]), 4, |_| true), None);
+        assert_eq!(seen("earliest", None, 0, |seen| seen.a() == 7), None);
+        assert_eq!(seen("absent", None, 0, |_| true), None);
+        clear_trace();
+    }
+
+    #[test]
+    fn test_guarded_replicas_are_not_observed() {
+        clear_trace();
+        set_compromised([1]);
+        watch();
+        crate::simplex::statelens::sl_probe!(Some(Participant::new(1)), "guarded", true, 0u8);
+        crate::simplex::statelens::sl_implies!(
+            Some(Participant::new(1)),
+            "INV-TEST",
+            true,
+            false,
+            "skipped by the guard"
+        );
+        crate::simplex::statelens::sl_probe!(Some(Participant::new(0)), "guarded", true, 0u8);
+        let trace = observations(0);
+        assert_eq!(trace.len(), 1);
+        assert_eq!(
+            (trace[0].me(), trace[0].seq()),
+            (Some(0), 1),
+            "a skipped hit takes no position"
+        );
+        clear_compromised();
+        clear_trace();
+    }
+
+    #[test]
+    fn test_implies_notes_its_pair() {
+        clear_trace();
+        watch();
+        crate::simplex::statelens::sl_implies!(None, "INV-PAIR", false, evaluated(), "never");
+        crate::simplex::statelens::sl_implies!(None, "INV-PAIR", true, true, "holds");
+        let violated = std::panic::catch_unwind(|| {
+            crate::simplex::statelens::sl_implies!(None, "INV-PAIR", true, false, "broken");
+        });
+        assert!(violated.is_err());
+        let pairs: Vec<(u32, u32)> = observations(0)
+            .iter()
+            .filter(|seen| seen.label() == "INV-PAIR")
+            .map(|seen| (seen.a(), seen.b()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![(0, 0), (1, 1), (1, 0)],
+            "the violation is in the trace"
+        );
+        clear_trace();
+    }
+
+    #[test]
+    fn test_trace_cap() {
+        clear_trace();
+        watch();
+        for _ in 0..TRACE_CAP {
+            note(None, "cap", "cap.rs:1:1", 0, 0);
+        }
+        assert_eq!(truncated(), None);
+        note(None, "cap", "cap.rs:1:1", 1, 0);
+        let first = TRACE_CAP as u64 + 1;
+        assert_eq!(
+            truncated(),
+            Some(first),
+            "an observation past the cap is dropped, and its position kept"
+        );
+        assert_eq!(TRACE.with(|trace| trace.borrow().seen.len()), TRACE_CAP);
+        assert_eq!(mark(), first, "a dropped observation takes a position");
+        assert_eq!(tick(), first + 1);
+        note(None, "cap", "cap.rs:1:1", 2, 0);
+        assert_eq!(truncated(), Some(first), "the first dropped position stays");
+        assert_eq!(mark(), first + 2);
+        assert_eq!(seen("cap", None, 0, |seen| seen.a() != 0), None);
+        unwatch();
+        assert_eq!(truncated(), None, "unwatch forgets the cut");
+        watch();
+        assert_eq!(truncated(), None, "watch starts an uncut trace");
+        clear_trace();
+        assert_eq!(truncated(), None);
+    }
+
+    #[test]
+    fn test_fresh_runtime_counts_runs() {
+        clear_trace();
+        clear_compromised();
+        assert_eq!(current_run(), 0);
+        watch();
+        crate::simplex::statelens::sl_probe!(None, "runs", true, 0u8);
+        let _first = commonware_runtime::deterministic::Runner::seeded(0);
+        assert_eq!(current_run(), 1, "the first runtime of an input has run 1");
+        crate::simplex::statelens::sl_probe!(None, "runs", true, 1u8);
+        let _second = commonware_runtime::deterministic::Runner::seeded(1);
+        crate::simplex::statelens::sl_probe!(None, "runs", true, 2u8);
+        let runs: Vec<(u32, u32)> = observations(0)
+            .iter()
+            .map(|seen| (seen.run(), seen.b()))
+            .collect();
+        assert_eq!(runs, vec![(0, 0), (1, 1), (2, 2)], "the trace spans runs");
+        let current = seen("runs", None, 0, |_| true).expect("current run");
+        assert_eq!(
+            (current.run(), current.b()),
+            (2, 2),
+            "seen reads the current run"
+        );
+        clear_trace();
+        assert_eq!(current_run(), 0);
+        let _third = commonware_runtime::deterministic::Runner::seeded(2);
+        assert_eq!(current_run(), 1);
+        clear_trace();
     }
 }
 
@@ -5810,7 +7695,8 @@ its base's file with two changes: the body of its `fuzz_target!` is exactly thre
 statements, `reset();`, the call of the module's `fuzz` with the base entry's generic
 arguments, and `clear_compromised();`, with the runtime's path written in full; and the `use`
 lines name the module instead of the base's entry. The closure parameter is the base's, so
-the input type is too. For a scaffold of TS-0003 on `simplex_cert_mock_chaos`:
+the input type is too. For a scaffold of TS-0003 on `simplex_cert_mock_chaos`, the pair whose
+module is `ts0003_simplex_cert_mock_chaos`:
 
 ~~~rust
 #![no_main]
@@ -5818,21 +7704,23 @@ the input type is too. For a scaffold of TS-0003 on `simplex_cert_mock_chaos`:
 #[cfg(feature = "mocks")]
 mod fuzz {
     use commonware_consensus_fuzz_simplex::{
-        Chaos, CodeCoverage, FuzzInput, SimplexCertificateMock, target_states::ts0003,
+        Chaos, CodeCoverage, FuzzInput, SimplexCertificateMock,
+        target_states::ts0003_simplex_cert_mock_chaos,
     };
     use libfuzzer_sys::fuzz_target;
 
     fuzz_target!(|input: FuzzInput| {
         commonware_consensus::simplex::statelens::reset();
-        ts0003::fuzz::<SimplexCertificateMock, Chaos, CodeCoverage>(input);
+        ts0003_simplex_cert_mock_chaos::fuzz::<SimplexCertificateMock, Chaos, CodeCoverage>(input);
         commonware_consensus::simplex::statelens::clear_compromised();
     });
 }
 ~~~
 
-The script checks that the file is the only `*_ts0003_statelens.rs` of the package, that its
-base is a candidate, that its one `fuzz_target!` matches the opening line of B.1 with the
-base's closure parameter, and that the body is these three statements; after every attempt it
+The script checks that the pair's thin target exists and that no new `*_ts0003_statelens.rs`
+of another base appeared, since a sibling pair's thin target is written by that pair, that its
+one `fuzz_target!` matches the opening line of B.1 with the base's closure parameter, and that
+the body is these three statements, the module's name being the pair's; after every attempt it
 checks that body in every scaffold's thin target, because guard 3 exempts only thin targets of
 this shape (section 18.6.2 step 2.4). The cryptography check
 of D15 then reads `fuzz::<SimplexCertificateMock` as it does in a variant.
@@ -5883,31 +7771,35 @@ Workflow test, see SPEC.md section 14.
    it while instrumenting, and the `kb` commands an operator can run by hand.
 6. Phase 2: `just campaign`, `just campaign --profile marshal`,
    `just campaign --profile
-   qmdb`, `just campaign --agent codex`, `--stop-after`. What
+   qmdb`, `just campaign --agent codex`, `--stop-after`, and `--invariants LIST` to bind
+   only the invariants it names, with the two id forms and what the selection leaves
+   unchanged. What
    the steps do, including the audit pass over the bindings and the plan lint. A campaign
    builds the StateLens targets and does not fuzz; `just fuzz
    <target>` is the
    convenience that runs a campaign and then fuzzes one of its targets, and `just clean`
    undoes what a campaign wrote so a checkout can be reused.
 7. Phase 3: run the printed `run` commands, or `just fuzz <profile>`, adding libFuzzer
-   arguments such as `-fork=8` (section 7.10); which marshal variants have an adversary that
-   runs Simplex or marshal code, and that qmdb has none.
+   arguments such as `-fork=8` after `--` (section 7.10), and that an unknown flag with two
+   dashes before `--` is refused; which marshal variants have an adversary that runs Simplex
+   or marshal code, and that qmdb has none.
 8. Target-State Synthesis (chapter 18), for simplex and marshal: `just extract-states
    [--registry simplex|marshal] [--local] <kind> <source>...` with an example for `test`,
    `issue` and `text`, then review the cards; that cards from sources that are not public go to
    the ignored `target-states.local/`, and that `target-states.local/` and `invariants.local/`
    must be copied into the fresh clone a campaign runs in; `just synthesize` after a campaign,
-   or `just fuzz <profile> --state-reaching [--targets GLOB]` for campaign, synthesis and
-   fuzzing in one go; the reports in `campaign/reach/` and what each verdict means; that every
-   scaffold that builds is fuzzed whatever its verdict, and a CRASH (finding candidate) is
-   triaged like any crash, rerunning the card with `--redo` when triage shows a scaffold fault;
-   that synthesis edits the checkout under the edit contract and `campaign/reach/TS-NNNN.diff`
-   is what to review; replaying a scaffold's crash with `STATELENS_REACH=1`.
-9. Results: the summary lines, exit codes, and `campaign/` (plan, diff, logs, prompts), and
+   or `just fuzz <profile> --state-reaching [--state-targets GLOB] [--fuzz-targets GLOB]`
+   for campaign, synthesis and fuzzing in one go; the reports in `campaign/reach/` and what
+   each verdict means; that every scaffold that builds is fuzzed whatever its verdict, and a
+   CRASH (finding candidate) is triaged like any crash, rerunning the card with `--redo` when
+   triage shows a scaffold fault; that synthesis edits the checkout under the edit contract
+   and `campaign/reach/TS-NNNN_<base>.diff` is what to review; replaying a scaffold's crash with
+   `STATELENS_REACH=1`.
+9. Coverage: `just coverage <profile|target...>` after a run, scaffolds included, what it
+   writes under the fuzz package's `coverage/html/`, and that the fuzz toolchain needs
+   `llvm-tools-preview` (section 7.13).
+10. Results: the summary lines, exit codes, and `campaign/` (plan, diff, logs, prompts), and
    what a plan section's `Status` and `Sites` ledger claim, which `just check-plan` rechecks.
-10. Coverage: `just coverage <profile|target...>` after a run, what it writes under the
-   fuzz package's `coverage/html/`, and that the fuzz toolchain needs `llvm-tools-preview`
-   (section 7.13).
 11. Investigating a panic (section 7.12).
 12. Testing the workflow itself: `STATELENS_FALSE_INVARIANTS=1` (the campaign must panic on
    the deliberately false invariants), `STATELENS_BYZANTINE=panic` (guard test),
@@ -5993,6 +7885,983 @@ Workflow test, see SPEC.md section 17.5.
 
 ---
 
-## Appendix H: `runtime/target_states.rs`
+## Appendix H: `runtime/target_states.rs` (verbatim)
 
-The scaffold helper template of section 18.7. Its verbatim copy is added here with the file.
+The scaffold helper template of section 18.7.
+
+~~~rust
+//! Target-State Synthesis helper for the scaffolds of one fuzz package.
+//!
+//! This file is a template kept in `statelens/runtime/`. A synthesis copies it to
+//! `<package>/src/target_states/mod.rs`, followed by one `pub mod tsNNNN_<base>;` line per
+//! scaffold module, in a checkout a campaign instrumented. It is never compiled on a
+//! committed branch.
+//!
+//! A scaffold splits and picks its knobs ([Knobs]), opens its stages
+//! ([Stages::new]) and checks its budget ([Stages::budget]) before any engine
+//! starts. It records each stage `E1` to `E(n-1)` through a [Witness]
+//! ([Stages::held]) or another outcome, and the last one, `En`, through
+//! [Stages::handoff], which decides the handoff. The helper takes every position
+//! of the event sequence itself: a witness read, an entry a recording wrapper
+//! stamps ([stamp]), an action ([Witness::act]), a restart boundary ([restart]),
+//! and the start and the mark of the handoff. It prints the lines the reach check
+//! parses, adds the feature of every held stage, and raises the only errors
+//! attributed to a scaffold, all before any engine starts.
+//!
+//! Once the trace drops an observation at its cap, what it holds from that position
+//! on is incomplete, so the helper prints a `truncated` line with the position, at
+//! its first event after the cut, and neither a stage read at or after the cut nor
+//! a handoff whose mark follows it holds.
+//!
+//! Environment switches, each read once per process:
+//! - `STATELENS_REACH=1` prints the `[statelens-reach]` lines on stderr.
+//! - `STATELENS_REACH_CONTROL=1` makes [control] true: the control run.
+
+// A scaffold module is a child of this one, and a child module can use every
+// private item of its parent. The helper's code is therefore in a private module of
+// its own, `imp`, whose private items no scaffold can reach, and this one
+// re-exports its API.
+pub use imp::{Knobs, Stages, Stamp, Witness, control, restart, stamp};
+
+mod imp {
+    use commonware_consensus::simplex::statelens::{self, Seen};
+    use std::{cell::RefCell, fmt, future::Future, io::Write as _, sync::OnceLock, time::Duration};
+
+    /// Most knobs a scaffold splits.
+    const MAX_KNOBS: usize = 16;
+
+    /// Most `trace` lines a miss prints.
+    const TRACE_LINES: usize = 64;
+
+    /// The reason of a stage read after the trace dropped an observation.
+    const TRUNCATED: &str = "(trace truncated)";
+
+    thread_local! {
+        static STATE: RefCell<State> = const { RefCell::new(State::new()) };
+    }
+
+    /// Whether `STATELENS_REACH=1`: the lines print only then.
+    fn reach() -> bool {
+        static REACH: OnceLock<bool> = OnceLock::new();
+        *REACH.get_or_init(|| std::env::var("STATELENS_REACH").is_ok_and(|value| value == "1"))
+    }
+
+    /// Whether `STATELENS_REACH_CONTROL=1`, read once: the control run, in which the
+    /// scaffold withholds the event its header names and a miss does not close the
+    /// prefix.
+    pub fn control() -> bool {
+        static CONTROL: OnceLock<bool> = OnceLock::new();
+        *CONTROL.get_or_init(|| {
+            std::env::var("STATELENS_REACH_CONTROL").is_ok_and(|value| value == "1")
+        })
+    }
+
+    /// Prints one line of card `card`, under `STATELENS_REACH=1`.
+    fn emit(card: &str, line: &str) {
+        if card.is_empty() {
+            return;
+        }
+        #[cfg(test)]
+        tests::LINES.with(|lines| lines.borrow_mut().push(line.to_string()));
+        if reach() {
+            let text = format!("[statelens-reach] {card} {line}\n");
+            let _ = std::io::stderr().write_all(text.as_bytes());
+        }
+    }
+
+    /// Adds the feature of stage `k` of card `card`, which held.
+    fn feature(card: &str, k: u32) {
+        #[cfg(test)]
+        tests::FEATURES.with(|features| features.borrow_mut().push(k));
+        statelens::record(statelens::site_hash(card), k, 0);
+    }
+
+    /// Takes a position of the event sequence for a helper event, and notices a cut.
+    fn position() -> u64 {
+        let seq = statelens::tick();
+        truncation();
+        seq
+    }
+
+    /// The position of the first observation the trace dropped at its cap, or `None`.
+    /// The first time it finds one while stages are open on this thread, it prints
+    /// the `truncated` line.
+    fn truncation() -> Option<u64> {
+        let seq = statelens::truncated()?;
+        let card = STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            let first = !std::mem::replace(&mut state.noticed, true);
+            first.then_some(state.card)
+        });
+        if let Some(card) = card {
+            emit(card, &format!("truncated seq={seq}"));
+        }
+        Some(seq)
+    }
+
+    /// Raises a scaffold error. Only the checks that run before any engine starts
+    /// call it, so the error depends on the scaffold's own code and knob bytes.
+    #[cold]
+    fn scaffold_error(card: &str, reason: fmt::Arguments<'_>) -> ! {
+        panic!("[statelens-scaffold] {card} {reason}");
+    }
+
+    /// `text` with every character `bad` accepts, and whitespace, replaced by `_`,
+    /// or `-` when it is empty, so a line keeps its fields apart.
+    fn token(text: &str, bad: &[char]) -> String {
+        if text.is_empty() {
+            return "-".to_string();
+        }
+        text.chars()
+            .map(|c| {
+                if c.is_whitespace() || bad.contains(&c) {
+                    '_'
+                } else {
+                    c
+                }
+            })
+            .collect()
+    }
+
+    /// `text` without the whitespace at its ends and next to each of `separators`,
+    /// so `R=2@E1, v=5@E1` keeps its entities apart.
+    fn tidy(text: &str, separators: &[char]) -> String {
+        let separator = |c: char| separators.contains(&c);
+        let mut out = String::with_capacity(text.len());
+        for piece in text.split_inclusive(separator) {
+            let part = piece.strip_suffix(separator).unwrap_or(piece);
+            out.push_str(part.trim());
+            out.push_str(&piece[part.len()..]);
+        }
+        out
+    }
+
+    /// An observable or a verb.
+    fn field_name(text: &str) -> String {
+        token(text, &['[', ']', ',', '@', '='])
+    }
+
+    /// A key, `name=value,...`, which may be empty.
+    fn field_key(text: &str) -> String {
+        let text = tidy(text, &[',', '=']);
+        if text.is_empty() {
+            return text;
+        }
+        token(&text, &['[', ']', '@'])
+    }
+
+    /// A value read or bound.
+    fn field_value(text: &str) -> String {
+        token(text, &['[', ']', ',', '@'])
+    }
+
+    /// A detail or reason: the rest of its line.
+    fn field_detail(text: &str) -> String {
+        text.replace(['\n', '\r'], " ")
+    }
+
+    /// An action, `verb[name=value,...]`; a bare verb fixes no entity.
+    fn field_action(text: &str) -> String {
+        let (verb, entities) = match text.split_once('[') {
+            Some((verb, rest)) => (verb, rest.strip_suffix(']').unwrap_or(rest)),
+            None => (text, ""),
+        };
+        format!("{}[{}]", field_name(verb.trim()), field_key(entities))
+    }
+
+    /// `bind`, `name=value@Ek,...`, as one field of its line.
+    fn field_bind(bind: &str) -> String {
+        token(&tidy(bind, &[',', '=', '@']), &[])
+    }
+
+    /// The knobs of a scaffold: the first bytes of its base input's `raw_bytes`.
+    #[derive(Debug)]
+    pub struct Knobs {
+        card: &'static str,
+        bytes: Vec<u8>,
+        next: usize,
+    }
+
+    impl Knobs {
+        /// Forgets the stages of an earlier input on this thread, so a scaffold
+        /// error before [Stages::new] prints none of them. Then takes the first `k`
+        /// bytes of `raw`, zero-padded, for card `card`, and leaves the rest; a tail
+        /// left empty from a non-empty `raw` becomes `[0]`. More than 16 knobs is a
+        /// scaffold error.
+        pub fn split(card: &'static str, raw: &mut Vec<u8>, k: usize) -> Self {
+            STATE.with(|state| *state.borrow_mut() = State::new());
+            if k > MAX_KNOBS {
+                scaffold_error(card, format_args!("more than {MAX_KNOBS} knobs: {k}"));
+            }
+            let had_bytes = !raw.is_empty();
+            let mut bytes: Vec<u8> = raw.drain(..k.min(raw.len())).collect();
+            bytes.resize(k, 0);
+            if had_bytes && raw.is_empty() {
+                raw.push(0);
+            }
+            Self {
+                card,
+                bytes,
+                next: 0,
+            }
+        }
+
+        /// The next knob: `domain[byte % domain.len()]`, so byte 0 picks
+        /// `domain[0]`, the source value. A domain with fewer than two values, or
+        /// more knobs picked than split, is a scaffold error.
+        pub fn pick<T: Copy>(&mut self, domain: &[T]) -> T {
+            if domain.len() < 2 {
+                scaffold_error(
+                    self.card,
+                    format_args!(
+                        "knob {} has a domain of {} value(s); it needs two or more",
+                        self.next,
+                        domain.len()
+                    ),
+                );
+            }
+            let Some(&byte) = self.bytes.get(self.next) else {
+                scaffold_error(
+                    self.card,
+                    format_args!("more knobs picked than split ({})", self.bytes.len()),
+                );
+            };
+            self.next += 1;
+            domain[usize::from(byte) % domain.len()]
+        }
+    }
+
+    /// The position an entry took when a recording wrapper stamped it. Only [stamp]
+    /// makes one.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Stamp {
+        seq: u64,
+        run: u32,
+    }
+
+    impl Stamp {
+        /// The entry's position; 0 when nothing watched.
+        pub const fn seq(self) -> u64 {
+            self.seq
+        }
+    }
+
+    /// Stamps an entry a recording wrapper records, as it records it: takes a
+    /// position, prints the `entry` line with it and returns it. Returns a stamp of
+    /// position 0 and prints nothing while not watching.
+    ///
+    /// `observable` names what the wrapper records, `key` the entities the entry is
+    /// keyed by, `name=value,...`, and `value` the value it records.
+    pub fn stamp(observable: &str, key: &str, value: &str) -> Stamp {
+        let seq = position();
+        let run = statelens::current_run();
+        if seq != 0 {
+            emit(
+                &card(),
+                &format!(
+                    "entry {}[{}]={} seq={seq}",
+                    field_name(observable),
+                    field_key(key),
+                    field_value(value)
+                ),
+            );
+        }
+        Stamp { seq, run }
+    }
+
+    /// Marks an incarnation boundary of `replicas`, a restart the scaffold drives or
+    /// a base's restart code runs: takes a position `s`, prints the `restart` line
+    /// and returns `s`, which names the incarnation the restart began, `inc<s>`.
+    /// Returns 0 and prints nothing while not watching.
+    pub fn restart(replicas: &[u32]) -> u64 {
+        let seq = position();
+        if seq != 0 {
+            let list: Vec<String> = replicas.iter().map(u32::to_string).collect();
+            let list = if list.is_empty() {
+                "-".to_string()
+            } else {
+                list.join(",")
+            };
+            emit(
+                &card(),
+                &format!("restart {list} seq={seq} run={}", statelens::current_run()),
+            );
+        }
+        seq
+    }
+
+    /// The card of the stages open on this thread, or an empty string.
+    fn card() -> String {
+        STATE.with(|state| state.borrow().card.to_string())
+    }
+
+    /// What establishes a held stage, with the entities it binds.
+    #[derive(Clone, Debug)]
+    pub struct Witness {
+        kind: &'static str,
+        bind: String,
+        evidence: String,
+        /// The position the witness took when it was built.
+        read: u64,
+        /// The largest position its evidence carries, with its run; none for an
+        /// `exact` witness with an item that has no stamp.
+        position: Option<(u64, u32)>,
+    }
+
+    impl Witness {
+        /// An `exact` witness: harness observables, one per part of the line, each
+        /// read as `(observable, key, value, stamp)`, with the entry's stamp when the
+        /// observable has one. `bind` is `name=value@Ek,...`, and each `key` names
+        /// the entities it is keyed by, `name=value,...`. Its position is its latest
+        /// stamp's, and it has none when an item has no stamp. Takes a position, its
+        /// `read=`.
+        pub fn exact(bind: &str, reads: &[(&str, &str, &str, Option<Stamp>)]) -> Self {
+            let read = position();
+            let evidence: Vec<String> = reads
+                .iter()
+                .map(|(observable, key, value, stamp)| {
+                    let seq = stamp
+                        .filter(|stamp| stamp.seq != 0)
+                        .map_or_else(|| "-".to_string(), |stamp| stamp.seq.to_string());
+                    format!(
+                        "exact={}[{}]={} seq={seq}",
+                        field_name(observable),
+                        field_key(key),
+                        field_value(value)
+                    )
+                })
+                .collect();
+            let stamps: Option<Vec<Stamp>> = reads
+                .iter()
+                .map(|read| read.3.filter(|stamp| stamp.seq != 0))
+                .collect();
+            let position = stamps
+                .and_then(|stamps| stamps.into_iter().max_by_key(|stamp| stamp.seq))
+                .map(|stamp| (stamp.seq, stamp.run));
+            Self {
+                kind: "exact",
+                bind: field_bind(bind),
+                evidence: evidence.join(" "),
+                read,
+                position,
+            }
+        }
+
+        /// An `intrinsic` witness: one probe observation whose values come from one
+        /// receiver. It identifies only the replica `me`, so `bind` gives every other
+        /// entity `?`. Takes a position, its `read=`.
+        pub fn intrinsic(bind: &str, seen: Seen) -> Self {
+            let read = position();
+            Self {
+                kind: "intrinsic",
+                bind: field_bind(bind),
+                evidence: format!("obs={}", observation(seen)),
+                read,
+                position: Some((seen.seq(), seen.run())),
+            }
+        }
+
+        /// A `construction` witness: takes a position right before it calls
+        /// `perform`, which performs the harness action, and returns `perform`'s
+        /// result with the witness. `action` is `verb[name=value,...]`. Before
+        /// [Stages::new] nothing watches, so the position is 0 and the witness has
+        /// none.
+        pub fn act<T>(bind: &str, action: &str, perform: impl FnOnce() -> T) -> (T, Self) {
+            let seq = position();
+            let run = statelens::current_run();
+            let result = perform();
+            (
+                result,
+                Self::construction(field_bind(bind), field_action(action), seq, run),
+            )
+        }
+
+        /// [Witness::act] for an action that is awaited: the returned future, when
+        /// first polled, takes the position and only then calls `perform` and awaits
+        /// the future it returns, so an action that takes effect when it is called
+        /// still comes after its position.
+        pub fn act_async<T, F, P>(
+            bind: &str,
+            action: &str,
+            perform: P,
+        ) -> impl Future<Output = (T, Self)> + use<T, F, P>
+        where
+            F: Future<Output = T>,
+            P: FnOnce() -> F,
+        {
+            let bind = field_bind(bind);
+            let action = field_action(action);
+            async move {
+                let seq = position();
+                let run = statelens::current_run();
+                let result = perform().await;
+                (result, Self::construction(bind, action, seq, run))
+            }
+        }
+
+        fn construction(bind: String, action: String, seq: u64, run: u32) -> Self {
+            Self {
+                kind: "construction",
+                bind,
+                evidence: format!("action={action} seq={seq}"),
+                read: seq,
+                position: (seq != 0).then_some((seq, run)),
+            }
+        }
+    }
+
+    /// An observation as `<run>:<seq>:<me>:<label>@<site>:<a>:<b>`.
+    fn observation(seen: Seen) -> String {
+        let me = seen
+            .me()
+            .map_or_else(|| "-".to_string(), |me| me.to_string());
+        format!(
+            "{}:{}:{me}:{}@{}:{}:{}",
+            seen.run(),
+            seen.seq(),
+            seen.label(),
+            seen.site(),
+            seen.a(),
+            seen.b()
+        )
+    }
+
+    /// The outcome of a stage.
+    enum Outcome {
+        Held(Witness),
+        Missed(String),
+        Unverifiable(String),
+        Withheld,
+    }
+
+    /// The stages of the card open on this thread. [Stages] is a handle to it, so
+    /// the panic hook can evaluate and report them.
+    struct State {
+        /// The card, or an empty string before the first [Stages::new].
+        card: &'static str,
+        n: u32,
+        /// Whether stage `k` has an outcome, at `k - 1`.
+        settled: Vec<bool>,
+        /// The stages recorded as held.
+        held: u32,
+        /// Whether the `truncated` line was printed.
+        noticed: bool,
+        since: u64,
+        open: bool,
+        handed_off: bool,
+        phase: &'static str,
+        /// The stage lines printed so far.
+        lines: Vec<String>,
+        evaluate: Option<fn(&mut Stages)>,
+    }
+
+    impl State {
+        const fn new() -> Self {
+            Self {
+                card: "",
+                n: 0,
+                settled: Vec::new(),
+                held: 0,
+                noticed: false,
+                since: 0,
+                open: false,
+                handed_off: false,
+                phase: "prefix",
+                lines: Vec::new(),
+                evaluate: None,
+            }
+        }
+    }
+
+    /// The stages `E1` to `En` of one card.
+    #[derive(Debug)]
+    pub struct Stages {
+        _private: (),
+    }
+
+    impl Stages {
+        /// Opens the stages of card `card` with `n` History events: watches the
+        /// trace, opens the prefix phase and prints `phase prefix`, and installs the
+        /// panic hook, once per process.
+        pub fn new(card: &'static str, n: u32) -> Self {
+            install_hook();
+            statelens::watch();
+            STATE.with(|state| {
+                *state.borrow_mut() = State {
+                    card,
+                    n,
+                    settled: vec![false; n as usize],
+                    open: true,
+                    ..State::new()
+                }
+            });
+            emit(card, "phase prefix");
+            Self { _private: () }
+        }
+
+        /// Takes the knobs, so none is picked later, and checks the budget before any
+        /// engine starts: `prefix`, the stage deadlines plus the largest release
+        /// delay, exceeding `runtime`, the runtime deadline, is a scaffold error.
+        pub fn budget(&self, knobs: Knobs, prefix: Duration, runtime: Duration) {
+            drop(knobs);
+            if prefix > runtime {
+                scaffold_error(
+                    &card(),
+                    format_args!(
+                        "budget: the prefix {prefix:?} exceeds the runtime deadline {runtime:?}"
+                    ),
+                );
+            }
+        }
+
+        /// Stage `k` held: prints its record, adds its feature, moves
+        /// [Stages::since] past its position and returns `true`. Does nothing and
+        /// returns `false` for stage n, which only [Stages::handoff] records, for a
+        /// stage that has an outcome, for an event number outside 1 to n, and once
+        /// the prefix is closed. A witness read at or after the position of the first
+        /// observation the trace dropped makes the stage `unverifiable (trace
+        /// truncated)` instead, with no feature, and returns `false`.
+        pub fn held(&mut self, k: u32, witness: Witness) -> bool {
+            settle(k, Outcome::Held(witness), false)
+        }
+
+        /// Stage `k` missed, with `detail`, or `cannot: <capability>`. The first miss
+        /// closes the prefix, except in the control run, and prints up to 64 trace
+        /// lines from the stage's start. A miss after the trace dropped an
+        /// observation is `unverifiable (trace truncated)` instead, and closes
+        /// nothing, unless it is a `cannot:`. Stage n takes only a `cannot:`, after
+        /// which [Stages::handoff] reports the handoff lost.
+        pub fn missed(&mut self, k: u32, detail: &str) {
+            settle(k, Outcome::Missed(detail.to_string()), false);
+        }
+
+        /// Stage `k` is unverifiable, for `reason`: no available witness binds it.
+        /// For stage n, call it before [Stages::handoff], which then reports the
+        /// handoff lost.
+        pub fn unverifiable(&mut self, k: u32, reason: &str) {
+            settle(k, Outcome::Unverifiable(reason.to_string()), true);
+        }
+
+        /// Stage `k` was withheld: the control run skipped its action.
+        pub fn withheld(&mut self, k: u32) {
+            settle(k, Outcome::Withheld, false);
+        }
+
+        /// Whether the prefix is open.
+        pub fn open(&self) -> bool {
+            STATE.with(|state| state.borrow().open)
+        }
+
+        /// The position from which the next stage reads the trace.
+        pub fn since(&self) -> u64 {
+            STATE.with(|state| state.borrow().since)
+        }
+
+        /// Decides the handoff. Takes a position; then, when stage n has no outcome
+        /// and the prefix is open, calls `read`, which must read `En`'s witness and
+        /// cannot await; then takes the handoff mark, and records `En` held with the
+        /// witness `read` returned, or missed on `None`. The handoff holds when `En`
+        /// was held in this call and the mark directly follows the witness's read.
+        /// Once the trace dropped an observation at or before the mark, `En` is
+        /// `unverifiable (trace truncated)` instead and the handoff is lost. Prints
+        /// the handoff, `phase continuation` and the `reach` line, closes the prefix
+        /// and stops watching. Does nothing when called again.
+        pub fn handoff(&mut self, read: impl FnOnce() -> Option<Witness>) {
+            let Some((card, n, pending)) = STATE.with(|state| {
+                let state = state.borrow();
+                let last = (state.n as usize).checked_sub(1);
+                let pending =
+                    state.open && last.is_some_and(|last| state.settled.get(last) == Some(&false));
+                (!state.handed_off).then_some((state.card, state.n, pending))
+            }) else {
+                return;
+            };
+            position();
+            let witness = pending.then(read);
+            let mark = position();
+            let cut = truncation().is_some_and(|seq| seq <= mark);
+            let mut evidence = None;
+            if let Some(witness) = witness {
+                let outcome = match witness {
+                    _ if cut => Outcome::Unverifiable(TRUNCATED.to_string()),
+                    Some(witness) => {
+                        evidence = Some((witness.read, witness.position));
+                        Outcome::Held(witness)
+                    }
+                    None => Outcome::Missed("not held at handoff".to_string()),
+                };
+                if !settle(n, outcome, true) {
+                    evidence = None;
+                }
+            }
+            let holds = evidence.is_some_and(|(read, _)| read != 0 && mark == read + 1);
+            // Reading the trace copies it, so `next=` is read only for a line that
+            // prints.
+            let next = evidence
+                .and_then(|(_, position)| position)
+                .filter(|_| reach())
+                .and_then(|(seq, run)| {
+                    statelens::observations(seq.saturating_add(1))
+                        .into_iter()
+                        .find(|seen| {
+                            seen.run() == run
+                                && !statelens::is_byzantine(
+                                    seen.me().map(statelens::Participant::new),
+                                )
+                        })
+                })
+                .map_or_else(
+                    || "-".to_string(),
+                    |seen| format!("{}:{}", seen.run(), seen.seq()),
+                );
+            let held = STATE.with(|state| {
+                let mut state = state.borrow_mut();
+                state.open = false;
+                state.handed_off = true;
+                state.phase = "continuation";
+                state.held
+            });
+            statelens::unwatch();
+            let verdict = if holds { "holds" } else { "lost" };
+            emit(card, &format!("handoff {verdict} mark={mark} next={next}"));
+            emit(card, "phase continuation");
+            emit(
+                card,
+                &format!("reach {held}/{n} control={}", u8::from(control())),
+            );
+        }
+
+        /// Shape A: registers the evaluation of the stages, which the panic hook runs
+        /// over the trace so far.
+        pub fn on_panic(&mut self, evaluate: fn(&mut Self)) {
+            STATE.with(|state| state.borrow_mut().evaluate = Some(evaluate));
+        }
+
+        /// Prints `done`, after the last oracle.
+        pub fn done(&mut self) {
+            emit(&card(), "done");
+        }
+    }
+
+    /// Records the outcome of stage `k`, and returns whether it recorded it held.
+    /// `last` lets the handoff, the panic hook and [Stages::unverifiable] record
+    /// stage n; a `cannot:` miss records it too. Once the trace dropped an
+    /// observation, a miss other than a `cannot:`, and a witness read at or after the
+    /// dropped position, are `unverifiable (trace truncated)`.
+    fn settle(k: u32, outcome: Outcome, last: bool) -> bool {
+        let cut = truncation();
+        let outcome = match outcome {
+            Outcome::Held(witness) if cut.is_some_and(|seq| witness.read >= seq) => {
+                Outcome::Unverifiable(TRUNCATED.to_string())
+            }
+            Outcome::Missed(text) if cut.is_some() && !text.starts_with("cannot:") => {
+                Outcome::Unverifiable(TRUNCATED.to_string())
+            }
+            outcome => outcome,
+        };
+        let last = last || matches!(&outcome, Outcome::Missed(text) if text.starts_with("cannot:"));
+        let control = control();
+        let recorded = STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            let n = state.n;
+            let index = (k as usize).checked_sub(1)?;
+            if !state.open || k > n || (k == n && !last) || state.settled.get(index) != Some(&false)
+            {
+                return None;
+            }
+            state.settled[index] = true;
+            let start = state.since;
+            let line = match &outcome {
+                Outcome::Held(witness) => {
+                    state.held += 1;
+                    let next = witness
+                        .position
+                        .map_or(witness.read, |(seq, _)| seq)
+                        .saturating_add(1);
+                    state.since = state.since.max(next);
+                    format!(
+                        "E{k}/{n} held {} bind={} {} read={}",
+                        witness.kind, witness.bind, witness.evidence, witness.read
+                    )
+                }
+                Outcome::Missed(text) => {
+                    if !control {
+                        state.open = false;
+                    }
+                    with_detail(format!("E{k}/{n} missed"), text)
+                }
+                Outcome::Unverifiable(text) => with_detail(format!("E{k}/{n} unverifiable"), text),
+                Outcome::Withheld => format!("E{k}/{n} withheld"),
+            };
+            state.lines.push(line.clone());
+            Some((state.card, line, start))
+        });
+        let Some((card, line, start)) = recorded else {
+            return false;
+        };
+        emit(card, &line);
+        match outcome {
+            Outcome::Held(_) => {
+                feature(card, k);
+                true
+            }
+            Outcome::Missed(_) => {
+                // Reading the trace copies it, so it is read only for lines that print.
+                if reach() {
+                    for seen in statelens::observations(start).into_iter().take(TRACE_LINES) {
+                        emit(card, &format!("trace {}", observation(seen)));
+                    }
+                }
+                false
+            }
+            Outcome::Unverifiable(_) | Outcome::Withheld => false,
+        }
+    }
+
+    /// `head`, then `text` as the rest of the line when there is one.
+    fn with_detail(head: String, text: &str) -> String {
+        if text.is_empty() {
+            head
+        } else {
+            format!("{head} {}", field_detail(text))
+        }
+    }
+
+    /// Chains the helper's panic hook in front of the current one (libFuzzer's),
+    /// once per process.
+    fn install_hook() {
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                report_panic(info);
+                previous(info);
+            }));
+        });
+    }
+
+    /// Prints the `panic` line, the phase and the stage lines so far; in Shape A, the
+    /// stages the registered evaluation finds in the trace; and `unverifiable
+    /// (crashed)` for every stage of the open prefix the hook cannot read.
+    fn report_panic(info: &std::panic::PanicHookInfo<'_>) {
+        if !reach() {
+            return;
+        }
+        let Some((card, phase, lines, evaluate)) = STATE.with(|state| {
+            let state = state.try_borrow().ok()?;
+            (!state.card.is_empty()).then(|| {
+                (
+                    state.card,
+                    state.phase,
+                    state.lines.clone(),
+                    state.evaluate.filter(|_| !state.handed_off),
+                )
+            })
+        }) else {
+            return;
+        };
+        let location = info.location().map_or_else(
+            || "-".to_string(),
+            |location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            },
+        );
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("Box<dyn Any>");
+        let first = message.lines().next().unwrap_or("");
+        emit(card, &with_detail(format!("panic {location}"), first));
+        emit(card, &format!("phase {phase}"));
+        for line in &lines {
+            emit(card, line);
+        }
+        let mut stages = Stages { _private: () };
+        if let Some(evaluate) = evaluate {
+            evaluate(&mut stages);
+        }
+        let n = STATE.with(|state| {
+            state
+                .try_borrow()
+                .ok()
+                .filter(|state| !state.handed_off)
+                .map_or(0, |state| state.n)
+        });
+        for k in 1..=n {
+            settle(k, Outcome::Unverifiable("(crashed)".to_string()), true);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        thread_local! {
+            /// The lines the helper printed on this thread, without their prefix and card.
+            pub(super) static LINES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+            /// The stages whose feature the helper added on this thread.
+            pub(super) static FEATURES: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+        }
+
+        /// Opens `n` stages of `card` with no knobs, forgetting what earlier tests on
+        /// this thread printed.
+        fn open(card: &'static str, n: u32) -> Stages {
+            LINES.take();
+            FEATURES.take();
+            let knobs = Knobs::split(card, &mut Vec::new(), 0);
+            let stages = Stages::new(card, n);
+            stages.budget(knobs, Duration::ZERO, Duration::ZERO);
+            stages
+        }
+
+        /// Notes `count` observations of replica 0 in state `a`, as a probe would.
+        fn observe(a: u32, count: usize) {
+            for _ in 0..count {
+                let me = Some(statelens::Participant::new(0));
+                statelens::note(me, "state", "state.rs:1:1", a, 0);
+            }
+        }
+
+        /// The observation at position `seq`.
+        fn at(seq: u64) -> Seen {
+            let found = statelens::observations(seq);
+            assert_eq!(found.first().map(|seen| seen.seq()), Some(seq));
+            found[0]
+        }
+
+        /// The index of the first of `lines` that starts with `start`.
+        fn find(lines: &[String], start: &str) -> Option<usize> {
+            lines.iter().position(|line| line.starts_with(start))
+        }
+
+        #[test]
+        fn test_stages_read_after_the_cut_are_unverifiable() {
+            let mut stages = open("TS-9001", 3);
+            observe(1, 1);
+            let first = at(statelens::mark());
+            assert!(
+                stages.held(1, Witness::intrinsic("R=0@E1", first)),
+                "a stage read before the cut holds"
+            );
+            observe(1, statelens::TRACE_CAP - 1);
+            assert_eq!(statelens::truncated(), None, "the trace is full, not cut");
+            let kept = statelens::mark();
+            observe(0, 1);
+            let cut = statelens::truncated().expect("the trace drops the state change");
+            assert_eq!(cut, kept + 1);
+            let stale = at(kept);
+            assert_eq!(stale.a(), 1, "the latest observation kept is stale");
+            assert!(
+                !stages.held(2, Witness::intrinsic("R=0@E2", stale)),
+                "a stage read after the cut does not hold"
+            );
+            stages.handoff(|| Some(Witness::intrinsic("R=0@E3", stale)));
+            let lines = LINES.take();
+            assert_eq!(lines.len(), 8, "{lines:#?}");
+            assert_eq!(lines[0], "phase prefix");
+            assert!(lines[1].starts_with("E1/3 held intrinsic bind=R=0@E1 obs="));
+            assert_eq!(lines[2], format!("truncated seq={cut}"));
+            assert_eq!(lines[3], "E2/3 unverifiable (trace truncated)");
+            assert_eq!(lines[4], "E3/3 unverifiable (trace truncated)");
+            assert!(lines[5].starts_with("handoff lost mark="), "{}", lines[5]);
+            assert_eq!(lines[6], "phase continuation");
+            assert_eq!(lines[7], "reach 1/3 control=0");
+            assert_eq!(FEATURES.take(), vec![1], "none for a stage after the cut");
+            assert_eq!(statelens::truncated(), None, "the handoff stops watching");
+        }
+
+        #[test]
+        fn test_handoff_cannot_hold_across_a_cut() {
+            let mut stages = open("TS-9002", 2);
+            observe(1, 1);
+            let first = at(statelens::mark());
+            assert!(stages.held(1, Witness::intrinsic("R=0@E1", first)));
+            observe(1, statelens::TRACE_CAP - 1);
+            let kept = statelens::mark();
+            let mut cut = None;
+            stages.handoff(|| {
+                let witness = Witness::intrinsic("R=0@E2", at(kept));
+                // The state changes between the read and the mark, past the cap.
+                observe(0, 1);
+                cut = statelens::truncated();
+                Some(witness)
+            });
+            let cut = cut.expect("the trace drops the state change");
+            let lines = LINES.take();
+            let truncated = find(&lines, "truncated").expect("the cut is printed");
+            assert_eq!(lines[truncated], format!("truncated seq={cut}"));
+            assert_eq!(find(&lines[truncated + 1..], "truncated"), None, "once");
+            let last = find(&lines, "E2/2").expect("En has a line");
+            assert!(truncated < last, "{lines:#?}");
+            assert_eq!(lines[last], "E2/2 unverifiable (trace truncated)");
+            assert!(lines[last + 1].starts_with("handoff lost mark="));
+            assert!(find(&lines, "reach 1/2 control=0").is_some());
+            assert_eq!(FEATURES.take(), vec![1]);
+        }
+
+        #[test]
+        fn test_handoff_holds_without_a_cut() {
+            let mut stages = open("TS-9003", 2);
+            observe(1, 1);
+            let first = at(statelens::mark());
+            assert!(stages.held(1, Witness::intrinsic("R=0@E1", first)));
+            observe(1, 1);
+            let last = statelens::mark();
+            stages.handoff(|| Some(Witness::intrinsic("R=0@E2", at(last))));
+            let lines = LINES.take();
+            assert_eq!(find(&lines, "truncated"), None);
+            let last = find(&lines, "E2/2 held intrinsic").expect("En holds");
+            assert!(lines[last + 1].starts_with("handoff holds mark="));
+            assert!(find(&lines, "reach 2/2 control=0").is_some());
+            assert_eq!(FEATURES.take(), vec![1, 2]);
+        }
+
+        #[test]
+        fn test_unverifiable_last_stage_loses_the_handoff() {
+            let mut stages = open("TS-9004", 2);
+            observe(1, 1);
+            let first = at(statelens::mark());
+            assert!(stages.held(1, Witness::intrinsic("R=0@E1", first)));
+            stages.unverifiable(2, "no observable binds v");
+            stages.handoff(|| unreachable!("En has an outcome"));
+            let lines = LINES.take();
+            let last = find(&lines, "E2/2").expect("En has a line");
+            assert_eq!(lines[last], "E2/2 unverifiable no observable binds v");
+            assert!(
+                lines[last + 1].starts_with("handoff lost mark="),
+                "{lines:#?}"
+            );
+            assert!(find(&lines, "reach 1/2 control=0").is_some(), "{lines:#?}");
+            assert_eq!(FEATURES.take(), vec![1]);
+        }
+
+        #[test]
+        fn test_lines_that_do_not_print_read_no_trace() {
+            let mut stages = open("TS-9005", 2);
+            observe(1, 2);
+            stages.missed(1, "deadline");
+            let lines = LINES.take();
+            let traced = lines
+                .iter()
+                .filter(|line| line.starts_with("trace "))
+                .count();
+            assert_eq!(traced, if reach() { 2 } else { 0 }, "{lines:#?}");
+            let mut stages = open("TS-9005", 1);
+            observe(1, 1);
+            let last = statelens::mark();
+            observe(1, 1);
+            stages.handoff(|| Some(Witness::intrinsic("R=0@E1", at(last))));
+            let lines = LINES.take();
+            let handoff = find(&lines, "handoff holds mark=").expect("the handoff holds");
+            assert_eq!(lines[handoff].ends_with(" next=-"), !reach(), "{lines:#?}");
+        }
+    }
+}
+~~~

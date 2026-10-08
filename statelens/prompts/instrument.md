@@ -140,6 +140,9 @@ the fuzzer when an execution reached a new internal state.
   move the field to reach it.
 - Assertion messages start with the invariant title and include the values involved,
   for example `"no finalize after nullify: view={} nullified={}"`.
+- Never call the read side of the runtime (`watch`, `unwatch`, `tick`, `mark`,
+  `current_run`, `truncated`, `seen`, `sites`, `observations` or `note`): it is for
+  scaffolds, and the campaign stops at its scope check when instrumentation calls it.
 
 ## Discretization rules
 
