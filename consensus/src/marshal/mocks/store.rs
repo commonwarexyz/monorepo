@@ -60,6 +60,10 @@ impl<T: Blocks> Blocks for Recording<T> {
         Ok((self, handle))
     }
 
+    async fn has(&self, digest: &<Self::Block as Digestible>::Digest) -> Result<bool, Self::Error> {
+        self.inner.has(digest).await
+    }
+
     async fn get(
         &self,
         id: Identifier<'_, <Self::Block as Digestible>::Digest>,

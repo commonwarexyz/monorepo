@@ -87,7 +87,13 @@ where
     /// Codec configuration for block type.
     pub block_codec_config: AB::Cfg,
 
-    /// Maximum number of resolver messages handled in one batch.
+    /// Maximum combined number of speculative fetches and prefetched bodies.
+    ///
+    /// Also bounds the number of resolver messages handled in one batch. Sources from
+    /// [`Mailbox::blocks`](super::core::Mailbox::blocks) give each range an additional
+    /// window of this size for pending acquisitions and buffered bodies.
+    /// Direct acquisitions are not limited by the shared capacity; each stays active until
+    /// its block is delivered or its receiver is dropped.
     pub max_repair: NonZeroUsize,
 
     /// Maximum number of dispatched blocks awaiting application acknowledgement,
