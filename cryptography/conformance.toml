@@ -174,6 +174,22 @@ hash = "7334b4f046d39deb32066592cd2428730efa93fba0d93cf4a7c0bca125d2176e"
 n_cases = 4096
 hash = "5050ef7d884501c20b8a3d871a5f929b57ae0e35db922debb178b476d38255c4"
 
+["commonware_cryptography::handshake::sake::conformance::ml_kem::CodecConformance<Syn<crate::ed25519::Signature,MlKem768>>"]
+n_cases = 65536
+hash = "8934ed4cc04a979bdc40c3f08c46bceb5080d1b9142bd3332987086ddcb66108"
+
+["commonware_cryptography::handshake::sake::conformance::ml_kem::CodecConformance<SynAck<crate::ed25519::Signature,MlKem768>>"]
+n_cases = 65536
+hash = "ef1724f30320fdcec7c460d408facf7c78df7f0e360881516865cbaec75668fe"
+
+["commonware_cryptography::handshake::sake::conformance::ml_kem::SakeMlKem768V0"]
+n_cases = 1024
+hash = "321572e79cdec4f92da9bcef12ae348a7a634c285b970bf80bb340756e14424e"
+
+["commonware_cryptography::handshake::sake::conformance::ml_kem::SakeMlKem768V1"]
+n_cases = 1024
+hash = "221225fa818731f555949ed04584b1336c9209dc009c14f7fc02247238f580f1"
+
 ["commonware_cryptography::handshake::sake::exchange::conformance::CodecConformance<EphemeralPublicKey>"]
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
@@ -201,6 +217,14 @@ hash = "3ad1a2a1fdfb349f57b5cf7d3d7e8af9c7598ab170eec71547c2f53ccdc7ed6d"
 ["commonware_cryptography::ml_dsa::scheme::tests::conformance::CodecConformance<Signature>"]
 n_cases = 1024
 hash = "9be54ef3e3180d630fef4b8693dad907f491b8973821a02561c2ad3b89d4e40b"
+
+["commonware_cryptography::ml_kem::tests::conformance::CodecConformance<Ciphertext>"]
+n_cases = 65536
+hash = "ecd12aa1551ed8ce1e98e6db8576d582351ee252a783375c0a38933ccc35ceaf"
+
+["commonware_cryptography::ml_kem::tests::conformance::CodecConformance<EncapsulationKey>"]
+n_cases = 65536
+hash = "77ac6bd75b9514c265bad91675e0544fa089246ca7f8c7b4e2beac5bc4fca7e0"
 
 ["commonware_cryptography::secp256r1::certificate::tests::conformance::CodecConformance<Certificate>"]
 n_cases = 1024

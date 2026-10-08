@@ -110,6 +110,7 @@ fn fuzz(input: FuzzInput) {
 
         let dialer_handshake = Cups::<_, ChaCha20Poly1305>::new(
             Sake {
+                kem: commonware_cryptography::handshake::sake::X25519,
                 signer: dialer_signer.clone(),
                 synchrony_bound,
                 max_handshake_age,
@@ -121,6 +122,7 @@ fn fuzz(input: FuzzInput) {
 
         let listener_handshake = Cups::<_, ChaCha20Poly1305>::new(
             Sake {
+                kem: commonware_cryptography::handshake::sake::X25519,
                 signer: listener_signer.clone(),
                 synchrony_bound,
                 max_handshake_age,

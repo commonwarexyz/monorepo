@@ -485,6 +485,7 @@ mod tests {
                 lookup::Config::local(
                     Cups::<_, ChaCha20Poly1305>::new(
                         Sake {
+                            kem: commonware_cryptography::handshake::sake::X25519,
                             signer: dealer_signer,
                             synchrony_bound: Duration::from_secs(5),
                             max_handshake_age: Duration::from_secs(10),
@@ -503,6 +504,7 @@ mod tests {
                 lookup::Config::local(
                     Cups::<_, ChaCha20Poly1305>::new(
                         Sake {
+                            kem: commonware_cryptography::handshake::sake::X25519,
                             signer: participant_signer,
                             synchrony_bound: Duration::from_secs(5),
                             max_handshake_age: Duration::from_secs(10),

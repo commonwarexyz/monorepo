@@ -13,3 +13,11 @@ hash = "7bde2bb15485121462b64166f2cc35466a912f2f5494de57fd5169662b39db7d"
 ["commonware_stream::sake::conformance::SakeV1CupsV0"]
 n_cases = 256
 hash = "46ada4282fe948c6eab39e36f9b7c757473bb2486141e66748301535cc0cacd4"
+
+["commonware_stream::sake::conformance::ml_kem::MlKemCupsV0"]
+n_cases = 64
+hash = "3af7cc0101f906b259866c58d08713098ccc6c28a393d8fd3d10096fe6b61b95"
+
+["commonware_stream::sake::conformance::ml_kem::MlKemCupsV1"]
+n_cases = 64
+hash = "26c96552bbd532c6fb9b84b7b3db4c3815d55c39f9afb0514aa799db290a46c5"

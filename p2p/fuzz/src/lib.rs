@@ -240,6 +240,7 @@ impl NetworkScheme for Discovery {
         let mut config = discovery::Config::recommended(
             Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
+                    kem: commonware_cryptography::handshake::sake::X25519,
                     signer: peer.info.signer.clone(),
                     synchrony_bound: Duration::from_secs(5),
                     max_handshake_age: Duration::from_secs(10),
@@ -326,6 +327,7 @@ impl NetworkScheme for Lookup {
         let mut config = lookup::Config::recommended(
             Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
+                    kem: commonware_cryptography::handshake::sake::X25519,
                     signer: peer.info.signer.clone(),
                     synchrony_bound: Duration::from_secs(5),
                     max_handshake_age: Duration::from_secs(10),

@@ -173,6 +173,7 @@ libc = "0.2.186"
 libfuzzer-sys = "0.4.13"
 loom = "0.7.2"
 ml-dsa = { version = "0.1.1", default-features = false }
+ml-kem = { version = "0.3.2", default-features = false }
 num-bigint = { version = "0.4.8", default-features = false }
 num-integer = "0.1.46"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }
@@ -317,6 +318,9 @@ opt-level = 3
 opt-level = 3
 
 [profile.test.package.ml-dsa]
+opt-level = 3
+
+[profile.test.package.ml-kem]
 opt-level = 3
 
 [profile.test.package.module-lattice]

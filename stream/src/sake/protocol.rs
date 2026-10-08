@@ -1,9 +1,9 @@
 use crate::utils::codec::{Error as FrameError, recv_frame, send_frame};
 use commonware_codec::{DecodeExt, Encode, Error as CodecError, FixedSize};
 use commonware_cryptography::{
-    Signer,
+    Kem, Signer,
     handshake::sake::{
-        Ack, Context, Error as HandshakeError, Syn, SynAck, Version, dial_end, dial_start,
+        Ack, Context, Error as HandshakeError, Syn, SynAck, Version, X25519, dial_end, dial_start,
         listen_end, listen_start,
     },
     transcript::Transcript,
@@ -42,24 +42,30 @@ impl From<HandshakeError> for Error {
 
 /// Implements [crate::Handshake] with SAKE.
 ///
+/// The KEM defaults to [X25519]. Peers must use the same KEM.
+///
 /// # Examples
 ///
 /// ```
-/// use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+/// use commonware_cryptography::{Signer as _, ed25519::PrivateKey, handshake::sake::X25519};
 /// use commonware_stream::sake::{self, Sake};
 /// use std::time::Duration;
 ///
 /// let handshake = Sake {
 ///     signer: PrivateKey::from_seed(0),
+///     kem: X25519,
 ///     synchrony_bound: Duration::from_secs(5),
 ///     max_handshake_age: Duration::from_secs(10),
 ///     version: sake::Version::V1,
 /// };
 /// ```
 #[derive(Clone)]
-pub struct Sake<S> {
+pub struct Sake<S, K = X25519> {
     /// Signer used to authenticate the local peer.
     pub signer: S,
+
+    /// Key encapsulation mechanism used for the ephemeral key exchange.
+    pub kem: K,
 
     /// Maximum time drift allowed for future timestamps.
     pub synchrony_bound: Duration,
@@ -71,9 +77,9 @@ pub struct Sake<S> {
     pub version: Version,
 }
 
-impl<S> Sake<S> {
+impl<S, K: Kem> Sake<S, K> {
     /// Returns the SAKE context for a handshake with `peer` in `namespace`.
-    fn context<P>(self, clock: &impl Clock, namespace: &[u8], peer: P) -> Context<S, P> {
+    fn context<P>(self, clock: &impl Clock, namespace: &[u8], peer: P) -> Context<S, P, K> {
         // Accept peer timestamps from `max_handshake_age` before now up to, but excluding,
         // `synchrony_bound` after now.
         let current_time = clock.current().epoch().as_millis_u64();
@@ -85,6 +91,7 @@ impl<S> Sake<S> {
             ok_timestamps,
             self.signer,
             peer,
+            self.kem,
             self.version,
         )
     }
@@ -117,7 +124,7 @@ where
     Ok(M::decode(frame)?)
 }
 
-impl<S: Signer> crate::Handshake for Sake<S> {
+impl<S: Signer, K: Kem> crate::Handshake for Sake<S, K> {
     type PublicKey = S::PublicKey;
     type Error = Error;
 
@@ -146,7 +153,7 @@ impl<S: Signer> crate::Handshake for Sake<S> {
         let (state, syn) = dial_start(context, sake);
         send_handshake_frame(sink, syn).await?;
 
-        let syn_ack = recv_handshake_frame::<SynAck<S::Signature>, _>(stream).await?;
+        let syn_ack = recv_handshake_frame::<SynAck<S::Signature, K>, _>(stream).await?;
 
         let (ack, transcript) = dial_end(state, syn_ack)?;
         send_handshake_frame(sink, ack).await?;
@@ -175,7 +182,7 @@ impl<S: Signer> crate::Handshake for Sake<S> {
             return Err(Error::PeerRejected(peer.encode().to_vec()));
         }
 
-        let msg1 = recv_handshake_frame::<Syn<S::Signature>, _>(stream).await?;
+        let msg1 = recv_handshake_frame::<Syn<S::Signature, K>, _>(stream).await?;
 
         // Read the clock only after the Syn arrives, so the acceptance window and the SynAck
         // timestamp reflect when the Syn is checked.
@@ -221,16 +228,34 @@ mod test {
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
     type TestCups = Cups<(), ChaCha20Poly1305>;
-    type TestUpgrade = Cups<Sake<PrivateKey>, ChaCha20Poly1305>;
+    type TestUpgrade<K = X25519> = Cups<Sake<PrivateKey, K>, ChaCha20Poly1305>;
+
+    macro_rules! test_kems {
+        ($test:ident) => {
+            $test::<X25519>();
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))]
+            $test::<commonware_cryptography::ml_kem::MlKem768>();
+        };
+    }
 
     /// Checks that a closed peer fails the first handshake frame with a send error.
     #[test]
     fn test_frame_errors_surface_as_handshake_errors() {
+        test_kems!(frame_errors_surface_as_handshake_errors);
+    }
+
+    fn frame_errors_surface_as_handshake_errors<K: Kem + Default>() {
         deterministic::Runner::default().start(|context| async move {
             let (sink, peer_stream) = mocks::Channel::init();
             let (_peer_sink, stream) = mocks::Channel::init();
             drop(peer_stream);
-            let result = upgrader(
+            let result = upgrader::<K>(
                 PrivateKey::from_seed(0),
                 sake::Version::V1,
                 cups::Version::V1,
@@ -255,14 +280,18 @@ mod test {
     /// only when `max_message_size` exceeds it.
     #[test]
     fn test_max_message_size_bounds() {
-        const MAX_SIZE: u32 = <TestUpgrade as crate::Upgrader>::MAX_SIZE;
-        assert_eq!(MAX_SIZE, TestCups::MAX_SIZE);
+        test_kems!(max_message_size_bounds);
+    }
+
+    fn max_message_size_bounds<K: Kem + Default>() {
+        let max_size = <TestUpgrade<K> as crate::Upgrader>::MAX_SIZE;
+        assert_eq!(max_size, TestCups::MAX_SIZE);
         deterministic::Runner::default().start(|context| async move {
-            for max_message_size in [0, MAX_SIZE, MAX_SIZE + 1] {
+            for max_message_size in [0, max_size, max_size + 1] {
                 for dialer in [true, false] {
                     let (sink, _) = mocks::Channel::init();
                     let (_, stream) = mocks::Channel::init();
-                    let handshake = upgrader(
+                    let handshake = upgrader::<K>(
                         PrivateKey::from_seed(0),
                         sake::Version::V1,
                         cups::Version::V1,
@@ -298,7 +327,7 @@ mod test {
 
                     // Within the limit, the attempt reaches the dropped channel ends and fails
                     // without panicking.
-                    if max_message_size <= MAX_SIZE {
+                    if max_message_size <= max_size {
                         assert!(result.unwrap().is_err());
                     } else {
                         assert_eq!(
@@ -312,9 +341,14 @@ mod test {
     }
 
     /// Returns an upgrader for `signer` at the given SAKE and CUPS versions.
-    fn upgrader(signer: PrivateKey, sake: sake::Version, cups: cups::Version) -> TestUpgrade {
+    fn upgrader<K: Kem + Default>(
+        signer: PrivateKey,
+        sake: sake::Version,
+        cups: cups::Version,
+    ) -> TestUpgrade<K> {
         Cups::new(
             Sake {
+                kem: K::default(),
                 signer,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
@@ -386,7 +420,14 @@ mod test {
     /// Checks that a dialer and listener at the same CUPS version establish streams that reject
     /// payloads above `max_message_size` and exchange messages in both directions.
     #[test]
-    fn test_can_setup_and_send_messages() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_can_setup_and_send_messages() {
+        fn check<K: Kem + Default>() {
+            can_setup_and_send_messages::<K>().unwrap();
+        }
+        test_kems!(check);
+    }
+
+    fn can_setup_and_send_messages<K: Kem + Default>() -> Result<(), Box<dyn std::error::Error>> {
         for cups in [cups::Version::V0, cups::Version::V1] {
             for max_message_size in [0, 1, 100, MAX_MESSAGE_SIZE] {
                 let executor = deterministic::Runner::timed(Duration::from_secs(5));
@@ -399,9 +440,10 @@ mod test {
                     let (dialer_sink, listener_stream) = mocks::Channel::init();
                     let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-                    let dialer_handshake = upgrader(dialer_signer.clone(), sake::Version::V1, cups);
+                    let dialer_handshake =
+                        upgrader::<K>(dialer_signer.clone(), sake::Version::V1, cups);
                     let listener_handshake =
-                        upgrader(listener_signer.clone(), sake::Version::V1, cups);
+                        upgrader::<K>(listener_signer.clone(), sake::Version::V1, cups);
 
                     // Run both sides of the handshake.
                     let listener_handle =
@@ -467,7 +509,7 @@ mod test {
 
     /// Connects peers with the given SAKE and CUPS versions. Checks bidirectional delivery for
     /// matching CUPS versions and V1 rejection of V0 records after a successful handshake.
-    fn connect_with(
+    fn connect_with<D: Kem + Default, L: Kem + Default>(
         dialer: (sake::Version, cups::Version),
         listener: (sake::Version, cups::Version),
     ) -> Result<(), Error> {
@@ -477,8 +519,8 @@ mod test {
             let listener_signer = PrivateKey::from_seed(24);
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();
-            let dialer_handshake = upgrader(dialer_signer.clone(), dialer.0, dialer.1);
-            let listener_handshake = upgrader(listener_signer.clone(), listener.0, listener.1);
+            let dialer_handshake = upgrader::<D>(dialer_signer.clone(), dialer.0, dialer.1);
+            let listener_handshake = upgrader::<L>(listener_signer.clone(), listener.0, listener.1);
 
             // Run both sides of the handshake.
             let listener_handle = context.child("listener").spawn(move |context| async move {
@@ -541,6 +583,10 @@ mod test {
     /// establish streams that accept matching CUPS records and reject V0 records at V1 receivers.
     #[test]
     fn test_versions() {
+        test_kems!(versions);
+    }
+
+    fn versions<K: Kem + Default>() {
         let versions = [
             (sake::Version::V0, cups::Version::V0),
             (sake::Version::V0, cups::Version::V1),
@@ -549,7 +595,7 @@ mod test {
         ];
         for dialer in versions {
             for listener in versions {
-                let result = connect_with(dialer, listener);
+                let result = connect_with::<K, K>(dialer, listener);
                 if dialer.0 == listener.0 {
                     result.unwrap();
                 } else {
@@ -563,6 +609,27 @@ mod test {
                 }
             }
         }
+    }
+
+    /// Checks that incompatible KEM encodings fail before establishing a stream.
+    #[cfg(not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    )))]
+    #[test]
+    fn test_kem_mismatch() {
+        let versions = (sake::Version::V1, cups::Version::V1);
+        assert!(matches!(
+            connect_with::<X25519, commonware_cryptography::ml_kem::MlKem768>(versions, versions),
+            Err(Error::UnableToDecode(_))
+        ));
+        assert!(matches!(
+            connect_with::<commonware_cryptography::ml_kem::MlKem768, X25519>(versions, versions),
+            Err(Error::Frame(FrameError::RecvTooLarge(_)))
+        ));
     }
 
     /// Checks that the listener decrypts each record in place, inside the pooled buffer its stream
@@ -585,8 +652,9 @@ mod test {
                     last_alloc: last_alloc.clone(),
                 };
 
-                let dialer_handshake = upgrader(dialer_signer, sake::Version::V1, cups);
-                let listener_handshake = upgrader(listener_signer.clone(), sake::Version::V1, cups);
+                let dialer_handshake = upgrader::<X25519>(dialer_signer, sake::Version::V1, cups);
+                let listener_handshake =
+                    upgrader::<X25519>(listener_signer.clone(), sake::Version::V1, cups);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -650,8 +718,10 @@ mod test {
                 let sends = Arc::new(AtomicUsize::new(0));
                 let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-                let dialer_handshake = upgrader(dialer_signer.clone(), sake::Version::V1, cups);
-                let listener_handshake = upgrader(listener_signer.clone(), sake::Version::V1, cups);
+                let dialer_handshake =
+                    upgrader::<X25519>(dialer_signer.clone(), sake::Version::V1, cups);
+                let listener_handshake =
+                    upgrader::<X25519>(listener_signer.clone(), sake::Version::V1, cups);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -737,8 +807,10 @@ mod test {
                 let sends = Arc::new(AtomicUsize::new(0));
                 let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-                let dialer_handshake = upgrader(dialer_signer.clone(), sake::Version::V1, cups);
-                let listener_handshake = upgrader(listener_signer.clone(), sake::Version::V1, cups);
+                let dialer_handshake =
+                    upgrader::<X25519>(dialer_signer.clone(), sake::Version::V1, cups);
+                let listener_handshake =
+                    upgrader::<X25519>(listener_signer.clone(), sake::Version::V1, cups);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -828,8 +900,10 @@ mod test {
                 let sends = Arc::new(AtomicUsize::new(0));
                 let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-                let dialer_handshake = upgrader(dialer_signer.clone(), sake::Version::V1, cups);
-                let listener_handshake = upgrader(listener_signer.clone(), sake::Version::V1, cups);
+                let dialer_handshake =
+                    upgrader::<X25519>(dialer_signer.clone(), sake::Version::V1, cups);
+                let listener_handshake =
+                    upgrader::<X25519>(listener_signer.clone(), sake::Version::V1, cups);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -904,8 +978,10 @@ mod test {
                 let sends = Arc::new(AtomicUsize::new(0));
                 let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-                let dialer_handshake = upgrader(dialer_signer.clone(), sake::Version::V1, cups);
-                let listener_handshake = upgrader(listener_signer.clone(), sake::Version::V1, cups);
+                let dialer_handshake =
+                    upgrader::<X25519>(dialer_signer.clone(), sake::Version::V1, cups);
+                let listener_handshake =
+                    upgrader::<X25519>(listener_signer.clone(), sake::Version::V1, cups);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -970,6 +1046,10 @@ mod test {
     /// instead of `max_message_size`.
     #[test]
     fn test_listen_rejects_oversized_fixed_size_peer_key_frame() {
+        test_kems!(listen_rejects_oversized_fixed_size_peer_key_frame);
+    }
+
+    fn listen_rejects_oversized_fixed_size_peer_key_frame<K: Kem + Default>() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let dialer_signer = PrivateKey::from_seed(42);
@@ -982,7 +1062,7 @@ mod test {
             // Even with a large application limit, the listener should bound the
             // unauthenticated peer-key frame to the fixed public-key size.
             let listener_handshake =
-                upgrader(listener_signer, sake::Version::V1, cups::Version::V1);
+                upgrader::<K>(listener_signer, sake::Version::V1, cups::Version::V1);
             let max_message_size = 1024 * 1024;
 
             // Advertise a frame that is one byte larger than the encoded public key and send no
@@ -1018,6 +1098,10 @@ mod test {
     /// `max_message_size`.
     #[test]
     fn test_dial_rejects_oversized_fixed_size_syn_ack_frame() {
+        test_kems!(dial_rejects_oversized_fixed_size_syn_ack_frame);
+    }
+
+    fn dial_rejects_oversized_fixed_size_syn_ack_frame<K: Kem + Default>() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let dialer_signer = PrivateKey::from_seed(42);
@@ -1028,14 +1112,15 @@ mod test {
 
             // Use a large application limit to make sure this path is guarded by
             // the fixed SynAck size rather than by post-handshake settings.
-            let dialer_handshake = upgrader(dialer_signer, sake::Version::V1, cups::Version::V1);
+            let dialer_handshake =
+                upgrader::<K>(dialer_signer, sake::Version::V1, cups::Version::V1);
             let max_message_size = 1024 * 1024;
 
             // Build a valid SynAck only to derive its true encoded size for the
             // oversized prefix we inject below.
             let listener_public_key = listener_signer.public_key();
             let listener_handshake =
-                upgrader(listener_signer, sake::Version::V1, cups::Version::V1);
+                upgrader::<K>(listener_signer, sake::Version::V1, cups::Version::V1);
             let dialer_context = dialer_handshake.handshake.clone().context(
                 &context,
                 NAMESPACE,
@@ -1074,6 +1159,131 @@ mod test {
                 result,
                 Err(TimeoutError::Upgrade(Error::Frame(FrameError::RecvTooLarge(n))))
                     if n == syn_ack.encode().len() + 1
+            ));
+        });
+    }
+
+    /// Checks that the deadline releases a connection while waiting for handshake bytes or admission.
+    #[test]
+    fn test_handshake_timeouts() {
+        test_kems!(handshake_timeouts);
+    }
+
+    fn handshake_timeouts<K: Kem + Default>() {
+        for stage in 0..3 {
+            deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
+                let (sink, mut peer_stream) = mocks::Channel::init();
+                let (mut peer_sink, stream) = mocks::Channel::init();
+                let peer = PrivateKey::from_seed(1).public_key();
+                if stage == 2 {
+                    send_handshake_frame(&mut peer_sink, peer.clone())
+                        .await
+                        .unwrap();
+                }
+                let handshake = Timeout::new(
+                    upgrader::<K>(
+                        PrivateKey::from_seed(0),
+                        sake::Version::V1,
+                        cups::Version::V1,
+                    ),
+                    Duration::from_millis(50),
+                );
+                let start = context.current();
+                let result = if stage == 0 {
+                    handshake
+                        .dial(
+                            context.child("handshake"),
+                            NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            peer,
+                            stream,
+                            sink,
+                        )
+                        .await
+                        .map(|_| ())
+                } else {
+                    handshake
+                        .listen(
+                            context.child("handshake"),
+                            NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async {
+                                if stage == 2 {
+                                    futures::future::pending::<()>().await;
+                                }
+                                true
+                            },
+                            stream,
+                            sink,
+                        )
+                        .await
+                        .map(|_| ())
+                };
+                assert!(matches!(result, Err(TimeoutError::Timeout)));
+                let elapsed = context.current().duration_since(start).unwrap();
+                assert!(
+                    elapsed >= Duration::from_millis(50) && elapsed < Duration::from_millis(51)
+                );
+                assert!(peer_sink.send(&b"x"[..]).await.is_err());
+
+                // The dialer may have buffered its prelude and Syn before cancellation.
+                if stage == 0 {
+                    recv_handshake_frame::<<PrivateKey as Signer>::PublicKey, _>(&mut peer_stream)
+                        .await
+                        .unwrap();
+                    recv_handshake_frame::<Syn<<PrivateKey as Signer>::Signature, K>, _>(
+                        &mut peer_stream,
+                    )
+                    .await
+                    .unwrap();
+                }
+                assert!(peer_stream.recv(1).await.is_err());
+            });
+        }
+    }
+
+    /// Checks that the listener bounds a Syn frame by the selected KEM's fixed encoding.
+    #[test]
+    fn test_listen_rejects_oversized_fixed_size_syn_frame() {
+        test_kems!(listen_rejects_oversized_fixed_size_syn_frame);
+    }
+
+    fn listen_rejects_oversized_fixed_size_syn_frame<K: Kem + Default>() {
+        deterministic::Runner::default().start(|context| async move {
+            let dialer_signer = PrivateKey::from_seed(42);
+            let listener_signer = PrivateKey::from_seed(24);
+            let listener_key = listener_signer.public_key();
+            let dialer_key = dialer_signer.public_key();
+            let dialer_context = upgrader::<K>(dialer_signer, sake::Version::V1, cups::Version::V1)
+                .handshake
+                .context(&context, NAMESPACE, listener_key);
+            let (_, syn) = dial_start(context.child("dialer"), dialer_context);
+            let (mut dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, _dialer_stream) = mocks::Channel::init();
+            send_handshake_frame(&mut dialer_sink, dialer_key)
+                .await
+                .unwrap();
+            dialer_sink
+                .send(oversized_handshake_prefix(&syn))
+                .await
+                .unwrap();
+            let result = Timeout::new(
+                upgrader::<K>(listener_signer, sake::Version::V1, cups::Version::V1),
+                Duration::from_secs(1),
+            )
+            .listen(
+                context,
+                NAMESPACE,
+                1024 * 1024,
+                |_| async { true },
+                listener_stream,
+                listener_sink,
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(TimeoutError::Upgrade(Error::Frame(FrameError::RecvTooLarge(n))))
+                    if n == syn.encode().len() + 1
             ));
         });
     }

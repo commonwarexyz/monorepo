@@ -334,6 +334,7 @@ mod tests {
             let cfg = Config::local(
                 Cups::<_, ChaCha20Poly1305>::new(
                     Sake {
+                        kem: commonware_cryptography::handshake::sake::X25519,
                         signer: signer.clone(),
                         synchrony_bound: Duration::from_secs(5),
                         max_handshake_age: Duration::from_secs(10),

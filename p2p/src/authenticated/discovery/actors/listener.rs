@@ -292,6 +292,7 @@ mod tests {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_001);
             let handshake = Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
+                    kem: commonware_cryptography::handshake::sake::X25519,
                     signer: PrivateKey::from_seed(1),
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(1),
@@ -443,6 +444,7 @@ mod tests {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_001);
             let handshake = Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
+                    kem: commonware_cryptography::handshake::sake::X25519,
                     signer: PrivateKey::from_seed(1),
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(1),

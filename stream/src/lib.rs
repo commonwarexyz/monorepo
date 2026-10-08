@@ -20,7 +20,8 @@ commonware_macros::stability_scope!(BETA {
     pub mod utils;
 
     /// [CUPS](cups::Cups) running a [SAKE](sake::Sake) handshake with cipher `C`.
-    pub type SakeCups<S, C> = cups::Cups<sake::Sake<S>, C>;
+    pub type SakeCups<S, C, K = commonware_cryptography::handshake::sake::X25519> =
+        cups::Cups<sake::Sake<S, K>, C>;
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
     ///

@@ -103,6 +103,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let mut p2p_config = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
             Sake {
+                kem: commonware_cryptography::handshake::sake::X25519,
                 signer: node.signer.clone(),
                 synchrony_bound: Duration::from_secs(5),
                 max_handshake_age: Duration::from_secs(10),
@@ -601,6 +602,7 @@ mod tests {
                 discovery::Config::local(
                     Cups::<_, ChaCha20Poly1305>::new(
                         Sake {
+                            kem: commonware_cryptography::handshake::sake::X25519,
                             signer: signers[0].clone(),
                             synchrony_bound: Duration::from_secs(5),
                             max_handshake_age: Duration::from_secs(10),
