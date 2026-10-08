@@ -168,6 +168,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "sha512_hasher"
+path = "fuzz_targets/sha512_hasher.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "reed_solomon_engine"
 path = "fuzz_targets/reed_solomon_engine.rs"
 test = false

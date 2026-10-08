@@ -21,10 +21,6 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
-// =============================================================================
-// Fixed variant test trait implementations
-// =============================================================================
-
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const N: usize, S] fixed::Db<F, E, K, V, H, T, N, S>
     where {
@@ -40,10 +36,6 @@ crate::qmdb::any::traits::impl_db_any! {
     Family = F, Key = K, Value = V, Digest = H::Digest
 }
 
-// =============================================================================
-// Variable variant test trait implementations
-// =============================================================================
-
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const N: usize, S] variable::Db<F, E, K, V, H, T, N, S>
     where {
@@ -58,10 +50,6 @@ crate::qmdb::any::traits::impl_db_any! {
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
 }
-
-// =============================================================================
-// BitmapPrunedBits trait implementations
-// =============================================================================
 
 impl<
     F: Graftable,
@@ -113,10 +101,6 @@ where
     }
 }
 
-// =============================================================================
-// Partitioned Fixed variant test trait implementations
-// =============================================================================
-
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const P: usize, const N: usize, S] fixed::partitioned::Db<F, E, K, V, H, T, P, N, S>
     where {
@@ -156,10 +140,6 @@ impl<
         *self.any.bounds().start
     }
 }
-
-// =============================================================================
-// Partitioned Variable variant test trait implementations
-// =============================================================================
 
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const P: usize, const N: usize, S]

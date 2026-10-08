@@ -64,6 +64,9 @@ commonware_macros::stability_scope!(ALPHA {
 
     pub mod reed_solomon;
 
+    pub mod sha512;
+    pub use crate::sha512::{CoreSha512, Sha512};
+
     pub mod zk;
 });
 commonware_macros::stability_scope!(BETA {
@@ -726,5 +729,10 @@ mod tests {
     #[test]
     fn test_sha256_hasher_multiple_runs() {
         test_hasher_multiple_runs::<Sha256>();
+    }
+
+    #[test]
+    fn test_sha512_hasher_multiple_runs() {
+        test_hasher_multiple_runs::<Sha512>();
     }
 }

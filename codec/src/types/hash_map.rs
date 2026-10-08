@@ -14,8 +14,6 @@ use std::{collections::HashMap, hash::Hash};
 
 const HASHMAP_TYPE: &str = "HashMap";
 
-// ---------- HashMap ----------
-
 impl<K: Ord + Write, V: Write, S> Write for HashMap<K, V, S> {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);

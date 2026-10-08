@@ -122,7 +122,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        merkle::{LocationRangeExt as _, build_range_proof, hasher::Standard, mem::Mem},
+        merkle::{LocationRangeExt as _, RangePlan, hasher::Standard, mem::Mem},
         mmb, mmr,
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
@@ -144,15 +144,10 @@ mod tests {
         inactive_peaks: usize,
         range: Range<Location<F>>,
     ) -> Proof<F, Digest> {
-        build_range_proof(
-            hasher,
-            merkle.leaves(),
-            inactive_peaks,
-            range,
-            |pos| merkle.get_node(pos),
-            crate::merkle::Error::ElementPruned,
-        )
-        .unwrap()
+        RangePlan::new(merkle.leaves(), range)
+            .unwrap()
+            .build(hasher, inactive_peaks, |pos| merkle.get_node(pos))
+            .unwrap()
     }
 
     // ---- Generic inner functions for tests that work on both MMR and MMB ----

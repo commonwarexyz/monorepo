@@ -206,7 +206,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
-        let Some(tip) = ancestry.peek().cloned() else {
+        let Some(tip) = ancestry.peek() else {
             return self.inner.verify(context, ancestry).await;
         };
         let height = tip.height();
