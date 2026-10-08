@@ -22,14 +22,15 @@ const LIMB_BITS: usize = 51;
 /// The low [`LIMB_BITS`] bits: what a limb holds once carries have been propagated out of it.
 const MASK_51: u64 = (1 << LIMB_BITS) - 1;
 
-/// `16*p`, decomposed limb-wise at radix `2^LIMB_BITS`, used to make subtraction underflow-free.
-const BIAS_16P: [u64; LIMBS] = [
-    16 * ((1u64 << LIMB_BITS) - 19),
-    16 * ((1u64 << LIMB_BITS) - 1),
-    16 * ((1u64 << LIMB_BITS) - 1),
-    16 * ((1u64 << LIMB_BITS) - 1),
-    16 * ((1u64 << LIMB_BITS) - 1),
-];
+/// `k*p`, decomposed limb-wise at radix `2^LIMB_BITS`.
+const fn p_times(k: u64) -> [u64; LIMBS] {
+    let mut limbs = [k * MASK_51; LIMBS];
+    limbs[0] = k * ((1 << LIMB_BITS) - 19);
+    limbs
+}
+
+/// `16*p`, limb-wise, used to make subtraction underflow-free.
+const BIAS_16P: [u64; LIMBS] = p_times(16);
 
 /// A base field element in the field of order `p = 2^255 - 19`.
 ///
@@ -640,6 +641,23 @@ impl GCompleted {
             t: d.sub(c),
         }
     }
+
+    /// Finishes the `dbl-2008-hwcd` doubling of [`G::double`] from `A = X^2`, `B = Y^2`,
+    /// `C = 2*Z^2`, and `(X + Y)^2`.
+    #[inline(always)]
+    const fn from_squares(a: F, b: F, c: F, sum_squared: F) -> Self {
+        // In `G::double`'s notation, `X3/Z3 = E/G` and `Y3/Z3 = H/F`.
+        let e = sum_squared.sub(a).sub(b);
+        let g = b.sub(a);
+        let f = g.sub(c);
+        let h = a.neg().sub(b);
+        Self {
+            x: e,
+            y: h,
+            z: g,
+            t: f,
+        }
+    }
 }
 
 /// An affine point `(x, y)` stored as `(y + x, y - x, 2d*x*y)`.
@@ -882,6 +900,11 @@ fn pow_p58<B: FBackend>(backend: B, value: FVec) -> FVec {
 /// a point plus its negation, and points with a torsion component. Every input point, operand, and
 /// table entry may have any limbs below `2^52`.
 ///
+/// Fixed-base multiplication passes secret points through these operations, so no branch, memory
+/// index, or early exit of a point operation may depend on the coordinates of its points. Only the
+/// `negate` flags of [`Backend::add_cached`] and [`Backend::add_niels`] may be variable-time, and
+/// [`Backend::decompress_pair`] is variable-time on its encodings, which must be public.
+///
 /// The point types follow a point through a chain: an addition or doubling returns a
 /// [`Backend::Completed`] point, which converts to [`Backend::Projective`] coordinates for a
 /// doubling or to [`Backend::Extended`] coordinates for an addition. A backend may skip work for
@@ -907,9 +930,6 @@ pub trait Backend: MBackend + 'static {
 
     /// Converts a native projective point back to a [`GProjective`] with limbs below `2^52`.
     fn store_projective(self, point: Self::Projective) -> GProjective;
-
-    /// Returns the identity in extended coordinates.
-    fn identity(self) -> Self::Extended;
 
     /// Drops the `T` coordinate, which doubling does not read.
     fn project(self, point: Self::Extended) -> Self::Projective;
@@ -948,12 +968,6 @@ pub trait Backend: MBackend + 'static {
     /// Constant time: every entry of `row` is read, and the selection and negation use masks,
     /// so no branch, memory index, or early exit depends on `digit` or on the points.
     fn add_selected(self, point: Self::Extended, row: &[Niels; 8], digit: i8) -> Self::Completed;
-
-    /// Decompresses a point encoding as [`GAffine::decompress`] does.
-    #[inline(always)]
-    fn decompress(self, encoding: &[u8; 32]) -> Option<GAffine> {
-        GAffine::decompress(encoding)
-    }
 
     /// Decompresses two point encodings as [`GAffine::decompress`] does, or returns `None` when
     /// either is invalid.

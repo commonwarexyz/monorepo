@@ -7,7 +7,7 @@ use super::{
     Backend, Regs, digit_mac, digit_product, digit_times19, mul19, pack_pair, reduce_columns,
     split_pairs, square_regs, unpack_pair,
 };
-use crate::curve::{F, G, GCompleted, GProjective, Niels, ProjectiveNiels, basepoint};
+use crate::curve::{F, G, GCompleted, GProjective, LIMBS, Niels, ProjectiveNiels, basepoint};
 use core::arch::aarch64::*;
 
 impl crate::curve::Backend for Backend {
@@ -32,11 +32,6 @@ impl crate::curve::Backend for Backend {
     }
 
     #[inline(always)]
-    fn identity(self) -> G {
-        G::IDENTITY
-    }
-
-    #[inline(always)]
     fn project(self, point: G) -> GProjective {
         point.to_projective()
     }
@@ -45,17 +40,7 @@ impl crate::curve::Backend for Backend {
     fn double(self, point: GProjective) -> GCompleted {
         let [a, b] = square_pair(point.x, point.y);
         let c = point.z.square();
-        let c = c.add(c);
-        let e = point.x.add(point.y).square().sub(a).sub(b);
-        let g = b.sub(a);
-        let f = g.sub(c);
-        let h = a.neg().sub(b);
-        GCompleted {
-            x: e,
-            y: h,
-            z: g,
-            t: f,
-        }
+        GCompleted::from_squares(a, b, c.add(c), point.x.add(point.y).square())
     }
 
     #[inline(always)]
@@ -87,6 +72,8 @@ impl crate::curve::Backend for Backend {
     #[inline(always)]
     fn add_cached(self, point: G, cached: ProjectiveNiels, negate: bool) -> GCompleted {
         let cached = if negate { cached.negate() } else { cached };
+
+        // The steps of `G::add` up to its final products, with `2d*T2` precomputed.
         let [a, b] = mul_pair(
             point.y.sub(point.x),
             cached.diff,
@@ -138,7 +125,7 @@ fn square_pair(a: F, b: F) -> [F; 2] {
 /// Five-column convolution with columns above four folded by `2^255 = 19 (mod p)`.
 /// Each input digit is below `2^27`, so scaling by 19 fits `u32` and columns fit `u64`.
 #[inline(always)]
-fn convolution(a: [uint32x2_t; 5], b: [uint32x2_t; 5]) -> [uint64x2_t; 5] {
+fn convolution(a: [uint32x2_t; LIMBS], b: [uint32x2_t; LIMBS]) -> [uint64x2_t; LIMBS] {
     let b1 = digit_times19(b[1]);
     let b2 = digit_times19(b[2]);
     let b3 = digit_times19(b[3]);
@@ -202,6 +189,11 @@ fn mul_karatsuba(a: Regs, b: Regs) -> Regs {
         let lo = convolution(a.map(|p| p.lo), b.map(|p| p.lo));
         let hi = convolution(a.map(|p| p.hi), b.map(|p| p.hi));
         let sum = convolution(a_sum, b_sum);
+
+        // With each limb `lo + 2^26 * hi`, even column `2k` takes the low products of column `k`
+        // plus twice the high products of column `k - 1` (`2^52 = 2 * 2^51`), column 0 taking
+        // twice column 4's times 19, and odd column `2k + 1` takes the cross terms
+        // `sum - lo - hi` of column `k`.
         reduce_columns([
             vaddq_u64(lo[0], vshlq_n_u64::<1>(mul19(hi[4]))),
             vsubq_u64(vsubq_u64(sum[0], lo[0]), hi[0]),
@@ -220,22 +212,19 @@ fn mul_karatsuba(a: Regs, b: Regs) -> Regs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::curve::test::MASK_52;
 
     fn check(values: [F; 4]) {
         let [a, b, c, d] = values;
         for (actual, expected) in mul_pair(a, b, c, d).into_iter().zip([a.mul(b), c.mul(d)]) {
-            assert!(actual.0.iter().all(|limb| *limb < 1 << 52));
-            assert_eq!(actual.to_bytes(), expected.to_bytes());
-        }
-        for (actual, expected) in square_pair(a, c).into_iter().zip([a.square(), c.square()]) {
-            assert!(actual.0.iter().all(|limb| *limb < 1 << 52));
+            assert!(actual.0.iter().all(|limb| *limb <= MASK_52));
             assert_eq!(actual.to_bytes(), expected.to_bytes());
         }
     }
 
     #[test]
     fn tile_products_match_scalar() {
-        let max = F([(1 << 52) - 1; 5]);
+        let max = F([MASK_52; LIMBS]);
         for a in [F::ZERO, F::ONE, max] {
             for b in [F::ZERO, F::ONE, max] {
                 check([a, b, b, a]);
@@ -245,8 +234,8 @@ mod tests {
             .with_seed(0)
             .with_search_limit(512)
             .test(|u| {
-                let values: [[u64; 5]; 4] = u.arbitrary()?;
-                check(values.map(|v| F(v.map(|limb| limb & ((1 << 52) - 1)))));
+                let values: [[u64; LIMBS]; 4] = u.arbitrary()?;
+                check(values.map(|v| F(v.map(|limb| limb & MASK_52))));
                 Ok(())
             });
     }

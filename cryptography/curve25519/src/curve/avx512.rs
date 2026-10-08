@@ -2,7 +2,7 @@
 //! with field multiplication built on IFMA's 52-bit multiply-accumulates.
 
 use super::{
-    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, LANES, MASK_51, WithBackend, msm,
+    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, LANES, LIMBS, MASK_51, WithBackend, msm,
 };
 use core::arch::x86_64::*;
 
@@ -30,7 +30,7 @@ const EDWARDS_D2: FVec = FVec::splat(F::EDWARDS_D2);
 pub struct Backend(());
 
 /// Five limb registers, one coordinate per lane.
-type Rows = [__m256i; 5];
+type Rows = [__m256i; LIMBS];
 
 /// An extended or projective point, as lanes `[X, Y, Z, T]` with limbs below `300 * 2^52`.
 ///

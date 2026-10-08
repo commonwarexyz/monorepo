@@ -543,13 +543,16 @@ fn verify_pipeline<B: Backend>(
 /// Width of the non-adjacent forms [`straus`] recodes its variable-base scalars into.
 const NAF_WIDTH: usize = 5;
 
+/// The number of odd multiples a width-[`NAF_WIDTH`] digit can select.
+const TABLE_LEN: usize = 1 << (NAF_WIDTH - 2);
+
 /// Returns the odd multiples `point, 3*point, ..., 15*point`, built by repeatedly adding
 /// `2*point`, so a width-[`NAF_WIDTH`] digit `d` selects entry `|d| / 2`.
 #[inline(always)]
-fn odd_multiples<B: Backend>(backend: B, point: &G) -> [B::Cached; 1 << (NAF_WIDTH - 2)] {
+fn odd_multiples<B: Backend>(backend: B, point: &G) -> [B::Cached; TABLE_LEN] {
     let point = backend.load(point);
     let double = backend.cache(backend.to_extended(backend.double(backend.project(point))));
-    let mut table = [backend.cache(point); 1 << (NAF_WIDTH - 2)];
+    let mut table = [backend.cache(point); TABLE_LEN];
     let mut multiple = point;
     for entry in &mut table[1..] {
         multiple = backend.to_extended(backend.add_cached(multiple, double, false));
@@ -577,15 +580,15 @@ fn straus<B: Backend, const N: usize>(
 
     // One loop builds every table, so the inlined table builder appears once. The identity's
     // cache only initializes the array.
-    let placeholder = backend.cache(backend.identity());
-    let mut tables = [[placeholder; 1 << (NAF_WIDTH - 2)]; N];
+    let placeholder = backend.cache(backend.load(&G::IDENTITY));
+    let mut tables = [[placeholder; TABLE_LEN]; N];
     for (table, (point, _)) in tables.iter_mut().zip(&terms) {
         *table = odd_multiples(backend, point);
     }
 
     // The shared doubling chain starts at the highest nonzero digit of any scalar. If every
     // scalar is zero, so is the sum.
-    let identity = backend.project(backend.identity());
+    let identity = backend.project(backend.load(&G::IDENTITY));
     let Some(top) = base_digits
         .iter()
         .chain(&digits)
@@ -638,8 +641,8 @@ pub fn verify(
     })
 }
 
-/// The inputs of [`verify`], checked with the selected backend's single-point operations, which
-/// also decompress the signature's `R` and, without a cached point, `A`.
+/// The inputs of [`verify`], checked with the selected backend's single-point operations.
+/// Without a cached point, the backend also decompresses the signature's `R` together with `A`.
 struct Verify<'a> {
     a_bytes: &'a VerifyingKeyBytes,
     a_point: Option<&'a G>,
@@ -663,7 +666,7 @@ impl WithBackend for Verify<'_> {
                     .decompress_pair([&self.sig.r, self.a_bytes.as_bytes()])
                     .map(|[r, a]| (r, a.to_extended()))
             },
-            |point| backend.decompress(&self.sig.r).map(|r| (r, *point)),
+            |point| GAffine::decompress(&self.sig.r).map(|r| (r, *point)),
         );
         let Some((r, a)) = points else {
             return false;

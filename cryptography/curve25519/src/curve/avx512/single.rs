@@ -8,33 +8,34 @@
 //! multiplies, so IFMA only ever sees limbs below `2^52`.
 
 use super::{Backend, CachedPoint, CompletedPoint, PackedPoint, Rows};
-use crate::curve::{BIAS_16P, F, G, GAffine, GProjective, LANES, MASK_51, Niels};
-use core::arch::x86_64::*;
+use crate::curve::{BIAS_16P, F, G, GAffine, GProjective, LANES, LIMBS, MASK_51, Niels, p_times};
+use core::{
+    arch::{asm, x86_64::*},
+    hint::black_box,
+    mem::offset_of,
+    ptr::from_ref,
+};
 
 /// `1024p`, limb-wise. Every limb exceeds every unreduced product limb, so subtracting such a limb
 /// from it never underflows, and a sum of three terms below `2^61.3` stays below `2^63`.
-const BIAS: [u64; 5] = [
-    1024 * (MASK_51 - 18),
-    1024 * MASK_51,
-    1024 * MASK_51,
-    1024 * MASK_51,
-    1024 * MASK_51,
-];
+const BIAS: [u64; LIMBS] = p_times(1024);
 
 /// `2p`, limb-wise. For a carried limb `x` (at most `2^51 + 19 * 2^12`), `2p - x` lies in
 /// `[0, 2^52)`, so negating a cached operand needs no carry.
-const TWO_P: [u64; 5] = [
-    2 * (MASK_51 - 18),
-    2 * MASK_51,
-    2 * MASK_51,
-    2 * MASK_51,
-    2 * MASK_51,
-];
+const TWO_P: [u64; LIMBS] = p_times(2);
 
 /// The `vpermq` immediate placing lanes `a, b, c, d` of the source in lanes 0 to 3.
 const fn order(a: i32, b: i32, c: i32, d: i32) -> i32 {
     a | b << 2 | c << 4 | d << 6
 }
+
+/// The `vpshufd` immediate exchanging the two 64-bit lanes of each 128-bit half, so lanes
+/// `[a, b, c, d]` become `[b, a, d, c]`.
+const SWAP_PAIRS: i32 = 0x4e;
+
+/// The mask selecting all four lanes, under which [`Backend::negate`] and
+/// [`Backend::niels_operand`] negate their operand.
+const ALL_LANES: __mmask8 = 0b1111;
 
 /// `19*z` via `(z << 4) + (z << 1) + z`.
 ///
@@ -51,7 +52,7 @@ fn mul19(z: __m256i) -> __m256i {
     // SAFETY: AVX-512VL is enabled. The instructions only read their register input, write
     // their register outputs, and preserve flags.
     unsafe {
-        core::arch::asm!(
+        asm!(
             "vpsllq {times16}, {z}, 4",
             "vpsllq {doubled}, {z}, 1",
             "vpaddq {doubled}, {doubled}, {times16}",
@@ -79,7 +80,7 @@ macro_rules! masked {
             // SAFETY: AVX-512VL is enabled. The instruction only reads its register and mask
             // inputs, merges into its register output, and preserves flags.
             unsafe {
-                core::arch::asm!(
+                asm!(
                     concat!($instruction, " {result}{{{k}}}, {a}, {b}"),
                     result = inout(ymm_reg) result,
                     k = in(kreg) k,
@@ -107,7 +108,7 @@ fn mask_mov(src: __m256i, k: __mmask8, a: __m256i) -> __m256i {
     // SAFETY: AVX-512VL is enabled. The instruction only reads its register and mask inputs,
     // merges into its register output, and preserves flags.
     unsafe {
-        core::arch::asm!(
+        asm!(
             "vmovdqa64 {result}{{{k}}}, {a}",
             result = inout(ymm_reg) result,
             k = in(kreg) k,
@@ -131,6 +132,12 @@ fn decompress_pair(backend: Backend, encodings: [&[u8; 32]; 2]) -> Option<[GAffi
     Some([points[0]?, points[1]?])
 }
 
+// `Backend::load_niels` reads a `Niels` as 15 consecutive limbs: `y + x`, `y - x`, then `2d*x*y`.
+const _: () = {
+    assert!(size_of::<Niels>() == 15 * 8);
+    assert!(offset_of!(Niels, diff) == 40 && offset_of!(Niels, t2d) == 80);
+};
+
 // SAFETY (every unsafe block in this impl): `self` is a `Backend`, which is only constructed
 // after detecting AVX-512F, AVX-512VL, and AVX-512 IFMA, the features of every intrinsic and
 // helper used here.
@@ -141,7 +148,7 @@ fn decompress_pair(backend: Backend, encodings: [&[u8; 32]; 2]) -> Option<[GAffi
 impl Backend {
     /// Splats each limb into every lane.
     #[inline(always)]
-    fn splat(self, limbs: [u64; 5]) -> Rows {
+    fn splat(self, limbs: [u64; LIMBS]) -> Rows {
         // SAFETY: see the impl.
         unsafe {
             [
@@ -193,29 +200,36 @@ impl Backend {
     fn mul_wide(self, a: &Rows, b: &Rows) -> Rows {
         // SAFETY: see the impl.
         unsafe {
-            let mut lo = [_mm256_setzero_si256(); 10];
-            let mut hi = [_mm256_setzero_si256(); 10];
-            let mut folded = [_mm256_setzero_si256(); 5];
+            let mut lo = [_mm256_setzero_si256(); 2 * LIMBS];
+            let mut hi = [_mm256_setzero_si256(); 2 * LIMBS];
+            let mut folded = [_mm256_setzero_si256(); LIMBS];
             for high in [true, false] {
-                for i in 0..5 {
-                    for j in 0..5 {
-                        if (i + j >= 4) == high {
+                for i in 0..LIMBS {
+                    for j in 0..LIMBS {
+                        if (i + j + 1 >= LIMBS) == high {
                             hi[i + j + 1] = _mm256_madd52hi_epu64(hi[i + j + 1], a[i], b[j]);
                         }
-                        if (i + j >= 5) == high {
+                        if (i + j >= LIMBS) == high {
                             lo[i + j] = _mm256_madd52lo_epu64(lo[i + j], a[i], b[j]);
                         }
                     }
                 }
                 if high {
-                    for k in 0..5 {
-                        let column =
-                            _mm256_add_epi64(lo[k + 5], _mm256_add_epi64(hi[k + 5], hi[k + 5]));
+                    // The upper columns, 5 to 9, are complete after the first pass: fold column
+                    // `k + LIMBS` onto limb `k` times 19 (`2^255 = 19 mod p`) while the second pass
+                    // issues columns 0 to 4.
+                    for k in 0..LIMBS {
+                        let column = _mm256_add_epi64(
+                            lo[k + LIMBS],
+                            _mm256_add_epi64(hi[k + LIMBS], hi[k + LIMBS]),
+                        );
                         folded[k] = mul19(column);
                     }
                 }
             }
-            for k in 0..5 {
+
+            // Columns 0 to 4 are now complete: add each to the folded column of the same limb.
+            for k in 0..LIMBS {
                 let column = _mm256_add_epi64(lo[k], _mm256_add_epi64(hi[k], hi[k]));
                 folded[k] = _mm256_add_epi64(column, folded[k]);
             }
@@ -232,41 +246,46 @@ impl Backend {
     fn square_wide(self, a: &Rows) -> Rows {
         // SAFETY: see the impl.
         unsafe {
-            let mut c1 = [_mm256_setzero_si256(); 10];
-            let mut c2 = [_mm256_setzero_si256(); 10];
-            let mut c4 = [_mm256_setzero_si256(); 10];
-            let mut folded = [_mm256_setzero_si256(); 5];
+            let mut c1 = [_mm256_setzero_si256(); 2 * LIMBS];
+            let mut c2 = [_mm256_setzero_si256(); 2 * LIMBS];
+            let mut c4 = [_mm256_setzero_si256(); 2 * LIMBS];
+            let mut folded = [_mm256_setzero_si256(); LIMBS];
             for high in [true, false] {
-                for i in 0..5 {
-                    if (2 * i >= 5) == high {
+                for i in 0..LIMBS {
+                    if (2 * i >= LIMBS) == high {
                         c1[2 * i] = _mm256_madd52lo_epu64(c1[2 * i], a[i], a[i]);
                     }
-                    if (2 * i + 1 >= 5) == high {
+                    if (2 * i + 1 >= LIMBS) == high {
                         c2[2 * i + 1] = _mm256_madd52hi_epu64(c2[2 * i + 1], a[i], a[i]);
                     }
-                    for j in (i + 1)..5 {
-                        if (i + j >= 5) == high {
+                    for j in (i + 1)..LIMBS {
+                        if (i + j >= LIMBS) == high {
                             c2[i + j] = _mm256_madd52lo_epu64(c2[i + j], a[i], a[j]);
                         }
-                        if (i + j + 1 >= 5) == high {
+                        if (i + j + 1 >= LIMBS) == high {
                             c4[i + j + 1] = _mm256_madd52hi_epu64(c4[i + j + 1], a[i], a[j]);
                         }
                     }
                 }
                 if high {
-                    for k in 0..5 {
+                    // The upper columns, 5 to 9, are complete after the first pass: fold column
+                    // `k + LIMBS` onto limb `k` times 19 (`2^255 = 19 mod p`) while the second pass
+                    // issues columns 0 to 4.
+                    for k in 0..LIMBS {
                         let column = _mm256_add_epi64(
-                            c1[k + 5],
+                            c1[k + LIMBS],
                             _mm256_add_epi64(
-                                _mm256_add_epi64(c2[k + 5], c2[k + 5]),
-                                _mm256_slli_epi64::<2>(c4[k + 5]),
+                                _mm256_add_epi64(c2[k + LIMBS], c2[k + LIMBS]),
+                                _mm256_slli_epi64::<2>(c4[k + LIMBS]),
                             ),
                         );
                         folded[k] = mul19(column);
                     }
                 }
             }
-            for k in 0..5 {
+
+            // Columns 0 to 4 are now complete: add each to the folded column of the same limb.
+            for k in 0..LIMBS {
                 let column = _mm256_add_epi64(
                     c1[k],
                     _mm256_add_epi64(
@@ -280,15 +299,16 @@ impl Backend {
         }
     }
 
-    /// `[Y - X, Y + X, T, Z]`, carried, from lanes `[X, Y, Z, T]` with limbs below `2^61`.
+    /// `[Y - X, Y + X, T, Z]`, carried, from lanes `[X, Y, Z, T]` with limbs below `300 * 2^52`,
+    /// which every limb of [`BIAS`] exceeds.
     #[inline(always)]
     fn diff_sum(self, p: &Rows) -> Rows {
         let bias = self.splat(BIAS);
-        let mut out = [p[0]; 5];
+        let mut out = [p[0]; LIMBS];
         // SAFETY: see the impl.
         unsafe {
-            for k in 0..5 {
-                let swapped = _mm256_shuffle_epi32::<0x4e>(p[k]); // [Y, X, T, Z]
+            for k in 0..LIMBS {
+                let swapped = _mm256_shuffle_epi32::<SWAP_PAIRS>(p[k]); // [Y, X, T, Z]
                 let negated = mask_sub(p[k], 0b0001, bias[k], p[k]); // [-X, Y, Z, T]
                 out[k] = mask_add(swapped, 0b0011, swapped, negated); // [Y - X, X + Y, T, Z]
             }
@@ -307,8 +327,8 @@ impl Backend {
         let mut s = products;
         // SAFETY: see the impl.
         unsafe {
-            for k in 0..5 {
-                let swapped = _mm256_shuffle_epi32::<0x4e>(products[k]); // [B, A, D, C]
+            for k in 0..LIMBS {
+                let swapped = _mm256_shuffle_epi32::<SWAP_PAIRS>(products[k]); // [B, A, D, C]
                 let negated = mask_sub(products[k], 0b0101, bias[k], products[k]); // [-A, B, -C, D]
                 s[k] = _mm256_add_epi64(swapped, negated); // [E, H, F, G]
             }
@@ -318,7 +338,7 @@ impl Backend {
         let mut right = s;
         // SAFETY: see the impl.
         unsafe {
-            for k in 0..5 {
+            for k in 0..LIMBS {
                 left[k] = _mm256_permute4x64_epi64::<{ order(0, 3, 2, 0) }>(s[k]); // [E, G, F, E]
                 right[k] = _mm256_permute4x64_epi64::<{ order(2, 1, 3, 1) }>(s[k]); // [F, H, G, H]
             }
@@ -336,7 +356,7 @@ impl Backend {
         let mut s = *p;
         // SAFETY: see the impl.
         unsafe {
-            for k in 0..5 {
+            for k in 0..LIMBS {
                 let x = _mm256_permute4x64_epi64::<{ order(0, 1, 2, 0) }>(p[k]); // [X, Y, Z, X]
                 let y = _mm256_permute4x64_epi64::<{ order(0, 0, 0, 1) }>(p[k]); // [., ., ., Y]
                 s[k] = mask_add(x, 0b1000, x, y); // [X, Y, Z, X + Y]
@@ -349,7 +369,7 @@ impl Backend {
         let mut right = squares;
         // SAFETY: see the impl.
         unsafe {
-            for k in 0..5 {
+            for k in 0..LIMBS {
                 let a = _mm256_permute4x64_epi64::<{ order(0, 0, 0, 0) }>(squares[k]);
                 let b = _mm256_permute4x64_epi64::<{ order(1, 1, 1, 1) }>(squares[k]);
                 let c = _mm256_permute4x64_epi64::<{ order(3, 2, 2, 3) }>(squares[k]); // [K, Z^2, Z^2, K]
@@ -378,13 +398,13 @@ impl Backend {
     /// and the result is below `2^52`. With `16p` any limbs below `2^52` work, but the result needs
     /// a carry.
     #[inline(always)]
-    fn negate(self, q: &Rows, mask: __mmask8, bias: [u64; 5]) -> Rows {
+    fn negate(self, q: &Rows, mask: __mmask8, bias: [u64; LIMBS]) -> Rows {
         let bias = self.splat(bias);
         let mut out = *q;
         // SAFETY: see the impl.
         unsafe {
-            for k in 0..5 {
-                let swapped = _mm256_shuffle_epi32::<0x4e>(q[k]);
+            for k in 0..LIMBS {
+                let swapped = _mm256_shuffle_epi32::<SWAP_PAIRS>(q[k]);
                 let swapped = mask_mov(q[k], mask & 0b0011, swapped);
                 out[k] = mask_sub(swapped, mask & 0b0100, bias[k], swapped);
             }
@@ -442,8 +462,8 @@ impl Backend {
 
         // SAFETY: see the impl.
         unsafe {
-            let magnitude = core::hint::black_box(_mm256_set1_epi64x(i64::from(magnitude)));
-            let negative = core::hint::black_box(_mm256_set1_epi64x(i64::from(negative)));
+            let magnitude = black_box(_mm256_set1_epi64x(i64::from(magnitude)));
+            let negative = black_box(_mm256_set1_epi64x(i64::from(negative)));
             let mut masks = [0; 8];
             for (k, mask) in (1..).zip(&mut masks) {
                 *mask = _mm256_cmpeq_epi64_mask(magnitude, _mm256_set1_epi64x(k));
@@ -458,7 +478,7 @@ impl Backend {
     /// Loads a [`Niels`] point's fifteen limbs, four per register with the sixteenth lane zero.
     #[inline(always)]
     fn load_niels(self, niels: &Niels) -> [__m256i; 4] {
-        let limbs = core::ptr::from_ref(niels).cast::<i64>();
+        let limbs = from_ref(niels).cast::<i64>();
         // SAFETY: see the impl for the features. `Niels` is three consecutive `F`s, fifteen
         // `u64` limbs, so limbs 0..15 are readable; `loadu` needs no alignment, and the masked
         // load reads only limbs 12..15.
@@ -482,13 +502,7 @@ impl Backend {
         let (masks, negate) = self.digit_masks(digit);
         // SAFETY: see the impl.
         let selected = unsafe {
-            // The identity's `y + x` and `y - x` are one: limbs 0 and 5.
-            let mut selected = [
-                _mm256_set_epi64x(0, 0, 0, 1),
-                _mm256_set_epi64x(0, 0, 1, 0),
-                _mm256_setzero_si256(),
-                _mm256_setzero_si256(),
-            ];
+            let mut selected = self.load_niels(&Niels::IDENTITY);
             for (mask, entry) in masks.into_iter().zip(row) {
                 let limbs = self.load_niels(entry);
                 for i in 0..4 {
@@ -504,8 +518,8 @@ impl Backend {
     #[inline(always)]
     fn load(self, point: &G) -> Rows {
         let (x, y, z, t) = (point.x.0, point.y.0, point.z.0, point.t.0);
-        let mut rows = [[0i64; 4]; 5];
-        for k in 0..5 {
+        let mut rows = [[0i64; 4]; LIMBS];
+        for k in 0..LIMBS {
             rows[k] = [x[k] as i64, y[k] as i64, z[k] as i64, t[k] as i64];
         }
         // SAFETY: see the impl.
@@ -524,8 +538,8 @@ impl Backend {
     #[inline(always)]
     fn store(self, point: &Rows) -> [F; 4] {
         let rows = self.carry(*point);
-        let mut lanes = [[0u64; 4]; 5];
-        for k in 0..5 {
+        let mut lanes = [[0u64; 4]; LIMBS];
+        for k in 0..LIMBS {
             // SAFETY: see the impl for the features. Each destination is four `u64`s, one
             // register, and `storeu` needs no alignment.
             unsafe { _mm256_storeu_si256(lanes[k].as_mut_ptr().cast(), rows[k]) };
@@ -581,11 +595,6 @@ impl crate::curve::Backend for Backend {
     }
 
     #[inline(always)]
-    fn identity(self) -> PackedPoint {
-        PackedPoint(self.load(&G::IDENTITY))
-    }
-
-    #[inline(always)]
     fn project(self, point: PackedPoint) -> PackedPoint {
         point
     }
@@ -613,7 +622,7 @@ impl crate::curve::Backend for Backend {
     #[inline(always)]
     fn add_cached(self, point: PackedPoint, cached: CachedPoint, negate: bool) -> CompletedPoint {
         let operand = if negate {
-            self.negate(&cached.0, 0xff, TWO_P)
+            self.negate(&cached.0, ALL_LANES, TWO_P)
         } else {
             cached.0
         };
@@ -622,7 +631,7 @@ impl crate::curve::Backend for Backend {
 
     #[inline(always)]
     fn add_niels(self, point: PackedPoint, niels: &Niels, negate: bool) -> CompletedPoint {
-        let mask = if negate { 0xff } else { 0 };
+        let mask = if negate { ALL_LANES } else { 0 };
         self.add_operands(&point.0, &self.niels_operand(self.load_niels(niels), mask))
     }
 

@@ -1,13 +1,16 @@
 //! Property suites shared by field and group backends.
 
 use super::{
-    Backend, F, FBackend, FVec, G, GAffine, GCompleted, GProjective, LANES, MASK_51, Niels,
-    WithBackend,
+    Backend, F, FBackend, FVec, G, GAffine, GCompleted, GProjective, LANES, LIMB_BITS, LIMBS,
+    MASK_51, Niels, WithBackend,
     msm::{self, WithLanes},
+    p_times,
 };
 #[cfg(test)]
 use crate::test::ZIP215_POINTS;
 use arbitrary::{Arbitrary, Unstructured};
+#[cfg(test)]
+use commonware_utils::Widen;
 use core::array;
 
 pub(super) const MASK_52: u64 = (1 << 52) - 1;
@@ -101,7 +104,7 @@ fn assert_bounded(value: FVec) {
     );
 }
 
-pub(super) fn assert_f_eq(actual: FVec, expected: FVec, property: &str) {
+fn assert_f_eq(actual: FVec, expected: FVec, property: &str) {
     assert_bounded(actual);
     assert_bounded(expected);
     for lane in 0..LANES {
@@ -319,20 +322,6 @@ fn repeated_squaring_matches_scalar() {
 #[cfg(test)]
 #[test]
 fn backend_at_bounds() {
-    /// Asserts that a coordinate is within the field bound and equals `expected` as a field
-    /// element.
-    fn assert_coordinate_eq(actual: F, expected: F, property: &str) {
-        assert!(
-            actual
-                .0
-                .iter()
-                .chain(&expected.0)
-                .all(|&limb| limb < 1 << 52),
-            "{property}: a limb is outside the field bound"
-        );
-        assert_eq!(canonical(actual.0), canonical(expected.0), "{property}");
-    }
-
     struct CheckBackendAtBounds;
 
     impl WithBackend for CheckBackendAtBounds {
@@ -409,14 +398,7 @@ fn backend_at_bounds() {
                 (lanes.double(loaded), point.double()),
             ] {
                 for actual in lanes.store(actual) {
-                    for (actual, expected) in [
-                        (actual.x, expected.x),
-                        (actual.y, expected.y),
-                        (actual.t, expected.t),
-                        (actual.z, expected.z),
-                    ] {
-                        assert_coordinate_eq(actual, expected, "group formula at bound");
-                    }
+                    assert_g_same(actual, expected, "group formula at bound");
                 }
             }
         }
@@ -619,17 +601,7 @@ fn zip215_decompression_and_group_laws() {
 #[cfg(test)]
 #[test]
 fn completed_point_operations_match_extended() {
-    use super::Niels;
-
     fn check(p: G, q: G) {
-        let niels = |point: G| {
-            let affine = point.to_affine();
-            Niels {
-                sum: affine.y.add(affine.x),
-                diff: affine.y.sub(affine.x),
-                t2d: affine.t2d,
-            }
-        };
         let assert_matches = |actual: G, expected: G, property: &str| {
             assert_on_curve(actual);
             assert_g_eq(actual, expected, property);
@@ -719,14 +691,13 @@ fn completed_point_operations_match_extended() {
 fn spread_limbs(value: F, choice: u8) -> F {
     let mut limbs = canonical(value.0);
     if choice & 1 == 1 {
-        let p = [MASK_51 - 18, MASK_51, MASK_51, MASK_51, MASK_51];
-        for (limb, p) in limbs.iter_mut().zip(p) {
+        for (limb, p) in limbs.iter_mut().zip(p_times(1)) {
             *limb += p;
         }
     } else {
-        for i in 0..4 {
+        for i in 0..LIMBS - 1 {
             if (choice >> (i + 1)) & 1 == 1 && limbs[i + 1] > 0 {
-                limbs[i] += 1 << 51;
+                limbs[i] += 1 << LIMB_BITS;
                 limbs[i + 1] -= 1;
             }
         }
@@ -744,43 +715,41 @@ fn rescale(point: G, scale: F, choice: u8) -> G {
     }
 }
 
-/// Asserts that two extended points have the same coordinates modulo `p`, and that `actual` is
-/// within the field bound. The coordinates need not form a curve point.
-fn assert_g_same(actual: G, expected: G, property: &str) {
+/// Asserts that a coordinate is within the field bound and equals `expected` as a field element.
+fn assert_coordinate_eq(actual: F, expected: F, property: &str) {
+    assert!(
+        actual
+            .0
+            .iter()
+            .chain(&expected.0)
+            .all(|&limb| limb < 1 << 52),
+        "{property}: a limb is outside the field bound"
+    );
+    assert_eq!(canonical(actual.0), canonical(expected.0), "{property}");
+}
+
+/// Asserts that two extended points have the same coordinates modulo `p`, all within the field
+/// bound. The coordinates need not form a curve point.
+pub(super) fn assert_g_same(actual: G, expected: G, property: &str) {
     for (actual, expected, coordinate) in [
         (actual.x, expected.x, "X"),
         (actual.y, expected.y, "Y"),
         (actual.z, expected.z, "Z"),
         (actual.t, expected.t, "T"),
     ] {
-        assert!(
-            actual.0.iter().all(|&limb| limb < 1 << 52),
-            "{property}: a limb is outside the field bound"
-        );
-        assert_eq!(
-            canonical(actual.0),
-            canonical(expected.0),
-            "{property}: {coordinate}"
-        );
+        assert_coordinate_eq(actual, expected, &format!("{property}: {coordinate}"));
     }
 }
 
-/// Asserts that two projective points have the same coordinates modulo `p`.
+/// Asserts that two projective points have the same coordinates modulo `p`, all within the field
+/// bound.
 fn assert_projective_same(actual: GProjective, expected: GProjective, property: &str) {
     for (actual, expected, coordinate) in [
         (actual.x, expected.x, "X"),
         (actual.y, expected.y, "Y"),
         (actual.z, expected.z, "Z"),
     ] {
-        assert!(
-            actual.0.iter().all(|&limb| limb < 1 << 52),
-            "{property}: a limb is outside the field bound"
-        );
-        assert_eq!(
-            canonical(actual.0),
-            canonical(expected.0),
-            "{property}: {coordinate}"
-        );
+        assert_coordinate_eq(actual, expected, &format!("{property}: {coordinate}"));
     }
 }
 
@@ -796,7 +765,7 @@ const fn niels(point: G) -> Niels {
 
 /// A field element with arbitrary limbs below `2^52`.
 fn arbitrary_f(u: &mut Unstructured<'_>) -> arbitrary::Result<F> {
-    let limbs: [u64; 5] = u.arbitrary()?;
+    let limbs: [u64; LIMBS] = u.arbitrary()?;
     Ok(F(limbs.map(|limb| limb & MASK_52)))
 }
 
@@ -807,6 +776,9 @@ const MAX_STEPS: usize = 16;
 /// arbitrary points with low-order components, rescaled projective coordinates, and spread limbs,
 /// and on points, affine operands, and table rows with arbitrary limbs below `2^52`, which the
 /// contract admits whether or not they are on the curve.
+///
+/// Also checks the backend's paired decompression of arbitrary encodings against scalar
+/// decompression.
 fn fuzz_point_matches_portable<B: Backend>(
     u: &mut Unstructured<'_>,
     backend: B,
@@ -862,9 +834,8 @@ fn fuzz_point_matches_portable<B: Backend>(
         }
         row
     } else {
-        super::basepoint::TABLE[u.int_in_range(0..=31)?]
+        *u.choose(&super::basepoint::TABLE)?
     };
-    let odd = u.int_in_range(0..=127)?;
     let mut chain = Vec::new();
     for _ in 0..u.int_in_range(0..=MAX_STEPS)? {
         chain.push(u.arbitrary()?);
@@ -874,17 +845,20 @@ fn fuzz_point_matches_portable<B: Backend>(
         q,
         niels,
         row,
-        odd,
         chain,
-        encodings,
     }
     .call(backend);
+
+    // Paired decompression agrees with the scalar path, including for invalid encodings.
+    let [first, second] = &encodings;
+    assert_pair_matches(backend, first, second);
+    assert_pair_matches(backend, second, first);
     Ok(())
 }
 
 /// A decompressed point's encoding and `2d*x*y`, for comparing decompression results.
-fn key(point: Option<GAffine>) -> Option<([u8; 32], [u8; 32])> {
-    point.map(|point| (point.compress(), point.t2d.to_bytes()))
+fn key(point: GAffine) -> ([u8; 32], [u8; 32]) {
+    (point.compress(), point.t2d.to_bytes())
 }
 
 /// Asserts that [`Backend::decompress_pair`] returns both scalar decompressions, or `None` when
@@ -894,14 +868,11 @@ fn assert_pair_matches<B: Backend>(backend: B, first: &[u8; 32], second: &[u8; 3
     assert_eq!(
         backend
             .decompress_pair([first, second])
-            .map(|[a, b]| (key(Some(a)), key(Some(b)))),
-        expected.map(|(a, b)| (key(Some(a)), key(Some(b)))),
+            .map(|pair| pair.map(key)),
+        expected.map(|(a, b)| [key(a), key(b)]),
         "decompress pair"
     );
 }
-
-/// The number of caches a chain of single-point operations saves addition operands in.
-const CACHES: usize = 2;
 
 /// One operation of a chain that feeds each native result into the next operation.
 #[derive(Clone, Copy, Debug)]
@@ -909,10 +880,10 @@ enum Step {
     /// Doubles the point, finishing the previous result in projective coordinates, or in
     /// extended coordinates and then projecting it when `extended` is set.
     Double { extended: bool },
-    /// Prepares the point as an addition operand and saves it in cache `slot`.
-    Cache { slot: usize },
-    /// Adds the operand saved in cache `slot`, negated when `negate` is set.
-    Add { slot: usize, negate: bool },
+    /// Prepares the point as an addition operand and saves it in the cache.
+    Cache,
+    /// Adds the operand saved in the cache, negated when `negate` is set.
+    Add { negate: bool },
     /// Adds the affine operand, negated when `negate` is set.
     AddNiels { negate: bool },
     /// Adds the row's entry that `digit` selects, negated when `digit` is negative, or the
@@ -926,11 +897,8 @@ impl<'a> Arbitrary<'a> for Step {
             0 => Self::Double {
                 extended: u.arbitrary()?,
             },
-            1 => Self::Cache {
-                slot: u.int_in_range(0..=CACHES - 1)?,
-            },
+            1 => Self::Cache,
             2 => Self::Add {
-                slot: u.int_in_range(0..=CACHES - 1)?,
                 negate: u.arbitrary()?,
             },
             3 => Self::AddNiels {
@@ -996,12 +964,8 @@ struct PointMatches {
     /// The row that fixed-base additions select from: a row of the fixed-base table or arbitrary
     /// entries.
     row: [Niels; 8],
-    /// An entry of the flattened verification table, below 128.
-    odd: usize,
     /// The operations of a chain starting from `p`.
     chain: Vec<Step>,
-    /// Point encodings, valid or not.
-    encodings: [[u8; 32]; 2],
 }
 
 impl WithBackend for PointMatches {
@@ -1012,7 +976,6 @@ impl WithBackend for PointMatches {
         let p = backend.load(&self.p);
         let q = backend.load(&self.q);
         assert_g_same(backend.store(p), self.p, "load and store");
-        assert_g_same(backend.store(backend.identity()), G::IDENTITY, "identity");
 
         // Each operation's completed point matches in both finished forms.
         let check = |actual: B::Completed, expected: GCompleted, property: &str| {
@@ -1038,13 +1001,11 @@ impl WithBackend for PointMatches {
                 portable.add_cached(self.p, portable.cache(self.q), negate),
                 "add",
             );
-            for niels in [&self.niels, &super::ODD_MULTIPLES.as_flattened()[self.odd]] {
-                check(
-                    backend.add_niels(p, niels, negate),
-                    portable.add_niels(self.p, niels, negate),
-                    "add Niels",
-                );
-            }
+            check(
+                backend.add_niels(p, &self.niels, negate),
+                portable.add_niels(self.p, &self.niels, negate),
+                "add Niels",
+            );
         }
         for digit in -8..=8 {
             check(
@@ -1056,8 +1017,8 @@ impl WithBackend for PointMatches {
 
         // The chain feeds each native result into the next operation, as the algorithms do,
         // finishing it in the coordinates that operation reads, and compares every finished point
-        // with the portable backend. Each cache starts as `q`.
-        let mut caches = [(backend.cache(q), portable.cache(self.q)); CACHES];
+        // with the portable backend. The cache starts as `q`.
+        let mut cache = (backend.cache(q), portable.cache(self.q));
         let mut link = Link::<B>::Extended(p, self.p);
         for (index, &step) in self.chain.iter().enumerate() {
             let property = format!("chain input of step {index}, {step:?}");
@@ -1073,14 +1034,14 @@ impl WithBackend for PointMatches {
                         portable.double(portable.project(expected)),
                     )
                 }
-                Step::Cache { slot } => {
+                Step::Cache => {
                     let (actual, expected) = link.extended(backend, &property);
-                    caches[slot] = (backend.cache(actual), portable.cache(expected));
+                    cache = (backend.cache(actual), portable.cache(expected));
                     Link::Extended(actual, expected)
                 }
-                Step::Add { slot, negate } => {
+                Step::Add { negate } => {
                     let (actual, expected) = link.extended(backend, &property);
-                    let (cached, expected_cached) = caches[slot];
+                    let (cached, expected_cached) = cache;
                     Link::Completed(
                         backend.add_cached(actual, cached, negate),
                         portable.add_cached(expected, expected_cached, negate),
@@ -1105,84 +1066,46 @@ impl WithBackend for PointMatches {
         if let Link::Completed(actual, expected) = link {
             check(actual, expected, "chain result");
         }
-
-        // Decompression agrees with the scalar path, including for invalid encodings.
-        let [first, second] = &self.encodings;
-        assert_eq!(
-            key(backend.decompress(first)),
-            key(GAffine::decompress(first))
-        );
-        assert_pair_matches(backend, first, second);
-        assert_pair_matches(backend, second, first);
     }
 }
 
 #[cfg(test)]
 #[test]
 fn minifuzz_point() {
-    // Fully inlined point formulas can exceed the test harness's default stack in debug builds.
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            commonware_invariants::minifuzz::Builder::default()
-                .with_seed(0)
-                .with_search_limit(400)
-                .test(|u| Plan::Point.run(u));
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    commonware_invariants::minifuzz::Builder::default()
+        .with_seed(0)
+        .with_search_limit(400)
+        .test(|u| Plan::Point.run(u));
 }
 
 /// Checks the selected backend's single-point operations against the portable backend on the identity,
 /// every ZIP215 point (each low-order point among them), sums with the basepoint, equal and
 /// opposite operands, every row of the fixed-base table with reduced and with spread limbs, and
 /// coordinates and table entries at or near the field bound, each with every digit and through a
-/// chain of every transition between operations.
+/// chain that finishes every kind of result in both coordinate systems.
 #[cfg(test)]
 #[test]
 fn single_point_operations_match_portable() {
-    struct Run(Vec<PointMatches>);
-
-    impl WithBackend for Run {
-        type Output = ();
-
-        fn call<B: Backend>(self, backend: B) {
-            for check in self.0 {
-                check.call(backend);
-            }
-        }
-    }
-
-    // Doublings finished in both coordinate systems after doublings and additions, caches of
-    // finished results reused under both signs, and signed affine and selected additions.
-    const CHAIN: [Step; 18] = [
+    // Every kind of result finished in both coordinate systems, the original operand added, caches
+    // of finished results added under both signs, and signed affine and selected additions. In the
+    // field-bound case no finished point is zero in every coordinate, so no comparison holds
+    // trivially.
+    const CHAIN: [Step; 19] = [
         Step::Double { extended: false },
         Step::Double { extended: false },
         Step::Double { extended: true },
-        Step::Cache { slot: 0 },
-        Step::Add {
-            slot: 0,
-            negate: false,
-        },
+        Step::Add { negate: false },
+        Step::Cache,
+        Step::Add { negate: false },
+        Step::Double { extended: false },
         Step::AddNiels { negate: true },
         Step::Double { extended: false },
-        Step::Add {
-            slot: 0,
-            negate: true,
-        },
-        Step::Add {
-            slot: 1,
-            negate: false,
-        },
+        Step::Add { negate: true },
         Step::AddSelected { digit: -8 },
-        Step::Cache { slot: 1 },
+        Step::Cache,
         Step::Double { extended: true },
         Step::AddSelected { digit: 5 },
-        Step::Add {
-            slot: 1,
-            negate: true,
-        },
+        Step::Add { negate: true },
         Step::AddNiels { negate: false },
         Step::Double { extended: true },
         Step::AddSelected { digit: 0 },
@@ -1208,7 +1131,6 @@ fn single_point_operations_match_portable() {
         }));
     }
 
-    let encodings = [ZIP215_POINTS[0], [0xff; 32]];
     let mut checks = Vec::new();
     for (i, &p) in points.iter().enumerate() {
         let p = rescale(p, F::from_bytes(&[i as u8 + 2; 32]), i as u8);
@@ -1219,9 +1141,7 @@ fn single_point_operations_match_portable() {
                 q,
                 niels: niels(q),
                 row: rows[n % rows.len()],
-                odd: n % 128,
                 chain: CHAIN.to_vec(),
-                encodings,
             });
         }
     }
@@ -1229,14 +1149,14 @@ fn single_point_operations_match_portable() {
     // Coordinates at the field bound need not form a curve point; the formulas still must match
     // coordinate-wise. The table entries near the bound are distinct, so selecting the wrong
     // entry fails too.
-    let max = F([MASK_52; 5]);
+    let max = F([MASK_52; LIMBS]);
     let bound = G {
         x: max,
         y: max,
         t: max,
         z: max,
     };
-    let near = |offset: usize| F([MASK_52 - offset as u64; 5]);
+    let near = |offset: usize| F([MASK_52 - Widen::<u64>::widen(offset); LIMBS]);
     checks.push(PointMatches {
         p: bound,
         q: bound,
@@ -1250,11 +1170,11 @@ fn single_point_operations_match_portable() {
             diff: near(3 * k + 1),
             t2d: near(3 * k + 2),
         }),
-        odd: 127,
         chain: CHAIN.to_vec(),
-        encodings,
     });
-    super::with_backend(Run(checks));
+    for check in checks {
+        super::with_backend(check);
+    }
 }
 
 /// Checks the selected backend's paired decompression against two scalar decompressions for

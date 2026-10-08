@@ -20,6 +20,10 @@ use zeroize::Zeroizing;
 pub(super) static TABLE: [[Niels; 8]; 32] = table();
 
 /// Width of the non-adjacent forms whose digits select entries of [`ODD_MULTIPLES`].
+///
+/// A wider form has sparser nonzero digits, so each scalar half needs fewer additions, but each
+/// extra bit doubles the static table, which holds `2 * 2^(w - 2)` entries of 120 bytes (15 KiB at
+/// width 8).
 pub const ODD_MULTIPLES_NAF_WIDTH: usize = 8;
 
 /// The number of odd multiples a width-[`ODD_MULTIPLES_NAF_WIDTH`] digit can select.
@@ -63,11 +67,15 @@ impl WithBackend for MulBase<'_> {
     // point operations can inline.
     #[inline(always)]
     fn call<B: Backend>(self, backend: B) -> G {
-        mul_base(backend, &Zeroizing::new(digits(self.0)))
+        // The secret digits are recoded directly into the buffer cleared on drop, so no other copy
+        // of the array is made.
+        let mut digits = Zeroizing::new([0; 64]);
+        recode(self.0, &mut digits);
+        mul_base(backend, &digits)
     }
 }
 
-/// Returns `sum e[i] * 16^i * B` for the radix-16 digits `e` of [`digits`].
+/// Returns `sum e[i] * 16^i * B` for the radix-16 digits `e` of [`recode`].
 ///
 /// Pair `j` holds digits `e[2j]` and `e[2j+1]`, both read from row `j`. Adding the odd digits,
 /// multiplying by 16 with four doublings, and then adding the even digits gives
@@ -76,12 +84,13 @@ impl WithBackend for MulBase<'_> {
 #[inline(always)]
 fn mul_base<B: Backend>(backend: B, digits: &[i8; 64]) -> G {
     let pairs = digits.as_chunks::<2>().0;
-    let mut result = backend.identity();
+    let mut result = backend.load(&G::IDENTITY);
     for (row, pair) in TABLE.iter().zip(pairs) {
         result = backend.to_extended(backend.add_selected(result, row, pair[1]));
     }
 
-    // Only the last doubling feeds an addition, which reads `T`.
+    // Four doublings multiply by 16. Only the last feeds an addition, which reads `T`, so the
+    // first three finish in projective coordinates.
     let mut multiple = backend.project(result);
     for _ in 0..3 {
         multiple = backend.to_projective(backend.double(multiple));
@@ -94,12 +103,11 @@ fn mul_base<B: Backend>(backend: B, digits: &[i8; 64]) -> G {
     backend.store(result)
 }
 
-/// Recodes a scalar below `2^255` as `sum e[i] * 16^i`, with `e[i]` in `[-8, 7]` for `i < 63`
-/// and `e[63]` in `[0, 8]`.
+/// Recodes a scalar below `2^255` into `digits` as `sum e[i] * 16^i`, with `e[i]` in `[-8, 7]`
+/// for `i < 63` and `e[63]` in `[0, 8]`.
 #[inline]
-fn digits(scalar: &[u8; 32]) -> [i8; 64] {
+fn recode(scalar: &[u8; 32], digits: &mut [i8; 64]) {
     debug_assert!(scalar[31] >> 7 == 0);
-    let mut digits = [0i8; 64];
     for (pair, byte) in digits.as_chunks_mut::<2>().0.iter_mut().zip(scalar) {
         *pair = [(byte & 15) as i8, (byte >> 4) as i8];
     }
@@ -114,7 +122,6 @@ fn digits(scalar: &[u8; 32]) -> [i8; 64] {
         *digit = value.wrapping_sub(carry << 4);
     }
     digits[63] = digits[63].wrapping_add(carry);
-    digits
 }
 
 /// Returns `digit * P` from `row[k] = (k + 1) * P`, for `digit` in `[-8, 8]`.
@@ -130,31 +137,26 @@ pub(super) fn select(row: &[Niels; 8], digit: i8) -> Niels {
     for (k, entry) in (1u8..).zip(row) {
         point.conditional_assign(entry, magnitude.ct_eq(&k));
     }
-    let negated = Niels {
-        sum: point.diff,
-        diff: point.sum,
-        t2d: point.t2d.neg(),
-    };
-    Niels::conditional_select(&point, &negated, Choice::from(negative))
+    Niels::conditional_select(&point, &point.negate(), Choice::from(negative))
 }
 
 /// Builds [`TABLE`] at compile time from [`GAffine::BASEPOINT`].
 const fn table() -> [[Niels; 8]; 32] {
-    // `points[8 * j + k]` is `(k + 1) * p` for `p = 256^j * B`, built by repeated addition.
+    // `points[j][k]` is `(k + 1) * p` for `p = 256^j * B`, built by repeated addition.
     let mut p = GAffine::BASEPOINT.to_extended();
-    let mut points = [G::IDENTITY; 256];
+    let mut points = [[G::IDENTITY; 8]; 32];
     let mut j = 0;
     while j < 32 {
         let mut multiple = p;
         let mut k = 0;
         while k < 8 {
-            points[8 * j + k] = multiple;
+            points[j][k] = multiple;
             multiple = multiple.add(p);
             k += 1;
         }
 
         // `256 * p = 32 * (8 * p)`.
-        p = points[8 * j + 7];
+        p = points[j][7];
         let mut doubling = 0;
         while doubling < 5 {
             p = p.add(p);
@@ -162,75 +164,65 @@ const fn table() -> [[Niels; 8]; 32] {
         }
         j += 1;
     }
-
-    let niels = to_niels(&points);
-    let mut table = [[Niels::IDENTITY; 8]; 32];
-    let mut i = 0;
-    while i < 256 {
-        table[i / 8][i % 8] = niels[i];
-        i += 1;
-    }
-    table
+    to_niels(&points)
 }
 
 /// Builds [`ODD_MULTIPLES`] at compile time from [`GAffine::BASEPOINT`].
 const fn odd_multiples() -> [[Niels; ODD_MULTIPLES_LEN]; 2] {
-    // `points[ODD_MULTIPLES_LEN * j + k]` is `(2k + 1) * p` for `p = 2^(128j) * B`, built by
-    // repeatedly adding `2 * p`.
+    // `points[j][k]` is `(2k + 1) * p` for `p = 2^(128j) * B`, built by repeatedly adding
+    // `2 * p`.
     let mut p = GAffine::BASEPOINT.to_extended();
-    let mut points = [G::IDENTITY; 2 * ODD_MULTIPLES_LEN];
+    let mut points = [[G::IDENTITY; ODD_MULTIPLES_LEN]; 2];
     let mut j = 0;
     while j < 2 {
         let double = p.add(p);
         let mut multiple = p;
         let mut k = 0;
         while k < ODD_MULTIPLES_LEN {
-            points[ODD_MULTIPLES_LEN * j + k] = multiple;
+            points[j][k] = multiple;
             multiple = multiple.add(double);
             k += 1;
         }
 
+        // Advance `p` to `2^128 * p`, the base of the next row: verification splits its scalar
+        // into the two `u128` halves of `Scalar::halves`.
         let mut doubling = 0;
-        while doubling < 128 {
+        while doubling < u128::BITS {
             p = p.add(p);
             doubling += 1;
         }
         j += 1;
     }
-
-    let niels = to_niels(&points);
-    let mut table = [[Niels::IDENTITY; ODD_MULTIPLES_LEN]; 2];
-    let mut i = 0;
-    while i < 2 * ODD_MULTIPLES_LEN {
-        table[i / ODD_MULTIPLES_LEN][i % ODD_MULTIPLES_LEN] = niels[i];
-        i += 1;
-    }
-    table
+    to_niels(&points)
 }
 
 /// Normalizes extended points to [`Niels`] form at compile time, inverting every `Z` with one
 /// shared inversion.
-const fn to_niels<const N: usize>(points: &[G; N]) -> [Niels; N] {
-    // `prefix[i]` is the product of the first `i` Z coordinates.
-    let mut prefix = [F::ONE; N];
+const fn to_niels<const ROWS: usize, const COLS: usize>(
+    points: &[[G; COLS]; ROWS],
+) -> [[Niels; COLS]; ROWS] {
+    // Point `i` is `points[i / COLS][i % COLS]` in row-major order, and
+    // `prefix[i / COLS][i % COLS]` is the product of the first `i` Z coordinates.
+    let mut prefix = [[F::ONE; COLS]; ROWS];
     let mut product = F::ONE;
     let mut i = 0;
-    while i < N {
-        prefix[i] = product;
-        product = product.mul(points[i].z);
+    while i < ROWS * COLS {
+        prefix[i / COLS][i % COLS] = product;
+        product = product.mul(points[i / COLS][i % COLS].z);
         i += 1;
     }
 
     // On entry to each iteration, `inverse` inverts the product of the first `i` Z coordinates.
     let mut inverse = product.invert();
-    let mut niels = [Niels::IDENTITY; N];
+    let mut niels = [[Niels::IDENTITY; COLS]; ROWS];
     while i > 0 {
         i -= 1;
-        let z_inverse = inverse.mul(prefix[i]);
-        inverse = inverse.mul(points[i].z);
-        let x = points[i].x.mul(z_inverse);
-        let y = points[i].y.mul(z_inverse);
-        niels[i] = Niels {
+        let (row, col) = (i / COLS, i % COLS);
+        let z_inverse = inverse.mul(prefix[row][col]);
+        inverse = inverse.mul(points[row][col].z);
+        let x = points[row][col].x.mul(z_inverse);
+        let y = points[row][col].y.mul(z_inverse);
+        niels[row][col] = Niels {
             sum: y.add(x),
             diff: y.sub(x),
             t2d: x.mul(y).mul(F::EDWARDS_D2),
@@ -291,7 +283,8 @@ mod tests {
             scalar
         });
         for scalar in scalars {
-            let digits = digits(&scalar);
+            let mut digits = [0; 64];
+            recode(&scalar, &mut digits);
             assert!(digits[..63].iter().all(|digit| (-8..8).contains(digit)));
             assert!((0..=8).contains(&digits[63]));
 

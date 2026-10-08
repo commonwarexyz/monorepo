@@ -8,6 +8,11 @@
 //! five-limb representation.
 
 use super::{BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, LANES, MASK_51, msm};
+#[cfg(test)]
+use super::{
+    portable,
+    test::{MASK_52, assert_g_same},
+};
 use core::arch::aarch64::*;
 
 // Single-point operations with paired products on a NEON tile, for single-signature verification
@@ -884,7 +889,7 @@ fn mixed_pair_matches_scalar() {
     )
     .unwrap();
     let points = [GAffine::IDENTITY, GAffine::BASEPOINT, torsion, mixed];
-    let max = F([super::test::MASK_52; 5]);
+    let max = F([MASK_52; 5]);
     let loose = G {
         x: max,
         y: max,
@@ -923,23 +928,9 @@ fn mixed_pair_matches_scalar() {
                             point.x = point.x.neg();
                             point.t2d = point.t2d.neg();
                         }
-                        let expected = msm::Lanes::add_mixed(
-                            crate::curve::portable::Backend::new(),
-                            current[lane],
-                            point,
-                        );
-                        for (actual, expected) in [
-                            (actual[lane].x, expected.x),
-                            (actual[lane].y, expected.y),
-                            (actual[lane].t, expected.t),
-                            (actual[lane].z, expected.z),
-                        ] {
-                            super::test::assert_f_eq(
-                                FVec::splat(actual),
-                                FVec::splat(expected),
-                                "mixed pair coordinate",
-                            );
-                        }
+                        let expected =
+                            msm::Lanes::add_mixed(portable::Backend::new(), current[lane], point);
+                        assert_g_same(actual[lane], expected, "mixed pair");
                     }
                 }
             }

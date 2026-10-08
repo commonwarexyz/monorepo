@@ -11,8 +11,8 @@ use core::array;
 ///
 /// This is the correctness reference for accelerated backends. Each vector operation applies the
 /// corresponding scalar operation independently to every lane. Field vector and MSM operations
-/// are variable-time because they operate only on public data. Selected point addition is
-/// constant-time.
+/// are variable-time because they operate only on public data. Single-point operations follow the
+/// timing contract of [`super::Backend`].
 ///
 /// Freely constructible: unlike the accelerated backends, the portable one needs no CPU feature,
 /// so possession proves nothing and gates nothing.
@@ -100,11 +100,6 @@ impl super::Backend for Backend {
     }
 
     #[inline(always)]
-    fn identity(self) -> G {
-        G::IDENTITY
-    }
-
-    #[inline(always)]
     fn project(self, point: G) -> GProjective {
         point.to_projective()
     }
@@ -114,17 +109,7 @@ impl super::Backend for Backend {
         let a = point.x.square();
         let b = point.y.square();
         let c = point.z.square();
-        let c = c.add(c);
-        let e = point.x.add(point.y).square().sub(a).sub(b);
-        let g = b.sub(a);
-        let f = g.sub(c);
-        let h = a.neg().sub(b);
-        GCompleted {
-            x: e,
-            y: h,
-            z: g,
-            t: f,
-        }
+        GCompleted::from_squares(a, b, c.add(c), point.x.add(point.y).square())
     }
 
     #[inline(always)]
@@ -154,6 +139,7 @@ impl super::Backend for Backend {
     #[inline(always)]
     fn add_cached(self, point: G, cached: ProjectiveNiels, negate: bool) -> GCompleted {
         let rhs = if negate { cached.negate() } else { cached };
+
         // The steps of `G::add` up to its final products, with `2d*T2` precomputed.
         let a = point.y.sub(point.x).mul(rhs.diff);
         let b = point.y.add(point.x).mul(rhs.sum);
