@@ -223,6 +223,56 @@ where
     });
 }
 
+/// A client synced over the full retained history of a source whose inactivity floor is at its
+/// last commit matches the source's bounds, floor, and root, and holds every operation.
+pub(crate) fn test_sync_full_range_with_floor_at_last_commit<H: KeylessSyncTestHarness>()
+where
+    OpOf<H>: Encode + Clone,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        // The unpruned source raises its floor to its last commit.
+        let source_db = H::init_db(context.child("source")).await;
+        let ops = H::create_ops(100);
+        let start = H::bounds(&source_db).end;
+        let source_db =
+            H::apply_ops_raising_floor(source_db, ops.clone(), Some(H::sample_metadata())).await;
+        let bounds = H::bounds(&source_db);
+        let floor = H::inactivity_floor_loc(&source_db);
+        assert_eq!(floor, bounds.end.checked_sub(1).unwrap());
+        let root = H::db_root(&source_db);
+
+        // Sync a fresh client over the full range.
+        let source_db = Arc::new(source_db);
+        let config = Config {
+            db_config: H::config("full_range_floor_at_last_commit", &context),
+            fetch_batch_size: NZU64!(10),
+            target: Target {
+                root,
+                range: non_empty_range!(bounds.start, bounds.end),
+            },
+            context: context.child("client"),
+            source: source_db.clone(),
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: 1,
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
+        };
+        let synced: DbOf<H> = sync::sync(config).await.unwrap();
+
+        assert_eq!(H::bounds(&synced), bounds);
+        assert_eq!(H::inactivity_floor_loc(&synced), floor);
+        assert_eq!(H::db_root(&synced), root);
+        H::assert_ops_applied(&synced, start, &ops).await;
+
+        H::destroy(synced).await;
+        H::destroy(Arc::try_unwrap(source_db).unwrap_or_else(|_| panic!("single source"))).await;
+    });
+}
+
 /// A source wrapper that holds the first boundary response until released and panics on a
 /// second boundary request.
 struct DelayedBoundary<S> {
@@ -1227,6 +1277,11 @@ macro_rules! keyless_sync_tests {
         }
 
         #[test_traced("WARN")]
+        fn test_sync_full_range_with_floor_at_last_commit() {
+            super::test_sync_full_range_with_floor_at_last_commit::<$harness>();
+        }
+
+        #[test_traced("WARN")]
         fn test_target_updates_preserve_delayed_boundary() {
             super::test_target_updates_preserve_delayed_boundary::<$harness>();
         }
@@ -1294,8 +1349,14 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let suffix = context.next_u64().to_string();
         let config = H::config(&suffix, &context);
         let mut db = H::init_db_with_config(context.child("db"), config.clone()).await;
+        // Each batch raises the floor to its commit, so the prune below needs no floor commit.
         for seed in 0..3u64 {
-            db = Box::pin(H::apply_ops(db, H::create_ops_seeded(100, seed), None)).await;
+            db = Box::pin(H::apply_ops_raising_floor(
+                db,
+                H::create_ops_seeded(100, seed),
+                None,
+            ))
+            .await;
         }
         let db = H::prune(db, Location::new(100)).await;
         let db = H::db_sync(db).await;

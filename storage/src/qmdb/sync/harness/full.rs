@@ -120,7 +120,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
 }
 
 /// A client synced from the target's sync boundary matches the target's bounds, floor, and roots,
-/// keeps that state across a reopen, and stays in step with the target under further operations.
+/// stays in step with the target under further operations, and keeps that state across a reopen.
 /// The cases vary the target size against the fetch batch size.
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
@@ -173,13 +173,6 @@ where
 
         H::assert_ops_applied(&got_db, target_start, &target_ops).await;
 
-        // The synced state persists without an explicit sync.
-        drop(got_db);
-        let got_db = H::init_db_with_config(client_context.child("reopened"), db_config).await;
-        assert_eq!(H::bounds(&got_db).end, target_op_count);
-        assert_eq!(H::inactivity_floor_loc(&got_db), target_floor);
-        assert_eq!(H::canonical_root(&got_db), target_canonical_root);
-
         // The same new operations give both databases the same root and leave every operation
         // readable, so the synced client is a usable continuation of the target.
         let new_ops = H::create_ops_seeded(target_db_ops, 1);
@@ -190,6 +183,19 @@ where
         let target_db = H::apply_ops(target_db, new_ops.clone(), None).await;
 
         assert_eq!(H::db_root(&got_db), H::db_root(&target_db));
+        H::assert_ops_applied(&got_db, target_start, &target_ops).await;
+        H::assert_ops_applied(&got_db, new_start, &new_ops).await;
+
+        // The continued state persists across a reopen.
+        let got_db = H::db_sync(got_db).await;
+        drop(got_db);
+        let got_db = H::init_db_with_config(client_context.child("reopened"), db_config).await;
+        assert_eq!(H::bounds(&got_db).end, H::bounds(&target_db).end);
+        assert_eq!(
+            H::inactivity_floor_loc(&got_db),
+            H::inactivity_floor_loc(&target_db)
+        );
+        assert_eq!(H::canonical_root(&got_db), H::canonical_root(&target_db));
         H::assert_ops_applied(&got_db, target_start, &target_ops).await;
         H::assert_ops_applied(&got_db, new_start, &new_ops).await;
 

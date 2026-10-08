@@ -6144,12 +6144,21 @@ mod tests {
 
             journal.destroy().await.expect("failed to destroy journal");
 
-            // Destroy removes the journal state, so the same config reopens empty.
-            let journal = Journal::<_, Digest>::init(context.child("after_destroy"), cfg)
+            // Destroy removes the journal state, so the same config reopens empty and accepts new
+            // writes.
+            let mut journal = Journal::<_, Digest>::init(context.child("after_destroy"), cfg)
                 .await
                 .expect("failed to re-initialize journal");
             assert!(journal.bounds().is_empty());
             assert_eq!(journal.size(), 0);
+            for i in 0..10u64 {
+                (journal, _) = journal.append(&test_digest(i + 1000)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            assert_eq!(journal.bounds().end, 10);
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i + 1000));
+            }
             journal.destroy().await.expect("failed to destroy journal");
         });
     }
@@ -6201,12 +6210,21 @@ mod tests {
 
             journal.destroy().await.expect("failed to destroy journal");
 
-            // Destroy removes the journal state, so the same config reopens empty.
-            let journal = Journal::<_, Digest>::init(context.child("after_destroy"), cfg)
+            // Destroy removes the journal state, so the same config reopens empty and accepts new
+            // writes.
+            let mut journal = Journal::<_, Digest>::init(context.child("after_destroy"), cfg)
                 .await
                 .expect("failed to re-initialize journal");
             assert!(journal.bounds().is_empty());
             assert_eq!(journal.size(), 0);
+            for i in 0..10u64 {
+                (journal, _) = journal.append(&test_digest(i + 1000)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            assert_eq!(journal.bounds().end, 10);
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i + 1000));
+            }
             journal.destroy().await.expect("failed to destroy journal");
         });
     }

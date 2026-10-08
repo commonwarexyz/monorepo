@@ -9764,12 +9764,21 @@ mod tests {
 
             journal.destroy().await.unwrap();
 
-            // Destroy removes the journal state, so the same config reopens empty.
-            let journal = Journal::<_, u64>::init(context.child("after_destroy"), cfg)
+            // Destroy removes the journal state, so the same config reopens empty and accepts new
+            // writes.
+            let mut journal = Journal::<_, u64>::init(context.child("after_destroy"), cfg)
                 .await
                 .unwrap();
             assert!(journal.bounds().is_empty());
             assert_eq!(journal.size(), 0);
+            for i in 0..10u64 {
+                (journal, _) = journal.append(&((i + 1000) * 100)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            assert_eq!(journal.bounds().end, 10);
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), (i + 1000) * 100);
+            }
             journal.destroy().await.unwrap();
         });
     }
@@ -9822,12 +9831,21 @@ mod tests {
 
             journal.destroy().await.unwrap();
 
-            // Destroy removes the journal state, so the same config reopens empty.
-            let journal = Journal::<_, u64>::init(context.child("after_destroy"), cfg)
+            // Destroy removes the journal state, so the same config reopens empty and accepts new
+            // writes.
+            let mut journal = Journal::<_, u64>::init(context.child("after_destroy"), cfg)
                 .await
                 .unwrap();
             assert!(journal.bounds().is_empty());
             assert_eq!(journal.size(), 0);
+            for i in 0..10u64 {
+                (journal, _) = journal.append(&((i + 1000) * 1000)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            assert_eq!(journal.bounds().end, 10);
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), (i + 1000) * 1000);
+            }
             journal.destroy().await.unwrap();
         });
     }
