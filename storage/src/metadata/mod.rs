@@ -29,9 +29,9 @@
 //! (otherwise, we would not be guaranteed to recover the latest complete state from disk on
 //! restart as half of a blob could be old data and half new data).
 //!
-//! # Writing Updates
+//! # Overwrites and Rewrites
 //!
-//! When keys and encoded value sizes are stable, [Metadata] updates the target blob in place. A
+//! When keys and encoded value sizes are stable, [Metadata] overwrites the target blob in place. A
 //! store no larger than one blob page ([commonware_runtime::BLOB_PAGE_SIZE]) is written whole, in
 //! one write. Larger stores write only the changed values, version, and checksum, so large
 //! collections with infrequent changes stay cheap to update. Any other update rewrites the entire
