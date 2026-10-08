@@ -253,9 +253,9 @@ jobs:
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
-    - name: Run miri tests for runtime::iobuf and runtime::buffer::paged::append
+    - name: Run miri tests for runtime::iobuf and runtime::utils::buffer::paged::writer
       run: |
-        just miri iobuf:: utils::buffer::paged::append::tests:: -p commonware-runtime --partition hash:${{matrix.partition}}/12
+        just miri iobuf:: utils::buffer::paged::writer::tests:: -p commonware-runtime --partition hash:${{matrix.partition}}/12
     - name: Run miri tests for runtime::iouring::task and runtime::iouring::tasks
       run: |
         just miri iouring::task::tests:: iouring::tasks::tests:: -p commonware-runtime --features iouring --partition hash:${{matrix.partition}}/12 --no-tests=pass
