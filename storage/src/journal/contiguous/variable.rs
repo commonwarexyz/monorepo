@@ -1386,9 +1386,11 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             let limit = super::blob_end_position(blob, per_blob, ceiling);
             let physical_size = writer.size();
             let buffer = self.cfg.replay_buffer;
+            // Suspects are the newest blobs, read again soon after open, so their scan warms the
+            // page cache. Older blobs are left out of it.
             let (writer, replay) = if blob >= first_suspect {
                 writer
-                    .replay_recoverable(buffer, ReadOptions::DONT_CACHE)
+                    .replay_recoverable_caching(buffer, ReadOptions::DONT_CACHE)
                     .await?
             } else {
                 writer.replay(buffer, ReadOptions::DONT_CACHE).await?
@@ -6671,6 +6673,45 @@ mod tests {
                 .count();
             assert!(uncached >= 2 + reads_per_pass, "{uncached} uncached reads");
             assert!(reads.len() - uncached < reads_per_pass, "{reads:?}");
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// The recovery scan of the newest blobs leaves their full pages in the page cache, so a read
+    /// right after reopening is served without storage I/O.
+    #[test_traced]
+    fn test_variable_recovery_warms_page_cache() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config::<()> {
+                partition: "variable-recovery-warm-cache".into(),
+                items_per_section: NZU64!(1000),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(256)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..100u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+
+            // Persist the data without advancing the offsets watermark, so reopening rebuilds the
+            // offsets in memory and only the data scan can warm the data pages.
+            journal.commit().await.unwrap();
+
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(256)),
+                ..cfg
+            };
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..100);
+            assert_eq!(journal.try_read_sync(0), Some(0));
             journal.destroy().await.unwrap();
         });
     }

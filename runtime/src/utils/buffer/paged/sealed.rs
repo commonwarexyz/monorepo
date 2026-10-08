@@ -14,7 +14,7 @@
 
 use super::{
     CHECKSUM_SIZE, CacheRef, Replay,
-    read::{Malformed, PageReader, ReplayCache},
+    read::{Malformed, PageReader},
     view::{Tail, View},
 };
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs, ReadOptions};
@@ -207,11 +207,8 @@ impl<B: Blob> Sealed<B> {
             logical_blob_size,
             self.inner.partial_page.clone(),
             prefetch_pages,
-            ReplayCache {
-                cache_ref: self.inner.cache_ref.clone(),
-                blob_id: self.inner.id,
-                shrinks: None,
-            },
+            page_size_nz,
+            None,
             read_options,
             Malformed::Fail,
         );
@@ -962,15 +959,13 @@ mod tests {
         });
     }
 
-    /// `Sealed::replay` validates every full page it reads, so it leaves those pages in the cache
-    /// instead of handing them back only to the OS's page cache. A partial tail page is not
-    /// page-aligned and is left uncached.
+    /// `Sealed::replay` reads each page once, so it must leave the page cache cold.
     #[test_traced("DEBUG")]
-    fn test_sealed_replay_populates_page_cache() {
+    fn test_sealed_replay_leaves_page_cache_cold() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context
-                .open("test_partition", b"sealed_replay_populates_cache")
+                .open("test_partition", b"sealed_replay_cold_cache")
                 .await
                 .unwrap();
             let cache_ref =
@@ -987,7 +982,7 @@ mod tests {
             let (sealed, sync) = append.seal().await.unwrap();
             sync.await.unwrap();
 
-            // Clear whatever the write path cached so only the replay below can populate it.
+            // Clear whatever the write path cached so only the replay below could populate it.
             cache_ref.clear();
             let mut probe = vec![0u8; page_size];
             assert!(!sealed.try_read_sync_into(&mut probe, 0));
@@ -996,13 +991,10 @@ mod tests {
                 .replay(NZUsize!(BUFFER_SIZE), ReadOptions::DONT_CACHE)
                 .unwrap();
             assert!(replay.ensure(total).await.unwrap());
+            assert_eq!(replay.copy_to_bytes(total).as_ref(), data.as_slice());
 
-            // Both full pages are now served from cache; the partial tail is skipped.
-            assert!(sealed.try_read_sync_into(&mut probe, 0));
-            assert_eq!(probe, data[..page_size]);
-            assert!(sealed.try_read_sync_into(&mut probe, page_size as u64));
-            assert_eq!(probe, data[page_size..2 * page_size]);
-            assert!(!sealed.try_read_sync_into(&mut probe, 2 * page_size as u64));
+            assert!(!sealed.try_read_sync_into(&mut probe, 0));
+            assert!(!sealed.try_read_sync_into(&mut probe, page_size as u64));
         });
     }
 

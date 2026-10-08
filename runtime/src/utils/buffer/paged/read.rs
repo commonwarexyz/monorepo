@@ -5,6 +5,7 @@ use commonware_codec::{Buf, FixedSize};
 use commonware_utils::Widen;
 use std::{
     collections::VecDeque,
+    num::NonZeroU16,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -12,24 +13,23 @@ use std::{
 };
 use tracing::{error, warn};
 
-/// Destination for the pages a [PageReader] validates.
+/// Destination for the pages a [PageReader] validates, for a replay of a recovering blob.
 pub(super) struct ReplayCache {
     /// Page cache to populate.
     pub(super) cache_ref: CacheRef,
     /// Cache key identifying the blob being read.
     pub(super) blob_id: u64,
-    /// Shrink count of a recovering blob, paired with its value when the replay began. A shrink can
-    /// replace pages read before it, so pages are published only while the count is unchanged. An
-    /// append-only blob never shrinks and carries none.
-    pub(super) shrinks: Option<(Arc<AtomicU64>, u64)>,
+    /// Shrink count of the recovering blob. A shrink can replace pages read before it, so pages are
+    /// published only while the count still equals `start`.
+    pub(super) shrinks: Arc<AtomicU64>,
+    /// Value of `shrinks` when the replay began.
+    pub(super) start: u64,
 }
 
 impl ReplayCache {
     /// Whether no shrink has happened since the replay began.
     fn current(&self) -> bool {
-        self.shrinks
-            .as_ref()
-            .is_none_or(|(shrinks, start)| shrinks.load(Ordering::Relaxed) == *start)
+        self.shrinks.load(Ordering::Relaxed) == self.start
     }
 }
 
@@ -77,8 +77,8 @@ pub(super) struct PageReader<B: Blob> {
     blob_page: u64,
     /// Number of pages to prefetch at once.
     prefetch_count: usize,
-    /// Destination for pages validated while filling a batch.
-    cache: ReplayCache,
+    /// Destination for pages validated while filling a batch, if the replay publishes them.
+    cache: Option<ReplayCache>,
     /// Options applied to every blob read.
     read_options: ReadOptions,
     /// Handling of a stored page that is not well-formed.
@@ -99,8 +99,8 @@ impl<B: Blob> PageReader<B> {
     /// Its physical page is included in `physical_blob_size` but is not read from storage.
     /// Ending at an earlier malformed page discards the frozen page.
     ///
-    /// Every full page validated while filling a batch is written into `cache`, so a replay warms
-    /// the same cache ordinary reads use instead of leaving it cold.
+    /// With a `cache`, every full page validated while filling a batch is written into it, so a
+    /// replay warms the cache ordinary reads use. Without one, the replay leaves the cache alone.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         blob: Arc<B>,
@@ -108,11 +108,12 @@ impl<B: Blob> PageReader<B> {
         logical_blob_size: u64,
         partial_page: Option<IoBuf>,
         prefetch_count: usize,
-        cache: ReplayCache,
+        page_size: NonZeroU16,
+        cache: Option<ReplayCache>,
         read_options: ReadOptions,
         malformed: Malformed,
     ) -> Self {
-        let page_size = cache.cache_ref.page_size().get() as usize;
+        let page_size = page_size.get() as usize;
         let physical_page_size = page_size + Checksum::SIZE;
         let physical_pages = physical_blob_size / physical_page_size as u64;
         let logical_pages = if logical_blob_size == 0 {
@@ -284,20 +285,22 @@ impl<B: Blob> PageReader<B> {
         } else {
             pages.saturating_sub(1)
         };
-        if full_pages > 0 {
+        if full_pages > 0
+            && let Some(cache) = &self.cache
+        {
             let physical_page_size = self.physical_page_size;
             let page_size = self.page_size;
 
             // A shrink bumps the count before the writer re-caches any page it replaces, and
             // re-caching takes the same lock, so this check cannot let old bytes overwrite new ones.
-            self.cache.cache_ref.cache_pages_if(
-                self.cache.blob_id,
+            cache.cache_ref.cache_pages_if(
+                cache.blob_id,
                 (0..full_pages).map(|idx| {
                     let start = idx * physical_page_size;
                     &physical_buf.as_ref()[start..start + page_size]
                 }),
                 self.blob_page * page_size as u64,
-                || self.cache.current(),
+                || cache.current(),
             );
         }
 
@@ -601,7 +604,6 @@ mod tests {
     use bytes::Buf as _;
     use commonware_macros::test_traced;
     use commonware_utils::{NZU16, NZUsize};
-    use std::num::NonZeroU16;
 
     #[test]
     fn test_replay_buf_bytes_share_pages() {

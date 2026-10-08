@@ -157,8 +157,8 @@ pub struct Writer<B: Blob, Phase = Append> {
     /// A reference to the page cache that manages read caching for this blob.
     cache_ref: CacheRef,
 
-    /// Number of times recovery has shrunk the blob. A replay publishes the pages it reads to the
-    /// cache only while this is unchanged.
+    /// Number of times recovery has shrunk the blob. A caching replay publishes the pages it reads
+    /// to the cache only while this is unchanged.
     shrinks: Arc<AtomicU64>,
 
     /// The write buffer containing any logical bytes following the last full page boundary in the
@@ -432,8 +432,34 @@ impl<B: Blob> Recovery<B> {
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<(Self, Replay<B>), Error> {
-        self.replay_prefix_with(u64::MAX, buffer_size, read_options, Malformed::End)
+        self.replay_prefix_with(u64::MAX, buffer_size, read_options, Malformed::End, None)
             .await
+    }
+
+    /// Like [Self::replay_recoverable], but writes each full page it validates into the page
+    /// cache, for a scan whose bytes will be read again soon. Other replays leave the cache alone.
+    ///
+    /// The replay stops writing once this recovery shrinks the blob, since appends after a shrink
+    /// can replace pages the replay already read.
+    pub async fn replay_recoverable_caching(
+        self,
+        buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<(Self, Replay<B>), Error> {
+        let cache = ReplayCache {
+            cache_ref: self.cache_ref.clone(),
+            blob_id: self.id,
+            shrinks: self.shrinks.clone(),
+            start: self.shrinks.load(Ordering::Relaxed),
+        };
+        self.replay_prefix_with(
+            u64::MAX,
+            buffer_size,
+            read_options,
+            Malformed::End,
+            Some(cache),
+        )
+        .await
     }
 }
 
@@ -1228,17 +1254,19 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<(Self, Replay<B>), Error> {
-        self.replay_prefix_with(max_size, buffer_size, read_options, Malformed::Fail)
+        self.replay_prefix_with(max_size, buffer_size, read_options, Malformed::Fail, None)
             .await
     }
 
-    /// Shared body of the replay methods, handling malformed stored pages per `malformed`.
+    /// Shared body of the replay methods, handling malformed stored pages per `malformed` and
+    /// writing validated full pages into `cache`, if set.
     async fn replay_prefix_with(
         mut self,
         max_size: u64,
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
         malformed: Malformed,
+        cache: Option<ReplayCache>,
     ) -> Result<(Self, Replay<B>), Error> {
         // Flush the live tip and restrict the disk span to pages intersecting the requested prefix.
         self.flush_internal(true, false).await?;
@@ -1262,11 +1290,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             logical_size,
             partial_page,
             prefetch,
-            ReplayCache {
-                cache_ref: self.cache_ref.clone(),
-                blob_id: self.id,
-                shrinks: Some((self.shrinks.clone(), self.shrinks.load(Ordering::Relaxed))),
-            },
+            page_size,
+            cache,
             read_options,
             malformed,
         ));
@@ -2136,11 +2161,11 @@ mod tests {
         });
     }
 
-    /// A recoverable replay validates every full page it reads, so it leaves those pages in the
-    /// cache instead of handing them back only to the OS's page cache. A partial tail page is not
-    /// page-aligned and is left uncached.
+    /// Only a caching replay writes the full pages it validates into the page cache; plain and
+    /// recoverable replays leave it cold. A partial tail page is not page-aligned and is left
+    /// uncached.
     #[test_traced("DEBUG")]
-    fn test_replay_recoverable_populates_page_cache() {
+    fn test_replay_recoverable_caching_populates_page_cache() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context
@@ -2169,8 +2194,22 @@ mod tests {
             let mut probe = vec![0u8; page];
             assert!(!recovery.try_read_sync_into(&mut probe, 0));
 
+            // Draining plain and recoverable replays leaves the cache cold.
+            let (recovery, mut replay) = recovery
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            assert!(!replay.ensure(total + 1).await.unwrap());
             let (recovery, mut replay) = recovery
                 .replay_recoverable(NZUsize!(BUFFER_SIZE), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            assert!(!replay.ensure(total + 1).await.unwrap());
+            assert!(!recovery.try_read_sync_into(&mut probe, 0));
+            assert!(!recovery.try_read_sync_into(&mut probe, page as u64));
+
+            let (recovery, mut replay) = recovery
+                .replay_recoverable_caching(NZUsize!(BUFFER_SIZE), ReadOptions::DONT_CACHE)
                 .await
                 .unwrap();
             assert!(!replay.ensure(total + 1).await.unwrap());
@@ -5642,9 +5681,9 @@ mod tests {
         });
     }
 
-    /// A replay outlives the recovery that created it, so its in-flight read can finish after the
-    /// recovery shrinks and rewrites the blob. Publishing that read must not restore the old bytes
-    /// over the rewritten page in the cache.
+    /// A caching replay outlives the recovery that created it, so its in-flight read can finish
+    /// after the recovery shrinks and rewrites the blob. Publishing that read must not restore the
+    /// old bytes over the rewritten page in the cache.
     #[test]
     fn test_replay_cannot_repopulate_cache_after_shrink() {
         let cfg =
@@ -5664,7 +5703,7 @@ mod tests {
             (recovery, _) = recovery.append(&vec![0xAA; 3 * page + 20]).await.unwrap();
             recovery = recovery.sync().await.unwrap();
             let (mut recovery, mut replay) = recovery
-                .replay(NZUsize!(1), ReadOptions::DONT_CACHE)
+                .replay_recoverable_caching(NZUsize!(1), ReadOptions::DONT_CACHE)
                 .await
                 .unwrap();
             let mut read = Box::pin(replay.ensure(page));
