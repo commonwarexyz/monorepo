@@ -10,13 +10,14 @@ use crate::{
     qmdb::{
         self,
         sync::{
-            self,
+            self, Source as _,
             source::tests::{SequenceSource, fetch_compact_state},
         },
+        verify_proof_and_pinned_nodes,
     },
 };
 use commonware_codec::Encode;
-use commonware_cryptography::sha256;
+use commonware_cryptography::{Sha256, sha256};
 use commonware_runtime::{BufferPooler, Metrics, Runner as _, Supervisor as _, deterministic};
 use commonware_utils::NZU64;
 use rand::Rng as _;
@@ -756,6 +757,101 @@ pub(crate) fn test_compact_sync_dropped_import_preserves_existing_state<
     });
 }
 
+/// A compact database built from an unapplied import serves only its cached tip. A size the
+/// partition's previous witness journal still retains is refused, before and after the first
+/// sync replaces that journal with the imported witness.
+pub(crate) fn test_compact_serve_refuses_previous_contents_while_import_pending<
+    H: CompactSyncTestHarness,
+>() {
+    deterministic::Runner::default().start(|mut context| async move {
+        let suffix = format!("compact-pending-{}", context.next_u64());
+
+        // The destination partition retains a witness below the imported tip.
+        let client_cfg = H::config(&suffix, &context);
+        let seeded = H::init(context.child("seed"), client_cfg.clone(), None).await;
+        let seeded = H::apply(
+            seeded,
+            &[H::value(7), H::value(8)],
+            Some(H::value(70)),
+            Location::new(0),
+        )
+        .await;
+        let seeded = H::sync(seeded).await;
+        let stale = H::target(&seeded);
+        drop(seeded);
+
+        // The source commits twice, so its tip lies above the retained stale size.
+        let source = H::init_full(context.child("source"), &suffix).await;
+        let source =
+            H::apply_full(source, &[H::value(1)], Some(H::value(11)), Location::new(0)).await;
+        let source =
+            H::apply_full(source, &[H::value(2)], Some(H::value(12)), Location::new(0)).await;
+        let source = H::commit_full(source).await;
+        let target = sync::CompactTarget {
+            root: H::full_root(&source),
+            size: H::full_bounds(&source).end,
+        };
+        assert!(stale.size < target.size);
+        let source = Arc::new(source);
+        let response = fetch_compact_state(&source, target.clone()).await.unwrap();
+        let sync::Response::Boundary {
+            op, pinned_nodes, ..
+        } = response
+        else {
+            unreachable!("boundary fetch returns a boundary response");
+        };
+        let imported = H::import(
+            context.child("import"),
+            &client_cfg,
+            target.size - 1,
+            pinned_nodes,
+            op,
+        )
+        .await
+        .unwrap();
+        assert_eq!(H::target(&imported), target);
+
+        // The tip comes from the cached import and verifies against the imported root.
+        let tip_request = sync::Request::Boundary {
+            size: target.size,
+            start: target.size - 1,
+        };
+        let sync::Response::Boundary {
+            proof,
+            op,
+            pinned_nodes,
+        } = imported.serve(tip_request).await.unwrap().0
+        else {
+            unreachable!("boundary request returns a boundary response");
+        };
+        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &proof,
+            target.size - 1,
+            std::slice::from_ref(&op),
+            &pinned_nodes,
+            &target.root,
+        ));
+
+        // The stale size is refused while the journal holds the previous contents, and after
+        // the first sync replaces them with the imported witness.
+        let stale_request = sync::Request::Boundary {
+            size: stale.size,
+            start: stale.size - 1,
+        };
+        assert!(matches!(
+            imported.serve(stale_request).await,
+            Err(qmdb::Error::Journal(crate::journal::Error::ItemPruned(_)))
+        ));
+        let db = H::sync(imported).await;
+        assert!(matches!(
+            db.serve(stale_request).await,
+            Err(qmdb::Error::Journal(crate::journal::Error::ItemPruned(_)))
+        ));
+        assert_eq!(H::target(&db), target);
+        H::destroy(db).await;
+    });
+}
+
 /// Instantiates the shared compact sync tests for `$harness` in a module named `$mod_name`.
 ///
 /// The optional `$extra` names a macro that receives `$harness` and emits additional tests
@@ -819,6 +915,11 @@ macro_rules! compact_sync_tests {
             #[test_traced("WARN")]
             fn test_compact_sync_dropped_import_preserves_existing_state() {
                 crate::qmdb::sync::harness::test_compact_sync_dropped_import_preserves_existing_state::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_compact_serve_refuses_previous_contents_while_import_pending() {
+                crate::qmdb::sync::harness::test_compact_serve_refuses_previous_contents_while_import_pending::<$harness>();
             }
 
             $( $extra!($harness); )?
