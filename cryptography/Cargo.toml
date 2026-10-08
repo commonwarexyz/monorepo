@@ -33,6 +33,7 @@ curve25519-dalek.workspace = true
 ecdsa.workspace = true
 fixedbitset.workspace = true
 hashbrown.workspace = true
+ml-dsa = { workspace = true, features = ["alloc", "zeroize"] }
 num-rational = { workspace = true, optional = true }
 num-traits = { workspace = true, optional = true }
 once_cell = { workspace = true, features = ["alloc", "race"] }
@@ -80,6 +81,10 @@ criterion.workspace = true
 ecdsa = { workspace = true, features = ["alloc"] }
 rayon.workspace = true
 rstest.workspace = true
+
+[target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dev-dependencies]
+# aws-lc-rs exposes ML-DSA only behind its unstable feature; tests use it to check interoperability.
+aws-lc-rs = { workspace = true, features = ["unstable"] }
 
 [lib]
 bench = false
@@ -139,6 +144,11 @@ required-features = [ "std" ]
 name = "ed25519"
 harness = false
 path = "src/ed25519/benches/bench.rs"
+
+[[bench]]
+name = "ml_dsa"
+harness = false
+path = "src/ml_dsa/benches/bench.rs"
 
 [[bench]]
 name = "secp256r1"

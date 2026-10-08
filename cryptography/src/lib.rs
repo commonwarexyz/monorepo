@@ -62,6 +62,8 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod lthash;
     pub use crate::lthash::LtHash;
 
+    pub mod ml_dsa;
+
     pub mod reed_solomon;
 
     pub mod sha512;
@@ -691,6 +693,58 @@ mod tests {
     fn test_secp256r1_recoverable_len() {
         assert_eq!(secp256r1::recoverable::PublicKey::SIZE, 33);
         assert_eq!(secp256r1::recoverable::Signature::SIZE, 65);
+    }
+
+    #[test]
+    fn test_ml_dsa_validate() {
+        test_validate::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_public_key_order() {
+        test_public_key_order::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_validate_invalid_public_key() {
+        test_validate_invalid_public_key::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_sign_and_verify() {
+        test_sign_and_verify::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_sign_and_verify_wrong_message() {
+        test_sign_and_verify_wrong_message::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_sign_and_verify_wrong_namespace() {
+        test_sign_and_verify_wrong_namespace::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_empty_namespace() {
+        test_empty_namespace::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_signature_determinism() {
+        test_signature_determinism::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_invalid_signature_publickey_pair() {
+        test_invalid_signature_publickey_pair::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_len() {
+        assert_eq!(crate::ml_dsa::PrivateKey::SIZE, 32);
+        assert_eq!(crate::ml_dsa::PublicKey::SIZE, 1952);
+        assert_eq!(crate::ml_dsa::Signature::SIZE, 3309);
     }
 
     fn test_hasher_multiple_runs<H: Hasher>() {

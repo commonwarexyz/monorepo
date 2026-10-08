@@ -186,6 +186,22 @@ hash = "c341c1f05040d0821a58043738d4a8fc0b327b4b0aa701fa9c6adac9b9f41982"
 n_cases = 65536
 hash = "47ab8f97f2b9ff2b56e952c4e219c8c95832cf3a58d5b682cdc769c2ecb79daf"
 
+["commonware_cryptography::ml_dsa::certificate::tests::conformance::CodecConformance<Certificate>"]
+n_cases = 1024
+hash = "2c899859139769c799e3c6cb77dbccc0be4992becd07bb502c18db4b71618822"
+
+["commonware_cryptography::ml_dsa::scheme::tests::conformance::CodecConformance<PrivateKey>"]
+n_cases = 1024
+hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
+
+["commonware_cryptography::ml_dsa::scheme::tests::conformance::CodecConformance<PublicKey>"]
+n_cases = 1024
+hash = "3ad1a2a1fdfb349f57b5cf7d3d7e8af9c7598ab170eec71547c2f53ccdc7ed6d"
+
+["commonware_cryptography::ml_dsa::scheme::tests::conformance::CodecConformance<Signature>"]
+n_cases = 1024
+hash = "9be54ef3e3180d630fef4b8693dad907f491b8973821a02561c2ad3b89d4e40b"
+
 ["commonware_cryptography::secp256r1::certificate::tests::conformance::CodecConformance<Certificate>"]
 n_cases = 1024
 hash = "c708aa3df9cc2918aaf2d8db673c96729a2d2fd41b470ac5f6843489fc380951"
