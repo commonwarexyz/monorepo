@@ -1002,10 +1002,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------------
-    // Auto-conversion (Bitmap <-> Run) tests
-    // -----------------------------------------------------------------------------
-
     #[test]
     fn test_bitmap_auto_converts_to_run_after_filling_gaps() {
         // Get into Bitmap form first by inserting alternating values past the Array
