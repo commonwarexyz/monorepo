@@ -34,7 +34,7 @@ jobs:
           - os: macos-latest
             variant: default
             flags: ""
-    uses: ./.github/workflows/reusable-slow-tests.yml
+    uses: ./.github/workflows/slow-tests.yml
     with:
       os: ${{ matrix.os }}
       variant: ${{ matrix.variant }}

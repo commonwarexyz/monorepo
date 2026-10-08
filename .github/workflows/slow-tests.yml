@@ -1,4 +1,4 @@
-name: Slow tests (reusable)
+name: Slow tests
 
 on:
   workflow_call:
