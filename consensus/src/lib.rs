@@ -424,11 +424,10 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// cost. The default declines.
         ///
         /// Asking for the ancestry runs the marshal's proposal checks. The ancestry is absent when
-        /// they find the epoch boundary block, a candidate stored for this round before a restart
-        /// (reused, or the view skipped under inline verification), or a parent the marshal
-        /// cannot build on. The marshal then answers consensus itself and discards whatever this
-        /// method returns. A block returned without asking for the ancestry is discarded too, so
-        /// a stored candidate is never contradicted.
+        /// they find the epoch boundary block or a parent the marshal cannot build on. The marshal
+        /// then answers consensus itself and discards whatever this method returns. A block
+        /// returned without asking for the ancestry is discarded too, so the checks always precede
+        /// a staged block.
         ///
         /// With [`Handoff::Publish`] or [`Handoff::Stage`], the marshal stages the returned block
         /// as it would a proposal. With [`Handoff::Wait`], consensus waits for parent

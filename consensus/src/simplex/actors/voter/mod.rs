@@ -8887,12 +8887,10 @@ mod tests {
             handle.abort();
 
             // Post-restart: install a fresh application that also drops
-            // `propose` responses. This mirrors the marshal's post-restart
-            // behavior when `get_verified` sees a cached block for the round
-            // and deliberately drops the tx, forcing the voter to nullify
-            // the view rather than reuse the stale block. A propose observer
-            // on this application is the assertion anchor: it must record
-            // exactly one call for the target view.
+            // `propose` responses, as an automaton whose build fails or whose
+            // parent fetch is abandoned does, forcing the voter to nullify the
+            // view. A propose observer on this application is the assertion
+            // anchor: it must record exactly one call for the target view.
             let post_propose_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let post_propose_tracker = post_propose_calls.clone();
             let app_cfg = mocks::application::Config::<Sha256, _> {
@@ -8989,8 +8987,7 @@ mod tests {
                     {
                         panic!(
                             "restarted voter must not emit a new Notarize for the \
-                             leader-owned view; its stale verified block could \
-                             still be cached in marshal"
+                             leader-owned view without a proposal"
                         );
                     }
                     batcher::Message::Update { .. } => {}

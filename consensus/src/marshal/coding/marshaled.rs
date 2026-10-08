@@ -643,7 +643,7 @@ where
     }
 
     /// Runs the proposal checks for `consensus_context` and yields what the proposal path does
-    /// next: reuse a block of marshal's own, skip the view, or build on the fetched parent.
+    /// next: re-propose the epoch boundary block, skip the view, or build on the fetched parent.
     ///
     /// The returned future borrows nothing from `self`, so the propose task and a prepare
     /// request's [`Parent`](crate::marshal::ancestry::Parent) handle can both await it.
@@ -660,51 +660,6 @@ where
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
         let build_duration = self.build_duration.clone();
         async move {
-            // On leader recovery, marshal may already hold a verified block
-            // for this round (persisted by a pre-crash propose that reached
-            // its relay broadcast).
-            //
-            // The pre-crash commitment may already have been broadcast,
-            // so building a fresh block would equivocate. The stored
-            // block is the only proposal we can broadcast for this round.
-            //
-            // The recovered block is safe to reuse only if its embedded
-            // context matches the context simplex just recovered, or if it
-            // is the parent re-proposed at the epoch boundary: that stores the
-            // parent under its original context, whose round is the parent's own.
-            // Otherwise the cached block was built against a different
-            // parent and cannot be broadcast under the current header, so
-            // skip the view and let the voter nullify it via timeout.
-            let last_in_epoch = epocher
-                .last(consensus_context.epoch())
-                .expect("current epoch should exist");
-            if let Some(block) = marshal.get_verified(consensus_context.round).await {
-                let block_context = block.context();
-                let commitment = block.commitment();
-                let reproposal =
-                    commitment == consensus_context.parent.1 && block.height() == last_in_epoch;
-                if !reproposal && block_context != consensus_context {
-                    debug!(
-                        round = ?consensus_context.round,
-                        ?consensus_context,
-                        ?block_context,
-                        "skipping proposal: cached verified block context no longer matches"
-                    );
-                    return Resolved::Skip;
-                }
-                // Stage the recovered block so the relay broadcast re-sends
-                // its shards through the same handshake as a fresh
-                // proposal. The relay-time persist deduplicates against the
-                // pre-crash write, with the handle covering the original.
-                debug!(
-                    round = ?consensus_context.round,
-                    ?commitment,
-                    reproposal,
-                    "reusing verified block from marshal on leader recovery"
-                );
-                return Resolved::Reuse(commitment, block, "recovered block");
-            }
-
             // The parent for any consensus context is in the same epoch: the
             // boundary block of the previous epoch is the genesis block of the
             // current epoch.
@@ -734,8 +689,11 @@ where
             // Special case: If the parent block is the last block in the epoch,
             // re-propose it as to not produce any blocks that will be cut out
             // by the epoch transition.
+            let last_in_epoch = epocher
+                .last(consensus_context.epoch())
+                .expect("current epoch should exist");
             if parent.height() == last_in_epoch {
-                return Resolved::Reuse(parent.commitment(), parent, "re-proposed boundary block");
+                return Resolved::Reuse(parent.commitment(), parent);
             }
 
             let ancestor_stream = marshal.ancestor_stream(
@@ -829,7 +787,7 @@ where
                     resolved = checks => resolved,
                 };
                 let (ancestor_stream, build_timer) = match resolved {
-                    Resolved::Reuse(commitment, block, name) => {
+                    Resolved::Reuse(commitment, block) => {
                         gates
                             .stage(
                                 consensus_context.round,
@@ -838,7 +796,7 @@ where
                                 |id| {
                                     tx.send_lossy(id);
                                 },
-                                name,
+                                prepare::BOUNDARY_BLOCK,
                             )
                             .await;
                         return;
@@ -1151,10 +1109,10 @@ where
     ///
     /// The application receives the parent as a [`Parent`](crate::marshal::ancestry::Parent)
     /// handle. Asking the handle for the ancestry runs the same checks as [`Self::propose`], in
-    /// the same order, and a block those checks reuse without the application answers
-    /// [`Handoff::Stage`]. An application that declines without asking costs no lookup or
-    /// fetch, and one that declines on its first poll is answered [`Handoff::Wait`] on this
-    /// task without a spawn. A round without a scheme answers [`Handoff::Wait`] as well.
+    /// the same order, and the epoch boundary block, which those checks re-propose without the
+    /// application, answers [`Handoff::Stage`]. An application that declines without asking
+    /// costs no fetch, and one that declines on its first poll is answered [`Handoff::Wait`] on
+    /// this task without a spawn. A round without a scheme answers [`Handoff::Wait`] as well.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
     async fn prepare(

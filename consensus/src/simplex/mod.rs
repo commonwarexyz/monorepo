@@ -296,9 +296,9 @@
 //! `handoff` hook and builds through its ordinary proposal path. The decision is final for the
 //! request.
 //!
-//! Asking for the ancestry runs the ordinary construction checks, which may reuse an existing
-//! block without the application: such a block is staged. A build that yields no block answers
-//! `Wait`. With `Stage`, construction and distribution overlap parent certification while
+//! Asking for the ancestry runs the ordinary construction checks, which may re-propose the epoch
+//! boundary block without the application: such a block is staged. A build that yields no block
+//! answers `Wait`. With `Stage`, construction and distribution overlap parent certification while
 //! consensus holds the vote. An application can choose it for any handoff whose outgoing leader
 //! it does not trust.
 //!

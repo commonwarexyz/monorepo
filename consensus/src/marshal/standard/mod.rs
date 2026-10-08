@@ -3738,6 +3738,137 @@ mod tests {
         }
     }
 
+    /// A leader that crashes between its relay broadcast and the journaling of its notarize
+    /// vote holds a verified block for the round on restart. No vote names that block, so it
+    /// cannot be notarized, and the restarted leader builds a fresh one on the recovered
+    /// context whatever the stored block's own context says. The relay persist stores the
+    /// fresh block beside the stale one, and certification resolves through it.
+    #[test_traced("WARN")]
+    fn test_propose_rebuilds_after_restart() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let mut oracle = setup_network_with_participants(
+                    context.child("network"),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let me = participants[0].clone();
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+                let round = Round::new(Epoch::zero(), View::new(2));
+
+                // Before the crash, the relay broadcast of a block built on a parent that
+                // replay has since replaced persisted it at the round.
+                let pre_setup = StandardHarness::setup_validator(
+                    context.child("validator").with_attribute("index", 0),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let pre_marshal = pre_setup.mailbox;
+                let pre_actor = pre_setup.actor_handle;
+                let pre_extra = pre_setup.extra;
+                let pre_application = pre_setup.application;
+                let stale = B::new::<Sha256>(
+                    Ctx {
+                        round,
+                        leader: me.clone(),
+                        parent: (View::new(1), Sha256::hash(&[b"replaced parent"])),
+                    },
+                    genesis.digest(),
+                    Height::new(1),
+                    100,
+                );
+                let stale_digest = stale.digest();
+                assert!(pre_marshal.verified(round, stale).await);
+
+                // Crash: abort the actor and release the storage partition before reopening.
+                pre_actor.abort();
+                let _ = pre_actor.await;
+                drop(pre_marshal);
+                drop(pre_extra);
+                drop(pre_application);
+
+                let post_setup = StandardHarness::setup_validator(
+                    context
+                        .child("validator_restart")
+                        .with_attribute("index", 0),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let marshal = post_setup.mailbox;
+                assert_eq!(
+                    marshal
+                        .get_verified(round)
+                        .await
+                        .map(|block| block.digest()),
+                    Some(stale_digest),
+                    "{kind:?}: the restarted marshal must restore the stale block"
+                );
+
+                let ctx = Ctx {
+                    round,
+                    leader: me.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let fresh = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
+                let fresh_digest = fresh.digest();
+                let app: MockVerifyingApp<B, S> =
+                    MockVerifyingApp::new().with_propose_result(fresh);
+                let mut wrapper = Wrapper::new(
+                    kind,
+                    context.child("wrapper_under_test"),
+                    app,
+                    marshal.clone(),
+                );
+                let digest = wrapper
+                    .propose(ctx)
+                    .await
+                    .await
+                    .expect("propose must return a digest");
+                assert_eq!(
+                    digest, fresh_digest,
+                    "{kind:?}: a restarted leader must build a fresh block"
+                );
+
+                let _ = wrapper.broadcast(digest, Plan::Propose { round });
+                assert!(
+                    wrapper
+                        .certify(round, digest)
+                        .await
+                        .await
+                        .expect("certify result missing"),
+                    "{kind:?}: the fresh block must certify through the relay handshake"
+                );
+                assert_eq!(
+                    marshal
+                        .get_verified(round)
+                        .await
+                        .map(|block| block.digest()),
+                    Some(stale_digest),
+                    "{kind:?}: the stale block stays stored first at the round"
+                );
+                assert!(
+                    marshal.get_block(&fresh_digest).await.is_some(),
+                    "{kind:?}: the fresh block must be stored beside the stale one"
+                );
+            });
+        }
+    }
+
     /// Returns whether the runtime spawned a task whose label contains `label`.
     fn spawned_task(metrics: &str, label: &str) -> bool {
         metrics
@@ -3749,8 +3880,9 @@ mod tests {
     /// fetch, no build, and no task.
     ///
     /// A block returned without asking for the parent is discarded, whether the build
-    /// completes on its first poll or from a task, and so is a block returned after the checks
-    /// skipped the view. The recovery checks thus always precede a staged block.
+    /// completes on its first poll or from a task, so the checks always precede a staged
+    /// block. A block stored for the round before a restart does not replace the
+    /// application's build.
     ///
     /// An application that asks builds on the fetched parent and is answered under its
     /// decision.
@@ -3867,14 +3999,13 @@ mod tests {
                     "{kind:?}: a suspended prepare is driven by a task"
                 );
 
-                // A stored block for the round skips the view: under inline verification any
-                // stored block does, and under deferred verification one whose context no
-                // longer matches. A block the application returns regardless of the absent
-                // ancestry is discarded.
-                let skipped_round = Round::new(Epoch::zero(), View::new(2));
+                // A block stored for the round before a restart does not decide the view: the
+                // application builds on the parent named by the recovered context and is
+                // answered under its decision, whatever the stored block's own context says.
+                let rebuilt_round = Round::new(Epoch::zero(), View::new(2));
                 let stored = B::new::<Sha256>(
                     Ctx {
-                        round: skipped_round,
+                        round: rebuilt_round,
                         leader: me.clone(),
                         parent: (View::new(1), Sha256::hash(&[b"replaced parent"])),
                     },
@@ -3882,33 +4013,32 @@ mod tests {
                     Height::new(1),
                     101,
                 );
-                assert!(marshal.clone().verified(skipped_round, stored).await);
-                let skipped_context = Ctx {
-                    round: skipped_round,
+                assert!(marshal.clone().verified(rebuilt_round, stored).await);
+                let rebuilt_context = Ctx {
+                    round: rebuilt_round,
                     leader: me.clone(),
                     parent: (View::zero(), genesis.digest()),
                 };
-                let unwanted = B::new::<Sha256>(
-                    skipped_context.clone(),
+                let rebuilt = B::new::<Sha256>(
+                    rebuilt_context.clone(),
                     genesis.digest(),
                     Height::new(1),
                     102,
                 );
-                let skipping_app = MockVerifyingApp::new()
+                let rebuilding_app = MockVerifyingApp::new()
                     .with_handoff(Handoff::Publish(()))
-                    .with_propose_result(unwanted)
-                    .ignoring_absence();
-                let mut skipping = Wrapper::new(
+                    .with_propose_result(rebuilt.clone());
+                let mut rebuilding = Wrapper::new(
                     kind,
-                    context.child("skipping"),
-                    skipping_app,
+                    context.child("rebuilding"),
+                    rebuilding_app,
                     marshal.clone(),
                 );
-                let response = skipping.prepare(skipped_context).await;
+                let response = rebuilding.prepare(rebuilt_context).await;
                 assert_eq!(
                     response.await.expect("prepare decision missing"),
-                    Handoff::Wait,
-                    "{kind:?}: a block built after the checks skipped the view must be discarded"
+                    Handoff::Publish(rebuilt.digest()),
+                    "{kind:?}: a stored block must not replace the application's build"
                 );
 
                 // An application that asks builds on the fetched parent and is answered under
@@ -3950,6 +4080,9 @@ mod tests {
     /// handoff can request a build on a parent whose link was never validated. The
     /// build must only walk ancestry through the parent that the block's consensus
     /// context names.
+    ///
+    /// The application returns its block even when the parent handle yields no
+    /// ancestry, so the unlinked case also checks that the marshal discards it.
     #[test_traced("WARN")]
     fn test_deferred_handoff_rejects_unvalidated_parent_link() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -4000,8 +4133,10 @@ mod tests {
                 };
                 let child =
                     B::new::<Sha256>(handoff_context.clone(), tip.digest(), Height::new(2), 200);
-                let mut app = MockVerifyingApp::new().with_handoff(Handoff::Stage(()));
-                app.propose_result = Some(child.clone());
+                let app = MockVerifyingApp::new()
+                    .with_handoff(Handoff::Stage(()))
+                    .with_propose_result(child.clone())
+                    .ignoring_absence();
                 let mut deferred = Wrapper::new(
                     WrapperKind::Deferred,
                     context.child(label),
@@ -9109,7 +9244,7 @@ mod tests {
     ///
     /// Processing a finalization requires making the finalized archives
     /// durable before the block is dispatched to the application, but the
-    /// sync itself must not serialize unrelated mailbox traffic: a proposer's
+    /// sync itself must not serialize unrelated mailbox traffic: a
     /// `get_verified` (a pure prunable-cache read) issued while the sync is in
     /// flight must be answered immediately.
     ///
@@ -10349,9 +10484,8 @@ mod tests {
     }
 
     /// A prepare relay sends the staged candidate without storing it, so an abandoned
-    /// candidate leaves nothing for the propose paths to reuse after a restart. The
-    /// propose relay that locks the candidate in stores it without sending it again and
-    /// completes the durability handshake.
+    /// candidate costs no storage write. The propose relay that locks the candidate in
+    /// stores it without sending it again and completes the durability handshake.
     #[test_traced("WARN")]
     fn test_standard_prepare_relay_sends_once_and_propose_stores() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));

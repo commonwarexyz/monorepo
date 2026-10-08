@@ -28,16 +28,17 @@ use tracing::{Instrument as _, Span, debug, warn};
 ///
 /// The handle reports the same outcome to the marshal with a unit ancestry.
 pub(crate) enum Resolved<D, S, A> {
-    /// The marshal stages a block of its own under `id`, either a candidate recovered from
-    /// before a restart or the epoch boundary block. The `&'static str` names the block in the
-    /// staging logs.
-    Reuse(D, Arc<S>, &'static str),
+    /// The marshal re-proposes the epoch boundary block under `id`.
+    Reuse(D, Arc<S>),
     /// The marshal cannot build on this parent.
     Skip,
     /// The parent is fetched and the application may build on its ancestry. The timer
     /// measures the application's build from this point.
     Build(A, Timer),
 }
+
+/// The staging log name of a re-proposed epoch boundary block.
+pub(crate) const BOUNDARY_BLOCK: &str = "re-proposed boundary block";
 
 /// A parent the marshal fetches only when the application asks for it.
 ///
@@ -68,7 +69,7 @@ where
 {
     async fn ancestry(self) -> Option<impl Ancestry<B>> {
         let (resolved, ancestry) = match (self.resolve)().await {
-            Resolved::Reuse(id, block, name) => (Resolved::Reuse(id, block, name), None),
+            Resolved::Reuse(id, block) => (Resolved::Reuse(id, block), None),
             Resolved::Skip => (Resolved::Skip, None),
             Resolved::Build(ancestry, timer) => (Resolved::Build((), timer), Some(ancestry)),
         };
@@ -169,9 +170,9 @@ fn drive<E, B, D, S, Fut>(
 
 /// Answers a prepare request whose parent handle was resolved.
 ///
-/// A block the marshal reuses or a parent it cannot build on decides the answer regardless of
-/// what the application returned. Otherwise the application's block is sealed and staged under
-/// its decision, and its build time is observed.
+/// A boundary block the marshal re-proposes or a parent it cannot build on decides the answer
+/// regardless of what the application returned. Otherwise the application's block is sealed and
+/// staged under its decision, and its build time is observed.
 async fn answer<E, B, D, S>(
     context: E,
     prepared: Handoff<B>,
@@ -185,11 +186,11 @@ async fn answer<E, B, D, S>(
     D: Digest,
 {
     match resolved {
-        Resolved::Reuse(id, block, name) => {
+        Resolved::Reuse(id, block) => {
             if !prepared.is_wait() {
                 debug!(
                     ?round,
-                    "discarding prepared block: marshal reuses a block of its own"
+                    "discarding prepared block: marshal re-proposes the boundary block"
                 );
             }
             gates
@@ -200,7 +201,7 @@ async fn answer<E, B, D, S>(
                     |id| {
                         tx.send_lossy(Handoff::Stage(id));
                     },
-                    name,
+                    BOUNDARY_BLOCK,
                 )
                 .await;
         }
