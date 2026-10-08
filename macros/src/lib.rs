@@ -335,10 +335,11 @@ pub use commonware_macros_impl::test_async;
 /// }
 /// ```
 pub use commonware_macros_impl::test_collect_traces;
-/// Prefix a test name with a nextest filter group.
+/// Suffix a test name with a nextest filter group.
 ///
-/// This renames `test_some_behavior` into `test_some_behavior_<group>_`, making
-/// it easy to filter tests by group postfixes in nextest.
+/// This renames `test_some_behavior` into `test_some_behavior_<group>_`. The nextest profiles in
+/// `nextest.toml` select tests by that suffix, whether it ends the test name or a module in its
+/// path. Place it above every other test attribute.
 pub use commonware_macros_impl::test_group;
 /// Capture logs from a test run using
 /// [libtest's output capture functionality](https://doc.rust-lang.org/book/ch11-02-running-tests.html#showing-function-output).

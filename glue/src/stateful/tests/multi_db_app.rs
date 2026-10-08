@@ -408,7 +408,7 @@ impl MultiDbEngine {
             sync_config: SyncEngineConfig {
                 fetch_batch_size: NZU64!(16),
                 apply_batch_size: NZU64!(64),
-                max_outstanding_requests: 8,
+                max_outstanding_requests: NZUsize!(8),
                 update_channel_size: NZUsize!(256),
             },
             retained_marshal_blocks: 10,
@@ -425,7 +425,7 @@ impl MultiDbEngine {
         self.sync_config = SyncEngineConfig {
             fetch_batch_size: NZU64!(1),
             apply_batch_size: NZU64!(1),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_channel_size: NZUsize!(4),
         };
         self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;

@@ -35,6 +35,7 @@ use commonware_storage::{
             batch::{MerkleizedBatch, Staged, UnmerkleizedBatch},
             db::Db,
         },
+        floor::Proportional,
         operation::Key,
         sync::{self, Target as CurrentSyncTarget},
     },
@@ -305,7 +306,9 @@ where
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged.merkleize(updates, upserts, metadata, &guard).await?
+            staged
+                .merkleize(updates, upserts, metadata, &guard, &mut Proportional)
+                .await?
         };
         Ok(CurrentMerkleized { inner, db })
     }
@@ -346,7 +349,9 @@ where
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged.merkleize(updates, upserts, metadata, &guard).await?
+            staged
+                .merkleize(updates, upserts, metadata, &guard, &mut Proportional)
+                .await?
         };
         Ok(CurrentMerkleized { inner, db })
     }
@@ -396,7 +401,10 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&db, self.metadata).await?;
+        let merkleized = self
+            .batch
+            .merkleize(&db, self.metadata, &mut Proportional)
+            .await?;
         Ok(CurrentMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -422,7 +430,10 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&db, self.metadata).await?;
+        let merkleized = self
+            .batch
+            .merkleize(&db, self.metadata, &mut Proportional)
+            .await?;
         Ok(CurrentMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -1779,7 +1790,7 @@ mod tests {
                 let db = Shared::new("test", db);
 
                 // Apply over the discarded target's bytes, then crash without finalizing. The
-                // batch is one journal append of its updates, floor-raise moves, and commit: three
+                // batch is one journal append of its updates, floor walk moves, and commit: three
                 // operations for one key and six for four keys. Only the written case exceeds
                 // `CAPACITY`.
                 let merkleized = batch(&db, 3, writes).await;
