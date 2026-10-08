@@ -1,0 +1,86 @@
+name: Slow tests
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        required: true
+        type: string
+      variant:
+        required: true
+        type: string
+      flags:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  Build:
+    name: Build tests
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 180
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
+    - name: Clear disk space
+      uses: ./.github/actions/disk
+    - name: Run setup
+      uses: ./.github/actions/setup
+      with:
+        additional-cache-key: ${{ inputs.flags || 'default' }}
+        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+    - name: Install nextest
+      uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+      with:
+        tool: cargo-nextest@0.9.133
+    - name: Build and archive tests
+      run: cargo nextest archive ${{ inputs.flags }} --profile slow --archive-file "$RUNNER_TEMP/tests.tar.zst"
+    - name: Upload tests
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      with:
+        name: slow-tests-${{ inputs.os }}-${{ inputs.variant }}
+        path: ${{ runner.temp }}/tests.tar.zst
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 7
+        overwrite: true
+
+  Tests:
+    name: "Tests (partition: ${{ matrix.partition }}/20)"
+    needs: Build
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 180
+    strategy:
+      matrix:
+        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
+    - name: Clear disk space
+      uses: ./.github/actions/disk
+    - name: Install nextest
+      uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+      with:
+        tool: cargo-nextest@0.9.133
+    - name: Download tests
+      uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+      with:
+        name: slow-tests-${{ inputs.os }}-${{ inputs.variant }}
+        path: ${{ runner.temp }}
+    - name: Run slow tests
+      run: >-
+        cargo-nextest nextest run --archive-file "$RUNNER_TEMP/tests.tar.zst"
+        --workspace-remap "$GITHUB_WORKSPACE"
+        --partition hash:${{ matrix.partition }}/20 --verbose --profile slow
