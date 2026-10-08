@@ -33,6 +33,7 @@ Use `just` commands, which run tests through `nextest`. Start with the narrowest
 just test -p <crate> <test_name>  # focused iteration
 just test -p <crate>              # changed crate
 just clippy -p <crate>            # changed crate linting
+just dylint -p <crate>            # custom lints (needs cargo-dylint and dylint-link)
 just lint                         # workspace-wide lint, docs, and stability checks
 just pre-pr                       # before opening a PR
 ```

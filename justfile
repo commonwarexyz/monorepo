@@ -158,9 +158,9 @@ check-publish-order:
 cooldown:
     ./.github/scripts/check_dependency_cooldown.sh
 
-# Run custom Dylint lints
-dylint:
-    cargo {{ nightly_version }} dylint --all --workspace -- --all-targets
+# Run custom Dylint lints, for the workspace or for one crate with `-p <crate>`
+dylint *args='--workspace':
+    cargo {{ nightly_version }} dylint --all {{ args }} -- --all-targets
 
 # Test custom Dylint lints against their UI fixtures
 test-dylints:

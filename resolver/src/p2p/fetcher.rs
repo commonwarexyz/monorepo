@@ -112,8 +112,6 @@ where
     active: PrioritySet<ID, SystemTime>,
     /// Request data for active requests (ID -> request details)
     requests: BTreeMap<ID, ActiveRequest<P, Key>>,
-    /// Reverse lookup from key to request ID
-    key_to_id: BTreeMap<Key, ID>,
 
     // Config
     /// Timeout for requests
@@ -187,7 +185,6 @@ where
             request_id: 0,
             active: PrioritySet::new(),
             requests: BTreeMap::new(),
-            key_to_id: BTreeMap::new(),
             timeout: config.timeout,
             pending: PrioritySet::new(),
             waiter: None,
@@ -324,15 +321,7 @@ where
             assert!(self.pending.remove(&key));
             let deadline = start.checked_add(self.timeout).expect("time overflowed");
             self.active.put(id, deadline);
-            self.requests.insert(
-                id,
-                ActiveRequest {
-                    key: key.clone(),
-                    peer,
-                    start,
-                },
-            );
-            self.key_to_id.insert(key, id);
+            self.requests.insert(id, ActiveRequest { key, peer, start });
             return;
         }
 
@@ -350,20 +339,16 @@ where
         });
     }
 
-    /// Retains only the fetches with keys greater than the given key.
+    /// Retains only the fetches whose keys satisfy the predicate.
     pub fn retain(&mut self, predicate: impl Fn(&Key) -> bool) {
-        // Collect IDs to remove based on key predicate
-        let ids_to_remove: Vec<ID> = self
-            .requests
-            .iter()
-            .filter(|(_, req)| !predicate(&req.key))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in ids_to_remove {
-            self.active.remove(&id);
-            self.requests.remove(&id);
-        }
-        self.key_to_id.retain(|k, _| predicate(k));
+        let active = &mut self.active;
+        self.requests.retain(|id, request| {
+            let keep = predicate(&request.key);
+            if !keep {
+                active.remove(id);
+            }
+            keep
+        });
         self.pending.retain(&predicate);
         self.targets.retain(|k, _| predicate(k));
 
@@ -420,7 +405,6 @@ where
 
         // Remove the request and score zero throughput (nothing was delivered).
         let req = self.requests.remove(&id)?;
-        self.key_to_id.remove(&req.key);
         self.update_performance(&req.peer, 0);
 
         Some(req.key)
@@ -435,7 +419,6 @@ where
 
         let req = self.requests.remove(&id)?;
         self.active.remove(&id);
-        self.key_to_id.remove(&req.key);
         Some(req)
     }
 
@@ -551,7 +534,7 @@ where
     /// Returns true if the fetch is in progress.
     #[cfg(test)]
     pub fn contains(&self, key: &Key) -> bool {
-        self.key_to_id.contains_key(key) || self.pending.contains(key)
+        self.pending.contains(key) || self.requests.values().any(|request| &request.key == key)
     }
 }
 
@@ -761,12 +744,11 @@ mod tests {
         fetcher.requests.insert(
             id,
             ActiveRequest {
-                key: key.clone(),
+                key,
                 peer,
                 start: now,
             },
         );
-        fetcher.key_to_id.insert(key, id);
     }
 
     #[test]
@@ -804,9 +786,12 @@ mod tests {
             assert!(fetcher.pending.contains(&MockKey(1)));
             assert!(fetcher.pending.contains(&MockKey(2)));
             assert!(fetcher.pending.contains(&MockKey(3)));
-            assert!(fetcher.key_to_id.contains_key(&MockKey(10)));
-            assert!(!fetcher.key_to_id.contains_key(&MockKey(20)));
-            assert!(!fetcher.key_to_id.contains_key(&MockKey(30)));
+            assert_eq!(fetcher.requests.get(&100).unwrap().key, MockKey(10));
+            assert!(fetcher.active.contains(&100));
+            for id in [101, 102] {
+                assert!(!fetcher.requests.contains_key(&id));
+                assert!(!fetcher.active.contains(&id));
+            }
         });
     }
 
@@ -1248,14 +1233,11 @@ mod tests {
             // Retain only MockKey(1)
             fetcher.retain(|key| key.0 == 1);
 
-            // Verify the ID mapping is preserved correctly
             assert_eq!(fetcher.len_active(), 1);
-            assert!(fetcher.key_to_id.contains_key(&MockKey(1)));
-            assert!(!fetcher.key_to_id.contains_key(&MockKey(2)));
-
-            // Verify the request data for MockKey(1) is preserved
-            let id = fetcher.key_to_id.get(&MockKey(1)).unwrap();
-            assert!(fetcher.requests.contains_key(id));
+            assert_eq!(fetcher.requests.get(&100).unwrap().key, MockKey(1));
+            assert!(fetcher.active.contains(&100));
+            assert!(!fetcher.requests.contains_key(&101));
+            assert!(!fetcher.active.contains(&101));
         });
     }
 

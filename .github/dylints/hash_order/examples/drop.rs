@@ -57,6 +57,7 @@ struct Fields {
     // are not flagged.
     ordered: BTreeMap<u64, oneshot::Sender<()>>,
     weak: HashMap<u64, Weak<oneshot::Sender<()>>>,
+    weak_registry: Weak<Mutex<HashMap<u64, oneshot::Sender<()>>>>,
     trees: HashMap<u64, Tree>,
     borrowed: &'static HashMap<u64, oneshot::Sender<()>>,
 

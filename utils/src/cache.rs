@@ -317,8 +317,9 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// Entries are visited in slot order. Dropped entries' slots and allocations
     /// are retained for reuse.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
-        // Decide every entry before detaching any, so a panicking `keep` cannot
-        // leave freed slots in the index.
+        // The index is swept once by slot liveness, so retain never rehashes a
+        // key. Decide every entry before detaching any, so a panicking `keep`
+        // cannot leave freed slots in the index.
         let dropped: Vec<Slot> = self
             .slots
             .iter()

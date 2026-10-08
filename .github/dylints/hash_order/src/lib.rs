@@ -84,7 +84,8 @@ declare_lint! {
     /// mutex guard or permit, an aborter, or an acknowledgement, directly or through its
     /// fields, enum variants, type arguments, tuples, and arrays. Values behind `Arc` or `Rc`
     /// count, since the collection may hold their last strong reference. Values behind `Weak`
-    /// do not count.
+    /// do not count. An endpoint reached only through an associated type projection, a trait
+    /// object, a closure, or a future is not recognized.
     ///
     /// The lint reports struct and enum fields whose type holds such a collection, also inside
     /// tuples, arrays, and the type arguments of wrappers such as `Arc<Mutex<_>>` or
@@ -338,6 +339,9 @@ fn wakes_on_drop<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>, visited: &mut Vec<D
 fn drop_sensitive<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
     match *ty.kind() {
         ty::Adt(adt, generic_args) => {
+            if listed(cx, adt.did(), NON_OWNING) {
+                return None;
+            }
             if listed(cx, adt.did(), HASH_COLLECTIONS)
                 && generic_args
                     .types()
@@ -393,7 +397,8 @@ fn report_iteration(cx: &LateContext<'_>, span: Span, ty: Ty<'_>) {
                 ty.peel_refs()
             ));
             diag.help(
-                "use `BTreeMap` or `BTreeSet`, or expect the lint with a reason if the order cannot matter",
+                "use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add \
+                 `#[cfg_attr(dylint_lib = \"hash_order\", expect(hash_iteration, reason = \"...\"))]`",
             );
         }),
     );
@@ -408,7 +413,10 @@ fn report_drop(cx: &LateContext<'_>, span: Span, ty: Ty<'_>) {
             diag.note(format!(
                 "`{ty}` drops its elements in an order that varies between runs"
             ));
-            diag.help("use `BTreeMap` or `BTreeSet`");
+            diag.help(
+                "use `BTreeMap` or `BTreeSet`, or if no task can be waiting on the elements, add \
+                 `#[cfg_attr(dylint_lib = \"hash_order\", expect(hash_drop, reason = \"...\"))]`",
+            );
         }),
     );
 }
