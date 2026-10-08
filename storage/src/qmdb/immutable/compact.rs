@@ -536,8 +536,8 @@ where
     ///
     /// # Errors
     ///
-    /// - [`Error::StaleBatch`] if the batch is detected as stale (see
-    ///   [`crate::qmdb::chain`] for more details).
+    /// Returns [`Error::StaleBatch`] if the batch is detected as stale (see
+    /// [`crate::qmdb::chain`] for more details).
     #[tracing::instrument(
         name = "qmdb.immutable.compact.db.apply_batch",
         level = "info",

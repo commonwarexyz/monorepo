@@ -563,7 +563,7 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `loc` > inactivity floor.
+    /// Returns [`Error::PruneBeyondMinRequired`] if `loc` > inactivity floor.
     #[tracing::instrument(name = "qmdb.immutable.db.prune", level = "info", skip_all)]
     #[boxed]
     pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>> {
