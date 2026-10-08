@@ -11,6 +11,8 @@ use futures::future::poll_immediate;
 use rand::{Rng, RngExt as _};
 use std::{fmt::Debug, future::Future};
 
+pub mod floor;
+
 /// Check strict, non-wrapping neighbors against the model's live keys.
 pub fn assert_ordered_neighbors<K: Ord + Debug>(
     keys: impl IntoIterator<Item = K>,

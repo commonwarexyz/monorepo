@@ -773,9 +773,8 @@ mod tests {
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: 1,
+                        max_outstanding_requests: NZUsize!(1),
                         update_channel_size: NZUsize!(1),
-                        max_retained_roots: 1,
                     },
                     prune_config: None,
                 },
@@ -1073,9 +1072,8 @@ mod tests {
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: 1,
+                        max_outstanding_requests: NZUsize!(1),
                         update_channel_size: NZUsize!(1),
-                        max_retained_roots: 1,
                     },
                     resolvers: (),
                     finalization,

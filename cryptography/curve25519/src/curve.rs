@@ -12,16 +12,23 @@ use subtle::{Choice, ConditionallySelectable};
 /// all lanes can use smaller tiles directly.
 pub const LANES: usize = 8;
 
-/// The low 51 bits: what a limb holds once carries have been propagated out of it.
-const MASK_51: u64 = (1 << 51) - 1;
+/// The number of limbs in a field element.
+const LIMBS: usize = 5;
 
-/// `16*p`, decomposed limb-wise at radix 51, used to make subtraction underflow-free.
-const BIAS_16P: [u64; 5] = [
-    16 * ((1u64 << 51) - 19),
-    16 * ((1u64 << 51) - 1),
-    16 * ((1u64 << 51) - 1),
-    16 * ((1u64 << 51) - 1),
-    16 * ((1u64 << 51) - 1),
+/// The radix exponent: each limb holds `LIMB_BITS` bits once carries have been propagated out of
+/// it, so a field element is `sum(limb[i] * 2^(LIMB_BITS * i))`.
+const LIMB_BITS: usize = 51;
+
+/// The low [`LIMB_BITS`] bits: what a limb holds once carries have been propagated out of it.
+const MASK_51: u64 = (1 << LIMB_BITS) - 1;
+
+/// `16*p`, decomposed limb-wise at radix `2^LIMB_BITS`, used to make subtraction underflow-free.
+const BIAS_16P: [u64; LIMBS] = [
+    16 * ((1u64 << LIMB_BITS) - 19),
+    16 * ((1u64 << LIMB_BITS) - 1),
+    16 * ((1u64 << LIMB_BITS) - 1),
+    16 * ((1u64 << LIMB_BITS) - 1),
+    16 * ((1u64 << LIMB_BITS) - 1),
 ];
 
 /// A base field element in the field of order `p = 2^255 - 19`.
@@ -29,7 +36,8 @@ const BIAS_16P: [u64; 5] = [
 /// The five limbs use radix `2^51`. The representation is redundant: values need not be
 /// canonical, but every arithmetic operation accepts and returns limbs less than `2^52`.
 #[derive(Clone, Copy, Debug)]
-pub struct F(pub [u64; 5]);
+#[repr(transparent)]
+pub struct F(pub [u64; LIMBS]);
 
 // Secret-dependent selection goes through `subtle`, whose `Choice` sits behind an optimization
 // barrier so the compiler cannot prove the mask is 0/-1 and lower the select to a branch.
@@ -81,9 +89,9 @@ impl F {
             u64::from_le_bytes(chunk)
         };
 
-        let mut limbs = [0; 5];
+        let mut limbs = [0; LIMBS];
         for (i, limb) in limbs.iter_mut().enumerate() {
-            let bit = i * 51;
+            let bit = i * LIMB_BITS;
             let offset = (bit / 8).min(bytes.len() - 8);
             *limb = (load8(offset) >> (bit - 8 * offset)) & MASK_51;
         }
@@ -93,27 +101,29 @@ impl F {
     /// Restores the `< 2^52` limb bound without canonicalizing the field element.
     ///
     /// Inputs must have limbs below `2^63`.
-    #[inline]
-    fn reduce(mut l: [u64; 5]) -> Self {
-        for i in 0..l.len() - 1 {
-            l[i + 1] += l[i] >> 51;
+    #[inline(always)]
+    const fn reduce(mut l: [u64; LIMBS]) -> Self {
+        let mut i = 0;
+        while i < LIMBS - 1 {
+            l[i + 1] += l[i] >> LIMB_BITS;
             l[i] &= MASK_51;
+            i += 1;
         }
 
         // The carry out of limb 4 has at most 13 bits, so the fold stays below the `2^52` limb
         // bound for every input and the compiler drops the multiply's overflow check.
-        const _: () = assert!(MASK_51 + (u64::MAX >> 51) * 19 < 1 << 52);
-        l[0] += (l[4] >> 51) * 19;
-        l[4] &= MASK_51;
+        const _: () = assert!(MASK_51 + (u64::MAX >> LIMB_BITS) * 19 < 1 << (LIMB_BITS + 1));
+        l[0] += (l[LIMBS - 1] >> LIMB_BITS) * 19;
+        l[LIMBS - 1] &= MASK_51;
         Self(l)
     }
 
     /// Carry-propagates the limbs for canonical serialization.
     ///
     /// The returned limbs are below `2^51`, except limb 1, which may equal `2^51`.
-    fn carry(&self) -> Self {
+    const fn carry(&self) -> Self {
         let mut l = Self::reduce(self.0).0;
-        l[1] += l[0] >> 51;
+        l[1] += l[0] >> LIMB_BITS;
         l[0] &= MASK_51;
         Self(l)
     }
@@ -125,23 +135,23 @@ impl F {
         // Adding 19 overflows bit 255 exactly when l >= p.
         let mut q = 19;
         for &limb in &l {
-            q = (limb + q) >> 51;
+            q = (limb + q) >> LIMB_BITS;
         }
 
         l[0] += 19 * q;
-        for i in 0..l.len() - 1 {
-            l[i + 1] += l[i] >> 51;
+        for i in 0..LIMBS - 1 {
+            l[i + 1] += l[i] >> LIMB_BITS;
             l[i] &= MASK_51;
         }
-        l[4] &= MASK_51;
+        l[LIMBS - 1] &= MASK_51;
 
         let mut words = [0u64; 4];
         for (i, limb) in l.into_iter().enumerate() {
-            let bit = i * 51;
+            let bit = i * LIMB_BITS;
             let word = bit / 64;
             let shift = bit % 64;
             words[word] |= limb << shift;
-            if shift > 64 - 51 {
+            if shift > 64 - LIMB_BITS {
                 words[word + 1] |= limb >> (64 - shift);
             }
         }
@@ -173,101 +183,142 @@ impl F {
     }
 
     /// Returns `self + rhs`.
-    #[inline]
-    pub fn add(self, rhs: Self) -> Self {
-        Self::reduce(array::from_fn(|i| self.0[i] + rhs.0[i]))
+    #[inline(always)]
+    pub const fn add(self, rhs: Self) -> Self {
+        let mut l = self.0;
+        let mut i = 0;
+        while i < l.len() {
+            l[i] += rhs.0[i];
+            i += 1;
+        }
+        Self::reduce(l)
     }
 
     /// Returns `self - rhs`.
-    #[inline]
-    pub fn sub(self, rhs: Self) -> Self {
-        Self::reduce(array::from_fn(|i| self.0[i] + BIAS_16P[i] - rhs.0[i]))
+    #[inline(always)]
+    pub const fn sub(self, rhs: Self) -> Self {
+        let mut l = self.0;
+        let mut i = 0;
+        while i < l.len() {
+            l[i] = l[i] + BIAS_16P[i] - rhs.0[i];
+            i += 1;
+        }
+        Self::reduce(l)
     }
 
     /// Returns `-self`.
-    #[inline]
-    pub fn neg(self) -> Self {
+    #[inline(always)]
+    pub const fn neg(self) -> Self {
         Self::ZERO.sub(self)
     }
 
-    /// Reduces five wide radix-`2^51` columns to the scalar limb bound.
-    #[inline]
-    fn from_wide(mut c: [u128; 5]) -> Self {
+    /// Reduces [`LIMBS`] wide radix-`2^LIMB_BITS` columns to the scalar limb bound.
+    #[inline(always)]
+    const fn from_wide(mut c: [u128; LIMBS]) -> Self {
         const MASK: u128 = MASK_51 as u128;
-        for i in 0..4 {
-            c[i + 1] += c[i] >> 51;
+        let mut i = 0;
+        while i < LIMBS - 1 {
+            c[i + 1] += c[i] >> LIMB_BITS;
             c[i] &= MASK;
+            i += 1;
         }
 
         // The carry out of column 4 has at most 77 bits, so the fold stays below `2^102` for
         // every input, the final carry keeps limb 1 below the `2^52` limb bound, and the compiler
         // drops the multiply's overflow check.
-        const _: () = assert!(MASK + (u128::MAX >> 51) * 19 < 1 << 102);
-        c[0] += 19 * (c[4] >> 51);
-        c[4] &= MASK;
-        c[1] += c[0] >> 51;
+        const _: () = assert!(MASK + (u128::MAX >> LIMB_BITS) * 19 < 1 << (2 * LIMB_BITS));
+        c[0] += 19 * (c[LIMBS - 1] >> LIMB_BITS);
+        c[LIMBS - 1] &= MASK;
+        c[1] += c[0] >> LIMB_BITS;
         c[0] &= MASK;
 
-        Self(array::from_fn(|i| c[i] as u64))
+        Self([
+            c[0] as u64,
+            c[1] as u64,
+            c[2] as u64,
+            c[3] as u64,
+            c[4] as u64,
+        ])
     }
 
     /// Returns `self * rhs`.
-    #[inline]
-    pub fn mul(self, rhs: Self) -> Self {
+    #[inline(always)]
+    pub const fn mul(self, rhs: Self) -> Self {
         // Accumulate the nine schoolbook columns, then fold columns 5 through 8 down using
         // `2^255 = 19 (mod p)`. At the input bound, every folded column remains below `2^112`.
-        let mut c = [0u128; 9];
-        for (i, a) in self.0.into_iter().enumerate() {
-            for (c, b) in c[i..].iter_mut().zip(rhs.0) {
-                *c += u128::from(a) * u128::from(b);
+        let mut c = [0u128; 2 * LIMBS - 1];
+        let mut i = 0;
+        while i < LIMBS {
+            let mut j = 0;
+            while j < LIMBS {
+                c[i + j] += self.0[i] as u128 * rhs.0[j] as u128;
+                j += 1;
             }
+            i += 1;
         }
-        let (low, high) = c.split_at_mut(5);
-        for (low, high) in low.iter_mut().zip(high) {
+        let mut i = 0;
+        while i < LIMBS - 1 {
             // On AArch64, a checked u128 multiply lowers to a branch on the operand's magnitude.
             // Every column stays below `2^107` at the input bound, so assert that bound and
             // multiply without a check.
-            assert!(*high < 1 << 107);
-            *low += high.wrapping_mul(19);
+            assert!(c[i + LIMBS] < 1 << 107);
+            c[i] += c[i + LIMBS].wrapping_mul(19);
+            i += 1;
         }
         Self::from_wide([c[0], c[1], c[2], c[3], c[4]])
     }
 
     /// Returns `self * self` using one product for each pair of distinct limbs.
-    #[inline]
-    pub fn square(self) -> Self {
+    #[inline(always)]
+    pub const fn square(self) -> Self {
         let limbs = self.0;
         let mut limbs_19 = limbs;
-        for limb in &mut limbs_19[3..] {
-            *limb *= 19;
+        let mut k = 3;
+        while k < LIMBS {
+            limbs_19[k] *= 19;
+            k += 1;
         }
 
-        let mut c = [0u128; 5];
-        for i in 0..limbs.len() {
-            for j in i..limbs.len() {
+        // Each product of distinct limbs occurs twice, so it takes its left factor from `limbs_2`.
+        let mut limbs_2 = limbs;
+        let mut k = 0;
+        while k < LIMBS - 1 {
+            limbs_2[k] *= 2;
+            k += 1;
+        }
+
+        let mut c = [0u128; LIMBS];
+        let mut i = 0;
+        while i < LIMBS {
+            let mut j = i;
+            while j < LIMBS {
                 let column = i + j;
-                let (column, rhs) = if column < limbs.len() {
+                let (column, rhs) = if column < LIMBS {
                     (column, limbs[j])
                 } else {
-                    (column - limbs.len(), limbs_19[j])
+                    (column - LIMBS, limbs_19[j])
                 };
-                let product = u128::from(limbs[i]) * u128::from(rhs);
-                c[column] += if i == j { product } else { 2 * product };
+                let lhs = if i == j { limbs[i] } else { limbs_2[i] };
+                c[column] += lhs as u128 * rhs as u128;
+                j += 1;
             }
+            i += 1;
         }
         Self::from_wide(c)
     }
 
     /// Squares `self` `k` times.
-    fn pow2k(mut self, k: u32) -> Self {
-        for _ in 0..k {
+    const fn pow2k(mut self, k: u32) -> Self {
+        let mut n = 0;
+        while n < k {
             self = self.square();
+            n += 1;
         }
         self
     }
 
     /// Raises `self` to `2^250 - 1` using the standard addition chain.
-    fn pow_2_250_minus_1(self) -> Self {
+    const fn pow_2_250_minus_1(self) -> Self {
         let a = self.square();
         let a2 = a.square().square();
         let b = self.mul(a2);
@@ -284,12 +335,12 @@ impl F {
     }
 
     /// Raises `self` to `(p - 5) / 8 = 2^252 - 3`.
-    fn pow_p58(self) -> Self {
+    const fn pow_p58(self) -> Self {
         self.mul(self.pow_2_250_minus_1().pow2k(2))
     }
 
     /// Returns the multiplicative inverse of `self`.
-    fn invert(self) -> Self {
+    const fn invert(self) -> Self {
         self.pow_p58().pow2k(3).mul(self.square().mul(self))
     }
 }
@@ -319,7 +370,7 @@ pub struct FVec {
     // We could have a dynamic number of lanes here, depending on the backend,
     // but it's easier to just have a fixed number, perhaps dispatching several
     // instructions for backends with fewer lanes.
-    limbs: [[u64; LANES]; 5],
+    limbs: [[u64; LANES]; LIMBS],
 }
 
 impl FVec {
@@ -338,7 +389,7 @@ impl FVec {
 
     /// Transposes scalar field elements into limb rows.
     pub fn transpose(lanes: [F; LANES]) -> Self {
-        let mut limbs = [[0u64; LANES]; 5];
+        let mut limbs = [[0u64; LANES]; LIMBS];
         for (i, lane) in lanes.iter().enumerate() {
             for (row, value) in limbs.iter_mut().zip(lane.0) {
                 row[i] = value;
@@ -351,33 +402,10 @@ impl FVec {
     pub fn untranspose(self) -> [F; LANES] {
         array::from_fn(|i| F(array::from_fn(|limb| self.limbs[limb][i])))
     }
-
-    /// Selects `other` in lanes whose corresponding mask is true.
-    ///
-    /// Variable-time, so the mask must be public.
-    fn select_lanes(self, other: Self, select_other: &[bool; LANES]) -> Self {
-        let masks = select_other.map(|select| 0u64.wrapping_sub(select as u64));
-        Self {
-            limbs: array::from_fn(|limb| {
-                array::from_fn(|lane| {
-                    (self.limbs[limb][lane] & !masks[lane])
-                        | (other.limbs[limb][lane] & masks[lane])
-                })
-            }),
-        }
-    }
 }
 
 /// Abstracts over base field operations.
 pub trait FBackend: Copy {
-    /// Negates the selected lanes and preserves the other lanes' limb representations.
-    ///
-    /// Variable-time, so the mask must be public.
-    #[inline(always)]
-    fn conditional_neg(self, value: FVec, negative: &[bool; LANES]) -> FVec {
-        value.select_lanes(self.neg(value), negative)
-    }
-
     /// a + b.
     fn add(self, a: FVec, b: FVec) -> FVec;
 
@@ -410,25 +438,15 @@ pub trait FBackend: Copy {
 /// A compact point on the twisted Edwards curve in extended homogeneous coordinates.
 ///
 /// This is the scalar representation used directly for individual point operations and as the
-/// array-of-structures representation between vector operations.
+/// array-of-structures representation between vector operations. Its coordinates are laid out
+/// as 20 consecutive limbs, so backends can load several points straight into lanes.
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct G {
     x: F,
     y: F,
     t: F,
     z: F,
-}
-
-impl ConditionallySelectable for G {
-    #[inline]
-    fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
-        Self {
-            x: F::conditional_select(&a.x, &b.x, choice),
-            y: F::conditional_select(&a.y, &b.y, choice),
-            t: F::conditional_select(&a.t, &b.t, choice),
-            z: F::conditional_select(&a.z, &b.z, choice),
-        }
-    }
 }
 
 impl G {
@@ -441,7 +459,7 @@ impl G {
     };
 
     /// Compresses this point to its canonical Ed25519 encoding.
-    pub fn to_bytes(self) -> [u8; 32] {
+    pub fn compress(self) -> [u8; 32] {
         let z_inverse = self.z.invert();
         let x = self.x.mul(z_inverse);
         let mut bytes = self.y.mul(z_inverse).to_bytes();
@@ -449,8 +467,20 @@ impl G {
         bytes
     }
 
+    /// Converts this point to affine representation.
+    pub const fn to_affine(self) -> GAffine {
+        let z_inverse = self.z.invert();
+        let x = self.x.mul(z_inverse);
+        let y = self.y.mul(z_inverse);
+        GAffine {
+            x,
+            y,
+            t2d: x.mul(y).mul(F::EDWARDS_D2),
+        }
+    }
+
     /// Negates this point.
-    pub fn negate(self) -> Self {
+    pub const fn negate(self) -> Self {
         Self {
             x: self.x.neg(),
             y: self.y,
@@ -460,8 +490,8 @@ impl G {
     }
 
     /// Adds two points using the complete unified formula for `a = -1`.
-    #[inline]
-    pub fn add(self, rhs: Self) -> Self {
+    #[inline(always)]
+    pub const fn add(self, rhs: Self) -> Self {
         // Hisil-Wong-Carter-Dawson, "Twisted Edwards Curves Revisited",
         // add-2008-hwcd-3 specialized to a = -1:
         //
@@ -490,10 +520,23 @@ impl G {
     }
 
     /// Adds an affine point using its precomputed `2d*x*y` coordinate.
-    #[inline]
-    pub fn add_mixed(self, rhs: GAffine) -> Self {
-        let a = self.y.sub(self.x).mul(rhs.y.sub(rhs.x));
-        let b = self.y.add(self.x).mul(rhs.y.add(rhs.x));
+    #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
+    #[inline(always)]
+    pub const fn add_mixed(self, rhs: GAffine) -> Self {
+        self.add_niels(Niels {
+            sum: rhs.y.add(rhs.x),
+            diff: rhs.y.sub(rhs.x),
+            t2d: rhs.t2d,
+        })
+    }
+
+    /// Adds a point in [`Niels`] form: [`G::add`] specialized to an operand whose `Z` is one.
+    #[inline(always)]
+    const fn add_niels(self, rhs: Niels) -> Self {
+        // The steps of `G::add` with `Z2 = 1`. The Niels form supplies `Y2 - X2`, `Y2 + X2`, and
+        // `2d*T2`, so `C` takes one multiplication and `D = 2*Z1` takes none.
+        let a = self.y.sub(self.x).mul(rhs.diff);
+        let b = self.y.add(self.x).mul(rhs.sum);
         let c = self.t.mul(rhs.t2d);
         let d = self.z.add(self.z);
         let e = b.sub(a);
@@ -509,8 +552,8 @@ impl G {
     }
 
     /// Doubles this point using the dedicated `dbl-2008-hwcd` formula.
-    #[inline]
-    pub fn double(self) -> Self {
+    #[inline(always)]
+    pub const fn double(self) -> Self {
         let a = self.x.square();
         let b = self.y.square();
         let c = self.z.square();
@@ -528,6 +571,7 @@ impl G {
     }
 
     /// Multiplies this point by a public scalar bit sequence using variable-time double-and-add.
+    #[cfg(test)]
     pub fn scalar_mul(self, bits: impl IntoIterator<Item = bool>) -> Self {
         let mut result = Self::IDENTITY;
         for bit in bits {
@@ -535,21 +579,6 @@ impl G {
             if bit {
                 result = result.add(self);
             }
-        }
-        result
-    }
-
-    /// Multiplies this point by a secret 256-bit little-endian scalar.
-    ///
-    /// This performs one doubling and one addition per bit, selecting the result without
-    /// secret-dependent branches or indexing.
-    pub fn scalar_mul_secret(self, scalar: &[u8; 32]) -> Self {
-        let mut result = Self::IDENTITY;
-        for i in (0..256).rev() {
-            let doubled = result.double();
-            let added = doubled.add(self);
-            let bit = Choice::from(scalar[i / 8] >> (i % 8) & 1);
-            result = Self::conditional_select(&doubled, &added, bit);
         }
         result
     }
@@ -566,12 +595,221 @@ impl G {
     pub fn is_identity(&self) -> bool {
         self.x.is_zero() && self.y.eq(&self.z)
     }
+
+    /// Drops the `T` coordinate, which doubling does not read.
+    #[inline(always)]
+    pub const fn to_projective(self) -> GProjective {
+        GProjective {
+            x: self.x,
+            y: self.y,
+            z: self.z,
+        }
+    }
+
+    /// Prepares this point for repeated additions with [`G::add_projective_niels`].
+    #[inline(always)]
+    pub const fn to_projective_niels(self) -> ProjectiveNiels {
+        ProjectiveNiels {
+            sum: self.y.add(self.x),
+            diff: self.y.sub(self.x),
+            z: self.z,
+            t2d: self.t.mul(F::EDWARDS_D2),
+        }
+    }
+
+    /// Adds a point in [`Niels`] form, deferring the final multiplications to the conversion of
+    /// the returned completed point.
+    #[inline(always)]
+    pub const fn add_niels_completed(self, rhs: Niels) -> GCompleted {
+        // The steps of `G::add_niels` up to its final products.
+        let a = self.y.sub(self.x).mul(rhs.diff);
+        let b = self.y.add(self.x).mul(rhs.sum);
+        let c = self.t.mul(rhs.t2d);
+        let d = self.z.add(self.z);
+        GCompleted::from_products(a, b, c, d)
+    }
+
+    /// Adds a point in [`ProjectiveNiels`] form, deferring the final multiplications to the
+    /// conversion of the returned completed point.
+    #[inline(always)]
+    pub const fn add_projective_niels(self, rhs: ProjectiveNiels) -> GCompleted {
+        // The steps of `G::add` up to its final products, with `2d*T2` precomputed.
+        let a = self.y.sub(self.x).mul(rhs.diff);
+        let b = self.y.add(self.x).mul(rhs.sum);
+        let c = self.t.mul(rhs.t2d);
+        let zz = self.z.mul(rhs.z);
+        GCompleted::from_products(a, b, c, zz.add(zz))
+    }
+}
+
+/// A point in projective coordinates `(X:Y:Z)`, the affine point `(X/Z, Y/Z)`.
+///
+/// Doubling reads only these coordinates, so a chain of doublings can skip computing `T`.
+#[derive(Clone, Copy, Debug)]
+pub struct GProjective {
+    x: F,
+    y: F,
+    z: F,
+}
+
+impl GProjective {
+    /// The neutral element, `(0, 1)` in affine coordinates.
+    pub const IDENTITY: Self = Self {
+        x: F::ZERO,
+        y: F::ONE,
+        z: F::ONE,
+    };
+
+    /// Doubles this point with the steps of [`G::double`] up to its final products.
+    #[inline(always)]
+    pub const fn double(self) -> GCompleted {
+        let a = self.x.square();
+        let b = self.y.square();
+        let c = self.z.square();
+        let c = c.add(c);
+        let e = self.x.add(self.y).square().sub(a).sub(b);
+        let g = b.sub(a);
+        let f = g.sub(c);
+        let h = a.neg().sub(b);
+        GCompleted {
+            x: e,
+            y: h,
+            z: g,
+            t: f,
+        }
+    }
+
+    /// Multiplies this point by the curve's cofactor (8).
+    pub fn mul_by_cofactor(mut self) -> Self {
+        for _ in 0..3 {
+            self = self.double().to_projective();
+        }
+        self
+    }
+
+    /// Returns whether this point represents the identity.
+    pub fn is_identity(&self) -> bool {
+        self.x.is_zero() && self.y.eq(&self.z)
+    }
+
+    /// Converts this point to extended coordinates.
+    #[cfg(test)]
+    pub const fn to_extended(self) -> G {
+        G {
+            x: self.x.mul(self.z),
+            y: self.y.mul(self.z),
+            t: self.x.mul(self.y),
+            z: self.z.square(),
+        }
+    }
+}
+
+/// A point `((X:Z), (Y:T))`, the affine point `(X/Z, Y/T)`, as an addition or doubling leaves it
+/// before its final multiplications.
+///
+/// Converting to [`GProjective`] takes three multiplications and to [`G`] four, so each
+/// operation can compute only the coordinates the next one reads.
+#[derive(Clone, Copy, Debug)]
+pub struct GCompleted {
+    x: F,
+    y: F,
+    z: F,
+    t: F,
+}
+
+impl GCompleted {
+    /// Finishes the complete addition formula of [`G::add`] from its products `A`, `B`, and `C`
+    /// and `D = 2*Z1*Z2`.
+    #[inline(always)]
+    const fn from_products(a: F, b: F, c: F, d: F) -> Self {
+        // In `G::add`'s notation, `X3/Z3 = E/G` and `Y3/Z3 = H/F`.
+        Self {
+            x: b.sub(a),
+            y: b.add(a),
+            z: d.add(c),
+            t: d.sub(c),
+        }
+    }
+
+    /// Converts this point to projective coordinates.
+    #[inline(always)]
+    pub const fn to_projective(self) -> GProjective {
+        GProjective {
+            x: self.x.mul(self.t),
+            y: self.z.mul(self.y),
+            z: self.t.mul(self.z),
+        }
+    }
+
+    /// Converts this point to extended coordinates.
+    #[inline(always)]
+    pub const fn to_extended(self) -> G {
+        G {
+            x: self.x.mul(self.t),
+            y: self.z.mul(self.y),
+            t: self.x.mul(self.y),
+            z: self.t.mul(self.z),
+        }
+    }
+}
+
+/// An affine point `(x, y)` stored as `(y + x, y - x, 2d*x*y)`.
+#[derive(Clone, Copy)]
+pub struct Niels {
+    sum: F,
+    diff: F,
+    t2d: F,
+}
+
+impl Niels {
+    /// The neutral element, `(0, 1)`.
+    const IDENTITY: Self = Self {
+        sum: F::ONE,
+        diff: F::ONE,
+        t2d: F::ZERO,
+    };
+
+    /// Negates this point, which swaps `y + x` with `y - x` and negates `2d*x*y`.
+    #[inline(always)]
+    pub const fn negate(self) -> Self {
+        Self {
+            sum: self.diff,
+            diff: self.sum,
+            t2d: self.t2d.neg(),
+        }
+    }
+}
+
+/// A point `(X:Y:Z:T)` in extended coordinates stored as `(Y + X, Y - X, Z, 2d*T)`, so adding it
+/// with [`G::add_projective_niels`] skips the multiplication by `2d`.
+#[derive(Clone, Copy)]
+pub struct ProjectiveNiels {
+    sum: F,
+    diff: F,
+    z: F,
+    t2d: F,
+}
+
+impl ProjectiveNiels {
+    /// Negates this point, which swaps `Y + X` with `Y - X` and negates `2d*T`.
+    #[inline(always)]
+    pub const fn negate(self) -> Self {
+        Self {
+            sum: self.diff,
+            diff: self.sum,
+            z: self.z,
+            t2d: self.t2d.neg(),
+        }
+    }
 }
 
 /// A compact affine point prepared for mixed addition.
 ///
-/// This stores individual affine points and their precomputed `2d*x*y` coordinate.
+/// This stores individual affine points and their precomputed `2d*x*y` coordinate. Its
+/// coordinates are laid out as 15 consecutive limbs, so backends can load several points straight
+/// into lanes.
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct GAffine {
     x: F,
     y: F,
@@ -644,8 +882,15 @@ impl GAffine {
         })
     }
 
+    /// Compresses this point to its canonical Ed25519 encoding.
+    pub fn compress(self) -> [u8; 32] {
+        let mut bytes = self.y.to_bytes();
+        bytes[31] |= u8::from(self.x.is_odd()) << 7;
+        bytes
+    }
+
     /// Converts this affine point to extended homogeneous representation.
-    pub fn to_extended(self) -> G {
+    pub const fn to_extended(self) -> G {
         G {
             x: self.x,
             y: self.y,
@@ -715,128 +960,6 @@ impl GAffine {
     }
 }
 
-/// Points on the twisted Edwards curve `-x^2 + y^2 = 1 + d*x^2*y^2` in extended homogeneous
-/// coordinates `(X : Y : Z : T)`.
-///
-/// The affine point is `(X/Z, Y/Z)`, and `T` carries the product `X*Y/Z`, giving the invariant
-/// `X*Y = T*Z`. Scaling all four coordinates by any nonzero factor represents the same point.
-/// The affine curve equation, scaled by `Z^2`, is `-X^2 + Y^2 = Z^2 + d*T^2`.
-#[derive(Clone, Copy)]
-pub struct GVec {
-    /// The extended homogeneous X coordinate.
-    pub x: FVec,
-    /// The extended homogeneous Y coordinate.
-    pub y: FVec,
-    /// The extended homogeneous T coordinate.
-    pub t: FVec,
-    /// The extended homogeneous Z coordinate.
-    pub z: FVec,
-}
-
-impl GVec {
-    /// Transposes scalar points into backend lanes.
-    pub fn transpose(lanes: [G; LANES]) -> Self {
-        Self {
-            x: FVec::transpose(lanes.map(|point| point.x)),
-            y: FVec::transpose(lanes.map(|point| point.y)),
-            t: FVec::transpose(lanes.map(|point| point.t)),
-            z: FVec::transpose(lanes.map(|point| point.z)),
-        }
-    }
-
-    /// Untransposes backend lanes into scalar points.
-    pub fn untranspose(self) -> [G; LANES] {
-        let x = self.x.untranspose();
-        let y = self.y.untranspose();
-        let t = self.t.untranspose();
-        let z = self.z.untranspose();
-        array::from_fn(|i| G {
-            x: x[i],
-            y: y[i],
-            t: t[i],
-            z: z[i],
-        })
-    }
-
-    /// Returns every lane set to `point`.
-    pub const fn splat(point: G) -> Self {
-        Self {
-            x: FVec::splat(point.x),
-            y: FVec::splat(point.y),
-            t: FVec::splat(point.t),
-            z: FVec::splat(point.z),
-        }
-    }
-
-    /// Returns the identity in every lane.
-    pub const fn identity() -> Self {
-        Self::splat(G::IDENTITY)
-    }
-
-    #[inline(always)]
-    fn add_pairs<const COUNT: usize>(sums: [G; LANES], backend: impl GBackend) -> [G; LANES] {
-        let mut left = [G::IDENTITY; LANES];
-        let mut right = [G::IDENTITY; LANES];
-        for i in 0..COUNT / 2 {
-            left[i] = sums[2 * i];
-            right[i] = sums[2 * i + 1];
-        }
-        backend
-            .g_add(Self::transpose(left), Self::transpose(right))
-            .untranspose()
-    }
-
-    /// Sums all eight lanes with a vector addition tree.
-    pub fn sum_lanes<B: GBackend>(self, backend: B) -> G {
-        let sums = Self::add_pairs::<LANES>(self.untranspose(), backend);
-        let sums = Self::add_pairs::<{ LANES / 2 }>(sums, backend);
-        Self::add_pairs::<{ LANES / 4 }>(sums, backend)[0]
-    }
-}
-
-/// Like `GVec`, but assuming that the point is in affine representation.
-///
-/// When we deserialize a point from bytes, this is what we naturally get.
-/// Operations are faster taking this into account, so we want to make sure to
-/// exploit that when we can, by using [`GBackend::g_add_mixed`] and cousins.
-#[derive(Clone, Copy)]
-pub struct GAffineVec {
-    pub x: FVec,
-    pub y: FVec,
-    pub t2d: FVec,
-}
-
-impl GAffineVec {
-    /// Transposes scalar affine points into backend lanes.
-    pub fn transpose(lanes: [GAffine; LANES]) -> Self {
-        Self {
-            x: FVec::transpose(lanes.map(|point| point.x)),
-            y: FVec::transpose(lanes.map(|point| point.y)),
-            t2d: FVec::transpose(lanes.map(|point| point.t2d)),
-        }
-    }
-
-    /// Packs affine points, negating the selected lanes.
-    ///
-    /// Variable-time, so the lane signs must be public.
-    pub fn from_signed_lanes<B: FBackend>(
-        backend: B,
-        lanes: &[GAffine; LANES],
-        negative: &[bool; LANES],
-    ) -> Self {
-        let packed = Self::transpose(*lanes);
-        if !negative.iter().any(|&value| value) {
-            return packed;
-        }
-
-        Self {
-            x: backend.conditional_neg(packed.x, negative),
-            y: packed.y,
-            t2d: backend.conditional_neg(packed.t2d, negative),
-        }
-    }
-}
-
 /// Raises every lane to `2^250 - 1` using the standard addition chain.
 fn pow_2_250_minus_1<B: FBackend>(backend: B, value: FVec) -> FVec {
     let a = backend.square(value);
@@ -859,28 +982,14 @@ fn pow_p58<B: FBackend>(backend: B, value: FVec) -> FVec {
     backend.mul(value, backend.pow2k(pow_2_250_minus_1(backend, value), 2))
 }
 
-/// Abstracts over group operations.
-pub trait GBackend: FBackend {
-    /// Add two points together.
-    ///
-    /// This method must work for all points, including the identity point, equal points, and a
-    /// point plus its negation. The Ed25519 curve admits complete addition formulas because
-    /// `a = -1` and `d` is non-square.
-    fn g_add(self, a: GVec, b: GVec) -> GVec;
-
-    /// Add two points together, assuming one is in its affine representation.
-    ///
-    /// This can be faster than [`Self::g_add`].
-    fn g_add_mixed(self, a: GVec, b: GAffineVec) -> GVec;
-
-    /// Add a point to itself.
-    fn g_double(self, a: GVec) -> GVec {
-        self.g_add(a, a)
+/// Abstracts over field and group operations.
+pub trait Backend: MBackend + 'static {
+    /// Decompresses both encodings as [`GAffine::decompress`] does, returning `None` if either
+    /// does not decode.
+    fn decompress_pair(self, [first, second]: [&[u8; 32]; 2]) -> Option<[GAffine; 2]> {
+        Some([GAffine::decompress(first)?, GAffine::decompress(second)?])
     }
 }
-
-/// Abstracts over field and group operations.
-pub trait Backend: MBackend + 'static {}
 
 /// A computation which can run over an arbitrary [`Backend`].
 ///
@@ -897,10 +1006,15 @@ pub trait WithBackend {
     fn call<B: Backend>(self, backend: B) -> Self::Output;
 }
 
+// Precomputed multiples of the Ed25519 basepoint: constant-time multiplication for key
+// generation and signing, and odd-multiple tables for verification.
+mod basepoint;
+pub use basepoint::{ODD_MULTIPLES, ODD_MULTIPLES_NAF_WIDTH};
+
 // Scalar multiplication on the Montgomery form of the curve, for X25519.
 pub mod montgomery;
 
-// Backend bucket kernels for MSM. Signing owns digit recoding and scheduling.
+// Backend kernels for MSM. Signing owns digit recoding and scheduling.
 pub mod msm;
 
 // Now, a module for each backend.

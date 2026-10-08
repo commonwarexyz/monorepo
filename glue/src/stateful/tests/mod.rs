@@ -1220,9 +1220,8 @@ fn out_of_order_certifications_complete_on_qmdb() {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NZUsize!(1),
-                    max_retained_roots: 1,
                 },
                 prune_config: None,
             },
@@ -1368,9 +1367,8 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NZUsize!(1),
-                    max_retained_roots: 1,
                 },
                 prune_config: None,
             },
@@ -1554,9 +1552,8 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NZUsize!(1),
-                    max_retained_roots: 1,
                 },
                 prune_config: None,
             },
@@ -1812,9 +1809,8 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NZUsize!(1),
-                    max_retained_roots: 1,
                 },
                 // The first prune runs at block 4 and targets block 3's floor,
                 // which crosses the full QMDB's first journal blob.

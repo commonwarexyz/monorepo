@@ -1,7 +1,8 @@
 //! Property suites shared by field and group backends.
 
 use super::{
-    Backend, F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES, MASK_51, WithBackend,
+    Backend, F, FBackend, FVec, G, GAffine, LANES, MASK_51, WithBackend,
+    msm::{self, WithLanes},
 };
 #[cfg(test)]
 use crate::test::ZIP215_POINTS;
@@ -106,110 +107,63 @@ pub(super) fn assert_f_eq(actual: FVec, expected: FVec, property: &str) {
     }
 }
 
-fn assert_f_nonzero(value: FVec, property: &str) {
-    assert_bounded(value);
-    for lane in 0..LANES {
-        let value = canonical(value.limbs.map(|limbs| limbs[lane]));
-        assert_ne!(value, [0; 5], "{property}, lane {lane}");
+/// Asserts that every coordinate of a point is within the field bound and that its Z is nonzero.
+fn assert_point_bounded(point: G, property: &str) {
+    for coordinate in [point.x, point.y, point.t, point.z] {
+        assert!(
+            coordinate.0.iter().all(|&limb| limb < 1 << 52),
+            "{property}: a limb is outside the field bound"
+        );
+    }
+    assert_ne!(
+        canonical(point.z.0),
+        [0; 5],
+        "{property}: projective Z coordinate"
+    );
+}
+
+/// Asserts that two extended points are the same group element.
+fn assert_g_eq(actual: G, expected: G, property: &str) {
+    assert_point_bounded(actual, property);
+    assert_point_bounded(expected, property);
+    for (actual_coordinate, expected_coordinate) in [
+        (actual.x, expected.x),
+        (actual.y, expected.y),
+        (actual.t, expected.t),
+    ] {
+        assert_eq!(
+            canonical(actual_coordinate.mul(expected.z).0),
+            canonical(expected_coordinate.mul(actual.z).0),
+            "{property}"
+        );
     }
 }
 
-const fn identity() -> GVec {
-    GVec {
-        x: FVec::splat(F::ZERO),
-        y: FVec::splat(F::ONE),
-        t: FVec::splat(F::ZERO),
-        z: FVec::splat(F::ONE),
-    }
+/// Asserts that an extended point satisfies the curve equation and `X*Y = T*Z`.
+fn assert_on_curve(point: G) {
+    assert_point_bounded(point, "curve point");
+    let lhs = point.y.square().sub(point.x.square());
+    let rhs = point.z.square().add(F::EDWARDS_D.mul(point.t.square()));
+    assert_eq!(canonical(lhs.0), canonical(rhs.0), "curve equation");
+    assert_eq!(
+        canonical(point.x.mul(point.y).0),
+        canonical(point.t.mul(point.z).0),
+        "extended-coordinate invariant"
+    );
 }
 
-fn basepoint<B: FBackend>(backend: B) -> GVec {
-    let x = FVec::splat(F([
-        1738742601995546,
-        1146398526822698,
-        2070867633025821,
-        562264141797630,
-        587772402128613,
-    ]));
-    let y = FVec::splat(F([
-        1801439850948184,
-        1351079888211148,
-        450359962737049,
-        900719925474099,
-        1801439850948198,
-    ]));
-    GVec {
-        x,
-        y,
-        t: backend.mul(x, y),
-        z: FVec::splat(F::ONE),
-    }
-}
-
-fn negate<B: FBackend>(backend: B, point: GVec) -> GVec {
-    GVec {
-        x: backend.neg(point.x),
-        y: point.y,
-        t: backend.neg(point.t),
-        z: point.z,
-    }
-}
-
-fn scale<B: GBackend>(backend: B, point: GVec, mut scalar: u32) -> GVec {
-    let mut result = identity();
+/// Multiplies every lane by `scalar` with double-and-add.
+fn scale<L: msm::Lanes<N>, const N: usize>(lanes: L, point: L::Point, mut scalar: u32) -> L::Point {
+    let mut result = lanes.identity();
     let mut multiple = point;
     while scalar != 0 {
         if scalar & 1 == 1 {
-            result = backend.g_add(result, multiple);
+            result = lanes.add(result, multiple);
         }
-        multiple = backend.g_double(multiple);
+        multiple = lanes.double(multiple);
         scalar >>= 1;
     }
     result
-}
-
-fn assert_g_eq<B: FBackend>(backend: B, actual: GVec, expected: GVec, property: &str) {
-    for coordinate in [actual.x, actual.y, actual.t, actual.z] {
-        assert_bounded(coordinate);
-    }
-    for coordinate in [expected.x, expected.y, expected.t, expected.z] {
-        assert_bounded(coordinate);
-    }
-    assert_f_nonzero(actual.z, property);
-    assert_f_nonzero(expected.z, property);
-    assert_f_eq(
-        backend.mul(actual.x, expected.z),
-        backend.mul(expected.x, actual.z),
-        property,
-    );
-    assert_f_eq(
-        backend.mul(actual.y, expected.z),
-        backend.mul(expected.y, actual.z),
-        property,
-    );
-    assert_f_eq(
-        backend.mul(actual.t, expected.z),
-        backend.mul(expected.t, actual.z),
-        property,
-    );
-}
-
-fn assert_on_curve<B: FBackend>(backend: B, point: GVec) {
-    for coordinate in [point.x, point.y, point.t, point.z] {
-        assert_bounded(coordinate);
-    }
-    assert_f_nonzero(point.z, "projective Z coordinate");
-    let lhs = backend.sub(backend.square(point.y), backend.square(point.x));
-    let rhs = backend.add(
-        backend.square(point.z),
-        backend.mul(FVec::splat(F::EDWARDS_D), backend.square(point.t)),
-    );
-    assert_f_eq(lhs, rhs, "curve equation");
-    assert_f_eq(
-        backend.mul(point.x, point.y),
-        backend.mul(point.t, point.z),
-        "extended-coordinate invariant",
-    );
 }
 
 fn fuzz_field<B: Backend>(u: &mut Unstructured<'_>, backend: B) -> arbitrary::Result<()> {
@@ -258,62 +212,64 @@ fn fuzz_field<B: Backend>(u: &mut Unstructured<'_>, backend: B) -> arbitrary::Re
 }
 
 fn fuzz_group<B: Backend>(u: &mut Unstructured<'_>, backend: B) -> arbitrary::Result<()> {
-    let a = u.arbitrary::<u16>()?;
-    let b = u.arbitrary::<u16>()?;
-    let c = u.arbitrary::<u16>()?;
-    let basepoint = basepoint(backend);
-    let p = scale(backend, basepoint, u32::from(a));
-    let q = scale(backend, basepoint, u32::from(b));
-    let r = scale(backend, basepoint, u32::from(c));
-
-    for point in [basepoint, p, q, r] {
-        assert_on_curve(backend, point);
-    }
-    assert_g_eq(backend, backend.g_add(p, identity()), p, "right identity");
-    assert_g_eq(backend, backend.g_add(identity(), p), p, "left identity");
-    assert_g_eq(
-        backend,
-        backend.g_add(p, negate(backend, p)),
-        identity(),
-        "additive inverse",
-    );
-    assert_g_eq(
-        backend,
-        backend.g_add(p, q),
-        backend.g_add(q, p),
-        "addition commutes",
-    );
-    assert_g_eq(
-        backend,
-        backend.g_add(backend.g_add(p, q), r),
-        backend.g_add(p, backend.g_add(q, r)),
-        "addition associates",
-    );
-    assert_g_eq(
-        backend,
-        backend.g_double(p),
-        backend.g_add(p, p),
-        "doubling",
-    );
-    assert_g_eq(
-        backend,
-        backend.g_add(p, q),
-        scale(backend, basepoint, u32::from(a) + u32::from(b)),
-        "scalar addition",
-    );
-
-    let affine_basepoint = GAffineVec {
-        x: basepoint.x,
-        y: basepoint.y,
-        t2d: backend.mul(basepoint.t, FVec::splat(F::EDWARDS_D2)),
-    };
-    assert_g_eq(
-        backend,
-        backend.g_add_mixed(p, affine_basepoint),
-        backend.g_add(p, basepoint),
-        "mixed addition",
-    );
+    let scalars = [
+        u.arbitrary::<u16>()?,
+        u.arbitrary::<u16>()?,
+        u.arbitrary::<u16>()?,
+    ]
+    .map(u32::from);
+    backend.with_lanes(GroupLaws { scalars });
     Ok(())
+}
+
+/// Group laws on a backend's native lanes, with every lane holding the same multiples of the
+/// basepoint.
+struct GroupLaws {
+    scalars: [u32; 3],
+}
+
+impl WithLanes for GroupLaws {
+    type Output = ();
+
+    fn call<L: msm::Lanes<N>, const N: usize>(self, lanes: L) {
+        let basepoint = GAffine::BASEPOINT.to_extended();
+        let base = lanes.load_extended([&basepoint; N]);
+        let [p, q, r] = self.scalars.map(|scalar| scale(lanes, base, scalar));
+        for point in [base, p, q, r] {
+            lanes.store(point).into_iter().for_each(assert_on_curve);
+        }
+
+        // Every lane of `actual` must be the same group element as that lane of `expected`.
+        let assert_lanes_eq = |actual: L::Point, expected: L::Point, property: &str| {
+            for (actual, expected) in lanes.store(actual).into_iter().zip(lanes.store(expected)) {
+                assert_g_eq(actual, expected, property);
+            }
+        };
+        let identity = lanes.identity();
+        let negated = lanes.store(p).map(G::negate);
+        let negated = lanes.load_extended(negated.each_ref());
+        assert_lanes_eq(lanes.add(p, identity), p, "right identity");
+        assert_lanes_eq(lanes.add(identity, p), p, "left identity");
+        assert_lanes_eq(lanes.add(p, negated), identity, "additive inverse");
+        assert_lanes_eq(lanes.add(p, q), lanes.add(q, p), "addition commutes");
+        assert_lanes_eq(
+            lanes.add(lanes.add(p, q), r),
+            lanes.add(p, lanes.add(q, r)),
+            "addition associates",
+        );
+        assert_lanes_eq(lanes.double(p), lanes.add(p, p), "doubling");
+        assert_lanes_eq(
+            lanes.add(p, q),
+            scale(lanes, base, self.scalars[0] + self.scalars[1]),
+            "scalar addition",
+        );
+        let affine = lanes.load([&GAffine::BASEPOINT; N]);
+        assert_lanes_eq(
+            lanes.add_mixed(p, affine),
+            lanes.add(p, base),
+            "mixed addition",
+        );
+    }
 }
 
 #[cfg(test)]
@@ -359,6 +315,20 @@ fn repeated_squaring_matches_scalar() {
 #[cfg(test)]
 #[test]
 fn backend_at_bounds() {
+    /// Asserts that a coordinate is within the field bound and equals `expected` as a field
+    /// element.
+    fn assert_coordinate_eq(actual: F, expected: F, property: &str) {
+        assert!(
+            actual
+                .0
+                .iter()
+                .chain(&expected.0)
+                .all(|&limb| limb < 1 << 52),
+            "{property}: a limb is outside the field bound"
+        );
+        assert_eq!(canonical(actual.0), canonical(expected.0), "{property}");
+    }
+
     struct CheckBackendAtBounds;
 
     impl WithBackend for CheckBackendAtBounds {
@@ -398,32 +368,48 @@ fn backend_at_bounds() {
 
             // These coordinates need not form a curve point: compare the complete formulas
             // coordinate-wise to exercise their loose-intermediate bounds.
-            let point = GVec {
+            backend.with_lanes(FormulasAtBound);
+        }
+    }
+
+    /// Each lane formula on coordinates at the field bound matches the scalar formula exactly.
+    struct FormulasAtBound;
+
+    impl WithLanes for FormulasAtBound {
+        type Output = ();
+
+        fn call<L: msm::Lanes<N>, const N: usize>(self, lanes: L) {
+            // Maximal loose coordinates exercise formula bounds without requiring a curve point.
+            let max = F([MASK_52; 5]);
+            let point = G {
                 x: max,
                 y: max,
                 t: max,
                 z: max,
             };
-            let affine = GAffineVec {
+            let affine = GAffine {
                 x: max,
                 y: max,
                 t2d: max,
             };
+            let loaded = lanes.load_extended([&point; N]);
+            let mixed = lanes.load([&affine; N]);
+
+            // Compare every output coordinate with the scalar formula and its field bound.
             for (actual, expected) in [
-                (backend.g_add(point, point), reference.g_add(point, point)),
-                (
-                    backend.g_add_mixed(point, affine),
-                    reference.g_add_mixed(point, affine),
-                ),
-                (backend.g_double(point), reference.g_double(point)),
+                (lanes.add(loaded, loaded), point.add(point)),
+                (lanes.add_mixed(loaded, mixed), point.add_mixed(affine)),
+                (lanes.double(loaded), point.double()),
             ] {
-                for (actual, expected) in [
-                    (actual.x, expected.x),
-                    (actual.y, expected.y),
-                    (actual.t, expected.t),
-                    (actual.z, expected.z),
-                ] {
-                    assert_f_eq(actual, expected, "group formula at bound");
+                for actual in lanes.store(actual) {
+                    for (actual, expected) in [
+                        (actual.x, expected.x),
+                        (actual.y, expected.y),
+                        (actual.t, expected.t),
+                        (actual.z, expected.z),
+                    ] {
+                        assert_coordinate_eq(actual, expected, "group formula at bound");
+                    }
                 }
             }
         }
@@ -488,51 +474,72 @@ fn fuzz_group_matches_portable<B: Backend>(
     u: &mut Unstructured<'_>,
     backend: B,
 ) -> arbitrary::Result<()> {
-    let reference = super::portable::Backend::new();
     let encodings: [[u8; 32]; LANES] = u.arbitrary()?;
     let decoded = GAffine::decompress_batch(backend, &encodings);
-    let lanes = array::from_fn(|i| {
+    let affine = array::from_fn(|i| {
         let scalar = GAffine::decompress(&encodings[i]);
         assert_eq!(
-            decoded[i].map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
-            scalar.map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
+            decoded[i].map(|point| (point.to_extended().compress(), point.t2d.to_bytes())),
+            scalar.map(|point| (point.to_extended().compress(), point.t2d.to_bytes())),
             "decompression lane {i}",
         );
         scalar.unwrap_or(GAffine::IDENTITY)
     });
-    let affine = GAffineVec::transpose(lanes);
-    let rhs = GVec::transpose(lanes.map(GAffine::to_extended));
+
+    // Scale each projective input by an arbitrary nonzero factor, so the formulas see
+    // coordinates other than the normalized ones.
     let scales = arbitrary_fvec(u)?
         .untranspose()
         .map(|scale| if scale.is_zero() { F::ONE } else { scale });
-    let point = GVec::transpose(array::from_fn(|i| {
-        let point = lanes[(i + 1) % LANES].to_extended();
+    let points = array::from_fn(|i| {
+        let point = affine[(i + 1) % LANES].to_extended();
         G {
             x: point.x.mul(scales[i]),
             y: point.y.mul(scales[i]),
             t: point.t.mul(scales[i]),
             z: point.z.mul(scales[i]),
         }
-    }));
-    assert_g_eq(
-        reference,
-        reference.g_double(point),
-        backend.g_double(point),
-        "backend doubling",
-    );
-    assert_g_eq(
-        reference,
-        reference.g_add(point, rhs),
-        backend.g_add(point, rhs),
-        "backend addition",
-    );
-    assert_g_eq(
-        reference,
-        reference.g_add_mixed(point, affine),
-        backend.g_add_mixed(point, affine),
-        "backend mixed addition",
-    );
+    });
+    backend.with_lanes(MatchesScalar { points, affine });
     Ok(())
+}
+
+/// Each lane's doubling of `points` matches scalar doubling, and its additions of `affine` in
+/// extended and mixed form both match scalar full addition, so `affine` must hold curve points.
+/// The inputs pass through the backend's native lanes `N` at a time.
+struct MatchesScalar {
+    points: [G; LANES],
+    affine: [GAffine; LANES],
+}
+
+impl WithLanes for MatchesScalar {
+    type Output = ();
+
+    fn call<L: msm::Lanes<N>, const N: usize>(self, lanes: L) {
+        const { assert!(LANES.is_multiple_of(N)) };
+
+        // Each native group loads its points and the matching `affine` points, the latter in both
+        // extended and affine form.
+        let extended = self.affine.map(GAffine::to_extended);
+        for start in (0..LANES).step_by(N) {
+            let point = lanes.load_extended(array::from_fn(|lane| &self.points[start + lane]));
+            let rhs = lanes.load_extended(array::from_fn(|lane| &extended[start + lane]));
+            let affine = lanes.load(array::from_fn(|lane| &self.affine[start + lane]));
+            let doubled = lanes.store(lanes.double(point));
+            let added = lanes.store(lanes.add(point, rhs));
+            let mixed = lanes.store(lanes.add_mixed(point, affine));
+
+            // Scalar doubling and full addition are the per-lane oracles, and both lane additions
+            // must match the full scalar sum.
+            for lane in 0..N {
+                let point = self.points[start + lane];
+                let sum = point.add(extended[start + lane]);
+                assert_g_eq(doubled[lane], point.double(), "backend doubling");
+                assert_g_eq(added[lane], sum, "backend addition");
+                assert_g_eq(mixed[lane], sum, "backend mixed addition");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -566,7 +573,6 @@ fn zip215_decompression_and_group_laws() {
         type Output = ();
 
         fn call<B: Backend>(self, backend: B) {
-            let reference = super::portable::Backend::new();
             let mut encodings = ZIP215_POINTS.to_vec();
             for offset in 0..19 {
                 for sign in [0, 0x80] {
@@ -582,31 +588,17 @@ fn zip215_decompression_and_group_laws() {
                 let lanes = array::from_fn(|i| {
                     let scalar = GAffine::decompress(&bytes[i]);
                     assert_eq!(
-                        decoded[i].map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes())),
-                        scalar.map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes()))
+                        decoded[i].map(|p| (p.to_extended().compress(), p.t2d.to_bytes())),
+                        scalar.map(|p| (p.to_extended().compress(), p.t2d.to_bytes()))
                     );
                     scalar.unwrap_or(GAffine::IDENTITY)
                 });
-                let p = GVec::transpose(lanes.map(GAffine::to_extended));
-                let q = GVec::transpose(array::from_fn(|i| lanes[(i + 1) % LANES].to_extended()));
-                assert_g_eq(
-                    reference,
-                    backend.g_add(p, q),
-                    reference.g_add(p, q),
-                    "ZIP215 addition",
-                );
-                assert_g_eq(
-                    reference,
-                    backend.g_double(p),
-                    reference.g_double(p),
-                    "ZIP215 doubling",
-                );
-                assert_g_eq(
-                    reference,
-                    backend.g_add_mixed(q, GAffineVec::transpose(lanes)),
-                    reference.g_add(q, p),
-                    "ZIP215 mixed addition",
-                );
+
+                // Each point's successor doubles, adds the point, and adds it in mixed form.
+                backend.with_lanes(MatchesScalar {
+                    points: array::from_fn(|i| lanes[(i + 1) % LANES].to_extended()),
+                    affine: lanes,
+                });
             }
         }
     }
@@ -615,23 +607,162 @@ fn zip215_decompression_and_group_laws() {
     super::with_backend(Check);
 }
 
+/// Checks the completed, projective, and Niels forms against the extended formulas, for sums of
+/// equal and opposite points and of points with low-order components.
 #[cfg(test)]
 #[test]
-fn secret_scalar_multiplication_matches_public() {
+fn completed_point_operations_match_extended() {
+    use super::Niels;
+
+    fn check(p: G, q: G) {
+        let niels = |point: G| {
+            let affine = point.to_affine();
+            Niels {
+                sum: affine.y.add(affine.x),
+                diff: affine.y.sub(affine.x),
+                t2d: affine.t2d,
+            }
+        };
+        let assert_matches = |actual: G, expected: G, property: &str| {
+            assert_on_curve(actual);
+            assert_g_eq(actual, expected, property);
+        };
+
+        let doubled = p.to_projective().double();
+        assert_matches(doubled.to_extended(), p.double(), "double to extended");
+        assert_matches(
+            doubled.to_projective().to_extended(),
+            p.double(),
+            "double to projective",
+        );
+        assert_matches(
+            p.to_projective().mul_by_cofactor().to_extended(),
+            p.mul_by_cofactor(),
+            "cofactor",
+        );
+        assert_eq!(
+            p.to_projective().mul_by_cofactor().is_identity(),
+            p.mul_by_cofactor().is_identity()
+        );
+
+        let sum = p.add(q);
+        let difference = p.add(q.negate());
+        for (actual, expected, property) in [
+            (p.add_projective_niels(q.to_projective_niels()), sum, "sum"),
+            (
+                p.add_projective_niels(q.to_projective_niels().negate()),
+                difference,
+                "difference",
+            ),
+            (p.add_niels_completed(niels(q)), sum, "Niels sum"),
+            (
+                p.add_niels_completed(niels(q).negate()),
+                difference,
+                "Niels difference",
+            ),
+        ] {
+            assert_matches(actual.to_extended(), expected, property);
+            assert_matches(actual.to_projective().to_extended(), expected, property);
+        }
+    }
+
+    // The identity, every ZIP215 point (including each low-order point), and the basepoint with
+    // a low-order component, so that `Z` is not one.
+    let base = GAffine::BASEPOINT.to_extended();
+    let mut points = vec![G::IDENTITY, base.add(base)];
+    for encoding in &ZIP215_POINTS {
+        let point = GAffine::decompress(encoding).unwrap().to_extended();
+        points.extend([point, base.add(point)]);
+    }
+    for &p in &points {
+        for &q in &points {
+            check(p, q);
+        }
+        check(p, p.negate());
+    }
+
     commonware_invariants::minifuzz::Builder::default()
         .with_seed(0)
-        .with_search_limit(32)
+        .with_search_limit(64)
         .test(|u| {
-            let scalar: [u8; 32] = u.arbitrary()?;
-            let torsion = GAffine::decompress(u.choose(&ZIP215_POINTS)?)
-                .unwrap()
-                .to_extended();
-            let point = GAffine::BASEPOINT.to_extended().add(torsion);
-            let bits = (0..256).rev().map(|i| scalar[i / 8] >> (i % 8) & 1 == 1);
-            assert_eq!(
-                point.scalar_mul_secret(&scalar).to_bytes(),
-                point.scalar_mul(bits).to_bytes()
-            );
+            let mut point = || -> arbitrary::Result<G> {
+                let encoding: [u8; 32] = u.arbitrary()?;
+                let point = GAffine::decompress(&encoding).unwrap_or(GAffine::BASEPOINT);
+                let torsion = GAffine::decompress(u.choose(&ZIP215_POINTS)?).unwrap();
+                Ok(point.to_extended().add(torsion.to_extended()))
+            };
+            let p = point()?;
+            let q = point()?;
+            check(p, q);
+            check(p, p);
+            check(p, p.negate());
+            Ok(())
+        });
+}
+
+/// [`Backend::decompress_pair`] matches decompressing each encoding on its own, whichever of the
+/// two encodings fails to decode.
+#[cfg(test)]
+#[test]
+fn decompress_pair_matches_scalar() {
+    /// Checks every ordered pair of encodings with the given backend.
+    struct Check<'a>(&'a [[u8; 32]]);
+
+    impl WithBackend for Check<'_> {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) {
+            let key = |point: GAffine| (point.compress(), point.t2d.to_bytes());
+            for first in self.0 {
+                for second in self.0 {
+                    let expected = GAffine::decompress(first)
+                        .zip(GAffine::decompress(second))
+                        .map(|(first, second)| [key(first), key(second)]);
+                    let actual = backend
+                        .decompress_pair([first, second])
+                        .map(|points| points.map(key));
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+
+    fn check(encodings: &[[u8; 32]]) {
+        Check(encodings).call(super::portable::Backend::new());
+        super::with_backend(Check(encodings));
+    }
+
+    // A `y` with no matching `x`, under both sign bits.
+    let undecodable = (2u8..)
+        .map(|y| {
+            let mut encoding = [0u8; 32];
+            encoding[0] = y;
+            encoding
+        })
+        .find(|encoding| GAffine::decompress(encoding).is_none())
+        .unwrap();
+    let mut negative = undecodable;
+    negative[31] |= 0x80;
+
+    let mut encodings = ZIP215_POINTS.to_vec();
+    encodings.extend([undecodable, negative]);
+    check(&encodings);
+
+    // Arbitrary encodings, about half of which decode, next to random multiples of the basepoint
+    // and an undecodable encoding.
+    let base = GAffine::BASEPOINT.to_extended();
+    commonware_invariants::minifuzz::Builder::default()
+        .with_seed(0)
+        .with_search_limit(64)
+        .test(|u| {
+            let arbitrary: [[u8; 32]; 2] = u.arbitrary()?;
+            let valid = arbitrary.map(|scalar| {
+                let bits = scalar
+                    .into_iter()
+                    .flat_map(|byte| (0..8).map(move |i| byte >> i & 1 == 1));
+                base.scalar_mul(bits).compress()
+            });
+            check(&[arbitrary[0], arbitrary[1], valid[0], valid[1], undecodable]);
             Ok(())
         });
 }
@@ -642,102 +773,49 @@ fn with_backend_matches_portable() {
     #[derive(Clone, Copy)]
     struct DispatchComputation {
         field: FVec,
-        point: GVec,
-        affine: GAffineVec,
+        point: G,
+        affine: GAffine,
     }
 
     impl WithBackend for DispatchComputation {
-        type Output = (FVec, GVec);
+        type Output = (FVec, G);
 
         fn call<B: Backend>(self, backend: B) -> Self::Output {
             let field = backend.sub(
                 backend.add(
-                    backend.mul(self.field, self.point.x),
-                    backend.square(self.point.y),
+                    backend.mul(self.field, FVec::splat(self.point.x)),
+                    backend.square(FVec::splat(self.point.y)),
                 ),
                 backend.neg(self.field),
             );
-            let point = backend.g_add_mixed(
-                backend.g_add(backend.g_double(self.point), self.point),
-                self.affine,
-            );
-            (field, point)
+            (field, backend.with_lanes(self))
+        }
+    }
+
+    impl WithLanes for DispatchComputation {
+        type Output = G;
+
+        fn call<L: msm::Lanes<N>, const N: usize>(self, lanes: L) -> G {
+            let point = lanes.load_extended([&self.point; N]);
+            let affine = lanes.load([&self.affine; N]);
+            let chained = lanes.add_mixed(lanes.add(lanes.double(point), point), affine);
+            lanes.store(chained)[0]
         }
     }
 
     let portable = super::portable::Backend::new();
-    let basepoint = basepoint(portable);
-    let point = scale(portable, basepoint, 13);
+    let point = GAffine::BASEPOINT
+        .to_extended()
+        .scalar_mul((0..4).rev().map(|bit| 13u32 & (1 << bit) != 0));
     let computation = DispatchComputation {
-        field: point.x,
+        field: FVec::splat(point.x),
         point,
-        affine: GAffineVec {
-            x: basepoint.x,
-            y: basepoint.y,
-            t2d: portable.mul(basepoint.t, FVec::splat(F::EDWARDS_D2)),
-        },
+        affine: GAffine::BASEPOINT,
     };
-    let expected = computation.call(portable);
+    let expected = WithBackend::call(computation, portable);
     let actual = super::with_backend(computation);
     assert_f_eq(actual.0, expected.0, "runtime-dispatched field computation");
-    assert_g_eq(
-        portable,
-        actual.1,
-        expected.1,
-        "runtime-dispatched group computation",
-    );
-}
-
-#[test]
-fn backend_conditional_neg_matches_every_mask() {
-    struct Check;
-
-    impl WithBackend for Check {
-        type Output = ();
-
-        fn call<B: Backend>(self, backend: B) {
-            let mixed = FVec {
-                limbs: array::from_fn(|limb| {
-                    array::from_fn(|lane| {
-                        let offset = (limb * LANES + lane) as u64;
-                        if (limb + lane) & 1 == 0 {
-                            offset
-                        } else {
-                            MASK_52 - offset
-                        }
-                    })
-                }),
-            };
-            for value in [FVec::splat(F::ZERO), FVec::splat(F([MASK_52; 5])), mixed] {
-                let lanes = value.untranspose();
-                for mask in 0..1u16 << LANES {
-                    let negative = array::from_fn(|lane| mask & (1 << lane) != 0);
-                    let actual = backend.conditional_neg(value, &negative);
-                    let expected = FVec::transpose(array::from_fn(|lane| {
-                        if negative[lane] {
-                            lanes[lane].neg()
-                        } else {
-                            lanes[lane]
-                        }
-                    }));
-                    assert_f_eq(actual, expected, "conditional negation");
-                    for (lane, negative) in negative.into_iter().enumerate() {
-                        if !negative {
-                            for limb in 0..5 {
-                                assert_eq!(
-                                    actual.limbs[limb][lane], value.limbs[limb][lane],
-                                    "unselected limb {limb}, lane {lane}, mask {mask:#04x}"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Check.call(super::portable::Backend::new());
-    super::with_backend(Check);
+    assert_g_eq(actual.1, expected.1, "runtime-dispatched group computation");
 }
 
 #[test]
@@ -749,7 +827,7 @@ fn bucket_fill_matches_scalar_sum_for_every_geometry() {
             &GAffine::BASEPOINT
                 .to_extended()
                 .add(torsion.to_extended())
-                .to_bytes(),
+                .compress(),
         )
         .unwrap();
         let points = [GAffine::IDENTITY, GAffine::BASEPOINT, torsion, mixed];
@@ -785,7 +863,7 @@ fn bucket_fill_matches_scalar_sum_for_every_geometry() {
                     buckets.as_flattened_mut(),
                     NB,
                     piece,
-                    |term| *term,
+                    |(point, digit)| (point, *digit),
                 );
             }
             let actual = buckets
@@ -809,30 +887,45 @@ fn bucket_fill_matches_scalar_sum_for_every_geometry() {
     check::<16>();
 }
 
+/// Each backend's lanes store exactly what they load and sum to the scalar sum of their points.
 #[test]
-fn sum_lanes_matches_scalar_sum() {
+fn lanes_store_and_sum_match_scalar() {
     struct Check;
 
-    impl WithBackend for Check {
+    impl WithLanes for Check {
         type Output = ();
 
-        fn call<B: Backend>(self, backend: B) {
+        fn call<L: msm::Lanes<N>, const N: usize>(self, lanes: L) {
+            // Include prime-order, torsion and mixed-order points, plus identity and negation.
             let base = GAffine::BASEPOINT.to_extended();
             let torsion = GAffine::decompress(&[0; 32]).unwrap().to_extended();
             let points = [G::IDENTITY, base, torsion, base.add(torsion), base.negate()];
+
+            // Rotate the fixtures through every active-lane mask.
             for offset in 0..points.len() {
-                for mask in 0..1usize << LANES {
-                    let lanes = array::from_fn(|lane| {
+                for mask in 0..1usize << N {
+                    let inputs: [G; N] = array::from_fn(|lane| {
                         if mask & (1 << lane) != 0 {
                             points[(lane + offset) % points.len()]
                         } else {
                             G::IDENTITY
                         }
                     });
-                    let expected = lanes.into_iter().fold(G::IDENTITY, G::add);
-                    let actual = GVec::transpose(lanes).sum_lanes(backend);
+                    let loaded = lanes.load_extended(inputs.each_ref());
+
+                    // Storage must preserve the exact coordinates, including loose field values.
+                    for (stored, input) in lanes.store(loaded).into_iter().zip(inputs) {
+                        assert_eq!(
+                            [stored.x.0, stored.y.0, stored.t.0, stored.z.0],
+                            [input.x.0, input.y.0, input.t.0, input.z.0],
+                            "offset={offset} mask={mask:#x}"
+                        );
+                    }
+
+                    // Summation must preserve torsion as well as the prime-order component.
+                    let expected = inputs.into_iter().fold(G::IDENTITY, G::add);
                     assert!(
-                        actual.add(expected.negate()).is_identity(),
+                        lanes.sum(loaded).add(expected.negate()).is_identity(),
                         "offset={offset} mask={mask:#x}"
                     );
                 }
@@ -840,6 +933,16 @@ fn sum_lanes_matches_scalar_sum() {
         }
     }
 
-    Check.call(super::portable::Backend::new());
-    super::with_backend(Check);
+    struct Run;
+
+    impl WithBackend for Run {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) {
+            backend.with_lanes(Check);
+        }
+    }
+
+    Run.call(super::portable::Backend::new());
+    super::with_backend(Run);
 }
