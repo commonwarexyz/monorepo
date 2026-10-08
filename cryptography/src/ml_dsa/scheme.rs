@@ -283,7 +283,8 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 ///
 /// Decoding accepts only encodings that FIPS 204 `sigDecode` accepts, and `sigEncode` is the
 /// inverse of `sigDecode` on those encodings, so a decoded signature has exactly one encoding.
-/// Decoding from a [Bytes]-backed buffer shares that buffer rather than copying it.
+/// Decoding copies the signature out of its buffer: signatures outlive the messages that carry
+/// them, so a retained signature must not keep a pooled network buffer alive.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, FixedArray)]
 pub struct Signature {
     raw: Bytes,
@@ -308,8 +309,10 @@ impl Read for Signature {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         at_least(buf, SIGNATURE_LENGTH)?;
+        let mut raw = [0u8; SIGNATURE_LENGTH];
+        buf.copy_to_slice(&mut raw);
         let signature = Self {
-            raw: buf.copy_to_bytes(SIGNATURE_LENGTH),
+            raw: Bytes::copy_from_slice(&raw),
         };
         if signature.parse().is_none() {
             return Err(CodecError::Invalid(NAME, "Invalid Signature"));
@@ -483,8 +486,8 @@ mod tests {
         let decoded = Signature::decode(encoded.clone()).unwrap();
         assert_eq!(original, decoded);
 
-        // Decoding from owned bytes shares the input allocation.
-        assert_eq!(decoded.as_ref().as_ptr(), encoded.as_ref().as_ptr());
+        // Decoding copies out of the input allocation so the input can be released.
+        assert_ne!(decoded.as_ref().as_ptr(), encoded.as_ref().as_ptr());
     }
 
     #[test]
