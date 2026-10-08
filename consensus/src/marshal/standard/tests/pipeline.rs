@@ -11,6 +11,11 @@ enum First {
     Build,
 }
 
+/// The victim's application. Its first verification (the parent's) and its single handoff
+/// build each wait on a test-controlled gate.
+///
+/// A second build request panics because the retained handoff must never be rebuilt.
+/// `policies` counts how often the handoff policy is evaluated.
 #[derive(Clone)]
 struct PipelineApp {
     verify_started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
@@ -75,6 +80,7 @@ async fn next_vote(
 /// published after that certification and is never rebuilt.
 fn retained_pipeline_handoff(first: First) {
     deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+        // Only the victim runs marshal and consensus. The peer supplies votes and certificates.
         let Fixture {
             participants,
             schemes,
@@ -96,6 +102,8 @@ fn retained_pipeline_handoff(first: First) {
         )
         .await;
         let mut marshal = setup.mailbox;
+
+        // Verify and finalize view 1 in marshal so the engine starts from it as its floor.
         let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
         let floor_round = Round::new(Epoch::zero(), View::new(1));
         let floor_block = B::new::<Sha256>(
@@ -116,6 +124,9 @@ fn retained_pipeline_handoff(first: First) {
             QUORUM,
         );
         StandardHarness::report_finalization(&mut marshal, floor_finalization.clone()).await;
+
+        // Cache the peer's view 2 block in the victim's buffer without sending it, so the
+        // victim can verify the parent while it remains uncertified.
         let parent_round = Round::new(Epoch::zero(), View::new(2));
         let parent_block = B::new::<Sha256>(
             Ctx {
@@ -134,6 +145,8 @@ fn retained_pipeline_handoff(first: First) {
                 .broadcast(Recipients::Some(vec![]), parent_block)
                 .accepted()
         );
+
+        // The victim leads view 3, and its handoff candidate builds on the parent.
         let round = Round::new(Epoch::zero(), View::new(3));
         let expected_context = Ctx {
             round,
@@ -142,6 +155,8 @@ fn retained_pipeline_handoff(first: First) {
         };
         let block = B::new::<Sha256>(expected_context.clone(), parent_digest, Height::new(3), 300);
         let digest = block.digest();
+
+        // Gates that let the test pace the parent's verification and the handoff build.
         let (verify_tx, verify_rx) = oneshot::channel();
         let (verify_release_tx, verify_release_rx) = oneshot::channel();
         let (build_tx, build_rx) = oneshot::channel();
@@ -157,6 +172,9 @@ fn retained_pipeline_handoff(first: First) {
             policies: policies.clone(),
             block,
         };
+
+        // Register the victim's engine channels and the peer's matching channels, then link
+        // every participant.
         let control = oracle.control(victim.clone());
         let vote_network = control.register(3, TEST_QUOTA).await.unwrap();
         let certificate_network = control.register(4, TEST_QUOTA).await.unwrap();
@@ -167,6 +185,8 @@ fn retained_pipeline_handoff(first: First) {
             control.register(4, TEST_QUOTA).await.unwrap();
         let _resolver = control.register(5, TEST_QUOTA).await.unwrap();
         setup_network_links(&mut oracle, &participants, LINK).await;
+
+        // Run the engine from the finalized floor with the gated application behind Deferred.
         let wrapper = Deferred::new(
             context.child("wrapper"),
             app,

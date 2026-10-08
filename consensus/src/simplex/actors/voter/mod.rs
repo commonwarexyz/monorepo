@@ -63,7 +63,8 @@ mod tests {
                 self, Config as _, Mode as _, Random, RandomVersion, RoundRobin, RoundRobinElector,
             },
             metrics::TimeoutReason,
-            mocks, quorum,
+            mocks::{self, application::Certifier},
+            quorum,
             scheme::{
                 Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf,
                 ed25519, secp256r1,
@@ -623,6 +624,18 @@ mod tests {
             );
             context.sleep(Duration::from_millis(1)).await;
         }
+    }
+
+    /// Certifies every view but `view`, whose request it parks in `requests` for
+    /// [`take_certification_request`].
+    fn hold(view: View, requests: CertificationRequests) -> Certifier<Sha256Digest> {
+        Certifier::Controlled(Box::new(move |round, _, response| {
+            if round.view() == view {
+                requests.lock().push((round.view(), response));
+            } else {
+                response.send(true).unwrap();
+            }
+        }))
     }
 
     fn trace_position(
@@ -3975,8 +3988,7 @@ mod tests {
             // Views 1 and 2 form term 1; view 3 starts term 2.
             let outgoing_idx = built_elector.elect(Round::new(epoch, View::new(1)), ());
             let outgoing = participants[usize::from(outgoing_idx)].clone();
-            let local_index =
-                usize::from(built_elector.elect(Round::new(epoch, View::new(3)), ()));
+            let local_index = usize::from(built_elector.elect(Round::new(epoch, View::new(3)), ()));
             assert_ne!(usize::from(outgoing_idx), local_index);
 
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
@@ -4025,14 +4037,17 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = msg.unwrap() {
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) =
+                            msg.unwrap()
+                        {
                             if notarize.view() == View::new(2) {
                                 saw_view_2_notarize = true;
                             }
                             if notarize.view() == View::new(3) {
                                 assert!(
                                     saw_view_2_notarize,
-                                    "expected the outgoing tip's notarize before the handoff notarize"
+                                    "expected the outgoing tip's notarize before the \
+                                     handoff notarize"
                                 );
                                 assert_eq!(
                                     notarize.proposal.parent,
@@ -4109,7 +4124,9 @@ mod tests {
             while parent.is_none() || child.is_none() {
                 select! {
                     message = batcher_receiver.recv() => {
-                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = message.unwrap() {
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) =
+                            message.unwrap()
+                        {
                             match notarize.view() {
                                 view if view == View::new(1) => {
                                     parent = Some(notarize.proposal);
@@ -4258,7 +4275,6 @@ mod tests {
             let propose_requests = Arc::new(Mutex::new(Vec::new()));
             let handoff_responses = Arc::new(Mutex::new(Vec::new()));
             let certification_requests = Arc::new(Mutex::new(Vec::new()));
-            let controlled = certification_requests.clone();
             let actor_handle = Arc::new(Mutex::new(None));
             let pending_syncs = PendingSyncs::default();
             let voter_context = DelayedSyncContext {
@@ -4277,15 +4293,7 @@ mod tests {
                     timeout_retry: HANDOFF_RETRY_TIMEOUT,
                     local_index,
                     actor_handle: Some(actor_handle.clone()),
-                    certifier: mocks::application::Certifier::Controlled(Box::new(
-                        move |round, _, response| {
-                            if round.view() == View::new(2) {
-                                controlled.lock().push((round.view(), response));
-                            } else {
-                                response.send(true).unwrap();
-                            }
-                        },
-                    )),
+                    certifier: hold(View::new(2), certification_requests.clone()),
                     propose_requests: Some(propose_requests.clone()),
                     handoff_responses: Some(handoff_responses.clone()),
                     ..options
@@ -4737,16 +4745,18 @@ mod tests {
         );
     }
 
+    /// [`certification_first_reuses_build`] under [`HandoffPolicy::Stage`].
     #[test_traced]
-    fn test_pipelined_handoff_certification_before_build() {
+    fn test_pipelined_handoff_certification_first_reuses_build_stage() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             certification_first_reuses_build(&mut context, HandoffPolicy::Stage).await;
         });
     }
 
+    /// [`certification_first_reuses_build`] under [`HandoffPolicy::Publish`].
     #[test_traced]
-    fn test_pipelined_handoff_permitted_early_publication_finishes_after_certification() {
+    fn test_pipelined_handoff_certification_first_reuses_build_publish() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             certification_first_reuses_build(&mut context, HandoffPolicy::Publish).await;
@@ -5517,10 +5527,8 @@ mod tests {
         quorum: u32,
         schemes: Vec<ed25519::Scheme>,
         local_index: usize,
-        _oracle: Oracle<PublicKey, deterministic::Context>,
         mailbox: Mailbox<ed25519::Scheme, Sha256Digest>,
         batcher: mailbox::Receiver<batcher::Message<ed25519::Scheme, Sha256Digest>>,
-        _relay: Arc<mocks::relay::Relay<Sha256Digest, PublicKey>>,
         proposals: Vec<Proposal<Sha256Digest>>,
         propose_requests: ProposeRequests,
         /// The application's held response to the view 4 handoff request.
@@ -5558,7 +5566,6 @@ mod tests {
             let propose_requests = Arc::new(Mutex::new(Vec::new()));
             let handoff_responses = Arc::new(Mutex::new(Vec::new()));
             let certification_requests: CertificationRequests = Arc::new(Mutex::new(Vec::new()));
-            let controlled = certification_requests.clone();
             let (mut mailbox, mut batcher, _, relay, _) = setup_voter(
                 &*context,
                 &oracle,
@@ -5573,15 +5580,7 @@ mod tests {
                     propose_requests: Some(propose_requests.clone()),
                     handoff_responses: Some(handoff_responses.clone()),
                     handoff: HandoffPolicy::Publish,
-                    certifier: mocks::application::Certifier::Controlled(Box::new(
-                        move |round, _, response| {
-                            if round.view() == View::new(2) {
-                                controlled.lock().push((round.view(), response));
-                            } else {
-                                response.send(true).unwrap();
-                            }
-                        },
-                    )),
+                    certifier: hold(View::new(2), certification_requests.clone()),
                     ..Default::default()
                 },
             )
@@ -5644,10 +5643,8 @@ mod tests {
                 quorum,
                 schemes,
                 local_index,
-                _oracle: oracle,
                 mailbox,
                 batcher,
-                _relay: relay,
                 proposals,
                 propose_requests,
                 response,
@@ -5833,7 +5830,6 @@ mod tests {
             let local_index = usize::from(built_elector.elect(Round::new(epoch, View::new(4)), ()));
             let propose_requests = Arc::new(Mutex::new(Vec::new()));
             let certification_requests: CertificationRequests = Arc::new(Mutex::new(Vec::new()));
-            let controlled = certification_requests.clone();
             let (mut mailbox, mut batcher, _, _, _) = setup_voter(
                 &context,
                 &oracle,
@@ -5844,15 +5840,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(10),
                     local_index,
                     propose_requests: Some(propose_requests.clone()),
-                    certifier: mocks::application::Certifier::Controlled(Box::new(
-                        move |round, _, response| {
-                            if round.view() == View::new(3) {
-                                controlled.lock().push((round.view(), response));
-                            } else {
-                                response.send(true).unwrap();
-                            }
-                        },
-                    )),
+                    certifier: hold(View::new(3), certification_requests.clone()),
                     ..Default::default()
                 },
             )

@@ -546,6 +546,21 @@ mod tests {
         time::Duration,
     };
 
+    /// Runner budget for [`cancelled_handoff_proposal_unblocks_parent_certification`],
+    /// including its [`QUIET`] window.
+    const BUDGET: Duration = Duration::from_secs(1_000);
+
+    /// How long [`cancelled_handoff_proposal_unblocks_parent_certification`] checks that parent
+    /// verification stays behind the handoff build.
+    ///
+    /// The proposal gate has no timed release, and nothing in the fixture fires on a timer within
+    /// this window, so parent verification can only start inside it by overtaking the build.
+    const QUIET: Duration = Duration::from_secs(300);
+
+    /// How long [`cancelled_handoff_proposal_unblocks_parent_certification`] waits for parent
+    /// verification to start once the handoff build is cancelled.
+    const RESUME: Duration = Duration::from_secs(1);
+
     struct ApplicationGate {
         started: oneshot::Sender<()>,
         release: oneshot::Receiver<()>,
@@ -1619,7 +1634,7 @@ mod tests {
     /// build and lets the parent certify.
     #[test]
     fn cancelled_handoff_proposal_unblocks_parent_certification() {
-        deterministic::Runner::timed(Duration::from_secs(1_000)).start(|context| async move {
+        deterministic::Runner::timed(BUDGET).start(|context| async move {
             let (outgoing_gate, outgoing_started, outgoing_release) = application_gate();
             let (parent_gate, mut parent_started, parent_release) = application_gate();
             let (proposal_gate, proposal_started, _proposal_release) = application_gate();
@@ -1714,7 +1729,7 @@ mod tests {
                 _ = &mut parent_started => {
                     panic!("parent verification overtook the handoff build");
                 },
-                _ = context.sleep(Duration::from_secs(300)) => {},
+                _ = context.sleep(QUIET) => {},
             }
             assert!(poll!(&mut certify).is_pending());
 
@@ -1724,7 +1739,7 @@ mod tests {
                 result = &mut parent_started => {
                     result.expect("parent verification should start");
                 },
-                _ = context.sleep(Duration::from_secs(1)) => {
+                _ = context.sleep(RESUME) => {
                     panic!("cancelled handoff build blocked parent verification");
                 },
             }
