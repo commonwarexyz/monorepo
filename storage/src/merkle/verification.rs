@@ -80,12 +80,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
             .split_proof_digests(&proof.digests)
             .map_err(|_| Error::InvalidProof)?;
         let num_fold_peaks = bp.fold_prefix.len();
-
-        let fold_acc = if num_fold_peaks > 0 {
-            Some(*proof.digests.first().ok_or(Error::InvalidProof)?)
-        } else {
-            None
-        };
+        let fold_acc = proof_digests.fold_prefix.copied();
         let suffix_peaks = bp
             .suffix_peaks()
             .map_or_else(Vec::new, |peaks| peaks.to_vec());
@@ -132,8 +127,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
             digests.push(acc.expect("fold_prefix is non-empty so acc must be set"));
         }
 
-        let sibling_start = bp.sibling_start();
-        for &pos in &bp.fetch_nodes[..sibling_start] {
+        for pos in bp.individual_positions() {
             match self.digests.get(&pos) {
                 Some(d) => digests.push(*d),
                 None => return Err(Error::ElementPruned(pos)),
@@ -142,7 +136,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         if let Some(suffix_peaks) = bp.suffix_peaks() {
             digests.push(self.suffix_acc(hasher, suffix_peaks)?);
         }
-        for &pos in &bp.fetch_nodes[sibling_start..] {
+        for &pos in &bp.siblings {
             match self.digests.get(&pos) {
                 Some(d) => digests.push(*d),
                 None => return Err(Error::ElementPruned(pos)),

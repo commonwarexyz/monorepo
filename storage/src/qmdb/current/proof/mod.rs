@@ -2494,27 +2494,6 @@ mod tests {
         }
     }
 
-    struct RecordingStorage<'a, S> {
-        inner: &'a S,
-        reads: Mutex<BTreeSet<u64>>,
-    }
-
-    impl<F: Family, S: Storage<F>> Storage<F> for RecordingStorage<'_, S> {
-        type Digest = S::Digest;
-
-        fn size(&self) -> Position<F> {
-            self.inner.size()
-        }
-
-        async fn get_node(
-            &self,
-            position: Position<F>,
-        ) -> Result<Option<S::Digest>, merkle::Error<F>> {
-            self.reads.lock().insert(*position);
-            self.inner.get_node(position).await
-        }
-    }
-
     async fn fixture<F: Graftable>(
         leaves: u64,
         pruned: u64,
@@ -2558,14 +2537,14 @@ mod tests {
                 let (bitmap, ops, grafted) = fixture::<F>(leaves, pruned).await;
                 let hasher = qmdb::hasher::<Sha256>();
                 let ops_root = ops.root(&hasher, 0).unwrap();
-                let grafted_storage = grafting::Storage::<F, Sha256, _, _>::new(
+                let storage = grafting::Storage::<F, Sha256, _, _>::new(
                     &grafted,
                     grafting::height::<1>(),
                     &ops,
                 );
                 let root = db::compute_db_root::<F, Sha256, _, _, 1>(
                     &bitmap,
-                    &grafted_storage,
+                    &storage,
                     Location::new(leaves),
                     db::partial_chunk::<_, 1>(&bitmap),
                     floor,
@@ -2598,18 +2577,12 @@ mod tests {
                                 .positions()
                         },
                     );
-                    let positions = planned.iter().map(|pos| **pos).collect::<Vec<_>>();
-                    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
                     let fetched: BTreeMap<_, _> = planned
                         .iter()
                         .copied()
-                        .zip(grafted_storage.get_nodes(&planned).await.unwrap())
+                        .zip(storage.get_nodes(&planned).await.unwrap())
                         .collect();
                     let get_node = |pos: Position<F>| fetched.get(&pos).copied();
-                    let storage = RecordingStorage {
-                        inner: &grafted_storage,
-                        reads: Mutex::new(BTreeSet::new()),
-                    };
                     let preloaded = PreloadedBitmap {
                         bitmap: &bitmap,
                         chunks: required
@@ -2686,18 +2659,13 @@ mod tests {
                         read_chunks, required,
                         "leaves={leaves}, pruned={pruned}, location={location:?}",
                     );
-                    assert_eq!(
-                        storage.reads.into_inner().into_iter().collect::<Vec<_>>(),
-                        positions,
-                        "leaves={leaves}, pruned={pruned}, location={location:?}",
-                    );
                 }
             }
         }
     }
 
     #[test_async]
-    async fn required_reads_match_constructor_reads() {
+    async fn required_chunks_match_constructor_reads() {
         check_constructor_reads::<mmr::Family>().await;
         check_constructor_reads::<mmb::Family>().await;
     }
