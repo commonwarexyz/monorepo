@@ -229,7 +229,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Returns the pre-computed namespace.
-    const fn namespace(&self) -> &N {
+    pub const fn namespace(&self) -> &N {
         match self {
             Self::Signer { namespace, .. } => namespace,
             Self::Verifier { namespace, .. } => namespace,
