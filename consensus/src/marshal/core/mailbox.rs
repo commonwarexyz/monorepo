@@ -1,10 +1,7 @@
 use super::{Processed, Variant, durability::Durable as _};
 use crate::{
     Reporter,
-    marshal::{
-        Identifier,
-        ancestry::{AncestorStream, Ancestry, BlockProvider},
-    },
+    marshal::Identifier,
     simplex::types::{Activity, Finalization, Notarization},
     types::{Height, Round},
 };
@@ -14,17 +11,19 @@ use commonware_actor::{
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_p2p::Recipients;
-use commonware_runtime::{
-    Clock, Handle,
-    telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
-};
+use commonware_runtime::{Handle, telemetry::traces::TracedExt as _};
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
 use std::{
     collections::{BTreeMap, VecDeque, btree_map::Entry},
     num::NonZeroUsize,
-    sync::Arc,
 };
 use tracing::{Span, info_span};
+
+commonware_macros::stability_scope!(ALPHA {
+    use crate::marshal::ancestry::{AncestorStream, Ancestry, BlockProvider};
+    use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
+    use std::sync::Arc;
+});
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -77,61 +76,20 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the processed position and its backing block.
         response: oneshot::Sender<Option<(Processed, V::Block)>>,
     },
-    /// A hint that a finalized block may be available at a given height.
-    ///
-    /// This triggers a network fetch if the finalization is not available locally.
-    /// This is fire-and-forget: the finalization will be stored in marshal and
-    /// delivered via the normal finalization flow when available.
-    ///
-    /// The height must be covered by both the epocher and the provider. If the
-    /// epocher cannot map the height to an epoch, or the provider cannot supply
-    /// a scheme for that epoch, the hint is silently dropped.
-    ///
-    /// Targets are required because this is typically called when a peer claims to
-    /// be ahead. If a target returns invalid data, the resolver will block them.
-    /// Sending this message multiple times with different targets adds to the
-    /// target set.
+    /// A request to discover a finalization and its block from target peers.
     HintFinalized {
-        /// The span carried with this request.
         span: Span,
-        /// The height of the finalization to fetch.
         height: Height,
-        /// Target peers to fetch from. Added to any existing targets for this height.
         targets: NonEmptyVec<S::PublicKey>,
     },
-    /// A request to subscribe to a block by its digest.
-    SubscribeByDigest {
-        /// The span carried with this request.
-        span: Span,
-        /// The digest of the block to retrieve.
-        digest: <V::Block as Digestible>::Digest,
-        /// How marshal should behave if the block is missing locally.
-        fallback: DigestFallback,
-        /// A channel to send the retrieved block.
-        response: oneshot::Sender<V::Block>,
-    },
-    /// A request to subscribe to a block by its commitment.
-    SubscribeByCommitment {
+    /// A request to acquire the block matching an exact commitment.
+    Acquire {
         /// The span carried with this request.
         span: Span,
         /// The commitment of the block to retrieve.
         commitment: V::Commitment,
-        /// How marshal should behave if the block is missing locally.
-        fallback: CommitmentFallback,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
-    },
-    /// A hint to fetch a notarized block by round without adding another local subscriber.
-    ///
-    /// `commitment` is used as a locality check: if the block is already
-    /// available locally, the fetch is skipped.
-    HintNotarized {
-        /// The span carried with this request.
-        span: Span,
-        /// The notarized round to request.
-        round: Round,
-        /// The commitment used to short-circuit if the block is already local.
-        commitment: V::Commitment,
     },
     /// A request to retrieve the verified block previously persisted for `round`.
     GetVerified {
@@ -239,61 +197,6 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
 }
 
-/// How a digest-keyed block subscription should behave when the block is missing locally.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DigestFallback {
-    /// Wait for local availability only.
-    Wait,
-    /// Request the notarized proposal for `round` from peers.
-    ///
-    /// Use this only when the caller has a trusted round for the digest. Digest-keyed
-    /// subscriptions intentionally cannot request exact commitment fetches.
-    FetchByRound { round: Round },
-}
-
-impl From<DigestFallback> for CommitmentFallback {
-    fn from(fallback: DigestFallback) -> Self {
-        match fallback {
-            DigestFallback::Wait => Self::Wait,
-            DigestFallback::FetchByRound { round } => Self::FetchByRound { round },
-        }
-    }
-}
-
-/// How a commitment-keyed block subscription should behave when the block is missing locally.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CommitmentFallback {
-    /// Wait for local availability only.
-    ///
-    /// Use this for pending candidate proposal data before notarization.
-    Wait,
-    /// Request the notarized proposal for `round` from peers.
-    ///
-    /// Use this when the caller knows a trusted notarized or certified round and
-    /// commitment but not the proposal height, such as proposal construction,
-    /// verification of a known child, or certification of a notarized candidate. Do not infer
-    /// height from the finalized tip or another block: proposals may build on
-    /// a certified parent that is not finalized locally yet, and an unverified
-    /// child may lie about its height.
-    ///
-    /// The returned block is heightable once decoded, but that is too late for
-    /// the in-flight resolver key or retention bound.
-    FetchByRound { round: Round },
-    /// Request the exact commitment from peers and prune the request at
-    /// `height`.
-    ///
-    /// Use this only when no certified parent round is available. The caller must have a locally
-    /// validated resolver retention bound. Examples include repairing a finalized gap or walking
-    /// an accepted ancestry stream. Do not use it for a candidate's immediate parent when the
-    /// consensus context supplies the parent round.
-    ///
-    /// The height is not sent to peers. It is a local hint for request retention.
-    /// It is not part of response validity. A fetched block is delivered if its
-    /// commitment matches. A matching block above this bound is delivered but
-    /// not cached.
-    FetchByCommitment { height: Height },
-}
-
 impl<S: Scheme, V: Variant> Message<S, V> {
     /// Returns the span carried with this message.
     pub(crate) const fn span(&self) -> &Span {
@@ -302,8 +205,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::GetBlock { span, .. }
             | Self::GetFinalization { span, .. }
             | Self::GetVerified { span, .. }
-            | Self::SubscribeByDigest { span, .. }
-            | Self::SubscribeByCommitment { span, .. }
+            | Self::Acquire { span, .. }
             | Self::Forward { span, .. }
             | Self::Proposed { span, .. }
             | Self::Verified { span, .. }
@@ -314,7 +216,6 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::GetProcessed { span, .. }
             | Self::GetAnchor { span, .. }
             | Self::HintFinalized { span, .. }
-            | Self::HintNotarized { span, .. }
             | Self::SetFloor { span, .. }
             | Self::Prune { span, .. } => span,
         }
@@ -328,10 +229,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetFinalization { .. } => "get_finalization",
             Self::GetProcessed { .. } => "get_processed",
             Self::GetAnchor { .. } => "get_anchor",
+            Self::Acquire { .. } => "acquire",
             Self::HintFinalized { .. } => "hint_finalized",
-            Self::SubscribeByDigest { .. } => "subscribe_by_digest",
-            Self::SubscribeByCommitment { .. } => "subscribe_by_commitment",
-            Self::HintNotarized { .. } => "hint_notarized",
             Self::GetVerified { .. } => "get_verified",
             Self::Forward { .. } => "forward",
             Self::Proposed { .. } => "proposed",
@@ -347,7 +246,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
 
     fn stale(&self, current: Option<Height>) -> bool {
         match self {
-            // Height-targeted reads below the floor can never be served
+            // Best-effort reads may be discarded below a requested prune height.
             Self::GetInfo {
                 identifier: Identifier::Height(height),
                 ..
@@ -357,7 +256,6 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 ..
             }
             | Self::GetFinalization { height, .. } => Some(*height) < current,
-            // Hints only inform the actor about heights strictly above the floor
             Self::HintFinalized { height, .. } => Some(*height) <= current,
             // Durability acks cannot be dropped: callers depend on them
             Self::Proposed { .. } | Self::Verified { .. } | Self::Certified { .. } => false,
@@ -372,9 +270,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             | Self::GetProcessed { .. }
             | Self::GetAnchor { .. } => false,
-            Self::HintNotarized { .. } => false,
-            Self::SubscribeByDigest { .. }
-            | Self::SubscribeByCommitment { .. }
+            Self::Acquire { .. }
             | Self::GetVerified { .. }
             | Self::Forward { .. }
             | Self::SetFloor { .. }
@@ -394,9 +290,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::GetProcessed { response, .. } => response.is_closed(),
             Self::GetAnchor { response, .. } => response.is_closed(),
-            Self::SubscribeByDigest { response, .. }
-            | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
-            Self::HintNotarized { .. } => false,
+            Self::Acquire { response, .. } => response.is_closed(),
             Self::HintFinalized { .. }
             | Self::Forward { .. }
             | Self::Proposed { .. }
@@ -653,6 +547,19 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         }
     }
 
+    /// Discovers a finalization and its block from the supplied peers.
+    ///
+    /// Hints at or below the processed height and locally stored finalizations are ignored.
+    /// The height must be covered by the epocher and the provider's verification scope.
+    /// Repeated hints add targets to the same resolver request.
+    pub fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
+        let _ = self.sender.enqueue(Message::HintFinalized {
+            span: info_span!("marshal.mailbox.hint_finalized", height = height.traced()),
+            height,
+            targets,
+        });
+    }
+
     /// Returns the maximum number of application blocks marshal can dispatch before
     /// acknowledgements advance its processed floor.
     pub const fn max_pending_acks(&self) -> usize {
@@ -667,6 +574,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// fetched block does not match that relationship.
     ///
     /// Do not use this to wait for pending candidate proposal data.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn ancestor_stream<I, C>(
         &self,
         clock: Arc<C>,
@@ -750,144 +658,24 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.ok().flatten()
     }
 
-    /// Hints that a finalized block may be available at the given height.
+    /// Acquire the block matching `commitment`, fetching it from peers when missing locally.
     ///
-    /// This method will request the finalization from the network via the resolver
-    /// if it is not available locally.
+    /// Callers for the same commitment share acquisition work. Drop the receiver to cancel
+    /// this caller's interest. The receiver closes without delivery if marshal shuts down.
     ///
-    /// Targets are required because this is typically called when a peer claims to be
-    /// ahead. By targeting only those peers, we limit who we ask. If a target returns
-    /// invalid data, they will be blocked by the resolver. If targets don't respond
-    /// or return "no data", they effectively rate-limit themselves.
+    /// Acquisition ignores marshal's processed height and round floors: a request for a block no
+    /// peer serves stays live until the block arrives or every caller drops its receiver.
     ///
-    /// Calling this multiple times for the same height with different targets will
-    /// add to the target set if there is an ongoing fetch, allowing more peers to be tried.
-    ///
-    /// This is fire-and-forget: the finalization will be stored in marshal and delivered
-    /// via the normal finalization flow when available.
-    ///
-    /// The height must be covered by both the epocher and the provider. If the
-    /// epocher cannot map the height to an epoch, or the provider cannot supply
-    /// a scheme for that epoch, the hint is silently dropped.
-    pub fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
-        let _ = self.sender.enqueue(Message::HintFinalized {
-            span: info_span!("marshal.mailbox.hint_finalized", height = height.traced()),
-            height,
-            targets,
-        });
-    }
-
-    /// Subscribe to a block by its digest.
-    ///
-    /// If the block is found available locally, the block will be returned immediately.
-    ///
-    /// If the block is not available locally, the subscription will be registered and the caller
-    /// will be notified when the block is available. If the block is not finalized, it's possible
-    /// that it may never become available.
-    ///
-    /// Resolver fetches and subscriptions have independent lifetimes. The processed floor may deny
-    /// or retire a fetch. The subscription remains open while the block may still arrive through
-    /// local ingress. It closes without delivery only when marshal can no longer obtain the block.
-    ///
-    /// The `fallback` parameter controls whether marshal also asks peers for the missing block.
-    /// Digest-keyed subscriptions only support waiting locally or fetching by round.
-    ///
-    /// Delivery makes no durability promise. A delivered block may not have been persisted by
-    /// marshal, so it may not be retrievable after an unclean shutdown. Consumers that need
-    /// durable height-ordered delivery should rely on application dispatch instead.
-    ///
-    /// The oneshot receiver should be dropped to cancel the subscription.
-    pub fn subscribe_by_digest(
-        &self,
-        digest: <V::Block as Digestible>::Digest,
-        fallback: DigestFallback,
-    ) -> oneshot::Receiver<V::Block> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::SubscribeByDigest {
-            span: info_span!("marshal.mailbox.subscribe_by_digest", digest = %digest),
-            digest,
-            fallback,
-            response: tx,
-        });
-        rx
-    }
-
-    /// Subscribe to a block by its commitment.
-    ///
-    /// If the block is found available locally, the block will be returned immediately.
-    ///
-    /// If the block is not available locally, the subscription will be registered and the caller
-    /// will be notified when the block is available. If the block is not finalized, it's possible
-    /// that it may never become available.
-    ///
-    /// Resolver fetches and subscriptions have independent lifetimes. The processed floor may deny
-    /// or retire a fetch. The subscription remains open while the block may still arrive through
-    /// local ingress. It closes without delivery only when marshal can no longer obtain the block.
-    ///
-    /// The `fallback` parameter controls whether marshal also asks peers for the missing block.
-    ///
-    /// Delivery makes no durability promise. A delivered block may not have been persisted by
-    /// marshal, so it may not be retrievable after an unclean shutdown. Consumers that need
-    /// durable height-ordered delivery should rely on application dispatch instead.
-    ///
-    /// The oneshot receiver should be dropped to cancel the subscription.
-    pub fn subscribe_by_commitment(
-        &self,
-        commitment: V::Commitment,
-        fallback: CommitmentFallback,
-    ) -> oneshot::Receiver<V::Block> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::SubscribeByCommitment {
-            span: info_span!("marshal.mailbox.subscribe_by_commitment", commitment = %commitment),
-            fallback,
+    /// Delivery does not imply application validity or durability. Consumers that need durable,
+    /// height-ordered delivery should use application dispatch.
+    pub fn acquire(&self, commitment: V::Commitment) -> oneshot::Receiver<V::Block> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::Acquire {
+            span: info_span!("marshal.mailbox.acquire", commitment = %commitment),
             commitment,
-            response: tx,
+            response,
         });
-        rx
-    }
-
-    /// Hint that peers may have the block notarized at `round`.
-    ///
-    /// This issues a round-bound resolver request without registering a new
-    /// block subscriber. The `commitment` is only used to skip the request when
-    /// the block is already available locally.
-    ///
-    /// This is useful when a local-only waiter already exists and later
-    /// certification makes a network fetch by notarized round valid.
-    pub fn hint_notarized(&self, round: Round, commitment: V::Commitment) {
-        let _ = self.sender.enqueue(Message::HintNotarized {
-            span: info_span!(
-                "marshal.mailbox.hint_notarized",
-                round = %round,
-                commitment = %commitment
-            ),
-            round,
-            commitment,
-        });
-    }
-
-    /// Returns a stream over the ancestry of a given block, leading up to genesis.
-    ///
-    /// This stream may fetch missing parents because callers should only request
-    /// ancestry for data they already have locally and are willing to build on,
-    /// verify, certify, or repair from. It is not a candidate fetch path.
-    ///
-    /// If the starting block is not found, `None` is returned.
-    pub async fn ancestry<C>(
-        &self,
-        clock: Arc<C>,
-        (fallback, start_digest): (DigestFallback, <V::Block as Digestible>::Digest),
-        fetch_duration: Timed,
-    ) -> Option<impl Ancestry<V::ApplicationBlock> + use<S, V, C>>
-    where
-        Self: BlockProvider<Block = V::ApplicationBlock>,
-        C: Clock,
-    {
-        let receiver = self.subscribe_by_digest(start_digest, fallback);
-        receiver.await.ok().map(|block| {
-            let block = V::into_shared(block);
-            self.ancestor_stream(clock, [block], fetch_duration)
-        })
+        receiver
     }
 
     /// Returns the verified block previously persisted for `round`, if any.
@@ -1075,10 +863,6 @@ mod tests {
     type TestMessage = Message<harness::S, Standard<harness::B>>;
     type TestPending = Pending<harness::S, Standard<harness::B>>;
 
-    fn public_key(seed: u64) -> harness::K {
-        PrivateKey::from_seed(seed).public_key()
-    }
-
     fn round(height: u64) -> Round {
         Round::new(Epoch::zero(), View::new(height))
     }
@@ -1187,53 +971,6 @@ mod tests {
         )
     }
 
-    fn subscribe_by_digest(height: u64) -> (TestMessage, oneshot::Receiver<Arc<harness::B>>) {
-        let (response, receiver) = oneshot::channel();
-        (
-            TestMessage::SubscribeByDigest {
-                span: Span::none(),
-                digest: block(height).digest(),
-                fallback: DigestFallback::FetchByRound {
-                    round: round(height),
-                },
-                response,
-            },
-            receiver,
-        )
-    }
-
-    fn subscribe_by_commitment_message(
-        height: u64,
-        fallback: CommitmentFallback,
-    ) -> (TestMessage, oneshot::Receiver<Arc<harness::B>>) {
-        let (response, receiver) = oneshot::channel();
-        (
-            TestMessage::SubscribeByCommitment {
-                span: Span::none(),
-                commitment: commitment(height),
-                fallback,
-                response,
-            },
-            receiver,
-        )
-    }
-
-    fn hint_finalized(height: u64, target: harness::K) -> TestMessage {
-        TestMessage::HintFinalized {
-            span: Span::none(),
-            height: Height::new(height),
-            targets: NonEmptyVec::new(target),
-        }
-    }
-
-    fn hint_notarized(height: u64) -> TestMessage {
-        TestMessage::HintNotarized {
-            span: Span::none(),
-            round: round(height),
-            commitment: commitment(height),
-        }
-    }
-
     fn set_floor(height: u64) -> TestMessage {
         TestMessage::SetFloor {
             span: Span::none(),
@@ -1300,13 +1037,6 @@ mod tests {
         })
     }
 
-    fn hint_targets(overflow: &TestPending, height: u64) -> Option<&NonEmptyVec<harness::K>> {
-        overflow
-            .hints
-            .get(&Height::new(height))
-            .map(|(_, targets)| targets)
-    }
-
     fn has_block_message(overflow: &TestPending, height: u64) -> bool {
         overflow.messages.iter().any(|message| {
             matches!(
@@ -1325,25 +1055,6 @@ mod tests {
         overflow.prune.as_ref().map(|(_, height)| *height) == Some(Height::new(height))
     }
 
-    fn has_subscription(overflow: &TestPending, height: u64) -> bool {
-        let expected_digest = block(height).digest();
-        let expected_commitment = commitment(height);
-        overflow.messages.iter().any(|message| {
-            matches!(
-                message,
-                PendingMessage::Message(TestMessage::SubscribeByDigest { digest, response, .. })
-                    if *digest == expected_digest && !response.is_closed()
-            ) || matches!(
-                message,
-                PendingMessage::Message(TestMessage::SubscribeByCommitment {
-                    commitment,
-                    response,
-                    ..
-                }) if *commitment == expected_commitment && !response.is_closed()
-            )
-        })
-    }
-
     #[test]
     fn durable_methods_report_failure_when_mailbox_closed() {
         let runner = deterministic::Runner::default();
@@ -1359,99 +1070,6 @@ mod tests {
             assert!(!mailbox.verified(round(2), block(2)).await);
             assert!(!mailbox.certified(round(3), block(3)).await);
         });
-    }
-
-    #[test]
-    fn policy_coalesces_hint_targets() {
-        let mut overflow = pending();
-        let first = public_key(1);
-        let second = public_key(2);
-
-        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, first.clone()));
-        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, first.clone()));
-        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, second.clone()));
-
-        assert_eq!(overflow.messages.len(), 1);
-        let targets = hint_targets(&overflow, 10).expect("expected hint");
-        assert_eq!(targets.len().get(), 2);
-        assert!(targets.contains(&first));
-        assert!(targets.contains(&second));
-    }
-
-    #[test]
-    fn policy_preserves_commitment_subscription_fallbacks() {
-        let mut overflow = pending();
-
-        let (wait, _wait_rx) = subscribe_by_commitment_message(1, CommitmentFallback::Wait);
-        let (by_round, _by_round_rx) = subscribe_by_commitment_message(
-            2,
-            CommitmentFallback::FetchByRound { round: round(2) },
-        );
-        let (by_commitment, _by_commitment_rx) = subscribe_by_commitment_message(
-            3,
-            CommitmentFallback::FetchByCommitment {
-                height: Height::new(3),
-            },
-        );
-
-        <TestMessage as Policy>::handle(&mut overflow, wait);
-        <TestMessage as Policy>::handle(&mut overflow, by_round);
-        <TestMessage as Policy>::handle(&mut overflow, by_commitment);
-
-        let drained = drain(&mut overflow);
-        assert_eq!(drained.len(), 3);
-        assert!(matches!(
-            &drained[0],
-            TestMessage::SubscribeByCommitment {
-                fallback: CommitmentFallback::Wait,
-                ..
-            }
-        ));
-        assert!(matches!(
-            &drained[1],
-            TestMessage::SubscribeByCommitment {
-                fallback: CommitmentFallback::FetchByRound { round: found },
-                ..
-            } if *found == round(2)
-        ));
-        assert!(matches!(
-            &drained[2],
-            TestMessage::SubscribeByCommitment {
-                fallback: CommitmentFallback::FetchByCommitment { height },
-                ..
-            } if *height == Height::new(3)
-        ));
-    }
-
-    #[test]
-    fn policy_handles_closed_subscriptions() {
-        let mut overflow = pending();
-
-        let (pending_closed, pending_closed_rx) = subscribe_by_digest(1);
-        drop(pending_closed_rx);
-        overflow
-            .messages
-            .push_back(PendingMessage::Message(pending_closed));
-
-        let (pending_open, mut pending_open_rx) = subscribe_by_commitment_message(
-            2,
-            CommitmentFallback::FetchByRound { round: round(2) },
-        );
-        overflow
-            .messages
-            .push_back(PendingMessage::Message(pending_open));
-
-        let (current_closed, current_closed_rx) = subscribe_by_digest(3);
-        drop(current_closed_rx);
-        <TestMessage as Policy>::handle(&mut overflow, current_closed);
-
-        assert!(!has_subscription(&overflow, 1));
-        assert!(has_subscription(&overflow, 2));
-        assert!(!has_subscription(&overflow, 3));
-        assert!(matches!(
-            pending_open_rx.try_recv(),
-            Err(TryRecvError::Empty)
-        ));
     }
 
     #[test]
@@ -1515,13 +1133,10 @@ mod tests {
     #[test]
     fn policy_drains_fifo() {
         let mut overflow = pending();
-        let first = public_key(1);
-        let second = public_key(2);
-        let (response, _subscribe_rx) = oneshot::channel();
-        let subscribe = TestMessage::SubscribeByDigest {
+        let (response, _acquire_rx) = oneshot::channel();
+        let acquire = TestMessage::Acquire {
             span: Span::none(),
-            digest: block(1).digest(),
-            fallback: DigestFallback::Wait,
+            commitment: block(1).digest(),
             response,
         };
         let (response, _processed_rx) = oneshot::channel();
@@ -1529,38 +1144,27 @@ mod tests {
             span: Span::none(),
             response,
         };
+        let (response, _anchor_rx) = oneshot::channel();
+        let anchor = TestMessage::GetAnchor {
+            span: Span::none(),
+            response,
+        };
+        let (verified, _verified_rx) = verified(2);
 
-        <TestMessage as Policy>::handle(&mut overflow, subscribe);
-        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, first.clone()));
-        <TestMessage as Policy>::handle(&mut overflow, hint_notarized(1));
-        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, second.clone()));
+        <TestMessage as Policy>::handle(&mut overflow, acquire);
         <TestMessage as Policy>::handle(&mut overflow, processed);
+        <TestMessage as Policy>::handle(&mut overflow, verified);
+        <TestMessage as Policy>::handle(&mut overflow, anchor);
 
         let drained = drain(&mut overflow);
         assert_eq!(drained.len(), 4);
         assert!(matches!(
-            &drained[0],
-            TestMessage::SubscribeByDigest {
-                digest,
-                fallback: DigestFallback::Wait,
-                ..
-            } if *digest == block(1).digest()
+            &drained[0], TestMessage::Acquire { commitment, .. }
+                if *commitment == block(1).digest()
         ));
-        let TestMessage::HintFinalized {
-            height, targets, ..
-        } = &drained[1]
-        else {
-            panic!("expected hint");
-        };
-        assert_eq!(*height, Height::new(10));
-        assert_eq!(targets.len().get(), 2);
-        assert!(targets.contains(&first));
-        assert!(targets.contains(&second));
-        assert!(matches!(
-            &drained[2],
-            TestMessage::HintNotarized { round: hinted, .. } if *hinted == round(1)
-        ));
-        assert!(matches!(&drained[3], TestMessage::GetProcessed { .. }));
+        assert!(matches!(&drained[1], TestMessage::GetProcessed { .. }));
+        assert!(matches!(&drained[2], TestMessage::Verified { .. }));
+        assert!(matches!(&drained[3], TestMessage::GetAnchor { .. }));
     }
 
     #[test]
@@ -1610,11 +1214,6 @@ mod tests {
         overflow
             .messages
             .push_back(PendingMessage::Message(get_block_7));
-        overflow.hint_finalized(
-            Span::none(),
-            Height::new(8),
-            NonEmptyVec::new(public_key(1)),
-        );
         overflow
             .messages
             .push_back(PendingMessage::Message(get_block_8));
@@ -1628,7 +1227,6 @@ mod tests {
         assert!(!has_get_info(&overflow, 4));
         assert!(!has_get_block(&overflow, 7));
         assert!(has_get_block(&overflow, 8));
-        assert!(hint_targets(&overflow, 8).is_none());
         let drained = drain(&mut overflow);
         assert_eq!(drained.len(), 3);
         assert!(matches!(
@@ -1658,11 +1256,6 @@ mod tests {
         overflow
             .messages
             .push_back(PendingMessage::Message(get_block_6));
-        overflow.hint_finalized(
-            Span::none(),
-            Height::new(6),
-            NonEmptyVec::new(public_key(2)),
-        );
         overflow
             .messages
             .push_back(PendingMessage::Message(get_block_7));
@@ -1675,7 +1268,6 @@ mod tests {
         assert!(!has_get_finalization(&overflow, 4));
         assert!(!has_get_block(&overflow, 6));
         assert!(has_get_block(&overflow, 7));
-        assert!(hint_targets(&overflow, 6).is_none());
         let drained = drain(&mut overflow);
         assert_eq!(drained.len(), 2);
         assert!(matches!(
@@ -1769,8 +1361,6 @@ mod tests {
         <TestMessage as Policy>::handle(&mut overflow, get_block_4);
         <TestMessage as Policy>::handle(&mut overflow, get_block_5);
         <TestMessage as Policy>::handle(&mut overflow, get_finalization_4);
-        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(5, public_key(1)));
-        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(6, public_key(2)));
 
         <TestMessage as Policy>::handle(&mut overflow, prune(7));
         assert!(has_prune(&overflow, 7));
@@ -1851,5 +1441,73 @@ mod tests {
         let drained = drain(&mut overflow);
         assert!(matches!(drained[0], TestMessage::SetFloor { .. }));
         assert!(matches!(drained[1], TestMessage::Prune { .. }));
+    }
+
+    #[test]
+    fn acquisition_fifo_survives_pruning_and_skips_canceled_callers() {
+        let mut overflow = pending();
+        let (first_response, mut first_receiver) = oneshot::channel();
+        let (closed_response, closed_receiver) = oneshot::channel();
+        let (last_response, mut last_receiver) = oneshot::channel();
+        for (height, response) in [
+            (1, first_response),
+            (2, closed_response),
+            (3, last_response),
+        ] {
+            <TestMessage as Policy>::handle(
+                &mut overflow,
+                TestMessage::Acquire {
+                    span: Span::none(),
+                    commitment: commitment(height),
+                    response,
+                },
+            );
+        }
+        drop(closed_receiver);
+        <TestMessage as Policy>::handle(&mut overflow, prune(10));
+        let drained = drain(&mut overflow);
+        assert_eq!(drained.len(), 3);
+        assert!(matches!(drained[0], TestMessage::Prune { .. }));
+        assert!(
+            matches!(drained[1], TestMessage::Acquire { commitment: found, .. } if found == commitment(1))
+        );
+        assert!(
+            matches!(drained[2], TestMessage::Acquire { commitment: found, .. } if found == commitment(3))
+        );
+        assert!(matches!(
+            first_receiver.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        assert!(matches!(last_receiver.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn policy_coalesces_hint_targets() {
+        let mut overflow = pending();
+        let first = PrivateKey::from_seed(1).public_key();
+        let second = PrivateKey::from_seed(2).public_key();
+        for target in [first.clone(), first.clone(), second.clone()] {
+            <TestMessage as Policy>::handle(
+                &mut overflow,
+                TestMessage::HintFinalized {
+                    span: Span::none(),
+                    height: Height::new(10),
+                    targets: NonEmptyVec::new(target),
+                },
+            );
+        }
+        assert_eq!(overflow.messages.len(), 1);
+        let drained = drain(&mut overflow);
+        assert_eq!(drained.len(), 1);
+        let TestMessage::HintFinalized {
+            height, targets, ..
+        } = &drained[0]
+        else {
+            panic!("expected hint");
+        };
+        assert_eq!(*height, Height::new(10));
+        assert_eq!(targets.len().get(), 2);
+        assert!(targets.contains(&first));
+        assert!(targets.contains(&second));
     }
 }
