@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+use crate::storage::{preadv2, pwritev2};
 use crate::{
     Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     storage::{
@@ -12,13 +14,17 @@ use commonware_utils::{
     channel::oneshot,
     sync::{Mutex, MutexGuard},
 };
+#[cfg(target_os = "linux")]
+use std::os::fd::AsFd as _;
+#[cfg(not(target_os = "linux"))]
+use std::os::fd::AsRawFd as _;
 #[cfg(test)]
 use std::sync::mpsc;
 use std::{
     fs::File,
     io::IoSlice,
     ops::Deref,
-    os::{fd::AsRawFd, unix::fs::FileExt},
+    os::unix::fs::FileExt,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -298,34 +304,22 @@ impl Blob {
         }
 
         while !buf.is_empty() {
-            let iovec = libc::iovec {
-                iov_base: buf.as_mut_ptr().cast(),
-                iov_len: buf.len(),
-            };
-            // SAFETY: `file` owns a valid fd for this call. `iovec` describes the exclusive
-            // writable slice borrowed for the duration of the syscall.
-            let ret = unsafe {
-                libc::preadv2(
-                    file.as_raw_fd(),
-                    &iovec,
-                    1,
-                    offset.try_into().map_err(|_| Error::OffsetOverflow)?,
-                    libc::RWF_DONTCACHE,
-                )
-            };
-            if ret < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
+            let bytes_read = match preadv2(
+                file.as_fd(),
+                buf,
+                offset.try_into().map_err(|_| Error::OffsetOverflow)?,
+                libc::RWF_DONTCACHE,
+            ) {
+                Ok(bytes_read) => bytes_read,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) => {
+                    if cache.retry_cached(&file.dont_cache_supported, &err, true) {
+                        file.read_exact_at(buf, offset)?;
+                        return Ok(());
+                    }
+                    return Err(err.into());
                 }
-                if cache.retry_cached(&file.dont_cache_supported, &err, true) {
-                    file.read_exact_at(buf, offset)?;
-                    return Ok(());
-                }
-                return Err(err.into());
-            }
-
-            let bytes_read = ret as usize;
+            };
             if bytes_read == 0 {
                 return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
             }
@@ -379,18 +373,13 @@ impl Blob {
             cfg_if! {
                 if #[cfg(target_os = "linux")] {
                     let attempted_dont_cache = cache.is_disabled(&file.dont_cache_supported);
-                    // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                    // `io_slices` points to valid readable buffers held alive for this syscall.
-                    let ret = unsafe {
-                        libc::pwritev2(
-                            file.as_raw_fd(),
-                            io_slices.as_ptr().cast::<libc::iovec>(),
-                            io_slices_len as i32,
-                            offset.try_into().map_err(|_| Error::OffsetOverflow)?,
-                            flags.unwrap_or(0)
-                                | if attempted_dont_cache { libc::RWF_DONTCACHE } else { 0 },
-                        )
-                    };
+                    let ret = pwritev2(
+                        file.as_fd(),
+                        &io_slices[..io_slices_len],
+                        offset.try_into().map_err(|_| Error::OffsetOverflow)?,
+                        flags.unwrap_or(0)
+                            | if attempted_dont_cache { libc::RWF_DONTCACHE } else { 0 },
+                    );
                 } else {
                     let _ = &cache;
                     let attempted_dont_cache = false;
@@ -406,23 +395,25 @@ impl Blob {
                             offset.try_into().map_err(|_| Error::OffsetOverflow)?,
                         )
                     };
+                    let ret = if ret < 0 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(ret as usize)
+                    };
                 }
             }
 
-            if ret < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
+            let bytes_written = match ret {
+                Ok(bytes_written) => bytes_written,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) => {
+                    // Retry normally and stop requesting an unsupported cache-bypass hint.
+                    if cache.retry_cached(&file.dont_cache_supported, &err, attempted_dont_cache) {
+                        continue;
+                    }
+                    return Err(err.into());
                 }
-
-                // Retry normally and stop requesting an unsupported cache-bypass hint.
-                if cache.retry_cached(&file.dont_cache_supported, &err, attempted_dont_cache) {
-                    continue;
-                }
-                return Err(err.into());
-            }
-
-            let bytes_written = ret as usize;
+            };
             if bytes_written == 0 {
                 return Err(Error::WriteFailed);
             }
