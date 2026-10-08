@@ -157,7 +157,7 @@ async fn replay_ancestry<B: ConsensusBlock>(
 /// target height on a channel instead of polling (and cloning) the application's
 /// block map. All clones share one subscriber set.
 #[derive(Clone)]
-pub(crate) struct ProgressHandle {
+pub struct ProgressHandle {
     inner: Arc<Mutex<Progress>>,
 }
 
@@ -167,7 +167,8 @@ struct Progress {
 }
 
 impl ProgressHandle {
-    pub(crate) fn new() -> Self {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Progress {
                 latest: 0,
@@ -224,7 +225,7 @@ where
 }
 
 #[derive(Clone)]
-pub(crate) struct DeliveryReporter<B>
+pub struct DeliveryReporter<B>
 where
     B: ConsensusBlock<Digest = Sha256Digest>,
 {
@@ -240,7 +241,7 @@ impl<B> DeliveryReporter<B>
 where
     B: ConsensusBlock<Digest = Sha256Digest>,
 {
-    pub(crate) fn new(
+    pub fn new(
         validator: usize,
         application: SinkApplication<B>,
         max_pending_acks: Option<NonZeroUsize>,
@@ -258,7 +259,7 @@ where
 
     /// Publish delivery-height updates to `progress` so a liveness watcher can
     /// await progress on a channel instead of polling.
-    pub(crate) fn with_progress(mut self, progress: ProgressHandle) -> Self {
+    pub fn with_progress(mut self, progress: ProgressHandle) -> Self {
         self.progress = Some(progress);
         self
     }
@@ -346,7 +347,7 @@ where
 }
 
 /// Out-of-band registry of blocks constructed by the fuzz applications.
-pub(crate) struct BlockContextRegistry<C> {
+pub struct BlockContextRegistry<C> {
     contexts: Arc<Mutex<HashMap<Sha256Digest, C>>>,
 }
 
@@ -367,7 +368,7 @@ impl<C> Clone for BlockContextRegistry<C> {
 }
 
 impl<C> BlockContextRegistry<C> {
-    pub(crate) fn record(&self, digest: Sha256Digest, context: C) {
+    pub fn record(&self, digest: Sha256Digest, context: C) {
         self.contexts.lock().insert(digest, context);
     }
 }
@@ -445,12 +446,12 @@ where
         self
     }
 
-    pub(crate) fn with_block_contexts(mut self, block_contexts: BlockContextRegistry<C>) -> Self {
+    pub fn with_block_contexts(mut self, block_contexts: BlockContextRegistry<C>) -> Self {
         self.block_contexts = Some(block_contexts);
         self
     }
 
-    pub(crate) fn with_reporter(mut self, reporter: DeliveryReporter<B>) -> Self {
+    pub fn with_reporter(mut self, reporter: DeliveryReporter<B>) -> Self {
         self.reporter = Some(reporter);
         self
     }
@@ -528,7 +529,7 @@ const FAULT_BEHAVIOR_VIEWS: usize = MAX_TWINS_ROUNDS as usize + 1;
 
 /// Honest application selected by the final byte of the general Twins input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ApplicationChoice {
+pub enum ApplicationChoice {
     AlwaysAccept,
     /// May temporarily omit proposals, delay verification, or reject blocks.
     /// These behaviors are deterministic and shared by all honest validators.
@@ -559,7 +560,7 @@ impl fmt::Display for ApplicationChoice {
 /// The table is generated once from fuzz bytes, then indexed by view rather
 /// than call order so honest validators make the same validity decision.
 #[derive(Clone, Copy)]
-pub(crate) struct FaultyConfig {
+pub struct FaultyConfig {
     omit_proposal: [bool; FAULT_BEHAVIOR_VIEWS],
     verification: [VerificationBehavior; FAULT_BEHAVIOR_VIEWS],
     fault_injection_through: View,

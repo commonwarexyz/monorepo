@@ -9017,5 +9017,59 @@ class Synthesize(unittest.TestCase):
                          sl.collections.Counter())
 
 
+class ReachVerdictCommand(unittest.TestCase):
+    """`reach-verdict` computes the verdict of replays captured outside synthesis, through
+    the same functions, and exits 0 only for REACHED."""
+
+    def run_command(self, canonical, control=CONTROL):
+        directory = pathlib.Path(tempfile.mkdtemp())
+        try:
+            card = directory / "TS-0004.md"
+            card.write_text(REACH_CARD.format(id="TS-0004", history=TS4))
+            module = directory / "ts0004.rs"
+            module.write_text(MODULE)
+            canonical_log = directory / "canonical.log"
+            canonical_log.write_text(replay_output(canonical))
+            args = [
+                "reach-verdict",
+                "--card", str(card),
+                "--module", str(module),
+                "--canonical", str(canonical_log),
+            ]
+            if control is not None:
+                control_log = directory / "control.log"
+                control_log.write_text(replay_output(control))
+                args += ["--control", str(control_log)]
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = sl.main(args)
+            return code, out.getvalue().splitlines()
+        finally:
+            shutil.rmtree(directory)
+
+    def test_reached_prints_the_verdict_and_exits_zero(self):
+        code, lines = self.run_command(REACHED)
+        self.assertEqual((code, lines[0]), (0, "REACHED 4/4"), lines)
+
+    def test_a_missed_stage_is_partial_and_exits_one(self):
+        partial = REACHED[:4] + (
+            "E3/4 missed no notarization by the deadline",
+            "E4/4 missed not held at handoff",
+            "handoff lost mark=9 next=-",
+            "phase continuation",
+            "reach 2/4 control=0",
+            "done",
+        )
+        code, lines = self.run_command(partial)
+        self.assertEqual((code, lines[0]), (1, "PARTIAL 2/4"), lines)
+        self.assertIn("reason: E3 missed: no notarization by the deadline", lines)
+
+    def test_a_missing_control_is_unverified(self):
+        code, lines = self.run_command(REACHED, control=None)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "UNVERIFIED 4/4")
+        self.assertIn("control: the control did not run", lines)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

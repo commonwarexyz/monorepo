@@ -1,0 +1,17 @@
+# The shim compiles the two committed templates of `statelens/runtime/` by
+# `#[path]`, byte-identical, under the crate names they expect (see
+# `src/lib.rs`). It is only ever built as a dependency of the differential
+# crate, so the `#[cfg(test)]` parts of the templates are compiled out.
+[package]
+name = "statelens-differential-shim"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+commonware-cryptography = { path = "../../../cryptography" }
+commonware-utils = { path = "../../../utils" }
+sancov = "0.1.0"

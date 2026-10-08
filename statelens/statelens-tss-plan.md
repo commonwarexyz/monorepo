@@ -753,6 +753,107 @@ superseded: the twins example lists the eight scaffolds, `<base>_ts0004_statelen
 `simplex_cert_mock_twins_*` base, and the name is no longer a prediction of the agent's choice
 (SPEC 18.9, `FuzzRecipe.test_an_invariant_list_goes_to_the_campaign`).
 
+## Revisions: differential test of the primitives (2026-10-08)
+
+The user's decision, binding: "this is just testing; you do not need to instrument the
+codebase or launch a campaign"; import the runtime module rather than copy it; a test-only
+module under `statelens/` may import the marshal scenario primitives and ours; and
+`consensus/fuzz/marshal` may change only for visibility. The question answered: do the helper
+primitives, and a prefix written by the scaffold rules, reach the state a human-written prefix
+of the same source test reaches, and does the reach check say so?
+
+1. Visibility (`consensus/fuzz/marshal/src`, uncommitted): the modules `scenarios::{environment,
+   harness, input, recording_resolver, scenarios}`, `marshal::end_to_end::{app, twins}` and
+   `twins::stack`, the `Scenario` trait and `drive`, `FuzzScenarioStandardHarness` with its
+   verbs and `finish`, `ScenarioHandoff` and its types, the recorders with `RecordingResolver`'s
+   two injection fields, the setup pieces of `app` and `twins::stack` and the input types go
+   from `pub(crate)` to `pub`. Every changed line is the keyword, plus three rustfmt reflows and
+   two `#[allow]`s (`async_fn_in_trait`, `clippy::new_without_default`). `scenarios::runner`
+   stays `pub(crate)`; its SETUP block is copied verbatim into the test crate. Clippy
+   `-D warnings` on all targets, rustfmt and nextest (80/80) pass. Nothing under `consensus/src`
+   changes. PRD R-LAYOUT-3 and SPEC section 3 record the exception.
+2. The crate `statelens/differential/` (empty `[workspace]` table; the shim is a member of it
+   as a path dependency under it): the shim compiles `runtime/{statelens,target_states}.rs`
+   byte-identical by `#[path]`, with `extern crate self as commonware_consensus` and
+   `as commonware_runtime` and a local `deterministic::STATELENS_FRESH_RUN`; no `sed` copy was
+   needed, since the runtime's Simplex-only tail is `#[cfg(test)]` and compiled out in a
+   dependency. Seven cards TS-9001 to TS-9007 over the six source tests (TS-9003 Deferred and
+   TS-9004 Inline split the height-lie test), one module per card with the SPEC 18.7 header, a
+   verbatim setup with stamping wrappers on both sides, and a digest wider than `finish`
+   (resolver, buffer, blocks, finalizations, acks, every node's durable storage through
+   `Context::scan`, `logical_blob` and `storage_audit`, settled first). 24 positive tests, 6
+   negatives. PRD R-LAYOUT-2, SPEC D13 and section 3 record the exception; SPEC 18.10.1 has
+   the procedure and the expected table, and the README a section.
+3. `scripts/differential.sh`: worktree, rsync, fuzz-package checks, build, every test twice
+   (canonical with `STATELENS_REACH=1`, control with `STATELENS_REACH_CONTROL=1`) in its own
+   process, `statelens.py reach-verdict` (a new command over the existing `card_history`,
+   `first_run` and `reach_verdict`; `ReachVerdictCommand` tests it), the table, cleanup.
+   Result at `392b116687`: `differential: PASSED (+180s)`, all 24 positives equal and REACHED
+   n/n with no annotation or rejected witness, all 6 negatives caught.
+4. Verification found, and the refix closed: the script skipped the control replay for `neg_*`
+   tests, so a wrong prefix could never be REACHED and the `NOT CAUGHT` branch was dead (now
+   every test gets the control); a notarization reported to another node and an armed,
+   unconsumed delivery were invisible to the digest (now read from durable storage and from
+   the resolver's injection fields; two new negatives, each caught by the digest alone while
+   the validator says REACHED); acknowledgements were only a settle precondition (now a digest
+   line, and an unsettled cluster panics). Not narrowed: items that widened with their modules
+   because they sit in now-pub signatures, and the harness verb set.
+5. What it establishes and does not (SPEC 18.10.1 and 18.11, PRD 11.2 and 11.6): primitive and
+   reconstruction fidelity against a human-written definition of the same state, and the
+   validator's acceptance; nothing about agent output, probes (`intrinsic` witnesses) or
+   fuzzing, and settled states only, so an event in flight at the handoff is not told apart.
+
+## Differential review triage (2026-10-08)
+
+The review of the differential test (`statelens-code-review-target-state-differential.md`)
+found 4 medium and 2 low findings, no critical or high. Each was triaged against the current
+tree before any fix (the reviewer's fixtures of findings 4 to 6 rerun against the tree; the
+script findings reproduced on a verbatim copy of the script in a scratch repository with
+`cargo`/`rustfmt` stubs and the real validator, under bash 5.3 and 3.2), then fixed; the docs
+follow. The differential run was repeated through the script after the
+fixes, with the fuzz package's checks skipped since that package did not change: the same 30
+rows, `differential: PASSED`. Not changed: `statelens/scripts/statelens.py` and its tests. The
+review report's status lines, left open here, were closed by the verifier round below.
+
+| Finding | Verdict | What was wrong (or why not) | Fix |
+|---|---|---|---|
+| 1 | Valid | The `neg_*` branch of `differential.sh` failed only on equal digests plus an unannotated REACHED, so a negative whose replay crashed (exit 101 or 127, no digest line), printed no digest, got `NO REPORT` or `CRASH`, or hit a validator traceback or abort counted as caught: five such negatives, `differential: PASSED`, exit 0. The validator's exit code cannot discriminate (1 for every verdict but REACHED and for an abort), so the fix checks the verdict's shape; the exposure is negatives only, since the positive branch already requires exit 0, a digest and REACHED. SPEC 18.10.1 step 6 and the README stated the same weak criterion. | `VERDICT_SHAPE` (`REACHED|UNVERIFIED|PARTIAL|UNREACHED k/n`, annotated or not); a negative with a non-zero exit, a digest line other than `true`/`false` or an unshaped verdict is `(ERROR)` and fails the run; `(NOT CAUGHT)` as before. The expected table has no negative that crashes, so nothing is lost. SPEC 18.10.1 steps 6, Negative controls, 18.1, AC-25; PRD AC-25; differential README. |
+| 2 | Valid | `tests=$(cargo ... --list \| sed ...)` was never compared with the 30 names: an empty listing, one that lost tests (every negative included) or nested names (`tests::nested::x`) ran fewer or zero replays and exited 0 (bash 5.3 printed PASSED; bash 3.2 died on the empty `rows[@]` under `set -u` yet still exited 0, the EXIT trap's `git worktree prune` masking the status). A failing `--list` was already caught by `pipefail` (exit 101), as the reviewer said. | `EXPECTED_TESTS` (the 30 names of `src/tests.rs`) and a sorted `diff` against the listing into `logs/tests.diff`; any difference prints the diff and exits 2 before any replay. `printf '%s\n' ${rows[@]+"${rows[@]}"}` for bash 3.2. SPEC 18.10.1 step 4, AC-25; PRD AC-25; differential README (Layout, How to run). |
+| 3 | Valid | `WT=<scratch>/wt-diff` and `LOGS=<scratch>/differential-logs` were fixed per scratch; startup deleted the old logs and ran `cleanup` whenever `$WT` existed, and `cleanup` fell back to `rm -rf "$WT"` with no ownership check. Reproduced: a second concurrent run removed the first's live worktree at startup (and the first's trap later the second's); an unrelated directory at `<scratch>/wt-diff` was deleted by the fallback. Confined to that scratch child; the checkout was never touched. | `RUN=$(mktemp -d "$SCRATCH/run.XXXXXX")`, `WT=$RUN/wt-diff`, `LOGS=$RUN/logs`; the startup cleanup and log deletion are gone; `cleanup` unchanged, now inside the run's own directory; the header documents the exit codes and the default `$TMPDIR/statelens-differential`. Two concurrent runs pass with 30 rows each, zero worktree registrations left. SPEC 18.10.1 procedure, step 1, 4, 6, AC-25; differential README. |
+| 4 | Valid | `ts9005.rs` stamped `verify=pending` unconditionally right after `wrapper_verify` returned and E2 read that string back; nothing touched the receiver before E5. So the E2 Check "B's verification of d at v is pending" was asserted by the prefix, not observed, and a receiver already holding a verdict held E2; the digest cannot notice, since both sides run the same system. The rule is SPEC 18.7's `exact` definition (a harness observable, a wrapper's stamped entry or a side-effect-free local query), not scenario S3 as the reviewer wrote; neither the reference drive nor the source test checks pending-ness, so the claim is the card's own and only the prefix can establish it. Not a `cannot:`. | The unconditional stamp removed; `e2_recorded` returns the `subscription` and `fetch_count` entries; after the poll, one `try_recv` on the held receiver: `Err(Empty)` stamps `pending` then and holds E2 with three items; `Ok(v)` or `Closed` records the verdict or `dropped`, drops the receiver and misses E2 ("the verification of d did not stay pending"). Positions unchanged (`neg_ts9005_swapped_arm_verify` still `witness rejected: order`). Module comment; SPEC 18.10.1 "The test"; differential README Limitations. |
+| 5 | Valid | `waiting` in `ts9006.rs` built E2's and E4's witness with `replica_nonzero("subscription", ",m=..")`, so a count raised from 1 to 2 after E3's drop still held E4, against the card's E4 Holds line, the module comment ("unchanged") and the reference's `assert_eq!` on `buffer_subscription_count`. One correction to the report: the digest cannot catch such a regression ("or the exact total in the digest"), since both sides print the same total; only side A's reference assertion can. | `waiting(.., count: Option<&str>)`: `None` keeps nonzero (E2), `Some(count)` requires `replica_exact` (E4); after E2 is held, `registered` captures the observed value and the handoff closure requires it (`registered.as_deref()?`), so the control run misses E4 by construction. Optional total-count item not taken. SPEC 18.10.1 "The test" and "What it establishes"; differential README. |
+| 6 | Partly valid | The seven cards are documented as cards in the 18.3 grammar; no document claimed lint-cleanliness or discovery. Explicit lint gave 14 problems: rule 11 on all seven (no generated `## Source excerpts`), a card defect; rule 1 on all seven, because `differential/cards/` is not a card tree, the documented, intentional location (the `9NNN` ids stay out of the counter), so a lint-support gap, not a card defect. Rules 2 to 10, 12 and 13 pass; all 15 pinned citations resolve at `392b116687`. Moving the cards into `target-states/marshal/` is not an option (they would become synthesis cards and raise the counter). | `statelens.py excerpts` on the seven cards (`excerpts --check`: 0 of 7 out of date); explicit lint now reports 7 problems, all rule 1. Not taken: the rule-1 fixture location in `statelens.py` and a lint step in the script (follow-up). SPEC 18.10.1 "Scenarios covered" and the differential README now say exactly that: outside the card trees, linted only when named, location reported and nothing else. |
+
+Follow-ups of this triage: `statelens.py lint` could accept `differential/cards/TS-NNNN.md` as a
+named marshal-card location (never discovered or counted) with a test, and `differential.sh`
+could lint the cards in the worktree before the builds; TS-9006 could add the `subscriptions`
+total as a fifth E4 item; the scenarios.rs citations (70 to 131 lines) exceed the 18.3 guidance
+of about 40 lines, unchecked by lint.
+
+## Verifier leftovers of the triage (2026-10-08)
+
+The verification of the six fixes, from a shared scratch clone through its own copy of the
+script (baseline from scratch with the fuzz checks, a validator traceback on a negative, one
+test deleted, two concurrent runs, the wrong prefixes of findings 4 and 5, the full card lint),
+upheld every verdict (1 to 5 valid, 6 partly valid) and left five items, A to E, each checked
+against the tree before any change:
+
+| Item | Verdict | What was wrong (or why not) | Fix |
+|---|---|---|---|
+| A | Valid | `statelens/README.md`'s differential section still described the pre-fix script: a worktree "under `DIFFERENTIAL_SCRATCH` (`$TMPDIR` by default)", logs in `<scratch>/differential-logs/`, negatives that "must be caught" without the replay condition of finding 1. | The section names `<scratch>/run.XXXXXX/wt-diff` and `logs/` (the path is printed), the default `$TMPDIR/statelens-differential`, and "caught, by the digest or by the validator's verdict of a replay that ran to its digest line". |
+| B | Valid | The review report's six findings read `Status: OPEN` after the fixes, against the convention that a fixed finding is marked FIXED with a note; finding 5's "or the exact total in the digest" was wrong for a regression of the system under test, which both sides run, so both digests carry it and only side A's reference assertion sees it (a wrong prefix's extra wait is a different thing, and the digest did catch that one). | Table and sections set to FIXED (6: FIXED, partly valid) with a note each, finding 5's sentence corrected to "on side A", finding 6's note as the triage wrote it. |
+| C | Valid | `(NOT CAUGHT)` matched only an unannotated REACHED, so a negative with equal digests and `REACHED k/n (weak)`, or any other annotation (`nondeterministic`, `control n/a`, `control missing`, `unbound label`, `missing:`, `stray failure`, `relation across restart`, `location in .. diff`; `reach_verdict` and `verdict_text`, all informational, none a rejected witness), would have counted as caught. Latent: no current negative yields an annotated REACHED. | The match is the REACHED prefix, annotated or not; the positive branch still requires an unannotated REACHED. SPEC 18.10.1 step 6; differential README. |
+| D | Valid | `ts9006.rs` stamped `verify=pending` at the E1 call and E2 read it back (gated on `try_recv`, so E2 itself was sound), against the general clause of SPEC 18.10.1 that a pending reply is stamped only at its stage. | The stamp moved into E2's `Empty` branch as in TS-9005: `waiting` returns the three recorded parts, the verify entry is the stage's own (E2 stamps `pending`, E3 `dropped` as it drops the receiver), E4 requires the `dropped` entry with E2's count. SPEC 18.10.1 "The test"; differential README Limitations; the module comment. |
+| E | Info | `statelens/tss-reach-check-explained.md`, untracked, appeared in the checkout during the verification. | None; not part of this change, left in place. |
+
+The procedure was rerun once after these fixes, the fuzz package's checks included (clippy,
+rustfmt, nextest 80/80; the 30 listed tests are the 30 expected): the same 30 rows as the
+expected table of SPEC 18.10.1, `differential: PASSED (+187s)`, exit 0; TS-9006's E2 now reads
+`verify=pending` stamped after the `subscription` entry, and its control run misses E2; the
+worktree and its target directory were gone afterwards. `just check-scripts`, `just
+check-prompts` and `just check-invariants` pass; the seven cards, linted by name, still report
+their location (rule 1) and nothing else, with `excerpts --check` at 0 of 7 out of date.
+
 ## Follow-ups (not in this change)
 - Variant `run` lines print `-- -rss_limit_mb=4000 -print_final_stats=1` (statelens.py:5650),
   against the no-flags preference.

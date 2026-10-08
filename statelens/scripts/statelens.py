@@ -10785,6 +10785,36 @@ def first_panic(lines):
     return None
 
 
+def cmd_reach_verdict(args):
+    """The reach verdict of one scaffold from replays captured outside synthesis (SPEC
+    section 18.8): the card's History, the module's header and each replay's exit code
+    and output, through the same `first_run` and `reach_verdict` the synthesis uses.
+    Prints the verdict, then the reasons, annotations and control reason one per line.
+    Exit code 0 for REACHED, 1 otherwise."""
+    history = card_history(Path(args.card).read_text(errors="replace"))
+    module = Path(args.module).read_text(errors="replace")
+
+    def replay(path, code):
+        if path is None:
+            return None
+        return code, first_run(Path(path).read_text(errors="replace"), history.id)
+
+    result = reach_verdict(
+        history,
+        module,
+        replay(args.canonical, args.canonical_code),
+        replay(args.control, args.control_code),
+    )
+    print(verdict_text(result), flush=True)
+    for reason in result["reasons"]:
+        print(f"reason: {reason}")
+    for annotation in result["annotations"]:
+        print(f"annotation: {annotation}")
+    if result["control_reason"]:
+        print(f"control: {result['control_reason']}")
+    return 0 if result["verdict"] == "REACHED" else 1
+
+
 def main(argv):
     parser = Parser(
         prog="statelens.py",
@@ -11173,6 +11203,28 @@ def main(argv):
         action="store_true",
         help="undo and synthesize again the selected pairs (card, base) that have a report",
     )
+    reach = commands.add_parser(
+        "reach-verdict",
+        help="the reach verdict of a scaffold from captured replays",
+        description=(
+            "Compute the reach verdict (SPEC section 18.8) of one scaffold from a card, "
+            "the scaffold module and the captured output of its canonical replay and, "
+            "optionally, its control replay, as the synthesis computes it. Exit code 0 "
+            "for REACHED, 1 otherwise."
+        ),
+    )
+    reach.add_argument("--card", required=True, help="the target-state card (TS-NNNN.md)")
+    reach.add_argument("--module", required=True, help="the scaffold module (tsNNNN.rs)")
+    reach.add_argument(
+        "--canonical", required=True, help="the canonical replay's output, with its stderr"
+    )
+    reach.add_argument(
+        "--canonical-code", type=int, default=0, help="the canonical replay's exit code"
+    )
+    reach.add_argument("--control", help="the control replay's output, if it ran")
+    reach.add_argument(
+        "--control-code", type=int, default=0, help="the control replay's exit code"
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -11204,6 +11256,8 @@ def main(argv):
             return cmd_lint_plan(args)
         if args.command == "lint-prompts":
             return cmd_lint_prompts(args)
+        if args.command == "reach-verdict":
+            return cmd_reach_verdict(args)
         if args.command == "synthesize":
             return Synthesis(args).run()
         return Campaign(args).run()

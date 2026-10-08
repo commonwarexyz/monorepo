@@ -14,14 +14,14 @@
 
 mod adversary;
 mod elector;
-pub(crate) mod environment;
-pub(crate) mod harness;
-pub(crate) mod input;
-pub(crate) mod recording_resolver;
+pub mod environment;
+pub mod harness;
+pub mod input;
+pub mod recording_resolver;
 pub(crate) mod runner;
 #[allow(clippy::module_inception)]
 // the concrete scenarios live in scenarios/scenarios.rs by design.
-pub(crate) mod scenarios;
+pub mod scenarios;
 mod strategy;
 
 pub use input::{MarshalScenarioPrefixInput, ScenarioKind};

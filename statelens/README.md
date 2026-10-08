@@ -716,3 +716,45 @@ STATELENS_BYZANTINE=panic NIGHTLY_VERSION=<fuzz toolchain> just run simplex_cert
 STATELENS_FEEDBACK=0 NIGHTLY_VERSION=<fuzz toolchain> just run simplex_cert_mock_twins_mutator_statelens \
   <empty dir> -- -max_total_time=600
 ```
+
+### The differential test of the TSS primitives
+
+The marshal scenario prefixes (`consensus/fuzz/marshal/src/scenarios/`) are hand-written
+reconstructions of six marshal standard tests that check the state they reach at the handoff.
+`statelens/differential/` is a test-only crate that, for each of those tests, drives the
+scenario's own prefix and a hand-written TSS prefix, built from the helper primitives
+(`Stages`, `Witness`, `stamp`, `Stages::handoff`) and the same harness verbs as a scaffold
+would use, on an identical setup and input, takes a canonical state digest of both, and
+requires equal digests and a `REACHED n/n` verdict from the real reach-check validator
+(`statelens.py reach-verdict`) on the TSS side's `[statelens-reach]` lines. Six negative
+controls (a dropped event, `En` read before the handoff, swapped events, a certificate or a
+finalization delivered to another node, a delivery left armed) must be caught, by the digest
+or by the validator's verdict of a replay that ran to its digest line. It instruments
+nothing, starts no engine and runs no fuzzer: it tests the method, not a campaign, and it
+says nothing about what an agent writes.
+
+```
+statelens/scripts/differential.sh
+DIFFERENTIAL_SCRATCH=/path/with/25GB/free SKIP_FUZZ_CHECKS=1 statelens/scripts/differential.sh
+```
+
+The script never builds in the checkout: it adds a detached worktree of `HEAD` under
+`<scratch>/run.XXXXXX/wt-diff`, one `mktemp -d` directory per run (`DIFFERENTIAL_SCRATCH`,
+default `$TMPDIR/statelens-differential`), copies `statelens/` and
+`consensus/fuzz/marshal/` into it, checks the fuzz package there (clippy with `-D warnings`,
+rustfmt of the touched files, nextest; `SKIP_FUZZ_CHECKS=1` skips this), builds the crate,
+runs every test in its own process twice (the canonical and the control replay) with the
+reach lines captured, runs the validator, prints a `| test | digest equal | verdict |` table
+and `differential: PASSED` or `FAILED`, and removes the worktree with its target directory.
+It needs about 25 GB of free disk, the `stable` toolchain with nextest and the pinned
+nightly's rustfmt (`DIFFERENTIAL_RUSTFMT`), and takes a few minutes after the builds. The
+logs and both digests of every test stay in `<scratch>/run.XXXXXX/logs/` (the path is
+printed at the end) for a diff.
+
+The crate is the one `Cargo.toml` under `statelens/`: its empty `[workspace]` table keeps it
+out of the root workspace, so no workspace build, test, lint or CI job sees it. It needs the
+scenario primitives of `consensus/fuzz/marshal/src` to be `pub` rather than `pub(crate)`, the
+one change outside `statelens/`, a visibility change and nothing else.
+[differential/README.md](differential/README.md) lists what the digest compares and the
+test's limits: it compares settled states, so an event still in flight at the handoff is not
+told apart. SPEC.md section 18.10.1 has the procedure and the expected table.

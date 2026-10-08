@@ -22,7 +22,7 @@ use commonware_consensus_fuzz_core::simplex::Simplex;
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 
 /// The standard marshal mailbox for the mock block.
-pub(crate) type Mb<P> = commonware_consensus::marshal::core::Mailbox<
+pub type Mb<P> = commonware_consensus::marshal::core::Mailbox<
     SchemeOf<P>,
     commonware_consensus::marshal::standard::Standard<B<P>>,
 >;
@@ -34,7 +34,7 @@ pub(crate) type Mb<P> = commonware_consensus::marshal::core::Mailbox<
 /// scenario identical in both fuzzing modes.
 #[allow(dead_code)] // `A` names node 0, addressed by the adversary rather than scenarios.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Node {
+pub enum Node {
     A,
     B,
     C,
@@ -42,7 +42,7 @@ pub(crate) enum Node {
 }
 
 impl Node {
-    pub(crate) const fn idx(self) -> usize {
+    pub const fn idx(self) -> usize {
         self as usize
     }
 }
@@ -55,11 +55,11 @@ impl Node {
 /// indices are part of the certificate identity). Every signer is an
 /// always-honest, marshal-holding node in both modes; the adversary's own
 /// attack messages are signed separately by the disrupters.
-pub(crate) const QUORUM_SIGNERS: [Node; 3] = [Node::B, Node::C, Node::D];
+pub const QUORUM_SIGNERS: [Node; 3] = [Node::B, Node::C, Node::D];
 
 /// The kind of a fabricated certificate, recorded in the ledger.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CertificateKind {
+pub enum CertificateKind {
     Notarization,
     Finalization,
 }
@@ -72,24 +72,24 @@ pub(crate) enum CertificateKind {
 /// is the certificate's full wire encoding, compared exactly against the
 /// recovered-journal entries for certificates above the engine floor.
 #[derive(Clone, Debug)]
-pub(crate) struct PrefixCertificate {
-    pub(crate) kind: CertificateKind,
-    pub(crate) round: Round,
-    pub(crate) parent_view: View,
+pub struct PrefixCertificate {
+    pub kind: CertificateKind,
+    pub round: Round,
+    pub parent_view: View,
     #[allow(dead_code)]
-    pub(crate) payload: Sha256Digest,
-    pub(crate) signers: Vec<Node>,
-    pub(crate) scenario: &'static str,
-    pub(crate) encoded: Bytes,
+    pub payload: Sha256Digest,
+    pub signers: Vec<Node>,
+    pub scenario: &'static str,
+    pub encoded: Bytes,
 }
 
 /// The height, view, and digest the fuzz adversary attacks: the first live view
 /// above the engine floor.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct AttackAnchor {
-    pub(crate) height: Height,
-    pub(crate) view: View,
-    pub(crate) digest: Sha256Digest,
+pub struct AttackAnchor {
+    pub height: Height,
+    pub view: View,
+    pub digest: Sha256Digest,
 }
 
 /// A backfill request the source produces, expressed precisely enough to
@@ -101,7 +101,7 @@ pub(crate) struct AttackAnchor {
 // surface and exercised by unit tests, reserved for finalized-fetch scenarios.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum FetchMatch {
+pub enum FetchMatch {
     /// A block requested by commitment, any annotation.
     Block(Sha256Digest),
     /// A block requested for the finalized chain by finalization round.
@@ -127,7 +127,7 @@ pub(crate) enum FetchMatch {
 
 impl FetchMatch {
     /// Whether an observed `(key, annotation)` matches this expectation.
-    pub(crate) fn matches(&self, key: &Key<Sha256Digest>, annotation: &Annotation) -> bool {
+    pub fn matches(&self, key: &Key<Sha256Digest>, annotation: &Annotation) -> bool {
         match *self {
             Self::Block(commitment) => {
                 matches!(key, Key::Block(observed) if *observed == commitment)
@@ -166,17 +166,17 @@ impl FetchMatch {
 /// Invariant-selection hint for the fuzzing phase, expressed in the terms of
 /// the ground-truth checks in
 /// `consensus/fuzz/marshal/src/marshal/end_to_end/invariants.rs`.
-pub(crate) struct Expectation {
+pub struct Expectation {
     /// The floor height every honest node started from, anchoring the
     /// ground-truth first-delivery check; `None` for genesis-started clusters
     /// (floor 0). The hint selects only among the parameters the ground-truth
     /// checks already accept; it can never weaken them.
-    pub(crate) all_floor_rooted: Option<Height>,
+    pub all_floor_rooted: Option<Height>,
 }
 
 impl Expectation {
     /// Genesis-rooted: every honest node delivers contiguously from genesis.
-    pub(crate) const fn genesis_rooted() -> Self {
+    pub const fn genesis_rooted() -> Self {
         Self {
             all_floor_rooted: None,
         }
@@ -186,14 +186,14 @@ impl Expectation {
 /// Blocks one node must hold or lack at handoff, looked up by digest through
 /// the node's marshal (buffer plus local storage).
 #[derive(Clone, Debug)]
-pub(crate) struct NodeExpectation {
-    pub(crate) node: Node,
-    pub(crate) present: Vec<Sha256Digest>,
-    pub(crate) absent: Vec<Sha256Digest>,
+pub struct NodeExpectation {
+    pub node: Node,
+    pub present: Vec<Sha256Digest>,
+    pub absent: Vec<Sha256Digest>,
 }
 
 impl NodeExpectation {
-    pub(crate) fn new(node: Node) -> Self {
+    pub fn new(node: Node) -> Self {
         Self {
             node,
             present: Vec::new(),
@@ -202,46 +202,46 @@ impl NodeExpectation {
     }
 
     /// Require the node to hold the block with `digest` at handoff.
-    pub(crate) fn holds(mut self, digest: Sha256Digest) -> Self {
+    pub fn holds(mut self, digest: Sha256Digest) -> Self {
         self.present.push(digest);
         self
     }
 
     /// Require the node to lack the block with `digest` at handoff.
-    pub(crate) fn lacks(mut self, digest: Sha256Digest) -> Self {
+    pub fn lacks(mut self, digest: Sha256Digest) -> Self {
         self.absent.push(digest);
         self
     }
 }
 
 /// The verified state a prefix hands the fuzzing phase.
-pub(crate) struct ScenarioHandoff<P: Simplex> {
+pub struct ScenarioHandoff<P: Simplex> {
     /// The floor the engines start from: Genesis or a source-existing Finalized.
-    pub(crate) engine_floor: Floor<SchemeOf<P>, Sha256Digest>,
+    pub engine_floor: Floor<SchemeOf<P>, Sha256Digest>,
     /// Certificates every honest engine recovers from its seeded voter journal
     /// at startup, replayed before the live loop. The runner writes each as an
     /// `Artifact::Notarization` into the engine's journal partition before
     /// `Engine::new`, and the composition proof (I1) requires every
     /// above-floor prefix certificate to match one of these entries exactly.
-    pub(crate) engine_journal: Vec<Notarization<SchemeOf<P>, Sha256Digest>>,
+    pub engine_journal: Vec<Notarization<SchemeOf<P>, Sha256Digest>>,
     /// Height, view, and digest the adversary attacks: the first live view
     /// above the floor and the recovered journal state.
-    pub(crate) attack_anchor: AttackAnchor,
+    pub attack_anchor: AttackAnchor,
     /// The reference chain the honest nodes deliver, when the source has one.
-    pub(crate) reference_chain: Vec<B<P>>,
+    pub reference_chain: Vec<B<P>>,
     /// The complete fetch history each listed node must have issued by handoff,
     /// as an exact multiset (an empty list requires the node to have issued no
     /// fetch at all). Nodes absent in the adversarial mode are skipped.
-    pub(crate) node_fetches: Vec<(Node, Vec<FetchMatch>)>,
+    pub node_fetches: Vec<(Node, Vec<FetchMatch>)>,
     /// The fetches that must still be active (not retained away) on each listed
     /// node at handoff, as an exact multiset.
-    pub(crate) node_active_fetches: Vec<(Node, Vec<FetchMatch>)>,
+    pub node_active_fetches: Vec<(Node, Vec<FetchMatch>)>,
     /// Block presence and absence each listed node must exhibit at handoff:
     /// the defining state names which marshal holds each candidate and which
     /// must lack it. Nodes absent in the adversarial mode are skipped.
-    pub(crate) expected_nodes: Vec<NodeExpectation>,
+    pub expected_nodes: Vec<NodeExpectation>,
     /// Invariant-selection hint for the fuzzing phase.
-    pub(crate) expectation: Expectation,
+    pub expectation: Expectation,
 }
 
 #[cfg(test)]

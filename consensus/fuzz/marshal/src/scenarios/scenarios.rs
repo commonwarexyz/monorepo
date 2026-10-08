@@ -105,7 +105,8 @@ use commonware_cryptography::{Digestible as _, Hasher as _, Sha256};
 use commonware_utils::channel::oneshot::error::TryRecvError;
 
 /// A scripted prefix that drives the cluster to a source-defined marshal state.
-pub(crate) trait Scenario {
+#[allow(async_fn_in_trait)]
+pub trait Scenario {
     /// Drive the live prefix and return the verified handoff.
     async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
         &self,
@@ -114,7 +115,7 @@ pub(crate) trait Scenario {
 }
 
 /// Dispatch to the concrete scenario's live prefix.
-pub(crate) async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
+pub async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
     kind: ScenarioKind,
     harness: &mut FuzzScenarioStandardHarness<P, M>,
 ) -> ScenarioHandoff<P> {
@@ -188,7 +189,7 @@ fn attack_above<P: Simplex>(block: &B<P>) -> AttackAnchor {
 /// live network from the victim, so the fuzzing phase drives forward from the
 /// missing-candidate state itself rather than from locally re-certified
 /// copies.
-pub(crate) struct StandardCertifyMissingCandidateFetchesByRound;
+pub struct StandardCertifyMissingCandidateFetchesByRound;
 
 impl Scenario for StandardCertifyMissingCandidateFetchesByRound {
     async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
@@ -286,7 +287,7 @@ impl Scenario for StandardCertifyMissingCandidateFetchesByRound {
 /// same-round verified sibling of the live view-1 candidate, a state the
 /// marshal tolerates by design (source
 /// `test_standard_certify_persists_equivocated_block`).
-pub(crate) struct StandardCertifyFirstBlockFetchesGenesisParent;
+pub struct StandardCertifyFirstBlockFetchesGenesisParent;
 
 impl Scenario for StandardCertifyFirstBlockFetchesGenesisParent {
     async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
@@ -423,7 +424,7 @@ impl Scenario for StandardCertifyFirstBlockFetchesGenesisParent {
 /// marshal tolerates by design (source
 /// `test_standard_certify_persists_equivocated_block`), and the outstanding
 /// round-bound fetch can only resolve to a valid round-1 notarization.
-pub(crate) struct StandardVerifyHeightLieParentFetchIsRoundBound;
+pub struct StandardVerifyHeightLieParentFetchIsRoundBound;
 
 impl Scenario for StandardVerifyHeightLieParentFetchIsRoundBound {
     async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
@@ -557,7 +558,7 @@ impl Scenario for StandardVerifyHeightLieParentFetchIsRoundBound {
 /// replay installs the recovered proposal and no engine can produce a
 /// competing view-1 certificate. Only the victim holds the fetched candidate
 /// at handoff, and the first attackable live view is view 2 over it.
-pub(crate) struct StandardCertifyBumpsNotarizedFetchForPendingVerify;
+pub struct StandardCertifyBumpsNotarizedFetchForPendingVerify;
 
 impl Scenario for StandardCertifyBumpsNotarizedFetchForPendingVerify {
     async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
@@ -673,7 +674,7 @@ impl Scenario for StandardCertifyBumpsNotarizedFetchForPendingVerify {
 /// canceled wait, and any certification gate the pending verify parked is
 /// keyed by (round, digest), so no live `certify` at view 1 can take it.
 /// Nothing the fuzzing phase produces can conflict with prefix state.
-pub(crate) struct StandardVerifyMissingCandidateWaitsWithoutFetching;
+pub struct StandardVerifyMissingCandidateWaitsWithoutFetching;
 
 impl Scenario for StandardVerifyMissingCandidateWaitsWithoutFetching {
     async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
@@ -820,7 +821,7 @@ impl Scenario for StandardVerifyMissingCandidateWaitsWithoutFetching {
 /// anything); the other honest marshals receive the floor finalization at
 /// engine startup and backfill the chain over the live network from the
 /// victim, so every honest node still delivers from genesis.
-pub(crate) struct StandardGetBlockByHeightAndLatest;
+pub struct StandardGetBlockByHeightAndLatest;
 
 impl Scenario for StandardGetBlockByHeightAndLatest {
     async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(

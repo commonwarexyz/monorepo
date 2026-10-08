@@ -59,13 +59,13 @@ use std::{
 };
 
 /// The always-accept block builder wired under every marshal variant.
-pub(crate) type App<P> = AlwaysAcceptBlockBuilderApp<Ctx<P>, SchemeOf<P>>;
+pub type App<P> = AlwaysAcceptBlockBuilderApp<Ctx<P>, SchemeOf<P>>;
 
 /// Deadline for awaiting a wrapper verify/certify verdict during a prefix.
 const WRAPPER_WAIT: Duration = Duration::from_secs(5);
 
 /// A block dispatched to peers: round, block digest, and recipients.
-pub(crate) type BufferSend<P> = (Round, Sha256Digest, Recipients<PublicKeyOf<P>>);
+pub type BufferSend<P> = (Round, Sha256Digest, Recipients<PublicKeyOf<P>>);
 
 /// A marshal broadcast buffer that records every `send` and, only once
 /// forwarding is enabled at handoff, delegates it to the real broadcast mailbox.
@@ -74,7 +74,7 @@ pub(crate) type BufferSend<P> = (Round, Sha256Digest, Recipients<PublicKeyOf<P>>
 /// recipients of dispatched blocks without the live buffered mailbox's cache and
 /// subscription state changing; the runner enables forwarding before the engines
 /// start so the fuzzing phase disseminates blocks normally.
-pub(crate) struct RecordingBuffer<P: Simplex> {
+pub struct RecordingBuffer<P: Simplex> {
     inner: buffered::Mailbox<PublicKeyOf<P>, B<P>>,
     sends: Arc<Mutex<Vec<BufferSend<P>>>>,
     forwarding: Arc<AtomicBool>,
@@ -93,7 +93,7 @@ impl<P: Simplex> Clone for RecordingBuffer<P> {
 }
 
 impl<P: Simplex> RecordingBuffer<P> {
-    pub(crate) fn new(
+    pub fn new(
         inner: buffered::Mailbox<PublicKeyOf<P>, B<P>>,
         sends: Arc<Mutex<Vec<BufferSend<P>>>>,
         forwarding: Arc<AtomicBool>,
@@ -143,19 +143,19 @@ impl<P: Simplex> Buffer<Standard<B<P>>> for RecordingBuffer<P> {
 }
 
 /// The live per-node handles the harness drives.
-pub(crate) struct HarnessNode<P: Simplex, M: TwinsMarshal<P, App<P>>> {
-    pub(crate) mailbox: Mb<P>,
-    pub(crate) wrapper: M::Wrapper,
-    pub(crate) resolver: RecordingResolver<P>,
-    pub(crate) application: Application<B<P>>,
+pub struct HarnessNode<P: Simplex, M: TwinsMarshal<P, App<P>>> {
+    pub mailbox: Mb<P>,
+    pub wrapper: M::Wrapper,
+    pub resolver: RecordingResolver<P>,
+    pub application: Application<B<P>>,
     /// Blocks this node dispatched through its recording broadcast buffer.
-    pub(crate) sends: Arc<Mutex<Vec<BufferSend<P>>>>,
+    pub sends: Arc<Mutex<Vec<BufferSend<P>>>>,
     /// Local-wait block subscriptions registered through the recording buffer.
-    pub(crate) subscriptions: Arc<AtomicUsize>,
+    pub subscriptions: Arc<AtomicUsize>,
 }
 
 /// The scenario scripting surface over the four-node cluster.
-pub(crate) struct FuzzScenarioStandardHarness<P: Simplex, M: TwinsMarshal<P, App<P>>> {
+pub struct FuzzScenarioStandardHarness<P: Simplex, M: TwinsMarshal<P, App<P>>> {
     context: deterministic::Context,
     participants: Vec<PublicKeyOf<P>>,
     schemes: Vec<SchemeOf<P>>,
@@ -174,7 +174,7 @@ pub(crate) struct FuzzScenarioStandardHarness<P: Simplex, M: TwinsMarshal<P, App
 // are exercised by future scenarios.
 #[allow(dead_code)]
 impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
-    pub(crate) fn new(
+    pub fn new(
         context: deterministic::Context,
         participants: Vec<PublicKeyOf<P>>,
         schemes: Vec<SchemeOf<P>>,
@@ -194,27 +194,27 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// Set the source test a prefix is porting (ledger provenance).
-    pub(crate) fn begin(&mut self, scenario: &'static str) {
+    pub fn begin(&mut self, scenario: &'static str) {
         self.scenario = scenario;
     }
 
     /// The canonical chain the convenience [`Self::block`] helper has built.
-    pub(crate) fn canonical(&self) -> &[B<P>] {
+    pub fn canonical(&self) -> &[B<P>] {
         &self.canonical
     }
 
     /// The certificates fabricated so far, for composition-soundness inspection.
-    pub(crate) fn ledger(&self) -> &[PrefixCertificate] {
+    pub fn ledger(&self) -> &[PrefixCertificate] {
         &self.ledger
     }
 
     /// The height-zero genesis block.
-    pub(crate) fn genesis(&self) -> &B<P> {
+    pub fn genesis(&self) -> &B<P> {
         &self.genesis
     }
 
     /// The participant public keys, in index order.
-    pub(crate) fn participants(&self) -> &[PublicKeyOf<P>] {
+    pub fn participants(&self) -> &[PublicKeyOf<P>] {
         &self.participants
     }
 
@@ -241,7 +241,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     // ---- Block construction ------------------------------------------------
 
     /// The consensus context for a block: round, leader, and parent reference.
-    pub(crate) fn context(
+    pub fn context(
         &self,
         round: Round,
         leader: Node,
@@ -259,7 +259,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     /// without extending any global chain. Named distinctly from the source
     /// harness's `make_raw_block`, which takes only a parent, height, and
     /// timestamp and derives the rest (S6).
-    pub(crate) fn block_with_context(
+    pub fn block_with_context(
         &self,
         parent_digest: Sha256Digest,
         parent_view: View,
@@ -282,7 +282,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     /// Build a raw block whose parent digest is `hash(seed)`: the source
     /// `make_raw_block(Sha256::hash(&[b"..."]), ..)` shape for an independent
     /// branch anchor.
-    pub(crate) fn make_seeded_block(
+    pub fn make_seeded_block(
         &self,
         seed: &[u8],
         parent_view: View,
@@ -302,7 +302,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// Build a child of `parent`, reading the parent digest and view from it.
-    pub(crate) fn make_child(
+    pub fn make_child(
         &self,
         parent: &B<P>,
         round: Round,
@@ -322,7 +322,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
 
     /// Build a same-round equivocation of `block`: identical context and
     /// height, distinguished only by `timestamp`.
-    pub(crate) fn make_equivocation(&self, block: &B<P>, timestamp: u64) -> B<P> {
+    pub fn make_equivocation(&self, block: &B<P>, timestamp: u64) -> B<P> {
         B::<P>::new::<Sha256>(
             block.context.clone(),
             block.context.parent.1,
@@ -332,20 +332,20 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// The digest of a block.
-    pub(crate) fn digest(block: &B<P>) -> Sha256Digest {
+    pub fn digest(block: &B<P>) -> Sha256Digest {
         block.digest()
     }
 
     /// The consensus commitment of a block (equal to its digest for the standard
     /// variant).
-    pub(crate) fn commitment(block: &B<P>) -> Sha256Digest {
+    pub fn commitment(block: &B<P>) -> Sha256Digest {
         block.digest()
     }
 
     /// Convenience canonical-chain builder: append and return the next block on
     /// the chain at `view`, led by `leader`. Retained only for source tests that
     /// actually construct a canonical chain.
-    pub(crate) fn block(&mut self, leader: Node, view: u64) -> B<P> {
+    pub fn block(&mut self, leader: Node, view: u64) -> B<P> {
         let parent = self.canonical.last().unwrap_or(&self.genesis);
         let parent_digest = parent.digest();
         let parent_view = parent.context.round.view();
@@ -363,13 +363,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// A side/fork block on an explicit parent, not appended to the chain.
-    pub(crate) fn fork_block(
-        &self,
-        parent: &B<P>,
-        leader: Node,
-        view: u64,
-        height: Height,
-    ) -> B<P> {
+    pub fn fork_block(&self, parent: &B<P>, leader: Node, view: u64, height: Height) -> B<P> {
         self.make_child(parent, Self::round(view), leader, height, height.get())
     }
 
@@ -397,7 +391,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// Build a notarization over an explicit proposal, recording it.
-    pub(crate) fn make_notarization(
+    pub fn make_notarization(
         &mut self,
         round: Round,
         parent_view: View,
@@ -419,7 +413,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// Build a finalization over an explicit proposal, recording it.
-    pub(crate) fn make_finalization(
+    pub fn make_finalization(
         &mut self,
         round: Round,
         parent_view: View,
@@ -441,7 +435,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// Notarization over `block`, reading its view and parent view from context.
-    pub(crate) fn notarization_of(
+    pub fn notarization_of(
         &mut self,
         block: &B<P>,
         signers: &[Node],
@@ -452,7 +446,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// Finalization over `block`, reading its view and parent view from context.
-    pub(crate) fn finalization_of(
+    pub fn finalization_of(
         &mut self,
         block: &B<P>,
         signers: &[Node],
@@ -465,7 +459,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     // ---- Awaited mailbox verbs --------------------------------------------
 
     /// Persist `block` as verified at `view` on `node`, asserting durability.
-    pub(crate) async fn verified(&self, node: Node, view: u64, block: &B<P>) {
+    pub async fn verified(&self, node: Node, view: u64, block: &B<P>) {
         assert!(
             self.mailbox(node)
                 .verified(Self::round(view), block.clone())
@@ -475,7 +469,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// Persist `block` as certified at `view` on `node`, asserting durability.
-    pub(crate) async fn certified(&self, node: Node, view: u64, block: &B<P>) {
+    pub async fn certified(&self, node: Node, view: u64, block: &B<P>) {
         assert!(
             self.mailbox(node)
                 .certified(Self::round(view), block.clone())
@@ -489,7 +483,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     /// several before awaiting preserves the source's concurrent propose handshake
     /// (blocks staged and broadcast in submission order before any durability
     /// wait).
-    pub(crate) fn proposed_all_deferred(
+    pub fn proposed_all_deferred(
         &self,
         node: Node,
         view: u64,
@@ -507,12 +501,12 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
 
     /// The blocks `node` dispatched through its recording broadcast buffer, in
     /// order, each as `(round, digest, recipients)`.
-    pub(crate) fn buffer_sends(&self, node: Node) -> Vec<BufferSend<P>> {
+    pub fn buffer_sends(&self, node: Node) -> Vec<BufferSend<P>> {
         self.node(node).sends.lock().clone()
     }
 
     /// Report a notarization to `node`'s marshal (fire-and-forget).
-    pub(crate) fn report_notarization(
+    pub fn report_notarization(
         &self,
         node: Node,
         notarization: Notarization<SchemeOf<P>, Sha256Digest>,
@@ -524,7 +518,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// Report a finalization to `node`'s marshal (fire-and-forget).
-    pub(crate) fn report_finalization(
+    pub fn report_finalization(
         &self,
         node: Node,
         finalization: Finalization<SchemeOf<P>, Sha256Digest>,
@@ -536,16 +530,12 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// Install a finalization as the marshal floor on `node` (fire-and-forget).
-    pub(crate) fn set_floor(
-        &self,
-        node: Node,
-        finalization: Finalization<SchemeOf<P>, Sha256Digest>,
-    ) {
+    pub fn set_floor(&self, node: Node, finalization: Finalization<SchemeOf<P>, Sha256Digest>) {
         self.mailbox(node).set_floor(finalization);
     }
 
     /// Issue a round-bound backfill hint for a notarized commitment on `node`.
-    pub(crate) fn hint_notarized(&self, node: Node, view: u64, commitment: Sha256Digest) {
+    pub fn hint_notarized(&self, node: Node, view: u64, commitment: Sha256Digest) {
         self.mailbox(node)
             .hint_notarized(Self::round(view), commitment);
     }
@@ -555,7 +545,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     /// genesis, so every scaffolding node must deliver from the floor for the
     /// cluster to be live; the victim node's own floor sequence is scripted
     /// separately and excluded here.
-    pub(crate) fn set_floor_others(
+    pub fn set_floor_others(
         &self,
         except: Node,
         finalization: Finalization<SchemeOf<P>, Sha256Digest>,
@@ -572,7 +562,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
 
     /// Best-effort local block lookup by height, digest, or latest: the
     /// source mailbox verb's full [`Identifier`] surface.
-    pub(crate) async fn get_block(
+    pub async fn get_block(
         &self,
         node: Node,
         identifier: impl Into<Identifier<Sha256Digest>>,
@@ -581,7 +571,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// Best-effort local finalization lookup by height.
-    pub(crate) async fn get_finalization(
+    pub async fn get_finalization(
         &self,
         node: Node,
         height: Height,
@@ -590,7 +580,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// Best-effort `(height, digest)` lookup.
-    pub(crate) async fn get_info(
+    pub async fn get_info(
         &self,
         node: Node,
         identifier: impl Into<Identifier<Sha256Digest>>,
@@ -600,7 +590,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
 
     /// Register a pending block subscription by digest on `node`, returning the
     /// receiver (retain it to keep the subscription alive).
-    pub(crate) fn subscribe_by_digest(
+    pub fn subscribe_by_digest(
         &self,
         node: Node,
         digest: Sha256Digest,
@@ -610,7 +600,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// Register a pending block subscription by commitment on `node`.
-    pub(crate) fn subscribe_by_commitment(
+    pub fn subscribe_by_commitment(
         &self,
         node: Node,
         commitment: Sha256Digest,
@@ -621,7 +611,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     }
 
     /// FIFO barrier: a round-trip that flushes prior fire-and-forget messages.
-    pub(crate) async fn barrier(&self, node: Node) -> Option<Height> {
+    pub async fn barrier(&self, node: Node) -> Option<Height> {
         self.mailbox(node)
             .get_processed()
             .await
@@ -630,13 +620,13 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
 
     /// The application delivery tip on `node` (`(height, digest)`), set from the
     /// marshal's startup Tip report.
-    pub(crate) fn app_tip(&self, node: Node) -> Option<(Height, Sha256Digest)> {
+    pub fn app_tip(&self, node: Node) -> Option<(Height, Sha256Digest)> {
         self.node(node).application.tip()
     }
 
     /// Fence every honest node so all prior fire-and-forget messages are
     /// processed before the prefix finishes.
-    pub(crate) async fn barrier_all(&self) {
+    pub async fn barrier_all(&self) {
         for idx in 0..self.nodes.len() {
             if self.nodes[idx].is_some() {
                 let _ = self.mailbox(node_from_idx(idx)).get_processed().await;
@@ -648,7 +638,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
 
     /// Execute the real wrapper `verify` on `node`, returning its pending
     /// receiver.
-    pub(crate) async fn wrapper_verify(
+    pub async fn wrapper_verify(
         &mut self,
         node: Node,
         context: Ctx<P>,
@@ -659,7 +649,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
 
     /// Execute the real wrapper `certify` on `node`, returning its pending
     /// receiver.
-    pub(crate) async fn wrapper_certify(
+    pub async fn wrapper_certify(
         &mut self,
         node: Node,
         round: Round,
@@ -670,11 +660,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
 
     /// Await a wrapper verify/certify verdict, racing it against a deterministic
     /// deadline so an unresolved operation fails loudly rather than hanging.
-    pub(crate) async fn await_wrapper(
-        &self,
-        receiver: oneshot::Receiver<bool>,
-        label: &str,
-    ) -> bool {
+    pub async fn await_wrapper(&self, receiver: oneshot::Receiver<bool>, label: &str) -> bool {
         select! {
             result = receiver => result.expect("wrapper receiver dropped"),
             _ = self.context.sleep(WRAPPER_WAIT) => {
@@ -687,24 +673,24 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
 
     /// Arm a payload answering `node`'s next backfill fetch, delivered through
     /// the held resolver handler as if a peer had responded.
-    pub(crate) fn respond_to_next_fetch(&self, node: Node, value: Bytes) {
+    pub fn respond_to_next_fetch(&self, node: Node, value: Bytes) {
         self.node(node).resolver.respond_to_next_fetch(value);
     }
 
     /// Await the marshal's validation verdict for `node`'s most recent armed
     /// delivery.
-    pub(crate) async fn wait_for_delivery_response(&self, node: Node) -> bool {
+    pub async fn wait_for_delivery_response(&self, node: Node) -> bool {
         self.node(node).resolver.wait_for_delivery_response().await
     }
 
     /// Whether `node` issued no targeted fetch.
-    pub(crate) fn targeted_is_empty(&self, node: Node) -> bool {
+    pub fn targeted_is_empty(&self, node: Node) -> bool {
         self.node(node).resolver.targeted_is_empty()
     }
 
     /// Number of local-wait block subscriptions `node`'s marshal registered
     /// through its broadcast buffer.
-    pub(crate) fn buffer_subscription_count(&self, node: Node) -> usize {
+    pub fn buffer_subscription_count(&self, node: Node) -> usize {
         self.node(node).subscriptions.load(Ordering::Relaxed)
     }
 
@@ -743,7 +729,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
 
     /// Fence, then mechanically assert every part of `handoff`; the engines must
     /// start only after this returns.
-    pub(crate) async fn finish(&self, handoff: &ScenarioHandoff<P>) {
+    pub async fn finish(&self, handoff: &ScenarioHandoff<P>) {
         self.barrier_all().await;
 
         // Exact per-node fetch history and still-active fetches: the observed

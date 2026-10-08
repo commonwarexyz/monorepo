@@ -44,10 +44,10 @@ use commonware_utils::{NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec}
 use std::{sync::Arc, time::Duration};
 
 /// A recorded backfill request: its peer-visible key and local annotation.
-pub(crate) type FetchRecord = (Key<Sha256Digest>, Annotation);
+pub type FetchRecord = (Key<Sha256Digest>, Annotation);
 
 /// A recorded targeted backfill request with its target peer set.
-pub(crate) type TargetedRecord<P> = (Key<Sha256Digest>, Vec<PublicKeyOf<P>>);
+pub type TargetedRecord<P> = (Key<Sha256Digest>, Vec<PublicKeyOf<P>>);
 
 /// A targeted fetch paired with its target peers, as the inner resolver takes it.
 type TargetedFetch<P> = (
@@ -58,13 +58,13 @@ type TargetedFetch<P> = (
 /// Records fetches, optionally forwards them to the real P2P resolver, and
 /// answers the next one with a pre-armed payload delivered through the held
 /// handler as if a peer had responded.
-pub(crate) struct RecordingResolver<P: Simplex> {
+pub struct RecordingResolver<P: Simplex> {
     fetches: Arc<Mutex<Vec<FetchRecord>>>,
     active: Arc<Mutex<Vec<FetchRecord>>>,
     targeted: Arc<Mutex<Vec<TargetedRecord<P>>>>,
     retains: Arc<Mutex<usize>>,
-    auto_delivery: Arc<Mutex<Option<Bytes>>>,
-    delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
+    pub auto_delivery: Arc<Mutex<Option<Bytes>>>,
+    pub delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
     handler: Option<handler::Handler<Sha256Digest>>,
     inner: Option<resolver::Mailbox<Sha256Digest, PublicKeyOf<P>>>,
 }
@@ -105,20 +105,20 @@ impl<P: Simplex> RecordingResolver<P> {
     /// consumes, mirroring the source helper's `holding` constructor. Exercised
     /// by unit tests; production nodes use the network-capable wirings.
     #[allow(dead_code)]
-    pub(crate) fn holding(metrics: impl Metrics) -> (handler::Receiver<Sha256Digest>, Self) {
+    pub fn holding(metrics: impl Metrics) -> (handler::Receiver<Sha256Digest>, Self) {
         let (receiver, handler) = handler::init(metrics, NZUsize!(100));
         (receiver, Self::new(Some(handler), None))
     }
 
     /// Wrap the real P2P resolver mailbox, recording accepted requests while
     /// forwarding them. No injection path.
-    pub(crate) fn observing(inner: resolver::Mailbox<Sha256Digest, PublicKeyOf<P>>) -> Self {
+    pub fn observing(inner: resolver::Mailbox<Sha256Digest, PublicKeyOf<P>>) -> Self {
         Self::new(None, inner.into())
     }
 
     /// Wrap the real P2P resolver mailbox built by [`init_injectable`],
     /// keeping its handler so armed deliveries can be injected.
-    pub(crate) fn injectable(
+    pub fn injectable(
         handler: handler::Handler<Sha256Digest>,
         inner: resolver::Mailbox<Sha256Digest, PublicKeyOf<P>>,
     ) -> Self {
@@ -158,7 +158,7 @@ impl<P: Simplex> RecordingResolver<P> {
 
     /// Arm a payload for the next fetch, which is delivered through the held
     /// handler as if a peer had responded.
-    pub(crate) fn respond_to_next_fetch(&self, value: Bytes) {
+    pub fn respond_to_next_fetch(&self, value: Bytes) {
         assert!(
             self.handler.is_some(),
             "recording resolver has no injection handler"
@@ -182,7 +182,7 @@ impl<P: Simplex> RecordingResolver<P> {
     }
 
     /// Await the actor's validation verdict for the most recent armed delivery.
-    pub(crate) async fn wait_for_delivery_response(&self) -> bool {
+    pub async fn wait_for_delivery_response(&self) -> bool {
         let response = self
             .delivery_responses
             .lock()
@@ -192,29 +192,29 @@ impl<P: Simplex> RecordingResolver<P> {
     }
 
     /// Every fetch ever issued, in order.
-    pub(crate) fn fetches(&self) -> Vec<FetchRecord> {
+    pub fn fetches(&self) -> Vec<FetchRecord> {
         self.fetches.lock().clone()
     }
 
     /// Fetches still active after the latest retention.
-    pub(crate) fn active_fetches(&self) -> Vec<FetchRecord> {
+    pub fn active_fetches(&self) -> Vec<FetchRecord> {
         self.active.lock().clone()
     }
 
     /// Targeted fetches with their target peer sets.
     #[allow(dead_code)]
-    pub(crate) fn targeted(&self) -> Vec<TargetedRecord<P>> {
+    pub fn targeted(&self) -> Vec<TargetedRecord<P>> {
         self.targeted.lock().clone()
     }
 
     /// Whether no targeted fetch was ever issued.
-    pub(crate) fn targeted_is_empty(&self) -> bool {
+    pub fn targeted_is_empty(&self) -> bool {
         self.targeted.lock().is_empty()
     }
 
     /// Number of retain calls observed.
     #[allow(dead_code)]
-    pub(crate) fn retain_count(&self) -> usize {
+    pub fn retain_count(&self) -> usize {
         *self.retains.lock()
     }
 }
@@ -329,7 +329,7 @@ impl<P: Simplex> TargetedResolver for RecordingResolver<P> {
 /// [`Consumer`](commonware_resolver::Consumer) whose `deliver` injects an armed
 /// payload into the same receiver the actor consumes. Registers the marshal
 /// backfill channel for `validator`.
-pub(crate) async fn init_injectable<P: Simplex>(
+pub async fn init_injectable<P: Simplex>(
     context: &deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,

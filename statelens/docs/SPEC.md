@@ -142,7 +142,7 @@ them; the last column names the PRD requirement.
 | D10 | A campaign runs in place in the operator's checkout, a fresh clone of the repository; StateLens never makes another clone. The campaign refuses a checkout with tracked changes outside `SL/` or with instrumentation from an earlier campaign, never commits, and records its changes in `SL/campaign/instrumentation.diff`. Uncommitted registry edits are used. | R-P2-1 |
 | D11 | Tests use the `stable` toolchain; fuzz builds use the nightly pinned in `.github/workflows/slow.yml`. | R-P2-2 step 5 |
 | D12 | Orchestration is one Python 3 script, `SL/scripts/statelens.py` (standard library only), wrapped by `SL/justfile`. | R-LAYOUT-1, R-AG-1 |
-| D13 | No `Cargo.toml` is committed under `SL/`. `SL/runtime/*.rs` MUST stay `rustfmt`-clean, because CI's `just check-fmt` formats every `*.rs` file in the tree. | R-LAYOUT-2, R-NF-4 |
+| D13 | No `Cargo.toml` the workspace builds is committed under `SL/`. The one exception is the test-only crate `SL/differential/` (section 18.10.1, AC-25): its manifest carries an empty `[workspace]` table, so cargo's upward search stops there and the root workspace never lists or builds it, no CI job names it, and only `SL/scripts/differential.sh` builds it, in a scratch worktree. Every `*.rs` file under `SL/`, the runtime templates and the test crate included, MUST stay `rustfmt`-clean, because CI's `just check-fmt` formats every `*.rs` file in the tree. | R-LAYOUT-2, R-NF-4 |
 | D14 | Prompt files are named `analyst-<kind>.md`, one per source kind (`issue`, `design`, `comment`, `spec`, `paper`), plus a shared `analyst.md`. Target-state extraction is the exception: one prompt, `state-analyst.md`, serves every kind (D60). | R-LAYOUT-1, R-P1-2 |
 | D15 | StateLens fuzz targets use only the `cert_mock` certificate scheme (`consensus/src/simplex/mocks/scheme.rs`, imported as `cert_mock` in `consensus/fuzz/core`). Every call of a fuzz entry point in a simplex target, `fuzz::<P, ...>` or one of the `fuzz_*::<P, ...>` audit entry points, names a `P` whose `impl Simplex` in `consensus/fuzz/core/src/simplex.rs` sets `type Scheme = cert_mock::Scheme<...>`. At the reference commit these are `SimplexCertificateMock`, `SimplexCertificateMockAttributable`, `SimplexCertificateMockCustomRoundRobin` and `SimplexCertificateMockByzantineFirstLeader`; the simplex targets name `SimplexCertificateMock`, `SimplexCertificateMockByzantineFirstLeader` and `SimplexCertificateMockCustomRoundRobin`. No ed25519, BLS12-381 or secp256r1 scheme is used. The materialize step enforces this (section 7.2). The test gate is not affected. | R-P2-4 |
 | D16 | Ghost state lives for one run. The campaign patches the deterministic runtime so that `Runner::new` calls a hook that clears it; independent runs in one test thread (for example the seeds of one test) no longer share history, while a crash-restart from a checkpoint keeps it (Appendix B.4). | R-INS-5, PRD section 8.4 |
@@ -234,12 +234,20 @@ statelens/
   runtime/
     statelens.rs                 runtime support module of every profile (Appendix A)
     target_states.rs             scaffold helper, copied to `<package>/src/target_states/mod.rs` (Appendix H)
+  differential/                  test-only crate of the differential test (section 18.10.1, AC-25); outside the workspace
+    Cargo.toml                   package `statelens-differential`, with an empty `[workspace]` table
+    README.md                    what the test compares, how to run it, its limitations
+    cards/                       TS-9001.md to TS-9007.md, one card per History the test replays (section 18.3 grammar)
+    shim/                        `statelens-differential-shim`: compiles `runtime/statelens.rs` and
+                                 `runtime/target_states.rs` by `#[path]`, byte-identical
+    src/                         setup.rs, record.rs, digest.rs, cards/tsNNNN.rs, tests.rs
   scripts/
     statelens.py                 lint, lint-examples, lint-plan, lint-prompts, extract,
                                  kb, code, ast, targets, campaign, test-gate, synthesize,
-                                 coverage, clean
+                                 reach-verdict, coverage, clean
                                  (sections 5 to 7 and 18)
     test_statelens.py            tests for the quiet failures (section 5.9)
+    differential.sh              the differential test's procedure (section 18.10.1, AC-25)
 ```
 
 Constraints on committed files:
@@ -250,10 +258,21 @@ Constraints on committed files:
   exists in the instrumented subsystems. A name that is not code, such as a knowledge-base
   claim field, is declared in the document with a
   `<!-- statelens-lint: not-code: a, b -->` line.
-- No `Cargo.toml` anywhere under `SL/` (R-LAYOUT-2).
-- `runtime/*.rs` pass `rustfmt +<pinned nightly> --edition 2024 --check` with the
-  repository `rustfmt.toml`.
-- Nothing outside `SL/` is changed (R-LAYOUT-3).
+- No `Cargo.toml` the workspace builds anywhere under `SL/` (R-LAYOUT-2). The one exception
+  is `SL/differential/`, a test-only crate outside the workspace: its manifest has an empty
+  `[workspace]` table, its shim is a member of that workspace as a path dependency under it,
+  `cargo metadata` at the repository root lists neither package, no CI job names them, and
+  `SL/scripts/differential.sh` builds them only in a scratch worktree (section 18.10.1). Its
+  lockfile is generated there and not committed. CI's formatting checks cover its files like
+  any other in the tree: `just check-fmt` its `*.rs` files and `just check-toml-fmt` its two
+  manifests.
+- Every `*.rs` file under `SL/`, `runtime/*.rs` and `differential/` included, passes
+  `rustfmt +<pinned nightly> --edition 2024 --check` with the repository `rustfmt.toml`.
+- Nothing outside `SL/` is changed (R-LAYOUT-3), except the visibility change in
+  `consensus/fuzz/marshal/src` the differential test imports through (section 18.10.1,
+  AC-25): `pub(crate)` widened to `pub` on the scenario primitives the test crate uses, the
+  two lint `#[allow]`s this needs, and nothing else; no logic, signature or doc change, and
+  nothing under `consensus/src`.
 
 ---
 
@@ -873,6 +892,7 @@ prefixed with `statelens:`.
 | `coverage` | `coverage [--profile P] [TARGET...]`; replays the corpus of each StateLens target under coverage instrumentation and writes an HTML report per target plus a merged one (section 7.13). A positional name is a profile or a target, as `just fuzz` reads it; a scaffold's name is accepted like a variant's, and a profile covers its scaffolds with its variants (section 18.9). A target with no corpus is skipped | 0 done, 1 usage or an unknown target, 2 no corpus anywhere, no `llvm-tools-preview`, or a failed coverage run |
 | `targets` | `targets [--profile P] [--state-reaching] [--match GLOB]...`; the StateLens targets `P` builds, one per line, which is what `just fuzz <profile>` reads rather than parsing a campaign summary. `--match` keeps the targets a shell pattern names, by variant name or by the original target's, and is what `just fuzz <profile> --fuzz-targets GLOB` passes. With `--state-reaching` it lists the scaffolds of the selected pairs (card, base) instead, and a `TS-NNNN` pattern names a card; `just fuzz` forwards `--state-targets` and `--fuzz-targets` alike as `--match`, having checked each pattern's form (section 18.9) | 0 done, 1 a pattern that names no target; with `--state-reaching`, 0 done, also with no scaffold yet, 1 no card and base selected or a selected card with a lint problem |
 | `synthesize` | `synthesize [--agent A] [--profile P] [--match GLOB]... [--redo]`, where `P` is `simplex` or `marshal`, by default the profile of `SL/campaign/meta.json`; writes, builds and checks one scaffold per selected card on each selected base, every candidate base with no base pattern, on a checkout a campaign of `P` instrumented (section 18.6) | 0 at least one scaffold exists for the selection, 1 usage or nothing selected, 2 a failed precondition, an edit outside the edit contract's scope, a missing anchor, or a `--redo` that does not apply, 3 no scaffold built |
+| `reach-verdict` | `reach-verdict --card CARD --module MODULE --canonical LOG [--canonical-code N] [--control LOG] [--control-code N]`; the reach verdict of one scaffold from replays captured outside synthesis, through the same `card_history`, `first_run` and `reach_verdict` the synthesis uses (section 18.8): prints the verdict, then the reasons, annotations and control reason one per line. `SL/scripts/differential.sh` is its caller (section 18.10.1) | 0 REACHED, 1 any other verdict |
 | `test-gate` | `test-gate [--profile P]`; runs the test gate's command (section 7.7) on the checkout as it stands, then, for a profile that has them, the component tests, which are reported and not gated. With no `--profile` it takes the profile from `SL/campaign/meta.json` | 0 gate passed, 1 no profile, 4 gate failed |
 | `ast` | `ast sites NAME [PATH...] [--writes-only] [--tests]`, `ast notes [--pattern RE] [PATH...] [--tests]`; a `PATH` is a file or a directory (section 5.8) | 0 done, including no sites, 1 usage or rust-analyzer absent |
 | `clean` | `clean [--yes]`; without `--yes` it prints what it would undo and changes nothing. Files a campaign or an instrumenter added are deleted and paths that exist in `HEAD` are restored from it, the two told apart by asking `git ls-tree` rather than by reading a status code. Status is asked with `--untracked-files=all`, so a wholly untracked directory is named as its files rather than collapsed to one entry that is not a file to delete, and a directory that is left empty is removed while nothing in it is deleted unseen. With `--yes` it checks afterwards that nothing in scope still differs from `HEAD`. The scope includes the simplex and marshal fuzz packages, where synthesis writes (section 18.6), but not the `corpus/`, `artifacts/` and `coverage/` that git ignores there; under the simplex and marshal `src/target_states/`, which synthesis writes whole and a campaign refuses, it also deletes the files git ignores, and with `--yes` it reports such a directory that remains as a difference (exit 1) | 0 done, including a preview, which is not a failure; 1 something in scope still differs from `HEAD`, so the checkout is not reusable |
@@ -1197,8 +1217,10 @@ disclosure, the post-checks), `ScaffoldSelection` (patterns, the skip rule, `--r
 `Synthesize` (guards 1 to 6 of section 18.6.1, with stub agents, the test inventory, an
 interrupted synthesis, revalidation after a card, `--redo` and the last check, an interrupted
 revalidation completed by the next synthesis, and the last check's build), `SynthesisManifest` (the
-renamed `[[bin]]` block) and `ReachCheck` (the lines of section 18.8, each witness rejection
-rule, truncation, the control, the verdicts and crash attribution), and extends `Cleaning`,
+renamed `[[bin]]` block), `ReachCheck` (the lines of section 18.8, each witness rejection
+rule, truncation, the control, the verdicts and crash attribution) and `ReachVerdictCommand`
+(the `reach-verdict` command: REACHED exits 0, a missed stage is PARTIAL with exit 1, a
+missing control UNVERIFIED), and extends `Cleaning`,
 `JustfileProfiles`, `PromptCopies` and `TestGate` (the forced nextest rendering and the
 validation of a run's output). Tests write to
 temporary directories only, never to `SL/`, and their fixture repositories commit unsigned,
@@ -4429,7 +4451,7 @@ missing capabilities.
 | AC | Procedure | Pass condition |
 |---|---|---|
 | AC-1 | For each agent: `just extract-invariants issue <URL of a real Simplex bug>`. | At least one new `invariants/simplex/INV-*.md`; `just check-invariants` reports no problem for it. |
-| AC-2 | On `main` with the subproject committed: `git ls-files statelens` contains no `Cargo.toml`; `just check-fmt`; `just lint`; `just test -p commonware-consensus`; `just test -p commonware-storage`; the CI fuzz target listings for `consensus/fuzz/simplex`, `consensus/fuzz/marshal` and `storage/fuzz`. | All behave exactly as without the subproject. |
+| AC-2 | On `main` with the subproject committed: `git ls-files statelens` lists no `Cargo.toml` other than `statelens/differential/Cargo.toml` and `statelens/differential/shim/Cargo.toml`, and `cargo metadata --format-version 1` at the root names neither `statelens-differential` nor `statelens-differential-shim`; `just check-fmt`; `just lint`; `just test -p commonware-consensus`; `just test -p commonware-storage`; the CI fuzz target listings for `consensus/fuzz/simplex`, `consensus/fuzz/marshal` and `storage/fuzz`. | All behave exactly as without the subproject. |
 | AC-3 | `just check-invariants`; `git ls-files statelens/invariants statelens/false-invariants`; then `just extract-invariants --registry marshal comment consensus/src/marshal/mod.rs`. | No lint problem. Every invariant file is in a subsystem directory. The new files are in `invariants/marshal/`, numbered from the next global ID. |
 | AC-4 | With at least one simplex invariant: `just campaign`, then the printed `run` command. | Materialize, instrument, plan, build and test gate complete, the result is `READY`, and the `run` command starts the fuzzer. |
 | AC-5 | In an instrumented checkout, two 10-minute runs on empty corpora: `STATELENS_FEEDBACK=0 just run simplex_cert_mock_twins_mutator_statelens <empty dir A> -- -max_total_time=600` and the same without the variable on `<empty dir B>`. | The `ft:` value on the `DONE` line is higher with feedback. Compare `ft:`, not `cov:` (section 9.3). |
@@ -4488,7 +4510,8 @@ to AC-28, for Target-State Synthesis.
    section 7.1; `synthesize` with the guards of section 18.6.1 and the reach check; the
    synthesis prompts; the justfile; the README. Each verbatim copy in this document is added or
    updated with its file. Then AC-22 to AC-28 (section 18.10).
-7. Change nothing outside `statelens/`.
+7. Change nothing outside `statelens/`, except the visibility change in
+   `consensus/fuzz/marshal/src` of section 18.10.1 (AC-25).
 
 ---
 
@@ -4777,9 +4800,33 @@ for the `simplex` and `qmdb` profiles, without an agent and so without instrumen
   skipped the card, `--redo` undid it and synthesized it again, and `clean --yes` left
   nothing behind.
 
+With the differential test of section 18.10.1, at commit `392b116687` with the uncommitted
+visibility change and test crate, in the scratch worktree `SL/scripts/differential.sh` made:
+
+- `commonware-consensus-fuzz-marshal` with the widened visibility passes
+  `cargo +stable clippy --all-targets -- -D warnings`, `rustfmt --check` of the nine touched
+  files on the pinned nightly, and `cargo +stable nextest run` (80 of 80 tests), so the change
+  changed nothing the package tests.
+- The two templates of `SL/runtime/` compile byte-identical under the shim, and
+  `cargo metadata` at the repository root lists neither `statelens-differential` nor its
+  shim.
+- All 24 positive tests print `digest-equal=true` and are `REACHED n/n`, with no annotation
+  and no `witness rejected` in any replay; each of the 6 negative controls gives, from a
+  replay that ran to its digest line and a verdict the validator computed, an unequal
+  digest or a verdict other than REACHED (the table of section 18.10.1); the whole procedure
+  ends `differential: PASSED` about 180 s after the builds. After the review fixes of
+  2026-10-08 (the script's `(ERROR)` rows, test manifest and per-run directory; TS-9005's
+  `try_recv` at E2; TS-9006's E4 count), the run was repeated with the fuzz package's checks
+  skipped, since that package did not change: the same 30 rows, `differential: PASSED`.
+  After the verifier's leftovers (`(NOT CAUGHT)` matching REACHED annotated or not,
+  TS-9006's stamp moved to E2), the whole procedure ran once more, the fuzz package's checks
+  included: the same 30 rows, `differential: PASSED (+187s)`.
+
 Not verified: a synthesis with a real agent or after a real campaign, AC-24 to AC-28 as
-written, any marshal synthesis, and whether the Phase 1 permissions of section 12 let the
-agent read a `text` file outside the repository (as for `design` and `paper`).
+written (the differential test of AC-25 judges the primitives and a hand-written
+reconstruction, never an agent's output), any marshal synthesis by an agent, and whether the
+Phase 1 permissions of section 12 let the agent read a `text` file outside the repository (as
+for `design` and `paper`).
 
 ### 18.2 Decisions
 
@@ -6281,11 +6328,225 @@ the profile after a campaign that ended `READY` or `PANIC (tests)`.
 | AC-22 | `just check-invariants` with TS-0001 committed. For each agent: `just extract-states --registry marshal test consensus/src/marshal/standard/mod.rs:7027`; `just extract-states --registry simplex test consensus/src/simplex/mod.rs:3260`; `just extract-states --registry simplex text "<a paragraph describing TS-0004>"`; `just extract-states --registry marshal issue https://github.com/commonwarexyz/monorepo/pull/4317`; and, with `STATELENS_KB` set, `just extract-states --registry marshal kb <finding id>`. Then the refusals: a `test` path outside the roots, `--registry qmdb`, and `just extract-invariants test <path>`. Last, a `test` extraction with `--local`. | No lint problem. Each extraction writes lint-clean cards with a pinned `source_ref`; the `issue` card is deleted as a duplicate of TS-0001. The refusals exit with code 1. The `text`, `kb` and `--local` cards are written only to `target-states.local/`, which `git status` does not list. Once TS-0002 to TS-0004 are committed (TS-0004 moved by hand), `just check-invariants` reports no problem. |
 | AC-23 | The runtime self-tests in the test gate (section 7.7), and the helper's self-tests (section 18.7) in a checkout synthesis wrote `mod.rs` to. Then a campaign whose stub instrumenter adds a call of `seen` under the editable roots. | The self-tests pass: watching; `tick` and the observations sharing one strictly increasing sequence, so that two ticks with no observation between them, and observations and ticks interleaved, get distinct, ordered positions; `mark` returning the last position without advancing; `clear_trace`, which `reset` calls, starting the sequence again, so positions are unique within one input only; `seen` finding the earliest match at or after a position, `site` and `run`, a guarded replica absent from the trace, the pairs `sl_implies!` notes, the cap, past which `truncated()` returns the position of the first dropped observation, which a later drop does not move and `watch` and `unwatch` reset, and the sequence still advances, `sites`, and the run counter of the fresh-run hook. The helper's self-tests pass: after a state change past the cap, `truncated seq=<s>` once, `unverifiable (trace truncated)` with no feature for a later stage and for `En`, and `handoff lost`; without a cut, `handoff holds`; an `En` recorded `unverifiable` before the handoff keeps its reason and loses the handoff; with `STATELENS_REACH` unset, a miss records no `trace` line and the handoff records `next=-`. The campaign stops in the scope check with exit code 2, naming the file. |
 | AC-24 | `just synthesize --profile simplex --match simplex_cert_mock_chaos_ts0003 --match simplex_cert_mock_ts0004`, which pins each card to one base, the family of PRD section 11.4, so the selection is the two pairs (TS-0003, `simplex_cert_mock_chaos`) and (TS-0004, `simplex_cert_mock`). Then one stub agent per guard of section 18.6.1: an edit outside the scope, then `just synthesize` once more, and then that edit undone with `git checkout`; a dependency added to the package manifest; an `sl_probe!` added; a two-attempt stub, each of whose attempts writes a valid module and thin target, whose first attempt removes or alters an `sl_assert!` call and whose second makes an unrelated edit and leaves that change in place, and a variant whose second attempt reverts the change; a ghost update deleted, and the `set_compromised` call of the Chaos-Twins hook (Appendix B.5) changed; a `#[path]` attribute on the runtime module's declaration; the runtime module changed; a `[statelens-reach]` literal in the module; a `statelens::watch()` call in the module; an `eprintln!` call, a `set_hook` call and an `include!` in the module; a module under a directory named `target`; a marked accessor under `consensus/src/simplex/` that keeps the test gate passing, and one that fails it; an unmarked hunk in the fuzz package; a marked `if false` around an unchanged `sl_assert!` call. Then a stub that never builds, with one pair selected, and one that exits with a non-zero code. Then, with `NEXTEST_STATUS_LEVEL=fail` and `CARGO_TERM_COLOR=always` set, the marked accessor that fails the test gate again, and one that keeps the crate building but a test of the gate from compiling; and, on a fresh checkout whose campaign `logs/test.log` was removed before the first synthesis, the passing accessor. Then three two-pair stubs, over the two pairs above: one whose second pair changes the first pair's module so that its thin target no longer builds, one whose second pair adds a marked accessor under `consensus/src/simplex/`, followed by `just synthesize --redo --match simplex_cert_mock_ts0004`, interrupted (`SIGINT`) during TS-0003's revalidation replays, and then `just synthesize --match simplex_cert_mock_ts0004` with a stub that writes only TS-0004's module and thin target, and one whose second pair writes only its own module and thin target. Then one card on two bases, `just synthesize --profile simplex --match TS-0004 --match simplex_cert_mock --match simplex_cert_mock_faulty_net`, on a checkout without TS-0004's reports, with a stub that writes a module and thin target per pair; then the same command again; then `just synthesize --redo --match simplex_cert_mock_ts0004`. | The scaffolds, `simplex_cert_mock_chaos_ts0003_statelens` and `simplex_cert_mock_ts0004_statelens`, build, and the console prints their verdicts, one `TS-NNNN` line per pair, and `run` and `replay` lines without libFuzzer arguments; TS-0004 is REACHED. No `corpus/` or `artifacts/` entry exists for them, and `git status` lists only paths section 18.6.1 allows. The stubs: exit code 2 with the pair's edits restored, and the next synthesis exits with code 2 before any pair, naming the path; the manifest restored with feedback; vetoes for the probe, the runtime module, the literal, the `watch` call, the print, the panic hook, the include and the ignored module; the two-attempt stub vetoed in every attempt with the same guard 3 feedback, the stub changing nothing after its second attempt, which ends the pair, NOT BUILT, and the `sl_assert!` call as in `B` after the pair, while its variant's second attempt builds; vetoes for the ghost update, the hook and the `#[path]` attribute; the test gate run again, passing and then GATE FAILED with the edit restored; `unmarked edit`; `edit beside instrumentation`; NOT BUILT and exit code 3, with the pair's files restored and every variant still building; and a failed attempt after which the other pair is synthesized. Under the changed nextest settings, the failing accessor is GATE FAILED naming the failing test, and the one that breaks a test's build is GATE FAILED with `(unusable output: no nextest summary line)`; `SL/campaign/reach/baseline/tests.json` lists the gate's tests; without the campaign log, the gate runs once on the tree as the campaign left it, logged to `logs/test-baseline.log`, before any pair, and the accessor passes the gate. The first two-pair stub is `NOT BUILT (breaks TS-0003_simplex_cert_mock_chaos)` with its edits restored and TS-0003's verdict and report, `TS-0003_simplex_cert_mock_chaos.md`, unchanged; the accessor's pair keeps its scaffold and TS-0003's report gains `## Revalidation after TS-0004_simplex_cert_mock`, and after the `--redo`, which removes the accessor, is interrupted with exit code 130, leaving TS-0003's verdict unchanged and `SL/campaign/reach/revalidation.json`, the next synthesis adds `## Revalidation after --redo`, before TS-0004 is synthesized again, and deletes that record; the third revalidates TS-0003 too, under `## Revalidation after TS-0004_simplex_cert_mock`; the last check builds every scaffold. The card on two bases gives two scaffolds, `simplex_cert_mock_ts0004_statelens` and `simplex_cert_mock_faulty_net_ts0004_statelens`, two reports and two diffs, `TS-0004_simplex_cert_mock.*` and `TS-0004_simplex_cert_mock_faulty_net.*`, two `pub mod` lines in `target_states/mod.rs`, a `run` line each, and the second pair revalidates the first, whose report gains `## Revalidation after TS-0004_simplex_cert_mock_faulty_net`; the second command prints two `skipped: TS-0004 on <base> was synthesized as <scaffold>; use --redo` lines, one per pair; the `--redo` of one pair moves `TS-0004_simplex_cert_mock.*` to `TS-0004_simplex_cert_mock.<stamp>.*`, leaves the other pair's thin target and `[[bin]]` block in place, and its report gains `## Revalidation after --redo`. |
-| AC-25 | The procedure of AC-24 for TS-0001 and TS-0002 on a `marshal` checkout, with `--profile marshal` and the pairs (TS-0001, `marshal_e2e_standard_deferred_cert_mock_twins_split_header`) and (TS-0002, `marshal_e2e_standard_deferred_cert_mock_poison`), the families of PRD section 11.4, selected as `--match <base>_ts0001 --match <base>_ts0002`; the card on two bases uses `marshal_e2e_standard_deferred_cert_mock_poison` and `marshal_e2e_coding_cert_mock_poison`. Then a stub scaffold of TS-0001 that builds `E7`'s witness while R's certification is outstanding, and passes it to `Stages::handoff` only after that certification has completed. | As AC-24 for the real agent. TS-0001's report shows the pending-state handoff check: `handoff holds`, with `E7` witnessed by an `exact` observable that shows R's certification still outstanding at the handoff instant. The stub's report shows `handoff lost`, with a `mark=` greater than `E7`'s `read=` + 1, and PARTIAL 6/7. |
+| AC-25 | The procedure of AC-24 for TS-0001 and TS-0002 on a `marshal` checkout, with `--profile marshal` and the pairs (TS-0001, `marshal_e2e_standard_deferred_cert_mock_twins_split_header`) and (TS-0002, `marshal_e2e_standard_deferred_cert_mock_poison`), the families of PRD section 11.4, selected as `--match <base>_ts0001 --match <base>_ts0002`; the card on two bases uses `marshal_e2e_standard_deferred_cert_mock_poison` and `marshal_e2e_coding_cert_mock_poison`. Then a stub scaffold of TS-0001 that builds `E7`'s witness while R's certification is outstanding, and passes it to `Stages::handoff` only after that certification has completed. Then the differential test of section 18.10.1: `SL/scripts/differential.sh` from the checkout, with `DIFFERENTIAL_SCRATCH` naming a directory with 25 GB free. | As AC-24 for the real agent. TS-0001's report shows the pending-state handoff check: `handoff holds`, with `E7` witnessed by an `exact` observable that shows R's certification still outstanding at the handoff instant. The stub's report shows `handoff lost`, with a `mark=` greater than `E7`'s `read=` + 1, and PARTIAL 6/7. The differential test prints the table of section 18.10.1 and `differential: PASSED`: the fuzz package's clippy, rustfmt and tests pass with the widened visibility, the 30 tests listed are the 30 expected, every positive test has equal digests and `REACHED n/n` with no annotation, and every negative control is caught, by the digest or by the validator's verdict of a replay that ran to its digest line (no row carries `(FAILED)`, `(NOT CAUGHT)` or `(ERROR)`); the worktree and its target directory are gone afterwards, the logs stay in `<scratch>/run.XXXXXX/logs/`, and `git status` of the checkout is as before. The test compares the settled state after `finish` of hand-written prefixes; it establishes neither state equality at the handoff mark nor anything about an agent's scaffold. |
 | AC-26 | Two canonical replays of each scaffold of AC-24 and AC-25. Stub scaffolds, one per witness rejection rule of section 18.7: an `as Ek` value that differs, and one that `Ek` bound to `?`; an entity missing from `bind=`; an `exact` key without an entity of the line; positions against the History's order; a foreign `run`; a relation across a `restart` line whose incarnation the line does not bind; an `intrinsic` witness with a wrong `me`, one citing two observations, and one giving a view a value; a `construction` witness for `En`, and one for an event whose actor is not `harness`. Two stubs of an ordered pair with presence-only evidence: one for the later stage, and one for the earlier stage while the later is stamped. A stub that performs two harness actions A and then B, with no probe observation between them, for events the History orders A before B, each with a `construction` witness; and one that performs B before A. A stub that restarts one replica twice with no probe observation between the restarts, and whose later line, related by an `as Ek` to a stage before both restarts, names the incarnation the first restart began while its evidence lies after the second. Stubs with a vacuous control, a `weak` control, no `Control:` line, and `Control: n/a` with an `intrinsic` witness. A stub that prints `[statelens-reach]` itself, and one that prints `[statelens-scaffold]` itself. Stubs whose prefix raises an invariant's panic, panics on a line the pair's diff added or moved, makes a sanitizer report in an accessor it added, and fails in the control run only. A stub agent that runs its scaffold and leaves a crash file. A stub with an empty knob domain. A stub with a missed stage. A stub that fills the trace to `TRACE_CAP`, changes the state past the cap, and reads in the handoff the latest observation the trace kept. A stub whose canonical replay fails, with synthesis interrupted (`SIGINT`) during the control replay. | The two replays print the same stage lines. Each rejection stub is UNVERIFIED with `witness rejected: <its rule>`, each presence-only stub UNVERIFIED with `unverifiable (no position)`, and each control stub UNVERIFIED. The two actions get distinct positions, A's smaller, and both stages hold in the first stub; the second is UNVERIFIED with `witness rejected: order`. The two restarts print distinct `seq=` values, so two incarnations, and the stub that names the first is UNVERIFIED with `witness rejected: incarnation`. The printing stubs are vetoed. Each failing stub is CRASH (finding candidate), with refinement stopped after that attempt and its crash file in `attempt-<a>/`; `just run <scaffold>` reproduces the first three, the second and third carry `location in TS-NNNN diff`, and the fourth's `replay` line sets `STATELENS_REACH_CONTROL=1`. The stray crash file is in `attempt-<a>/swept/`, and that attempt is CRASH (finding candidate) with `stray failure`. The empty domain is SCAFFOLD ERROR, and refinement continues. The missed stage prints `handoff lost`, `reach k/n` and then `done`. The truncation stub prints `truncated seq=<s>` and is UNVERIFIED with `unverifiable (trace truncated)`; the same lines with `En` held, `read=` at or after `<s>` and `handoff holds` are UNVERIFIED too. The interrupted synthesis exits with code 130 with the pair's edits restored, and `TS-NNNN_<base>/attempt-<a>/` holds the canonical crash file and log, `version.diff`, which `git apply --check` accepts on the tree before the pair, `version/`, and `interrupted.txt`, which names the pair, the control replay as the step that stopped and gives the canonical replay's `run` and `replay` lines. |
 | AC-27 | On a checkout of AC-24: `just fuzz simplex --parallel --tmux --state-reaching --state-targets TS-0004 --fuzz-targets "simplex_cert_*" --skip-campaign`; the same with `--fuzz-targets simplex_cert_mock`, with `--fuzz-targets "simplex_cert_mock_twins_*"`, with `--state-targets "TS-000*"` and with `--fuzz-targets "nothing*"`; then `just fuzz simplex --bogus`, `just fuzz simplex --state-targets TS-0003`, `just fuzz simplex --state-reaching --fuzz-targets TS-0003`, `just fuzz simplex --state-reaching --state-targets "simplex_cert_*"`, `just fuzz qmdb --state-reaching` and `just fuzz simplex_cert_mock --state-reaching`. | The first opens the session `statelens-simplex-reach` with one window per `simplex_cert_*` base of TS-0004 whose scaffold built, 20 pairs at `HEAD`, and none for a variant, each running `just run <scaffold>` with no added argument, the message saying `20 scaffold(s), one tmux window each`; `simplex_cert_mock` opens one window, `simplex_cert_mock_ts0004`; `simplex_cert_mock_twins_*` opens eight, `simplex_cert_mock_twins_campaign_ts0004` to `simplex_cert_mock_twins_mutator_state_cov_ts0004`; `TS-000*` opens one window per scaffold of TS-0003's and TS-0004's pairs; `nothing*` fails before synthesis. The last six exit with code 1. |
 | AC-28 | `just clean --yes` on a checkout of AC-24 or AC-25; then `just campaign` on a checkout that has `<package>/src/target_states/`. For a scaffold that runs a real engine under a Byzantine identity (a non-empty `set_compromised` in Shape B, or a Shape A base whose hook compromises one), a canonical replay with `STATELENS_BYZANTINE=panic`. | After `clean` every path in its scope, the fuzz packages included, matches `HEAD`, and no `target_states/` or thin target is left. The campaign exits with code 2. The replay panics with `[statelens][BYZANTINE]`; with no such scaffold, this check is recorded as not applicable. |
 | R-TS-NF-3 | With the same duration and flags, each scaffold and its base's variant, in the same instrumented checkout. | The exec/s values are reported side by side. |
+
+#### 18.10.1 Differential test of the primitives (AC-25)
+
+The scenario prefixes of `consensus/fuzz/marshal/src/scenarios/scenarios.rs` are hand-written
+reconstructions of six marshal standard tests (PRD section 11.2) that check the state they
+reach at the handoff through `finish`. They are the one human-written definition of such
+states the repository has, so they serve as the differential oracle of the helper primitives:
+for each source test, a hand-written TSS prefix built from the helper of Appendix H and the
+same harness verbs, as `prompts/synthesize.md` and section 18.7 prescribe for a scaffold,
+must leave the cluster in the same state as the scenario's prefix and must be judged REACHED
+by the reach check of section 18.8. The test is `SL/differential/`, a test-only crate outside
+the workspace (section 3), and `SL/scripts/differential.sh` runs it. Neither instruments the
+system under test, starts an engine or runs libFuzzer: this tests the method, not a campaign.
+
+Procedure (`SL/scripts/differential.sh`; `DIFFERENTIAL_SCRATCH` names the scratch directory,
+`$TMPDIR/statelens-differential` by default, under which every run gets a directory of its
+own, `run.XXXXXX` from `mktemp -d`; it needs about 25 GB of free disk, the `stable`
+toolchain with nextest, and the pinned nightly's rustfmt, `DIFFERENTIAL_RUSTFMT`):
+
+1. `git worktree add --detach <scratch>/run.XXXXXX/wt-diff HEAD`, one directory per run, so
+   concurrent runs share nothing and the trap removes only what the run created; `rsync` of
+   `SL/` and `consensus/fuzz/marshal/` into it, so the uncommitted visibility change and the
+   crate are present; `CARGO_TARGET_DIR` inside the worktree; the root `Cargo.lock` copied
+   beside the crate's manifest, so cached versions are reused. The script never builds in
+   the checkout it runs from, and a trap removes the worktree with its target directory.
+2. The fuzz package: `cargo +stable clippy -p commonware-consensus-fuzz-marshal --all-targets
+   -- -D warnings`, `rustfmt --check` of the nine touched files, and `cargo +stable nextest
+   run -p commonware-consensus-fuzz-marshal`, which shows the visibility change changed
+   nothing (`SKIP_FUZZ_CHECKS=1` skips this step).
+3. `rustfmt --check` of the crate and `cargo +stable test --manifest-path
+   SL/differential/Cargo.toml --lib --no-run`.
+4. The 30 tests of the table below, checked against `-- --list`: a listing that differs (a
+   missing, extra or duplicate name, a test moved into a nested module) is an error, exit 2,
+   before any replay, so no test is skipped silently. Each runs in a process of its own with
+   `--exact`, `--test-threads=1` and `--nocapture`, twice: the canonical replay under
+   `STATELENS_REACH=1`, with `DIFFERENTIAL_DIGESTS=<logs>` (`<logs>` is
+   `<scratch>/run.XXXXXX/logs/`) so both digests land in `<test>.{a,b}.digest`, and the
+   control replay under `STATELENS_REACH_CONTROL=1` as well; stdout and stderr captured per
+   replay (`<test>.<canonical|control>.{out,log}`).
+5. `python3 scripts/statelens.py reach-verdict --card cards/TS-NNNN.md --module
+   src/cards/tsNNNN.rs --canonical <log> --canonical-code <exit> --control <log>
+   --control-code <exit>` for every test, the negatives included, so a wrong prefix can be
+   REACHED there and the check stays live; the verdict goes to `<test>.verdict`.
+6. A table `| test | digest equal | verdict |`; `differential: PASSED` and exit 0 when every
+   positive test has exit 0, `digest-equal=true` and `REACHED n/n`, and every negative ran
+   to its digest line (exit 0) and got a verdict the validator computed (`REACHED`,
+   `UNVERIFIED`, `PARTIAL` or `UNREACHED` `k/n`), with an unequal digest or a verdict other
+   than REACHED; `differential: FAILED` and exit 1 otherwise, with `(FAILED)` beside a
+   positive's verdict, `(NOT CAUGHT)` beside a negative's with equal digests and a REACHED
+   verdict, annotated or not (an annotation is informational, never a rejected witness),
+   and `(ERROR)` beside a negative's whose replay crashed, printed no digest line or got no
+   computed verdict (a traceback, `CRASH`, `NO REPORT`): an error of the run, not a caught
+   control. The validator's exit code cannot tell these apart, since it is 1 for every
+   verdict but REACHED, so the script checks the verdict's shape. Logs stay in
+   `<scratch>/run.XXXXXX/logs/`, printed at the end.
+
+The test. One `#[test]` per card, marshal variant and configuration runs two prefixes on the
+same setup: `src/setup.rs` is a verbatim copy of the SETUP block and harness construction of
+`scenarios::runner::run@392b116687` (`scenarios/runner.rs:139-264`, the one private function
+the test cannot import), with the stamping wrappers of `src/record.rs` (a `StampingResolver`,
+`StampingBuffer` and `StampingReporter`, which forward every call unchanged and `stamp` the
+entries they record) around the three arguments of `start_with_buffer` on both sides, and the
+input bytes are `FuzzRng::new(vec![0u8; 64])`, the canonical input. Side A calls
+`scenarios::drive::<P, M>(kind, &mut harness)` unmodified and then `finish`. Side B resets the
+runtime module, splits the knobs (none), builds `Stages` with a budget of `STAGE_DEADLINE`
+(5 s of simulated time) per stage and `Duration::MAX`, sets an empty compromised set, calls
+the fresh-run hook where the materialized `Runner::new` would, and drives the card's History
+from `src/cards/tsNNNN.rs`: one stage per event, a `construction` witness (`Witness::act`,
+`Witness::act_async`) for a `harness` event, an `exact` witness read back from the recorder's
+stamped entries for a replica event, every reply of the system under test raced against the
+stage deadline, a pending reply established at its stage by `try_recv` on the receiver the
+prefix holds, a side-effect-free query that leaves an empty channel awaitable, and stamped
+only then (TS-9005 and TS-9006 stamp `verify=pending` at E2 on `Empty`, never at the call; a
+verdict or a dropped sender there misses E2), a count a later stage must preserve read back as
+the value an earlier stage observed, not as nonzero (TS-9006's E4 requires E2's
+`subscription` count), `En` read freshly inside the closure of `Stages::handoff`, then
+`finish` when every stage held and this is not the control run, and `Stages::done`. Each
+module opens with the header of section 18.7 (`Shape: B`, `Control: withholds E1`, its
+injections). Both sides
+then take the digest of `src/digest.rs`, and the test asserts `reached` and equal digests;
+side B never sees side A's digest. The digest first settles the cluster (no pending
+application acknowledgement and stable processed positions, within 64 rounds, else a panic),
+since the two sides never share a schedule, and then prints, with every multiset sorted and
+every read side-effect-free (`Get*` mailbox queries, shared counters and maps, and the
+runtime's durable storage read without opening a blob): what `finish` reads; the recorded
+resolver fetches, the active and targeted fetches, the armed delivery and the unconsumed
+delivery verdicts (`RecordingResolver::auto_delivery` and `delivery_responses`); buffer
+subscriptions and sends; held blocks by digest, verified blocks by view, finalizations and
+info by height, the application tip, deliveries and pending acknowledgements; every node's
+storage partition by partition (the certificate and block caches, the finalized archives, the
+application metadata, through `Context::scan` and `logical_blob`) with one `storage_audit` of
+the whole runtime; the handoff description; the ledger and the canonical chain.
+
+The imports. The crate depends by path on `commonware-consensus-fuzz-marshal` (feature
+`mocks`), `commonware-consensus` (`mocks`), `commonware-consensus-fuzz-core`,
+`commonware-cryptography` (`mocks`), `commonware-runtime` (`test-utils`), `commonware-utils`,
+`commonware-p2p` (`mocks`), `commonware-resolver`, `commonware-actor`, `commonware-codec`,
+`commonware-macros`, `bytes` and `futures`; the shim adds `sancov`. The two committed
+templates are compiled byte-identical by `SL/differential/shim/`: `extern crate self as
+commonware_consensus;` and `extern crate self as commonware_runtime;` put the shim into its
+own extern prelude under both names, so the helper's one import,
+`commonware_consensus::simplex::statelens::{self, Seen}`, resolves to
+`#[path = "../../../../runtime/statelens.rs"] pub mod statelens;` under a `simplex` module,
+and the runtime's `commonware_runtime::deterministic::STATELENS_FRESH_RUN` to a local
+`OnceLock<fn()>`; the helper is `#[path = "../../../runtime/target_states.rs"] pub mod
+target_states;`. The runtime's tail after `// [statelens] consensus only:` is `#[cfg(test)]`,
+so it is compiled out when the shim is built as a dependency, and no `sl_probe!`,
+`sl_assert!` or `sl_implies!` is invoked anywhere in the crate. No copy, `sed` or edit of the
+templates is involved; `SL/runtime/` is byte-identical to `HEAD`.
+
+The visibility change. `consensus/fuzz/marshal/src` makes the scenario primitives the crate
+imports `pub` instead of `pub(crate)`, the one change outside `SL/` (section 3; PRD
+R-LAYOUT-3): the module declarations `scenarios::{environment, harness, input,
+recording_resolver, scenarios}`, `marshal::end_to_end::{app, twins}` and `twins::stack`
+(`scenarios::runner` stays `pub(crate)`, hence the verbatim setup copy); the `Scenario` trait
+and `drive`; `FuzzScenarioStandardHarness`, its verbs and `finish`; `ScenarioHandoff` and its
+types; `RecordingBuffer`, `RecordingResolver` with its two injection fields `auto_delivery`
+and `delivery_responses`, which the digest reads, and `init_injectable`; the setup pieces of
+`app` and `twins::stack` (`setup_validator`, `setup_network`, `register_engine_networks`,
+`genesis_block`, `MarshalChoice`, `TwinsMarshal`, `AlwaysAcceptBlockBuilderApp`,
+`BlockContextRegistry`, `DeliveryReporter`, `ProgressHandle`) and the aliases `B`, `Ctx`,
+`PublicKeyOf` and `SchemeOf`; the input types. Every changed line is the keyword, except
+three reflows rustfmt makes for the shorter keyword and two `#[allow]`s the lints then
+require (`async_fn_in_trait` on the now-pub `Scenario` trait, `clippy::new_without_default`
+on `ProgressHandle::new`). No logic, signature or doc changes; nothing under `consensus/src`
+changes (scenario SPEC G5 and R8). Items that sit in now-pub signatures become `pub` with
+them (`ApplicationChoice` and `FaultyConfig` in the `TwinsBlockBuilder` trait, `FetchRecord`,
+`TargetedRecord`, `CertificateKind`, `PrefixCertificate`), and the harness verb set is
+widened whole, since one half `pub(crate)` would be the worse surface. A read-only accessor
+for the resolver's injection fields would be cleaner than reading them, but is not a
+visibility change.
+
+Scenarios covered. Seven cards over the six source tests, `SL/differential/cards/TS-9001.md`
+to `TS-9007.md`, in the grammar of section 18.3 with their generated Source excerpts (`just
+excerpts differential/cards/TS-NNNN.md` after a citation changes) and pinned to
+`392b116687`. They are not cards of a registry: the `9NNN` ids and the location outside the
+card trees keep them out of `lint`'s default discovery, out of synthesis and out of the
+registries' counter, so `lint` reaches them only when they are named, and then reports
+their location (rule 1) and nothing else; rules 2 to 13 pass. `reach-verdict` checks their
+ID and History through `card_history`, not the whole card:
+
+| Card | Source test (`consensus/src/marshal/standard/mod.rs`) | Scenario kind | Stages | Tests |
+|---|---|---|---|---|
+| TS-9001 | `test_standard_certify_missing_candidate_fetches_by_round` | `StandardCertifyMissingCandidateFetchesByRound` | 4 | deferred and inline, N4F0C4 and N4F1C3 |
+| TS-9002 | `test_standard_certify_first_block_fetches_genesis_parent` | `StandardCertifyFirstBlockFetchesGenesisParent` | 5 | the same four |
+| TS-9003 | `test_standard_verify_height_lie_parent_fetch_is_round_bound`, Deferred: rejected at certify | `StandardVerifyHeightLieParentFetchIsRoundBound` | 7 | deferred, N4F0C4 and N4F1C3 |
+| TS-9004 | the same test, Inline: rejected at verify | the same | 5 | inline, N4F0C4 and N4F1C3 |
+| TS-9005 | `test_standard_certify_bumps_notarized_fetch_for_pending_verify` | `StandardCertifyBumpsNotarizedFetchForPendingVerify` | 5 | the four |
+| TS-9006 | `test_standard_verify_missing_candidate_waits_without_fetching` | `StandardVerifyMissingCandidateWaitsWithoutFetching` | 4 | the four |
+| TS-9007 | `test_standard_get_block_by_height_and_latest` | `StandardGetBlockByHeightAndLatest` | 6 | the four |
+
+Expected result, observed at `392b116687` with the uncommitted trees (`differential: PASSED`
+about 180 s after the builds; no positive verdict carries an annotation, and no replay prints
+`witness rejected`):
+
+| test | digest equal | verdict | caught by |
+|---|---|---|---|
+| `ts9001_{deferred,inline}_{n4f0c4,n4f1c3}` (4) | true | REACHED 4/4 | - |
+| `ts9002_{deferred,inline}_{n4f0c4,n4f1c3}` (4) | true | REACHED 5/5 | - |
+| `ts9003_deferred_{n4f0c4,n4f1c3}` (2) | true | REACHED 7/7 | - |
+| `ts9004_inline_{n4f0c4,n4f1c3}` (2) | true | REACHED 5/5 | - |
+| `ts9005_{deferred,inline}_{n4f0c4,n4f1c3}` (4) | true | REACHED 5/5 | - |
+| `ts9006_{deferred,inline}_{n4f0c4,n4f1c3}` (4) | true | REACHED 4/4 | - |
+| `ts9007_{deferred,inline}_{n4f0c4,n4f1c3}` (4) | true | REACHED 6/6 | - |
+| `neg_ts9001_dropped_arm` | false | PARTIAL 0/4 | digest and validator |
+| `neg_ts9001_notarization_to_c` | false | REACHED 4/4 | digest (storage) |
+| `neg_ts9002_armed_garbage` | false | REACHED 5/5 | digest (`armed`) |
+| `neg_ts9002_stale_handoff_read` | true | PARTIAL 4/5 (`handoff lost`) | validator |
+| `neg_ts9005_swapped_arm_verify` | true | UNVERIFIED 4/5 (`witness rejected: order`) | validator |
+| `neg_ts9007_finalization_to_c` | false | PARTIAL 1/6 | digest and validator |
+
+Negative controls. Each `neg_*` test runs a deliberately wrong TSS prefix, a `Twist` of the
+card module, and must give an unequal digest or a verdict other than REACHED, from a replay
+that ran to its digest line and a verdict the validator computed (step 6; a crash, a missing
+digest line or an unparsed verdict is `(ERROR)`, not a caught control): E1, the armed
+delivery, dropped (TS-9001: certify never resolves, so the prefix misses every stage and B
+lacks the block); the view-1 notarization also reported to node C (TS-9001: the mailbox has
+no query for cached certificates, so only C's durable certificate cache, two blobs more under
+`cache-cache-0-notarizations-*`, tells the sides apart, while the validator says REACHED);
+`En`'s witness built before the handoff call (TS-9002: `handoff lost`, with `mark=` more than
+one past `read=`); a garbage delivery left armed on the victim (TS-9002: `armed=true` against
+`armed=false`, which the fuzzing phase would otherwise inherit silently, caught by the digest
+alone); two order-relevant harness events performed in reverse with the stages recorded in
+card order (TS-9005: `witness rejected: order`); a finalization delivered to node C (TS-9007:
+C fetches the block, so side B reaches no handoff and the verdict is PARTIAL). Further wrong
+prefixes that were tried, and how they were caught: a block timestamp changed (digest), the
+block also `verified` on C (`finish` panics: `node C must lack block`), a third harness event
+dropped (digest and PARTIAL), a handoff without awaiting certify (PARTIAL 3/4), a parent
+persisted before its child (digest and PARTIAL 2/7).
+
+What the test establishes, and what it does not. It establishes the fidelity of the
+primitives and of a reconstruction: a prefix written from the helper of Appendix H and the
+harness verbs, following the rules of section 18.7 and `prompts/synthesize.md` (one stage per
+event, witnesses from exact observables or constructions, `En` read inside the handoff, no
+fabrication), leaves the cluster, after `finish` and once it has settled, in the same state
+as the human-written scenario prefix of the same source test, by a definition of that state,
+the digest, written independently of both and wider than `finish`; and the reach check of
+section 18.8 accepts such a prefix as REACHED and rejects, or the digest tells apart, the
+wrong ones above. It does not establish that the two states are equal at the handoff mark:
+the digest is taken after `finish` and after a settle whose mailbox reads let the cluster
+progress and clean up, an observation procedure rather than a snapshot of the handoff
+instant, so a prefix that skips a barrier the scenario takes, so that an event is still in
+flight at its handoff, settles to the same state and is not told apart (a barrier before a
+report, or after a drop, skipped: equal digests and REACHED), by design of the digest; the
+handoff-instant claims of a stage are the witness rules' (section 18.7), not the digest's.
+It establishes nothing about agent output:
+the TSS prefixes are hand-written, so whether an agent writes such a prefix from a card is
+what AC-24 and AC-25 with a real agent judge, and no agent-generated scaffold has been run
+through it. It uses no probe, so every witness is `exact` or `construction`, the `intrinsic`
+kind is not exercised, and the run counter is what the fresh-run hook makes it (1). It
+covers the marshal standard harness only, two marshal variants and two configurations, with
+no engine, no libFuzzer and no knob. And both sides run the same system under test, so the
+digest comparison cannot see a regression of that system: only side A's reference
+assertions (`finish` and the scenario's own `assert_eq!`s) can.
 
 ### 18.11 Known limitations
 
@@ -6387,6 +6648,14 @@ the profile after a campaign that ended `READY` or `PANIC (tests)`.
   before `Stages::new`.
 - Whether a marshal prefix leaves enough height below the epoch ceiling for the liveness
   measurement is not measured; review of the module checks it.
+- The differential test of section 18.10.1 judges hand-written prefixes, never an agent's,
+  and compares the settled state after `finish`, not the state at the handoff mark, so a
+  prefix whose event is still in flight at its handoff is not told apart from one that
+  waited. Its digest lists storage partitions by the names
+  `setup_validator` and the marshal actor use, so a renamed partition drops out of the
+  per-node listing silently while the `storage_audit` line still covers it, and it reads
+  `RecordingResolver`'s injection fields directly, since an accessor would not be a
+  visibility change.
 
 ---
 
@@ -7804,7 +8073,9 @@ Workflow test, see SPEC.md section 14.
 12. Testing the workflow itself: `STATELENS_FALSE_INVARIANTS=1` (the campaign must panic on
    the deliberately false invariants), `STATELENS_BYZANTINE=panic` (guard test),
    `STATELENS_FEEDBACK=0` (feedback comparison) and `STATELENS_AUDIT=0` (skip the audit
-   pass).
+   pass); and the differential test of the TSS primitives against the marshal scenario
+   prefixes, `scripts/differential.sh` (section 18.10.1): what it compares, that it builds
+   only in a scratch worktree, what it establishes and what it does not.
 
 ---
 
