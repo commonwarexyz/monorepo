@@ -5997,8 +5997,6 @@ mod tests {
             .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // ========== Build the certificates manually ==========
-
             // Helper: assemble finalization from explicit signer indices
             let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
                 let votes: Vec<_> = (0..=quorum)
@@ -6059,8 +6057,6 @@ mod tests {
             let mut injector_sender =
                 start_certificate_injector(&context, &mut oracle, &participants, &link).await;
 
-            // ========== Broadcast certificates over recovered network. ==========
-
             // View F:
             let msg = Certificate::<_, D>::Notarization(b0_notarization).encode();
             injector_sender.send(Recipients::All, msg, true);
@@ -6088,8 +6084,6 @@ mod tests {
                 };
                 injector_sender.send(recipient, msg, true);
             }
-
-            // ========== Create engines ==========
 
             // Start engines after preloading certificates into each participant's
             // recovered channel (ensuring processing before any leader attempts to issue a
@@ -6190,8 +6184,6 @@ mod tests {
             // Allow started engines to consume preloaded certificates.
             context.sleep(Duration::from_secs(2)).await;
 
-            // ========== Assert the exact certificates are seen in each view ==========
-
             // Assert the exact certificates in view F
             // All participants should have finalized B_0
             let view = View::new(f_view);
@@ -6248,8 +6240,6 @@ mod tests {
                 let nullifies = reporter.nullifies.lock();
                 assert!(!nullifies.contains_key(&next_view), "reporter {i}");
             }
-
-            // ========== Reconnect all participants ==========
 
             // Reconnect all participants fully using the helper
             link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
