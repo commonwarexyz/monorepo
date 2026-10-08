@@ -269,13 +269,13 @@ pub enum CommitmentFallback {
     Wait,
     /// Request the notarized proposal for `round` from peers.
     ///
-    /// Use this when the caller knows a round and commitment from consensus but not
-    /// the proposal height, such as proposal construction, verification of a known
-    /// child, or certification of a notarized candidate. The round may not be notarized
-    /// yet, as with the uncertified parent of a pipelined handoff. An unresolved request
-    /// remains eligible until the processed finalized-round floor reaches its round. Do
-    /// not infer height from the finalized tip or another block: proposals may build on a
-    /// parent that is not finalized locally yet, and an unverified child may lie about its
+    /// Use this when the caller knows a round and commitment from consensus but not the
+    /// proposal height, such as proposal construction, verification of a known child, or
+    /// certification of a notarized candidate. The round may not be notarized yet, as with
+    /// the uncertified parent of a pipelined handoff. An unresolved request remains
+    /// eligible until the processed finalized-round floor reaches its round. Do not infer
+    /// height from the finalized tip or another block: proposals may build on a parent
+    /// that is not finalized locally yet, and an unverified child may lie about its
     /// height.
     ///
     /// The returned block is heightable once decoded, but that is too late for
@@ -284,9 +284,9 @@ pub enum CommitmentFallback {
     /// Request the exact commitment from peers and prune the request at
     /// `height`.
     ///
-    /// Use this only when no parent round is available. The caller must have a locally
-    /// validated resolver retention bound. Examples include repairing a finalized gap or walking
-    /// an accepted ancestry stream. Do not use it for a candidate's immediate parent when the
+    /// Use this only when no parent round is available. The caller must have a locally validated
+    /// resolver retention bound. Examples include repairing a finalized gap or walking an
+    /// accepted ancestry stream. Do not use it for a candidate's immediate parent when the
     /// consensus context supplies the parent round.
     ///
     /// The height is not sent to peers. It is a local hint for request retention.

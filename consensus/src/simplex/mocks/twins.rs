@@ -54,17 +54,17 @@
 //! target and contribute to its multiplicity.
 //!
 //! Scenario generation guarantees that every case within a campaign is
-//! structurally distinct. No duplicate (scenario, compromised-assignment)
-//! pairs are ever emitted. The scenario space is counted with an exact
-//! compressed transition DAG: each edge stores a residual symmetry-cell
-//! transition and the exact number of concrete round scenarios represented by
-//! that transition. Counts are computed bottom-up over the reachable residual
-//! states. When the scenario space exceeds the configured budget, sampled
-//! campaigns choose canonical scenarios uniformly without replacement. For each
-//! selected scenario, `cases()` computes the residual symmetry cells and
-//! generates only the unique compromised-node assignments: two assignments that
-//! differ only in which members of a cell are chosen are equivalent and
-//! collapsed to a single representative.
+//! structurally distinct. No duplicate (scenario, compromised-assignment) pairs
+//! are ever emitted. The scenario space is counted with an exact compressed
+//! transition DAG: each edge stores a residual symmetry-cell transition and the
+//! exact number of concrete round scenarios represented by that transition.
+//! Counts are computed bottom-up over the reachable residual states. When the
+//! scenario space exceeds the configured budget, sampled campaigns choose
+//! canonical scenarios uniformly without replacement. For each selected
+//! scenario, `cases()` computes the residual symmetry cells and generates only
+//! the unique compromised-node assignments: two assignments that differ only in
+//! which members of a cell are chosen are equivalent and collapsed to a single
+//! representative.
 //!
 //! These recipient sets are not required to be disjoint. A participant may
 //! appear in both masks for a round, meaning both twin halves can exchange

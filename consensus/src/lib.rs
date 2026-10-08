@@ -200,25 +200,26 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// the same verification and certification obligations as returning a payload from
         /// [`Automaton::propose`].
         ///
-        /// With [`Handoff::Wait`], consensus issues an ordinary
-        /// [`Automaton::propose`] for the same context once the parent certifies, unless it
-        /// has already voted to nullify this view.
+        /// With [`Handoff::Wait`], consensus issues an ordinary [`Automaton::propose`] for the same
+        /// context once the parent certifies, unless it has already voted to nullify this view.
         ///
-        /// Closing the response abandons the local proposal opportunity for this view once
-        /// the parent certifies or finalizes, without a retry. If a replacement parent
-        /// supersedes the parent first, consensus requests a proposal on the replacement.
+        /// Closing the response abandons the local proposal opportunity for this view once the
+        /// parent certifies or finalizes, without a retry. If a replacement parent supersedes the
+        /// parent first, consensus can then request a proposal on the replacement, unless it has
+        /// voted to nullify this view.
         ///
         /// Return the receiver promptly and do any work behind it. Parent certification does
-        /// not cancel this request. Consensus drops the receiver when it abandons the context,
-        /// so stop pending work when the receiver closes.
+        /// not cancel this request, and while the response is pending, consensus requests no
+        /// other proposal for this view. Consensus drops the receiver when it abandons the
+        /// context, so stop pending work when the receiver closes.
         ///
-        /// Consensus also drops the receiver once the parent can no longer be built on before
-        /// it certifies, as after a nullification in the parent's term, or once it votes to
-        /// nullify the parent's view or an earlier view of that term, since the application may
-        /// verify other blocks only after this build completes. An ordinary
-        /// [`Automaton::propose`] for the same context follows if the parent certifies and
-        /// consensus has not voted to nullify this view, or a request on a replacement parent
-        /// once one is selectable.
+        /// Consensus also drops the receiver once the parent can no longer be built on before it
+        /// certifies, as after a nullification in the parent's term, or once it votes to nullify
+        /// the view it is waiting in, at or below the parent, since the application may verify
+        /// other blocks only after this build completes. Unless consensus has voted to nullify this
+        /// view, an ordinary [`Automaton::propose`] for the same context follows if the parent
+        /// certifies, or consensus can request a proposal on a replacement parent once one is
+        /// selectable.
         fn handoff(
             &mut self,
             _context: Self::Context,
@@ -385,28 +386,28 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         ///
         /// With [`HandoffPolicy::Publish`] or [`HandoffPolicy::Stage`], the marshal uses its
         /// ordinary proposal path. Recovery and epoch-boundary reproposal may reuse a block
-        /// without invoking [`Self::propose`]. With [`HandoffPolicy::Wait`], consensus
-        /// waits for parent certification before requesting an ordinary proposal. The
-        /// returned policy is final for the request.
+        /// without invoking [`Self::propose`]. With [`HandoffPolicy::Wait`], consensus waits
+        /// for parent certification before requesting an ordinary proposal. The returned
+        /// policy is final for the request.
         ///
         /// With deferred or coded verification, a prepared build can start before this node
         /// has verified the parent's contents. The parent may later fail certification,
         /// which discards the candidate.
         ///
-        /// Parent certification does not cancel a prepared build. Consensus cancels it once
-        /// the parent can no longer be built on before it certifies, as after a nullification
-        /// in the parent's term, or once it votes to nullify the parent's view or an earlier
-        /// view of that term. It then requests an ordinary proposal for the same context if the
-        /// parent certifies and it has not voted to nullify the proposal's view, or a proposal
-        /// on a replacement parent once one is selectable.
+        /// Parent certification does not cancel a prepared build. Consensus cancels it once the
+        /// parent can no longer be built on before it certifies, as after a nullification in the
+        /// parent's term, or once it votes to nullify the view it is waiting in, at or below the
+        /// parent. Unless it has voted to nullify the proposal's view, it then requests an ordinary
+        /// proposal for the same context if the parent certifies, or can request a proposal on a
+        /// replacement parent once one is selectable.
         ///
-        /// [`HandoffPolicy::Publish`] trusts the outgoing leader. The
-        /// context names the parent by view and digest, and its leader field names the
-        /// incoming leader, not the outgoing one. Identify the outgoing leader from the
-        /// elector's schedule or authenticated metadata for the parent's consensus round. A
-        /// verified parent block can name an earlier proposer in its embedded context, as
-        /// with an epoch-boundary reproposal. If that identity or trust is uncertain, prepare
-        /// with [`HandoffPolicy::Stage`].
+        /// [`HandoffPolicy::Publish`] trusts the outgoing consensus leader not to equivocate and to
+        /// complete its term (see [`Handoff::Publish`]). The context names the parent by view and
+        /// digest, and its leader field names the incoming leader, not the outgoing one. Identify
+        /// the outgoing leader from the elector's schedule or authenticated metadata for the
+        /// parent's consensus round. A verified parent block can name an earlier proposer in its
+        /// embedded context, as with an epoch-boundary reproposal. If that identity or trust is
+        /// uncertain, prepare with [`HandoffPolicy::Stage`].
         ///
         /// This method runs synchronously on the proposal path. Do not block on I/O.
         /// If readiness is uncertain, return [`HandoffPolicy::Wait`].

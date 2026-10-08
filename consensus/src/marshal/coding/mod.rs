@@ -4986,11 +4986,11 @@ mod tests {
             // only if the stored block is reused as-is and certification
             // resolves through the durability gate registered by the
             // recovery staging.
-            let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
-                GatedVerifyingApp::new();
-
+            //
             // Request `Publish` rather than the conservative `Stage` to show that the
             // handoff forwards the application's permission.
+            let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
+                GatedVerifyingApp::new();
             let mock_app = mock_app.with_handoff(HandoffPolicy::Publish);
             let cfg = MarshaledConfig {
                 application: mock_app,

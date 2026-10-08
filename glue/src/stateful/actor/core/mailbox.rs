@@ -179,8 +179,9 @@ where
 /// Handle to the [`Stateful`](super::Stateful) actor.
 ///
 /// Implements the consensus [`Application`](commonware_consensus::Application) and receives
-/// finalized blocks from marshal as a [`Reporter`]. If the actor stops before responding,
-/// `propose` returns `None` and `verify` panics.
+/// finalized blocks from marshal as a [`Reporter`]. The mailbox forwards proposal, verification,
+/// and reporting calls to the actor. If the actor stops before responding, `propose` returns `None`
+/// and `verify` panics with "stateful actor dropped during verify".
 ///
 /// `handoff_policy` is answered from a retained clone of the application, including after
 /// the actor stops, so a policy other than [`HandoffPolicy::Wait`] does not guarantee that

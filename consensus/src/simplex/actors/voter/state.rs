@@ -410,7 +410,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.create_round(view).set_leader(leader);
     }
 
-    /// Copies the same-term stable leader into an optimistic successor.
+    /// Copies the same-term stable leader into an optimistic successor whose leader is unset.
+    /// Keeping an existing leader makes repeated inheritance idempotent.
     fn inherit_leader(&mut self, from: View, to: View) {
         if self.leader_is_set(to) {
             return;
@@ -778,11 +779,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return None;
         }
 
-        // Optimistic and pipelined handoff notarize votes can notarize a child ahead
-        // of its parent's certification, and finalization must not run ahead of that
-        // anchor.
-        // Certification already applies this, so it only matters when replay
-        // restores a certified round without re-running that precheck.
+        // Optimistic and pipelined handoff notarize votes can notarize a child
+        // ahead of its parent's certification, and finalization must not run
+        // ahead of that anchor. Certification already applies this, so it only
+        // matters when replay restores a certified round without re-running
+        // that precheck.
         let proposal = self.views.get(&view)?.proposal()?;
         if !self.explicit_parent_ready(proposal) {
             return None;
@@ -1011,7 +1012,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Returns whether we voted to nullify the current view and that view is at or below
-    /// `parent`. We have then stopped waiting for `parent` to certify.
+    /// `parent`. A handoff on an uncertified `parent` then neither starts nor keeps a
+    /// build, but it still waits for `parent` to certify and may then proceed as an
+    /// ordinary request.
     fn gave_up_below(&self, parent: View) -> bool {
         self.view <= parent && self.voted_nullify(self.view)
     }
@@ -1020,8 +1023,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// result may still be used.
     ///
     /// A build on an uncertified parent stops once its captured ancestry is no longer valid,
-    /// even if no replacement parent is selectable yet. A nullification in the parent's
-    /// term is one such case. The build also stops once we vote to nullify the view we are
+    /// even if no replacement parent is selectable yet. A nullification in the parent's term
+    /// is one such case. The build also stops once we vote to nullify the view we are
     /// waiting in, at or below the parent. The application may verify other blocks only
     /// after the build completes, so the build could keep the parent, the view we wait in,
     /// or a fallback parent from certifying.
@@ -1043,9 +1046,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Records a proposal built by the automaton if its captured parent remains
     /// valid.
     ///
-    /// Proposal construction is asynchronous, so parent evidence may change
-    /// while the automaton runs. Conflicting or invalidated ancestry is rejected.
+    /// Proposal construction is asynchronous, so parent evidence may change while the automaton
+    /// runs. The captured parent is accepted if it remains preferred for the view or is still valid
+    /// ancestry for the completed proposal. Conflicting or invalidated ancestry is rejected.
     pub fn proposed(&mut self, context: &Context<D, S::PublicKey>, payload: D) -> bool {
+        // Reject the captured parent only when it is neither preferred nor valid ancestry.
         if !self.captured_parent_valid(context, self.find_parent(context.view())) {
             // The rejected build recorded nothing, so release the latch for a retry.
             if let Some(round) = self.views.get_mut(&context.view()) {
@@ -1053,6 +1058,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             }
             return false;
         }
+
+        // Record the proposal as locally verified after accepting its captured parent.
         self.record_proposed(Proposal::new(context.round, context.parent.0, payload))
     }
 
@@ -1576,9 +1583,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// notarize vote or receive the leader's proposal.
     ///
     /// At a term end, the incoming leader stamps itself once it has voted for the
-    /// outgoing view, so it can prepare a pipelined handoff before the certificate
-    /// that unlocks the term exists. Other validators learn the incoming leader from
-    /// that certificate.
+    /// outgoing view, so it can prepare a pipelined handoff before the certificate that
+    /// unlocks the term exists. Other validators learn the incoming leader from that
+    /// certificate. Stamping skips a view whose leader is already set, so repeated
+    /// updates are idempotent.
     fn prepare_optimistic_successor(&mut self, view: View) {
         // Same-term successors inherit the current leader as soon as the
         // optimistic issuance window reaches them.
@@ -1792,9 +1800,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// conflicting proposal in the same view inherits the gate, which only delays
     /// its certification.
     ///
-    /// The vote is journaled, so replay restores the gate. A journaled vote for an
-    /// ordinary term-start proposal implies that its parent's certification or
-    /// finalization was already durable, so the gate passes after replay.
+    /// The vote is journaled, so replay restores the gate without relying on the
+    /// transient application decision. A journaled vote for an ordinary term-start
+    /// proposal implies that its parent's certification or finalization was already
+    /// durable, so the gate passes after replay.
     ///
     /// A term-start proposal outside this gate needs none: validators other than the
     /// proposer verify a term-start proposal only on explicitly certified ancestry, so
@@ -4145,7 +4154,8 @@ mod tests {
     }
 
     /// Certification exempts term-start candidates from the parent precheck
-    /// unless this node voted for one naming its immediate predecessor (see
+    /// unless one names its immediate predecessor in a view where this node
+    /// broadcast a notarize vote (see
     /// [`State::certification_parent_ready`]). A term-start proposal
     /// dispatches even when its cross-term parent is uncertified and the
     /// skipped views' nullifications are not held.

@@ -269,10 +269,10 @@ pub type Input<'a, S, E> =
 /// guarantees that the result is invariant across every valid representation.
 ///
 /// Honest participants may also enter the same round with certificates for
-/// different subjects (for example, one via a notarization of the previous view
-/// and another via a nullification). With `term_length > 1`, those certificates
-/// may even be from different views. Implementations must return the same leader
-/// for every certificate that can unlock the round. [`RoundRobinElector`] is
+/// different subjects (for example, one via a notarization of the previous view and
+/// another via a nullification). With `term_length > 1`, those certificates may
+/// even be from different views. Implementations must return the same leader for
+/// every certificate that can unlock the round. [`RoundRobinElector`] is
 /// [`Scheduled`], so it never receives a certificate. [`RandomElector`] uses the
 /// recovered threshold seed signature, which is independent of vote type and quorum
 /// subset for a given round. [`Random`] does not support `term_length > 1` because
@@ -296,8 +296,10 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// stable-leader term (as defined by [`Self::terms`]): nullification
     /// coverage, finalize gating, and leader-inactivity tracking all assume the
     /// leader is constant for the remainder of a term. This contract is not
-    /// enforced at runtime. A non-conforming implementation leaves participants
-    /// with inconsistent leaders and stalls progress.
+    /// enforced at runtime: once a round's leader is set, consensus never
+    /// replaces it, even if it consults the elector again for that round. A
+    /// non-conforming implementation leaves participants with inconsistent
+    /// leaders and stalls progress.
     ///
     /// See [Certificate Handling](Elector#certificate-handling) for `input`.
     ///

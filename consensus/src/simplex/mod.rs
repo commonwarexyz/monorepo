@@ -248,10 +248,10 @@
 //! the parent certifies. The application decides, per request, whether to prepare a candidate
 //! and whether consensus may publish it before the parent certifies.
 //!
-//! Handoff requests require a [`elector::Scheduled`] elector, which knows the incoming
-//! leader before the certificate that unlocks the term exists. A [`elector::Dynamic`] elector
-//! never pipelines handoffs. The incoming leader must also have voted for the outgoing term's
-//! final view or hold its notarization, and the outgoing term must have no nullification.
+//! Handoff requests require a [`elector::Scheduled`] elector, which knows the incoming leader
+//! before the certificate that unlocks the term exists. A [`elector::Dynamic`] elector never
+//! pipelines handoffs. The incoming leader must also have voted for the outgoing term's final
+//! view or hold its notarization, and the outgoing term must have no nullification.
 //! Otherwise, the leader uses the ordinary proposal path.
 //!
 //! Consensus handles each handoff response as follows:
@@ -277,24 +277,26 @@
 //! proposal for the same context, unless the leader has already voted to nullify the request's
 //! view. In that case, consensus drops the request, since no proposal can be recorded there.
 //!
-//! Consensus discards pending, waiting, held, and closed requests on view exit. When a
-//! replacement parent supersedes their ancestry, consensus discards them and requests a proposal
-//! on the replacement. Restart also discards pending requests and held candidates. Other
-//! validators require explicitly certified ancestry before verifying a term-start proposal, and
-//! so before voting to notarize it.
+//! Consensus discards pending, waiting, held, and closed requests on view exit. When a replacement
+//! parent supersedes their ancestry, consensus discards them and requests a proposal on the
+//! replacement once the rules above permit it. Restart also discards pending requests and held
+//! candidates. Other validators require explicitly certified ancestry before verifying a term-start
+//! proposal, and so before voting to notarize it.
 //!
 //! Marshal applications opt in through [`crate::Application::handoff_policy`], which returns
 //! [`crate::HandoffPolicy::Publish`], [`crate::HandoffPolicy::Stage`], or the default
-//! [`crate::HandoffPolicy::Wait`]. `Publish` and `Stage` use the ordinary construction path,
-//! which may reuse an existing block without calling the application builder. With `Stage`,
-//! construction overlaps parent certification while consensus holds publication. An application
-//! can choose it for any handoff whose outgoing leader it does not trust.
+//! [`crate::HandoffPolicy::Wait`]. Stateful Glue exposes the same policy. The application makes a
+//! synchronous decision from available information. It cannot revoke this decision. `Publish` and
+//! `Stage` use the ordinary construction path, which may reuse an existing block without calling
+//! the application builder. With `Stage`, construction overlaps parent certification while
+//! consensus holds publication. An application can choose it for any handoff whose outgoing
+//! leader it does not trust.
 //!
 //! With [`crate::Handoff::Publish`], rotating leaders can pipeline every view. The leader
-//! distributes each proposal in parallel with its parent's votes, allowing network-bound view
-//! time to drop from two network trips to one. With stable leaders,
-//! optimistic validation pipelines every view except the term start, so the handoff only moves
-//! each term's first view one network trip earlier.
+//! distributes each proposal in parallel with its parent's votes, allowing network-bound view time
+//! to drop from two network trips to one. With stable leaders, optimistic validation pipelines
+//! every view except the term start, so the handoff only moves each term's first view one network
+//! trip earlier.
 //!
 //! Publication before certification trusts the outgoing leader not to equivocate and to complete
 //! its term. The early proposal becomes usable only if every uncertified view it builds on
@@ -304,22 +306,22 @@
 //!
 //! ### Handoff Metrics
 //!
-//! `handoff_events` counts lifecycle events, and one request can count several. `Requested`
-//! counts handoff requests to the automaton, not unique views. `WaitReturned`
-//! counts [`crate::Handoff::Wait`] responses, including default ones.
-//! `CandidateReturned` counts candidates returned by the automaton, and `Held` counts candidates
-//! retained for parent certification. Releasing a held candidate does not count it again.
+//! `handoff_events` counts lifecycle events, and one request can count several. `Requested` counts
+//! handoff requests to the automaton, not unique views. `WaitReturned` counts
+//! [`crate::Handoff::Wait`] responses, including default ones. Consensus can still abandon a
+//! waiting request later. `CandidateReturned` counts candidates returned by the automaton, and
+//! `Held` counts candidates retained for parent certification. Releasing a held candidate does not
+//! count it again.
 //!
 //! Publication events count local relay attempts after proposal acceptance, classified by whether
-//! the exact parent had certified or finalized at that point. They do not imply network
-//! delivery.
+//! the exact parent had certified or finalized at that point. They do not imply network delivery.
 //!
 //! `handoff_abandoned` counts handoff requests or candidates that consensus discards before
 //! publication, and pending builds that it cancels, by reason:
 //!
 //! * `ViewExit`: the request's view ended.
 //! * `AncestrySuperseded`: the captured ancestry became invalid while a replacement parent was
-//!   selectable, so consensus requested a proposal on the replacement.
+//!   selectable, so consensus can request a proposal on the replacement instead.
 //! * `ParentNullify`: a pending build was cancelled after a local nullify vote for the view the
 //!   leader waits in, at or below the parent.
 //! * `AncestryInvalidated`: a pending build was cancelled because its captured ancestry became
@@ -349,9 +351,10 @@
 //! first local view entry, regardless of proposal timing, and omit samples when no entry was
 //! recorded.
 //!
-//! Both metric pairs sample only the view's leader at the same certificate-ready event, before
-//! the journal sync and network publication of that certificate. Timestamps are process-local and
-//! are not restored on restart.
+//! Both metric pairs sample only the view's leader at the same certificate-ready event, before the
+//! journal sync and network publication of that certificate. Timestamps are process-local and are
+//! not restored on restart. These durations do not measure transaction latency or total speculative
+//! work.
 //!
 //! ### Optimistic Finality
 //!
@@ -1853,10 +1856,9 @@ mod tests {
     /// With `accept_handoffs`, every application permits early publication of handoff
     /// candidates. Otherwise, applications wait for parent certification.
     ///
-    /// The leader and certification timeouts are tuned to the callers' link latencies. When
-    /// the latency nears half the leader timeout, a view that waits for its parent's
-    /// certification takes two or more network trips and times out. Runs then stay free of
-    /// nullifications only when views pipeline.
+    /// The leader and certification timeouts are fixed for every caller. Runs stay free of
+    /// nullifications only while the link latency stays below the leader timeout, since a view's
+    /// proposal arrives about one link latency after the view starts.
     async fn setup_round_robin_cluster(
         context: &mut deterministic::Context,
         namespace: &[u8],
@@ -8407,11 +8409,10 @@ mod tests {
         handoffs: bool,
     }
 
-    /// Makes an application return handoff candidates with early publication during
-    /// the adversarial prefix and wait for parent certification afterward, so early publication
-    /// evidence comes only from prefix views. `side` selects the counter in
-    /// `prefix_handoffs` that records returned prefix candidates: 0 for honest
-    /// applications and 1 for twin applications.
+    /// Makes an application return handoff candidates with early publication during the adversarial
+    /// prefix and wait for parent certification afterward, so early publication evidence comes only
+    /// from prefix views. `side` selects the counter in `prefix_handoffs` that records returned
+    /// prefix candidates: 0 for honest applications and 1 for twin applications.
     fn configure_twins_handoff(
         actor: &mut mocks::application::Application<deterministic::Context, Sha256, PublicKey>,
         prefix_end: View,

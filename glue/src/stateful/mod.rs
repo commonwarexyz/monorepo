@@ -198,8 +198,8 @@ where
     /// early-publication trust. If readiness is uncertain, return [`HandoffPolicy::Wait`].
     ///
     /// [`Stateful`] calls this method on a clone of the application, outside the processing
-    /// actor and without database batches. Metadata consulted here may live outside the
-    /// batches, but the application must share it across clones. This policy does not change
+    /// actor and without database batches. Metadata used only for this decision may live outside
+    /// the batches, but the application must share it across clones. This policy does not change
     /// the deterministic execution contract above.
     fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
         HandoffPolicy::Wait
