@@ -1115,6 +1115,11 @@ macro_rules! sync_tests {
             }
 
             #[test_traced("WARN")]
+            fn test_boundary_response_keeps_fetched_batch_at_lower_bound() {
+                crate::qmdb::sync::engine::tests::test_boundary_response_keeps_fetched_batch_at_lower_bound::<$harness>();
+            }
+
+            #[test_traced("WARN")]
             fn test_target_update_drops_queued_result_of_cancelled_request() {
                 crate::qmdb::sync::engine::tests::test_target_update_drops_queued_result_of_cancelled_request::<$harness>();
             }
