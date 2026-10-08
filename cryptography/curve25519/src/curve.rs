@@ -22,14 +22,15 @@ const LIMB_BITS: usize = 51;
 /// The low [`LIMB_BITS`] bits: what a limb holds once carries have been propagated out of it.
 const MASK_51: u64 = (1 << LIMB_BITS) - 1;
 
-/// `16*p`, decomposed limb-wise at radix `2^LIMB_BITS`, used to make subtraction underflow-free.
-const BIAS_16P: [u64; LIMBS] = [
-    16 * ((1u64 << LIMB_BITS) - 19),
-    16 * ((1u64 << LIMB_BITS) - 1),
-    16 * ((1u64 << LIMB_BITS) - 1),
-    16 * ((1u64 << LIMB_BITS) - 1),
-    16 * ((1u64 << LIMB_BITS) - 1),
-];
+/// `k*p`, decomposed limb-wise at radix `2^LIMB_BITS`.
+const fn p_times(k: u64) -> [u64; LIMBS] {
+    let mut limbs = [k * MASK_51; LIMBS];
+    limbs[0] = k * ((1 << LIMB_BITS) - 19);
+    limbs
+}
+
+/// `16*p`, limb-wise, used to make subtraction underflow-free.
+const BIAS_16P: [u64; LIMBS] = p_times(16);
 
 /// A base field element in the field of order `p = 2^255 - 19`.
 ///
@@ -519,38 +520,6 @@ impl G {
         }
     }
 
-    /// Adds an affine point using its precomputed `2d*x*y` coordinate.
-    #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
-    #[inline(always)]
-    pub const fn add_mixed(self, rhs: GAffine) -> Self {
-        self.add_niels(Niels {
-            sum: rhs.y.add(rhs.x),
-            diff: rhs.y.sub(rhs.x),
-            t2d: rhs.t2d,
-        })
-    }
-
-    /// Adds a point in [`Niels`] form: [`G::add`] specialized to an operand whose `Z` is one.
-    #[inline(always)]
-    const fn add_niels(self, rhs: Niels) -> Self {
-        // The steps of `G::add` with `Z2 = 1`. The Niels form supplies `Y2 - X2`, `Y2 + X2`, and
-        // `2d*T2`, so `C` takes one multiplication and `D = 2*Z1` takes none.
-        let a = self.y.sub(self.x).mul(rhs.diff);
-        let b = self.y.add(self.x).mul(rhs.sum);
-        let c = self.t.mul(rhs.t2d);
-        let d = self.z.add(self.z);
-        let e = b.sub(a);
-        let f = d.sub(c);
-        let g = d.add(c);
-        let h = b.add(a);
-        Self {
-            x: e.mul(f),
-            y: g.mul(h),
-            t: e.mul(h),
-            z: f.mul(g),
-        }
-    }
-
     /// Doubles this point using the dedicated `dbl-2008-hwcd` formula.
     #[inline(always)]
     pub const fn double(self) -> Self {
@@ -598,7 +567,7 @@ impl G {
 
     /// Drops the `T` coordinate, which doubling does not read.
     #[inline(always)]
-    pub const fn to_projective(self) -> GProjective {
+    const fn to_projective(self) -> GProjective {
         GProjective {
             x: self.x,
             y: self.y,
@@ -606,39 +575,15 @@ impl G {
         }
     }
 
-    /// Prepares this point for repeated additions with [`G::add_projective_niels`].
+    /// Prepares this point for repeated additions with [`Backend::add_cached`].
     #[inline(always)]
-    pub const fn to_projective_niels(self) -> ProjectiveNiels {
+    const fn to_projective_niels(self) -> ProjectiveNiels {
         ProjectiveNiels {
             sum: self.y.add(self.x),
             diff: self.y.sub(self.x),
             z: self.z,
             t2d: self.t.mul(F::EDWARDS_D2),
         }
-    }
-
-    /// Adds a point in [`Niels`] form, deferring the final multiplications to the conversion of
-    /// the returned completed point.
-    #[inline(always)]
-    pub const fn add_niels_completed(self, rhs: Niels) -> GCompleted {
-        // The steps of `G::add_niels` up to its final products.
-        let a = self.y.sub(self.x).mul(rhs.diff);
-        let b = self.y.add(self.x).mul(rhs.sum);
-        let c = self.t.mul(rhs.t2d);
-        let d = self.z.add(self.z);
-        GCompleted::from_products(a, b, c, d)
-    }
-
-    /// Adds a point in [`ProjectiveNiels`] form, deferring the final multiplications to the
-    /// conversion of the returned completed point.
-    #[inline(always)]
-    pub const fn add_projective_niels(self, rhs: ProjectiveNiels) -> GCompleted {
-        // The steps of `G::add` up to its final products, with `2d*T2` precomputed.
-        let a = self.y.sub(self.x).mul(rhs.diff);
-        let b = self.y.add(self.x).mul(rhs.sum);
-        let c = self.t.mul(rhs.t2d);
-        let zz = self.z.mul(rhs.z);
-        GCompleted::from_products(a, b, c, zz.add(zz))
     }
 }
 
@@ -653,40 +598,6 @@ pub struct GProjective {
 }
 
 impl GProjective {
-    /// The neutral element, `(0, 1)` in affine coordinates.
-    pub const IDENTITY: Self = Self {
-        x: F::ZERO,
-        y: F::ONE,
-        z: F::ONE,
-    };
-
-    /// Doubles this point with the steps of [`G::double`] up to its final products.
-    #[inline(always)]
-    pub const fn double(self) -> GCompleted {
-        let a = self.x.square();
-        let b = self.y.square();
-        let c = self.z.square();
-        let c = c.add(c);
-        let e = self.x.add(self.y).square().sub(a).sub(b);
-        let g = b.sub(a);
-        let f = g.sub(c);
-        let h = a.neg().sub(b);
-        GCompleted {
-            x: e,
-            y: h,
-            z: g,
-            t: f,
-        }
-    }
-
-    /// Multiplies this point by the curve's cofactor (8).
-    pub fn mul_by_cofactor(mut self) -> Self {
-        for _ in 0..3 {
-            self = self.double().to_projective();
-        }
-        self
-    }
-
     /// Returns whether this point represents the identity.
     pub fn is_identity(&self) -> bool {
         self.x.is_zero() && self.y.eq(&self.z)
@@ -731,30 +642,30 @@ impl GCompleted {
         }
     }
 
-    /// Converts this point to projective coordinates.
+    /// Finishes the `dbl-2008-hwcd` doubling of [`G::double`] from `A = X^2`, `B = Y^2`,
+    /// `C = 2*Z^2`, and `(X + Y)^2`.
     #[inline(always)]
-    pub const fn to_projective(self) -> GProjective {
-        GProjective {
-            x: self.x.mul(self.t),
-            y: self.z.mul(self.y),
-            z: self.t.mul(self.z),
-        }
-    }
-
-    /// Converts this point to extended coordinates.
-    #[inline(always)]
-    pub const fn to_extended(self) -> G {
-        G {
-            x: self.x.mul(self.t),
-            y: self.z.mul(self.y),
-            t: self.x.mul(self.y),
-            z: self.t.mul(self.z),
+    const fn from_squares(a: F, b: F, c: F, sum_squared: F) -> Self {
+        // In `G::double`'s notation, `X3/Z3 = E/G` and `Y3/Z3 = H/F`.
+        let e = sum_squared.sub(a).sub(b);
+        let g = b.sub(a);
+        let f = g.sub(c);
+        let h = a.neg().sub(b);
+        Self {
+            x: e,
+            y: h,
+            z: g,
+            t: f,
         }
     }
 }
 
 /// An affine point `(x, y)` stored as `(y + x, y - x, 2d*x*y)`.
+///
+/// The coordinates are laid out as 15 consecutive limbs, so backends can load them straight into
+/// registers.
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub struct Niels {
     sum: F,
     diff: F,
@@ -771,7 +682,7 @@ impl Niels {
 
     /// Negates this point, which swaps `y + x` with `y - x` and negates `2d*x*y`.
     #[inline(always)]
-    pub const fn negate(self) -> Self {
+    const fn negate(self) -> Self {
         Self {
             sum: self.diff,
             diff: self.sum,
@@ -781,7 +692,7 @@ impl Niels {
 }
 
 /// A point `(X:Y:Z:T)` in extended coordinates stored as `(Y + X, Y - X, Z, 2d*T)`, so adding it
-/// with [`G::add_projective_niels`] skips the multiplication by `2d`.
+/// with [`Backend::add_cached`] skips the multiplication by `2d`.
 #[derive(Clone, Copy)]
 pub struct ProjectiveNiels {
     sum: F,
@@ -793,7 +704,7 @@ pub struct ProjectiveNiels {
 impl ProjectiveNiels {
     /// Negates this point, which swaps `Y + X` with `Y - X` and negates `2d*T`.
     #[inline(always)]
-    pub const fn negate(self) -> Self {
+    const fn negate(self) -> Self {
         Self {
             sum: self.diff,
             diff: self.sum,
@@ -982,10 +893,85 @@ fn pow_p58<B: FBackend>(backend: B, value: FVec) -> FVec {
     backend.mul(value, backend.pow2k(pow_2_250_minus_1(backend, value), 2))
 }
 
-/// Abstracts over field and group operations.
+/// Abstracts over field, group, and multi-scalar operations.
+///
+/// Every point operation must produce the same projective coordinates, modulo `p`, as the scalar
+/// formulas of the portable backend for every input point, including the identity, equal points,
+/// a point plus its negation, and points with a torsion component. Every input point, operand, and
+/// table entry may have any limbs below `2^52`.
+///
+/// Fixed-base multiplication passes secret points through these operations, so no branch, memory
+/// index, or early exit of a point operation may depend on the coordinates of its points. Only the
+/// `negate` flags of [`Backend::add_cached`] and [`Backend::add_niels`] may be variable-time, and
+/// [`Backend::decompress_pair`] is variable-time on its encodings, which must be public.
+///
+/// The point types follow a point through a chain: an addition or doubling returns a
+/// [`Backend::Completed`] point, which converts to [`Backend::Projective`] coordinates for a
+/// doubling or to [`Backend::Extended`] coordinates for an addition. A backend may skip work for
+/// coordinates the next operation does not read.
 pub trait Backend: MBackend + 'static {
-    /// Decompresses both encodings as [`GAffine::decompress`] does, returning `None` if either
-    /// does not decode.
+    /// A point in extended coordinates, the input of an addition.
+    type Extended: Copy;
+
+    /// A point in projective coordinates, the input of a doubling.
+    type Projective: Copy;
+
+    /// A point as an addition or doubling leaves it, before its final multiplications.
+    type Completed: Copy;
+
+    /// A point prepared as the right operand of repeated additions.
+    type Cached: Copy;
+
+    /// Converts a point to the native extended representation.
+    fn load(self, point: &G) -> Self::Extended;
+
+    /// Converts a native extended point back to a [`G`] with limbs below `2^52`.
+    fn store(self, point: Self::Extended) -> G;
+
+    /// Converts a native projective point back to a [`GProjective`] with limbs below `2^52`.
+    fn store_projective(self, point: Self::Projective) -> GProjective;
+
+    /// Drops the `T` coordinate, which doubling does not read.
+    fn project(self, point: Self::Extended) -> Self::Projective;
+
+    /// Doubles a point, deferring its final coordinate multiplications.
+    fn double(self, point: Self::Projective) -> Self::Completed;
+
+    /// Finishes a completed point in projective coordinates.
+    fn to_projective(self, point: Self::Completed) -> Self::Projective;
+
+    /// Finishes a completed point in extended coordinates.
+    fn to_extended(self, point: Self::Completed) -> Self::Extended;
+
+    /// Prepares a point for repeated additions.
+    fn cache(self, point: Self::Extended) -> Self::Cached;
+
+    /// Adds `cached`, or its negation when `negate` is set, deferring the final coordinate
+    /// multiplications.
+    ///
+    /// Variable-time in `negate`, which must be public.
+    fn add_cached(
+        self,
+        point: Self::Extended,
+        cached: Self::Cached,
+        negate: bool,
+    ) -> Self::Completed;
+
+    /// Adds an affine point, or its negation when `negate` is set, deferring the final coordinate
+    /// multiplications.
+    ///
+    /// Variable-time in `negate`, which must be public.
+    fn add_niels(self, point: Self::Extended, niels: &Niels, negate: bool) -> Self::Completed;
+
+    /// Adds `digit * P` for `row[k] = (k + 1) * P` and `digit` in `[-8, 8]`.
+    ///
+    /// Constant time: every entry of `row` is read, and the selection and negation use masks,
+    /// so no branch, memory index, or early exit depends on `digit` or on the points.
+    fn add_selected(self, point: Self::Extended, row: &[Niels; 8], digit: i8) -> Self::Completed;
+
+    /// Decompresses two point encodings as [`GAffine::decompress`] does, or returns `None` when
+    /// either is invalid.
+    #[inline(always)]
     fn decompress_pair(self, [first, second]: [&[u8; 32]; 2]) -> Option<[GAffine; 2]> {
         Some([GAffine::decompress(first)?, GAffine::decompress(second)?])
     }
@@ -993,11 +979,9 @@ pub trait Backend: MBackend + 'static {
 
 /// A computation which can run over an arbitrary [`Backend`].
 ///
-/// [`with_backend`] hands its caller a backend whose concrete type is only
-/// known at runtime, so the computation must be generic over backends. Plain
-/// closures can't have generic call methods, so we use a trait instead:
-/// implement it on a struct capturing the computation's inputs, and return
-/// its results from [`Self::call`].
+/// [`with_backend`] selects a concrete backend at runtime, so the computation must provide a
+/// generic call method. Implement this trait on a type that captures the computation's inputs;
+/// ordinary closures cannot have generic call methods.
 pub trait WithBackend {
     /// The result of the computation.
     type Output;
@@ -1035,9 +1019,9 @@ pub fn test_backend() -> impl Backend {
 
 /// Run a computation with the best [`Backend`] this CPU supports.
 ///
-/// This is the only way to gain access to a backend. AVX-512 requires runtime feature detection.
-/// Every use is forced through this single gate so an accelerated backend is only constructed
-/// where its instructions are guaranteed to be available.
+/// AVX-512 dispatch checks the required CPU features before constructing its backend and entering
+/// the computation's target-feature scope.
+#[cfg_attr(target_arch = "aarch64", inline(always))]
 pub fn with_backend<F: WithBackend>(f: F) -> F::Output {
     #[cfg(all(target_arch = "x86_64", any(feature = "std", test)))]
     {
@@ -1054,6 +1038,6 @@ pub fn with_backend<F: WithBackend>(f: F) -> F::Output {
     #[cfg(not(target_arch = "aarch64"))]
     {
         // Portable fallback, available everywhere.
-        f.call(portable::Backend::new())
+        portable::Backend::new().call(f)
     }
 }

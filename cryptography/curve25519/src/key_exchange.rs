@@ -62,9 +62,9 @@ impl SecretKey {
 
     /// The public key to send to the other party.
     pub fn public_key(&self) -> PublicKey {
-        PublicKey {
-            bytes: montgomery::x25519(&self.bytes, &BASEPOINT_U),
-        }
+        let mut public = PublicKey { bytes: [0; 32] };
+        montgomery::x25519(&self.bytes, &BASEPOINT_U, &mut public.bytes);
+        public
     }
 
     /// Performs a key exchange with the other party's public key, consuming this key.
@@ -73,7 +73,12 @@ impl SecretKey {
     /// the result to a value everybody can compute. Keys produced by [`Self::public_key`] never
     /// cause this failure.
     pub fn exchange(self, other: &PublicKey) -> Option<SharedSecret> {
-        SharedSecret::from_x25519(montgomery::x25519(&self.bytes, &other.bytes))
+        let mut shared = SharedSecret { bytes: [0; 32] };
+        montgomery::x25519(&self.bytes, &other.bytes, &mut shared.bytes);
+
+        // X25519 exposes only whether the result is all zero. Compare every byte before branching
+        // on that public classification.
+        bool::from(!shared.bytes.ct_eq(&[0; 32])).then_some(shared)
     }
 }
 
@@ -160,17 +165,6 @@ pub struct SharedSecret {
 }
 
 impl SharedSecret {
-    fn from_x25519(bytes: [u8; 32]) -> Option<Self> {
-        let bytes = Zeroizing::new(bytes);
-
-        // X25519 exposes only whether the result is all zero. Compare every byte before branching
-        // on that public classification.
-        if bool::from(bytes.ct_eq(&[0; 32])) {
-            return None;
-        }
-        Some(Self { bytes: *bytes })
-    }
-
     /// The raw bytes of the shared secret.
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.bytes

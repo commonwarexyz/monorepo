@@ -4,8 +4,7 @@ mod msm;
 mod scalar;
 
 use crate::curve::{
-    Backend, G, GAffine, GProjective, LANES, ODD_MULTIPLES, ODD_MULTIPLES_NAF_WIDTH, WithBackend,
-    with_backend,
+    Backend, G, GAffine, LANES, ODD_MULTIPLES, ODD_MULTIPLES_NAF_WIDTH, WithBackend, with_backend,
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -544,87 +543,85 @@ fn verify_pipeline<B: Backend>(
 /// Width of the non-adjacent forms [`straus`] recodes its variable-base scalars into.
 const NAF_WIDTH: usize = 5;
 
+/// The number of odd multiples a width-[`NAF_WIDTH`] digit can select.
+const TABLE_LEN: usize = 1 << (NAF_WIDTH - 2);
+
+/// Returns the odd multiples `point, 3*point, ..., 15*point`, built by repeatedly adding
+/// `2*point`, so a width-[`NAF_WIDTH`] digit `d` selects entry `|d| / 2`.
+#[inline(always)]
+fn odd_multiples<B: Backend>(backend: B, point: &G) -> [B::Cached; TABLE_LEN] {
+    let point = backend.load(point);
+    let double = backend.cache(backend.to_extended(backend.double(backend.project(point))));
+    let mut table = [backend.cache(point); TABLE_LEN];
+    let mut multiple = point;
+    for entry in &mut table[1..] {
+        multiple = backend.to_extended(backend.add_cached(multiple, double, false));
+        *entry = backend.cache(multiple);
+    }
+    table
+}
+
 /// Computes `base[0]*B + base[1]*2^128*B + sum(scalar*point)` over `terms` with Straus's
 /// method: one doubling chain shared by every term, adding `digit*point` at each nonzero digit
 /// of the scalars' non-adjacent forms from a table of odd multiples of each point.
 ///
 /// Variable-time, so the points and scalars must be public.
-fn straus<const N: usize>(base: [Scalar; 2], terms: [(G, Scalar); N]) -> GProjective {
+#[inline(always)]
+fn straus<B: Backend, const N: usize>(
+    backend: B,
+    base: [Scalar; 2],
+    terms: [(G, Scalar); N],
+) -> B::Projective {
     // The basepoint multiples come from static tables, which afford a wider window and so fewer
     // additions than the per-call tables. In a width-`w` non-adjacent form every nonzero digit
     // is odd with magnitude below `2^(w-1)`, and at least `w - 1` zeros separate nonzero digits.
     let base_digits = base.map(|scalar| scalar.naf::<ODD_MULTIPLES_NAF_WIDTH>());
     let digits = terms.map(|(_, scalar)| scalar.naf::<NAF_WIDTH>());
 
-    // Each table holds the odd multiples `point, 3*point, ..., 15*point`, built by repeatedly
-    // adding `2*point`, so a digit `d` selects entry `|d| / 2`.
-    let tables = terms.map(|(point, _)| {
-        let double = point
-            .to_projective()
-            .double()
-            .to_extended()
-            .to_projective_niels();
-        let mut table = [point.to_projective_niels(); 1 << (NAF_WIDTH - 2)];
-        let mut multiple = point;
-        for entry in &mut table[1..] {
-            multiple = multiple.add_projective_niels(double).to_extended();
-            *entry = multiple.to_projective_niels();
-        }
-        table
-    });
+    // One loop builds every table, so the inlined table builder appears once. The identity's
+    // cache only initializes the array.
+    let placeholder = backend.cache(backend.load(&G::IDENTITY));
+    let mut tables = [[placeholder; TABLE_LEN]; N];
+    for (table, (point, _)) in tables.iter_mut().zip(&terms) {
+        *table = odd_multiples(backend, point);
+    }
 
     // The shared doubling chain starts at the highest nonzero digit of any scalar. If every
     // scalar is zero, so is the sum.
+    let identity = backend.project(backend.load(&G::IDENTITY));
     let Some(top) = base_digits
         .iter()
         .chain(&digits)
         .filter_map(|digits| digits.iter().rposition(|&digit| digit != 0))
         .max()
     else {
-        return GProjective::IDENTITY;
+        return identity;
     };
 
     // Horner's rule over digit positions, most significant first: double the running sum once
     // per position, then add each term's selected multiple, negated for a negative digit.
     // Doublings and additions leave a completed point, converted to extended coordinates only
     // when an addition, which reads `T`, comes next.
-    let mut sum = GProjective::IDENTITY;
+    let mut sum = identity;
     for i in (0..=top).rev() {
-        let mut step = sum.double();
+        let mut step = backend.double(sum);
         for (digits, table) in base_digits.iter().zip(&ODD_MULTIPLES) {
             let digit = digits[i];
             if digit != 0 {
-                let mut multiple = table[usize::from(digit.unsigned_abs()) / 2];
-                if digit < 0 {
-                    multiple = multiple.negate();
-                }
-                step = step.to_extended().add_niels_completed(multiple);
+                let multiple = &table[usize::from(digit.unsigned_abs()) / 2];
+                step = backend.add_niels(backend.to_extended(step), multiple, digit < 0);
             }
         }
         for (digits, table) in digits.iter().zip(&tables) {
             let digit = digits[i];
             if digit != 0 {
-                let mut multiple = table[usize::from(digit.unsigned_abs()) / 2];
-                if digit < 0 {
-                    multiple = multiple.negate();
-                }
-                step = step.to_extended().add_projective_niels(multiple);
+                let multiple = table[usize::from(digit.unsigned_abs()) / 2];
+                step = backend.add_cached(backend.to_extended(step), multiple, digit < 0);
             }
         }
-        sum = step.to_projective();
+        sum = backend.to_projective(step);
     }
     sum
-}
-
-/// Decompresses two encodings with [`Backend::decompress_pair`].
-struct DecompressPair<'a>([&'a [u8; 32]; 2]);
-
-impl WithBackend for DecompressPair<'_> {
-    type Output = Option<[GAffine; 2]>;
-
-    fn call<B: Backend>(self, backend: B) -> Self::Output {
-        backend.decompress_pair(self.0)
-    }
 }
 
 /// Verifies one signature per the [module's validation criteria](super).
@@ -636,36 +633,69 @@ pub fn verify(
     sig: &Signature,
     msg: &[u8],
 ) -> bool {
-    let Some(s) = Scalar::from_canonical_bytes(&sig.s) else {
-        return false;
-    };
-    let points = a_point.map_or_else(
-        || {
-            with_backend(DecompressPair([&sig.r, a_bytes.as_bytes()]))
-                .map(|[r, a]| (r, a.to_extended()))
-        },
-        |point| GAffine::decompress(&sig.r).map(|r| (r, *point)),
-    );
-    let Some((r, a)) = points else {
-        return false;
-    };
-    let h = Scalar::from_bytes_mod_order_wide(&Sha512::hash(&[&sig.r, a_bytes.as_bytes(), msg]).0);
+    with_backend(Verify {
+        a_bytes,
+        a_point,
+        sig,
+        msg,
+    })
+}
 
-    // With `v = u*h (mod L)`, `[8](u*s*B - u*R - v*A) = u*[8](s*B - R - h*A)` because `[8]`
-    // maps every point into the prime-order subgroup. Since `0 < |u| < L`, one side is the
-    // identity exactly when the other is. The combination below is `sign(u)` times the left
-    // side: it multiplies by `|u|`, negates `A` only when `u` is nonnegative, and splits
-    // `|u|*s (mod L)` at bit 128 so that all four scalars are below `2^128`.
-    let (u, v) = h.half_size();
-    let a = if u < 0 { a } else { a.negate() };
-    let u = Scalar::from_u128(u.unsigned_abs());
-    let (low, high) = s.mul_mod_l(&u).halves();
-    straus(
-        [Scalar::from_u128(low), Scalar::from_u128(high)],
-        [(r.to_extended().negate(), u), (a, Scalar::from_u128(v))],
-    )
-    .mul_by_cofactor()
-    .is_identity()
+/// The inputs of [`verify`], checked with the selected backend's single-point operations.
+/// Without a cached point, the backend also decompresses the signature's `R` together with `A`.
+struct Verify<'a> {
+    a_bytes: &'a VerifyingKeyBytes,
+    a_point: Option<&'a G>,
+    sig: &'a Signature,
+    msg: &'a [u8],
+}
+
+impl WithBackend for Verify<'_> {
+    type Output = bool;
+
+    // Inlined so the algorithm compiles inside the backend's target-feature entry, where its
+    // point operations can inline.
+    #[inline(always)]
+    fn call<B: Backend>(self, backend: B) -> bool {
+        let Some(s) = Scalar::from_canonical_bytes(&self.sig.s) else {
+            return false;
+        };
+        let points = self.a_point.map_or_else(
+            || {
+                backend
+                    .decompress_pair([&self.sig.r, self.a_bytes.as_bytes()])
+                    .map(|[r, a]| (r, a.to_extended()))
+            },
+            |point| GAffine::decompress(&self.sig.r).map(|r| (r, *point)),
+        );
+        let Some((r, a)) = points else {
+            return false;
+        };
+        let h = Scalar::from_bytes_mod_order_wide(
+            &Sha512::hash(&[&self.sig.r, self.a_bytes.as_bytes(), self.msg]).0,
+        );
+
+        // With `v = u*h (mod L)`, `[8](u*s*B - u*R - v*A) = u*[8](s*B - R - h*A)` because `[8]`
+        // maps every point into the prime-order subgroup. Since `0 < |u| < L`, one side is the
+        // identity exactly when the other is. The combination below is `sign(u)` times the left
+        // side: it multiplies by `|u|`, negates `A` only when `u` is nonnegative, and splits
+        // `|u|*s (mod L)` at bit 128 so that all four scalars are below `2^128`.
+        let (u, v) = h.half_size();
+        let a = if u < 0 { a } else { a.negate() };
+        let u = Scalar::from_u128(u.unsigned_abs());
+        let (low, high) = s.mul_mod_l(&u).halves();
+        let mut sum = straus(
+            backend,
+            [Scalar::from_u128(low), Scalar::from_u128(high)],
+            [(r.to_extended().negate(), u), (a, Scalar::from_u128(v))],
+        );
+
+        // Multiplying by the cofactor (8) maps the sum into the prime-order subgroup.
+        for _ in 0..3 {
+            sum = backend.to_projective(backend.double(sum));
+        }
+        backend.store_projective(sum).is_identity()
+    }
 }
 
 struct VerifyBatchCall<'a, 'b, R, S> {
@@ -704,6 +734,7 @@ pub(super) fn verify_batch_bytes(
 mod tests {
     use super::*;
     use crate::{
+        curve::test_backend,
         signing::{SigningKey, VerifyingKey},
         test::strategy::Recording,
     };
@@ -719,7 +750,7 @@ mod tests {
     fn structural_rejection_does_not_record_complete_work() {
         // A valid signature, copies with a non-canonical `s` (top bit set) and an undecodable
         // `R`, and a key with an undecodable encoding.
-        let signer = SigningKey::from_seed([7; 32]);
+        let signer = SigningKey::from_seed(&[7; 32]);
         let key = signer.verifying_key();
         let valid = signer.sign(b"resource", b"control");
         let mut bad_s = valid.clone();
@@ -788,7 +819,15 @@ mod tests {
     fn straus_matches_double_and_add() {
         // With every scalar zero, no digit is nonzero, which takes the early return.
         let basepoint = GAffine::BASEPOINT.to_extended();
-        assert!(straus([Scalar::ZERO; 2], [(basepoint, Scalar::ZERO)]).is_identity());
+        assert!(
+            test_backend()
+                .store_projective(straus(
+                    test_backend(),
+                    [Scalar::ZERO; 2],
+                    [(basepoint, Scalar::ZERO)]
+                ))
+                .is_identity()
+        );
 
         // Each variable point gains a low-order component, and the difference from
         // double-and-add must be exactly the identity, so the torsion part is checked too.
@@ -818,7 +857,8 @@ mod tests {
                         sum.add(point.scalar_mul(scalar.bits_be()))
                     });
                 assert!(
-                    straus(base, terms)
+                    test_backend()
+                        .store_projective(straus(test_backend(), base, terms))
                         .to_extended()
                         .add(expected.negate())
                         .is_identity()
