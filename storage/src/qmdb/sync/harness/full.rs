@@ -46,28 +46,41 @@ pub(crate) async fn prune_boxed<H: SyncTestHarness>(db: H::Db, loc: Location<H::
 /// Harness that abstracts per-database and per-family details so the shared tests below can
 /// operate on any database that supports sync.
 pub(crate) trait SyncTestHarness: Sized + 'static {
+    /// Merkle family of the database.
     type Family: merkle::Family;
+    /// Database under test, which the sync engine builds, reopens, and serves from.
     type Db: qmdb::sync::Database<
             Family = Self::Family,
             Context = deterministic::Context,
             Digest = sha256::Digest,
             Config: Clone,
         > + Sync;
+    /// Metadata type carried by commits.
     type Metadata: Clone + PartialEq + Debug + Send + Sync + 'static;
 
+    /// Returns a config whose partitions are unique to `suffix`.
     fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self>;
+    /// Returns `n` operations from a fixed seed.
     fn create_ops(n: usize) -> Vec<OpOf<Self>>;
+    /// Returns `n` operations from `seed`, so distinct seeds touch distinct keys or values.
     fn create_ops_seeded(n: usize, seed: u64) -> Vec<OpOf<Self>>;
+    /// Returns the metadata the shared tests commit, so they can check it round-trips.
     fn sample_metadata() -> Self::Metadata;
 
+    /// Opens a fresh database under partitions unique to `ctx`.
     fn init_db(ctx: deterministic::Context) -> impl Future<Output = Self::Db> + Send;
+    /// Opens the database that `config` names, recovering any state it persisted.
     fn init_db_with_config(
         ctx: deterministic::Context,
         config: ConfigOf<Self>,
     ) -> impl Future<Output = Self::Db> + Send;
+    /// Removes all persisted state of `db`.
     fn destroy(db: Self::Db) -> impl Future<Output = ()> + Send;
+    /// Makes every applied operation of `db` durable.
     fn db_sync(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
 
+    /// Applies `ops` as one batch whose commit carries `metadata` and keeps the current
+    /// inactivity floor. The result is durable only after [`Self::db_sync`].
     fn apply_ops(
         db: Self::Db,
         ops: Vec<OpOf<Self>>,
@@ -80,6 +93,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     /// Databases whose batches declare their inactivity floor raise it to `loc` first.
     fn prune(db: Self::Db, loc: Location<Self::Family>) -> impl Future<Output = Self::Db> + Send;
 
+    /// Returns the range of retained operation locations in `db`.
     fn bounds(db: &Self::Db) -> std::ops::Range<Location<Self::Family>>;
 
     /// Returns the most recent location from which `db` can be safely synced.
@@ -99,6 +113,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
         Self::db_root(db)
     }
 
+    /// Returns the metadata carried by the last commit in `db`.
     fn get_metadata(db: &Self::Db) -> impl Future<Output = Option<Self::Metadata>> + Send;
 
     /// Panics unless every operation in `ops` is present in `db`, where `start` is the location

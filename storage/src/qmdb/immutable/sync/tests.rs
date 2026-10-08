@@ -34,17 +34,24 @@ use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Immutable-specific harness methods used by the immutable-only sync tests.
 pub(crate) trait ImmutableSyncTestHarness: SyncTestHarness {
+    /// Key type of the database.
     type Key: Send + Sync + 'static;
+    /// Value type stored under a key.
     type Value: Clone + PartialEq + std::fmt::Debug + Send + Sync + 'static;
 
+    /// Applies `ops` like [`SyncTestHarness::apply_ops`], with the commit declaring `floor`
+    /// as the inactivity floor.
     fn apply_ops_with_floor(
         db: Self::Db,
         ops: Vec<OpOf<Self>>,
         metadata: Option<Self::Metadata>,
         floor: Location<Self::Family>,
     ) -> impl Future<Output = Self::Db> + Send;
+    /// Commits the applied batches of `db` so they survive a crash.
     fn commit(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
+    /// Returns the key and value an operation sets, or `None` for a commit.
     fn op_kv(op: &OpOf<Self>) -> Option<(&Self::Key, &Self::Value)>;
+    /// Returns the value stored under `key`, if any.
     fn lookup(db: &Self::Db, key: &Self::Key) -> impl Future<Output = Option<Self::Value>> + Send;
 }
 

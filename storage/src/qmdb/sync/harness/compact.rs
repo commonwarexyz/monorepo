@@ -29,7 +29,9 @@ pub(crate) type CompactConfigOf<H> =
 /// Harness that abstracts per-database and per-family details so the shared compact tests below
 /// can operate on any compact database that supports sync.
 pub(crate) trait CompactSyncTestHarness: Sized + 'static {
+    /// Merkle family of the database.
     type Family: merkle::Family;
+    /// Compact database under test. It is also the source when a compact peer serves the sync.
     type Db: qmdb::sync::Database<
             Family = Self::Family,
             Context = deterministic::Context,
@@ -49,9 +51,13 @@ pub(crate) trait CompactSyncTestHarness: Sized + 'static {
             Op = CompactOpOf<Self>,
             Error = qmdb::Error<Self::Family>,
         >;
+    /// Value type used for operations and for commit metadata.
     type Value: Clone + PartialEq + Debug + Send + Sync + 'static;
 
+    /// Returns a compact config whose partitions are unique to `suffix`.
     fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> CompactConfigOf<Self>;
+    /// Returns `config` with the witness journal split into sections of `items_per_section`
+    /// entries, so pruning can drop individual witnesses.
     fn with_witness_items_per_section(
         config: CompactConfigOf<Self>,
         items_per_section: NonZeroU64,
@@ -59,11 +65,14 @@ pub(crate) trait CompactSyncTestHarness: Sized + 'static {
     /// Returns a value derived from `seed`. Distinct seeds yield distinct values.
     fn value(seed: u8) -> Self::Value;
 
+    /// Opens the compact database that `config` names, restoring at most `max_size` operations
+    /// when a bound is given.
     fn init(
         ctx: deterministic::Context,
         config: CompactConfigOf<Self>,
         max_size: Option<Location<Self::Family>>,
     ) -> impl Future<Output = Self::Db> + Send;
+    /// Opens a fresh full database under partitions unique to `suffix`.
     fn init_full(
         ctx: deterministic::Context,
         suffix: &str,
@@ -76,7 +85,9 @@ pub(crate) trait CompactSyncTestHarness: Sized + 'static {
         pinned_nodes: Vec<sha256::Digest>,
         op: CompactOpOf<Self>,
     ) -> impl Future<Output = Result<Self::Db, qmdb::Error<Self::Family>>> + Send;
+    /// Removes all persisted state of `db`.
     fn destroy(db: Self::Db) -> impl Future<Output = ()> + Send;
+    /// Removes all persisted state of `full`.
     fn destroy_full(full: Self::Full) -> impl Future<Output = ()> + Send;
 
     /// Applies one batch of `values` whose commit carries `metadata` and `floor`, without
@@ -94,19 +105,30 @@ pub(crate) trait CompactSyncTestHarness: Sized + 'static {
         metadata: Option<Self::Value>,
         floor: Location<Self::Family>,
     ) -> impl Future<Output = Self::Full> + Send;
+    /// Makes every applied batch of `db` durable.
     fn sync(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
+    /// Commits the applied batches of `full`.
     fn commit_full(full: Self::Full) -> impl Future<Output = Self::Full> + Send;
+    /// Drops the witnesses of commits with fewer than `loc` operations. Fails while a
+    /// compact sync import has not been applied.
     fn prune(
         db: Self::Db,
         loc: Location<Self::Family>,
     ) -> impl Future<Output = Result<Self::Db, qmdb::Error<Self::Family>>> + Send;
 
+    /// Returns the current root of `db`.
     fn root(db: &Self::Db) -> sha256::Digest;
+    /// Returns the compact sync target for the current state of `db`.
     fn target(db: &Self::Db) -> sync::CompactTarget<Self::Family, sha256::Digest>;
+    /// Returns the number of operations in `db`, commits included.
     fn size(db: &Self::Db) -> Location<Self::Family>;
+    /// Returns the inactivity floor declared by the last commit in `db`.
     fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family>;
+    /// Returns the metadata carried by the last commit in `db`.
     fn metadata(db: &Self::Db) -> Option<Self::Value>;
+    /// Returns the current root of `full`.
     fn full_root(full: &Self::Full) -> sha256::Digest;
+    /// Returns the range of retained operation locations in `full`.
     fn full_bounds(full: &Self::Full) -> std::ops::Range<Location<Self::Family>>;
 
     /// Replaces the inactivity floor of the commit operation `op`.
