@@ -692,7 +692,14 @@ impl Backend {
     }
 }
 
-impl super::Backend for Backend {}
+impl super::Backend for Backend {
+    /// One lane-wise square-root chain covers both encodings, costing less than two scalar
+    /// chains.
+    fn decompress_pair(self, encodings: [&[u8; 32]; 2]) -> Option<[GAffine; 2]> {
+        let points = GAffine::decompress_batch(self, &core::array::from_fn(|i| *encodings[i % 2]));
+        Some([points[0]?, points[1]?])
+    }
+}
 
 impl super::msm::Backend for Backend {
     const STRIPES: usize = LANES;

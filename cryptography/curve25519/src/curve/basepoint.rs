@@ -1,10 +1,14 @@
-//! Constant-time multiplication of the Ed25519 basepoint by a secret scalar.
+//! Precomputed multiples of the Ed25519 basepoint.
 //!
-//! This is the fixed-base method of [Ed25519, section 4]. The scalar is recoded into 64 signed
-//! radix-16 digits `e[i]` in `[-8, 8]`, and `sum e[i] * 16^i * B` is accumulated from a
-//! precomputed table holding `k * 256^j * B` for `1 <= k <= 8` and `0 <= j < 32`. The odd digits
-//! are added first, the sum is multiplied by 16 with four doublings, and the even digits are
-//! added last.
+//! Multiplication by a secret scalar is constant time and uses the fixed-base method of
+//! [Ed25519, section 4]. The scalar is recoded into 64 signed radix-16 digits `e[i]` in
+//! `[-8, 8]`, and `sum e[i] * 16^i * B` is accumulated from a precomputed table holding
+//! `k * 256^j * B` for `1 <= k <= 8` and `0 <= j < 32`. The odd digits are added first, the sum
+//! is multiplied by 16 with four doublings, and the even digits are added last.
+//!
+//! Verification splits a public scalar at bit 128 and multiplies `B` by the low half and
+//! `2^128 * B` by the high half, looking up the non-adjacent-form digits of each half in
+//! [`ODD_MULTIPLES`].
 //!
 //! [Ed25519, section 4]: https://ed25519.cr.yp.to/ed25519-20110926.pdf
 
@@ -14,6 +18,16 @@ use zeroize::Zeroizing;
 
 /// `TABLE[j][k]` is `(k + 1) * 256^j * B` for the Ed25519 basepoint `B`.
 static TABLE: [[Niels; 8]; 32] = table();
+
+/// Width of the non-adjacent forms whose digits select entries of [`ODD_MULTIPLES`].
+pub const ODD_MULTIPLES_NAF_WIDTH: usize = 8;
+
+/// The number of odd multiples a width-[`ODD_MULTIPLES_NAF_WIDTH`] digit can select.
+const ODD_MULTIPLES_LEN: usize = 1 << (ODD_MULTIPLES_NAF_WIDTH - 2);
+
+/// `ODD_MULTIPLES[j][k]` is `(2k + 1) * 2^(128j) * B` for the Ed25519 basepoint `B`, so a
+/// nonzero digit `d` selects `|d| * 2^(128j) * B` at index `|d| / 2`.
+pub static ODD_MULTIPLES: [[Niels; ODD_MULTIPLES_LEN]; 2] = odd_multiples();
 
 impl ConditionallySelectable for Niels {
     #[inline]
@@ -98,9 +112,6 @@ fn select(row: &[Niels; 8], digit: i8) -> Niels {
 }
 
 /// Builds [`TABLE`] at compile time from [`GAffine::BASEPOINT`].
-///
-/// The multiples are computed in extended coordinates, and every `Z` is then inverted with one
-/// shared inversion.
 const fn table() -> [[Niels; 8]; 32] {
     // `points[8 * j + k]` is `(k + 1) * p` for `p = 256^j * B`, built by repeated addition.
     let mut p = GAffine::BASEPOINT.to_extended();
@@ -125,11 +136,59 @@ const fn table() -> [[Niels; 8]; 32] {
         j += 1;
     }
 
-    // `prefix[i]` is the product of the first `i` Z coordinates.
-    let mut prefix = [F::ONE; 256];
-    let mut product = F::ONE;
+    let niels = to_niels(&points);
+    let mut table = [[Niels::IDENTITY; 8]; 32];
     let mut i = 0;
     while i < 256 {
+        table[i / 8][i % 8] = niels[i];
+        i += 1;
+    }
+    table
+}
+
+/// Builds [`ODD_MULTIPLES`] at compile time from [`GAffine::BASEPOINT`].
+const fn odd_multiples() -> [[Niels; ODD_MULTIPLES_LEN]; 2] {
+    // `points[ODD_MULTIPLES_LEN * j + k]` is `(2k + 1) * p` for `p = 2^(128j) * B`, built by
+    // repeatedly adding `2 * p`.
+    let mut p = GAffine::BASEPOINT.to_extended();
+    let mut points = [G::IDENTITY; 2 * ODD_MULTIPLES_LEN];
+    let mut j = 0;
+    while j < 2 {
+        let double = p.add(p);
+        let mut multiple = p;
+        let mut k = 0;
+        while k < ODD_MULTIPLES_LEN {
+            points[ODD_MULTIPLES_LEN * j + k] = multiple;
+            multiple = multiple.add(double);
+            k += 1;
+        }
+
+        let mut doubling = 0;
+        while doubling < 128 {
+            p = p.add(p);
+            doubling += 1;
+        }
+        j += 1;
+    }
+
+    let niels = to_niels(&points);
+    let mut table = [[Niels::IDENTITY; ODD_MULTIPLES_LEN]; 2];
+    let mut i = 0;
+    while i < 2 * ODD_MULTIPLES_LEN {
+        table[i / ODD_MULTIPLES_LEN][i % ODD_MULTIPLES_LEN] = niels[i];
+        i += 1;
+    }
+    table
+}
+
+/// Normalizes extended points to [`Niels`] form at compile time, inverting every `Z` with one
+/// shared inversion.
+const fn to_niels<const N: usize>(points: &[G; N]) -> [Niels; N] {
+    // `prefix[i]` is the product of the first `i` Z coordinates.
+    let mut prefix = [F::ONE; N];
+    let mut product = F::ONE;
+    let mut i = 0;
+    while i < N {
         prefix[i] = product;
         product = product.mul(points[i].z);
         i += 1;
@@ -137,20 +196,20 @@ const fn table() -> [[Niels; 8]; 32] {
 
     // On entry to each iteration, `inverse` inverts the product of the first `i` Z coordinates.
     let mut inverse = product.invert();
-    let mut table = [[Niels::IDENTITY; 8]; 32];
+    let mut niels = [Niels::IDENTITY; N];
     while i > 0 {
         i -= 1;
         let z_inverse = inverse.mul(prefix[i]);
         inverse = inverse.mul(points[i].z);
         let x = points[i].x.mul(z_inverse);
         let y = points[i].y.mul(z_inverse);
-        table[i / 8][i % 8] = Niels {
+        niels[i] = Niels {
             sum: y.add(x),
             diff: y.sub(x),
             t2d: x.mul(y).mul(F::EDWARDS_D2),
         };
     }
-    table
+    niels
 }
 
 #[cfg(test)]
@@ -170,15 +229,32 @@ mod tests {
                 // `(k + 1) * 256^j` as a little-endian scalar.
                 let mut scalar = [0u8; 32];
                 scalar[j] = k as u8 + 1;
-                let expected = base.scalar_mul(bits(&scalar));
-                let z_inverse = expected.z.invert();
-                let x = expected.x.mul(z_inverse);
-                let y = expected.y.mul(z_inverse);
-                assert!(entry.sum.eq(&y.add(x)));
-                assert!(entry.diff.eq(&y.sub(x)));
-                assert!(entry.t2d.eq(&x.mul(y).mul(F::EDWARDS_D2)));
+                assert_niels_eq(entry, base.scalar_mul(bits(&scalar)));
             }
         }
+    }
+
+    #[test]
+    fn odd_multiples_match_scalar_multiples() {
+        let base = GAffine::BASEPOINT.to_extended();
+        for (j, row) in ODD_MULTIPLES.iter().enumerate() {
+            for (k, entry) in row.iter().enumerate() {
+                // `(2k + 1) * 2^(128j)` as a little-endian scalar.
+                let mut scalar = [0u8; 32];
+                scalar[16 * j] = 2 * k as u8 + 1;
+                assert_niels_eq(entry, base.scalar_mul(bits(&scalar)));
+            }
+        }
+    }
+
+    /// Asserts that `entry` is the [`Niels`] form of `expected`.
+    fn assert_niels_eq(entry: &Niels, expected: G) {
+        let z_inverse = expected.z.invert();
+        let x = expected.x.mul(z_inverse);
+        let y = expected.y.mul(z_inverse);
+        assert!(entry.sum.eq(&y.add(x)));
+        assert!(entry.diff.eq(&y.sub(x)));
+        assert!(entry.t2d.eq(&x.mul(y).mul(F::EDWARDS_D2)));
     }
 
     #[test]

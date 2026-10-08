@@ -607,6 +607,166 @@ fn zip215_decompression_and_group_laws() {
     super::with_backend(Check);
 }
 
+/// Checks the completed, projective, and Niels forms against the extended formulas, for sums of
+/// equal and opposite points and of points with low-order components.
+#[cfg(test)]
+#[test]
+fn completed_point_operations_match_extended() {
+    use super::Niels;
+
+    fn check(p: G, q: G) {
+        let niels = |point: G| {
+            let affine = point.to_affine();
+            Niels {
+                sum: affine.y.add(affine.x),
+                diff: affine.y.sub(affine.x),
+                t2d: affine.t2d,
+            }
+        };
+        let assert_matches = |actual: G, expected: G, property: &str| {
+            assert_on_curve(actual);
+            assert_g_eq(actual, expected, property);
+        };
+
+        let doubled = p.to_projective().double();
+        assert_matches(doubled.to_extended(), p.double(), "double to extended");
+        assert_matches(
+            doubled.to_projective().to_extended(),
+            p.double(),
+            "double to projective",
+        );
+        assert_matches(
+            p.to_projective().mul_by_cofactor().to_extended(),
+            p.mul_by_cofactor(),
+            "cofactor",
+        );
+        assert_eq!(
+            p.to_projective().mul_by_cofactor().is_identity(),
+            p.mul_by_cofactor().is_identity()
+        );
+
+        let sum = p.add(q);
+        let difference = p.add(q.negate());
+        for (actual, expected, property) in [
+            (p.add_projective_niels(q.to_projective_niels()), sum, "sum"),
+            (
+                p.add_projective_niels(q.to_projective_niels().negate()),
+                difference,
+                "difference",
+            ),
+            (p.add_niels_completed(niels(q)), sum, "Niels sum"),
+            (
+                p.add_niels_completed(niels(q).negate()),
+                difference,
+                "Niels difference",
+            ),
+        ] {
+            assert_matches(actual.to_extended(), expected, property);
+            assert_matches(actual.to_projective().to_extended(), expected, property);
+        }
+    }
+
+    // The identity, every ZIP215 point (including each low-order point), and the basepoint with
+    // a low-order component, so that `Z` is not one.
+    let base = GAffine::BASEPOINT.to_extended();
+    let mut points = vec![G::IDENTITY, base.add(base)];
+    for encoding in &ZIP215_POINTS {
+        let point = GAffine::decompress(encoding).unwrap().to_extended();
+        points.extend([point, base.add(point)]);
+    }
+    for &p in &points {
+        for &q in &points {
+            check(p, q);
+        }
+        check(p, p.negate());
+    }
+
+    commonware_invariants::minifuzz::Builder::default()
+        .with_seed(0)
+        .with_search_limit(64)
+        .test(|u| {
+            let mut point = || -> arbitrary::Result<G> {
+                let encoding: [u8; 32] = u.arbitrary()?;
+                let point = GAffine::decompress(&encoding).unwrap_or(GAffine::BASEPOINT);
+                let torsion = GAffine::decompress(u.choose(&ZIP215_POINTS)?).unwrap();
+                Ok(point.to_extended().add(torsion.to_extended()))
+            };
+            let p = point()?;
+            let q = point()?;
+            check(p, q);
+            check(p, p);
+            check(p, p.negate());
+            Ok(())
+        });
+}
+
+/// [`Backend::decompress_pair`] matches decompressing each encoding on its own, whichever of the
+/// two encodings fails to decode.
+#[cfg(test)]
+#[test]
+fn decompress_pair_matches_scalar() {
+    /// Checks every ordered pair of encodings with the given backend.
+    struct Check<'a>(&'a [[u8; 32]]);
+
+    impl WithBackend for Check<'_> {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) {
+            let key = |point: GAffine| (point.compress(), point.t2d.to_bytes());
+            for first in self.0 {
+                for second in self.0 {
+                    let expected = GAffine::decompress(first)
+                        .zip(GAffine::decompress(second))
+                        .map(|(first, second)| [key(first), key(second)]);
+                    let actual = backend
+                        .decompress_pair([first, second])
+                        .map(|points| points.map(key));
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+
+    fn check(encodings: &[[u8; 32]]) {
+        Check(encodings).call(super::portable::Backend::new());
+        super::with_backend(Check(encodings));
+    }
+
+    // A `y` with no matching `x`, under both sign bits.
+    let undecodable = (2u8..)
+        .map(|y| {
+            let mut encoding = [0u8; 32];
+            encoding[0] = y;
+            encoding
+        })
+        .find(|encoding| GAffine::decompress(encoding).is_none())
+        .unwrap();
+    let mut negative = undecodable;
+    negative[31] |= 0x80;
+
+    let mut encodings = ZIP215_POINTS.to_vec();
+    encodings.extend([undecodable, negative]);
+    check(&encodings);
+
+    // Arbitrary encodings, about half of which decode, next to random multiples of the basepoint
+    // and an undecodable encoding.
+    let base = GAffine::BASEPOINT.to_extended();
+    commonware_invariants::minifuzz::Builder::default()
+        .with_seed(0)
+        .with_search_limit(64)
+        .test(|u| {
+            let arbitrary: [[u8; 32]; 2] = u.arbitrary()?;
+            let valid = arbitrary.map(|scalar| {
+                let bits = scalar
+                    .into_iter()
+                    .flat_map(|byte| (0..8).map(move |i| byte >> i & 1 == 1));
+                base.scalar_mul(bits).compress()
+            });
+            check(&[arbitrary[0], arbitrary[1], valid[0], valid[1], undecodable]);
+            Ok(())
+        });
+}
+
 /// Checks the runtime dispatch path as one multi-operation computation.
 #[test]
 fn with_backend_matches_portable() {
