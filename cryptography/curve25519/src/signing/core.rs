@@ -750,7 +750,7 @@ mod tests {
     fn structural_rejection_does_not_record_complete_work() {
         // A valid signature, copies with a non-canonical `s` (top bit set) and an undecodable
         // `R`, and a key with an undecodable encoding.
-        let signer = SigningKey::from_seed([7; 32]);
+        let signer = SigningKey::from_seed(&[7; 32]);
         let key = signer.verifying_key();
         let valid = signer.sign(b"resource", b"control");
         let mut bad_s = valid.clone();

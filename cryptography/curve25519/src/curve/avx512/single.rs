@@ -11,7 +11,6 @@ use super::{Backend, CachedPoint, CompletedPoint, PackedPoint, Rows};
 use crate::curve::{BIAS_16P, F, G, GAffine, GProjective, LANES, LIMBS, MASK_51, Niels, p_times};
 use core::{
     arch::{asm, x86_64::*},
-    hint::black_box,
     mem::offset_of,
     ptr::from_ref,
 };
@@ -117,6 +116,19 @@ fn mask_mov(src: __m256i, k: __mmask8, a: __m256i) -> __m256i {
         );
     }
     result
+}
+
+/// Returns `v` hidden from the optimizer. Unlike [`core::hint::black_box`], which stores its
+/// argument to the stack, this keeps `v` in a register, so a secret digit it carries never
+/// reaches memory.
+#[inline]
+#[target_feature(enable = "avx512f,avx512vl")]
+fn opaque(mut v: __m256i) -> __m256i {
+    // SAFETY: the template is a comment, so nothing executes; it only pins `v` to a register.
+    unsafe {
+        asm!("/* {v} */", v = inout(ymm_reg) v, options(pure, nomem, nostack, preserves_flags));
+    }
+    v
 }
 
 /// Decompresses two encodings with one lane-wise square-root chain over the backend's eight
@@ -452,8 +464,9 @@ impl Backend {
     /// The masks selecting entry `k` of a table row when `|digit| = k + 1`, and the mask negating
     /// the selection when `digit` is negative, each covering all four lanes or none.
     ///
-    /// The magnitude and sign reach vector comparisons through an optimization barrier, so the
-    /// compiler cannot turn the masked selection into branches or indexing on `digit`.
+    /// The magnitude and sign reach vector comparisons through a register-only optimization
+    /// barrier, so the compiler cannot turn the masked selection into branches or indexing on
+    /// `digit`, and neither value touches the stack.
     #[inline(always)]
     fn digit_masks(self, digit: i8) -> ([__mmask8; 8], __mmask8) {
         // The sign bit, and `|digit|` computed with the two's complement identity.
@@ -462,8 +475,8 @@ impl Backend {
 
         // SAFETY: see the impl.
         unsafe {
-            let magnitude = black_box(_mm256_set1_epi64x(i64::from(magnitude)));
-            let negative = black_box(_mm256_set1_epi64x(i64::from(negative)));
+            let magnitude = opaque(_mm256_set1_epi64x(i64::from(magnitude)));
+            let negative = opaque(_mm256_set1_epi64x(i64::from(negative)));
             let mut masks = [0; 8];
             for (k, mask) in (1..).zip(&mut masks) {
                 *mask = _mm256_cmpeq_epi64_mask(magnitude, _mm256_set1_epi64x(k));
