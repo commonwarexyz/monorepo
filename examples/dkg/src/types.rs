@@ -554,7 +554,6 @@ pub const fn sync_config() -> SyncEngineConfig {
         apply_batch_size: NZU64!(64),
         max_outstanding_requests: NZUsize!(8),
         update_channel_size: NZUsize!(256),
-        max_retained_roots: 8,
     }
 }
 
