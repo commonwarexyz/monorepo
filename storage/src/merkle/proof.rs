@@ -777,11 +777,7 @@ impl<F: Family> RangePlan<F> {
         if range.is_empty() {
             return Err(super::Error::Empty);
         }
-        let end_minus_one = range
-            .end
-            .checked_sub(1)
-            .expect("can't underflow because range is non-empty");
-        if end_minus_one >= leaves {
+        if range.end > leaves {
             return Err(super::Error::RangeOutOfBounds(range.end));
         }
         let size = Position::try_from(leaves)?;
