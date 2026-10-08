@@ -1,7 +1,7 @@
 use crate::Secret;
 #[cfg(not(feature = "std"))]
 use alloc::{sync::Arc, vec, vec::Vec};
-use bytes::{BufMut, Bytes};
+use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, Write, util::at_least};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -387,7 +387,8 @@ impl<V: Variant> arbitrary::Arbitrary<'_> for PublicKey<V> {
 /// variant followed by a 40-byte nonce and the canonical compressed encoding of a vector within
 /// the coefficient bound (unused trailing bits must be zero), so a decoded signature has exactly
 /// one encoding. Whether the vector is short enough for the signed message is checked by
-/// verification. Decoding from a [Bytes]-backed buffer shares that buffer rather than copying it.
+/// verification. Decoding copies the signature out of its buffer: signatures outlive the
+/// messages that carry them, so a retained signature must not keep a pooled network buffer alive.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Signature<V: Variant> {
     raw: Bytes,
@@ -418,7 +419,9 @@ impl<V: Variant> Read for Signature<V> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         at_least(buf, Self::SIZE)?;
-        let raw = buf.copy_to_bytes(Self::SIZE);
+        let mut raw = BytesMut::zeroed(Self::SIZE);
+        buf.copy_to_slice(&mut raw);
+        let raw = raw.freeze();
         if !Self::is_well_formed(&raw) {
             return Err(CodecError::Invalid(NAME, "Invalid Signature"));
         }
@@ -631,8 +634,8 @@ mod tests {
         let decoded = Signature::<V>::decode(encoded.clone()).unwrap();
         assert_eq!(original, decoded);
 
-        // Decoding from owned bytes shares the input allocation.
-        assert_eq!(decoded.as_ref().as_ptr(), encoded.as_ref().as_ptr());
+        // Decoding copies out of the input allocation so the input can be released.
+        assert_ne!(decoded.as_ref().as_ptr(), encoded.as_ref().as_ptr());
     }
 
     fn decode_signature_rejects_wrong_length<V: Variant>() {
