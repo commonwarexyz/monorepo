@@ -28,7 +28,7 @@ from pathlib import Path
 
 
 PUBLISH_WORKFLOW = Path(".github/workflows/publish.yml")
-PUBLISH_PATTERN = re.compile(r"cargo publish --manifest-path (?P<path>\S+)")
+PUBLISH_PATTERN = re.compile(r"publish_crate\.sh (?P<path>\S+)")
 
 
 def find_repo_root(start: Path) -> Path:
