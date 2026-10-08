@@ -320,10 +320,10 @@ where
 /// state the chain forked from, an ancestor's tip, or this batch's own tip (once it is applied).
 ///
 /// Once any other batch is applied (a sibling fork, or one of this batch's own descendants),
-/// this batch is stale, as is every descendant the applied batch is not an ancestor of. Reading
-/// through a stale batch refuses with [`Error::StaleRead`]. Merkleization and application are
-/// rejected with [`Error::StaleBatch`] without mutating committed state (see
-/// [`crate::qmdb::chain`]).
+/// this batch is stale, as is every descendant of it except the applied batch and the applied
+/// batch's descendants. Reading through a stale batch refuses with [`Error::StaleRead`].
+/// Merkleization and application are rejected with [`Error::StaleBatch`] without mutating
+/// committed state (see [`crate::qmdb::chain`]).
 ///
 /// Building a child off a batch that `apply_batch` has consumed (the just-applied
 /// parent) is valid. The committed bitmap then equals the parent's post-apply state,
@@ -1044,6 +1044,11 @@ impl<const N: usize> BitmapBatch<N> {
     /// Return a chain equivalent to `self` with any `Layer` whose overlay is now fully committed
     /// replaced by a direct reference to the committed bitmap. Since `apply_batch` commits
     /// contiguous prefixes, committed `Layer`s are always at the bottom of the chain.
+    ///
+    /// A trimmed layer is never needed again. The batch-chain gate can accept chain states older
+    /// than the one this trim observed, but a database never returns to such a state: its
+    /// committed bitmap never shrinks in length, and a reinitialized database owns a new bitmap
+    /// that [`Self::ensure_based_on`] rejects.
     fn trim_committed(&self) -> Self {
         let shared = self.shared();
         let committed = bitmap::Readable::<N>::len(shared.as_ref());

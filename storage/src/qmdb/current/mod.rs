@@ -12,16 +12,16 @@
 //!
 //! A batch remains usable only while the DB sits on one of its chain's own states: the state the
 //! chain forked from, an ancestor's tip, or the batch's own tip. Once any other batch is applied
-//! (including one of its own descendants), that batch is stale, as is every descendant the applied
-//! batch is not an ancestor of.
+//! (a sibling fork, or one of the batch's own descendants), that batch is stale, as is every
+//! descendant of it except the applied batch and the applied batch's descendants.
 //! Reads refuse with `StaleRead`, and merkleization and application are rejected with
 //! `StaleBatch` (see [`crate::qmdb::chain`]).
 //!
 //! Concretely:
-//! - Build `A`, apply `A`, then build `B` from `A` -- `B` reads and merkleizes normally.
-//! - Build siblings `B1` and `B2`, apply `B1` -- `B2.get()` returns `StaleRead`, while
+//! - Build `A`, apply `A`, then build `B` from `A`: `B` reads and merkleizes normally.
+//! - Build siblings `B1` and `B2`, apply `B1`: `B2.get()` returns `StaleRead`, while
 //!   `apply_batch(B2)` and merkleizing a child of `B2` return `StaleBatch`.
-//! - Hold `view = db.to_batch()`, mutate the DB through another branch -- `view`'s reads
+//! - Hold `view = db.to_batch()`, mutate the DB through another branch: `view`'s reads
 //!   refuse from then on.
 //!
 //! # Motivation

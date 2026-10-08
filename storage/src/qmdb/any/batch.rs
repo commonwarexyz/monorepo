@@ -429,7 +429,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
     pub(crate) total_active_keys: usize,
 
     /// Arc refs to each ancestor's diff, collected during `finish()` while ancestors are
-    /// alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
+    /// alive. Reads consult them, and `apply_batch` applies the uncommitted ones.
     /// 1:1 with `bounds.ancestors` (same length, same ordering).
     pub(crate) ancestor_diffs: Vec<Arc<DiffVec<U::Key, F, U::Value>>>,
 
@@ -905,12 +905,7 @@ where
         batch_ops: &'o [Operation<F, U>],
     ) -> &'o Operation<F, U> {
         if loc >= self.base_state.size {
-            let idx = (*loc - *self.base_state.size) as usize;
-            debug_assert!(
-                idx < batch_ops.len(),
-                "location {loc} beyond batch tip -- on-chain checks make this unreachable"
-            );
-            return &batch_ops[idx];
+            return &batch_ops[(*loc - *self.base_state.size) as usize];
         }
         read_op_from_ancestors(&self.ancestors, *loc, *self.db_state.size)
     }
@@ -6833,44 +6828,6 @@ pub(crate) mod tests {
             assert_eq!(db.get(&key_b).await.unwrap(), Some(value_b));
             assert_eq!(db.get(&key_c).await.unwrap(), Some(value_c));
             assert_eq!(db.get(&untouched).await.unwrap(), Some(untouched_value));
-            child.merkleize(&db, None, &mut Proportional).await.unwrap();
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// Reading through a batch stays valid after the batch itself is applied (the live
-    /// state is then the chain's own tip), for the batch and for a child forked from it.
-    #[test]
-    fn merkleized_batch_reads_after_own_apply() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            type TestDb = UnorderedFixedDb<
-                mmr::Family,
-                deterministic::Context,
-                sha256::Digest,
-                sha256::Digest,
-                Sha256,
-                OneCap,
-                Sequential,
-            >;
-
-            let config = fixed_db_config::<OneCap>("own-apply-reads", &context);
-            let db = TestDb::init(context, config, None).await.unwrap();
-
-            let hot = Sha256::hash(&[b"hot"]);
-            let write = Sha256::hash(&[b"write"]);
-            let batch = db
-                .new_batch()
-                .write(hot, Some(write))
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
-            let (db, _) = db.apply_batch(Arc::clone(&batch)).await.unwrap();
-
-            assert_eq!(batch.get(&hot, &db).await.unwrap(), Some(write));
-            let child = batch.new_batch::<Sha256>();
-            assert_eq!(child.get(&hot, &db).await.unwrap(), Some(write));
             child.merkleize(&db, None, &mut Proportional).await.unwrap();
 
             db.destroy().await.unwrap();

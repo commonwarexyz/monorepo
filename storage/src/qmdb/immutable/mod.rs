@@ -3569,7 +3569,7 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Verify that applying a batch with a floor lower than the current floor
+    /// Verify that merkleizing a batch with a floor lower than the current floor
     /// returns an error.
     #[boxed]
     pub(crate) async fn run_floor_monotonicity_violation<F: Family, V, C>(
@@ -3632,9 +3632,6 @@ pub(super) mod tests {
             .await;
         assert!(matches!(result, Err(Error::FloorBeyondSize(floor, commit))
                 if floor == Location::new(100) && commit == Location::new(2)));
-        drop(db);
-
-        let db = open_db(context.child("test")).await;
 
         // Boundary: floor == total_size must also be rejected. The commit op is
         // at total_size - 1, so a floor equal to total_size would allow a later
@@ -3650,8 +3647,6 @@ pub(super) mod tests {
                 if floor == Location::new(3) && commit == Location::new(2)));
 
         // Floor == total_size - 1 (the commit location) is the maximum valid.
-        drop(db);
-        let db = open_db(context.child("test")).await;
         let merkleized = db
             .new_batch()
             .set(k2, v2)
@@ -3683,7 +3678,7 @@ pub(super) mod tests {
         // Live floor is 0 (from the seeded initial commit).
         // a: 1 set + commit at loc 2, floor=2 (valid: >= 0, == commit_loc).
         // b: 1 set + commit at loc 4, floor=1 (regresses below a's floor=2, but still >= 0).
-        // Merkleizing b must fail with FloorRegressed(1, 2) -- against a's floor, not the live
+        // Merkleizing b must fail with FloorRegressed(1, 2): against a's floor, not the live
         // floor, proving the parent's floor is what catches it.
         let a = db
             .new_batch()

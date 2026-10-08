@@ -32,11 +32,12 @@ use std::{
     sync::{Arc, Weak},
 };
 
-/// A database reference proven to be on a batch chain's own states, required for every
-/// committed read through the chain.
+/// A database reference proven to be on a batch chain's own states.
 ///
-/// Committed-read helpers take this instead of a bare database reference, so calling one without
-/// the check fails to compile. Public database methods reached through [`Deref`] are not covered.
+/// Committed-read helpers in the any and current families take this instead of a bare database
+/// reference, so calling one without the check fails to compile; the immutable and keyless
+/// families run the same check at each read entry point instead. Public database methods reached
+/// through [`Deref`] are not covered.
 /// It is only created by [`Bounds::on_chain`], [`Commitment::on_chain`], and [`merkleizable`],
 /// which check whatever commitment the caller supplies, so callers must pair the database with its
 /// own commitment (every current caller does).
@@ -134,7 +135,7 @@ impl<F: Family, D: Digest> Bounds<F, D> {
         }
     }
 
-    /// Check that the live state is one this chain accounts for -- the batch's own tip
+    /// Check that the live state is one this chain accounts for: the batch's own tip
     /// (reads through an already applied batch stay valid), the chain's database
     /// boundary, or an ancestor's tip. Anything else means a batch the chain does not lead through
     /// was applied (a foreign fork, or a descendant of this batch) or the database was

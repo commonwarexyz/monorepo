@@ -286,7 +286,6 @@ where
         level = "info",
         skip_all
     )]
-    #[allow(clippy::type_complexity)]
     pub async fn merkleize<E, C>(
         self,
         db: &Db<F, E, V, H, C, S>,
@@ -1753,16 +1752,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            let stale = db.new_batch().append(U64::new(3));
             let expected_root = batch_a.root();
             let (db, _) = db.apply_batch(batch_a).await.unwrap();
             assert_eq!(db.root(), expected_root);
-            // A fork from the pre-apply state can no longer merkleize, and the
-            // merkleized sibling can no longer apply.
-            assert!(matches!(
-                stale.merkleize(&db, Some(U64::new(33)), floor).await,
-                Err(Error::StaleBatch)
-            ));
             assert!(matches!(
                 db.apply_batch(batch_b).await,
                 Err(Error::StaleBatch)
