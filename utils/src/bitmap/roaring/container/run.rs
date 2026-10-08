@@ -825,12 +825,10 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------------
     // Codec validation: the Read impl must reject `(start, end)` sequences that
     // violate the sorted-and-disjoint invariant. The runtime API maintains this
     // invariant by construction, so these only fire for malformed peer-supplied
-    // bytes — exactly the case fuzzing and these tests exist for.
-    // -----------------------------------------------------------------------------
+    // bytes, the case fuzzing and these tests exist for.
 
     #[test]
     fn test_codec_rejects_overlapping_runs() {
