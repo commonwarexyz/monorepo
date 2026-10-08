@@ -5,7 +5,7 @@
 //! in a long-lived database.
 
 use crate::{
-    common::{AnyOFixDb, AnyOVarDigestDb, Digest},
+    common::{AnyOFixDb, AnyOFixP64kDb, AnyOVarDigestDb, Digest},
     merkleize::{LARGE_PAGE_CACHE_SIZE, PAGE_SIZE, any_fix_cfg_with_cache, any_var_cfg_with_cache},
 };
 use commonware_cryptography::{Hasher as _, Sha256, sha256};
@@ -18,11 +18,14 @@ use commonware_runtime::{
 use commonware_storage::{
     merkle::{Family, mmr},
     qmdb::{
-        any::traits::{DbAny, UnmerkleizedBatch as _},
+        any::{
+            FixedConfig,
+            traits::{DbAny, UnmerkleizedBatch as _},
+        },
         floor::Proportional,
     },
 };
-use commonware_utils::TestRng;
+use commonware_utils::{NZUsize, TestRng};
 use criterion::{Criterion, criterion_group};
 use futures::{StreamExt as _, TryStreamExt as _, future::ready};
 use rand::{Rng as _, seq::SliceRandom as _};
@@ -39,8 +42,9 @@ const KEYS_PER_BATCH: usize = 100;
 const BUCKET_SIZES: [u64; 2] = [1, 16];
 
 /// The scans to time.
-const SCANS: [Scan; 4] = [
+const SCANS: [Scan; 5] = [
     Scan::Take(10),
+    Scan::Range(1),
     Scan::Range(10),
     Scan::Range(1_000),
     Scan::All,
@@ -65,19 +69,33 @@ impl Scan {
             Self::All => format!("scan=all len={NUM_KEYS}"),
         }
     }
+
+    /// The number of keys the scan yields.
+    const fn len(self) -> usize {
+        match self {
+            Self::Take(len) | Self::Range(len) => len,
+            Self::All => NUM_KEYS as usize,
+        }
+    }
 }
 
+/// The database to scan.
 #[derive(Clone, Copy)]
 enum Variant {
+    /// Fixed-size values, with the ordered snapshot index.
     Fixed,
+    /// Fixed-size values, with the partitioned snapshot index (P=2).
+    FixedP64k,
+    /// Variable-size values, with the ordered snapshot index.
     Variable,
 }
 
 impl Variant {
     const fn name(self) -> &'static str {
         match self {
-            Self::Fixed => "any::ordered::fixed",
-            Self::Variable => "any::ordered::variable",
+            Self::Fixed => "fixed",
+            Self::FixedP64k => "fixed::p64k",
+            Self::Variable => "variable",
         }
     }
 }
@@ -94,6 +112,29 @@ macro_rules! with_db {
                     .unwrap();
                 $body
             }
+            Variant::FixedP64k => {
+                // The partitioned index takes a snapshot-build concurrency.
+                let FixedConfig {
+                    merkle_config,
+                    journal_config,
+                    translator,
+                    init_cache,
+                    init_buffer,
+                    ..
+                } = any_fix_cfg_with_cache(&$ctx, $cache.clone());
+                let cfg = FixedConfig {
+                    merkle_config,
+                    journal_config,
+                    translator,
+                    init_cache,
+                    init_buffer,
+                    init_concurrency: NZUsize!(1),
+                };
+                let $db = AnyOFixP64kDb::<mmr::Family>::init($ctx.child("storage"), cfg, None)
+                    .await
+                    .unwrap();
+                $body
+            }
             Variant::Variable => {
                 let cfg = any_var_cfg_with_cache(&$ctx, $cache.clone());
                 let $db = AnyOVarDigestDb::<mmr::Family>::init($ctx.child("storage"), cfg, None)
@@ -106,6 +147,8 @@ macro_rules! with_db {
 }
 
 /// Runs `$scan` `$iters` times and returns the total time. A cold scan clears the page cache first.
+/// Each scan must yield the expected number of keys, so a scan that stops early cannot pass for a
+/// fast one.
 macro_rules! time_scans {
     ($db:ident, $cache:ident, $bucket:expr, $scan:expr, $cold:expr, $iters:expr) => {{
         let mut keys: Vec<Digest> = (0..NUM_KEYS).map(|i| key(i, $bucket)).collect();
@@ -128,7 +171,7 @@ macro_rules! time_scans {
 
         // Each sample reopens the database, so fill the cache before timing warm scans.
         if !$cold {
-            count(Scan::All, 0).await.unwrap();
+            assert_eq!(count(Scan::All, 0).await.unwrap(), Scan::All.len());
         }
         let mut rng = TestRng::new(1);
         let mut total = Duration::ZERO;
@@ -140,7 +183,7 @@ macro_rules! time_scans {
             let now = Instant::now();
             let count = count($scan, start).await.unwrap();
             total += now.elapsed();
-            black_box(count);
+            assert_eq!(black_box(count), $scan.len());
         }
         total
     }};
@@ -169,7 +212,7 @@ async fn seed<F: Family, C: DbAny<F, Key = Digest, Value = Digest>>(mut db: C, b
 
 fn bench_stream_range(c: &mut Criterion) {
     let cfg = Config::default();
-    for variant in [Variant::Fixed, Variant::Variable] {
+    for variant in [Variant::Fixed, Variant::FixedP64k, Variant::Variable] {
         for bucket in BUCKET_SIZES {
             // Seeded on the first matched case, then shared by the rest.
             let mut seeded = false;
@@ -177,7 +220,7 @@ fn bench_stream_range(c: &mut Criterion) {
                 for cold in [false, true] {
                     let runner = tokio::Runner::new(cfg.clone());
                     let name = format!(
-                        "{}/v={} k={NUM_KEYS} bucket={bucket} {} cache={}",
+                        "{}/db={} keys={NUM_KEYS} bucket={bucket} {} cache={}",
                         module_path!(),
                         variant.name(),
                         scan.name(),

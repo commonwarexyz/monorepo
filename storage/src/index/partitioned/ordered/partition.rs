@@ -9,7 +9,7 @@
 //! run of equal keys. Collisions are rare for well-distributed translated keys, so most runs have
 //! length one. The index's insertion path appends new values to the end of an existing run.
 
-use std::ops::Range;
+use std::ops::{Bound, Range};
 
 /// A single partition's values as sorted parallel arrays keyed by translated key.
 pub(super) struct Partition<K, V> {
@@ -167,15 +167,19 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         Some(&self.vals[self.run_starting_at(idx)])
     }
 
-    /// The value runs of the keys from `first` through `last` (inclusive, `None` leaves that end
-    /// open), in ascending key order.
-    pub(super) fn runs(&self, first: Option<K>, last: Option<K>) -> impl Iterator<Item = &[V]> {
-        let start = first.map_or(0, |key| self.lower_bound(&key));
-        let end = last
-            .map_or(self.keys.len(), |key| {
-                self.keys.partition_point(|k| *k <= key)
-            })
-            .max(start);
+    /// The value runs of the keys within `start` and `end`, in ascending key order.
+    pub(super) fn runs(&self, start: Bound<K>, end: Bound<K>) -> impl Iterator<Item = &[V]> {
+        let start = match start {
+            Bound::Included(key) => self.lower_bound(&key),
+            Bound::Excluded(key) => self.keys.partition_point(|k| *k <= key),
+            Bound::Unbounded => 0,
+        };
+        let end = match end {
+            Bound::Included(key) => self.keys.partition_point(|k| *k <= key),
+            Bound::Excluded(key) => self.lower_bound(&key),
+            Bound::Unbounded => self.keys.len(),
+        }
+        .max(start);
         let mut vals = &self.vals[start..end];
         self.keys[start..end]
             .chunk_by(|a, b| a == b)

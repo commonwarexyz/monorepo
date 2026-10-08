@@ -15,6 +15,7 @@
 
 use crate::translator::Translator;
 use commonware_runtime::Metrics;
+use core::ops::Bound::{self, Excluded, Included};
 
 mod storage;
 
@@ -257,18 +258,30 @@ pub trait Ordered: Unordered {
     where
         Self::Value: 'a;
 
-    /// Returns the values of each translated key from the translation of `first` through the
-    /// translation of `last`, both inclusive, in ascending translated-key order. A `None` bound
-    /// leaves that end open. The iteration does not cycle.
+    /// Returns the values of each translated key within `start` and `end`, in ascending
+    /// translated-key order. Each bound applies to its key's translation, so excluding a key
+    /// excludes every key that shares its translation. The iteration does not cycle.
     fn translated_range<'a>(
         &'a self,
-        first: Option<&[u8]>,
-        last: Option<&[u8]>,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
     ) -> impl Iterator<Item = impl Iterator<Item = &'a Self::Value> + Send + use<'a, Self>>
     + Send
     + use<'a, Self>
     where
         Self::Value: 'a;
+}
+
+/// Whether no key lies within `start` and `end`. `BTreeMap::range` panics on these bounds when
+/// `start` exceeds `end`, or when they are equal and both excluded.
+fn is_empty_range<K: Ord>(start: Bound<&K>, end: Bound<&K>) -> bool {
+    match (start, end) {
+        (Included(start), Included(end)) => start > end,
+        (Included(start) | Excluded(start), Excluded(end)) | (Excluded(start), Included(end)) => {
+            start >= end
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -286,6 +299,7 @@ mod tests {
     use rand::RngExt as _;
     use std::{
         collections::{HashMap, HashSet},
+        ops::Bound::Unbounded,
         sync::Arc,
         thread,
     };
@@ -490,13 +504,13 @@ mod tests {
         }
     }
 
-    /// Verify `translated_range` yields each translated key's values in order between inclusive
-    /// translated bounds, without cycling. Expects a two-byte translation (TwoCap, or OneCap after
-    /// a one-byte partition prefix).
+    /// Verify `translated_range` yields each translated key's values in order within translated
+    /// bounds, without cycling. Expects a two-byte translation (TwoCap, or OneCap after a one-byte
+    /// partition prefix).
     fn run_ordered_translated_range<I: Ordered<Value = u64>>(index: &mut I) {
-        let range = |index: &I, first: Option<&[u8]>, last: Option<&[u8]>| {
+        let range = |index: &I, start: Bound<&[u8]>, end: Bound<&[u8]>| {
             index
-                .translated_range(first, last)
+                .translated_range(start, end)
                 .map(|values| {
                     let mut values: Vec<u64> = values.copied().collect();
                     values.sort_unstable();
@@ -504,7 +518,8 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        assert!(range(index, None, None).is_empty());
+        assert!(range(index, Unbounded, Unbounded).is_empty());
+        assert!(range(index, Included(&[0x00]), Excluded(&[0x00])).is_empty());
 
         // Values 1 and 2 collide, and value 3 shares their partition.
         let keys: [&[u8]; 6] = [
@@ -520,24 +535,61 @@ mod tests {
         }
 
         let all = vec![vec![1, 2], vec![3], vec![4], vec![5], vec![6]];
-        assert_eq!(range(index, None, None), all);
+        assert_eq!(range(index, Unbounded, Unbounded), all);
         assert_eq!(
-            range(index, Some(&[0x00, 0x02, 0xAA]), Some(&[0x05, 0x05])),
+            range(
+                index,
+                Included(&[0x00, 0x02, 0xAA]),
+                Included(&[0x05, 0x05])
+            ),
             all[1..4]
         );
-        assert_eq!(range(index, Some(&[0x00, 0x03]), None), all[2..]);
-        assert_eq!(range(index, None, Some(&[0x01, 0x00, 0x07])), all[..3]);
+        assert_eq!(range(index, Included(&[0x00, 0x03]), Unbounded), all[2..]);
         assert_eq!(
-            range(index, Some(&[0x01, 0x00, 0x07]), Some(&[0x01, 0x00])),
+            range(index, Unbounded, Included(&[0x01, 0x00, 0x07])),
+            all[..3]
+        );
+        assert_eq!(
+            range(
+                index,
+                Included(&[0x01, 0x00, 0x07]),
+                Included(&[0x01, 0x00])
+            ),
             all[2..3]
         );
         assert_eq!(
-            range(index, Some(&[0x00, 0x01]), Some(&[0x00, 0x01])),
+            range(index, Included(&[0x00, 0x01]), Included(&[0x00, 0x01])),
             all[..1]
         );
-        assert!(range(index, Some(&[0x02]), Some(&[0x04])).is_empty());
-        assert!(range(index, Some(&[0x05, 0x05]), Some(&[0x00, 0x01])).is_empty());
-        assert!(range(index, Some(&[0x00, 0x02]), Some(&[0x00, 0x01])).is_empty());
+        assert!(range(index, Included(&[0x02]), Included(&[0x04])).is_empty());
+        assert!(range(index, Included(&[0x05, 0x05]), Included(&[0x00, 0x01])).is_empty());
+        assert!(range(index, Included(&[0x00, 0x02]), Included(&[0x00, 0x01])).is_empty());
+
+        // Excluding a key excludes every key that shares its translation.
+        assert_eq!(
+            range(
+                index,
+                Excluded(&[0x00, 0x01, 0x07]),
+                Excluded(&[0x05, 0x05, 0x07])
+            ),
+            all[1..3]
+        );
+        assert_eq!(range(index, Excluded(&[0x00, 0x03]), Unbounded), all[2..]);
+        assert_eq!(range(index, Unbounded, Excluded(&[0x00, 0x02])), all[..1]);
+        assert_eq!(range(index, Unbounded, Excluded(&[0x01, 0x00])), all[..2]);
+        assert_eq!(
+            range(index, Excluded(&[0x01]), Excluded(&[0xFF, 0xFF])),
+            all[3..4]
+        );
+        assert_eq!(
+            range(index, Included(&[0x00, 0x02]), Excluded(&[0x00, 0x03])),
+            all[1..2]
+        );
+        assert!(range(index, Included(&[0x00, 0x02]), Excluded(&[0x00, 0x02])).is_empty());
+        assert!(range(index, Excluded(&[0x00, 0x02]), Included(&[0x00, 0x02])).is_empty());
+        assert!(range(index, Excluded(&[0x00, 0x02]), Excluded(&[0x00, 0x02])).is_empty());
+        assert!(range(index, Excluded(&[0xFF, 0xFF]), Unbounded).is_empty());
+        assert!(range(index, Unbounded, Excluded(&[0x00, 0x01])).is_empty());
     }
 
     #[test_traced]

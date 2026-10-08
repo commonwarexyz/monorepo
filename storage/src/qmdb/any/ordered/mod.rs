@@ -33,20 +33,56 @@ pub use crate::qmdb::any::operation::{Ordered as Operation, update::Ordered as U
 /// Type alias for a location and its associated key data.
 type LocatedKey<F, K, V> = Option<(Location<F>, Update<K, V>)>;
 
-/// The most locations a range scan reads at once after a cache miss. The batch starts at one and
-/// doubles after each read, so a scan that stops early reads little beyond what it consumed.
+/// The most locations a range scan reads at once after a cache miss, unless the read's first bucket
+/// alone holds more. The limit starts at one location and doubles after each read, so a scan that
+/// stops early reads little beyond what it consumed.
 const MAX_SCAN_BATCH: usize = 256;
 
-/// The update read from `loc`, if its key lies within `range`.
-fn update_in_range<F: Family, K: Key, V: ValueEncoding>(
+/// The state a range scan keeps between polls.
+struct Scan<R, B, K: Key, V: ValueEncoding> {
+    /// The requested key range.
+    range: R,
+    /// The buckets from the start key's translated key up to, but excluding, the end key's, in
+    /// ascending order. Every key in them except the start bucket's lies within the range.
+    buckets: B,
+    /// Whether the end key's bucket remains unread. It can hold keys on both sides of the end key,
+    /// so it is read last, and only if a key in range may remain.
+    end_bucket: bool,
+    /// A bucket that would have taken the previous read past its limit. It starts the next read.
+    held: Vec<u64>,
+    /// The locations of the current read. A failed read keeps them, so the next poll retries it.
+    batch: Vec<u64>,
+    /// The most locations the next read gathers.
+    limit: usize,
+    /// The updates in range read so far and not yet yielded. Once the current read completes,
+    /// they are in descending key order.
+    pending: Vec<Update<K, V>>,
+    /// Whether no unread active key lies within the range.
+    done: bool,
+}
+
+/// Adds the update read from `loc` to `pending` if its key lies within `range`. Returns whether no
+/// active key greater than the update's lies within `range`, which its `next_key` (the next active
+/// key, wrapping from the largest to the smallest) shows.
+fn collect_update<F: Family, K: Key, V: ValueEncoding>(
     op: Operation<F, K, V>,
     loc: u64,
     range: &impl RangeBounds<K>,
-) -> Option<Update<K, V>> {
+    pending: &mut Vec<Update<K, V>>,
+) -> bool {
     let Operation::Update(data) = op else {
         unreachable!("expected update operation at location {loc}");
     };
-    range.contains(&data.key).then_some(data)
+    let last = data.next_key <= data.key
+        || match range.end_bound() {
+            Included(end) => data.next_key > *end,
+            Excluded(end) => data.next_key >= *end,
+            Unbounded => false,
+        };
+    if range.contains(&data.key) {
+        pending.push(data);
+    }
+    last
 }
 
 impl<
@@ -228,75 +264,101 @@ where
             _ => false,
         };
 
-        // The translator preserves order, so the buckets between the bounds' translated keys hold
-        // every key in the range, and ascending buckets hold ascending keys.
-        let first = match range.start_bound() {
-            Included(key) | Excluded(key) => Some(key.as_ref()),
-            Unbounded => None,
+        // The translator preserves order, so only the bounds' own buckets can hold keys outside
+        // the range. The end key's bucket is read last, and only if needed.
+        let start = match range.start_bound() {
+            Included(key) | Excluded(key) => Included(key.as_ref()),
+            Unbounded => Unbounded,
         };
-        let last = match range.end_bound() {
-            Included(key) | Excluded(key) => Some(key.as_ref()),
-            Unbounded => None,
+        let end = match range.end_bound() {
+            Included(key) | Excluded(key) => Excluded(key.as_ref()),
+            Unbounded => Unbounded,
         };
         let buckets = (!empty)
-            .then(|| self.snapshot.translated_range(first, last))
+            .then(|| self.snapshot.translated_range(start, end))
             .into_iter()
             .flatten();
+        let end_bucket = !empty && end != Unbounded;
+        let scan = Scan {
+            range,
+            buckets,
+            end_bucket,
+            held: Vec::new(),
+            batch: Vec::new(),
+            limit: 1,
+            pending: Vec::new(),
+            done: false,
+        };
 
-        stream::unfold(
-            (range, buckets, Vec::new(), 1, Vec::<Update<K, V>>::new()),
-            move |(range, mut buckets, mut batch, mut limit, mut pending)| async move {
-                loop {
-                    // Drain each batch in ascending order before reading another.
-                    if let Some(item) = pending.pop() {
-                        return Some((
-                            Ok((item.key, item.value)),
-                            (range, buckets, batch, limit, pending),
-                        ));
-                    }
-
-                    // Start a batch with the next bucket, unless a failed read left one. A bucket
-                    // the cache holds entirely is served without reading ahead. Otherwise the
-                    // batch takes whole buckets up to the limit.
-                    if batch.is_empty() {
-                        batch.extend(buckets.next()?.map(|loc| **loc));
-                        let cached = batch.iter().try_for_each(|&loc| {
-                            let op = self.log.try_read_sync(loc)?;
-                            pending.extend(update_in_range(op, loc, &range));
-                            Some(())
-                        });
-                        if cached.is_some() {
-                            pending.sort_unstable_by(|a, b| b.key.cmp(&a.key));
-                            batch.clear();
-                            continue;
-                        }
-                        pending.clear();
-                        while batch.len() < limit
-                            && let Some(locs) = buckets.next()
-                        {
-                            batch.extend(locs.map(|loc| **loc));
-                        }
-                        batch.sort_unstable();
-                    }
-                    let ops = match self.log.read_many(&batch).await {
-                        Ok(ops) => ops,
-                        Err(e) => {
-                            return Some((Err(e.into()), (range, buckets, batch, limit, pending)));
-                        }
-                    };
-                    pending.extend(
-                        ops.into_iter()
-                            .zip(&batch)
-                            .filter_map(|(op, &loc)| update_in_range(op, loc, &range)),
-                    );
-
-                    // Descending order lets the stream emit ascending keys with constant-time pops.
-                    pending.sort_unstable_by(|a, b| b.key.cmp(&a.key));
-                    batch.clear();
-                    limit = (limit * 2).min(MAX_SCAN_BATCH);
+        stream::unfold(scan, move |mut scan| async move {
+            loop {
+                // Yield the read updates once the read that produced them completes.
+                if scan.batch.is_empty()
+                    && let Some(item) = scan.pending.pop()
+                {
+                    return Some((Ok((item.key, item.value)), scan));
                 }
-            },
-        )
+
+                // Start a read with the held bucket, else the next bucket, else the end key's.
+                if scan.batch.is_empty() {
+                    if scan.done {
+                        return None;
+                    }
+                    if !scan.held.is_empty() {
+                        mem::swap(&mut scan.batch, &mut scan.held);
+                    } else if let Some(locs) = scan.buckets.next() {
+                        scan.batch.extend(locs.map(|loc| **loc));
+                    } else if mem::take(&mut scan.end_bucket)
+                        && let Included(end) | Excluded(end) = scan.range.end_bound()
+                    {
+                        scan.batch
+                            .extend(self.snapshot.get(end.as_ref()).map(|loc| **loc));
+                    }
+                    if scan.batch.is_empty() {
+                        return None;
+                    }
+
+                    // Serve cache hits. A fully cached bucket is served without reading ahead.
+                    scan.batch.retain(|&loc| {
+                        let Some(op) = self.log.try_read_sync(loc) else {
+                            return true;
+                        };
+                        scan.done |= collect_update(op, loc, &scan.range, &mut scan.pending);
+                        false
+                    });
+                    if scan.batch.is_empty() {
+                        scan.pending.sort_unstable_by(|a, b| b.key.cmp(&a.key));
+                        continue;
+                    }
+
+                    // Read ahead whole buckets up to the limit, holding back one that exceeds it.
+                    while !scan.done
+                        && scan.batch.len() < scan.limit
+                        && let Some(locs) = scan.buckets.next()
+                    {
+                        let len = scan.batch.len();
+                        scan.batch.extend(locs.map(|loc| **loc));
+                        if scan.batch.len() > scan.limit {
+                            scan.held.extend(scan.batch.drain(len..));
+                            break;
+                        }
+                    }
+                    scan.batch.sort_unstable();
+                }
+                let ops = match self.log.read_many(&scan.batch).await {
+                    Ok(ops) => ops,
+                    Err(e) => return Some((Err(e.into()), scan)),
+                };
+                for (op, &loc) in ops.into_iter().zip(&scan.batch) {
+                    scan.done |= collect_update(op, loc, &scan.range, &mut scan.pending);
+                }
+
+                // Descending order lets the stream yield ascending keys with constant-time pops.
+                scan.pending.sort_unstable_by(|a, b| b.key.cmp(&a.key));
+                scan.batch.clear();
+                scan.limit = (scan.limit * 2).min(MAX_SCAN_BATCH);
+            }
+        })
     }
 
     /// Streams active keys in ascending order within `range`.
@@ -493,7 +555,7 @@ mod test {
     use commonware_macros::boxed;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Runner as _, Supervisor as _,
+        Metrics as _, Runner as _, Supervisor as _,
         deterministic::{self, Context},
     };
     use commonware_utils::{probability, sequence::FixedBytes, test_rng};
@@ -1752,6 +1814,146 @@ mod test {
         any::ordered::variable::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, Sequential>,
         any::test::variable_db_config_partitioned::<OneCap>
     );
+    test_scan_batches!(
+        test_stream_range_batches_any_fixed_sparse_partitioned,
+        any::ordered::fixed::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 2, Sequential>,
+        any::test::fixed_db_config_partitioned::<OneCap>
+    );
+
+    /// The items the context's journals have read so far.
+    fn items_read(context: &Context) -> u64 {
+        context
+            .encode()
+            .lines()
+            .filter_map(|line| {
+                let (name, value) = line.rsplit_once(' ')?;
+                let name = name.split('{').next()?;
+                name.ends_with("items_read_total")
+                    .then(|| value.parse::<u64>().unwrap())
+            })
+            .sum()
+    }
+
+    #[test]
+    fn test_stream_range_reads_only_needed_buckets() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = any::ordered::fixed::Db<
+                mmr::Family,
+                deterministic::Context,
+                Digest,
+                Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = any::test::fixed_db_config::<OneCap>("scan-reads", &context);
+            let cache = config.journal_config.page_cache.clone();
+            let db = TestDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+
+            // Two single-key buckets, a large bucket, a bucket of two keys, and a last key.
+            let (a, b) = (neighbor_key([1, 0, 0]), neighbor_key([2, 0, 0]));
+            let large: Vec<_> = (0..1024u16)
+                .map(|i| {
+                    let [hi, lo] = i.to_be_bytes();
+                    neighbor_key([3, hi, lo])
+                })
+                .collect();
+            let (e, f) = (neighbor_key([5, 5, 0]), neighbor_key([5, 9, 0]));
+            let g = neighbor_key([6, 0, 0]);
+            let mut keys = vec![a, b, e, f, g];
+            keys.extend(&large);
+            keys.sort_unstable();
+            let mut batch = db.new_batch();
+            for &key in &keys {
+                batch = batch.write(key, Some(key));
+            }
+            let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.sync().await.unwrap();
+            let expected = |keys: &[Digest]| keys.iter().map(|&k| (k, k)).collect::<Vec<_>>();
+            assert_eq!(
+                db.stream_range(..).try_collect::<Vec<_>>().await.unwrap(),
+                expected(&keys)
+            );
+
+            // Reading ahead stops before a bucket that would exceed the batch limit, so a scan
+            // that stops before the large bucket never reads it.
+            let stream = db.stream_range(..);
+            pin_mut!(stream);
+            let before = items_read(&context);
+            for key in [a, b] {
+                cache.clear();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key);
+            }
+            assert_eq!(items_read(&context) - before, 2);
+
+            // The large bucket is read whole once the scan reaches it.
+            cache.clear();
+            assert_eq!(
+                stream.try_collect::<Vec<_>>().await.unwrap(),
+                expected(&keys[2..])
+            );
+
+            // An excluded end key's bucket is never read.
+            let stream = db.stream_range(a..b);
+            pin_mut!(stream);
+            assert_eq!(stream.next().await.unwrap().unwrap().0, a);
+            cache.clear();
+            context.storage_fault_config().write().read_rate = Some(probability!(1.0));
+            assert!(stream.next().await.is_none());
+            context.storage_fault_config().write().read_rate = None;
+
+            // Nor is the end key's bucket when the keys read show that no key in range remains,
+            // although it shares the end key's translated key.
+            let stream = db.stream_range(b..=neighbor_key([5, 1, 0]));
+            pin_mut!(stream);
+            assert_eq!(stream.next().await.unwrap().unwrap().0, b);
+            for &key in &large {
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key);
+            }
+            cache.clear();
+            context.storage_fault_config().write().read_rate = Some(probability!(1.0));
+            assert!(stream.next().await.is_none());
+            context.storage_fault_config().write().read_rate = None;
+
+            // The end key's bucket is read when it may hold keys in range, and a failed read is
+            // retried.
+            let stream = db.stream_range(e..=g);
+            pin_mut!(stream);
+            assert_eq!(stream.next().await.unwrap().unwrap().0, e);
+            assert_eq!(stream.next().await.unwrap().unwrap().0, f);
+            cache.clear();
+            context.storage_fault_config().write().read_rate = Some(probability!(1.0));
+            assert!(stream.next().await.unwrap().is_err());
+            context.storage_fault_config().write().read_rate = None;
+            assert_eq!(stream.next().await.unwrap().unwrap().0, g);
+            assert!(stream.next().await.is_none());
+
+            // The same holds when the start key shares the end key's bucket.
+            cache.clear();
+            context.storage_fault_config().write().read_rate = Some(probability!(1.0));
+            let stream = db.stream_range(e..=neighbor_key([5, 7, 0]));
+            pin_mut!(stream);
+            assert!(stream.next().await.unwrap().is_err());
+            context.storage_fault_config().write().read_rate = None;
+            assert_eq!(stream.next().await.unwrap().unwrap().0, e);
+            cache.clear();
+            context.storage_fault_config().write().read_rate = Some(probability!(1.0));
+            assert!(stream.next().await.is_none());
+            context.storage_fault_config().write().read_rate = None;
+
+            // A scan ends after the last active key.
+            let stream = db.stream_range(g..);
+            pin_mut!(stream);
+            assert_eq!(stream.next().await.unwrap().unwrap().0, g);
+            cache.clear();
+            context.storage_fault_config().write().read_rate = Some(probability!(1.0));
+            assert!(stream.next().await.is_none());
+            context.storage_fault_config().write().read_rate = None;
+        });
+    }
 
     #[test]
     fn test_stream_range_lazy_errors() {

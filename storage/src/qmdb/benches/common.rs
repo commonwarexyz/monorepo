@@ -61,6 +61,9 @@ pub type AnyOFixDb<F> = OFixed<F, Context, Digest, Digest, Sha256, EightCap, Ray
 /// Ordered "any" DB with a partitioned snapshot index (256 partitions, P=1). Exercises the
 /// partitioned ordered index's cursor (get_mut/find/update) on apply.
 pub type AnyOFixP256Db<F> = OFixP256<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
+/// Ordered "any" DB with a partitioned snapshot index (65,536 partitions, P=2), the partitioned
+/// config recommended for large ordered key sets, used by the `stream_range` bench.
+pub type AnyOFixP64kDb<F> = OFixPart<F, Context, Digest, Digest, Sha256, EightCap, 2, Rayon>;
 /// Ordered "any" DB with a partitioned snapshot index (~16.8M partitions, P=3). The inline-SoA config
 /// for very large key sets (P=2 spills past ~33M entries), used by the `init_scale` bench.
 #[allow(dead_code)]

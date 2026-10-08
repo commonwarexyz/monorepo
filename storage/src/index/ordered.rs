@@ -6,7 +6,7 @@
 
 use crate::{
     index::{
-        Cursor as CursorTrait, Ordered, Unordered,
+        Cursor as CursorTrait, Ordered, Unordered, is_empty_range,
         storage::{Cursor as CursorImpl, IndexEntry, Overflow, Values, push_displaced},
     },
     translator::Translator,
@@ -23,7 +23,7 @@ use std::{
             VacantEntry as BTreeVacantEntry,
         },
     },
-    ops::Bound::{Excluded, Included, Unbounded},
+    ops::Bound::{self, Excluded, Unbounded},
 };
 
 /// Implementation of [IndexEntry] for [BTreeOccupiedEntry].
@@ -179,23 +179,16 @@ impl<T: Translator, V: Send + Sync> Ordered for Index<T, V> {
 
     fn translated_range<'a>(
         &'a self,
-        first: Option<&[u8]>,
-        last: Option<&[u8]>,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
     ) -> impl Iterator<Item = impl Iterator<Item = &'a V> + Send + use<'a, T, V>> + Send + use<'a, T, V>
     where
         V: 'a,
     {
-        let first = first.map(|key| self.translator.transform(key));
-        let last = last.map(|key| self.translator.transform(key));
-
-        // `BTreeMap::range` panics on inverted bounds.
-        let inverted = matches!((first, last), (Some(first), Some(last)) if first > last);
-        let bounds = (
-            first.map_or(Unbounded, Included),
-            last.map_or(Unbounded, Included),
-        );
-        (!inverted)
-            .then(|| self.map.range(bounds))
+        let start = start.map(|key| self.translator.transform(key));
+        let end = end.map(|key| self.translator.transform(key));
+        (!is_empty_range(start.as_ref(), end.as_ref()))
+            .then(|| self.map.range((start, end)))
             .into_iter()
             .flatten()
             .map(|(k, head)| self.values(k, head))
