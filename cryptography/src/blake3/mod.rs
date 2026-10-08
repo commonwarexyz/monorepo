@@ -1,10 +1,14 @@
 //! BLAKE3 implementation of the [Hasher] trait.
 //!
-//! This implementation uses the [blake3] crate to generate BLAKE3 digests.
+//! This implementation uses the [blake3] crate to generate BLAKE3 digests. [Hasher::hash_with]
+//! splits a message longer than one subtree of 64 KiB along the BLAKE3 tree and hashes the
+//! subtrees across the given strategy.
 //!
 //! # Example
 //! ```rust
 //! use commonware_cryptography::{Hasher, blake3::Blake3};
+//! use commonware_parallel::Rayon;
+//! use std::num::NonZeroUsize;
 //!
 //! // Hash data in a single shot
 //! let digest = Blake3::hash(&[b"hello,", b"world!"]);
@@ -16,14 +20,26 @@
 //! hasher.update(b"world!");
 //! let (_hasher, digest) = hasher.finalize();
 //! println!("digest: {:?}", digest);
+//!
+//! // Hash a long message across a thread pool
+//! let strategy = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
+//! let message = vec![7u8; 1 << 20];
+//! assert_eq!(
+//!     Blake3::hash_with(&[&message], &strategy),
+//!     Blake3::hash(&[&message]),
+//! );
 //! ```
 
 use crate::Hasher;
-use blake3::Hash;
+use blake3::{
+    CHUNK_LEN, Hash,
+    hazmat::{ChainingValue, HasherExt as _, Mode, merge_subtrees_non_root, merge_subtrees_root},
+};
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
+use commonware_parallel::Strategy;
 use commonware_utils::{Array, Span, sequence::FixedBytes};
 use core::{
     cmp::Ordering,
@@ -38,11 +54,103 @@ pub type CoreBlake3 = blake3::Hasher;
 
 const DIGEST_LENGTH: usize = blake3::OUT_LEN;
 
+/// Length, in bytes, of the largest subtree [`Hasher::hash_with`] hashes as one task: 64 chunks,
+/// enough to keep the widest SIMD kernel busy and to amortize the cost of a fork.
+pub(crate) const SUBTREE_LEN: usize = 64 * CHUNK_LEN;
+
+/// Hash the concatenation of `parts` on the calling thread.
+fn hash_serial(parts: &[&[u8]]) -> Digest {
+    let mut hasher = CoreBlake3::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    hasher.finalize().into()
+}
+
+/// Hash the `len`-byte concatenation of `parts`, which spans more than one chunk, as subtrees of
+/// at most [`SUBTREE_LEN`] bytes across `strategy`.
+fn hash_subtrees(parts: &[&[u8]], len: usize, strategy: &impl Strategy) -> Digest {
+    let root = Node {
+        parts,
+        skip: 0,
+        offset: 0,
+        len,
+    };
+    let (left, right) = root.children(strategy);
+    merge_subtrees_root(&left, &right, Mode::Hash).into()
+}
+
+/// A node of a message's BLAKE3 tree: the `len` bytes at byte `offset` of the message, which
+/// start `skip` bytes into the first of `parts`.
+///
+/// `parts` holds every byte of the node, and `skip` is at most the length of its first part.
+#[derive(Clone, Copy)]
+struct Node<'a> {
+    parts: &'a [&'a [u8]],
+    skip: usize,
+    offset: usize,
+    len: usize,
+}
+
+impl Node<'_> {
+    /// Hash the chaining values of the children of a node that spans more than one chunk, in
+    /// parallel across `strategy`.
+    fn children(self, strategy: &impl Strategy) -> (ChainingValue, ChainingValue) {
+        // The left child is the largest power-of-two number of chunks that leaves the right
+        // child nonempty, which for a node of more than one chunk is the largest power of two
+        // below its length. The right child starts in the first part that extends past it.
+        let left_len = 1 << (self.len - 1).ilog2();
+        let mut skip = self.skip + left_len;
+        let mut index = 0;
+        while skip >= self.parts[index].len() {
+            skip -= self.parts[index].len();
+            index += 1;
+        }
+        let left = Node {
+            parts: &self.parts[..=index],
+            len: left_len,
+            ..self
+        };
+        let right = Node {
+            parts: &self.parts[index..],
+            skip,
+            offset: self.offset + left_len,
+            len: self.len - left_len,
+        };
+        strategy.join(
+            || left.chaining_value(strategy),
+            || right.chaining_value(strategy),
+        )
+    }
+
+    /// Hash the node's chaining value, splitting it until every subtree fits in
+    /// [`SUBTREE_LEN`] bytes.
+    fn chaining_value(self, strategy: &impl Strategy) -> ChainingValue {
+        if self.len > SUBTREE_LEN {
+            let (left, right) = self.children(strategy);
+            return merge_subtrees_non_root(&left, &right, Mode::Hash);
+        }
+
+        // Feed the node's bytes, which start `skip` bytes into the first part.
+        let mut hasher = CoreBlake3::new();
+        hasher.set_input_offset(self.offset as u64);
+        let mut skip = self.skip;
+        let mut remaining = self.len;
+        for part in self.parts {
+            let bytes = &part[skip..];
+            let take = bytes.len().min(remaining);
+            hasher.update(&bytes[..take]);
+            remaining -= take;
+            if remaining == 0 {
+                break;
+            }
+            skip = 0;
+        }
+        hasher.finalize_non_root()
+    }
+}
+
 /// BLAKE3 hasher.
-#[cfg_attr(
-    feature = "blake3-parallel",
-    doc = "When the input message is larger than 128KiB, `rayon` is used to parallelize hashing."
-)]
 #[derive(Debug, Default)]
 pub struct Blake3 {
     hasher: CoreBlake3,
@@ -51,12 +159,21 @@ pub struct Blake3 {
 impl Hasher for Blake3 {
     type Digest = Digest;
 
-    fn hash(parts: &[&[u8]]) -> Self::Digest {
-        let mut hasher = Self::default();
-        for part in parts {
-            hasher.update(part);
+    fn hash_with(parts: &[&[u8]], strategy: &impl Strategy) -> Self::Digest {
+        // A message that fits in one subtree has nothing to split. A total that overflows
+        // `usize` (possible only when parts alias) hashes serially, since the streaming hasher
+        // counts bytes in a `u64`.
+        match parts
+            .iter()
+            .try_fold(0usize, |len, part| len.checked_add(part.len()))
+        {
+            Some(len) if len > SUBTREE_LEN => strategy.run(
+                len,
+                || hash_serial(parts),
+                || hash_subtrees(parts, len, strategy),
+            ),
+            _ => hash_serial(parts),
         }
-        hasher.finalize().1
     }
 
     fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
@@ -64,22 +181,7 @@ impl Hasher for Blake3 {
     }
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
-        #[cfg(not(feature = "blake3-parallel"))]
         self.hasher.update(message);
-
-        #[cfg(feature = "blake3-parallel")]
-        {
-            // 128 KiB
-            const PARALLEL_THRESHOLD: usize = 2usize.pow(17);
-
-            // Heuristic defined @ https://docs.rs/blake3/latest/blake3/struct.Hasher.html#method.update_rayon
-            if message.len() >= PARALLEL_THRESHOLD {
-                self.hasher.update_rayon(message);
-            } else {
-                self.hasher.update(message);
-            }
-        }
-
         self
     }
 
@@ -197,10 +299,25 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::{NZUsize, TestRng};
+    use rand::Rng as _;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering::Relaxed},
+        mpsc,
+    };
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"
     );
+
+    /// Return `len` random bytes, distinct per `seed`.
+    fn random(len: usize, seed: u64) -> Vec<u8> {
+        let mut bytes = vec![0; len];
+        TestRng::new(seed).fill_bytes(&mut bytes);
+        bytes
+    }
 
     #[test]
     fn test_blake3() {
@@ -230,7 +347,8 @@ mod tests {
     }
 
     /// Official BLAKE3 test vectors. Hashing 16 KiB or more in one update reaches the 16-way
-    /// AVX-512 chunk kernel, and 32 KiB or more also reaches the 16-way parent kernel.
+    /// AVX-512 chunk kernel, and 32 KiB or more also reaches the 16-way parent kernel. Across
+    /// workers, the longest vector splits into two subtrees.
     #[test]
     fn test_official_vectors() {
         const VECTORS: [(usize, [u8; DIGEST_LENGTH]); 3] = [
@@ -260,6 +378,104 @@ mod tests {
             hasher.update(&input);
             let (_, digest) = hasher.finalize();
             assert_eq!(digest.as_ref(), expected, "len {len}");
+            let digest = Blake3::hash_with(&[&input], crate::fuzz::parallel());
+            assert_eq!(digest.as_ref(), expected, "len {len}");
+        }
+    }
+
+    /// Messages around multiples of [`SUBTREE_LEN`], given whole, cut inside chunks and
+    /// subtrees, padded with empty parts, and paged, hash to the reference digest on the calling
+    /// thread and across workers. Splitting into subtrees on the calling thread also matches,
+    /// down to two chunks.
+    #[test]
+    fn test_hash_long_messages() {
+        let data = random((1 << 20) + 5000, 0);
+        for len in [
+            0,
+            1,
+            CHUNK_LEN,
+            CHUNK_LEN + 1,
+            3 * CHUNK_LEN + 7,
+            SUBTREE_LEN - 1,
+            SUBTREE_LEN,
+            SUBTREE_LEN + 1,
+            SUBTREE_LEN + CHUNK_LEN,
+            2 * SUBTREE_LEN - 1,
+            2 * SUBTREE_LEN,
+            2 * SUBTREE_LEN + 1,
+            2 * SUBTREE_LEN + 3 * CHUNK_LEN + 7,
+            3 * SUBTREE_LEN + 17,
+            8 * SUBTREE_LEN,
+            (1 << 20) + 5000,
+        ] {
+            let message = &data[..len];
+            let expected: Digest = blake3::hash(message).into();
+            let (a, b) = (len / 3, len / 3 + SUBTREE_LEN.min(len - len / 3));
+            let splits: [Vec<&[u8]>; 4] = [
+                vec![message],
+                vec![&message[..a], &message[a..b], &message[b..]],
+                vec![&[], message, &[]],
+                message.chunks(1000).collect(),
+            ];
+            for parts in &splits {
+                assert_eq!(Blake3::hash(parts), expected, "len={len}");
+                assert_eq!(
+                    Blake3::hash_with(parts, crate::fuzz::parallel()),
+                    expected,
+                    "len={len}"
+                );
+                if len > CHUNK_LEN {
+                    assert_eq!(
+                        hash_subtrees(parts, len, &Sequential),
+                        expected,
+                        "len={len}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A message longer than one subtree is hashed across the strategy's pool, and a shorter one
+    /// on the calling thread.
+    #[test]
+    fn test_hash_splits_long_messages() {
+        // One worker, planned as four, counts the jobs it runs while looping. Splitting a message
+        // from outside the pool hands it one job, whose nested forks stay on the worker.
+        let pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .unwrap(),
+        );
+        let strategy = Rayon::with_pool(pool.clone())
+            .with_parallelism(NZUsize!(4))
+            .manual();
+        let data = random(4 * SUBTREE_LEN, 0);
+        for (len, jobs) in [(SUBTREE_LEN, 0), (SUBTREE_LEN + 1, 1), (4 * SUBTREE_LEN, 1)] {
+            let done = Arc::new(AtomicBool::new(false));
+            let (started, ready) = mpsc::channel();
+            let (sender, receiver) = mpsc::channel();
+            pool.spawn({
+                let done = done.clone();
+                move || {
+                    started.send(()).unwrap();
+                    let mut jobs = 0;
+                    while !done.load(Relaxed) {
+                        if rayon::yield_now() == Some(rayon::Yield::Executed) {
+                            jobs += 1;
+                        }
+                    }
+                    sender.send(jobs).unwrap();
+                }
+            });
+            ready.recv().unwrap();
+
+            // Hash, then release the worker and compare its job count.
+            let message = &data[..len];
+            let digest = Blake3::hash_with(&[message], &strategy);
+            done.store(true, Relaxed);
+            assert_eq!(digest, blake3::hash(message).into(), "len={len}");
+            assert_eq!(receiver.recv().unwrap(), jobs, "len={len}");
         }
     }
 

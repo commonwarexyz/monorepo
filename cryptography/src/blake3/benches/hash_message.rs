@@ -1,18 +1,32 @@
 use commonware_cryptography::{Hasher, blake3::Blake3};
-use commonware_utils::test_rng;
+use commonware_parallel::Rayon;
+use commonware_utils::{NZUsize, test_rng};
 use criterion::{Criterion, criterion_group};
 use rand::Rng;
 
+/// Workers in the pool behind the parallel rows.
+const CONCURRENCY: usize = 8;
+
 fn bench_hash_message(c: &mut Criterion) {
     let mut sampler = test_rng();
+    let strategy = Rayon::new(NZUsize!(CONCURRENCY)).unwrap();
     let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
     for message_length in cases.into_iter() {
         let mut msg = vec![0u8; message_length];
         sampler.fill_bytes(msg.as_mut_slice());
         let msg = msg.as_slice();
-        c.bench_function(&format!("{}/msg_len={}", module_path!(), msg.len()), |b| {
-            b.iter(|| Blake3::hash(&[msg]));
-        });
+        c.bench_function(
+            &format!("{}/msg_len={} conc=1", module_path!(), msg.len()),
+            |b| b.iter(|| Blake3::hash(&[msg])),
+        );
+        c.bench_function(
+            &format!(
+                "{}/msg_len={} conc={CONCURRENCY}",
+                module_path!(),
+                msg.len()
+            ),
+            |b| b.iter(|| Blake3::hash_with(&[msg], &strategy)),
+        );
     }
 }
 

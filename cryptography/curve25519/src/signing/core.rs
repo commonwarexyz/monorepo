@@ -145,7 +145,7 @@ fn decompress_terms<B: Backend>(
 /// Hashes the challenges `R || A || M` of unit `unit`, with `M` the framed message.
 ///
 /// The unit's curve work cannot split, but long messages make its hashing worth spreading across
-/// workers, so the strategy decides from the challenges' size whether to split them.
+/// workers, so [`Sha512::hash_many_with`] splits the challenges across `strategy`.
 fn hash_unit(
     items: &[Item<'_>],
     unit: usize,
@@ -177,17 +177,7 @@ fn hash_unit(
         *input = &challenges[start..end];
         start = end;
     }
-    let inputs = &inputs[..lanes.len()];
-    strategy.run_batches(
-        inputs.len(),
-        NonZeroUsize::MIN,
-        challenges.len().div_ceil(inputs.len()),
-        |batches| {
-            batches
-                .map_collect_vec(|ranges| ranges, |range| Sha512::hash_many(&inputs[range]))
-                .concat()
-        },
-    )
+    Sha512::hash_many_with(&inputs[..lanes.len()], strategy)
 }
 
 /// Processes unit `unit` into `partition`, recoding its `R` terms at `width`. `digests` holds

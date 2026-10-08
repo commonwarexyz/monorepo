@@ -2,6 +2,7 @@
 
 use crate::merkle::{Bagging, Error, Family, Location, Position};
 use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_parallel::Strategy;
 use core::marker::PhantomData;
 
 /// A trait for computing the various digests of a Merkle-family structure.
@@ -43,6 +44,17 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     /// Computes the digest for a leaf given its position and the element it represents.
     fn leaf_digest(&self, pos: Position<F>, element: &[u8]) -> Self::Digest {
         self.hash(&[&(*pos).to_be_bytes(), element])
+    }
+
+    /// Like [`leaf_digest`](Self::leaf_digest), but lets a hash function that can split a long
+    /// element (e.g. BLAKE3) spread the work across `strategy`.
+    fn leaf_digest_with(
+        &self,
+        pos: Position<F>,
+        element: &[u8],
+        _strategy: &impl Strategy,
+    ) -> Self::Digest {
+        self.leaf_digest(pos, element)
     }
 
     /// Compute the digest of a byte slice.
@@ -197,6 +209,15 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
         Self::root_bagging(self)
     }
 
+    fn leaf_digest_with(
+        &self,
+        pos: Position<F>,
+        element: &[u8],
+        strategy: &impl Strategy,
+    ) -> H::Digest {
+        H::hash_with(&[&(*pos).to_be_bytes(), element], strategy)
+    }
+
     fn node_digest_pair(
         &self,
         nodes: [(Position<F>, &Self::Digest, &Self::Digest); 2],
@@ -234,6 +255,15 @@ impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
 
     fn leaf_digest(&self, pos: Position<F>, element: &[u8]) -> Self::Digest {
         (**self).leaf_digest(pos, element)
+    }
+
+    fn leaf_digest_with(
+        &self,
+        pos: Position<F>,
+        element: &[u8],
+        strategy: &impl Strategy,
+    ) -> Self::Digest {
+        (**self).leaf_digest_with(pos, element, strategy)
     }
 
     fn digest(&self, data: &[u8]) -> Self::Digest {
@@ -292,11 +322,37 @@ mod tests {
         mmr::{Location, Position, StandardHasher as Standard},
     };
     use alloc::vec::Vec;
-    use commonware_cryptography::{Hasher as CHasher, Sha256, sha256};
+    use commonware_cryptography::{Blake3, Hasher as CHasher, Sha256, sha256};
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::NZUsize;
 
     #[test]
     fn test_leaf_digest_sha256() {
         test_leaf_digest::<Sha256>();
+    }
+
+    /// [`Hasher::leaf_digest_with`] matches [`Hasher::leaf_digest`] on the calling thread and
+    /// across workers, directly and by reference, including an element long enough for BLAKE3 to
+    /// split.
+    #[test]
+    fn test_leaf_digest_with_matches_leaf_digest() {
+        fn check<H: CHasher>() {
+            let hasher: Standard<H> = Standard::new(ForwardFold);
+            let parallel = Rayon::new(NZUsize!(4)).unwrap().manual();
+            let element: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
+            for len in [0, 32, element.len()] {
+                let (pos, element) = (Position::new(7), &element[..len]);
+                let expected = hasher.leaf_digest(pos, element);
+                assert_eq!(hasher.leaf_digest_with(pos, element, &Sequential), expected);
+                assert_eq!(hasher.leaf_digest_with(pos, element, &parallel), expected);
+                assert_eq!(
+                    Hasher::leaf_digest_with(&&hasher, pos, element, &parallel),
+                    expected
+                );
+            }
+        }
+        check::<Sha256>();
+        check::<Blake3>();
     }
 
     #[test]

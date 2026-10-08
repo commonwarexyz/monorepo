@@ -1215,6 +1215,7 @@ mod tests {
     use commonware_coding::{Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{Digest as DigestTrait, Digestible, Hasher};
     use commonware_math::algebra::Random;
+    use commonware_parallel::Strategy;
     use commonware_utils::{Array, NZU16, NZU64, Span, test_rng};
     use std::{marker::PhantomData, ops::Deref};
 
@@ -1241,7 +1242,7 @@ mod tests {
     impl<D: DigestTrait> Hasher for TestHasher<D> {
         type Digest = D;
 
-        fn hash(_parts: &[&[u8]]) -> Self::Digest {
+        fn hash_with(_parts: &[&[u8]], _strategy: &impl Strategy) -> Self::Digest {
             D::EMPTY
         }
 

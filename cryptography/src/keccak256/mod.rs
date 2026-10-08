@@ -24,6 +24,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
+use commonware_parallel::Strategy;
 use commonware_utils::{Array, Span, sequence::FixedBytes};
 use core::{
     cmp::Ordering,
@@ -48,7 +49,7 @@ pub struct Keccak256 {
 impl Hasher for Keccak256 {
     type Digest = Digest;
 
-    fn hash(parts: &[&[u8]]) -> Self::Digest {
+    fn hash_with(parts: &[&[u8]], _strategy: &impl Strategy) -> Self::Digest {
         let mut hasher = Self::default();
         for part in parts {
             hasher.update(part);
