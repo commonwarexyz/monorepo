@@ -326,7 +326,7 @@
 //! where [`Verifier::is_batchable()`](commonware_cryptography::certificate::Verifier::is_batchable) returns `true`
 //! (such as [scheme::ed25519], [scheme::bls12381_multisig] and [scheme::bls12381_threshold]), `simplex` lazily
 //! verifies messages (only when a quorum is met), enabling efficient batch verification. For schemes where
-//! `is_batchable()` returns `false` (such as [scheme::secp256r1]), signatures are verified eagerly as they
+//! `is_batchable()` returns `false` (such as [scheme::secp256r1] and [scheme::ml_dsa]), signatures are verified eagerly as they
 //! arrive since there is no batching benefit.
 //!
 //! When buffered votes of one kind reach quorum, the `Batcher` asks the scheme to construct an
@@ -388,6 +388,13 @@
 //! supported by commercial HSMs and hardware security modules. Unlike [commonware_cryptography::ed25519], Secp256r1 does not
 //! benefit from batch verification, so signatures are verified individually. Certificates grow linearly with quorum size
 //! (similar to ed25519).
+//!
+//! ### [scheme::ml_dsa]
+//!
+//! [commonware_cryptography::ml_dsa] signatures use ML-DSA-65 ([FIPS 204](https://csrc.nist.gov/pubs/fips/204/final)), a
+//! lattice-based scheme believed to resist quantum adversaries. Public keys are 1952 bytes and signatures 3309 bytes, there
+//! is no batch verification, and certificates grow linearly with quorum size (like ed25519 and secp256r1), so bandwidth
+//! and certificate size are the main costs of a post-quantum deployment.
 //!
 //! ### [scheme::bls12381_threshold]
 //!
@@ -674,7 +681,7 @@ mod tests {
                     standard as bls12381_threshold_std,
                     vrf::{self as bls12381_threshold_vrf, Seedable},
                 },
-                ed25519, secp256r1,
+                ed25519, ml_dsa, secp256r1,
             },
             types::{
                 Certificate, Finalization as TFinalization, Finalize as TFinalize,
@@ -731,6 +738,7 @@ mod tests {
             $cb!($($args)*, bls12381_multisig_min_pk, RoundRobin, bls12381_multisig::fixture::<MinPk, _>, RoundRobin::default());
             $cb!($($args)*, bls12381_multisig_min_sig, RoundRobin, bls12381_multisig::fixture::<MinSig, _>, RoundRobin::default());
             $cb!($($args)*, ed25519, RoundRobin, ed25519::fixture, RoundRobin::default());
+            $cb!($($args)*, ml_dsa, RoundRobin, ml_dsa::fixture, RoundRobin::default());
             $cb!($($args)*, secp256r1, RoundRobin, secp256r1::fixture, RoundRobin::default());
         };
     }

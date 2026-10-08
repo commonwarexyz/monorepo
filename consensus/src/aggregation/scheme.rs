@@ -10,6 +10,8 @@
 //!   no trusted setup required.
 //! - [`secp256r1`]: Attributable signatures with individual verification. HSM-friendly,
 //!   no trusted setup required.
+//! - [`ml_dsa`]: Attributable signatures with individual verification. Post-quantum secure
+//!   (FIPS 204), with large keys and signatures.
 //! - [`bls12381_multisig`]: Attributable signatures with aggregated verification.
 //!   Compact certificates while preserving attribution.
 //! - [`bls12381_threshold`]: Non-attributable threshold signatures. Constant-size
@@ -88,4 +90,19 @@ pub mod secp256r1 {
     use commonware_utils::N3f1;
 
     impl_certificate_secp256r1!(&'a Item<D>, Namespace, N3f1);
+}
+
+pub mod ml_dsa {
+    //! ML-DSA-65 implementation of the [`Scheme`](commonware_cryptography::certificate::Scheme) trait
+    //! for `aggregation`.
+    //!
+    //! This scheme is attributable: individual signatures can be safely exposed as
+    //! evidence of liveness or faults. It is post-quantum secure but produces large
+    //! signatures and has no batch verification.
+
+    use crate::aggregation::types::{Item, Namespace};
+    use commonware_cryptography::impl_certificate_ml_dsa;
+    use commonware_utils::N3f1;
+
+    impl_certificate_ml_dsa!(&'a Item<D>, Namespace, N3f1);
 }
