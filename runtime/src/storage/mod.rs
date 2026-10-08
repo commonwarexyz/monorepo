@@ -7,12 +7,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use cfg_if::cfg_if;
     use commonware_formatting::hex;
     use commonware_utils::Widen;
-    use std::{
-        fs::File,
-        io::{self, Read as _, Seek as _, SeekFrom, Write as _},
-        ops::RangeInclusive,
-        path::Path,
-    };
+    use std::{fs::File, io, ops::RangeInclusive, path::Path};
 
     mod pending;
     pub(crate) use pending::{Generation, Pending, Sender};
@@ -37,11 +32,105 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 }
                 Ok(())
             }
+
+            /// Read up to `len` bytes from the start of `file`, stopping early at end of file.
+            ///
+            /// The resolved header is held in memory, so the read asks the kernel not to keep it
+            /// in the page cache, retrying without the hint where that is unsupported.
+            fn read_header_bytes(file: &mut File, len: usize) -> io::Result<Vec<u8>> {
+                let mut buf = vec![0; len];
+                let mut flags = libc::RWF_DONTCACHE;
+                let mut done = 0;
+                while done < len {
+                    let rest = &mut buf[done..];
+                    let iovec = libc::iovec {
+                        iov_base: rest.as_mut_ptr().cast(),
+                        iov_len: rest.len(),
+                    };
+                    let offset = libc::off_t::try_from(done)
+                        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+                    // SAFETY: `file` owns a valid fd for this call. `iovec` describes `rest`, a
+                    // slice borrowed exclusively for the duration of the call.
+                    let ret =
+                        unsafe { libc::preadv2(file.as_raw_fd(), &iovec, 1, offset, flags) };
+                    if ret < 0 {
+                        let err = io::Error::last_os_error();
+                        if err.kind() == io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        if err.raw_os_error() == Some(libc::EOPNOTSUPP) && flags != 0 {
+                            flags = 0;
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                    if ret == 0 {
+                        break;
+                    }
+                    done += ret as usize;
+                }
+                buf.truncate(done);
+                Ok(buf)
+            }
+
+            /// Write `buf` at the start of `file`.
+            ///
+            /// The written header is held in memory, so the write asks the kernel not to keep it
+            /// in the page cache, retrying without the hint where that is unsupported.
+            fn write_header_bytes(file: &mut File, buf: &[u8]) -> io::Result<()> {
+                let mut flags = libc::RWF_DONTCACHE;
+                let mut done = 0;
+                while done < buf.len() {
+                    let rest = &buf[done..];
+                    let iovec = libc::iovec {
+                        iov_base: rest.as_ptr().cast_mut().cast(),
+                        iov_len: rest.len(),
+                    };
+                    let offset = libc::off_t::try_from(done)
+                        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+                    // SAFETY: `file` owns a valid fd for this call. `iovec` describes `rest`, a
+                    // slice that outlives the call and that the kernel only reads.
+                    let ret =
+                        unsafe { libc::pwritev2(file.as_raw_fd(), &iovec, 1, offset, flags) };
+                    if ret < 0 {
+                        let err = io::Error::last_os_error();
+                        if err.kind() == io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        if err.raw_os_error() == Some(libc::EOPNOTSUPP) && flags != 0 {
+                            flags = 0;
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                    if ret == 0 {
+                        return Err(io::ErrorKind::WriteZero.into());
+                    }
+                    done += ret as usize;
+                }
+                Ok(())
+            }
         } else {
+            use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+
             /// Make inherited partition entries durable before user code starts. Partition
             /// directories and existing blob contents are synchronized on their first access.
             pub(crate) fn sync(dir: &Path) -> io::Result<()> {
                 File::open(dir)?.sync_all()
+            }
+
+            /// Read up to `len` bytes from the start of `file`, stopping early at end of file.
+            fn read_header_bytes(file: &mut File, len: usize) -> io::Result<Vec<u8>> {
+                let mut buf = Vec::with_capacity(len);
+                file.seek(SeekFrom::Start(0))?;
+                file.take(Widen::widen(len)).read_to_end(&mut buf)?;
+                Ok(buf)
+            }
+
+            /// Write `buf` at the start of `file`.
+            fn write_header_bytes(file: &mut File, buf: &[u8]) -> io::Result<()> {
+                file.seek(SeekFrom::Start(0))?;
+                file.write_all(buf)
             }
         }
     }
@@ -75,12 +164,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         name: &[u8],
     ) -> Result<Option<(u64, BlobVersion, u64)>, Error> {
         let requested = Header::resolve_len(raw_len);
-        let mut raw = Vec::with_capacity(requested);
-        file.seek(SeekFrom::Start(0))
-            .map_err(|_| Error::ReadFailed)?;
-        file.take(Widen::widen(requested))
-            .read_to_end(&mut raw)
-            .map_err(|_| Error::ReadFailed)?;
+        let raw = read_header_bytes(file, requested).map_err(|_| Error::ReadFailed)?;
 
         // V0's prefix includes mutable payload that may shrink after metadata was read.
         // A complete prefix must retain the original length, which yields the logical size.
@@ -105,14 +189,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         // Clear any previous bytes so a partial write cannot splice them into a valid header.
         file.set_len(0)
             .map_err(|e| Error::BlobResizeFailed(partition.clone(), hex(name), e.into()))?;
-        file.seek(SeekFrom::Start(0)).map_err(|_| Error::WriteFailed)?;
         #[cfg(test)]
         if let Some(len) = generation.pending.test.fail_creation_after.lock().take() {
-            file.write_all(&region[..len.min(region.len())])
+            write_header_bytes(file, &region[..len.min(region.len())])
                 .map_err(|_| Error::WriteFailed)?;
             return Err(Error::Closed);
         }
-        file.write_all(&region).map_err(|_| Error::WriteFailed)?;
+        write_header_bytes(file, &region).map_err(|_| Error::WriteFailed)?;
         file.sync_all()
             .map_err(|e| Error::BlobSyncFailed(partition.clone(), hex(name), e.into()))?;
         Ok((0, blob_version, data_offset))

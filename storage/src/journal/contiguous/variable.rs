@@ -5961,12 +5961,12 @@ mod tests {
             let (metadata_reads, recovery_reads) = reads.split_at(2);
             assert_eq!(metadata_reads, [ReadOptions::DONT_CACHE; 2]);
 
-            // Data-page validation uses the default options so alignment can reuse those pages
-            // during recovery.
+            // The remaining reads probe each blob's last page at open. Recovery keeps that page in
+            // memory, so they request DONT_CACHE too.
             assert!(
                 recovery_reads
                     .iter()
-                    .all(|options| *options == ReadOptions::default())
+                    .all(|options| *options == ReadOptions::DONT_CACHE)
             );
 
             // Init should auto-repair: offsets journal pruned to match data blobs
