@@ -71,7 +71,7 @@
 //! messages with that participant identity in that view.
 
 use crate::{
-    simplex::elector::{self, Terms},
+    simplex::elector::{self, Input, Terms},
     types::{Participant, Round, TermLength, View},
 };
 use commonware_cryptography::certificate::Scheme;
@@ -329,7 +329,7 @@ where
         self.fallback.terms()
     }
 
-    fn elect(&self, round: Round, input: elector::Input<'_, S, Self>) -> Participant {
+    fn elect(&self, round: Round, input: Input<'_, S, Self>) -> Participant {
         let idx = term_index(round.view(), self.fallback.terms().length());
         if let Some(&leader) = self.round_leaders.get(idx) {
             return leader;
@@ -1269,7 +1269,7 @@ mod tests {
         types::{Epoch, ViewDelta},
     };
     use commonware_cryptography::{Sha256, Signer, ed25519::PrivateKey};
-    use commonware_utils::{NZU32, TestRng, ordered::Set, test_rng};
+    use commonware_utils::{NZU32, TestRng, Widen, ordered::Set, test_rng};
     use std::{collections::HashSet, time::Duration};
 
     fn round(_: usize, leader: usize, primary_mask: u64, secondary_mask: u64) -> RoundScenario {
@@ -2242,7 +2242,7 @@ mod tests {
         );
 
         for (round_idx, round_scenario) in case.scenario.rounds().iter().enumerate() {
-            let round = Round::new(Epoch::new(0), View::new((round_idx as u64) + 1));
+            let round = Round::new(Epoch::new(0), View::new(Widen::widen(round_idx) + 1));
             assert_eq!(
                 twins.elect(round, ()),
                 Participant::from_usize(round_scenario.leader()),
@@ -2250,7 +2250,7 @@ mod tests {
             );
         }
 
-        for view in (framework.rounds as u64 + 1)..=20 {
+        for view in (Widen::widen(framework.rounds) + 1)..=20 {
             let round = Round::new(Epoch::new(333), View::new(view));
             assert_eq!(twins.elect(round, ()), fallback.elect(round, ()));
         }

@@ -280,17 +280,17 @@
 //! Consensus discards pending, waiting, held, and closed requests on view exit. When a replacement
 //! parent supersedes their ancestry, consensus discards them and requests a proposal on the
 //! replacement once the rules above permit it. Restart also discards pending requests and held
-//! candidates. Other validators require explicitly certified ancestry before verifying a term-start
-//! proposal, and so before voting to notarize it.
+//! candidates.
 //!
 //! Marshal applications opt in through [`crate::Application::handoff_policy`], which returns
 //! [`crate::HandoffPolicy::Publish`], [`crate::HandoffPolicy::Stage`], or the default
 //! [`crate::HandoffPolicy::Wait`]. Stateful Glue exposes the same policy. The application makes a
-//! synchronous decision from available information. It cannot revoke this decision. `Publish` and
-//! `Stage` use the ordinary construction path, which may reuse an existing block without calling
-//! the application builder. With `Stage`, construction overlaps parent certification while
-//! consensus holds publication. An application can choose it for any handoff whose outgoing
-//! leader it does not trust.
+//! synchronous decision from available information. It cannot revoke this decision.
+//!
+//! `Publish` and `Stage` use the ordinary construction path, which may reuse an existing block
+//! without calling the application builder. With `Stage`, construction overlaps parent
+//! certification while consensus holds publication. An application can choose it for any handoff
+//! whose outgoing leader it does not trust.
 //!
 //! With [`crate::Handoff::Publish`], rotating leaders can pipeline every view. The leader
 //! distributes each proposal in parallel with its parent's votes, allowing network-bound view time
@@ -299,62 +299,11 @@
 //! trip earlier.
 //!
 //! Publication before certification trusts the outgoing leader not to equivocate and to complete
-//! its term. The early proposal becomes usable only if every uncertified view it builds on
-//! certifies, and with stable leaders that can include several views of the outgoing term. If one
-//! of them never certifies, validators cannot use the proposal, and the usual timeout path
-//! nullifies the incoming term.
-//!
-//! ### Handoff Metrics
-//!
-//! `handoff_events` counts lifecycle events, and one request can count several. `Requested` counts
-//! handoff requests to the automaton, not unique views. `WaitReturned` counts
-//! [`crate::Handoff::Wait`] responses, including default ones. Consensus can still abandon a
-//! waiting request later. `CandidateReturned` counts candidates returned by the automaton, and
-//! `Held` counts candidates retained for parent certification. Releasing a held candidate does not
-//! count it again.
-//!
-//! Publication events count local relay attempts after proposal acceptance, classified by whether
-//! the exact parent had certified or finalized at that point. They do not imply network delivery.
-//!
-//! `handoff_abandoned` counts handoff requests or candidates that consensus discards before
-//! publication, and pending builds that it cancels, by reason:
-//!
-//! * `ViewExit`: the request's view ended.
-//! * `AncestrySuperseded`: the captured ancestry became invalid while a replacement parent was
-//!   selectable, so consensus can request a proposal on the replacement instead.
-//! * `ParentNullify`: a pending build was cancelled after a local nullify vote for the view the
-//!   leader waits in, at or below the parent.
-//! * `AncestryInvalidated`: a pending build was cancelled because its captured ancestry became
-//!   invalid, as after a nullification in the parent's term or a failed certification, before a
-//!   replacement parent was selectable.
-//! * `ViewNullify`: the parent of a waiting request certified after a local nullify vote for
-//!   the request's view.
-//! * `ResponseClosed`: the parent of a closed response certified or finalized.
-//! * `IneligibleAtRecording`: a returned candidate could not be recorded for its view.
-//!
-//! A cancelled build leaves its request waiting, so the request counts again if consensus later
-//! discards it. A closed response counts under view exit or superseded ancestry instead if one of
-//! those discards it first.
-//!
-//! Neither family tracks the ordinary request that replaces a waiting handoff, losses across
-//! restart, or whether a candidate was newly built or reused.
-//!
-//! ### Latency Metrics
-//!
-//! `notarization_latency` and `finalization_latency` measure leader-local time from accepted
-//! local proposal recording to local certificate readiness, falling back to first local view
-//! entry when no local proposal was recorded. Holding a prepared candidate happens before
-//! proposal recording, so that wait is excluded. Early publication can record the proposal
-//! before parent certification and include the remaining wait in these metrics.
-//!
-//! `notarization_latency_from_view_entry` and `finalization_latency_from_view_entry` measure from
-//! first local view entry, regardless of proposal timing, and omit samples when no entry was
-//! recorded.
-//!
-//! Both metric pairs sample only the view's leader at the same certificate-ready event, before the
-//! journal sync and network publication of that certificate. Timestamps are process-local and are
-//! not restored on restart. These durations do not measure transaction latency or total speculative
-//! work.
+//! its term. Other validators require explicitly certified ancestry before verifying a term-start
+//! proposal, and so before voting to notarize it. The early proposal becomes usable only if every
+//! uncertified view it builds on certifies, and with stable leaders that can include several views
+//! of the outgoing term. If one of them never certifies, validators cannot use the proposal, and
+//! the usual timeout path nullifies the incoming term.
 //!
 //! ### Optimistic Finality
 //!
@@ -478,6 +427,65 @@
 //! the request. The requester records that evidence and retries without faulting the peer. A
 //! delivered notarization completes its fetch on arrival, because certification judges evidence
 //! already in hand. Matching evidence or finalization retires pending work.
+//!
+//! ## Metrics
+//!
+//! ### Handoff Metrics
+//!
+//! `handoff_events` counts lifecycle events by label:
+//!
+//! * `Requested`: a handoff request reached the automaton. It counts requests, not unique views.
+//! * `WaitReturned`: the automaton returned [`crate::Handoff::Wait`], including default
+//!   responses. Consensus can still abandon a waiting request later.
+//! * `CandidateReturned`: the automaton returned a candidate.
+//! * `Held`: consensus retained a candidate for parent certification. Releasing a held candidate
+//!   does not count it again.
+//! * `PublishedBeforeCertification`: consensus attempted a local relay after proposal acceptance,
+//!   before the exact parent had certified or finalized.
+//! * `PublishedAfterCertification`: consensus attempted a local relay after proposal acceptance,
+//!   once the exact parent had certified or finalized.
+//!
+//! One request can count several events. Publication events do not imply network delivery.
+//!
+//! `handoff_abandoned` counts handoff requests or candidates that consensus discards before
+//! publication, and pending builds that it cancels, by reason:
+//!
+//! * `ViewExit`: the request's view ended.
+//! * `AncestrySuperseded`: the captured ancestry became invalid while a replacement parent was
+//!   selectable, so consensus can request a proposal on the replacement instead.
+//! * `ParentNullify`: a pending build was cancelled after a local nullify vote for the view the
+//!   leader waits in, at or below the parent.
+//! * `AncestryInvalidated`: a pending build was cancelled because its captured ancestry became
+//!   invalid, as after a nullification in the parent's term or a failed certification, before a
+//!   replacement parent was selectable.
+//! * `ViewNullify`: the parent of a waiting request certified after a local nullify vote for
+//!   the request's view.
+//! * `ResponseClosed`: the parent of a closed response certified or finalized.
+//! * `IneligibleAtRecording`: a returned candidate could not be recorded for its view.
+//!
+//! A cancelled build leaves its request waiting, so the request counts again if consensus later
+//! discards it. A closed response counts under view exit or superseded ancestry instead if one of
+//! those discards it first.
+//!
+//! Neither family tracks the ordinary request that replaces a waiting handoff, losses across
+//! restart, or whether a candidate was newly built or reused.
+//!
+//! ### Latency Metrics
+//!
+//! `notarization_latency` and `finalization_latency` measure leader-local time from accepted
+//! local proposal recording to local certificate readiness, falling back to first local view
+//! entry when no local proposal was recorded. Holding a prepared candidate happens before
+//! proposal recording, so that wait is excluded. Early publication can record the proposal
+//! before parent certification and include the remaining wait in these metrics.
+//!
+//! `notarization_latency_from_view_entry` and `finalization_latency_from_view_entry` measure from
+//! first local view entry, regardless of proposal timing, and omit samples when no entry was
+//! recorded.
+//!
+//! Both metric pairs sample only the view's leader at the same certificate-ready event, before the
+//! journal sync and network publication of that certificate. Timestamps are process-local and are
+//! not restored on restart. These durations do not measure transaction latency or total speculative
+//! work.
 //!
 //! ## Pluggable Hashing and Cryptography
 //!
@@ -777,9 +785,12 @@ pub(crate) fn quorum(n: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::{
-        HandoffPolicy, Monitor, Viewable,
+        Handoff, HandoffPolicy, Monitor, Viewable,
         simplex::{
-            elector::{self, Config as _, Elector as _, Random, RandomVersion, RoundRobin},
+            elector::{
+                Config as _, Elector, Random, RandomVersion, RoundRobin, RoundRobinElector,
+                Scheduled,
+            },
             mocks::{
                 scheme as scheme_mocks,
                 twins::{self, Elector as TwinsElector},
@@ -821,7 +832,7 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng,
+        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, Widen,
         channel::{fallible::OneshotExt as _, oneshot},
         non_empty,
         ordered::Set,
@@ -836,7 +847,10 @@ mod tests {
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
     use tracing::{debug, info, warn};
@@ -1703,7 +1717,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         RoundRobin: elector::Config<S>,
-        <RoundRobin as elector::Config<S>>::Elector: elector::Elector<S, Mode = elector::Scheduled>,
+        <RoundRobin as elector::Config<S>>::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 5;
         let required_containers = View::new(50);
@@ -1850,22 +1864,28 @@ mod tests {
         Sha256Digest,
     >;
 
+    /// Leader timeout of every [`setup_round_robin_cluster`] validator.
+    const CLUSTER_LEADER_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+    /// Certification timeout of every [`setup_round_robin_cluster`] validator.
+    const CLUSTER_CERTIFICATION_TIMEOUT: Duration = Duration::from_millis(3_500);
+
     /// Starts a fully linked five-validator ed25519 round-robin cluster and returns each
     /// validator's reporter, the view-1 leader's index, and the network oracle.
     ///
-    /// With `accept_handoffs`, every application permits early publication of handoff
-    /// candidates. Otherwise, applications wait for parent certification.
+    /// Every application uses `handoff` to answer handoff proposal requests.
     ///
-    /// The leader and certification timeouts are fixed for every caller. Runs stay free of
-    /// nullifications only while the link latency stays below the leader timeout, since a view's
-    /// proposal arrives about one link latency after the view starts.
+    /// Every caller uses [`CLUSTER_LEADER_TIMEOUT`] and [`CLUSTER_CERTIFICATION_TIMEOUT`]. Runs
+    /// stay free of nullifications only while the link latency stays below
+    /// [`CLUSTER_LEADER_TIMEOUT`], since a view's proposal arrives about one link latency after
+    /// the view starts.
     async fn setup_round_robin_cluster(
         context: &mut deterministic::Context,
         namespace: &[u8],
         link: Link,
         elector: RoundRobin<Sha256>,
         propose_latency: (f64, f64),
-        accept_handoffs: bool,
+        handoff: HandoffPolicy,
     ) -> (
         Vec<RoundRobinReporter>,
         usize,
@@ -1909,11 +1929,7 @@ mod tests {
             };
             let (mut actor, application) =
                 mocks::application::Application::new(context.child("application"), application_cfg);
-            actor.set_handoff(if accept_handoffs {
-                HandoffPolicy::Publish
-            } else {
-                HandoffPolicy::Wait
-            });
+            actor.set_handoff(handoff);
             actor.start();
 
             let blocker = oracle.control(validator.clone());
@@ -1929,8 +1945,8 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 epoch,
                 floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
-                leader_timeout: Duration::from_millis(1_500),
-                certification_timeout: Duration::from_millis(3_500),
+                leader_timeout: CLUSTER_LEADER_TIMEOUT,
+                certification_timeout: CLUSTER_CERTIFICATION_TIMEOUT,
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: ViewDelta::new(10),
@@ -1952,8 +1968,7 @@ mod tests {
         }
 
         let participants_set = participants.clone().try_into().unwrap();
-        let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
-            elector.build(&participants_set);
+        let built_elector: RoundRobinElector<ed25519::Scheme> = elector.build(&participants_set);
         let leader_idx = usize::from(built_elector.elect(Round::new(epoch, View::new(1)), ()));
 
         (reporters, leader_idx, oracle)
@@ -1979,7 +1994,7 @@ mod tests {
                     ViewDelta::new(128),
                 ),
                 /* propose_latency */ (10.0, 0.0),
-                /* accept_handoffs */ false,
+                HandoffPolicy::Wait,
             )
             .await;
 
@@ -2031,14 +2046,13 @@ mod tests {
                     jitter: Duration::from_millis(0),
                     success_rate: probability!(1.0),
                 },
-                RoundRobin::<Sha256>::default()
-                    .with_term(
-                        term_length,
-                        /* stall_timeout */ Duration::from_secs(20),
-                        ViewDelta::new(4),
+                RoundRobin::<Sha256>::default().with_term(
+                    term_length,
+                    /* stall_timeout */ Duration::from_secs(20),
+                    ViewDelta::new(4),
                 ),
                 /* propose_latency */ (10.0, 0.0),
-                /* accept_handoffs */ true,
+                HandoffPolicy::Publish,
             )
             .await;
 
@@ -2061,7 +2075,8 @@ mod tests {
                 let gap = window[1].duration_since(window[0]).unwrap_or_default();
                 assert!(
                     gap < 2 * link_latency,
-                    "expected pipelined boundary view {view} within two link latencies of its parent, got {gap:?}"
+                    "expected pipelined boundary view {view} within two link latencies of its \
+                     parent, got {gap:?}"
                 );
             }
 
@@ -2094,7 +2109,7 @@ mod tests {
                 },
                 RoundRobin::<Sha256>::default(),
                 /* propose_latency */ (10.0, 0.0),
-                /* accept_handoffs */ true,
+                HandoffPolicy::Publish,
             )
             .await;
 
@@ -2164,7 +2179,7 @@ mod tests {
                 ViewDelta::new(1),
             );
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
-            let schedule: elector::RoundRobinElector<ed25519::Scheme> =
+            let schedule: RoundRobinElector<ed25519::Scheme> =
                 elector.clone().build(&participant_set);
             let leader_of =
                 |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
@@ -2174,7 +2189,7 @@ mod tests {
 
             // The incoming leader's application holds its view 3 handoff build and leaves
             // the certification of view 2 to this test.
-            let build: Arc<Mutex<Option<oneshot::Sender<crate::Handoff<D>>>>> = Arc::default();
+            let build: Arc<Mutex<Option<oneshot::Sender<Handoff<D>>>>> = Arc::default();
             let certification: Arc<Mutex<Option<oneshot::Sender<bool>>>> = Arc::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
@@ -2307,7 +2322,7 @@ mod tests {
             let (reporters, leader_idx, oracle) = setup_round_robin_cluster(
                 &mut context,
                 b"consensus_stable_leader_full_term_no_nullify",
-                // 1s latency shrinks the 1.5s leader timeout below a
+                // 1s latency shrinks `CLUSTER_LEADER_TIMEOUT` below a
                 // certification round-trip: staying nullification-free (the
                 // assertion below) is only possible via optimistic pipelining.
                 Link {
@@ -2321,7 +2336,7 @@ mod tests {
                     ViewDelta::new(100),
                 ),
                 /* propose_latency */ (1.0, 0.0),
-                /* accept_handoffs */ false,
+                HandoffPolicy::Wait,
             )
             .await;
 
@@ -6854,7 +6869,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
-        L::Elector: elector::Elector<S, Mode = elector::Scheduled>,
+        L::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -7065,7 +7080,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
-        L::Elector: elector::Elector<S, Mode = elector::Scheduled>,
+        L::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -7281,7 +7296,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
-        L::Elector: elector::Elector<S, Mode = elector::Scheduled>,
+        L::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -7521,7 +7536,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
-        L::Elector: elector::Elector<S, Mode = elector::Scheduled>,
+        L::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -8411,21 +8426,20 @@ mod tests {
 
     /// Makes an application return handoff candidates with early publication during the adversarial
     /// prefix and wait for parent certification afterward, so early publication evidence comes only
-    /// from prefix views. `side` selects the counter in `prefix_handoffs` that records returned
-    /// prefix candidates: 0 for honest applications and 1 for twin applications.
+    /// from prefix views. `returned` counts the candidates the application returns during the
+    /// prefix.
     fn configure_twins_handoff(
         actor: &mut mocks::application::Application<deterministic::Context, Sha256, PublicKey>,
         prefix_end: View,
-        prefix_handoffs: Arc<Mutex<[usize; 2]>>,
-        side: usize,
+        returned: Arc<AtomicUsize>,
     ) {
         actor.set_handoff(HandoffPolicy::Publish);
         actor.set_handoff_controller(Box::new(move |round, proposal, response| {
             if round.view() <= prefix_end {
-                prefix_handoffs.lock()[side] += 1;
+                returned.fetch_add(1, Ordering::Relaxed);
                 response.send_lossy(proposal);
             } else {
-                response.send_lossy(crate::Handoff::Wait);
+                response.send_lossy(Handoff::Wait);
             }
         }));
     }
@@ -8441,7 +8455,8 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        let prefix_handoffs = Arc::new(Mutex::new([0usize; 2]));
+        let honest_handoffs = Arc::new(AtomicUsize::new(0));
+        let twin_handoffs = Arc::new(AtomicUsize::new(0));
         let early_publications = Arc::new(Mutex::new(0u64));
         let n = campaign.n;
         let faults = N3f1::max_faults(n) as usize;
@@ -8474,7 +8489,8 @@ mod tests {
             let link = link.clone();
             let trailing_finalizations = campaign.trailing_finalizations;
             let elector = elector.clone();
-            let prefix_handoffs = prefix_handoffs.clone();
+            let honest_handoffs = honest_handoffs.clone();
+            let twin_handoffs = twin_handoffs.clone();
             let early_publications = early_publications.clone();
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
@@ -8513,7 +8529,7 @@ mod tests {
 
                 // Each scripted round drives one full leader term, so the
                 // adversarial prefix spans `rounds * term_length` views.
-                let prefix_end = View::new(scenario.rounds().len() as u64 * term_length.get());
+                let prefix_end = View::new(Widen::widen(scenario.rounds().len()) * term_length.get());
                 let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
                 let mut reporters = Vec::new();
                 let mut engine_handlers = Vec::new();
@@ -8635,7 +8651,7 @@ mod tests {
                             application_cfg,
                         );
                         if campaign.handoffs {
-                            configure_twins_handoff(&mut actor, prefix_end, prefix_handoffs.clone(), 1);
+                            configure_twins_handoff(&mut actor, prefix_end, twin_handoffs.clone());
                         }
                         actor.start();
 
@@ -8710,7 +8726,7 @@ mod tests {
                         application_cfg,
                     );
                     if campaign.handoffs {
-                        configure_twins_handoff(&mut actor, prefix_end, prefix_handoffs.clone(), 0);
+                        configure_twins_handoff(&mut actor, prefix_end, honest_handoffs.clone());
                     }
                     actor.start();
 
@@ -8892,13 +8908,12 @@ mod tests {
                 *early_publications.lock() > 0,
                 "campaign must publish prefix handoffs before certification"
             );
-            let counts = prefix_handoffs.lock();
             assert!(
-                counts[0] > 0,
+                honest_handoffs.load(Ordering::Relaxed) > 0,
                 "honest apps must return handoffs during the adversarial prefix"
             );
             assert!(
-                counts[1] > 0,
+                twin_handoffs.load(Ordering::Relaxed) > 0,
                 "twin apps must return handoffs during the adversarial prefix"
             );
         }

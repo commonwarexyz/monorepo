@@ -596,7 +596,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{Faults, N3f1, NZU32, TryFromIterator, non_empty, test_rng};
+    use commonware_utils::{Faults, N3f1, NZU32, TryFromIterator, Widen, non_empty, test_rng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -629,7 +629,7 @@ mod tests {
 
         // Run through 3 * n views, record the sequence of leaders
         let mut leaders = Vec::new();
-        for view in 1..=(3 * n as u64) {
+        for view in 1..=(3 * u64::from(n)) {
             let round = Round::new(epoch, View::new(view));
             leaders.push(elector.elect(round, ()));
         }
@@ -650,7 +650,7 @@ mod tests {
             RoundRobin::<Sha256>::default().build(&participants);
 
         // Record leader for view 1 of epochs 0..n
-        let leaders: Vec<_> = (0..n as u64)
+        let leaders: Vec<_> = (0..Widen::widen(n))
             .map(|e| {
                 let round = Round::new(Epoch::new(e), View::new(1));
                 elector.elect(round, ())

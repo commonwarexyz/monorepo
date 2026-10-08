@@ -92,6 +92,11 @@ pub(super) enum ProposalRequest<D: Digest, P: PublicKey> {
 }
 
 impl<D: Digest, P: PublicKey> ProposalRequest<D, P> {
+    /// Returns whether this request prepares a pipelined handoff.
+    pub(super) const fn is_handoff(&self) -> bool {
+        matches!(self, Self::Handoff(_))
+    }
+
     /// Returns the proposal context.
     pub(super) const fn context(&self) -> &Context<D, P> {
         match self {
@@ -1890,7 +1895,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_utils::{NZU32, futures::AbortablePool, non_empty};
-    use std::time::Duration;
+    use std::{marker::PhantomData, time::Duration};
 
     fn round_robin<S: certificate::Scheme>(scheme: &S) -> RoundRobinElector<S> {
         <RoundRobin>::default().build(scheme.participants())
@@ -2179,7 +2184,7 @@ mod tests {
     #[derive(Clone)]
     struct RequireCertificateElector<S> {
         term_length: TermLength,
-        _phantom: std::marker::PhantomData<S>,
+        _phantom: PhantomData<S>,
     }
 
     impl<S: certificate::Scheme> Elector<S> for RequireCertificateElector<S> {
@@ -3852,7 +3857,7 @@ mod tests {
                     scheme: schemes[1].clone(),
                     elector: RequireCertificateElector {
                         term_length: TermLength::new(NZU32!(5)),
-                        _phantom: std::marker::PhantomData,
+                        _phantom: PhantomData,
                     },
                     epoch: Epoch::new(9),
                     view_retention: ViewDelta::new(10),
@@ -4315,7 +4320,7 @@ mod tests {
                     scheme: verifier,
                     elector: RequireCertificateElector {
                         term_length: TermLength::new(NZU32!(5)),
-                        _phantom: std::marker::PhantomData,
+                        _phantom: PhantomData,
                     },
                     epoch: Epoch::new(99),
                     view_retention: ViewDelta::new(10),
@@ -7449,7 +7454,7 @@ mod tests {
             let request = state
                 .try_propose()
                 .expect("recovered tip should allow a handoff");
-            assert!(matches!(request, ProposalRequest::Handoff(_)));
+            assert!(request.is_handoff());
             let handoff = request.into_context();
             assert_eq!(handoff.round.view(), View::new(11));
             assert_eq!(handoff.parent, (View::new(10), tip.payload));
@@ -7632,10 +7637,16 @@ mod tests {
         });
     }
 
+    /// Which message reaches the follower first.
+    enum Arrival {
+        Proposal,
+        Notarization,
+    }
+
     /// A validator other than the incoming leader verifies the pipelined proposal only
     /// once the tip certifies, whether the proposal arrives before or after the tip's
     /// notarization.
-    fn peer_verification_stays_explicit(proposal_first: bool) {
+    fn peer_verification_stays_explicit(arrival: Arrival) {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (
@@ -7656,13 +7667,16 @@ mod tests {
             // requests the tip's certificate from any peer before verifying.
             let tip_notarization = build_notarization(&verifier, &schemes, &tip);
             let child = fetch_proposal(6, 5, 66);
-            if proposal_first {
-                assert!(state.set_proposal(View::new(6), child.clone()));
-                assert!(matches!(state.try_verify(), Verify::Wait));
-                assert!(state.add_notarization(tip_notarization).0);
-            } else {
-                assert!(state.add_notarization(tip_notarization).0);
-                assert!(state.set_proposal(View::new(6), child.clone()));
+            match arrival {
+                Arrival::Proposal => {
+                    assert!(state.set_proposal(View::new(6), child.clone()));
+                    assert!(matches!(state.try_verify(), Verify::Wait));
+                    assert!(state.add_notarization(tip_notarization).0);
+                }
+                Arrival::Notarization => {
+                    assert!(state.add_notarization(tip_notarization).0);
+                    assert!(state.set_proposal(View::new(6), child.clone()));
+                }
             }
             assert!(matches!(
                 state.try_verify(),
@@ -7688,12 +7702,12 @@ mod tests {
 
     #[test]
     fn pipelined_handoff_keeps_peer_verification_explicit() {
-        peer_verification_stays_explicit(false);
+        peer_verification_stays_explicit(Arrival::Notarization);
     }
 
     #[test]
     fn pipelined_handoff_keeps_early_peer_proposal_explicit() {
-        peer_verification_stays_explicit(true);
+        peer_verification_stays_explicit(Arrival::Proposal);
     }
 
     #[test]

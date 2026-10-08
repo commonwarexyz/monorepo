@@ -10,7 +10,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use std::{marker::PhantomData, sync::Arc};
+use std::{future::pending, marker::PhantomData, sync::Arc};
 
 /// A mock application that implements `Application` for testing.
 ///
@@ -121,7 +121,7 @@ where
             // Cancelling this future drops the sender, which errors the receiver.
             let _dropped = gate.dropped;
             gate.started.send_lossy(());
-            std::future::pending::<()>().await;
+            pending::<()>().await;
         }
         self.propose_result.clone()
     }

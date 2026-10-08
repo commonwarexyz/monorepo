@@ -1681,7 +1681,7 @@ mod tests {
             // The proposer has already verified the outgoing term's earlier block.
             let mut verifier = mailbox.clone();
             let mut verify_outgoing = Box::pin(verifier.verify(
-                (context.child("verify_outgoing"), outgoing.context()),
+                (context.child("outgoing"), outgoing.context()),
                 ancestry::from_iter([Arc::new(outgoing.clone()), Arc::new(genesis.clone())]),
             ));
             assert!(poll!(&mut verify_outgoing).is_pending());

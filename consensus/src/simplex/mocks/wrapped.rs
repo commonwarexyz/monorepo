@@ -1,5 +1,5 @@
 use crate::{
-    simplex::elector::{self, Terms},
+    simplex::elector::{self, Input, Terms},
     types::Round,
 };
 use bytes::Bytes;
@@ -141,7 +141,7 @@ where
         self.inner.terms()
     }
 
-    fn elect(&self, round: Round, input: elector::Input<'_, Scheme<S>, Self>) -> Participant {
+    fn elect(&self, round: Round, input: Input<'_, Scheme<S>, Self>) -> Participant {
         self.inner.elect(round, input)
     }
 }

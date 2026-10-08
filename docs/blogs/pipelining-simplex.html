@@ -102,8 +102,7 @@ Chou</a></div>
         application also permits early publication, rotating leaders can
         cut network-bound view time from two network trips to one.
         Applications opt in, and the default still waits for
-        certification. Publishing a proposal early trusts the outgoing
-        leader not to equivocate and to complete its term.</em></p>
+        certification.</em></p>
         <p>Simplex can now produce blocks as fast as its leader can
         build them.</p>
         <p>Today, we’re introducing <a
@@ -247,16 +246,16 @@ Chou</a></div>
         the term cannot be used. Validators can then vote to abandon the
         rest of the term through Simplex’s normal nullification
         path.</p>
-        <p>The term boundary is also a leader handoff. By default,
-        optimistic work stops there, and the first view of a new term
-        must start from certified ancestry. A <em>pipelined handoff</em>
-        lets the incoming leader prepare its proposal before the parent
-        certifies. The application may also permit early publication,
-        which trusts the outgoing leader not to equivocate and to
-        complete its term. Rotating leaders benefit most, since every
-        view is a handoff. Together, these rules let Simplex views
-        pipeline without changing the evidence required for
+        <p>The term boundary is also a leader handoff, so by default
+        optimistic work stops there. The first view of a new term must
+        start from certified ancestry. Together, these rules let Simplex
+        views pipeline without changing the evidence required for
         finalization.</p>
+        <p>A <em>pipelined handoff</em> lets the incoming leader prepare
+        its proposal before the parent certifies. The application may
+        also permit early publication, which trusts the outgoing leader
+        not to equivocate and to complete its term. Rotating leaders
+        benefit most, since every view is a handoff.</p>
         <p>The consensus configuration also sets a bound on how many
         views validators can work ahead at once. A value of zero
         disables Optimistic Validation. A larger bound can keep the

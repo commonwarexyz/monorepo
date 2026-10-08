@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Viewable, marshal::ancestry::Ancestry};
+use crate::{Application, Viewable, marshal::ancestry::Ancestry};
 use commonware_p2p::Receiver;
 
 /// Which of the two concurrent steps completes first.
@@ -22,7 +22,7 @@ struct PipelineApp {
     block: B,
 }
 
-impl crate::Application<Runtime> for PipelineApp {
+impl Application<Runtime> for PipelineApp {
     type Block = B;
     type Context = Ctx;
     type SigningScheme = S;
@@ -294,11 +294,11 @@ fn retained_pipeline_handoff(first: First) {
 }
 
 #[test_traced("WARN")]
-fn test_pipeline_handoff_retains_completed_build_until_parent_certification() {
+fn test_pipelined_handoff_retains_completed_build_until_parent_certification() {
     retained_pipeline_handoff(First::Build);
 }
 
 #[test_traced("WARN")]
-fn test_pipeline_handoff_retains_build_across_parent_certification() {
+fn test_pipelined_handoff_retains_build_across_parent_certification() {
     retained_pipeline_handoff(First::Certification);
 }

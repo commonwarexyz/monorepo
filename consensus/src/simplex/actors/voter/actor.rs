@@ -40,7 +40,10 @@ use commonware_utils::{
     channel::oneshot,
     futures::{AbortablePool, rebind},
 };
-use core::{future::Future, panic};
+use core::{
+    future::{Future, pending},
+    panic,
+};
 use rand_core::CryptoRng;
 use std::{
     num::NonZeroUsize,
@@ -444,7 +447,7 @@ impl<
         let state = async {
             debug!(
                 round = ?context.round,
-                handoff = matches!(&request, ProposalRequest::Handoff(_)),
+                handoff = request.is_handoff(),
                 "requested proposal from automaton"
             );
             match &request {
@@ -522,7 +525,7 @@ impl<
                 None
             };
             if let Some(reason) = reason {
-                if matches!(&request.0, ProposalRequest::Handoff(_)) {
+                if request.0.is_handoff() {
                     self.record_handoff_abandoned(reason);
                 }
                 *pending_propose = None;
@@ -759,7 +762,7 @@ impl<
         proposed: Result<D, oneshot::error::RecvError>,
     ) -> Option<View> {
         // Try to use result
-        let is_handoff = matches!(&request, ProposalRequest::Handoff(_));
+        let is_handoff = request.is_handoff();
         let context = request.into_context();
         let proposed = match proposed {
             Ok(proposed) => proposed,
@@ -1274,7 +1277,7 @@ impl<
                         Some(Request(_, _, ProposalState::Held(payload))) if ready => {
                             Ok(ProposalResponse::Proposed(*payload))
                         }
-                        _ => core::future::pending().await,
+                        _ => pending().await,
                     };
                     let Request(request, span, _) =
                         pending_propose.take().expect("request must exist");
@@ -1332,7 +1335,7 @@ impl<
                         self.record_handoff_event(HandoffEventKind::CandidateReturned);
                         Ok(payload)
                     }
-                    Err(_) if matches!(&request, ProposalRequest::Handoff(_)) => {
+                    Err(_) if request.is_handoff() => {
                         pending_propose = Some(Request(request, span, ProposalState::Closed));
                         continue;
                     }

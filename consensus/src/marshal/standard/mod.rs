@@ -3618,12 +3618,8 @@ mod tests {
 
                 // A failed build closes the handoff response as it closes the ordinary one.
                 let failing_app = MockVerifyingApp::new().with_handoff(HandoffPolicy::Stage);
-                let mut failing = Wrapper::new(
-                    kind,
-                    context.child("failed_handoff"),
-                    failing_app,
-                    marshal.clone(),
-                );
+                let mut failing =
+                    Wrapper::new(kind, context.child("failed"), failing_app, marshal.clone());
                 let handoff_rx = failing.handoff(non_boundary_context.clone()).await;
                 assert!(
                     handoff_rx.await.is_err(),
@@ -3634,12 +3630,8 @@ mod tests {
                 let (gated_app, started, dropped) = MockVerifyingApp::new()
                     .with_handoff(HandoffPolicy::Publish)
                     .with_proposal_gate();
-                let mut gated = Wrapper::new(
-                    kind,
-                    context.child("cancelled_handoff"),
-                    gated_app,
-                    marshal.clone(),
-                );
+                let mut gated =
+                    Wrapper::new(kind, context.child("cancelled"), gated_app, marshal.clone());
                 let response = gated.handoff(non_boundary_context.clone()).await;
                 started.await.expect("handoff build should start");
                 drop(response);
@@ -3714,7 +3706,7 @@ mod tests {
                 let pipeline_app = MockVerifyingApp::new().with_handoff(HandoffPolicy::Publish);
                 let mut pipeline = Wrapper::new(
                     kind,
-                    context.child("pipeline_wrapper"),
+                    context.child("pipeline"),
                     pipeline_app,
                     marshal.clone(),
                 );
