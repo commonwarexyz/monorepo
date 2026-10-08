@@ -21,7 +21,6 @@ env:
 
 jobs:
   Build:
-    name: Build
     runs-on: ${{ inputs.os }}
     timeout-minutes: 180
     steps:
@@ -59,7 +58,7 @@ jobs:
     name: "Run (${{ matrix.partition }}/20)"
     needs: Build
     runs-on: ${{ inputs.os }}
-    timeout-minutes: 180
+    timeout-minutes: 45
     strategy:
       matrix:
         partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]

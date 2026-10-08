@@ -48,12 +48,6 @@ jobs:
     needs: Tests
     if: always()
     steps:
-      - name: Checkout swap action
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          sparse-checkout: .github/actions/swap
-      - name: Configure swap
-        uses: ./.github/actions/swap
       - name: Check test results
         run: |
           if [ "${{ needs.Tests.result }}" != "success" ]; then
