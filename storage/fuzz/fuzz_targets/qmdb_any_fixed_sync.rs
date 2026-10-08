@@ -143,7 +143,6 @@ where
         source,
         apply_batch_size: NZU64!(100),
         max_outstanding_requests: NZUsize!(10),
-        max_retained_roots: 8,
     };
 
     if let Ok(synced) = sync::sync(sync_config).await {

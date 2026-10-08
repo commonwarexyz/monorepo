@@ -106,7 +106,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 

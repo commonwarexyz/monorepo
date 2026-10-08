@@ -91,7 +91,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 0,
         }
     }
 
@@ -259,7 +258,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
         let synced: DbOf<H> = sync::sync(config).await.unwrap();
 
@@ -302,7 +300,7 @@ impl<S: Source<Op: Send>> Source for DelayedBoundary<S> {
 }
 
 /// A boundary response requested before a target update with an unchanged lower bound is
-/// applied without a second boundary request, and sync completes after its root is evicted.
+/// applied without a second boundary request, and sync completes at a later target.
 pub(crate) fn test_target_updates_preserve_delayed_boundary<H: KeylessSyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
@@ -354,7 +352,6 @@ where
             update_rx: Some(update_rx),
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 1,
         };
         let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
 
@@ -384,7 +381,7 @@ where
             "the retained boundary response must apply"
         );
 
-        // The boundary is now verified and applied. Evict its original root before finishing.
+        // The boundary is now verified and applied. Move to a later target before finishing.
         update_tx.send(final_target.clone()).await.unwrap();
         drop(update_tx);
         let synced = client.sync().await.unwrap();
@@ -477,7 +474,6 @@ where
             update_rx: Some(update_rx),
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 4,
         };
         let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
 
@@ -563,7 +559,6 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         })
         .await
         .unwrap();

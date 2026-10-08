@@ -108,7 +108,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
 
         // Create the engine
@@ -162,7 +161,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 1,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
@@ -234,7 +232,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
-            max_retained_roots: 0,
         };
 
         let sync_handle = sync::sync(config);
@@ -369,7 +366,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: Some(finish_receiver),
             reached_target_tx: None,
-            max_retained_roots: 1,
         };
 
         let sync_handle = sync::sync(config);
@@ -478,7 +474,6 @@ where
             update_rx: None,
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
-            max_retained_roots: 1,
         };
 
         // An early finish waits for the target, so sync still completes the full range and
@@ -536,7 +531,6 @@ where
             update_rx: None,
             finish_rx: Some(finish_receiver),
             reached_target_tx: None,
-            max_retained_roots: 1,
         };
 
         // Sync fails as soon as it observes the closed finish channel.
@@ -585,7 +579,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: Some(reached_sender),
-            max_retained_roots: 1,
         };
 
         // A lost notification is not a sync error, so sync completes at the target.
@@ -635,7 +628,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -1003,7 +995,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
 
         // Sync reaches the target root only if the corrupted candidate is rejected for the retry.
@@ -1175,7 +1166,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
-            max_retained_roots: 1,
         };
 
         let mut engine: Engine<H::Db, _> = Engine::new(config).await.unwrap();
@@ -1337,7 +1327,6 @@ where
             served: Vec::new(),
         }));
 
-        // Start sync with a retention window that never evicts.
         let (update_tx, update_rx) = mpsc::channel(1);
         let config = Config {
             context: context.child("client"),
@@ -1353,7 +1342,6 @@ where
             update_rx: Some(update_rx),
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 64,
         };
 
         // Drive sync alongside the test. A sync error fails the test at once.
