@@ -5,7 +5,7 @@
 //! Signing schemes differ in whether per-validator activities can be used as evidence of either
 //! liveness or of committing a fault:
 //!
-//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`], [`secp256r1`], [`ml_dsa`]): Individual signatures can be
+//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`], [`secp256r1`], [`ml_dsa`], [`fn_dsa`]): Individual signatures can be
 //!   presented to some third party as evidence of either liveness or of committing a fault. Certificates contain signer
 //!   indices alongside individual signatures, enabling secure per-validator activity tracking and conflict detection.
 //!
@@ -57,6 +57,7 @@ use commonware_utils::{N3f1, union};
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
+commonware_macros::stability_mod!(ALPHA, pub mod fn_dsa);
 commonware_macros::stability_mod!(ALPHA, pub mod ml_dsa);
 commonware_macros::stability_mod!(ALPHA, pub mod secp256r1);
 

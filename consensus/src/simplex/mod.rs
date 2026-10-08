@@ -326,7 +326,7 @@
 //! where [`Verifier::is_batchable()`](commonware_cryptography::certificate::Verifier::is_batchable) returns `true`
 //! (such as [scheme::ed25519], [scheme::bls12381_multisig] and [scheme::bls12381_threshold]), `simplex` lazily
 //! verifies messages (only when a quorum is met), enabling efficient batch verification. For schemes where
-//! `is_batchable()` returns `false` (such as [scheme::secp256r1] and [scheme::ml_dsa]), signatures are verified eagerly as they
+//! `is_batchable()` returns `false` (such as [scheme::secp256r1], [scheme::ml_dsa], and [scheme::fn_dsa]), signatures are verified eagerly as they
 //! arrive since there is no batching benefit.
 //!
 //! When buffered votes of one kind reach quorum, the `Batcher` asks the scheme to construct an
@@ -395,6 +395,13 @@
 //! lattice-based scheme believed to resist quantum adversaries. Public keys are 1952 bytes and signatures 3309 bytes, there
 //! is no batch verification, and certificates grow linearly with quorum size (like ed25519 and secp256r1), so bandwidth
 //! and certificate size are the main costs of a post-quantum deployment.
+//!
+//! ### [scheme::fn_dsa]
+//!
+//! [commonware_cryptography::fn_dsa] signatures use FN-DSA (Falcon), the lattice-based scheme NIST selected for FIPS 206.
+//! Signatures are 666 bytes (FN-DSA-512, NIST category 1) or 1280 bytes (FN-DSA-1024, category 5) with 897 or 1793 byte
+//! public keys, so certificates are several times smaller than with ML-DSA. There is no batch verification. **The scheme
+//! is experimental**: FIPS 206 has not been published, and the key and signature encodings may change to match it.
 //!
 //! ### [scheme::bls12381_threshold]
 //!
@@ -681,7 +688,7 @@ mod tests {
                     standard as bls12381_threshold_std,
                     vrf::{self as bls12381_threshold_vrf, Seedable},
                 },
-                ed25519, ml_dsa, secp256r1,
+                ed25519, fn_dsa, ml_dsa, secp256r1,
             },
             types::{
                 Certificate, Finalization as TFinalization, Finalize as TFinalize,
@@ -697,6 +704,7 @@ mod tests {
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         certificate::mocks::Fixture,
         ed25519::{PrivateKey, PublicKey},
+        fn_dsa::{FnDsa512, FnDsa1024},
         sha256::{Digest as Sha256Digest, Digest as D},
     };
     use commonware_macros::{select, test_group, test_traced};
@@ -738,6 +746,8 @@ mod tests {
             $cb!($($args)*, bls12381_multisig_min_pk, RoundRobin, bls12381_multisig::fixture::<MinPk, _>, RoundRobin::default());
             $cb!($($args)*, bls12381_multisig_min_sig, RoundRobin, bls12381_multisig::fixture::<MinSig, _>, RoundRobin::default());
             $cb!($($args)*, ed25519, RoundRobin, ed25519::fixture, RoundRobin::default());
+            $cb!($($args)*, fn_dsa_512, RoundRobin, fn_dsa::fixture::<FnDsa512, _>, RoundRobin::default());
+            $cb!($($args)*, fn_dsa_1024, RoundRobin, fn_dsa::fixture::<FnDsa1024, _>, RoundRobin::default());
             $cb!($($args)*, ml_dsa, RoundRobin, ml_dsa::fixture, RoundRobin::default());
             $cb!($($args)*, secp256r1, RoundRobin, secp256r1::fixture, RoundRobin::default());
         };

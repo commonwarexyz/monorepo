@@ -12,6 +12,8 @@
 //!   no trusted setup required.
 //! - [`ml_dsa`]: Attributable signatures with individual verification. Post-quantum secure
 //!   (FIPS 204), with large keys and signatures.
+//! - [`fn_dsa`]: Attributable signatures with individual verification. Post-quantum secure
+//!   (Falcon, experimental until FIPS 206 is published), with smaller signatures than ML-DSA.
 //! - [`bls12381_multisig`]: Attributable signatures with aggregated verification.
 //!   Compact certificates while preserving attribution.
 //! - [`bls12381_threshold`]: Non-attributable threshold signatures. Constant-size
@@ -105,4 +107,20 @@ pub mod ml_dsa {
     use commonware_utils::N3f1;
 
     impl_certificate_ml_dsa!(&'a Item<D>, Namespace, N3f1);
+}
+
+pub mod fn_dsa {
+    //! FN-DSA (Falcon) implementation of the [`Scheme`](commonware_cryptography::certificate::Scheme)
+    //! trait for `aggregation`.
+    //!
+    //! This scheme is attributable: individual signatures can be safely exposed as
+    //! evidence of liveness or faults. It is post-quantum secure and has no batch verification.
+    //! It is experimental: FIPS 206 is unpublished and the encodings may change (see
+    //! [commonware_cryptography::fn_dsa]).
+
+    use crate::aggregation::types::{Item, Namespace};
+    use commonware_cryptography::impl_certificate_fn_dsa;
+    use commonware_utils::N3f1;
+
+    impl_certificate_fn_dsa!(&'a Item<D>, Namespace, N3f1);
 }

@@ -53,6 +53,8 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod bloomfilter;
     pub use crate::bloomfilter::BloomFilter;
 
+    pub mod fn_dsa;
+
     #[cfg(any(test, feature = "fuzz"))]
     pub mod fuzz;
 
@@ -788,6 +790,112 @@ mod tests {
         assert_eq!(crate::ml_dsa::PrivateKey::SIZE, 32);
         assert_eq!(crate::ml_dsa::PublicKey::SIZE, 1952);
         assert_eq!(crate::ml_dsa::Signature::SIZE, 3309);
+    }
+
+    #[test]
+    fn test_fn_dsa_512_validate() {
+        test_validate::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa512>>();
+    }
+
+    #[test]
+    fn test_fn_dsa_512_public_key_order() {
+        test_public_key_order::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa512>>();
+    }
+
+    #[test]
+    fn test_fn_dsa_512_validate_invalid_public_key() {
+        test_validate_invalid_public_key::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa512>>();
+    }
+
+    #[test]
+    fn test_fn_dsa_512_sign_and_verify() {
+        test_sign_and_verify::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa512>>();
+    }
+
+    #[test]
+    fn test_fn_dsa_512_sign_and_verify_wrong_message() {
+        test_sign_and_verify_wrong_message::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa512>>();
+    }
+
+    #[test]
+    fn test_fn_dsa_512_sign_and_verify_wrong_namespace() {
+        test_sign_and_verify_wrong_namespace::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa512>>(
+        );
+    }
+
+    #[test]
+    fn test_fn_dsa_512_empty_namespace() {
+        test_empty_namespace::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa512>>();
+    }
+
+    #[test]
+    fn test_fn_dsa_512_signature_determinism() {
+        test_signature_determinism::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa512>>();
+    }
+
+    #[test]
+    fn test_fn_dsa_512_invalid_signature_publickey_pair() {
+        test_invalid_signature_publickey_pair::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa512>>(
+        );
+    }
+
+    #[test]
+    fn test_fn_dsa_1024_validate() {
+        test_validate::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa1024>>();
+    }
+
+    #[test]
+    fn test_fn_dsa_1024_public_key_order() {
+        test_public_key_order::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa1024>>();
+    }
+
+    #[test]
+    fn test_fn_dsa_1024_validate_invalid_public_key() {
+        test_validate_invalid_public_key::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa1024>>();
+    }
+
+    #[test]
+    fn test_fn_dsa_1024_sign_and_verify() {
+        test_sign_and_verify::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa1024>>();
+    }
+
+    #[test]
+    fn test_fn_dsa_1024_sign_and_verify_wrong_message() {
+        test_sign_and_verify_wrong_message::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa1024>>();
+    }
+
+    #[test]
+    fn test_fn_dsa_1024_sign_and_verify_wrong_namespace() {
+        test_sign_and_verify_wrong_namespace::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa1024>>(
+        );
+    }
+
+    #[test]
+    fn test_fn_dsa_1024_empty_namespace() {
+        test_empty_namespace::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa1024>>();
+    }
+
+    #[test]
+    fn test_fn_dsa_1024_signature_determinism() {
+        test_signature_determinism::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa1024>>();
+    }
+
+    #[test]
+    fn test_fn_dsa_1024_invalid_signature_publickey_pair() {
+        test_invalid_signature_publickey_pair::<crate::fn_dsa::PrivateKey<crate::fn_dsa::FnDsa1024>>(
+        );
+    }
+
+    #[test]
+    fn test_fn_dsa_len() {
+        use crate::fn_dsa::{FnDsa512, FnDsa1024, PrivateKey, PublicKey, Signature};
+
+        assert_eq!(PrivateKey::<FnDsa512>::SIZE, 32);
+        assert_eq!(PublicKey::<FnDsa512>::SIZE, 897);
+        assert_eq!(Signature::<FnDsa512>::SIZE, 666);
+        assert_eq!(PrivateKey::<FnDsa1024>::SIZE, 32);
+        assert_eq!(PublicKey::<FnDsa1024>::SIZE, 1793);
+        assert_eq!(Signature::<FnDsa1024>::SIZE, 1280);
     }
 
     fn test_hasher_multiple_runs<H: Hasher>() {
