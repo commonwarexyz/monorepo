@@ -50,6 +50,7 @@ pub(crate) mod cache;
 mod certified;
 mod delivery;
 pub(crate) mod durability;
+mod finalized;
 mod floor;
 pub use floor::{Floor, Processed};
 mod staged;
