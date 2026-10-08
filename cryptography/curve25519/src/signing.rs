@@ -110,7 +110,7 @@ impl SigningKey {
     fn sign_message(&self, msg: &[u8]) -> Signature {
         let mut nonce_digest = Zeroizing::new([0u8; 64]);
         FixedOutput::finalize_into(
-            sha2::Sha512::new().chain(self.prefix).chain(msg),
+            sha2::Sha512::new().chain(self.prefix.as_slice()).chain(msg),
             (&mut *nonce_digest).into(),
         );
         let nonce = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&nonce_digest));
