@@ -19,7 +19,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufferPooler, Metrics, Runner as _, Supervisor as _, deterministic, deterministic::Context,
 };
-use commonware_utils::{NZU64, non_empty_range};
+use commonware_utils::{NZU64, NZUsize, non_empty_range};
 use rand::Rng as _;
 
 mod harnesses {
@@ -547,7 +547,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             },
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 4,
+            max_outstanding_requests: NZUsize!(4),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
