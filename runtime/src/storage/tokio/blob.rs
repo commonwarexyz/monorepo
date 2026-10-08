@@ -120,6 +120,9 @@ struct Hooks {
     /// Ranges batched reads served from their direct reads rather than a positioned fallback.
     #[cfg(target_os = "linux")]
     direct_reads: std::sync::atomic::AtomicUsize,
+    /// Positioned reads served through the `O_DIRECT` descriptor rather than the page cache.
+    #[cfg(target_os = "linux")]
+    positioned_direct_reads: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -311,6 +314,16 @@ impl Blob {
         self.shared.tracker.skipped()
     }
 
+    /// Number of positioned reads served through the `O_DIRECT` descriptor, so a test can tell a
+    /// direct read from one that fell back to buffered I/O.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn positioned_direct_reads(&self) -> usize {
+        self.shared
+            .test
+            .positioned_direct_reads
+            .load(Ordering::Relaxed)
+    }
+
     /// Whether a read of `len` bytes at file offset `offset` with `options` can bypass the page
     /// cache with direct I/O, given an aligned buffer.
     #[allow(clippy::missing_const_for_fn)]
@@ -396,6 +409,10 @@ impl Blob {
                 break;
             }
         }
+        #[cfg(test)]
+        file.test
+            .positioned_direct_reads
+            .fetch_add(1, Ordering::Relaxed);
         Ok(true)
     }
 
@@ -817,6 +834,46 @@ mod tests {
             Storage::new(Config::new(directory.clone(), layouts), pool),
             directory,
         )
+    }
+
+    /// An `O_DIRECT` read must see the latest buffered write even when nothing was synced. The
+    /// direct descriptor is a separate open file description, but dirty pages belong to the inode,
+    /// and Linux flushes them before a direct read (`kiocb_write_and_wait` in `__iomap_dio_rw`).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_direct_read_sees_latest_unsynced_write() {
+        let (storage, directory) =
+            storage_for_reopen_test("direct_read_unsynced_write", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+
+        // The V1 header's data offset is one alignment unit, so offset 0 and this length are both
+        // direct-eligible.
+        const LEN: usize = DIRECT_ALIGNMENT;
+        let pattern_a = vec![0xAAu8; LEN];
+        let pattern_b = vec![0xBBu8; LEN];
+
+        blob.write_at(0, pattern_a, WriteOptions::default())
+            .await
+            .unwrap();
+        // Overwrite with no sync between the writes and the read.
+        blob.write_at(0, pattern_b.clone(), WriteOptions::default())
+            .await
+            .unwrap();
+
+        let before = blob.positioned_direct_reads();
+        let read = blob.read_at(0, LEN, ReadOptions::DONT_CACHE).await.unwrap();
+        assert_eq!(
+            read.coalesce().as_ref(),
+            pattern_b.as_slice(),
+            "direct read did not see the latest unsynced write"
+        );
+        assert!(
+            blob.positioned_direct_reads() > before,
+            "read did not take the O_DIRECT path"
+        );
+
+        drop(blob);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[tokio::test]
