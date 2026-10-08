@@ -1238,6 +1238,103 @@ mod tests {
         });
     }
 
+    /// A compact sync import that has not been applied serves only its cached tip. A size the
+    /// partition's previous witness journal still retains is refused, before and after the
+    /// import replaces that journal.
+    #[test_traced("INFO")]
+    fn test_serve_refuses_previous_contents_while_import_pending() {
+        deterministic::Runner::default().start(|context| async move {
+            let (src, dst) = ("keyless-pending-src", "keyless-pending-dst");
+
+            // The source commits twice. Its tip is the state the import carries.
+            let mut source = open_db::<mmr::Family>(context.child("source"), src).await;
+            for seed in [1u64, 2] {
+                let batch = source
+                    .new_batch()
+                    .append(U64::new(seed))
+                    .merkleize(&source, Some(U64::new(seed + 10)), Location::new(0))
+                    .await
+                    .unwrap();
+                (source, _) = source.apply_batch(batch).await.unwrap();
+            }
+            let source = source.sync().await.unwrap();
+            let target = source.target();
+            drop(source);
+            let (_, size, pinned_nodes) = {
+                let journal = open_witness_journal(context.child("tip"), src).await;
+                witness::tests::tip(&journal).await
+            };
+            assert_eq!(size, target.size);
+
+            // The destination partition retains a witness at a size below the imported tip.
+            let stale = {
+                let seeded = open_db::<mmr::Family>(context.child("seed"), dst).await;
+                let batch = seeded
+                    .new_batch()
+                    .append(U64::new(7))
+                    .append(U64::new(8))
+                    .merkleize(&seeded, Some(U64::new(70)), Location::new(0))
+                    .await
+                    .unwrap();
+                let (seeded, _) = seeded.apply_batch(batch).await.unwrap();
+                let seeded = seeded.sync().await.unwrap();
+                seeded.target()
+            };
+            assert!(stale.size < target.size);
+
+            let journal = open_witness_journal(context.child("import"), dst).await;
+            let imported = TestDb::<mmr::Family>::init_from_sync(
+                Sequential,
+                journal,
+                (),
+                target.size - 1,
+                pinned_nodes,
+                Operation::Commit(Some(U64::new(12)), Location::new(0)),
+            )
+            .unwrap();
+            assert_eq!(imported.target(), target);
+
+            // The tip comes from the cached import and verifies against the imported root.
+            let request = Request::Boundary {
+                size: target.size,
+                start: target.size - 1,
+            };
+            let Response::Boundary {
+                proof,
+                op,
+                pinned_nodes,
+            } = imported.serve(request).await.unwrap().0
+            else {
+                panic!("boundary request should get a boundary response");
+            };
+            assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                &proof,
+                target.size - 1,
+                std::slice::from_ref(&op),
+                &pinned_nodes,
+                &target.root
+            ));
+
+            // The retained stale size is refused while the journal still holds the previous
+            // contents, and after the first sync replaces them with the imported witness.
+            let stale_request = Request::Boundary {
+                size: stale.size,
+                start: stale.size - 1,
+            };
+            assert!(matches!(
+                imported.serve(stale_request).await,
+                Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
+            ));
+            let db = imported.sync().await.unwrap();
+            assert!(matches!(
+                db.serve(stale_request).await,
+                Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
+            ));
+            assert_eq!(db.target(), target);
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// A compact db over a delayed-sync storage backend.
     type DelayedDb = Db<
         mmr::Family,
