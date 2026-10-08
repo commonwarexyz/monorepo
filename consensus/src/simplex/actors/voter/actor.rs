@@ -114,15 +114,15 @@ enum ProposalState<D> {
     /// The automaton has not answered a handoff request yet.
     Handoff(oneshot::Receiver<Handoff<D>>),
     /// A handoff without a pending build: the application responded with [`Handoff::Wait`],
-    /// or we cancelled its build (see [`State::pending_handoff_abandonment`]). An
-    /// ordinary request for the same context follows exact parent certification, unless we
-    /// voted to nullify the request's view.
+    /// or we cancelled its build (see [`State::pending_handoff_abandonment`]). An ordinary
+    /// request for the same context follows exact parent certification, unless we voted to
+    /// nullify the request's view.
     Waiting,
-    /// A volatile build result awaiting parent certification.
-    Held(D),
-    /// A held result whose parent has certified. The select loop consumes it only
+    /// A volatile build result whose publication requires parent certification.
+    ///
+    /// Once its parent has certified, the select loop consumes the result only
     /// after the journal sync that follows that certification.
-    Ready(D),
+    Held(D),
     /// A handoff whose response closed. It forfeits the view once the exact parent
     /// certifies or finalizes, unless a replacement parent supersedes it first.
     Closed,
@@ -508,9 +508,10 @@ impl<
         pending_propose: &mut PendingProposal<D, S::PublicKey>,
         pending_verify: &mut PendingVerification<D, S::PublicKey>,
     ) {
-        // Drop requests for exited views, and requests whose captured parent is no longer
-        // valid once a replacement parent is selectable. Certification of an exited view
-        // continues after its verification receiver is dropped.
+        // Retain requests for the current and optimistic future views. Drop requests for exited
+        // views, and requests whose captured parent is no longer valid once a replacement parent
+        // is selectable. Certification of an exited view continues after its verification
+        // receiver is dropped.
         let current_view = self.state.current_view();
         if let Some(request) = pending_propose.as_ref() {
             let reason = if request.view() < current_view {
@@ -538,9 +539,9 @@ impl<
         // we vote to nullify the view we are waiting in, at or below its uncertified parent.
         // The application may verify other blocks only after the build completes, so the build
         // could keep the parent, the view we wait in, or a fallback parent from certifying.
-        // Dropping the receiver cancels the build. The request then waits: an ordinary
-        // request for the same context follows if the parent certifies, and supersession
-        // replaces it once another parent is selectable.
+        // Dropping the receiver cancels the build. The request then waits: an ordinary request
+        // for the same context follows if the parent certifies, and supersession replaces it
+        // once another parent is selectable.
         if let Some(Request(ProposalRequest::Handoff(context), _, state)) = pending_propose.as_mut()
             && matches!(state, ProposalState::Handoff(_))
             && let Some(reason) = self.state.pending_handoff_abandonment(context)
@@ -549,14 +550,16 @@ impl<
             *state = ProposalState::Waiting;
         }
 
-        // Advance a pending handoff once its exact parent certifies or finalizes. A
-        // waiting handoff becomes an ordinary request for the same context, unless we
-        // voted to nullify its view, where we can no longer record a proposal. A held
-        // build becomes ready to publish, and a closed response forfeits the view.
-        // Certification and finalization are recorded only in iterations that end with
-        // a journal sync, and responses are polled only in later iterations, so nothing
-        // built on the parent is consumed before its evidence is durable.
+        // Resolve waiting and closed handoffs once their exact parent certifies or finalizes.
+        // Parent certification does not cancel an unanswered request or discard a held result. A
+        // waiting handoff becomes an ordinary request for the same context, unless we voted to
+        // nullify its view, where we can no longer record a proposal. A closed response forfeits
+        // the view. Held builds become eligible at the next response poll. Certification and
+        // finalization are recorded only in iterations that end with a journal sync, and responses
+        // are polled only in later iterations, so nothing built on the parent is consumed before
+        // its evidence is durable.
         if let Some(Request(request, _, state)) = pending_propose.as_mut()
+            && matches!(state, ProposalState::Waiting | ProposalState::Closed)
             && self.state.proposal_parent_certified(request.context())
         {
             match state {
@@ -571,7 +574,6 @@ impl<
                             .await,
                     );
                 }
-                ProposalState::Held(payload) => *state = ProposalState::Ready(*payload),
                 ProposalState::Closed => {
                     let view = request.view();
                     *pending_propose = None;
@@ -708,7 +710,7 @@ impl<
     fn prepare_notarization(&mut self, view: View) -> Option<Notarization<S, D>> {
         let notarization = self.state.broadcast_notarization(view)?;
 
-        // Only the leader sees an unbiased latency sample, so record it now.
+        // Record leader-local latency at certificate readiness.
         if let Some(elapsed) = self.leader_elapsed(view) {
             self.notarization_latency.observe(elapsed);
             if let Some(since_entry) = self.state.elapsed_since_entry(view) {
@@ -1256,6 +1258,11 @@ impl<
                 self = self.prune_views().await;
 
                 // Prepare waiters
+                let ready = matches!(
+                    pending_propose.as_ref(),
+                    Some(Request(request, _, ProposalState::Held(_)))
+                        if self.state.proposal_parent_certified(request.context())
+                );
                 let propose_wait = async {
                     let proposed = match pending_propose.as_mut() {
                         Some(Request(_, _, ProposalState::Regular(receiver))) => {
@@ -1264,7 +1271,7 @@ impl<
                         Some(Request(_, _, ProposalState::Handoff(receiver))) => {
                             receiver.await.map(ProposalResponse::Handoff)
                         }
-                        Some(Request(_, _, ProposalState::Ready(payload))) => {
+                        Some(Request(_, _, ProposalState::Held(payload))) if ready => {
                             Ok(ProposalResponse::Proposed(*payload))
                         }
                         _ => core::future::pending().await,
