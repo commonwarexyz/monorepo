@@ -161,6 +161,8 @@ ecdsa = { version = "0.17.0", default-features = false }
 ed25519-consensus = "2.1.0"
 either = "1.16.0"
 fixedbitset = { version = "0.5.7", default-features = false }
+fn-dsa = "0.4.0"
+fn-dsa-comm = "0.4.0"
 futures = "0.3.32"
 futures-timer = "3.0.4"
 futures-util = { version = "0.3.32", default-features = false, features = ["std"] }
@@ -330,4 +332,16 @@ opt-level = 3
 opt-level = 3
 
 [profile.test.package.keccak]
+opt-level = 3
+
+[profile.test.package.fn-dsa-comm]
+opt-level = 3
+
+[profile.test.package.fn-dsa-kgen]
+opt-level = 3
+
+[profile.test.package.fn-dsa-sign]
+opt-level = 3
+
+[profile.test.package.fn-dsa-vrfy]
 opt-level = 3

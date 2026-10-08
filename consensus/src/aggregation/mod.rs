@@ -22,6 +22,10 @@
 //! - [`ml_dsa`][scheme::ml_dsa]: Attributable signatures with individual verification.
 //!   Post-quantum secure (FIPS 204). Certificates contain individual signatures.
 //!
+//! - [`fn_dsa`][scheme::fn_dsa]: Attributable signatures with individual verification.
+//!   Post-quantum secure (Falcon; experimental until FIPS 206 is published). Certificates contain
+//!   individual signatures.
+//!
 //! - [`bls12381_multisig`][scheme::bls12381_multisig]: Attributable signatures with aggregated
 //!   verification. Produces compact certificates while preserving signer attribution.
 //!
@@ -103,7 +107,7 @@ mod tests {
     use super::{Config, Engine, mocks};
     use crate::{
         aggregation::scheme::{
-            Scheme, bls12381_multisig, bls12381_threshold, ed25519, ml_dsa, secp256r1,
+            Scheme, bls12381_multisig, bls12381_threshold, ed25519, fn_dsa, ml_dsa, secp256r1,
         },
         types::{Epoch, EpochDelta, Height, HeightDelta},
     };
@@ -111,6 +115,7 @@ mod tests {
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::mocks::Fixture,
         ed25519::PublicKey,
+        fn_dsa::{FnDsa512, FnDsa1024},
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_group, test_traced};
@@ -143,6 +148,8 @@ mod tests {
             $cb!($($args)*, bls12381_multisig_min_pk, bls12381_multisig::fixture::<MinPk, _>);
             $cb!($($args)*, bls12381_multisig_min_sig, bls12381_multisig::fixture::<MinSig, _>);
             $cb!($($args)*, ed25519, ed25519::fixture);
+            $cb!($($args)*, fn_dsa_512, fn_dsa::fixture::<FnDsa512, _>);
+            $cb!($($args)*, fn_dsa_1024, fn_dsa::fixture::<FnDsa1024, _>);
             $cb!($($args)*, ml_dsa, ml_dsa::fixture);
             $cb!($($args)*, secp256r1, secp256r1::fixture);
         };

@@ -21,6 +21,10 @@
 //!   Post-quantum secure and no trusted setup required. Like secp256r1, does not benefit from batch
 //!   verification. Certificates contain individual signatures from each signer, which are much
 //!   larger than classical signatures (3309 bytes each).
+//!
+//! - [`fn_dsa`]: Attributable FN-DSA (Falcon) signatures with individual verification.
+//!   Experimental: FIPS 206 is unpublished and the encodings may change. Post-quantum secure with
+//!   much smaller signatures than ML-DSA (666 bytes for FN-DSA-512, 1280 bytes for FN-DSA-1024).
 #![cfg_attr(
     feature = "bls12381",
     doc = "
@@ -70,6 +74,8 @@ pub use crate::bls12381::certificate::{
     multisig as bls12381_multisig, threshold as bls12381_threshold,
 };
 pub use crate::ed25519::certificate as ed25519;
+#[commonware_macros::stability(ALPHA)]
+pub use crate::fn_dsa::certificate as fn_dsa;
 #[commonware_macros::stability(ALPHA)]
 pub use crate::ml_dsa::certificate as ml_dsa;
 #[commonware_macros::stability(ALPHA)]

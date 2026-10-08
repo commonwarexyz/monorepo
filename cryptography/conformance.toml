@@ -154,6 +154,38 @@ hash = "9010ca9b2849258179377f855fb77967ff003c8f349258d868bab76b0bfa1c5a"
 n_cases = 65536
 hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
 
+["commonware_cryptography::fn_dsa::certificate::tests::conformance::CodecConformance<Certificate<FnDsa1024>>"]
+n_cases = 1024
+hash = "e858d4c258ed77710762988256c20efb2d42170b956ae5875f7c5e5b51174b87"
+
+["commonware_cryptography::fn_dsa::certificate::tests::conformance::CodecConformance<Certificate<FnDsa512>>"]
+n_cases = 1024
+hash = "ec8d4e83ed6a41ef186c6732638b8a454a42d7f9e8245ba5254cfded1ec527b6"
+
+["commonware_cryptography::fn_dsa::scheme::tests::conformance::CodecConformance<PrivateKey<FnDsa1024>>"]
+n_cases = 1024
+hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
+
+["commonware_cryptography::fn_dsa::scheme::tests::conformance::CodecConformance<PrivateKey<FnDsa512>>"]
+n_cases = 1024
+hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
+
+["commonware_cryptography::fn_dsa::scheme::tests::conformance::CodecConformance<PublicKey<FnDsa1024>>"]
+n_cases = 1024
+hash = "486068e6f806a7d4978c3a0459746b326d6c6a1734bf40a6653f453217405d50"
+
+["commonware_cryptography::fn_dsa::scheme::tests::conformance::CodecConformance<PublicKey<FnDsa512>>"]
+n_cases = 1024
+hash = "bfac42656b8292a78f79d65c20e01bd66998aef293399d26514a0fad80009915"
+
+["commonware_cryptography::fn_dsa::scheme::tests::conformance::CodecConformance<Signature<FnDsa1024>>"]
+n_cases = 1024
+hash = "61e1688874f47fdc8db43fe44005c046b839cba813d43718d6f68fad06d47b93"
+
+["commonware_cryptography::fn_dsa::scheme::tests::conformance::CodecConformance<Signature<FnDsa512>>"]
+n_cases = 1024
+hash = "e7ef909f89340129e0220b4576aac211139bc77fc62b7f66a3b8e31d6c6facd0"
+
 ["commonware_cryptography::handshake::sake::conformance::CodecConformance<Ack>"]
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
