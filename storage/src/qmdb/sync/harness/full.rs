@@ -1115,6 +1115,26 @@ macro_rules! sync_tests {
             }
 
             #[test_traced("WARN")]
+            fn test_target_update_drops_queued_result_of_cancelled_request() {
+                crate::qmdb::sync::engine::tests::test_target_update_drops_queued_result_of_cancelled_request::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_target_updates_keep_old_size_request_beyond_floor() {
+                crate::qmdb::sync::engine::tests::test_target_updates_keep_old_size_request_beyond_floor::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_target_update_floor_move_cancels_operations_below_bound() {
+                crate::qmdb::sync::engine::tests::test_target_update_floor_move_cancels_operations_below_bound::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_moved_floor_schedules_boundary_without_waiting_for_old_operation() {
+                crate::qmdb::sync::engine::tests::test_moved_floor_schedules_boundary_without_waiting_for_old_operation::<$harness>();
+            }
+
+            #[test_traced("WARN")]
             fn test_sync_subset_of_target_database() {
                 crate::qmdb::sync::harness::test_sync_subset_of_target_database::<$harness>();
             }

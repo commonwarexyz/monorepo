@@ -769,11 +769,14 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
-        merkle::mmr::{Family as MmrFamily, Proof},
-        qmdb::sync::source,
+        merkle::{Proof, mmr::Family as MmrFamily},
+        qmdb::sync::{
+            harness::{DbOf, OpOf, SyncTestHarness},
+            source::{self, tests::FailSource},
+        },
     };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
@@ -927,18 +930,49 @@ mod tests {
         }
     }
 
-    fn insert_pending_request(
-        engine: &mut Engine<TestDb, TestSource>,
-        request: Request<MmrFamily>,
-    ) -> RequestId {
+    async fn retention_engine<H: SyncTestHarness>(
+        context: deterministic::Context,
+    ) -> Engine<DbOf<H>, FailSource<H::Family, OpOf<H>, sha256::Digest>>
+    where
+        OpOf<H>: Encode + 'static,
+    {
+        // Source requests stay unpolled; completed fetch results are injected directly.
+        let config = Config {
+            db_config: H::config("retention", &context),
+            context,
+            source: FailSource::new(),
+            target: Target {
+                root: sha256::Digest::from([1u8; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(10)),
+            },
+            max_outstanding_requests: NZUsize!(1),
+            fetch_batch_size: NZU64!(1),
+            apply_batch_size: NZU64!(1),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+        };
+        Engine::new(config).await.unwrap()
+    }
+
+    fn insert_pending_request<DB, S>(
+        engine: &mut Engine<DB, S>,
+        request: Request<DB::Family>,
+    ) -> RequestId
+    where
+        DB: Database,
+        S: SourceFor<DB>,
+        DB::Op: Encode + 'static,
+    {
         engine
             .outstanding_requests
             .insert(request, |_| std::future::pending())
     }
 
-    fn late_fetch_result(
+    fn late_fetch_result<F: Family, Op>(
         id: RequestId,
-    ) -> IndexedFetchResult<MmrFamily, i32, sha256::Digest, Infallible> {
+        operation: Op,
+    ) -> IndexedFetchResult<F, Op, sha256::Digest, qmdb::Error<F>> {
         IndexedFetchResult {
             id,
             result: Ok(Some(Response::Operations {
@@ -947,18 +981,19 @@ mod tests {
                     inactive_peaks: 0,
                     digests: vec![],
                 },
-                operations: vec![99],
+                operations: vec![operation],
             })),
         }
     }
 
     /// Moving the lower bound past an operation request cancels it with the old boundary and
     /// drops its queued result.
-    #[test]
-    fn target_update_drops_queued_result_of_cancelled_request() {
+    pub(crate) fn test_target_update_drops_queued_result_of_cancelled_request<H: SyncTestHarness>()
+    where
+        OpOf<H>: Encode + 'static,
+    {
         deterministic::Runner::default().start(|context| async move {
-            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            let mut engine = Engine::new(config).await.unwrap();
+            let mut engine = retention_engine::<H>(context).await;
 
             // Track the boundary request and an operation request below the next lower bound.
             assert!(engine.outstanding_requests.contains(&Location::new(5)));
@@ -968,7 +1003,7 @@ mod tests {
                 max_ops: NZU64!(1),
             };
             let old_id = insert_pending_request(&mut engine, request);
-            let queued_result = late_fetch_result(old_id);
+            let queued_result = late_fetch_result(old_id, H::create_ops(1).pop().unwrap());
             assert_eq!(engine.outstanding_requests.len(), 2);
 
             // Moving the lower bound beyond both starts cancels both requests.
@@ -999,11 +1034,12 @@ mod tests {
     /// An operation request at an old size survives any number of target updates while its
     /// start is beyond the lower bound, and its late response is stored. The boundary request
     /// survives updates that keep the lower bound.
-    #[test]
-    fn target_updates_keep_old_size_request_beyond_floor() {
+    pub(crate) fn test_target_updates_keep_old_size_request_beyond_floor<H: SyncTestHarness>()
+    where
+        OpOf<H>: Encode + Clone + PartialEq + Debug + 'static,
+    {
         deterministic::Runner::default().start(|context| async move {
-            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            let mut engine = Engine::new(config).await.unwrap();
+            let mut engine = retention_engine::<H>(context).await;
 
             // Track a pending boundary request and an operation request at the first target
             // size.
@@ -1051,22 +1087,26 @@ mod tests {
             }
 
             // The late response at the first target size is stored at its start.
-            engine.handle_fetch_result(late_fetch_result(id)).unwrap();
+            let operation = H::create_ops(1).pop().unwrap();
+            engine
+                .handle_fetch_result(late_fetch_result(id, operation.clone()))
+                .unwrap();
             assert_eq!(engine.outstanding_requests.len(), 0);
             assert_eq!(
                 engine.fetched_operations.get(&Location::new(8)),
-                Some(&vec![99])
+                Some(&vec![operation])
             );
         });
     }
 
     /// Moving the lower bound cancels an operation request whose range ends at the new bound and
     /// keeps one beyond it.
-    #[test]
-    fn target_update_floor_move_cancels_operations_below_bound() {
+    pub(crate) fn test_target_update_floor_move_cancels_operations_below_bound<H: SyncTestHarness>()
+    where
+        OpOf<H>: Encode + 'static,
+    {
         deterministic::Runner::default().start(|context| async move {
-            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            let mut engine = Engine::new(config).await.unwrap();
+            let mut engine = retention_engine::<H>(context).await;
 
             // Track operation requests below and beyond the next lower bound.
             let below = Request::Operations {
@@ -1099,11 +1139,14 @@ mod tests {
 
     /// Moving the lower bound to the start of an operation request cancels it and the old
     /// boundary request, and scheduling issues the boundary request at the new lower bound.
-    #[test]
-    fn moved_floor_schedules_boundary_without_waiting_for_old_operation() {
+    pub(crate) fn test_moved_floor_schedules_boundary_without_waiting_for_old_operation<
+        H: SyncTestHarness,
+    >()
+    where
+        OpOf<H>: Encode + 'static,
+    {
         deterministic::Runner::default().start(|context| async move {
-            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            let mut engine = Engine::new(config).await.unwrap();
+            let mut engine = retention_engine::<H>(context).await;
 
             // Track the boundary request and an operation request at the next lower bound.
             let operation_id = insert_pending_request(
