@@ -8,7 +8,7 @@ use crate::{
     qmdb::{
         Error,
         any::{ValueEncoding, batch::lookup_sorted},
-        chain::{self, Bounds, Commitment, OnChain},
+        chain::{self, Bounds, Commitment, Onchain},
         immutable::operation::Operation,
         operation::Key,
     },
@@ -154,12 +154,12 @@ where
     }
 
     /// Prove the live database is on this chain's own states, returning the witness
-    /// committed reads require (see [`Bounds::on_chain`]).
+    /// committed reads require (see [`Bounds::onchain`]).
     #[allow(clippy::type_complexity)]
-    fn on_chain<'a, E, C, T>(
+    fn onchain<'a, E, C, T>(
         &self,
         db: &'a Immutable<F, E, K, V, C, H, T, S>,
-    ) -> Result<OnChain<'a, Immutable<F, E, K, V, C, H, T, S>>, Error<F>>
+    ) -> Result<Onchain<'a, Immutable<F, E, K, V, C, H, T, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
@@ -167,8 +167,8 @@ where
         T: Translator,
     {
         self.parent.as_ref().map_or_else(
-            || self.base.on_chain(db, db.commitment()),
-            |parent| parent.bounds.on_chain(db, db.commitment()),
+            || self.base.onchain(db, db.commitment()),
+            |parent| parent.bounds.onchain(db, db.commitment()),
         )
     }
 
@@ -199,7 +199,7 @@ where
         C::Item: EncodeShared,
         T: Translator,
     {
-        let db = self.on_chain(db)?;
+        let db = self.onchain(db)?;
         // Check this batch's pending mutations.
         if let Some(value) = self.mutations.get(key) {
             return Ok(Some(value.clone()));
@@ -237,7 +237,7 @@ where
         C::Item: EncodeShared,
         T: Translator,
     {
-        let db = self.on_chain(db)?;
+        let db = self.onchain(db)?;
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -430,7 +430,7 @@ where
         H: Hasher<Digest = D>,
         T: Translator,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         db.journal
             .speculative_proof(&self.journal_batch, inactive_peaks)
@@ -462,7 +462,7 @@ where
         H: Hasher<Digest = D>,
         T: Translator,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         db.journal
             .speculative_pinned_nodes(&self.journal_batch)
             .map_err(Into::into)
@@ -498,7 +498,7 @@ where
         H: Hasher<Digest = D>,
         T: Translator,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         let floor = self.bounds.inactivity_floor;
         if let Some(entry) = lookup_active(self.diff.as_slice(), key, floor) {
             return Ok(Some(entry.value.clone()));
@@ -530,7 +530,7 @@ where
         H: Hasher<Digest = D>,
         T: Translator,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         if keys.is_empty() {
             return Ok(Vec::new());
         }

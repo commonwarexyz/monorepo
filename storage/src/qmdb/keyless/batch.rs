@@ -8,7 +8,7 @@ use crate::{
     qmdb::{
         Error,
         any::value::ValueEncoding,
-        chain::{self, Bounds, Commitment, OnChain},
+        chain::{self, Bounds, Commitment, Onchain},
     },
 };
 use commonware_codec::EncodeShared;
@@ -158,19 +158,19 @@ where
     }
 
     /// Prove the live database is on this chain's own states, returning the witness
-    /// committed reads require (see [`Bounds::on_chain`]).
+    /// committed reads require (see [`Bounds::onchain`]).
     #[allow(clippy::type_complexity)]
-    fn on_chain<'a, E, C>(
+    fn onchain<'a, E, C>(
         &self,
         db: &'a Keyless<F, E, V, C, H, S>,
-    ) -> Result<OnChain<'a, Keyless<F, E, V, C, H, S>>, Error<F>>
+    ) -> Result<Onchain<'a, Keyless<F, E, V, C, H, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
         self.parent.as_ref().map_or_else(
-            || self.base.on_chain(db, db.commitment()),
-            |parent| parent.bounds.on_chain(db, db.commitment()),
+            || self.base.onchain(db, db.commitment()),
+            |parent| parent.bounds.onchain(db, db.commitment()),
         )
     }
 
@@ -202,7 +202,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
-        let db = self.on_chain(db)?;
+        let db = self.onchain(db)?;
         let loc_val = *loc;
 
         // Check this batch's pending appends.
@@ -252,7 +252,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
-        let db = self.on_chain(db)?;
+        let db = self.onchain(db)?;
         if locs.is_empty() {
             return Ok(Vec::new());
         }
@@ -428,7 +428,7 @@ where
         C: Mutable<Item = Operation<F, V>>,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         db.journal
             .speculative_proof(&self.journal_batch, inactive_peaks)
@@ -456,7 +456,7 @@ where
         C: Mutable<Item = Operation<F, V>>,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         db.journal
             .speculative_pinned_nodes(&self.journal_batch)
             .map_err(Into::into)
@@ -481,7 +481,7 @@ where
         H: Hasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         if loc >= self.bounds.tip.size {
             return Ok(None);
         }
@@ -525,7 +525,7 @@ where
         H: Hasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         if locs.is_empty() {
             return Ok(Vec::new());
         }

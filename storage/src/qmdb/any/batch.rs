@@ -18,7 +18,7 @@ use crate::{
             ordered::{Neighbors, find_next_key_ascending},
         },
         bitmap::{Candidates, Shared},
-        chain::{self, Bounds, Commitment, OnChain},
+        chain::{self, Bounds, Commitment, Onchain},
         delete_known_loc,
         floor::{Action, Entry, Limits, Policy, Walk},
         operation::{Key, Operation as OperationTrait},
@@ -497,7 +497,7 @@ where
     Operation<F, U>: Codec,
 {
     /// The database the batch was validated against.
-    db: OnChain<'a, Db<F, E, C, I, H, U, N, S>>,
+    db: Onchain<'a, Db<F, E, C, I, H, U, N, S>>,
     /// Pending mutations. `Some(value)` for upsert, `None` for delete.
     mutations: BTreeMap<U::Key, Option<U::Value>>,
     /// Merkleization state, including the retained ancestor chain.
@@ -1100,7 +1100,7 @@ where
     fn gather_existing_locations<E, C, I, const N: usize>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
-        db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Onchain<'_, Db<F, E, C, I, H, U, N, S>>,
     ) -> Vec<Location<F>>
     where
         E: Context,
@@ -1236,7 +1236,7 @@ where
         policy: &mut P,
         mut prefetched: Option<Prefetched<F, U>>,
         mut source: impl Candidates<F>,
-        db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Onchain<'_, Db<F, E, C, I, H, U, N, S>>,
     ) -> Result<(Location<F>, Vec<Decided<F, U>>), crate::qmdb::Error<F>>
     where
         E: Context,
@@ -1449,7 +1449,7 @@ where
         walked: Walked<F, U>,
         mut floor: Location<F>,
         metadata: Option<U::Value>,
-        db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Onchain<'_, Db<F, E, C, I, H, U, N, S>>,
     ) -> RetainedMerkleizeResult<F, H::Digest, U, S>
     where
         E: Context,
@@ -1594,7 +1594,7 @@ where
         let end = start
             .checked_add(keys.len())
             .expect("staged read index overflow");
-        let db = self.batch.on_chain(db)?;
+        let db = self.batch.onchain(db)?;
         let (values, keys, mut resolutions) = self.batch.stage_reads(keys, db).await?;
         self.keys.extend(keys);
         self.resolutions.append(&mut resolutions);
@@ -2012,20 +2012,20 @@ where
     }
 
     /// Prove the live database is on this chain's own states, returning the witness
-    /// committed reads require (see [`Bounds::on_chain`]).
+    /// committed reads require (see [`Bounds::onchain`]).
     #[allow(clippy::type_complexity)]
-    pub(crate) fn on_chain<'a, E, C, I, const N: usize>(
+    pub(crate) fn onchain<'a, E, C, I, const N: usize>(
         &self,
         db: &'a Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<OnChain<'a, Db<F, E, C, I, H, U, N, S>>, crate::qmdb::Error<F>>
+    ) -> Result<Onchain<'a, Db<F, E, C, I, H, U, N, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
         match &self.base {
-            Base::Db { state, .. } => state.on_chain(db, db.commitment()),
-            Base::Child(parent) => parent.bounds.on_chain(db, db.commitment()),
+            Base::Db { state, .. } => state.onchain(db, db.commitment()),
+            Base::Child(parent) => parent.bounds.onchain(db, db.commitment()),
         }
     }
 
@@ -2092,7 +2092,7 @@ where
     /// Read unresolved slots from the committed DB and merge them back into `results`.
     async fn fill_committed_reads<E, C, I, T: Send, const N: usize>(
         unresolved: Vec<PendingRead<'_, U::Key>>,
-        db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Onchain<'_, Db<F, E, C, I, H, U, N, S>>,
         results: &mut [Option<U::Value>],
         map: impl Fn(U, Location<F>) -> T + Send + Sync,
         mut apply: impl FnMut(usize, T) -> U::Value,
@@ -2155,7 +2155,7 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let db = self.on_chain(db)?;
+        let db = self.onchain(db)?;
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -2205,7 +2205,7 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let (results, keys, resolutions) = self.stage_reads(keys, self.on_chain(db)?).await?;
+        let (results, keys, resolutions) = self.stage_reads(keys, self.onchain(db)?).await?;
         Ok((
             results,
             Staged {
@@ -2223,7 +2223,7 @@ where
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
-        db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Onchain<'_, Db<F, E, C, I, H, U, N, S>>,
     ) -> Result<
         (
             Vec<Option<U::Value>>,
@@ -2890,7 +2890,7 @@ where
         &self,
         walked: &Walked<F, update::Ordered<K, V>>,
         mut decided: Vec<Decided<F, update::Ordered<K, V>>>,
-        db: OnChain<'_, Db<F, E, C, I, H, update::Ordered<K, V>, N, S>>,
+        db: Onchain<'_, Db<F, E, C, I, H, update::Ordered<K, V>, N, S>>,
     ) -> Result<Vec<Decided<F, update::Ordered<K, V>>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3027,7 +3027,7 @@ where
         I: OrderedIndex<Value = Location<F>>,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         if self.total_active_keys == 0 {
             return Ok(None);
         }
@@ -3056,7 +3056,7 @@ where
         I: OrderedIndex<Value = Location<F>>,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         if self.total_active_keys == 0 {
             return Ok(None);
         }
@@ -3230,7 +3230,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         db.log
             .speculative_proof(&self.journal_batch, inactive_peaks)
@@ -3262,7 +3262,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         db.log
             .speculative_pinned_nodes(&self.journal_batch)
             .map_err(Into::into)
@@ -3284,7 +3284,7 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
             return Ok(entry.value().cloned());
         }
@@ -3314,7 +3314,7 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         if keys.is_empty() {
             return Ok(Vec::new());
         }

@@ -163,7 +163,7 @@ where
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         let hasher = qmdb::hasher::<H>();
         self.merkle_batch
@@ -198,7 +198,7 @@ where
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.onchain(db, db.commitment())?;
         let base = db.merkle.mem();
         F::nodes_to_pin(self.bounds.base.size)
             .map(|pos| {

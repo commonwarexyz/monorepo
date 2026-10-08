@@ -38,23 +38,23 @@ use std::{
 /// reference, so calling one without the check fails to compile; the immutable and keyless
 /// families run the same check at each read entry point instead. Public database methods reached
 /// through [`Deref`] are not covered.
-/// It is only created by [`Bounds::on_chain`], [`Commitment::on_chain`], and [`merkleizable`],
+/// It is only created by [`Bounds::onchain`], [`Commitment::onchain`], and [`merkleizable`],
 /// which check whatever commitment the caller supplies, so callers must pair the database with its
 /// own commitment (every current caller does).
 /// Holding the wrapped reference also freezes the database for the duration of the call.
 /// Every state mutation takes the database by value, so no apply, prune, or reinitialization can
 /// interleave with a checked read.
-pub(crate) struct OnChain<'a, T>(&'a T);
+pub(crate) struct Onchain<'a, T>(&'a T);
 
-impl<T> Clone for OnChain<'_, T> {
+impl<T> Clone for Onchain<'_, T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T> Copy for OnChain<'_, T> {}
+impl<T> Copy for Onchain<'_, T> {}
 
-impl<T> Deref for OnChain<'_, T> {
+impl<T> Deref for Onchain<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -80,13 +80,13 @@ impl<F: Family, D: Digest> Commitment<F, D> {
     /// Check a committed read for a batch built directly on the database at this
     /// commitment. With no ancestors to account for applies, only the unchanged state is
     /// readable. Returns [`Error::StaleRead`] otherwise.
-    pub(crate) fn on_chain<'a, T>(
+    pub(crate) fn onchain<'a, T>(
         &self,
         db: &'a T,
         current: Self,
-    ) -> Result<OnChain<'a, T>, Error<F>> {
+    ) -> Result<Onchain<'a, T>, Error<F>> {
         if *self == current {
-            Ok(OnChain(db))
+            Ok(Onchain(db))
         } else {
             Err(Error::StaleRead)
         }
@@ -145,13 +145,13 @@ impl<F: Family, D: Digest> Bounds<F, D> {
     /// chain's retained diffs shadow every key its unapplied batches touched. Membership
     /// compares size and root together, since a sibling fork can commit the same operation
     /// count with different contents.
-    pub(crate) fn on_chain<'a, T>(
+    pub(crate) fn onchain<'a, T>(
         &self,
         db: &'a T,
         current: Commitment<F, D>,
-    ) -> Result<OnChain<'a, T>, Error<F>> {
+    ) -> Result<Onchain<'a, T>, Error<F>> {
         if current == self.tip || current == self.db || self.ancestors.contains(&current) {
-            Ok(OnChain(db))
+            Ok(Onchain(db))
         } else {
             Err(Error::StaleRead)
         }
@@ -247,9 +247,9 @@ pub(crate) fn merkleizable<'a, T, F: Family, D: Digest>(
     current: Commitment<F, D>,
     boundary: Commitment<F, D>,
     ancestors: impl IntoIterator<Item = Commitment<F, D>>,
-) -> Result<OnChain<'a, T>, Error<F>> {
+) -> Result<Onchain<'a, T>, Error<F>> {
     validate_batch_applicable(current, boundary, ancestors)?;
-    Ok(OnChain(db))
+    Ok(Onchain(db))
 }
 
 /// Validate the inactivity floor of a batch at merkleize time.
@@ -333,20 +333,20 @@ mod tests {
             inactivity_floor: loc(14),
         };
         // Own tip, database boundary, and ancestor tips are readable.
-        assert!(bounds.on_chain(&(), state(18, 18)).is_ok());
-        assert!(bounds.on_chain(&(), state(10, 1)).is_ok());
-        assert!(bounds.on_chain(&(), state(16, 16)).is_ok());
+        assert!(bounds.onchain(&(), state(18, 18)).is_ok());
+        assert!(bounds.onchain(&(), state(10, 1)).is_ok());
+        assert!(bounds.onchain(&(), state(16, 16)).is_ok());
         // Foreign states are not, including at sizes the chain also reaches.
         assert!(matches!(
-            bounds.on_chain(&(), state(19, 19)),
+            bounds.onchain(&(), state(19, 19)),
             Err(Error::StaleRead)
         ));
         assert!(matches!(
-            bounds.on_chain(&(), state(16, 99)),
+            bounds.onchain(&(), state(16, 99)),
             Err(Error::StaleRead)
         ));
         assert!(matches!(
-            bounds.on_chain(&(), state(18, 99)),
+            bounds.onchain(&(), state(18, 99)),
             Err(Error::StaleRead)
         ));
     }
@@ -354,13 +354,13 @@ mod tests {
     #[test]
     fn on_chain_from_base_commitment_requires_unchanged_state() {
         let base = state(10, 1);
-        assert!(base.on_chain(&(), state(10, 1)).is_ok());
+        assert!(base.onchain(&(), state(10, 1)).is_ok());
         assert!(matches!(
-            base.on_chain(&(), state(10, 2)),
+            base.onchain(&(), state(10, 2)),
             Err(Error::StaleRead)
         ));
         assert!(matches!(
-            base.on_chain(&(), state(11, 1)),
+            base.onchain(&(), state(11, 1)),
             Err(Error::StaleRead)
         ));
     }
