@@ -45,7 +45,7 @@
 
 use super::{
     Sealed,
-    read::{Malformed, PageReader, Replay},
+    read::{Malformed, PageReader, Replay, ReplayCache},
     tip::Buffer,
     view::{Tail, View},
 };
@@ -63,7 +63,10 @@ use commonware_utils::Widen;
 use std::{
     marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tracing::warn;
 
@@ -154,6 +157,10 @@ pub struct Writer<B: Blob, Phase = Append> {
     /// A reference to the page cache that manages read caching for this blob.
     cache_ref: CacheRef,
 
+    /// Number of times recovery has shrunk the blob. A replay publishes the pages it reads to the
+    /// cache only while this is unchanged.
+    shrinks: Arc<AtomicU64>,
+
     /// The write buffer containing any logical bytes following the last full page boundary in the
     /// underlying blob.
     buffer: Buffer,
@@ -222,6 +229,7 @@ impl<B: Blob> Recovery<B> {
             },
             id: cache_ref.next_id(),
             cache_ref,
+            shrinks: Arc::new(AtomicU64::new(0)),
             buffer,
         })
     }
@@ -299,6 +307,9 @@ impl<B: Blob> Recovery<B> {
     /// Shrink the retained logical prefix to `target_size`. A page-boundary shrink leaves its
     /// resize for the caller's sync.
     async fn shrink(mut self, target_size: u64) -> Result<Self, Error> {
+        // Stop outstanding replays from caching pages this shrink may let appends replace.
+        self.shrinks.fetch_add(1, Ordering::Relaxed);
+
         let page_size: u64 = self.cache_ref.page_size().widen();
         let physical_page_size = page_size
             .checked_add(CHECKSUM_SIZE)
@@ -440,6 +451,7 @@ impl<B: Blob> From<Recovery<B>> for Writer<B> {
             sync_state: recovery.sync_state,
             id: recovery.id,
             cache_ref: recovery.cache_ref,
+            shrinks: recovery.shrinks,
             buffer: recovery.buffer,
         }
     }
@@ -1250,8 +1262,11 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             logical_size,
             partial_page,
             prefetch,
-            self.cache_ref.clone(),
-            self.id,
+            ReplayCache {
+                cache_ref: self.cache_ref.clone(),
+                blob_id: self.id,
+                shrinks: Some((self.shrinks.clone(), self.shrinks.load(Ordering::Relaxed))),
+            },
             read_options,
             malformed,
         ));
@@ -2103,6 +2118,15 @@ mod tests {
                 .replay_recoverable(NZUsize!(4096), ReadOptions::DONT_CACHE)
                 .await
                 .unwrap();
+
+            // A seek past the stale page's bytes, made before the scan finds them, leaves the
+            // cursor at the shorter end.
+            replay.seek_to(30).unwrap();
+            assert!(!replay.ensure(1).await.unwrap());
+            assert_eq!(replay.blob_size(), 20);
+            assert_eq!(replay.remaining(), 0);
+            assert!(replay.chunk().is_empty());
+            replay.seek_to(0).unwrap();
             for _ in 0..2 {
                 assert!(!replay.ensure(total).await.unwrap());
                 assert_eq!(replay.remaining(), 20);
@@ -5615,6 +5639,54 @@ mod tests {
                     .as_ref(),
                 model
             );
+        });
+    }
+
+    /// A replay outlives the recovery that created it, so its in-flight read can finish after the
+    /// recovery shrinks and rewrites the blob. Publishing that read must not restore the old bytes
+    /// over the rewritten page in the cache.
+    #[test]
+    fn test_replay_cannot_repopulate_cache_after_shrink() {
+        let cfg =
+            deterministic::Config::default().with_timeout(Some(std::time::Duration::from_secs(5)));
+        deterministic::Runner::new(cfg).start(|context| async move {
+            // Park the replay's read of the first page after it has captured the persisted bytes.
+            let page = PAGE_SIZE.get() as usize;
+            let physical = page + CHECKSUM_SIZE as usize;
+            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(8));
+            let (inner, size) = context.open("recovery-cache", b"replay").await.unwrap();
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let blob = DelayedReadBlob::new(inner, 0, physical, started_tx, release_rx);
+            let mut recovery = Recovery::open(blob, size, BUFFER_SIZE, cache.clone())
+                .await
+                .unwrap();
+            (recovery, _) = recovery.append(&vec![0xAA; 3 * page + 20]).await.unwrap();
+            recovery = recovery.sync().await.unwrap();
+            let (mut recovery, mut replay) = recovery
+                .replay(NZUsize!(1), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            let mut read = Box::pin(replay.ensure(page));
+            commonware_macros::select! {
+                _ = started_rx => {},
+                _ = read.as_mut() => panic!("read completed before release"),
+            }
+
+            // Discard and rewrite every page while the replay's read is parked.
+            recovery = recovery.truncate(0).await.unwrap();
+            (recovery, _) = recovery.append(&vec![0xBB; 3 * page + 20]).await.unwrap();
+            recovery = recovery.sync().await.unwrap();
+
+            // The replay still yields the bytes it read, but must not publish them.
+            release_tx.send(()).unwrap();
+            assert!(read.await.unwrap());
+            assert_eq!(replay.chunk(), vec![0xAA; page]);
+            let mut cached = vec![0; page];
+            assert!(recovery.try_read_sync_into(&mut cached, 0));
+            assert_eq!(cached, vec![0xBB; page]);
+            let actual = recovery.read_at(0, page).await.unwrap().coalesce();
+            assert_eq!(actual.as_ref(), vec![0xBB; page]);
         });
     }
 

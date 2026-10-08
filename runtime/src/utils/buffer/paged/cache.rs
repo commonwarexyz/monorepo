@@ -431,10 +431,25 @@ impl CacheRef {
         pages: impl Iterator<Item = &'a [u8]>,
         offset: u64,
     ) -> usize {
+        self.cache_pages_if(blob_id, pages, offset, || true)
+    }
+
+    /// Like [Self::cache_pages], but inserts nothing unless `valid` holds once the cache lock is
+    /// held.
+    pub(super) fn cache_pages_if<'a>(
+        &self,
+        blob_id: u64,
+        pages: impl Iterator<Item = &'a [u8]>,
+        offset: u64,
+        valid: impl FnOnce() -> bool,
+    ) -> usize {
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
         let mut cached = 0;
         let mut page_cache = self.cache.write();
+        if !valid() {
+            return 0;
+        }
         for page in pages {
             page_cache.cache(blob_id, page, page_num);
             cached += page.len();

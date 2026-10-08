@@ -14,7 +14,7 @@
 
 use super::{
     CHECKSUM_SIZE, CacheRef, Replay,
-    read::{Malformed, PageReader},
+    read::{Malformed, PageReader, ReplayCache},
     view::{Tail, View},
 };
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs, ReadOptions};
@@ -207,8 +207,11 @@ impl<B: Blob> Sealed<B> {
             logical_blob_size,
             self.inner.partial_page.clone(),
             prefetch_pages,
-            self.inner.cache_ref.clone(),
-            self.inner.id,
+            ReplayCache {
+                cache_ref: self.inner.cache_ref.clone(),
+                blob_id: self.inner.id,
+                shrinks: None,
+            },
             read_options,
             Malformed::Fail,
         );
