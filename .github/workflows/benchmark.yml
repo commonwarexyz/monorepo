@@ -38,9 +38,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # bls12381 alone runs for 4-5 hours, so cryptography is split into
+          # shards that each finish well inside the 6 hour job limit.
           - package: commonware-cryptography
             cargo_flags: ""
             benchmark_name: "commonware-cryptography"
+            shard: bls12381-dkg
+            benches: "--bench bls12381"
+            filter: "^bls12381::dkg::"
+          - package: commonware-cryptography
+            cargo_flags: ""
+            benchmark_name: "commonware-cryptography"
+            shard: bls12381-other
+            benches: "--bench bls12381"
+            filter: "^bls12381::([^d]|d[^k]|dk[^g])"
+          - package: commonware-cryptography
+            cargo_flags: ""
+            benchmark_name: "commonware-cryptography"
+            shard: other
+            exclude_bench: bls12381
           - package: commonware-storage
             cargo_flags: "--features test-traits"
             benchmark_name: "commonware-storage"
@@ -53,6 +69,8 @@ jobs:
           - package: commonware-utils
             cargo_flags: ""
             benchmark_name: "commonware-utils"
+    env:
+      RESULT_NAME: ${{ matrix.benchmark_name }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Configure swap
@@ -72,16 +90,28 @@ jobs:
       - name: Run benchmarks
         env:
           RUSTFLAGS: "--cfg full_bench"
+          BENCHES: ${{ matrix.benches || '--benches' }}
+          EXCLUDE_BENCH: ${{ matrix.exclude_bench }}
+          FILTER: ${{ matrix.filter }}
         run: |
+          read -r -a benches <<< "$BENCHES"
+          if [ -n "$EXCLUDE_BENCH" ]; then
+            benches=()
+            for bench in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "${{ matrix.package }}") | .targets[] | select(.kind == ["bench"]) | .name'); do
+              if [ "$bench" != "$EXCLUDE_BENCH" ]; then
+                benches+=(--bench "$bench")
+              fi
+            done
+          fi
           cargo bench ${{ matrix.cargo_flags }} \
-            --benches -p ${{ matrix.package }} \
-            -- --output-format bencher \
-            | tee "${{ matrix.benchmark_name }}.txt"
+            "${benches[@]}" -p ${{ matrix.package }} \
+            -- --output-format bencher ${FILTER:+"$FILTER"} \
+            | tee "$RESULT_NAME.txt"
       - name: Upload benchmark result
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: benchmark-${{ matrix.benchmark_name }}
-          path: "${{ matrix.benchmark_name }}.txt"
+          name: benchmark-${{ env.RESULT_NAME }}
+          path: "${{ env.RESULT_NAME }}.txt"
           if-no-files-found: error
 
   publish:
@@ -97,6 +127,7 @@ jobs:
         include:
           - package: commonware-cryptography
             benchmark_name: "commonware-cryptography"
+            shards: "bls12381-dkg bls12381-other other"
           - package: commonware-storage
             benchmark_name: "commonware-storage"
           - package: commonware-coding
@@ -113,11 +144,23 @@ jobs:
         continue-on-error: ${{ needs.benchmark.result != 'success' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: benchmark-${{ matrix.benchmark_name }}
+          pattern: benchmark-${{ matrix.benchmark_name }}${{ matrix.shards && '-*' || '' }}
+          merge-multiple: true
       - name: Validate benchmark result
         id: result
         run: |
           output="${{ matrix.benchmark_name }}.txt"
+          # Publish a sharded package only if every shard produced results.
+          for shard in ${{ matrix.shards }}; do
+            part="${{ matrix.benchmark_name }}-$shard.txt"
+            if [ ! -f "$part" ]; then
+              echo "found=false" >> "$GITHUB_OUTPUT"
+              echo "No benchmark result found for ${{ matrix.benchmark_name }} ($shard); skipping publish"
+              exit 0
+            fi
+            grep -Eq '^test .+ \.\.\. bench:' "$part"
+            cat "$part" >> "$output"
+          done
           if [ ! -f "$output" ]; then
             echo "found=false" >> "$GITHUB_OUTPUT"
             echo "No benchmark result found for ${{ matrix.benchmark_name }}; skipping publish"
