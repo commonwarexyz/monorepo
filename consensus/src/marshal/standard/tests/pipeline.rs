@@ -247,7 +247,7 @@ fn retained_pipeline_handoff(first: First) {
                             assert_ne!(
                                 vote.view(),
                                 round.view(),
-                                "default handoff policy must not vote before parent certification"
+                                "staged handoff must not vote before parent certification"
                             );
                         },
                         _ = context.sleep_until(quiet_until) => break,
