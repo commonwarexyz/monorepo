@@ -38,18 +38,19 @@
 //! can hold registrations on another, whose mailbox forwards their results.
 
 use super::{
-    mailbox::Mailbox,
+    mailbox::{Mailbox, Message},
     runtime::{Panic, Role, Shared, Worker},
     task::{Ready, Runnable},
 };
 use crate::utils::{self, Panicker};
-use commonware_utils::channel::oneshot;
 use crossbeam_utils::CachePadded;
 use std::{
     collections::VecDeque,
+    future::poll_fn,
     mem,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     sync::{Arc, mpsc},
+    task::Poll,
     thread::JoinHandle,
 };
 
@@ -88,6 +89,8 @@ struct Inject {
 struct Closing {
     /// Whether the task set and the inject queue have closed.
     closed: bool,
+    /// Whether worker zero has stopped the other pool workers.
+    stopped: bool,
     /// Pool workers that may still poll a task or clear one from the set.
     active: usize,
 }
@@ -125,6 +128,7 @@ impl Table {
             })),
             closing: Mutex::new(Closing {
                 closed: false,
+                stopped: false,
                 active: 0,
             }),
             progress: Condvar::new(),
@@ -304,6 +308,26 @@ impl Table {
         self.progress.notify_all();
     }
 
+    /// End the root of every pool worker after worker zero, which starts its
+    /// shutdown. Repeated calls do nothing.
+    pub fn stop(&self) {
+        {
+            let mut closing = self.closing();
+            if closing.stopped {
+                return;
+            }
+            closing.stopped = true;
+        }
+        for mailbox in self.mailboxes.iter().skip(1) {
+            let _ = mailbox.send(Message::WakeRoot);
+        }
+    }
+
+    /// Whether worker zero has stopped the pool.
+    fn is_stopped(&self) -> bool {
+        self.closing().stopped
+    }
+
     /// Block until the pool has closed. Every pool worker waits here before it
     /// drains the task set, which holds back one that stopped early after a
     /// failure.
@@ -329,19 +353,12 @@ impl Table {
     }
 }
 
-/// A pool worker's thread.
-struct Thread {
-    /// Ends the worker's root, which starts its shutdown.
-    stop: Option<oneshot::Sender<()>>,
-    /// Joined once the worker has cleaned up.
-    handle: JoinHandle<()>,
-}
-
 /// The pool workers after worker zero, each on its own thread.
 #[derive(Default)]
 pub struct Pool {
-    /// Threads in worker order, starting at worker one.
-    threads: Vec<Thread>,
+    /// Threads in worker order, starting at worker one, each joined once its
+    /// worker has cleaned up.
+    threads: Vec<JoinHandle<()>>,
 }
 
 impl Pool {
@@ -350,8 +367,8 @@ impl Pool {
     /// sent to `failures`, which interrupts the root while it runs. The runner
     /// collects a later one after joining the pool.
     ///
-    /// Panics with the first startup failure, after which the caller stops
-    /// the workers already started.
+    /// Panics with the first startup failure, after which worker zero's
+    /// cleanup stops the workers already started.
     pub fn start(&mut self, shared: &Arc<Shared>, failures: &Panicker) {
         let count = shared.pool.workers();
         self.threads.reserve(count - 1);
@@ -359,29 +376,16 @@ impl Pool {
         for index in 1..count {
             #[cfg(test)]
             let _fault = super::runtime::tests::before_pool_worker(shared, index);
-            let (stop, stopped) = oneshot::channel();
             let (ready, started) = mpsc::channel();
             let shared = shared.clone();
             let failures = failures.clone();
             let handle = utils::thread::spawn(shared.cfg.thread_stack_size(), move || {
-                run(shared, index as u32, ready, stopped, failures)
+                run(shared, index as u32, ready, failures)
             });
-            self.threads.push(Thread {
-                stop: Some(stop),
-                handle,
-            });
+            self.threads.push(handle);
             match started.recv().expect("pool worker exited during startup") {
                 Ok(()) => {}
                 Err(panic) => resume_unwind(panic),
-            }
-        }
-    }
-
-    /// Ask every worker to shut down, without waiting for any.
-    pub fn stop(&mut self) {
-        for thread in &mut self.threads {
-            if let Some(stop) = thread.stop.take() {
-                let _ = stop.send(());
             }
         }
     }
@@ -390,7 +394,7 @@ impl Pool {
     pub fn join(&mut self) {
         let mut first: Option<Panic> = None;
         for thread in self.threads.drain(..) {
-            if let Err(panic) = thread.handle.join() {
+            if let Err(panic) = thread.join() {
                 if first.is_none() {
                     first = Some(panic);
                 } else {
@@ -406,17 +410,16 @@ impl Pool {
 
 impl Drop for Pool {
     fn drop(&mut self) {
-        // A backstop for partial startup and for an unwind that skips the
-        // runner's own stop and join.
-        self.stop();
+        // Joins the workers when an unwind skips the runner's own join. Worker
+        // zero's cleanup, which runs first, has stopped them.
         if let Err(panic) = catch_unwind(AssertUnwindSafe(|| self.join())) {
             mem::forget(panic);
         }
     }
 }
 
-/// Run pool worker `index` on its own thread until `stopped` resolves. Reports
-/// readiness, or the startup failure, through `ready`.
+/// Run pool worker `index` on its own thread until worker zero stops the
+/// pool. Reports readiness, or the startup failure, through `ready`.
 ///
 /// Once started, the worker sends every failure to `failures`. A failure
 /// that ends it early goes before cleanup, since cleanup waits for the runner
@@ -425,9 +428,10 @@ fn run(
     shared: Arc<Shared>,
     index: u32,
     ready: mpsc::Sender<Result<(), Panic>>,
-    stopped: oneshot::Receiver<()>,
     failures: Panicker,
 ) {
+    let pool = shared.pool.clone();
+
     // Readiness is sent only once the worker exists with its ring and TLS.
     // The sender is kept until then so a startup failure can be returned.
     let mut ready = Some(ready);
@@ -437,12 +441,15 @@ fn run(
             Role::Pool(index),
             || {
                 let _ = ready.take().unwrap().send(Ok(()));
-                async move {
-                    let _ = stopped.await;
-                }
+                poll_fn(|_| {
+                    if pool.is_stopped() {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
             },
             None,
-            false,
         )?;
         if let Some(panic) = worker.take_panic() {
             failures.notify(panic);
