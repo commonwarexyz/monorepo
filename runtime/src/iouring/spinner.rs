@@ -35,14 +35,15 @@ const CALIBRATION_ITERATIONS: usize = 100_000;
 pub struct Config {
     /// Initial and minimum spin budget in microseconds. The adaptive
     /// controller grows the budget on hits and shrinks it on misses, but
-    /// never decays below this value. Set to 0 to disable spinning.
+    /// never decays below this value. Set to 0 to disable spinning. Defaults
+    /// to 2.
     pub budget_us: usize,
     /// Maximum spin budget in microseconds. The controller never exceeds
-    /// this regardless of adaptation.
+    /// this regardless of adaptation. Defaults to 10.
     pub max_budget_us: usize,
     /// Quick-wake threshold in microseconds. If the loop parks and wakes
     /// with real work in less than this duration, the controller grows the
-    /// budget aggressively (the loop should have spun longer).
+    /// budget aggressively (the loop should have spun longer). Defaults to 10.
     pub quick_wake_us: usize,
 }
 
@@ -60,9 +61,9 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            budget_us: 50,
-            max_budget_us: 300,
-            quick_wake_us: 150,
+            budget_us: 2,
+            max_budget_us: 10,
+            quick_wake_us: 10,
         }
     }
 }
