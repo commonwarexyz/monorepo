@@ -18,8 +18,6 @@ use commonware_utils::{
 };
 #[cfg(target_os = "linux")]
 use std::os::fd::AsFd as _;
-#[cfg(not(target_os = "linux"))]
-use std::os::fd::AsRawFd as _;
 #[cfg(all(test, target_os = "linux"))]
 use std::sync::atomic::AtomicU64;
 #[cfg(test)]
@@ -29,7 +27,7 @@ use std::{
     io::IoSlice,
     num::NonZeroUsize,
     ops::Deref,
-    os::unix::fs::FileExt,
+    os::{fd::AsRawFd as _, unix::fs::FileExt},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -48,7 +46,6 @@ const IOVEC_BATCH_SIZE: usize = 1024;
 mod aio {
     use super::*;
     use crate::BufMut as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
 
     /// Reads one blocking task submits as a single batch in [`crate::Blob::read_many`].
     ///
@@ -77,23 +74,6 @@ mod aio {
     /// One completed read, sent to the stream as soon as the kernel reports it.
     pub(super) type Completion = Result<(usize, IoBufsMut), Error>;
 
-    /// Lazily open an `O_DIRECT` descriptor on the blob's inode. `None` when the filesystem
-    /// rejects direct I/O, in which case callers read through the page cache instead.
-    pub(super) fn direct(file: &Shared) -> Option<&File> {
-        file.direct
-            .get_or_init(|| {
-                let path = format!("/proc/self/fd/{}", file.as_raw_fd());
-                let mut options = std::fs::OpenOptions::new();
-                options.read(true).custom_flags(libc::O_DIRECT);
-                options.open(path).ok()
-            })
-            .as_ref()
-    }
-
-    /// Alignment direct I/O requires of buffer addresses, file offsets, and lengths: the largest
-    /// logical block size of supported devices.
-    const ALIGN: usize = 4096;
-
     /// A block-aligned heap buffer: one submission's reads land here before being copied into
     /// their pool buffers.
     struct Aligned {
@@ -102,9 +82,9 @@ mod aio {
     }
     impl Aligned {
         fn new(len: usize) -> Result<Self, Error> {
-            let layout = std::alloc::Layout::from_size_align(len, ALIGN)
+            let layout = std::alloc::Layout::from_size_align(len, DIRECT_ALIGNMENT)
                 .map_err(|_| Error::OffsetOverflow)?;
-            // SAFETY: `len` is a non-zero multiple of ALIGN.
+            // SAFETY: `len` is a non-zero multiple of DIRECT_ALIGNMENT.
             let ptr = unsafe { std::alloc::alloc(layout) };
             if ptr.is_null() {
                 std::alloc::handle_alloc_error(layout);
@@ -114,8 +94,8 @@ mod aio {
     }
     impl Drop for Aligned {
         fn drop(&mut self) {
-            let layout =
-                std::alloc::Layout::from_size_align(self.len, ALIGN).expect("aligned layout");
+            let layout = std::alloc::Layout::from_size_align(self.len, DIRECT_ALIGNMENT)
+                .expect("aligned layout");
             // SAFETY: allocated in `new` with the same layout.
             unsafe { std::alloc::dealloc(self.ptr, layout) };
         }
@@ -210,7 +190,8 @@ mod aio {
         batch: Vec<Read>,
         tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
     ) -> Result<Context, Error> {
-        let fd = direct(file)
+        let fd = file
+            .direct_file()
             .expect("direct descriptor checked before dispatch")
             .as_raw_fd() as u32;
         let n = batch.len();
@@ -220,11 +201,11 @@ mod aio {
         let mut spans = Vec::with_capacity(n);
         let mut slab_len = 0usize;
         for read in &batch {
-            let aligned_offset = read.offset / ALIGN as u64 * ALIGN as u64;
+            let aligned_offset = read.offset / DIRECT_ALIGNMENT as u64 * DIRECT_ALIGNMENT as u64;
             let skip = (read.offset - aligned_offset) as usize;
             let aligned_len = skip
                 .checked_add(read.len)
-                .and_then(|len| len.checked_next_multiple_of(ALIGN))
+                .and_then(|len| len.checked_next_multiple_of(DIRECT_ALIGNMENT))
                 .ok_or(Error::OffsetOverflow)?;
             spans.push((aligned_offset, skip, slab_len, aligned_len));
             slab_len = slab_len
@@ -426,7 +407,7 @@ mod aio {
             let (blob, _) = storage.open("partition", b"blob").await.unwrap();
             blob.write_at(0, data, WriteOptions::SYNC).await.unwrap();
             assert!(
-                direct(&blob.shared).is_some(),
+                blob.shared.direct_file().is_some(),
                 "temporary directory must support O_DIRECT"
             );
             (storage, blob, directory)
@@ -461,13 +442,13 @@ mod aio {
                     Read {
                         index: 1,
                         offset: 1 << 63,
-                        len: ALIGN,
+                        len: DIRECT_ALIGNMENT,
                     },
                 ];
                 let ctx = take_context().unwrap();
                 assert!(submit(&blob.shared, &pool, ctx, batch, &tx).is_err());
 
-                let canary = Aligned::new(LEN + ALIGN).unwrap();
+                let canary = Aligned::new(LEN + DIRECT_ALIGNMENT).unwrap();
                 // SAFETY: `canary` owns `canary.len` writable bytes.
                 unsafe { std::ptr::write_bytes(canary.ptr, 0, canary.len) };
                 std::thread::sleep(Duration::from_millis(10));
@@ -536,13 +517,13 @@ mod aio {
 
         #[tokio::test]
         async fn test_reads_without_context_are_served_concurrently() {
-            let data: Vec<u8> = (0..3 * ALIGN).map(|i| (i % 251) as u8).collect();
+            let data: Vec<u8> = (0..3 * DIRECT_ALIGNMENT).map(|i| (i % 251) as u8).collect();
             let (storage, blob, directory) = direct_blob("without_context", data.clone()).await;
 
             // Each read is served on its own blocking task, and one past the end fails alone.
             let ranges = [
                 (10u64, 5000usize),
-                (ALIGN as u64 - 1, 2),
+                (DIRECT_ALIGNMENT as u64 - 1, 2),
                 (data.len() as u64, 1),
             ];
             let batch = ranges
@@ -698,6 +679,13 @@ impl Drop for Shared {
 }
 
 impl Shared {
+    /// The file reopened with `O_DIRECT`, opened on first use. `None` if the filesystem does not
+    /// support `O_DIRECT`.
+    #[cfg(target_os = "linux")]
+    fn direct_file(&self) -> Option<&File> {
+        self.direct.get_or_init(|| open_direct(self).ok()).as_ref()
+    }
+
     /// Serialize a blocking barrier with its terminal accounting.
     fn durability(&self) -> Result<MutexGuard<'_, ()>, Error> {
         let guard = self.durability.lock();
@@ -887,7 +875,7 @@ impl Blob {
         if !direct_aligned(offset, buf) {
             return Ok(false);
         }
-        let Some(direct) = file.direct.get_or_init(|| open_direct(file).ok()) else {
+        let Some(direct) = file.direct_file() else {
             return Ok(false);
         };
         let Some(read) = read_direct(direct, buf, offset)? else {
@@ -1125,7 +1113,7 @@ impl crate::Blob for Blob {
         // page cache holds. Its concurrency assumes filesystem-native direct I/O (such as ext4
         // or XFS): a filesystem that serves direct I/O through a buffered fallback stays correct
         // but completes each submission's reads one at a time.
-        if options.contains(ReadOptions::DONT_CACHE) && aio::direct(&self.shared).is_some() {
+        if options.contains(ReadOptions::DONT_CACHE) && self.shared.direct_file().is_some() {
             let mut reads = Vec::with_capacity(ranges.len());
             for (index, &(offset, len)) in ranges.iter().enumerate() {
                 let Some(offset) = offset.checked_add(self.data_offset) else {
@@ -1947,7 +1935,7 @@ mod tests {
             blob.write_at(0, b"data", WriteOptions::SYNC).await.unwrap();
             blob
         });
-        if aio::direct(&blob.shared).is_none() {
+        if blob.shared.direct_file().is_none() {
             drop(blob);
             runtime.block_on(storage.remove("partition", None)).unwrap();
             drop(storage);
@@ -1978,7 +1966,7 @@ mod tests {
 
         // Only some filesystems (such as tmpfs) hold a file this large and serve direct I/O.
         let len = i64::MAX as u64 - blob.data_offset;
-        if blob.resize(len).await.is_err() || aio::direct(&blob.shared).is_none() {
+        if blob.resize(len).await.is_err() || blob.shared.direct_file().is_none() {
             drop(blob);
             storage.remove("partition", None).await.unwrap();
             drop(storage);
@@ -2022,7 +2010,7 @@ mod tests {
         let (storage, directory) = storage_for_reopen_test("read_many_large", Layout::ALL);
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         assert!(
-            aio::direct(&blob.shared).is_some(),
+            blob.shared.direct_file().is_some(),
             "temporary directory must support O_DIRECT"
         );
 
@@ -2059,7 +2047,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            aio::direct(&blob.shared).is_some(),
+            blob.shared.direct_file().is_some(),
             "temporary directory must support O_DIRECT"
         );
 
