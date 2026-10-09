@@ -319,11 +319,13 @@ impl Config {
         self
     }
 
-    /// Set how many tasks a busy pool worker polls between checks for tasks
-    /// spawned or woken outside it. Defaults to 31.
+    /// Set how many tasks a busy pool worker polls between checks of the queue
+    /// shared by all pool workers. Defaults to 31.
     ///
-    /// Must be nonzero. A smaller interval starts such tasks sooner at the cost
-    /// of more synchronization, and 1 checks before every poll.
+    /// Must be nonzero. A smaller interval starts tasks in the shared queue
+    /// sooner at the cost of more synchronization. At 1, a busy worker checks
+    /// the shared queue before every poll and polls its own queued tasks only
+    /// while the shared queue is empty.
     pub const fn with_global_queue_interval(mut self, interval: u32) -> Self {
         self.global_queue_interval = interval;
         self
@@ -443,8 +445,8 @@ impl Config {
         self.worker_threads
     }
 
-    /// Return how many tasks a busy pool worker polls between checks for tasks
-    /// spawned or woken outside it.
+    /// Return how many tasks a busy pool worker polls between checks of the
+    /// queue shared by all pool workers.
     pub const fn global_queue_interval(&self) -> u32 {
         self.global_queue_interval
     }
