@@ -1,10 +1,11 @@
 //! The pool of workers that poll ordinary tasks: its shared scheduling state
 //! and its threads.
 //!
-//! [`Table`] is created before any worker starts. It holds every pool
+//! [`Pool`] is created before any worker starts. It holds every pool
 //! worker's mailbox, the pool-wide inject queue, the idle set, and the
 //! shutdown barrier. Every task's header reaches it through a weak
 //! reference, so a wake from any thread can find the task's pool.
+//! [`Threads`] starts and joins the threads of the workers after worker zero.
 //!
 //! # Placement
 //!
@@ -47,7 +48,7 @@
 //!
 //! ```text
 //! worker zero                            worker i (1..n)
-//!   Table::new (every mailbox)
+//!   Pool::new (every mailbox)
 //!   enter, start worker i ------------->   enter, report ready
 //!   build and drive the root               drive tasks
 //!   root ends: close the task set,
@@ -138,7 +139,7 @@ struct Closing {
 }
 
 /// Scheduling state shared by every pool worker and by task wakers.
-pub struct Table {
+pub struct Pool {
     /// Every pool worker's mailbox, indexed by worker.
     mailboxes: Box<[Arc<Mailbox>]>,
     /// One bit per worker that is parked or about to park.
@@ -153,7 +154,7 @@ pub struct Table {
     progress: Condvar,
 }
 
-impl Table {
+impl Pool {
     /// The state for a pool whose workers own `mailboxes`, in worker order.
     pub fn new(mailboxes: Vec<Arc<Mailbox>>) -> Self {
         assert!(
@@ -397,13 +398,13 @@ impl Table {
 
 /// The pool workers after worker zero, each on its own thread.
 #[derive(Default)]
-pub struct Pool {
-    /// Threads in worker order, starting at worker one, each joined once its
-    /// worker has cleaned up.
-    threads: Vec<JoinHandle<()>>,
+pub struct Threads {
+    /// Join handles in worker order, starting at worker one, each joined once
+    /// its worker has cleaned up.
+    handles: Vec<JoinHandle<()>>,
 }
 
-impl Pool {
+impl Threads {
     /// Start every worker after worker zero, waiting for each to create its
     /// ring before starting the next. Every failure of a started worker is
     /// sent to `failures`, which interrupts the root while it runs. The runner
@@ -413,7 +414,7 @@ impl Pool {
     /// cleanup stops the workers already started.
     pub fn start(&mut self, shared: &Arc<Shared>, failures: &Panicker) {
         let count = shared.pool.workers();
-        self.threads.reserve(count - 1);
+        self.handles.reserve(count - 1);
 
         for index in 1..count {
             #[cfg(test)]
@@ -424,7 +425,7 @@ impl Pool {
             let handle = utils::thread::spawn(shared.cfg.thread_stack_size(), move || {
                 run(shared, index as u32, ready, failures)
             });
-            self.threads.push(handle);
+            self.handles.push(handle);
             match started.recv().expect("pool worker exited during startup") {
                 Ok(()) => {}
                 Err(panic) => resume_unwind(panic),
@@ -435,7 +436,7 @@ impl Pool {
     /// Join every worker, resuming the first thread that panicked.
     pub fn join(&mut self) {
         let mut first: Option<Panic> = None;
-        for thread in self.threads.drain(..) {
+        for thread in self.handles.drain(..) {
             if let Err(panic) = thread.join() {
                 if first.is_none() {
                     first = Some(panic);
@@ -450,7 +451,7 @@ impl Pool {
     }
 }
 
-impl Drop for Pool {
+impl Drop for Threads {
     fn drop(&mut self) {
         // Joins the workers when an unwind skips the runner's own join. Worker
         // zero's cleanup, which runs first, has stopped them.
@@ -517,7 +518,7 @@ fn run(
 
 /// Send a pool worker's failure to the runner, then wake worker zero's root,
 /// which takes the failure before its next poll.
-fn report(pool: &Table, failures: &Panicker, panic: Panic) {
+fn report(pool: &Pool, failures: &Panicker, panic: Panic) {
     failures.notify(panic);
     let _ = pool.mailbox(0).send(Message::WakeRoot);
 }

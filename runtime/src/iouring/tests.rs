@@ -289,7 +289,7 @@ static PARK_HOOKS_ARMED: AtomicBool = AtomicBool::new(false);
 static PARK_HOOKS: Mutex<Vec<ParkHook>> = Mutex::new(Vec::new());
 
 /// Run `hook` on worker `index` of `pool` when it next reaches `point`.
-fn on_next_park(pool: &Table, index: u32, point: ParkPoint, hook: impl FnOnce() + Send + 'static) {
+fn on_next_park(pool: &Pool, index: u32, point: ParkPoint, hook: impl FnOnce() + Send + 'static) {
     PARK_HOOKS
         .lock()
         .push((ptr::from_ref(pool).addr(), index, point, Box::new(hook)));
@@ -297,7 +297,7 @@ fn on_next_park(pool: &Table, index: u32, point: ParkPoint, hook: impl FnOnce() 
 }
 
 /// Run the hook installed for this worker at this point of its park, if any.
-pub fn at_park(pool: &Table, index: u32, point: ParkPoint) {
+pub fn at_park(pool: &Pool, index: u32, point: ParkPoint) {
     if !PARK_HOOKS_ARMED.load(Ordering::Acquire) {
         return;
     }

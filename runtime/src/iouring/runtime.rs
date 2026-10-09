@@ -13,7 +13,7 @@
 //!   +-- Shared (Arc) <-------------------------- Local.shared
 //!   |     +-- Config, metrics, stop/panic signals
 //!   |     +-- Network, Storage, buffer pools
-//!   |     +-- Table (pool mailboxes, inject queue, idle set, shutdown barrier)
+//!   |     +-- Pool (pool mailboxes, inject queue, idle set, shutdown barrier)
 //!   |     |       ^-- task headers (Weak)
 //!   |     +-- Tasks (every live ordinary task, for teardown)
 //!   |     `-- Workers <------------------------ ActiveWorker
@@ -135,7 +135,7 @@
 use super::{
     driver::Driver,
     mailbox::{Cancel, Forward, Mailbox, Message},
-    pool::{MAX_WORKERS, Pool, Table},
+    pool::{MAX_WORKERS, Pool, Threads},
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
@@ -678,7 +678,7 @@ pub struct Shared {
     /// Validated configuration, immutable after startup.
     pub cfg: Config,
     /// Scheduling state of the pool workers.
-    pub pool: Arc<Table>,
+    pub pool: Arc<Pool>,
     /// User-visible metrics registry.
     registry: Registry,
     /// Task counters and running gauges.
@@ -1140,7 +1140,7 @@ impl Local {
     /// Return the current worker if it is a worker of the pool behind `pool`,
     /// including during shutdown.
     #[inline(always)]
-    pub fn serving(pool: &Weak<Table>) -> Option<Rc<RefCell<Self>>> {
+    pub fn serving(pool: &Weak<Pool>) -> Option<Rc<RefCell<Self>>> {
         let local = Self::current()?;
         // The weak reference preserves allocation identity without retaining
         // the pool. A one-off worker shares the pool but polls no task of it.
@@ -1816,7 +1816,7 @@ impl Worker {
     /// case is inlined there and the inject queue sits behind a call.
     #[inline]
     #[must_use]
-    fn next_runnable(&mut self, pool: Option<&Table>) -> Option<Runnable> {
+    fn next_runnable(&mut self, pool: Option<&Pool>) -> Option<Runnable> {
         let Some(pool) = pool else {
             return self.local.borrow_mut().ready.pop();
         };
@@ -1842,7 +1842,7 @@ impl Worker {
     /// oldest runnable, or the oldest local runnable if the share was empty.
     #[inline(never)]
     #[must_use]
-    fn take_inject(local: &RefCell<Local>, pool: &Table) -> Option<Runnable> {
+    fn take_inject(local: &RefCell<Local>, pool: &Pool) -> Option<Runnable> {
         let mut local = local.borrow_mut();
         pool.take(&mut local.ready).or_else(|| local.ready.pop())
     }
@@ -2176,7 +2176,7 @@ impl crate::Runner for Runner {
 
         let shared = Arc::new(Shared {
             cfg: self.cfg,
-            pool: Arc::new(Table::new(mailboxes)),
+            pool: Arc::new(Pool::new(mailboxes)),
             registry,
             metrics,
             pending_operations,
@@ -2203,7 +2203,7 @@ impl crate::Runner for Runner {
         // the root, which takes the failure before each poll. The receiver
         // outlives the root, so a failure after the root completes still fails
         // the runner.
-        let mut pool = Pool::default();
+        let mut threads = Threads::default();
         let (pool_panicker, mut pool_failures) = Panicker::new(false);
 
         // The root factory needs TLS installed so it can synchronously spawn or
@@ -2214,7 +2214,7 @@ impl crate::Runner for Runner {
             shared.clone(),
             Role::Pool(0),
             || {
-                pool.start(&shared, &pool_panicker);
+                threads.start(&shared, &pool_panicker);
                 let root = tasks.interrupt(f(Context {
                     name: label.name(),
                     attributes: Vec::new(),
@@ -2245,7 +2245,7 @@ impl crate::Runner for Runner {
             // pool workers and waits for them to drain the task set.
             worker.panics.run(|| tree.abort());
             worker.cleanup();
-            worker.panics.run(|| pool.join());
+            worker.panics.run(|| threads.join());
             if let Some(panic) = pool_failures.try_take() {
                 worker.panics.retain(panic);
             }

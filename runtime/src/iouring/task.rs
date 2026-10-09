@@ -67,7 +67,7 @@
 
 use super::{
     mailbox::{Mailbox, Message},
-    pool::Table,
+    pool::Pool,
     runtime::{Local, Panics},
     tasks::{Links, Tasks},
 };
@@ -495,7 +495,7 @@ pub struct Header {
     vtable: &'static Vtable,
     /// Pool that runs the task, reached by wakes from any thread, without
     /// extending its lifetime.
-    pool: Weak<Table>,
+    pool: Weak<Pool>,
     /// Identity of the [`Tasks`] set that retains the task.
     owner: NonZeroU64,
 }
@@ -622,7 +622,7 @@ impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
 pub struct Task(NonNull<Header>);
 
 // SAFETY: `Task::new` requires `F: Send`, and the header (including its
-// `Weak<Table>`) is `Send + Sync`. Only the thread that wins the running
+// `Weak<Pool>`) is `Send + Sync`. Only the thread that wins the running
 // state, clears a nonrunning task, or frees the cell accesses the future, and
 // only the holder of the task's shard lock in the task set accesses its links.
 unsafe impl Send for Task {}
@@ -667,7 +667,7 @@ impl Task {
     /// Allocate a task for `tasks` to retain, run by the pool behind `pool`,
     /// with its first poll queued. Returns the reference for the set to take
     /// over, and the task's first runnable.
-    pub fn new<F>(future: F, tasks: &Tasks, pool: Weak<Table>) -> (Self, Runnable)
+    pub fn new<F>(future: F, tasks: &Tasks, pool: Weak<Pool>) -> (Self, Runnable)
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -1212,8 +1212,8 @@ pub mod tests {
 
     /// A pool of one worker that never runs, so every wake takes the inject
     /// path.
-    pub fn pool() -> Arc<Table> {
-        Arc::new(Table::new(vec![Arc::new(Mailbox::new().unwrap())]))
+    pub fn pool() -> Arc<Pool> {
+        Arc::new(Pool::new(vec![Arc::new(Mailbox::new().unwrap())]))
     }
 
     /// Retain a task of `pool` in `set` and queue its first runnable in
@@ -1221,7 +1221,7 @@ pub mod tests {
     fn insert(
         set: &Tasks,
         ready: &mut Ready,
-        pool: &Arc<Table>,
+        pool: &Arc<Pool>,
         future: impl Future<Output = ()> + Send + 'static,
     ) -> Task {
         let (task, runnable) = Task::new(future, set, Arc::downgrade(pool));
@@ -1252,7 +1252,7 @@ pub mod tests {
     }
 
     /// Take the runnables pushed into `pool`'s inject queue.
-    fn scheduled(pool: &Table) -> Vec<Runnable> {
+    fn scheduled(pool: &Pool) -> Vec<Runnable> {
         std::iter::from_fn(|| pool.pop()).collect()
     }
 
@@ -1598,7 +1598,7 @@ pub mod tests {
             let mailboxes = (0..workers)
                 .map(|_| Arc::new(Mailbox::new().unwrap()))
                 .collect();
-            let pool = Table::new(mailboxes);
+            let pool = Pool::new(mailboxes);
             let set = Tasks::new(1);
             let tasks: Vec<Task> = (0..queued)
                 .map(|_| {
@@ -1989,7 +1989,7 @@ pub mod tests {
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::{
-        AfterPending, AfterPoll, Mailbox, Panics, REF_ONE, REFS, Ready, Runnable, State, Table,
+        AfterPending, AfterPoll, Mailbox, Panics, Pool, REF_ONE, REFS, Ready, Runnable, State,
         Task, Tasks,
     };
     use loom::{
@@ -2011,11 +2011,11 @@ mod loom_tests {
 
     /// A pool of `workers` workers with no runner. Task headers hold a
     /// standard `Weak` to it, and every wake takes the inject path.
-    fn pool(workers: usize) -> std::sync::Arc<Table> {
+    fn pool(workers: usize) -> std::sync::Arc<Pool> {
         let mailboxes = (0..workers)
             .map(|_| std::sync::Arc::new(Mailbox::new().unwrap()))
             .collect();
-        std::sync::Arc::new(Table::new(mailboxes))
+        std::sync::Arc::new(Pool::new(mailboxes))
     }
 
     /// Counts the drops of a future's captured state.
@@ -2073,7 +2073,7 @@ mod loom_tests {
     /// Tear down as worker zero does: close the set, then the pool, which
     /// discards the inject queue's runnables, then drain the set and clear
     /// each task.
-    fn teardown(set: &Tasks, pool: &Table) {
+    fn teardown(set: &Tasks, pool: &Pool) {
         set.close();
         pool.close();
         for task in set.drain(0) {
@@ -2087,7 +2087,7 @@ mod loom_tests {
     /// worker ends its spin on a wake signal and consumes it. The worker that
     /// completes the last task wakes every worker, so none waits forever.
     fn work(
-        pool: &Table,
+        pool: &Pool,
         set: &Tasks,
         index: u32,
         completed: &AtomicUsize,
