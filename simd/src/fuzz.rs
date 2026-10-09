@@ -310,7 +310,7 @@ fn test_profile() {
 fn test_selected_profile() {
     let selected = expected_backend();
     std::eprintln!("instruction differential backend: {selected:?}");
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "std"))]
     if std::arch::is_aarch64_feature_detected!("neon")
         && std::arch::is_aarch64_feature_detected!("sha2")
     {
