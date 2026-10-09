@@ -71,6 +71,13 @@ mod aio {
     /// direct I/O, which the blob remembers so later batches take the per-read path without
     /// trying again, or when the open fails for a transient reason such as a descriptor limit,
     /// which the next submission retries.
+    ///
+    /// The submissions of a blob's first batch run concurrently, so several of them may find
+    /// no descriptor yet and each open one. The first to finish wins and the rest close theirs
+    /// at once; every submission then reads through the winner. Serializing the open would
+    /// force a transient failure to be remembered as if the filesystem had rejected direct I/O,
+    /// so the duplicate opens, bounded by the submissions of one batch and paid once per blob,
+    /// are accepted instead.
     pub(super) fn direct(file: &Shared) -> Option<&File> {
         if let Some(direct) = file.direct.get() {
             return Some(direct);
@@ -644,7 +651,8 @@ struct Shared {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: AtomicBool,
-    /// Descriptor for direct I/O on the same inode, opened by the first batched read.
+    /// Descriptor for direct I/O on the same inode, opened by the first batched read (see
+    /// [aio::direct] for the concurrent first open).
     #[cfg(target_os = "linux")]
     direct: OnceLock<File>,
     /// Whether the filesystem has rejected direct I/O on this file, so batched reads skip it.
