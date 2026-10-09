@@ -13,8 +13,10 @@
 //! other worker. Every other push goes to the inject queue: wakes and spawns
 //! from outside the pool or on a closing worker, and spawns that leave a busy
 //! worker. Workers take a share of the queue whenever their own runs dry and
-//! every [`INJECT_INTERVAL`] takes, so a busy worker cannot keep a burst
-//! waiting one interval per runnable.
+//! once every [global queue interval] of takes, so a busy worker cannot keep a
+//! burst waiting one interval per runnable.
+//!
+//! [global queue interval]: super::Config::with_global_queue_interval
 //!
 //! # Waking a parked worker
 //!
@@ -110,11 +112,6 @@ cfg_if::cfg_if! {
         use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
     }
 }
-
-/// Takes between two looks at the inject queue while a worker has work of its
-/// own, the default `global_queue_interval` of tokio's current-thread
-/// scheduler.
-pub const INJECT_INTERVAL: u32 = 31;
 
 /// Most runnables one take moves from the inject queue, as tokio caps it at
 /// half its local queue.
