@@ -5,121 +5,274 @@
 
 Abstract over SIMD operations.
 
+In order to perform more operations per second, modern CPUs come equipped with
+large SIMD (Single Instruction, Multiple Data) units; as the name suggests,
+these units can operate on multiple units of data at a time, allowing for
+higher throughput.
+
+This crate makes it easy to write algorithms which take advantage of this extra
+processing power.
+Not only does it provide an abstraction for a subset of operations common to
+most platforms, it also provides abstractions over operations only available
+on specific platforms, and a means of composing these operations.
+This lets you compose portable code and platform-specific code together,
+letting you write performant and readable algorithms.
+
 ## Backends
 
-Native and array-backed emulated providers implement the same instruction contracts:
+This crate does not aim to implement every SIMD instruction that exists.
+We focus on instructions that are useful in the rest of the codebase.
+In particular, we don't imagine that floating-point instructions will be useful.
 
-| Provider | Byte/u32/u64 lanes | Required instructions |
-| --- | --- | --- |
-| Scalar | 1/1/1 | None |
-| NEON | 16/4/2 | NEON and SHA2, targeting Apple silicon |
-| Armv9 | 16/4/2 | NEON, SHA2, SVE, and SVE2; fixed 128-bit logical vectors |
-| Ice Lake | 64/16/8 | AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, and SHA-NI |
+We also don't try to track every possible subset or iteration of particular
+instruction sets.
+For example, on x86, various iterations of SIMD exist---SSE2, AVX, AVX-512---
+and some specialized instructions like GFNI, SHA-NI, etc. may not be available.
+Rather than trying to target all the possible combinations of these, we instead
+have a few "frontier" targets, which are platforms that are both widely available,
+and have all the gadgets you might want to use.
+We also support NEON for platforms such as Apple silicon that lack SVE2.
 
-Every backend also provides a fixed four-lane `u32` vector for SHA-256 state
-and message scheduling. Profile names identify checked deployment bundles;
-architectural NEON alone does not imply this crate's SHA2 requirement.
+These platforms are:
 
-The default `std` feature enables runtime detection. Without `std`, native
-providers require the instruction bundle to be enabled at compile time.
-Dispatch selects a supported native provider or falls back to scalar.
+- **Ice Lake**: x86-64 with AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, SHA-NI,
+  SSSE3, and SSE4.1.
+- **NEON**: AArch64 with NEON and SHA2.
+- **Armv9**: AArch64 with NEON, SHA2, SVE, and SVE2.
 
-## Operations
+Being on this list means that we expose instructions beyond those which are supported
+on every platform.
+Algorithms can reasonably be expected to be optimized against these platforms,
+and make use of these instructions.
 
-`Operation<S>` ties captured registers and outputs to the executing backend.
-Instruction leaves define their equivalent portable and specialized paths in a
-local struct and implementation inside the constructor. Ordinary generic
-functions compose those leaves and return results directly:
+It is nevertheless possible to benefit from SIMD-accelerated algorithms on
+other platforms, without modifying those algorithms or this crate.
+By implementing the portable subset for your backend of choice, you can benefit
+from the cross-platform subset of SIMD, which is substantial!
+This does not require modifying the crate at all, or any algorithms written
+using the crate!
+The only downside is that algorithms may not be aware of particular instructions
+they could be using on your platform.
+
+## Usage
+
+Algorithms are written against the `Simd` trait, which defines vector types and
+operations on them. The associated type `Simd::U64` holds multiple `u64` values,
+referred to as "lanes", and operations usually affect each lane independently.
+
+For example, addition wraps independently in each lane:
 
 ```rust
-use commonware_simd::{IceLake, Operation, Simd};
-
-fn foo<S: Simd>(value: S::U32) -> impl Operation<S, Output = S::U32> {
-    struct Foo<S: Simd>(S::U32);
-    impl<S: Simd> Operation<S> for Foo<S> {
-        type Output = S::U32;
-
-        fn portable(self, simd: S) -> S::U32 {
-            simd.u32_xor(self.0, simd.u32_splat(1))
-        }
-
-        fn ice_lake(self, simd: S) -> S::U32
-        where
-            S: IceLake,
-        {
-            simd.u32_ternary::<0x96>(self.0, simd.u32_splat(1), simd.u32_splat(0))
-        }
-    }
-    Foo::<S>(value)
-}
+use commonware_simd::Simd;
 
 #[inline(always)]
-fn compose<S: Simd>(simd: S, value: S::U32) -> S::U32 {
-    let value = simd.execute(foo::<S>(value));
-    simd.u32_add(value, simd.u32_splat(1))
-}
-
-fn kernel<S: Simd>(simd: S, input: u32) -> S::U32 {
-    simd.execute(#[inline(always)] |simd: S| compose(simd, simd.u32_splat(input)))
+fn add<S: Simd>(simd: S, a: S::U64, b: S::U64) -> S::U64 {
+    simd.u64_add(a, b)
 }
 ```
 
-Enter a whole kernel through `simd.execute(#[inline(always)] |simd| ...)`. A kernel
-is a substantial SIMD computation that keeps intermediates in registers.
-Closures implement `Operation<S>` through `FnMut(S) -> R` and are invoked once
-per execution. They can own and mutate inputs, borrow mutable buffers, and return
-backend registers; closures that only implement `FnOnce` are excluded. Child
-leaves still select the specialized path for the same backend.
+The number of lanes varies by backend. Loads and stores use slices containing
+at least `S::U64_LANES` elements; any extra elements are ignored. Process full
+vectors and handle the remaining elements separately:
 
-Native execution establishes the backend's target-feature scope. The closure body
-and hot shared SIMD helpers must inline into that scope; use `#[inline(always)]`
-on both. Inlining the closure adapter alone does not force the body to inline.
-Ordinary result-returning generic glue can compose leaves, but receiving the token
-alone does not give a function its target features. Scalar helpers and other
-independently scoped kernels may remain calls.
+```rust
+use commonware_simd::Simd;
 
-For a reusable kernel, return `impl Operation<S>` and keep its computation in an
-annotated closure. This makes the execution boundary explicit at the call site:
+#[inline(always)]
+fn add_slices<S: Simd>(simd: S, a: &[u64], b: &[u64], output: &mut [u64]) {
+    assert_eq!(a.len(), b.len());
+    assert_eq!(a.len(), output.len());
+    let full = a.len() / S::U64_LANES * S::U64_LANES;
+    for i in (0..full).step_by(S::U64_LANES) {
+        let sum = simd.u64_add(simd.u64_load(&a[i..]), simd.u64_load(&b[i..]));
+        simd.u64_store(sum, &mut output[i..]);
+    }
+    for i in full..a.len() {
+        output[i] = a[i].wrapping_add(b[i]);
+    }
+}
+```
+
+Slices need only their element type's alignment, not vector alignment. Aligning
+buffers to vector boundaries can help performance, but is not required for correctness.
+Use the lane count for each element type independently; backends need not use the
+same vector width for `u8`, `u32`, and `u64`.
+
+Functions that are generic over `Simd` compose naturally. The backend token is
+copied into each helper:
+
+```rust
+use commonware_simd::Simd;
+
+#[inline(always)]
+fn add<S: Simd>(simd: S, a: S::U64, b: S::U64) -> S::U64 {
+    simd.u64_add(a, b)
+}
+
+#[inline(always)]
+fn add_three<S: Simd>(simd: S, a: S::U64, b: S::U64, c: S::U64) -> S::U64 {
+    add(simd, add(simd, a, b), c)
+}
+```
+
+### Operations
+
+An `Operation` can define equivalent algorithms for different backends. Implement
+`portable` using the common instructions, then optionally override `ice_lake`, `neon`, or
+`arm_v9` to use that profile's extra instructions. Each specialized path defaults
+to `portable` and must produce the same result.
+
+Our addition example needs only common instructions. A function returning
+`impl Operation<S>` can capture vector values such as `S::U64`:
 
 ```rust
 use commonware_simd::{Operation, Simd};
 
-fn add<S: Simd>(left: S::U32, right: S::U32) -> impl Operation<S, Output = S::U32> {
+fn add<S: Simd>(a: S::U64, b: S::U64) -> impl Operation<S, Output = S::U64> {
     #[inline(always)]
-    move |simd: S| simd.u32_add(left, right)
+    move |simd: S| simd.u64_add(a, b)
 }
 
-fn caller<S: Simd>(simd: S, left: S::U32, right: S::U32) -> S::U32 {
-    simd.execute(add::<S>(left, right))
+fn kernel<S: Simd>(simd: S, a: S::U64, b: S::U64) -> S::U64 {
+    simd.execute(add::<S>(a, b))
 }
 ```
 
-The constructor only captures arguments and need not inline. The closure and any
-hot helpers it calls still need to inline into the execution wrapper. Returning
-an operation does not by itself make an outlined helper inherit target features.
+`Simd::execute` keeps the supplied backend when executing a child operation.
+Vector types such as `S::U64` depend on the backend and cannot be passed to
+another backend.
 
-`dispatch` and `check_consistent` require a universal
-operation with the same output type across the backends they execute. At that
-outer boundary, an explicit operation can call the shared composition function
-and normalize registers to scalars or buffers. A typed closure implements
-`Operation` for one backend; universal dispatch requires one value implementing
-it for several backends. Use a local operation struct for that outer adapter,
-then execute the typed closure kernel with its supplied `simd` token.
+At the outer boundary, `dispatch` selects a native backend supported by the host,
+falling back to scalar emulation.
+The default `std` feature enables runtime CPU feature detection. Without `std`,
+native backends require their features to be enabled at compile time.
 
-## Testing
+Dispatch requires one operation that implements every candidate backend with a
+common output type. Use a struct for this adapter, and return ordinary Rust
+values such as `u64` or a buffer, rather than backend-specific vector types:
 
-Shared fuzz plans enter through `dispatch` to check composition and compare the
-selected native backend directly with its matching emulator on real hardware. Run
-the fuzzer on each target platform to validate that platform's compiled instructions.
-Emulator-specific unit
-tests live in that backend's module and run independently of CPU support.
-Operation variants can be compared separately with `check_consistent`.
+```rust
+use commonware_simd::{Operation, Simd, dispatch};
 
-Hardware coverage belongs in this crate so consumers using the modeled interface
-can check their algorithms with emulation rather than repeat the hardware matrix.
+struct Add(u64, u64);
 
-Run `just test -p commonware-simd` for unit tests and bounded fuzz checks. The
-`simd/fuzz` target uses the same plans for continuous fuzzing.
+impl<S: Simd> Operation<S> for Add {
+    type Output = u64;
+
+    fn portable(self, simd: S) -> u64 {
+        simd.execute(#[inline(always)] |simd: S| {
+            let sum = simd.u64_add(simd.u64_splat(self.0), simd.u64_splat(self.1));
+            simd.u64_extract::<0>(sum)
+        })
+    }
+}
+
+assert_eq!(dispatch(Add(u64::MAX, 1)), 0);
+```
+
+Closures implementing `FnMut(S) -> R` also implement `Operation<S>`. They can
+borrow mutable buffers and are called once per execution. A closure with a typed
+backend parameter is useful inside a generic function:
+
+```rust
+use commonware_simd::Simd;
+
+fn add_scalar<S: Simd>(simd: S, a: u64, b: u64) -> u64 {
+    simd.execute(#[inline(always)] |simd: S| {
+        let sum = simd.u64_add(simd.u64_splat(a), simd.u64_splat(b));
+        simd.u64_extract::<0>(sum)
+    })
+}
+```
+
+Such a closure implements `Operation` for that particular backend; use the struct
+adapter above when runtime dispatch requires several backend implementations.
+Closures that only implement `FnOnce` are not supported.
+
+### Testing
+
+When testing an operation, check both that it agrees across backends and that it
+matches an independent reference implementation.
+
+Use `check_consistent` in a fuzz test to compare all emulated backends. Using the
+`Add` operation above:
+
+```rust
+# use commonware_simd::{Operation, Simd};
+# struct Add(u64, u64);
+# impl<S: Simd> Operation<S> for Add {
+#     type Output = u64;
+#     fn portable(self, simd: S) -> u64 {
+#         simd.execute(#[inline(always)] |simd: S| {
+#             let sum = simd.u64_add(simd.u64_splat(self.0), simd.u64_splat(self.1));
+#             simd.u64_extract::<0>(sum)
+#         })
+#     }
+# }
+use commonware_invariants::minifuzz;
+use commonware_simd::check_consistent;
+
+minifuzz::test(|u| {
+    let a: u64 = u.arbitrary()?;
+    let b: u64 = u.arbitrary()?;
+    check_consistent(|| Add(a, b));
+    Ok(())
+});
+```
+
+The factory must create equivalent inputs each time, including fresh mutable
+buffers. Include observable buffer changes in the output so they are compared.
+These checks exercise different lane counts and specialized algorithm paths;
+agreement alone does not prove that the algorithm is correct.
+
+Use `test_dispatch` to compare the portable scalar result against a reference:
+
+```rust
+# use commonware_simd::{Operation, Simd};
+# struct Add(u64, u64);
+# impl<S: Simd> Operation<S> for Add {
+#     type Output = u64;
+#     fn portable(self, simd: S) -> u64 {
+#         simd.execute(#[inline(always)] |simd: S| {
+#             let sum = simd.u64_add(simd.u64_splat(self.0), simd.u64_splat(self.1));
+#             simd.u64_extract::<0>(sum)
+#         })
+#     }
+# }
+use commonware_simd::test_dispatch;
+
+for (a, b) in [(0, 0), (1, 2), (u64::MAX, 1), (u64::MAX, u64::MAX)] {
+    assert_eq!(test_dispatch(Add(a, b)), a.wrapping_add(b));
+}
+```
+
+`test_dispatch` always uses scalar emulation, so consumer test results are
+consistent across platforms. Pair it with `check_consistent` even when an
+operation uses only common instructions, to cover different vector sizes.
+Emulation checks algorithm behavior; this crate's native tests and fuzz targets
+check instruction implementations on supported hardware.
+
+### Performance Footguns
+
+Enter a whole SIMD kernel through `simd.execute(#[inline(always)] |simd| ...)`.
+You can also define an `#[inline(always)]` function returning `impl Operation<S>`
+and pass its result to `simd.execute`. Annotate the returned operation's body with
+`#[inline(always)]` as well, as in the `add` example above.
+Native execution establishes the required CPU target features at this boundary.
+Passing a backend token to an ordinary helper does not give that helper the same
+target features.
+
+Annotate the closure body and hot shared SIMD helpers with `#[inline(always)]`
+so they inline into that scope. Scalar helpers and independently scoped kernels
+can remain function calls.
+
+Pass vector values such as `S::U64` directly between helpers, as in `add_three`.
+Avoid storing an intermediate vector to a slice just to load it again in the
+next helper. Extract individual lanes or store the final vector when you need
+ordinary Rust values or buffer output.
+
+Reuse the backend token for child operations. Call `dispatch` once for the
+whole computation, rather than inside a loop, to avoid repeated CPU detection.
 
 ## Status
 
