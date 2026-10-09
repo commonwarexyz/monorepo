@@ -42,9 +42,10 @@
 //! local [`Deferred`] batch into the worker before running it, so callbacks can
 //! reenter [`Local`] and append another batch.
 //!
-//! The root is pinned separately and passed to [`Worker::drive`]. On a one-off
-//! worker, the selected task runs as that worker's root. Pool workers after
-//! worker zero run a root that ends when worker zero stops the pool.
+//! The root is pinned separately and passed to [`Worker::drive`]. On a
+//! dedicated worker, which a dedicated or blocking task gets, the selected task
+//! runs as that worker's root. Pool workers after worker zero run a root that
+//! ends when worker zero stops the pool.
 //!
 //! ## Task placement
 //!
@@ -116,7 +117,7 @@
 //!                                  collect a pool worker failure the root missed
 //!                                                    |
 //!                                                    v
-//!                                  wait for one-off registrations to reach zero
+//!                                  wait for dedicated workers to finish
 //!                                                    |
 //!                                                    v
 //!                                        return result or resume panic
@@ -125,12 +126,12 @@
 //! No pool worker closes its mailbox or ring until every pool worker has
 //! drained the set and finished its last poll, since a task polled on one
 //! worker can hold registrations on another, whose mailbox forwards their
-//! results. A one-off worker closes its mailbox once its root is gone.
+//! results. A dedicated worker closes its mailbox once its root is gone.
 //!
 //! Work spawned by root destruction participates in shutdown. Each worker keeps
 //! TLS installed while destroying tasks, draining retained writes and syncs,
 //! retiring cancellations, and running deferred callbacks. Native thread-local
-//! destruction on one-off threads can follow registration release.
+//! destruction on dedicated threads can follow registration release.
 
 use super::{
     driver::Driver,
@@ -200,7 +201,7 @@ use std::{
 /// Maximum task polls or mailbox messages processed before yielding to other work.
 const BATCH_SIZE: usize = 64;
 
-/// Pinned future polled as a one-off worker's root, or the runner's service
+/// Pinned future polled as a dedicated worker's root, or the runner's service
 /// task before it becomes a [`Task`](super::task::Task).
 type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -208,7 +209,7 @@ type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 ///
 /// The runtime requires Linux 6.1 or newer and always uses single-issuer mode
 /// with deferred task work. The same configuration applies to pool and
-/// one-off workers. The wheel horizon is derived from network timeout policy.
+/// dedicated workers. The wheel horizon is derived from network timeout policy.
 #[derive(Clone, Debug)]
 pub struct RingConfig {
     /// SQ size and maximum outstanding operation SQEs, rounded up to a power of two.
@@ -255,9 +256,9 @@ pub struct Config {
     ring_config: RingConfig,
     /// Idle spinning policy, shared by all workers.
     idle_spinner: SpinnerConfig,
-    /// Stack size for pool, one-off worker, and Rayon threads.
+    /// Stack size for pool, dedicated worker, and Rayon threads.
     thread_stack_size: usize,
-    /// Whether spawned-task panics and one-off worker failures are caught.
+    /// Whether spawned-task panics and dedicated worker failures are caught.
     /// Task-disposal panics during worker execution are contained with either setting.
     catch_panics: bool,
     /// Base directory held while storage resources or requests remain alive.
@@ -340,14 +341,14 @@ impl Config {
         self
     }
 
-    /// Set the stack size of pool, one-off worker, and Rayon threads. Worker
+    /// Set the stack size of pool, dedicated worker, and Rayon threads. Worker
     /// zero runs on the calling thread and keeps its stack.
     pub const fn with_thread_stack_size(mut self, size: usize) -> Self {
         self.thread_stack_size = size;
         self
     }
 
-    /// Set whether spawned-task panics and one-off worker failures are caught.
+    /// Set whether spawned-task panics and dedicated worker failures are caught.
     ///
     /// Caught failures are logged without interrupting the root. Propagated
     /// failures are observed only while the root is executing. A failure of a
@@ -458,12 +459,12 @@ impl Config {
         &self.idle_spinner
     }
 
-    /// Return the configured pool, one-off worker, and Rayon thread stack size.
+    /// Return the configured pool, dedicated worker, and Rayon thread stack size.
     pub const fn thread_stack_size(&self) -> usize {
         self.thread_stack_size
     }
 
-    /// Return whether spawned-task panics and one-off worker failures are caught.
+    /// Return whether spawned-task panics and dedicated worker failures are caught.
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
     }
@@ -600,7 +601,7 @@ impl TaskMetrics {
     }
 }
 
-/// Registration and cleanup barrier for one-off workers.
+/// Registration and cleanup barrier for dedicated workers.
 #[derive(Default)]
 struct Workers {
     /// Registration gate and count protected by the same lock.
@@ -609,7 +610,7 @@ struct Workers {
     idle: Condvar,
 }
 
-/// One-off workers that shutdown must still wait for.
+/// Dedicated workers that shutdown must still wait for.
 #[derive(Default)]
 struct WorkerCount {
     /// Whether shutdown has stopped accepting new workers.
@@ -666,7 +667,7 @@ impl Drop for ActiveWorker {
     }
 }
 
-/// Runner-wide services shared by pool and one-off workers.
+/// Runner-wide services shared by pool and dedicated workers.
 pub struct Shared {
     /// Validated configuration, immutable after startup.
     pub cfg: Config,
@@ -682,7 +683,7 @@ pub struct Shared {
     shutdown: Mutex<Stopper>,
     /// User task panic policy and root notification.
     panicker: Panicker,
-    /// Synchronized creation and closure of one-off workers.
+    /// Synchronized creation and closure of dedicated workers.
     workers: Arc<Workers>,
     /// Every live ordinary task, retained so the pool workers' cleanup can
     /// drop its future.
@@ -697,7 +698,7 @@ pub struct Shared {
     storage_buffer_pool: BufferPool,
 }
 
-/// Task and runtime ownership transferred to a one-off thread.
+/// Task and runtime ownership transferred to a dedicated worker's thread.
 ///
 /// Field order destroys a rejected task and Shared before the reservation is released.
 struct Launch {
@@ -789,7 +790,7 @@ impl crate::Spawner for Context {
         self.tree = child;
         let shared = self.shared.clone();
 
-        // Dedicated and blocking spawns reserve a one-off worker before the
+        // Dedicated and blocking spawns reserve a dedicated worker before the
         // factory runs, so shutdown waits for them. Ordinary spawns only check
         // that the task set still accepts tasks.
         let reservation = if matches!(execution, Execution::Dedicated | Execution::Shared(true)) {
@@ -805,8 +806,9 @@ impl crate::Spawner for Context {
         };
 
         // User construction runs on the caller with no runtime borrow or lock.
-        // A reserved one-off remains counted through construction and launch,
-        // including when the factory unwinds or shutdown closes the registry.
+        // A reserved dedicated worker remains counted through construction and
+        // launch, including when the factory unwinds or shutdown closes the
+        // registry.
         let guard = FactoryGuard::new(&parent, metric);
         let future = f(self);
 
@@ -818,7 +820,7 @@ impl crate::Spawner for Context {
             parent.clone(),
         );
 
-        // A one-off worker polls the future as its root. An ordinary spawn
+        // A dedicated worker polls the future as its root. An ordinary spawn
         // becomes a task of the pool.
         if let Some(reservation) = reservation {
             shared.launch(Box::pin(future), reservation);
@@ -1043,8 +1045,22 @@ pub enum Role {
     /// Pool worker at this index, polling ordinary tasks. Worker zero runs on
     /// the thread calling [`crate::Runner::start`] and shuts the runner down.
     Pool(u32),
-    /// A dedicated or blocking task's thread, polling that task as its root.
-    OneOff,
+    /// A dedicated worker: a thread and ring of its own, started for one
+    /// dedicated or blocking task, which it polls as its root.
+    Dedicated,
+}
+
+impl Role {
+    /// Whether this worker polls the pool's ordinary tasks.
+    pub const fn is_pool(self) -> bool {
+        matches!(self, Self::Pool(_))
+    }
+
+    /// Whether this is worker zero, which runs on the runner's thread, polls
+    /// the runner's root, and shuts the runner down.
+    pub const fn owns_runner(self) -> bool {
+        matches!(self, Self::Pool(0))
+    }
 }
 
 /// Mutable execution state accessed only by its owning worker thread.
@@ -1086,7 +1102,7 @@ impl Local {
 
         let mailbox = match role {
             Role::Pool(index) => shared.pool.mailbox(index).clone(),
-            Role::OneOff => Arc::new(Mailbox::new()?),
+            Role::Dedicated => Arc::new(Mailbox::new()?),
         };
         let now = Instant::now();
         let driver = Driver::new(
@@ -1136,11 +1152,10 @@ impl Local {
     pub fn serving(pool: &Weak<Pool>) -> Option<Rc<RefCell<Self>>> {
         let local = Self::current()?;
         // The weak reference preserves allocation identity without retaining
-        // the pool. A one-off worker shares the pool but polls no task of it.
+        // the pool. A dedicated worker shares the pool but polls no task of it.
         let serves = {
             let local = local.borrow();
-            matches!(local.role, Role::Pool(_))
-                && ptr::eq(Arc::as_ptr(&local.shared.pool), pool.as_ptr())
+            local.role.is_pool() && ptr::eq(Arc::as_ptr(&local.shared.pool), pool.as_ptr())
         };
         serves.then_some(local)
     }
@@ -1201,7 +1216,7 @@ impl Local {
         !self.ready.is_empty()
             || self.root_ready
             || !self.deferred.is_empty()
-            || (matches!(self.role, Role::Pool(_)) && self.shared.pool.has_inject())
+            || (self.role.is_pool() && self.shared.pool.has_inject())
     }
 
     /// Earliest absolute deadline across driver requests and sleepers.
@@ -1427,7 +1442,7 @@ impl Worker {
     /// Install TLS only after constructing a cleanup owner. A pool worker
     /// counts itself in the pool's shutdown barrier, which its cleanup leaves.
     fn new(local: Local) -> Self {
-        if matches!(local.role, Role::Pool(_)) {
+        if local.role.is_pool() {
             local.shared.pool.enter();
         }
         let inject_interval = local.shared.cfg.global_queue_interval;
@@ -1498,7 +1513,7 @@ impl Worker {
         };
 
         // Include work spawned by root destruction in the shutdown barrier.
-        if role == Role::Pool(0) {
+        if role.owns_runner() {
             shared.workers.close();
         }
         worker.begin_close();
@@ -1520,7 +1535,7 @@ impl Worker {
             // Startup may reject the builder without invoking it. Its captured
             // root keeps the same disposal boundary as an executing spawned task.
             let root = TaskRoot { task: Some(task) };
-            let (mut worker, output) = Self::run(shared.clone(), Role::OneOff, || root, None)?;
+            let (mut worker, output) = Self::run(shared.clone(), Role::Dedicated, || root, None)?;
             worker.cleanup();
             worker.result(output)
         }));
@@ -1554,7 +1569,7 @@ impl Worker {
     }
 
     /// Close local registration. Worker zero also closes the task set and the
-    /// pool. A one-off worker closes its mailbox, retaining queued messages,
+    /// pool. A dedicated worker closes its mailbox, retaining queued messages,
     /// while a pool worker keeps its mailbox open until no pool worker polls
     /// any more (see [`Self::cleanup`]). Repeated calls leave the worker closed
     /// and preserve its existing inbox.
@@ -1568,12 +1583,12 @@ impl Worker {
             // pool to close. The set closes first, so it retains the task of
             // every runnable a closed queue discards. Cleanup drains the set.
             // Closing again does nothing.
-            if local.role == Role::Pool(0) {
+            if local.role.owns_runner() {
                 local.shared.tasks.close();
                 local.shared.pool.close();
             }
             local.closing = true;
-            if matches!(local.role, Role::Pool(_)) {
+            if local.role.is_pool() {
                 return;
             }
             local.mailbox.clone()
@@ -1632,7 +1647,7 @@ impl Worker {
         // cancelled tasks. Stopping them here rather than in the runner also
         // releases the barrier below when an unwind skips the runner's
         // shutdown.
-        if role == Role::Pool(0) {
+        if role.owns_runner() {
             shared.pool.stop();
         }
 
@@ -1802,7 +1817,7 @@ impl Worker {
 
     /// Take the next runnable to poll: a share of the pool's inject queue
     /// every [`Config::with_global_queue_interval`] calls, otherwise the
-    /// oldest local runnable, otherwise a share of the inject queue. A one-off
+    /// oldest local runnable, otherwise a share of the inject queue. A dedicated
     /// worker polls only its root, so its queue stays empty.
     ///
     /// The drive loop is instantiated in the caller's crate, so the common
@@ -1860,7 +1875,7 @@ impl Worker {
         };
         let (pool, index) = match role {
             Role::Pool(index) => (Some(&*shared.pool), Some(index)),
-            Role::OneOff => (None, None),
+            Role::Dedicated => (None, None),
         };
         let owner = shared.tasks.id();
 
@@ -2048,7 +2063,8 @@ impl Drop for Worker {
     }
 }
 
-/// Run a one-off task as the worker's root, containing poll and disposal panics.
+/// Run a dedicated or blocking task as its worker's root, containing poll and
+/// disposal panics.
 struct TaskRoot {
     /// Task retained until the root is destroyed.
     task: Option<BoxedTask>,
@@ -2075,7 +2091,7 @@ impl Drop for TaskRoot {
 ///
 /// The root future need not be Send and always runs on the calling thread.
 /// Spawned futures run on whichever pool worker takes them. The runner waits
-/// for every pool worker, one-off runtime cleanup, and retained writes and
+/// for every pool worker, dedicated worker cleanup, and retained writes and
 /// syncs before returning or resuming a panic. Native thread-local destruction
 /// may follow.
 pub struct Runner {
@@ -2233,9 +2249,10 @@ impl crate::Runner for Runner {
             #[cfg(test)]
             tests::before_abort();
 
-            // The root is gone and the pool is closed. Abort ordinary and
-            // one-off tasks, then clean up this worker, which stops the other
-            // pool workers and waits for them to drain the task set.
+            // The root is gone and the pool is closed. Abort ordinary,
+            // dedicated, and blocking tasks, then clean up this worker, which
+            // stops the other pool workers and waits for them to drain the
+            // task set.
             worker.panics.run(|| tree.abort());
             worker.cleanup();
             worker.panics.run(|| threads.join());
@@ -2243,8 +2260,8 @@ impl crate::Runner for Runner {
                 worker.panics.retain(panic);
             }
 
-            // One-off cleanup may depend on resources released by pool task
-            // disposal or I/O retirement, so drain the pool first.
+            // Dedicated worker cleanup may depend on resources released by pool
+            // task disposal or I/O retirement, so drain the pool first.
             shared.workers.wait();
             worker.result(output)
         });

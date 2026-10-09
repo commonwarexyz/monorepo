@@ -1,5 +1,5 @@
 //! Every live ordinary task of a runner, retained so teardown can drop its
-//! future. Root futures, including the tasks one-off workers run as their
+//! future. Root futures, including the tasks dedicated workers run as their
 //! roots, belong to their workers instead.
 //!
 //! [`Tasks`] is a sharded intrusive list. Each shard is a mutex over a doubly
