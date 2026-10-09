@@ -10,7 +10,7 @@ url: "https://commonware.xyz/blogs/is-it-ready-yet"
 image: "https://commonware.xyz/imgs/is-it-ready-yet.png"
 ---
 
-The [Commonware Library](https://github.com/commonwarexyz/monorepo) is now home to 17 primitives and over 50 primitive dialects (cryptography::bls12381, cryptography::ed25519, etc.), with [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) and [1500 daily benchmarks](https://commonware.xyz/benchmarks.html).
+The [Commonware Library](https://github.com/commonwarexyz/monorepo) is now home to 17 primitives and over 50 primitive dialects (cryptography::bls12381, cryptography::ed25519, etc.), with [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) and 1500 daily benchmarks.
 
 The only number that probably matters to you, however, is how many primitives are ready to use.
 
