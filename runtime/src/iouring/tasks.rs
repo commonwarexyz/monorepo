@@ -24,7 +24,7 @@
 //! runtime's rings.
 
 use super::{
-    pool::Table,
+    pool::Pool,
     task::{Header, Task, UnsafeCell},
 };
 use commonware_utils::GOLDEN_RATIO;
@@ -258,7 +258,7 @@ impl Tasks {
     ///
     /// Returns the new task if the set has closed. The caller clears its
     /// future outside worker borrows.
-    pub fn register<F>(&self, future: F, pool: Weak<Table>) -> Result<(), Task>
+    pub fn register<F>(&self, future: F, pool: Weak<Pool>) -> Result<(), Task>
     where
         F: Future<Output = ()> + Send + 'static,
     {
