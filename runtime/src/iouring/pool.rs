@@ -113,11 +113,12 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Most runnables one take moves from the inject queue, which bounds how long
-/// a take holds the pool-wide lock.
+/// Maximum number of runnables one take moves from the inject queue into a
+/// worker's queue, which bounds how long the take holds the pool-wide lock.
 const INJECT_BATCH: usize = 128;
 
-/// Most workers in one pool, one bit each in the idle set.
+/// Maximum number of workers in one pool, since the idle set gives each worker
+/// one bit of a `u64`.
 pub const MAX_WORKERS: usize = 64;
 
 /// Runnables waiting for any worker of the pool.
