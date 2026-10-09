@@ -182,7 +182,8 @@ impl Driver {
             match durability.clone().try_lock_owned() {
                 Ok(permit) => self.state.acquired(id, permit, deferred),
                 Err(_) => {
-                    // The native driver owns this wait even inside a Tokio task.
+                    // The native driver owns this wait, so no cooperative budget
+                    // of a task polling the driver may delay it.
                     // Admission may follow the last service turn before parking, so
                     // poll now to register the foreign release's wake target.
                     self.state.acquiring.push(Box::pin(async move {
@@ -2314,7 +2315,8 @@ pub mod tests {
         let mut harness = Harness::new(2);
         harness.service();
 
-        // The native driver must progress independently of an enclosing Tokio task's budget.
+        // The native driver must progress even once the enclosing task has spent its
+        // cooperative budget.
         while tokio::task::coop::has_budget_remaining() {
             tokio::task::consume_budget().await;
         }
