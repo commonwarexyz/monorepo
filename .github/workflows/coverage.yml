@@ -83,6 +83,15 @@ jobs:
         compression-level: 0
         retention-days: 1
         overwrite: true
+    # Proc macros run while the tests are built, so only this job records their coverage.
+    - name: Generate build coverage report
+      run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov report --branch --lcov --output-path lcov-${{ steps.path-normalization.outputs.flags }}-build.info
+    - name: Store build coverage report
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      with:
+        name: coverage-lcov-${{ steps.path-normalization.outputs.flags }}-build
+        path: lcov-${{ steps.path-normalization.outputs.flags }}-build.info
+        retention-days: 1
 
   Coverage:
     name: "Coverage${{ matrix.flags && format(' (flags: \"{0}\")', matrix.flags) }} (partition: ${{ matrix.partition }}/20)"
