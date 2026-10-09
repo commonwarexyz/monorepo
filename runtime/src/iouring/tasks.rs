@@ -182,9 +182,7 @@ pub struct Tasks {
 impl Tasks {
     /// A set for a pool of `workers` workers, with [`SHARDS_PER_WORKER`]
     /// shards for each. The worker count is rounded up to a power of two, so the
-    /// top bits of a task's hash select its shard. A pool has at most
-    /// [`MAX_WORKERS`](super::pool::MAX_WORKERS) workers, so a set has at most
-    /// 256 shards.
+    /// top bits of a task's hash select its shard.
     pub fn new(workers: usize) -> Self {
         // Loom requires every execution to make the same choices, but a task's
         // shard hashes its heap address, which can change between executions,
