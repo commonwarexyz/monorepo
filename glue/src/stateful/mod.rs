@@ -203,7 +203,8 @@ where
     /// [`Stateful`] calls this method on a clone of the application, outside the processing
     /// actor and without database batches. Metadata used only for this decision may live outside
     /// the batches, but the application must share it across clones. This decision does not
-    /// change the deterministic execution contract above.
+    /// change the deterministic execution contract above. The call can run on the consensus
+    /// task, so decide without blocking.
     fn handoff(&self, _context: &Self::Context) -> Handoff<()> {
         Handoff::Wait
     }

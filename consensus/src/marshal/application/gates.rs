@@ -36,8 +36,8 @@ pub(crate) enum GateOutcome {
 struct Inner<D: Digest, B> {
     /// In-flight certification gate tasks, consumed by certification.
     certifications: HashMap<(Round, D), oneshot::Receiver<GateOutcome>>,
-    /// Proposals staged for their relay broadcast, consumed by the relay (or
-    /// by certification when no broadcast was requested).
+    /// Proposals staged for their relay broadcast, consumed by the lock-in
+    /// broadcast (or by certification when no lock-in was requested).
     proposals: HashMap<(Round, D), Staged<B>>,
 }
 
@@ -55,10 +55,11 @@ struct Inner<D: Digest, B> {
 ///
 /// Tasks are inserted when a block enters proposal or verification handling and
 /// taken (consumed) when certification is ready to act on the result. A staged
-/// proposal holds the block itself until consensus requests its broadcast via
-/// [`crate::Relay::broadcast`] (or certification demands durability first),
-/// keeping marshal's mailbox free of any propose-time handshake. Stale entries
-/// are pruned after finalization via [`retain_after`](Self::retain_after).
+/// proposal holds the block itself until consensus locks it in with a propose
+/// broadcast via [`crate::Relay::broadcast`] (or certification demands
+/// durability first), keeping marshal's mailbox free of any propose-time
+/// handshake. Stale entries are pruned after finalization via
+/// [`retain_after`](Self::retain_after).
 #[derive(Clone)]
 pub(crate) struct Gates<D: Digest, B> {
     inner: Arc<Mutex<Inner<D, B>>>,
@@ -96,8 +97,8 @@ impl<D: Digest, B> Gates<D, B> {
 
     /// Removes and returns the staged proposal for `(round, digest)`, if present.
     ///
-    /// The taken block and ack are handed to marshal exactly once: by the relay
-    /// broadcast, or by certification when no broadcast was ever requested.
+    /// The taken block and ack are handed to marshal exactly once: by the lock-in
+    /// broadcast, or by certification when no lock-in was ever requested.
     pub(crate) fn take_staged(&self, round: Round, digest: D) -> Option<Staged<B>> {
         self.inner.lock().proposals.remove(&(round, digest))
     }
@@ -156,12 +157,14 @@ impl<D: Digest, B> Gates<D, B> {
     /// published so the relay broadcast and `certify` always find them.
     ///
     /// The handle arrives once marshal persists the staged block, which happens
-    /// when consensus requests its broadcast (or at certification when no
-    /// broadcast was requested), so this await can outlive the round. A real
+    /// when consensus locks it in with a propose broadcast (or at certification
+    /// when no lock-in was requested), so this await can outlive the round. A real
     /// sync failure panics here (the fatal policy, annotated with `name`). A
-    /// dropped ack means the marshal actor is gone or the staged entry was
-    /// pruned without ever being taken, so the gate is left unresolved and
-    /// `certify` falls back to its recovery fetch.
+    /// dropped ack means the marshal actor is gone, the staged entry was pruned
+    /// without ever being taken, or the same block was staged again for the
+    /// round. The first two leave the gate unresolved, so `certify` falls back
+    /// to its recovery fetch. Staging again also replaces the gate, so `certify`
+    /// awaits the later stage's gate instead.
     pub(crate) async fn stage(
         &self,
         round: Round,
@@ -175,14 +178,16 @@ impl<D: Digest, B> Gates<D, B> {
         {
             let mut inner = self.inner.lock();
             inner.certifications.insert((round, id), durable_rx);
-            inner.proposals.insert(
-                (round, id),
-                Staged {
-                    block,
-                    ack,
-                    sent: false,
-                },
-            );
+
+            // An id names one block, so a block staged again for the round, such as a
+            // re-proposed epoch boundary block, stays sent if a prepare broadcast sent it.
+            let sent = inner
+                .proposals
+                .get(&(round, id))
+                .is_some_and(|staged| staged.sent);
+            inner
+                .proposals
+                .insert((round, id), Staged { block, ack, sent });
         }
         publish(id);
         let Ok(handle) = persist.await else {
@@ -547,43 +552,50 @@ mod tests {
         });
     }
 
+    /// Sending a staged block keeps it staged and marks it sent. Staging the same block for the
+    /// same round again, as when a re-proposed epoch boundary block is proposed again after its
+    /// handoff parent is replaced, keeps that mark, so the lock-in broadcast does not send the
+    /// block a second time.
     #[test]
     fn test_send_staged_marks_sent_and_keeps_entry() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let gates = TestGates::new();
             let digest = Sha256::hash(&[b"block"]);
-            let (tx, rx) = oneshot::channel();
-
-            context.spawn({
-                let gates = gates.clone();
-                move |_| async move {
-                    gates
-                        .stage(
-                            round(1),
-                            digest,
-                            Arc::new(7),
-                            |id| {
-                                tx.send_lossy(id);
-                            },
-                            "test",
-                        )
-                        .await;
+            for send in [true, false] {
+                let (tx, rx) = oneshot::channel();
+                context.child("stage").spawn({
+                    let gates = gates.clone();
+                    move |_| async move {
+                        gates
+                            .stage(
+                                round(1),
+                                digest,
+                                Arc::new(7),
+                                |id| {
+                                    tx.send_lossy(id);
+                                },
+                                "test",
+                            )
+                            .await;
+                    }
+                });
+                assert_eq!(rx.await.expect("id published"), digest);
+                if send {
+                    assert!(
+                        gates
+                            .send_staged(round(1), Sha256::hash(&[b"other"]))
+                            .is_none()
+                    );
+                    let block = gates.send_staged(round(1), digest).expect("block staged");
+                    assert_eq!(*block, 7);
                 }
-            });
-            assert_eq!(rx.await.expect("id published"), digest);
+            }
 
-            assert!(
-                gates
-                    .send_staged(round(1), Sha256::hash(&[b"other"]))
-                    .is_none()
-            );
-            let block = gates.send_staged(round(1), digest).expect("block staged");
-            assert_eq!(*block, 7);
-
-            // The entry survives the send so the lock-in broadcast can persist it.
+            // The entry survives the send and the second staging, so the lock-in
+            // broadcast only persists it.
             let Staged { sent, .. } = gates.take_staged(round(1), digest).expect("still staged");
-            assert!(sent, "sending must mark the staged block sent");
+            assert!(sent, "a sent block must stay marked sent when staged again");
         });
     }
 

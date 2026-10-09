@@ -208,13 +208,18 @@ where
         proposed
     }
 
-    /// Prepares on an uncertified parent as [`Self::propose`] builds on a certified one.
+    /// Builds a term-start block on a parent that has not certified, in place of
+    /// [`Self::propose`].
     ///
     /// The payload depends on the parent's height, so the parent is fetched before the inner
     /// application is asked. The inner application then receives the fetched ancestry as its
     /// parent, and an inner application that declines still costs the fetch and the payload
-    /// selection (a dealer-log reservation, released afterward, or the final block's epoch
-    /// info).
+    /// selection (a dealer-log request from the midpoint on, or the final block's epoch info).
+    ///
+    /// A height that would carry this node's dealer log is left to [`Self::propose`] without
+    /// asking the inner application, and the reservation is released: consensus can abandon a
+    /// prepared block without notice, and a reservation kept for it would withhold the log
+    /// from later proposals until finalization passes that height.
     #[tracing::instrument(
         name = "dkg.reshare.application.prepare",
         level = "info",
@@ -237,8 +242,10 @@ where
         let Some((payload, log_reservation)) = self.payload(ancestry.clone()).await else {
             return Handoff::Wait;
         };
-        let prepared = self
-            .inner
+        if log_reservation.is_some() {
+            return Handoff::Wait;
+        }
+        self.inner
             .prepare(
                 context,
                 ancestry,
@@ -247,13 +254,7 @@ where
                     payload,
                 },
             )
-            .await;
-        if !prepared.is_wait()
-            && let Some(reservation) = log_reservation
-        {
-            reservation.included();
-        }
-        prepared
+            .await
     }
 
     #[tracing::instrument(
@@ -627,15 +628,16 @@ mod tests {
         )
     }
 
-    /// The wrapper forwards a prepare request to the inner application with the reshare
-    /// payload for the prepared height, so an inner application that opts into pipelined
-    /// handoffs keeps its decision and its block carries the payload. An inner application
-    /// that declines releases the dealer-log reservation.
+    /// Consensus can abandon a prepared block without notice, so a prepare request whose
+    /// height would carry this node's dealer log declines without asking the inner application
+    /// and releases the reservation for the ordinary proposal. Otherwise the wrapper forwards
+    /// the inner application's decision.
     #[test]
-    fn prepare_forwards_inner_decision_with_payload() {
+    fn prepare_leaves_dealer_log_to_propose() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = midpoint_parent();
+            let midpoint = midpoint_parent();
+            let genesis = mocks::genesis_block(leader().public_key());
             let payload = epoch_payload(10);
             for decision in [Handoff::Publish(()), Handoff::Stage(()), Handoff::Wait] {
                 let inner = RecordingApp {
@@ -645,29 +647,39 @@ mod tests {
                 let (mut app, release_rx) = log_wrapper(&context, payload.clone(), inner.clone());
                 let prepared = app
                     .prepare(
-                        (context.child("app"), block_context(&parent, 2)),
-                        ancestry::from_iter([Arc::new(parent.clone())]),
+                        (context.child("app"), block_context(&midpoint, 2)),
+                        ancestry::from_iter([Arc::new(midpoint.clone())]),
+                        (),
+                    )
+                    .await;
+                assert!(prepared.is_wait(), "a dealer log is left to propose");
+                assert!(
+                    inner.proposed().is_empty(),
+                    "a declined prepare builds nothing"
+                );
+                assert_eq!(
+                    release_rx.await.expect("reservation should be released"),
+                    midpoint.height().next()
+                );
+
+                // Before the midpoint no dealer log is reserved, so the decision is forwarded.
+                let prepared = app
+                    .prepare(
+                        (context.child("early"), block_context(&genesis, 1)),
+                        ancestry::from_iter([Arc::new(genesis.clone())]),
                         (),
                     )
                     .await;
                 match (decision, prepared) {
                     (Handoff::Publish(()), Handoff::Publish(block))
                     | (Handoff::Stage(()), Handoff::Stage(block)) => {
-                        assert!(inner.proposed() == vec![Some(payload.clone())]);
-                        assert!(block.payload() == Some(payload.clone()));
-                        assert!(
-                            release_rx.now_or_never().is_none(),
-                            "an included payload must keep its reservation"
-                        );
+                        assert!(inner.proposed() == vec![None]);
+                        assert!(block.payload().is_none());
                     }
                     (Handoff::Wait, Handoff::Wait) => {
                         assert!(
                             inner.proposed().is_empty(),
                             "a declined prepare builds nothing"
-                        );
-                        assert_eq!(
-                            release_rx.await.expect("reservation should be released"),
-                            parent.height().next()
                         );
                     }
                     _ => panic!("the wrapper must forward the inner decision"),

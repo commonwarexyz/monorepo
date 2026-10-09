@@ -8,17 +8,12 @@ use crate::{
     CertifiableBlock, Epochable, Handoff,
     marshal::ancestry::{Ancestry, Parent},
 };
-use commonware_runtime::deterministic;
+use commonware_runtime::{deterministic, reschedule};
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use std::{
-    future::{pending, poll_fn},
-    marker::PhantomData,
-    sync::Arc,
-    task::Poll,
-};
+use std::{future::pending, marker::PhantomData, sync::Arc};
 
 /// A mock application that implements `Application` for testing.
 ///
@@ -135,20 +130,6 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
     }
 }
 
-/// Suspends once, so a future that awaits it is not ready on its first poll.
-async fn suspend() {
-    let mut suspended = false;
-    poll_fn(|cx| {
-        if suspended {
-            return Poll::Ready(());
-        }
-        suspended = true;
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    })
-    .await;
-}
-
 impl<B, S> crate::Application<deterministic::Context> for MockVerifyingApp<B, S>
 where
     B: CertifiableBlock,
@@ -190,7 +171,7 @@ where
         }
         let decision = self.handoff;
         if self.suspend {
-            suspend().await;
+            reschedule().await;
         }
         if !self.ask_parent {
             let block = self
@@ -235,7 +216,6 @@ where
 pub struct GatedVerifyingApp<B, S> {
     started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
-    handoff: Handoff<()>,
     _phantom: PhantomData<(B, S)>,
 }
 
@@ -249,18 +229,11 @@ impl<B, S> GatedVerifyingApp<B, S> {
             Self {
                 started: Arc::new(Mutex::new(Some(started_tx))),
                 release: Arc::new(Mutex::new(Some(release_rx))),
-                handoff: Handoff::Wait,
                 _phantom: PhantomData,
             },
             started_rx,
             release_tx,
         )
-    }
-
-    /// Configure the decision `prepare` attaches to a built block.
-    pub const fn with_handoff(mut self, handoff: Handoff<()>) -> Self {
-        self.handoff = handoff;
-        self
     }
 }
 
@@ -282,19 +255,6 @@ where
         _input: Self::Input,
     ) -> Option<Self::Block> {
         None
-    }
-
-    async fn prepare(
-        &mut self,
-        _context: (deterministic::Context, Self::Context),
-        parent: impl Parent<Self::Block>,
-        _input: Self::Input,
-    ) -> Handoff<Self::Block> {
-        if self.handoff.is_wait() {
-            return Handoff::Wait;
-        }
-        let _ = parent.ancestry().await;
-        Handoff::Wait
     }
 
     async fn verify(

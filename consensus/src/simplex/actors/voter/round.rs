@@ -113,8 +113,8 @@ pub struct Round<S: Scheme, D: Digest> {
     certify: CertifyState,
     last_ancestry_request: Option<View>,
 
-    // Proposal and resolved parent payload selected when peer verification
-    // started. A certificate may replace either while the request is in flight.
+    // Proposal and exact parent payload captured by peer verification or
+    // recovered from a replayed local vote. A certificate may replace either.
     verifying: Option<(Proposal<D>, D)>,
 }
 
@@ -220,12 +220,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         true
     }
 
-    /// Records the proposal and parent payload selected when verification started.
+    /// Records the proposal and its captured parent payload.
     pub const fn set_verifying(&mut self, proposal: Proposal<D>, parent_payload: D) {
         self.verifying = Some((proposal, parent_payload));
     }
 
-    /// Returns the proposal binding recorded when verification started, if any.
+    /// Returns the known proposal and parent binding, if any.
     pub const fn verifying(&self) -> Option<&(Proposal<D>, D)> {
         self.verifying.as_ref()
     }

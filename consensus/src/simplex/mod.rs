@@ -484,8 +484,8 @@
 //! * `AncestryInvalidated`: a pending build was cancelled because its captured ancestry became
 //!   invalid, as after a nullification in the parent's term or a failed certification, before a
 //!   replacement parent was selectable.
-//! * `ViewNullify`: the parent of a waiting request certified after a local nullify vote for
-//!   the request's view.
+//! * `ViewNullify`: the parent of a waiting request certified or finalized after a local
+//!   nullify vote for the request's view.
 //! * `ResponseClosed`: the parent of a closed response certified or finalized.
 //! * `IneligibleAtRecording`: a returned candidate could not be recorded for its view.
 //!
@@ -793,9 +793,9 @@ cfg_if::cfg_if! {
             /// tolerate multiple candidates per round (at most one is ever
             /// referenced by the proposer's signed votes).
             ///
-            /// This is the lock-in for a payload: the relay stores it, and the
-            /// proposer's vote follows. A payload already sent by [`Plan::Prepare`]
-            /// is stored without being sent again.
+            /// This is the lock-in for a payload: the relay requests that it be
+            /// stored, and the proposer's vote follows. A payload already sent by
+            /// [`Plan::Prepare`] is stored without being sent again.
             Propose {
                 /// The round in which the block was proposed.
                 round: Round,
@@ -8849,15 +8849,13 @@ mod tests {
                 }
                 join_all(finalizers).await;
                 if campaign.handoffs {
-                    *early_publications.lock() += context
-                        .encode()
-                        .lines()
-                        .filter(|line| {
-                            line.contains("_handoff_events_total{")
-                                && line.contains("event=\"VotedBeforeCertification\"")
-                        })
-                        .map(|line| line.split_once(' ').unwrap().1.parse::<u64>().unwrap())
-                        .sum::<u64>();
+                    *early_publications.lock() += u64::from(count_nonzero_metric_lines(
+                        &context.encode(),
+                        &[
+                            "_handoff_events_total{",
+                            "event=\"VotedBeforeCertification\"",
+                        ],
+                    ));
                 }
 
                 // Verify safety: no conflicting finalizations across honest reporters.

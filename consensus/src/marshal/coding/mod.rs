@@ -103,7 +103,7 @@ mod tests {
     use commonware_coding::{Config as CodingConfig, ReedSolomon, Scheme as _};
     use commonware_cryptography::{
         Committable, Digestible, Hasher,
-        certificate::{ConstantProvider, Verifier as _, mocks::Fixture},
+        certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
         sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
@@ -118,8 +118,36 @@ mod tests {
     use commonware_utils::{
         NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
     };
-    use futures::StreamExt;
-    use std::{sync::Arc, time::Duration};
+    use futures::{FutureExt as _, StreamExt};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    #[derive(Clone)]
+    struct CountingProvider<P> {
+        inner: P,
+        lookups: Arc<AtomicUsize>,
+    }
+
+    impl<P: Provider> Provider for CountingProvider<P> {
+        type Scope = P::Scope;
+        type Scheme = P::Scheme;
+
+        fn scoped(&self, scope: Self::Scope) -> Option<Scoped<Self::Scheme>> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            self.inner.scoped(scope)
+        }
+
+        fn scheme(&self, scope: Self::Scope) -> Option<Arc<Self::Scheme>> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            self.inner.scheme(scope)
+        }
+    }
+
 
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
@@ -4494,6 +4522,68 @@ mod tests {
         })
     }
 
+    #[test_traced("WARN")]
+    fn test_coding_default_prepare_no_lookup() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "default-prepare",
+                provider.clone(),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+            let shards = start_shard_mailbox(
+                context.child("shards"),
+                participants.clone(),
+                provider.clone(),
+            )
+            .await;
+            let lookups = Arc::new(AtomicUsize::new(0));
+            let cfg = MarshaledConfig {
+                application: WalkingVerifyingApp::default(),
+                marshal,
+                shards,
+                scheme_provider: CountingProvider {
+                    inner: provider,
+                    lookups: lookups.clone(),
+                },
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("declining"), cfg);
+            let genesis = CodingHarness::genesis_block(NUM_VALIDATORS as u16);
+            let ctx = CodingCtx {
+                round: Round::new(Epoch::zero(), View::new(1)),
+                leader: participants[0].clone(),
+                parent: (View::zero(), genesis.commitment()),
+            };
+
+            // Only provider calls made by this prepare request count.
+            lookups.store(0, Ordering::SeqCst);
+            let response = marshaled
+                .prepare(ctx)
+                .now_or_never()
+                .expect("default prepare must return its receiver on the first poll");
+            let decision = response
+                .now_or_never()
+                .expect("default prepare response must be ready")
+                .expect("default prepare decision missing");
+            assert_eq!(decision, Handoff::Wait);
+            assert_eq!(
+                lookups.load(Ordering::SeqCst),
+                0,
+                "default prepare must not query the scheme provider"
+            );
+        });
+    }
+
     /// When the scheme provider has no entry for the current epoch,
     /// `Marshaled::propose` and `Marshaled::verify` must return a dropped
     /// receiver (the consensus engine treats `RecvError` as "abstain").
@@ -5039,6 +5129,96 @@ mod tests {
                 assert_eq!(*sent_round, round);
                 assert_eq!(block.digest(), digest);
                 assert!(matches!(recipients, Recipients::All));
+            }
+        });
+    }
+
+    /// Coding validators vote on a block before reconstructing it, so a notarized or locally
+    /// voted parent of a handoff can carry any height. A parent outside the request's epoch,
+    /// up to the maximum height, yields no ancestry, as it can never certify, while a parent
+    /// inside the epoch still builds.
+    #[test_traced("WARN")]
+    fn test_coding_prepare_skips_parent_outside_epoch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let genesis = genesis_block();
+            let genesis_parent_commitment = genesis_coding_commitment(&genesis);
+
+            for (view, height, built) in [
+                (1, Height::new(u64::MAX), false),
+                (3, Height::new(3 * BLOCKS_PER_EPOCH.get()), false),
+                (5, Height::new(1), true),
+            ] {
+                let parent_round = Round::new(Epoch::zero(), View::new(view));
+                let parent_ctx = CodingCtx {
+                    round: parent_round,
+                    leader: participants[1].clone(),
+                    parent: (View::zero(), genesis_parent_commitment),
+                };
+                let parent_block = make_coding_block(parent_ctx, genesis.digest(), height, view);
+                let parent_digest = parent_block.digest();
+                let parent = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                    parent_block,
+                    coding_config,
+                    &Sequential,
+                );
+                let parent_commitment = parent.commitment();
+                assert!(setup.mailbox.verified(parent_round, parent).await);
+
+                let ctx = CodingCtx {
+                    round: Round::new(Epoch::zero(), View::new(view + 1)),
+                    leader: me.clone(),
+                    parent: (View::new(view), parent_commitment),
+                };
+                let child = make_coding_block(ctx.clone(), parent_digest, Height::new(2), 7);
+                let child_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                    child.clone(),
+                    coding_config,
+                    &Sequential,
+                )
+                .commitment();
+                let cfg = MarshaledConfig {
+                    application: MockVerifyingApp::<CodingB, S>::new()
+                        .with_handoff(Handoff::Stage(()))
+                        .with_propose_result(child),
+                    marshal: setup.mailbox.clone(),
+                    shards: setup.extra.clone(),
+                    scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    strategy: Sequential,
+                };
+                let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+                let decision = marshaled
+                    .prepare(ctx)
+                    .await
+                    .await
+                    .expect("prepare must return a decision");
+                let expected = if built {
+                    Handoff::Stage(child_commitment)
+                } else {
+                    Handoff::Wait
+                };
+                assert_eq!(decision, expected, "parent height {height:?}");
             }
         });
     }

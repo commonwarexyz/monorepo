@@ -284,10 +284,10 @@ where
         receiver.await.ok().flatten()
     }
 
-    /// Decides through [`Application::handoff`] before any work, since the build needs
-    /// database batches that only the processing actor can prepare. A [`Handoff::Wait`]
+    /// Decides through [`Application::handoff`] before any work, so a [`Handoff::Wait`]
     /// decision never touches the parent or the actor queue. Otherwise the ancestry is fetched
-    /// and the build runs as an ordinary proposal, and the decision is attached to the result.
+    /// and the build runs as an ordinary proposal through the processing actor, which alone can
+    /// prepare its database batches, and the decision is attached to the result.
     async fn prepare(
         &mut self,
         context: (E, Self::Context),

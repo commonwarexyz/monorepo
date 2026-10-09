@@ -53,7 +53,7 @@ use crate::{
         application::{
             gates::{GateOutcome, Gates},
             prepare::{self, Resolved},
-            relay,
+            propose, relay,
         },
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
@@ -228,8 +228,8 @@ where
     /// Runs the proposal checks for `consensus_context` and yields what the proposal path does
     /// next: re-propose the epoch boundary block, skip the view, or build on the fetched parent.
     ///
-    /// The returned future borrows nothing from `self`, so the propose task and a prepare
-    /// request's [`Parent`](crate::marshal::ancestry::Parent) handle can both await it.
+    /// The returned future borrows nothing from `self`, so it can move into the spawned propose
+    /// task or into a prepare request's [`Parent`](crate::marshal::ancestry::Parent) handle.
     fn checks(
         &self,
         consensus_context: Context<B::Digest, S::PublicKey>,
@@ -277,7 +277,7 @@ where
 
             let ancestor_stream =
                 marshal.ancestor_stream(context.clone(), [parent], ancestor_fetch_duration);
-            Resolved::Build(ancestor_stream, build_duration.timer(&*context))
+            Resolved::Build(ancestor_stream, build_duration.timer(&*context), ())
         }
     }
 }
@@ -313,99 +313,30 @@ where
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
-        let mut application = self.application.clone();
-        let gates = self.gates.clone();
         let checks = self.checks(consensus_context.clone());
-
-        let (mut tx, rx) = oneshot::channel();
-        let context = self
-            .context
-            .child("propose")
-            .with_attribute("round", consensus_context.round);
         let span = info_span!(
             "marshal.inline.propose.task",
             round = %consensus_context.round
         );
-        context.spawn(move |runtime_context| {
-            async move {
-                let resolved = select! {
-                    _ = tx.closed() => {
-                        debug!(reason = "consensus dropped receiver", "skipping proposal");
-                        return;
-                    },
-                    resolved = checks => resolved,
-                };
-                let (ancestor_stream, build_timer) = match resolved {
-                    Resolved::Reuse(digest, block) => {
-                        gates
-                            .stage(
-                                consensus_context.round,
-                                digest,
-                                block,
-                                |id| {
-                                    tx.send_lossy(id);
-                                },
-                                prepare::BOUNDARY_BLOCK,
-                            )
-                            .await;
-                        return;
-                    }
-                    Resolved::Skip => return,
-                    Resolved::Build(ancestor_stream, build_timer) => (ancestor_stream, build_timer),
-                };
-
-                let (parent_view, parent_commitment) = consensus_context.parent;
-                let build_request = application
-                    .propose(
-                        (
-                            runtime_context.child("app_propose"),
-                            consensus_context.clone(),
-                        ),
-                        ancestor_stream,
-                        (),
-                    )
-                    .instrument(info_span!(
-                        "marshal.inline.application.propose",
-                        round = %consensus_context.round,
-                        parent_view = parent_view.traced(),
-                        parent = %parent_commitment
-                    ));
-
-                let built_block = select! {
-                    _ = tx.closed() => {
-                        debug!(reason = "consensus dropped receiver", "skipping proposal");
-                        return;
-                    },
-                    result = build_request => match result {
-                        Some(block) => block,
-                        None => {
-                            debug!(
-                                ?parent_commitment,
-                                reason = "block building failed",
-                                "skipping proposal"
-                            );
-                            return;
-                        }
-                    },
-                };
-                build_timer.observe(&runtime_context);
-
-                let digest = built_block.digest();
-                gates
-                    .stage(
-                        consensus_context.round,
-                        digest,
-                        Arc::new(built_block),
-                        |id| {
-                            tx.send_lossy(id);
-                        },
-                        "proposed block",
-                    )
-                    .await;
-            }
-            .instrument(span)
-        });
-        rx
+        let round = consensus_context.round;
+        let (parent_view, parent_commitment) = consensus_context.parent;
+        propose::request(
+            self.context.as_ref(),
+            &self.application,
+            self.gates.clone(),
+            consensus_context,
+            checks,
+            span,
+            move || {
+                info_span!(
+                    "marshal.inline.application.propose",
+                    round = %round,
+                    parent_view = parent_view.traced(),
+                    parent = %parent_commitment
+                )
+            },
+            |block: B, ()| (block.digest(), Arc::new(block)),
+        )
     }
 
     /// Performs complete verification inline.
@@ -621,7 +552,7 @@ where
             consensus_context,
             checks,
             span,
-            |block: B| (block.digest(), Arc::new(block)),
+            |block: B, ()| (block.digest(), Arc::new(block)),
         )
     }
 

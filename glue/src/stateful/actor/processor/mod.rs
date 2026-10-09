@@ -1473,7 +1473,9 @@ where
                 return Err(PrepareBatchesError::Incomplete);
             };
 
-            if parent.digest() != cursor.parent() || parent.height().next() != cursor_height {
+            if parent.digest() != cursor.parent()
+                || cursor_height.previous() != Some(parent.height())
+            {
                 warn!(
                     ?target_digest,
                     cursor = ?cursor.digest(),
@@ -3757,6 +3759,47 @@ mod tests {
             assert_eq!(result, Err(PrepareBatchesError::Invalid));
             assert_eq!(provider.fetches(), 1);
             assert!(!harness.processor.pending_contains(&block3.digest()));
+        });
+    }
+
+    /// An unverified ancestor can claim any height, including one with no successor. A parent
+    /// at the maximum height is rejected as non-contiguous instead of overflowing.
+    #[test]
+    fn execution_rebuild_pending_rejects_parent_at_max_height() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(block1.clone()).await);
+
+            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+            let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
+            let parent = Block {
+                height: Height::new(u64::MAX),
+                ..block2
+            };
+            let child = Block {
+                parent: parent.digest(),
+                ..block3
+            };
+            harness.processor.clear_pending();
+
+            let provider = ScriptedParentProvider::default();
+            provider.push(&child, [Some(parent)]);
+            let (mut response, _rx) = oneshot::channel::<bool>();
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    provider.clone(),
+                    Arc::new(child.clone()),
+                    &mut response,
+                )
+                .await;
+
+            assert_eq!(result, Err(PrepareBatchesError::Invalid));
+            assert_eq!(provider.fetches(), 1);
+            assert!(!harness.processor.pending_contains(&child.digest()));
         });
     }
 
