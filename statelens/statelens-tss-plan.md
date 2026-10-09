@@ -357,12 +357,17 @@ attempts, crash attribution, labels and sites read, run/replay lines), `reach/TS
 prompts and logs.
 
 **D68 `just fuzz <simplex|marshal> --state-reaching`.** Campaign (unless `--skip-campaign`) ->
-`synthesize` -> fuzz the scaffolds only, through the existing sequential/`--parallel`/`--tmux`
-branches (session `statelens-<profile>-reach`). `--state-targets` selects card ids (`TS-0003`)
-and `--fuzz-targets` candidate bases, by variant or scaffold name; both repeatable, both
-forwarded as `--match`, a pattern of the other flag's form refused, `--state-targets` only with
-`--state-reaching`; one scaffold per selected card and base, every candidate base without
-`--fuzz-targets`. Unknown `--x` flags are refused (today
+`synthesize` (unless `--skip-synthesis`) -> fuzz the scaffolds only, through the existing
+sequential/`--parallel`/`--tmux` branches (session `statelens-<profile>-reach`).
+`--state-targets` selects card ids (`TS-0003`) and `--fuzz-targets` candidate bases, by variant
+or scaffold name; both repeatable, both forwarded as `--match`, a pattern of the other flag's
+form refused, `--state-targets` and `--skip-synthesis` only with `--state-reaching`; one
+scaffold per selected card and base, every candidate base without `--fuzz-targets`.
+`--skip-synthesis` (added 2026-10-09, see the revision below) fuzzes the scaffolds a synthesis
+already built for the selection, whatever their verdicts, without the synthesis preflight, so
+fuzzing goes on after the checkout drifted from the synthesis baseline; the synthesis, its
+baseline and its guards are untouched, and a selection none was built for fails as after a
+synthesis that built none. Unknown `--x` flags are refused (today
 `--state-reaching` falls to `*) break` at justfile:63 and leaks to libFuzzer). A single target
 or qmdb with `--state-reaching` is refused. Example: `just fuzz simplex --parallel --tmux
 --state-reaching --state-targets TS-0004 --fuzz-targets "simplex_cert_*"` -> campaign, synthesis
@@ -853,6 +858,29 @@ expected table of SPEC 18.10.1, `differential: PASSED (+187s)`, exit 0; TS-9006'
 worktree and its target directory were gone afterwards. `just check-scripts`, `just
 check-prompts` and `just check-invariants` pass; the seven cards, linted by name, still report
 their location (rule 1) and nothing else, with `excerpts --check` at 0 of 7 out of date.
+
+## Revision: `--skip-synthesis` (2026-10-09)
+
+After an upstream fix was merged into a finished campaign checkout (`consensus/fuzz/core/src/lib.rs`
+changed), `just fuzz simplex --tmux --state-reaching --skip-campaign --state-targets "TS-000*"
+--state-targets "TS-001[0]" --fuzz-targets simplex_cert_mock ... -- -max_total_time=7200` failed
+with "the checkout differs from the synthesis baseline: consensus/fuzz/core/src/lib.rs; use a
+fresh clone" (exit 2): `--state-reaching` always ran `synthesize`, whose guards 1 to 3 compare
+the tree with `campaign/reach/baseline/`, and `--skip-campaign` had no scaffold analogue, so the
+scaffolds that synthesis had already built in the checkout could not be fuzzed at all. D68 gains
+`--skip-synthesis`: with `--state-reaching` it skips the `synthesize` call and the re-listing
+and fuzzes the scaffolds the first `targets --state-reaching --match ...` listing names, those
+built for the `--state-targets`/`--fuzz-targets` selection, whatever their verdicts; a pattern
+naming no card or base fails in that listing as before, and a selection none was built for
+exits 1 with the `campaign/reach/` message, as after a synthesis that built none. Without
+`--state-reaching` it is refused in one line ("just fuzz: --skip-synthesis needs
+--state-reaching"). It composes with `--skip-campaign`, `--parallel`, `--tmux` and the libFuzzer
+arguments after `--`. The synthesis script, the baseline and the guards are untouched, so a
+synthesis still refuses the drifted checkout, which is what the guard is for. Files: `justfile`
+(header, comment block, flag loop, refusal, `if [ "$synthesis" = yes ]` around the synthesis and
+the re-listing), `scripts/test_statelens.py` (three `FuzzRecipe` tests, one of them the drifted
+checkout's command under stubs), `README.md` (Phase 3 and "Fuzzing the scaffolds"), SPEC 5.3,
+5.4, 18.2 D68, 18.9 and AC-27, PRD R-P2-5, R-TS-P3-1 and AC-27, and D68 above.
 
 ## Follow-ups (not in this change)
 - Variant `run` lines print `-- -rss_limit_mb=4000 -print_final_stats=1` (statelens.py:5650),

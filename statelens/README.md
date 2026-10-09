@@ -278,7 +278,11 @@ holds, as without the flag. `--fuzz-targets GLOB`, which you may repeat, keeps o
 a shell pattern names, by the variant's name or the original target's; a pattern that names
 none stops before the campaign, listing what the profile builds. `--state-reaching` runs the
 profile's scaffolds instead, one per selected card and base, and `--state-targets` selects its
-cards (see Target-State Synthesis). `--invariants LIST`, which you may repeat, goes to the campaign, which then binds
+cards (see Target-State Synthesis). `--skip-synthesis`, which needs `--state-reaching`, fuzzes
+the scaffolds synthesis already built in this checkout, whatever their verdicts, without the
+synthesis preflight: the way to keep fuzzing after the checkout drifted from the synthesis
+baseline, for example when an upstream fix was merged into it; synthesis itself still refuses
+such a checkout. `--invariants LIST`, which you may repeat, goes to the campaign, which then binds
 only the invariants it names (see Phase 2); it is refused with `--skip-campaign`, which runs
 no campaign, and with a single target. A double-dash flag `just fuzz` does not know is refused
 rather than passed to libFuzzer, whose own flags take one dash:
@@ -542,6 +546,7 @@ pair again with `--redo --match <base>_tsNNNN`, or the whole card with `--redo -
 ```
 just fuzz simplex --parallel --tmux --state-reaching --state-targets TS-0004 --fuzz-targets "simplex_cert_*"
 just fuzz simplex --tmux --state-reaching --state-targets TS-0003 --skip-campaign
+just fuzz simplex --tmux --state-reaching --skip-campaign --skip-synthesis --state-targets "TS-000*" --fuzz-targets simplex_cert_mock -- -max_total_time=7200
 just fuzz simplex --state-reaching --state-targets TS-0004 --fuzz-targets "simplex_cert_mock_twins_*" --invariants "simplex/INV-0001,simplex/INV-0002" -- -max_total_time=3600
 just fuzz marshal --parallel --state-reaching -- -max_total_time=600
 just run simplex_cert_mock_ts0004_statelens -- -fork=4
@@ -557,17 +562,21 @@ variant or scaffold of theirs has; both may be repeated, and a pattern of the ot
 is refused, as is `--state-targets` without `--state-reaching`. Without `--fuzz-targets` every
 base of the profile is used, so `just fuzz simplex --tmux --state-reaching` with three cards
 opens up to 60 windows. The first command above opens one window per `simplex_cert_*` base of
-TS-0004; the third synthesizes TS-0004 on each of the eight `simplex_cert_mock_twins_*` bases
+TS-0004; the fourth synthesizes TS-0004 on each of the eight `simplex_cert_mock_twins_*` bases
 and runs the eight scaffolds in turn, each with `-max_total_time=3600`:
 `simplex_cert_mock_twins_campaign_ts0004_statelens`, its `_audit`, `_hb` and `_state_cov`
 siblings (`simplex_cert_mock_twins_campaign_audit_ts0004_statelens` and so on), and the four
 `simplex_cert_mock_twins_mutator*_ts0004_statelens`. The recipe's messages count scaffolds
 ("8 scaffold(s), one tmux window each"). A selection with no card, or with a card that has a
-lint problem, fails before the campaign, and a failed synthesis stops the command. With a
-single target, or with `qmdb`, `--state-reaching` is refused. As for a variant, libFuzzer gets
-only the arguments you pass after `--`, and crashes land in `<package>/artifacts/<scaffold>/`.
-libFuzzer runs the empty input, the canonical one, first, so a scaffold that fails on its
-card's own history fails at once.
+lint problem, fails before the campaign, and a failed synthesis stops the command.
+`--skip-synthesis` runs no synthesis and fuzzes the scaffolds already built for the selection,
+whatever their verdicts, which is how the third command above keeps fuzzing a checkout that
+drifted from the synthesis baseline (see Phase 3); a selection none was built for fails as it
+does after a synthesis that built none. With a single target, or with `qmdb`,
+`--state-reaching` is refused. As for a variant, libFuzzer gets only the arguments you pass
+after `--`, and crashes land in `<package>/artifacts/<scaffold>/`. libFuzzer runs the empty
+input, the canonical one, first, so a scaffold that fails on its card's own history fails at
+once.
 
 Replay a scaffold's crash with its `replay` line, which sets `STATELENS_REACH=1`, so the replay
 also prints the `[statelens-reach]` stage lines: how far through the history that input got

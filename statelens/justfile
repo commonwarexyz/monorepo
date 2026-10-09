@@ -40,7 +40,7 @@ run target *args:
         cd ../consensus/fuzz && just run "$@" ;;
     esac
 
-# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--fuzz-targets GLOB]... [--state-targets GLOB]... [--invariants LIST]... [--skip-campaign] [--parallel] [--tmux] [--state-reaching] [-- -fork=8]
+# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--fuzz-targets GLOB]... [--state-targets GLOB]... [--invariants LIST]... [--skip-campaign] [--skip-synthesis] [--parallel] [--tmux] [--state-reaching] [-- -fork=8]
 fuzz target *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -60,6 +60,10 @@ fuzz target *args:
     # `--` is refused rather than passed on.
     # --skip-campaign fuzzes the targets a campaign already built in this checkout,
     # whatever its result, because a campaign refuses an instrumented checkout.
+    # --skip-synthesis fuzzes the scaffolds a synthesis already built, whatever
+    # their verdicts, because a synthesis refuses a checkout that drifted from its
+    # baseline, as one does once an upstream fix is merged into it; it needs
+    # --state-reaching.
     # --invariants LIST goes to the campaign, which binds only the invariants it
     # names, so it needs a campaign and a profile.
     # Both pattern flags reach the listing and the synthesis as --match, whose one
@@ -82,6 +86,7 @@ fuzz target *args:
     parallel=no
     windows=no
     campaign=yes
+    synthesis=yes
     narrowed=no
     cards=no
     reaching=no
@@ -91,6 +96,7 @@ fuzz target *args:
     while [ $# -gt 0 ]; do
       case "$1" in
         --skip-campaign)        campaign=no; shift ;;
+        --skip-synthesis)       synthesis=no; shift ;;
         --parallel|--parallels) parallel=yes; shift ;;
         --tmux)                 parallel=yes; windows=yes; shift ;;
         --state-reaching)       reaching=yes; shift ;;
@@ -129,6 +135,10 @@ fuzz target *args:
     fi
     if [ "$cards" = yes ] && [ "$reaching" = no ]; then
         echo "just fuzz: --state-targets needs --state-reaching" >&2
+        exit 1
+    fi
+    if [ "$synthesis" = no ] && [ "$reaching" = no ]; then
+        echo "just fuzz: --skip-synthesis needs --state-reaching" >&2
         exit 1
     fi
     if [ "$every" = no ] && [ "$narrowed" = yes ]; then
@@ -174,12 +184,15 @@ fuzz target *args:
         exit 0
     fi
     # Synthesis writes a scaffold per selected card and base; a failure stops the
-    # recipe with its exit code. Then only the scaffolds run, never the variants,
+    # recipe with its exit code, and with --skip-synthesis the scaffolds listed
+    # above stand as they are. Then only the scaffolds run, never the variants,
     # one window or run per scaffold, and the messages below count scaffolds.
     kind=target
     if [ "$reaching" = yes ]; then
-        python3 scripts/statelens.py synthesize --profile "$profile" ${patterns[@]+"${patterns[@]}"}
-        list
+        if [ "$synthesis" = yes ]; then
+            python3 scripts/statelens.py synthesize --profile "$profile" ${patterns[@]+"${patterns[@]}"}
+            list
+        fi
         if [ "${#names[@]}" -eq 0 ]; then
             echo "just fuzz: no scaffold for this selection; see the reports in campaign/reach/" >&2
             exit 1

@@ -5496,6 +5496,98 @@ class FuzzRecipe(unittest.TestCase):
             self.assertEqual((code, calls), (1, []), args)
             self.assertIn(f"just fuzz: {message}", err, args)
 
+    def test_skip_synthesis_runs_the_built_scaffolds_without_a_synthesis(self):
+        # The scaffolds a synthesis built stand, so the listing prints them before any
+        # synthesis ($BEFORE) and the recipe runs them from that one listing: no
+        # synthesis, whose preflight refuses a checkout that drifted from the baseline.
+        code, calls, err = self.fuzz(
+            "simplex", "--state-reaching", "--skip-campaign", "--skip-synthesis",
+            "--state-targets", "TS-000*", "--fuzz-targets", "simplex_cert_*",
+            "--", "-max_total_time=5", before=self.lines(self.SCAFFOLDS),
+        )
+        self.assertEqual(code, 0, err)
+        matches = "--match TS-000* --match simplex_cert_*"
+        listing = f"python3 scripts/statelens.py targets --profile simplex --state-reaching {matches}"
+        self.assertEqual(calls, [listing] + [f"just run {name} -- -max_total_time=5"
+                                             for name in self.SCAFFOLDS])
+        self.assertIn("just fuzz: 2 simplex scaffold(s), in turn", err)
+        # Without --skip-campaign the campaign still runs; the synthesis still does not,
+        # and --parallel runs the scaffolds together.
+        code, calls, err = self.fuzz(
+            "simplex", "--state-reaching", "--skip-synthesis", "--parallel",
+            "--", "-max_total_time=5", before=self.lines(self.SCAFFOLDS),
+        )
+        self.assertEqual(code, 0, err)
+        listing = "python3 scripts/statelens.py targets --profile simplex --state-reaching"
+        self.assertEqual(calls[:2], [listing, "just campaign --profile simplex"])
+        self.assertEqual(sorted(calls[2:]),
+                         [f"just run {name} -- -max_total_time=5" for name in self.SCAFFOLDS])
+        self.assertNotIn("synthesize", "\n".join(calls))
+        self.assertRegex(err, r"just fuzz: 2 simplex scaffold\(s\), [12] at a time, \d+ core\(s\)")
+        # A selection no scaffold was built for fails as it does after a synthesis that
+        # built none, and a pattern naming no card or base fails in the listing.
+        code, calls, err = self.fuzz("simplex", "--state-reaching", "--skip-campaign",
+                                     "--skip-synthesis", "--state-targets=TS-0003")
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [f"{listing} --match TS-0003"])
+        self.assertIn("just fuzz: no scaffold for this selection; see the reports in campaign/reach/", err)
+        code, calls, err = self.fuzz(
+            "simplex", "--state-reaching", "--skip-campaign", "--skip-synthesis",
+            "--fuzz-targets", "nothing*",
+            before="statelens: error: no simplex card and candidate base match nothing*\n", targets=1,
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [f"{listing} --match nothing*"])
+        self.assertIn("no simplex card and candidate base match nothing*", err)
+        # Without the flag the synthesis runs, as before.
+        code, calls, err = self.fuzz("simplex", "--state-reaching", "--skip-campaign",
+                                     "--", "-runs=1", after=self.lines(self.SCAFFOLDS))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(calls[1], "python3 scripts/statelens.py synthesize --profile simplex")
+
+    def test_skip_synthesis_needs_state_reaching(self):
+        for args in (["simplex", "--skip-synthesis"],
+                     ["simplex", "--skip-campaign", "--skip-synthesis", "--tmux"],
+                     ["simplex_cert_mock_statelens", "--skip-synthesis", "--", "-runs=1"]):
+            code, calls, err = self.fuzz(*args)
+            self.assertEqual((code, calls), (1, []), args)
+            self.assertIn("just fuzz: --skip-synthesis needs --state-reaching", err, args)
+
+    def test_the_drifted_checkout_command_opens_a_window_per_built_scaffold(self):
+        # The command that failed on a finished checkout an upstream fix was merged into,
+        # with the flag added: the built scaffolds of the selection, one tmux window each,
+        # the libFuzzer bound forwarded, and no synthesis.
+        built = [
+            "simplex_cert_mock_ts0003_statelens",
+            "simplex_cert_mock_twins_campaign_ts0003_statelens",
+            "simplex_cert_mock_twins_mutator_ts0010_statelens",
+        ]
+        code, calls, err = self.fuzz(
+            "simplex", "--tmux", "--state-reaching", "--skip-campaign", "--skip-synthesis",
+            "--state-targets", "TS-000*", "--state-targets", "TS-001[0]",
+            "--fuzz-targets", "simplex_cert_mock", "--fuzz-targets", "simplex_cert_mock_twins_mutator",
+            "--fuzz-targets", "simplex_cert_mock_twins_campaign", "--", "-max_total_time=7200",
+            before=self.lines(built),
+        )
+        self.assertEqual(code, 0, err)
+        matches = ("--match TS-000* --match TS-001[0] --match simplex_cert_mock "
+                   "--match simplex_cert_mock_twins_mutator --match simplex_cert_mock_twins_campaign")
+        self.assertEqual(calls[:2], [
+            f"python3 scripts/statelens.py targets --profile simplex --state-reaching {matches}",
+            "tmux has-session -t statelens-simplex-reach",
+        ])
+        windows = calls[2:5]
+        self.assertTrue(windows[0].startswith(
+            "tmux new-session -d -s statelens-simplex-reach -n simplex_cert_mock_ts0003 "))
+        for window, name in zip(windows[1:], built[1:]):
+            self.assertTrue(window.startswith(
+                f"tmux new-window -t statelens-simplex-reach -n {name[:-len('_statelens')]} "), window)
+        for window, name in zip(windows, built):
+            self.assertIn(f"just run '{name}' -- -max_total_time=7200;", window)
+        self.assertEqual(calls[5:], ["tmux attach -t statelens-simplex-reach"])
+        self.assertIn("just fuzz: 3 scaffold(s), one tmux window each", err)
+        self.assertNotIn("synthesize", "\n".join(calls))
+
 
 class QmdbRegistry(unittest.TestCase):
     """The qmdb registry takes its own scope values and no other registry's."""
