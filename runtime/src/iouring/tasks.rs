@@ -579,12 +579,12 @@ pub mod tests {
 
         let barrier = Arc::new(Barrier::new(4));
         let drains: Vec<_> = (0..4)
-            .map(|start| {
+            .map(|worker| {
                 let set = set.clone();
                 let barrier = barrier.clone();
                 thread::spawn(move || {
                     barrier.wait();
-                    set.drain(start)
+                    set.drain(worker)
                         .map(|t| t.as_ptr().as_ptr().addr())
                         .collect::<Vec<_>>()
                 })

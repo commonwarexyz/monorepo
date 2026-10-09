@@ -2163,6 +2163,13 @@ mod loom_tests {
         }
     }
 
+    /// Successive pushes from outside the pool racing a worker's takes and
+    /// park are never lost: a take never hides a later push from the worker.
+    #[test]
+    fn test_successive_foreign_pushes_racing_a_take_are_never_lost() {
+        foreign_pushes(1, 2, false, Some(3));
+    }
+
     /// A foreign wake racing the poll path, by value or by reference, is never
     /// lost, even one that finds the task already notified by an earlier wake
     /// from the same thread: the task completes in a poll its runnable runs,

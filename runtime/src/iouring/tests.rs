@@ -381,6 +381,31 @@ where
     (handle, thread)
 }
 
+/// Spawn `left` tasks one at a time from threads outside the pool, each while
+/// its predecessor polls, so each waits in the global queue alone. Each records
+/// `polls` when it starts, and the last sends the records through `done`.
+fn chain_foreign_spawns(
+    context: Context,
+    polls: Arc<AtomicUsize>,
+    mut records: Vec<usize>,
+    left: usize,
+    done: oneshot::Sender<Vec<usize>>,
+) {
+    thread::spawn(move || {
+        let next = context.child("chain");
+        context.child("foreign").spawn(move |_| async move {
+            records.push(polls.load(Ordering::Relaxed));
+            if left == 1 {
+                let _ = done.send(records);
+            } else {
+                chain_foreign_spawns(next, polls, records, left - 1, done);
+            }
+        });
+    })
+    .join()
+    .unwrap();
+}
+
 /// Start a task on worker one that holds a receive in its ring when
 /// `in_ring`, so worker one waits in its ring rather than on its futex.
 /// Returns worker one's thread and the receive's peer.
@@ -446,6 +471,12 @@ impl ArcWake for WakeThenPanic {
 
 #[test]
 fn test_config_validation_before_startup() {
+    // The documented defaults are valid.
+    let mut defaults = Config::default();
+    assert_eq!(defaults.worker_threads(), 2);
+    assert_eq!(defaults.global_queue_interval(), 31);
+    defaults.validate();
+
     let mut rounded = config().with_ring_config(RingConfig {
         size: 3,
         ..RingConfig::default()
@@ -3134,6 +3165,7 @@ fn test_remote_driver_failure_interrupts_root_even_when_task_panics_are_caught()
         exact: true,
         deadline: None,
     });
+    let resumed = &AtomicBool::new(false);
     let result = catch_unwind(AssertUnwindSafe(|| {
         Runner::new(config().with_worker_threads(2).with_catch_panics(true)).start(
             |context| async move {
@@ -3144,12 +3176,28 @@ fn test_remote_driver_failure_interrupts_root_even_when_task_panics_are_caught()
                     Operation::register(request).await.unwrap();
                     pending::<()>().await;
                 });
-                pending::<()>().await;
+
+                // Nothing else wakes the root, so it is polled again only for
+                // the failure, which must end it before its code resumes.
+                let mut yielded = false;
+                poll_fn(|_| {
+                    if mem::replace(&mut yielded, true) {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+                resumed.store(true, Ordering::SeqCst);
             },
         );
     }));
     let panic = result.expect_err("losing a pool worker must interrupt the root");
     assert!(extract_panic_message(&*panic).contains("injected service failure after completion"));
+    assert!(
+        !resumed.load(Ordering::SeqCst),
+        "the root resumed after the failure"
+    );
     assert!(Local::current().is_none());
 }
 
@@ -3459,6 +3507,50 @@ fn test_busy_worker_takes_a_share_of_the_global_queue_every_interval() {
                 *last <= 2 * interval as usize,
                 "last foreign wake waited {last} polls with interval {interval}"
             );
+        });
+    }
+}
+
+/// A busy worker takes from the global queue on exactly every configured
+/// interval: a task queued there just after one take runs after the
+/// interval's other polls, none of them at 1.
+#[test]
+fn test_busy_worker_checks_the_global_queue_every_interval() {
+    const CHAIN: usize = 8;
+    for interval in [1, 2, 4, config().global_queue_interval()] {
+        Runner::new(config().with_global_queue_interval(interval)).start(|context| async move {
+            // A task that requeues itself keeps this worker's own queue busy.
+            let polls = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let yielder = context.child("yielder").spawn({
+                let polls = polls.clone();
+                let stop = stop.clone();
+                move |_| async move {
+                    while !stop.load(Ordering::Relaxed) {
+                        polls.fetch_add(1, Ordering::Relaxed);
+                        reschedule().await;
+                    }
+                }
+            });
+
+            let (done, records) = oneshot::channel();
+            chain_foreign_spawns(context.child("chain"), polls, Vec::new(), CHAIN, done);
+            let records = records.await.unwrap();
+            stop.store(true, Ordering::Relaxed);
+            yielder.await.unwrap();
+
+            // The first task waits for wherever the countdown stood. Each later
+            // one is queued while its predecessor polls, so it waits exactly
+            // one interval. The runner's metrics task sleeps for ten seconds
+            // after its first poll, so it takes none of those polls.
+            assert_eq!(records.len(), CHAIN);
+            for pair in records.windows(2) {
+                assert_eq!(
+                    pair[1] - pair[0],
+                    interval as usize - 1,
+                    "interval {interval}"
+                );
+            }
         });
     }
 }
