@@ -119,6 +119,7 @@ fn normalize_at_outer_boundary() {
     for input in [0, 1, u32::MAX, 0xdead_beef] {
         check_consistent(|| Root(input));
         assert_eq!(crate::dispatch(Root(input)), expected(input));
+        assert_eq!(crate::test_dispatch(Root(input)), expected(input));
     }
 }
 
