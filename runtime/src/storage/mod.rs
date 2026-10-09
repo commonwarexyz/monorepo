@@ -72,6 +72,72 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 Ok(ret as usize)
             }
 
+            /// Alignment of the offset, length, and buffer address that reads need to bypass the
+            /// page cache with `O_DIRECT`. Covers devices with 512-byte and 4 KiB logical blocks.
+            pub(crate) const DIRECT_ALIGNMENT: usize = 4096;
+
+            /// Reopen `file` read-only with `O_DIRECT`.
+            ///
+            /// Reopening through procfs yields an independent open file description, so the flag
+            /// does not affect reads and writes through `file`. Fails if the filesystem does not
+            /// support `O_DIRECT`.
+            pub(crate) fn open_direct(file: &File) -> io::Result<File> {
+                use std::os::unix::fs::OpenOptionsExt as _;
+
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_DIRECT)
+                    .open(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            }
+
+            /// Whether a read into `buf` at `offset` meets [DIRECT_ALIGNMENT].
+            pub(crate) fn direct_aligned(offset: u64, buf: &[u8]) -> bool {
+                !buf.is_empty()
+                    && offset.is_multiple_of(DIRECT_ALIGNMENT as u64)
+                    && buf.len().is_multiple_of(DIRECT_ALIGNMENT)
+                    && buf.as_ptr().addr().is_multiple_of(DIRECT_ALIGNMENT)
+            }
+
+            /// Read into `buf` at `offset` through `direct`, a descriptor from [open_direct],
+            /// bypassing the page cache. `offset` and `buf` must satisfy [direct_aligned].
+            ///
+            /// Returns the number of bytes read, fewer than `buf.len()` only at end of file, or
+            /// `None` without reading anything if the device rejects the request, so the caller
+            /// can read another way.
+            pub(crate) fn read_direct(
+                direct: &File,
+                buf: &mut [u8],
+                offset: u64,
+            ) -> io::Result<Option<usize>> {
+                let mut done = 0;
+                while done < buf.len() {
+                    let pos = offset
+                        .checked_add(done as u64)
+                        .and_then(|pos| libc::off_t::try_from(pos).ok())
+                        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+                    match preadv2(direct.as_fd(), &mut buf[done..], pos, 0) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            done += read;
+
+                            // A direct read stops short of a block boundary only at end of file.
+                            if !done.is_multiple_of(DIRECT_ALIGNMENT) {
+                                break;
+                            }
+                        }
+                        Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+
+                        // A device whose blocks are larger than `DIRECT_ALIGNMENT` rejects the
+                        // request before reading anything.
+                        Err(err) if done == 0 && err.raw_os_error() == Some(libc::EINVAL) => {
+                            return Ok(None);
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+                Ok(Some(done))
+            }
+
             /// Make what a prior process wrote crash-durable before any storage structure reads by
             /// flushing the whole filesystem containing `dir` with `syncfs(2)`.
             ///
@@ -90,9 +156,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             /// Fill `buf` from the start of `file`, stopping early at end of file, and return the
             /// number of bytes read.
             ///
-            /// The resolved header is held in memory, so the read asks the kernel not to keep it
-            /// in the page cache, retrying without the hint where that is unsupported.
+            /// The resolved header is held in memory, so the read bypasses the page cache with
+            /// `O_DIRECT` when `buf` is aligned and the filesystem supports it. Otherwise it asks
+            /// the kernel not to keep the bytes, retrying without the hint where that is
+            /// unsupported.
             fn read_header_bytes(file: &mut File, buf: &mut [u8]) -> io::Result<usize> {
+                if direct_aligned(0, buf)
+                    && let Ok(direct) = open_direct(file)
+                    && let Some(read) = read_direct(&direct, buf, 0)?
+                {
+                    return Ok(read);
+                }
+
                 let mut flags = libc::RWF_DONTCACHE;
                 let mut done = 0;
                 while done < buf.len() {
@@ -186,6 +261,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         })
     }
 
+    /// Holds a blob's header region, aligned so a full region can be read with `O_DIRECT`.
+    #[repr(align(4096))]
+    struct HeaderBuf([u8; Layout::V1.data_offset() as usize]);
+
     /// Reads a blob's leading bytes and resolves its header (see [header::resolve]).
     pub(crate) fn resolve_header(
         file: &mut File,
@@ -196,10 +275,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         name: &[u8],
     ) -> Result<Option<(u64, BlobVersion, u64)>, Error> {
         let requested = Header::resolve_len(raw_len);
-        let mut buf = [0u8; Layout::V1.data_offset() as usize];
+        let mut buf = HeaderBuf([0; Layout::V1.data_offset() as usize]);
         let read =
-            read_header_bytes(file, &mut buf[..requested]).map_err(|_| Error::ReadFailed)?;
-        let raw = &buf[..read];
+            read_header_bytes(file, &mut buf.0[..requested]).map_err(|_| Error::ReadFailed)?;
+        let raw = &buf.0[..read];
 
         // V0's prefix includes mutable payload that may shrink after metadata was read.
         // A complete prefix must retain the original length, which yields the logical size.
