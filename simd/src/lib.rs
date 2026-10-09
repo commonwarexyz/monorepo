@@ -58,7 +58,7 @@ commonware_macros::stability_scope!(ALPHA {
     mod core;
     pub use core::{ArmV9, IceLake, Neon, Operation, Simd};
     mod dispatch;
-    pub use dispatch::dispatch;
+    pub use dispatch::{dispatch, test_dispatch};
     pub mod emulated;
     pub mod native;
     #[cfg(any(test, feature = "fuzz"))]
