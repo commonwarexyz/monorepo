@@ -113,8 +113,8 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Most runnables one take moves from the inject queue, as tokio caps it at
-/// half its local queue.
+/// Most runnables one take moves from the inject queue, which bounds how long
+/// a take holds the pool-wide lock.
 const INJECT_BATCH: usize = 128;
 
 /// Most workers in one pool, one bit each in the idle set.
@@ -265,8 +265,8 @@ impl Pool {
         runnable
     }
 
-    /// Take a share of the inject queue, as tokio does: one runnable more
-    /// than an even split between the workers, at most [`INJECT_BATCH`].
+    /// Take a share of the inject queue: one runnable more than an even split
+    /// between the workers, at most [`INJECT_BATCH`].
     /// Returns the oldest and queues the rest in `ready`.
     #[must_use]
     pub fn take(&self, ready: &mut Ready) -> Option<Runnable> {
