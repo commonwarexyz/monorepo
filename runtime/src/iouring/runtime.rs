@@ -181,7 +181,7 @@ use std::{
     cell::RefCell,
     convert::Infallible,
     env,
-    future::Future,
+    future::{Future, poll_fn},
     mem,
     net::{IpAddr, SocketAddr, ToSocketAddrs},
     num::NonZeroUsize,
@@ -2166,7 +2166,8 @@ impl crate::Runner for Runner {
         let context_tree = tree.clone();
 
         // A pool worker that fails interrupts the root even when task panics
-        // are caught, since the pool cannot run without it. The receiver
+        // are caught, since the pool cannot run without it. The worker wakes
+        // the root, which takes the failure before each poll. The receiver
         // outlives the root, so a failure after the root completes still fails
         // the runner.
         let mut pool = Pool::default();
@@ -2181,13 +2182,24 @@ impl crate::Runner for Runner {
             Role::Pool(0),
             || {
                 pool.start(&shared, &pool_panicker);
-                pool_failures.interrupt_ref(tasks.interrupt(f(Context {
+                let root = tasks.interrupt(f(Context {
                     name: label.name(),
                     attributes: Vec::new(),
                     shared: context_shared,
                     tree: context_tree,
                     execution: Execution::default(),
-                })))
+                }));
+                let failures = &mut pool_failures;
+                async move {
+                    let mut root = pin!(root);
+                    poll_fn(|cx| {
+                        if let Some(panic) = failures.try_take() {
+                            resume_unwind(panic);
+                        }
+                        root.as_mut().poll(cx)
+                    })
+                    .await
+                }
             },
             Some(Box::pin(process.collect(Sleep::new))),
         )
