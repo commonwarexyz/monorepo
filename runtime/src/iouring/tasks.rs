@@ -596,8 +596,10 @@ pub mod tests {
             .flat_map(|drain| drain.join().unwrap())
             .collect();
         drained.sort_unstable();
+
         let mut expected: Vec<usize> = tasks.iter().map(|t| t.as_ptr().as_ptr().addr()).collect();
         expected.sort_unstable();
+
         assert_eq!(drained, expected);
         for t in tasks {
             assert_eq!(refs(&t), 1);

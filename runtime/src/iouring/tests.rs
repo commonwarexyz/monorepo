@@ -342,6 +342,108 @@ impl Drop for PanickingDrop {
     }
 }
 
+/// Spin on the calling thread until `started` holds a thread, then return it.
+/// Called from the root, this keeps worker zero from polling anything else.
+fn wait_started(started: &Mutex<Option<ThreadId>>) -> ThreadId {
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    loop {
+        if let Some(thread) = *started.lock() {
+            return thread;
+        }
+        assert!(Instant::now() < deadline, "task never started");
+        std::hint::spin_loop();
+    }
+}
+
+/// Spawn `f` from a thread outside the pool, so its first runnable goes to the
+/// inject queue, and block the calling worker until another worker has started
+/// it. Returns the task's handle and the thread that started it.
+fn spawn_elsewhere<T, Fut>(context: &Context, f: Fut) -> (Handle<T>, ThreadId)
+where
+    T: Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+{
+    let started = Arc::new(Mutex::new(None));
+    let child = context.child("elsewhere");
+    let handle = thread::spawn({
+        let started = started.clone();
+        move || {
+            child.spawn(move |_| async move {
+                *started.lock() = Some(thread::current().id());
+                f.await
+            })
+        }
+    })
+    .join()
+    .unwrap();
+    let thread = wait_started(&started);
+    assert_ne!(thread, thread::current().id(), "task started on the caller");
+    (handle, thread)
+}
+
+/// Start a task on worker one that holds a receive in its ring when
+/// `in_ring`, so worker one waits in its ring rather than on its futex.
+/// Returns worker one's thread and the receive's peer.
+fn occupy_worker_one(context: &Context, in_ring: bool) -> (ThreadId, Option<UnixStream>) {
+    if !in_ring {
+        return (spawn_elsewhere(context, async {}).1, None);
+    }
+    let (socket, peer) = UnixStream::pair().unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let (_, other) = spawn_elsewhere(context, async move {
+        let fd: Arc<OwnedFd> = Arc::new(socket.into());
+        let _ = Operation::register(Request::Recv(RecvRequest {
+            fd,
+            buf: IoBufMut::with_capacity(1),
+            offset: 0,
+            len: 1,
+            exact: true,
+            deadline: None,
+        }))
+        .await;
+    });
+    (other, Some(peer))
+}
+
+/// A spin outlasting the test's timeout, so only a push's wake signal can end
+/// it, as no message is published.
+fn endless_spinner() -> SpinnerConfig {
+    SpinnerConfig {
+        budget_us: 60_000_000,
+        max_budget_us: 60_000_000,
+        quick_wake_us: 60_000_000,
+    }
+}
+
+/// A waker whose destruction panics, so releasing its timer fails the worker
+/// that holds it.
+struct PanicOnDrop;
+
+impl ArcWake for PanicOnDrop {
+    fn wake_by_ref(_: &Arc<Self>) {}
+}
+
+impl Drop for PanicOnDrop {
+    fn drop(&mut self) {
+        if !thread::panicking() {
+            panic!("injected pool worker failure during shutdown");
+        }
+    }
+}
+
+/// Wakes a stored task waker, which queues that task on the current worker,
+/// then panics, failing the worker with the task's runnable still queued.
+struct WakeThenPanic(Mutex<Option<Waker>>);
+
+impl ArcWake for WakeThenPanic {
+    fn wake_by_ref(this: &Arc<Self>) {
+        if let Some(waker) = this.0.lock().take() {
+            waker.wake();
+        }
+        panic!("injected pool worker callback failure");
+    }
+}
+
 #[test]
 fn test_config_validation_before_startup() {
     let mut rounded = config().with_ring_config(RingConfig {
@@ -2748,45 +2850,6 @@ fn test_foreign_tls_destructor_can_wake_after_current_key_destruction() {
     assert!(!panicked, "ordinary wake accessed destroyed runtime TLS");
 }
 
-/// Spin on the calling thread until `started` holds a thread, then return it.
-/// Called from the root, this keeps worker zero from polling anything else.
-fn wait_started(started: &Mutex<Option<ThreadId>>) -> ThreadId {
-    let deadline = Instant::now() + TEST_TIMEOUT;
-    loop {
-        if let Some(thread) = *started.lock() {
-            return thread;
-        }
-        assert!(Instant::now() < deadline, "task never started");
-        std::hint::spin_loop();
-    }
-}
-
-/// Spawn `f` from a thread outside the pool, so its first runnable goes to the
-/// inject queue, and block the calling worker until another worker has started
-/// it. Returns the task's handle and the thread that started it.
-fn spawn_elsewhere<T, Fut>(context: &Context, f: Fut) -> (Handle<T>, ThreadId)
-where
-    T: Send + 'static,
-    Fut: Future<Output = T> + Send + 'static,
-{
-    let started = Arc::new(Mutex::new(None));
-    let child = context.child("elsewhere");
-    let handle = thread::spawn({
-        let started = started.clone();
-        move || {
-            child.spawn(move |_| async move {
-                *started.lock() = Some(thread::current().id());
-                f.await
-            })
-        }
-    })
-    .join()
-    .unwrap();
-    let thread = wait_started(&started);
-    assert_ne!(thread, thread::current().id(), "task started on the caller");
-    (handle, thread)
-}
-
 #[test]
 fn test_tasks_spread_across_workers_and_complete() {
     for count in [1, 2, 4] {
@@ -3244,30 +3307,6 @@ fn test_wake_on_a_pool_worker_keeps_the_task_there() {
     });
 }
 
-/// Start a task on worker one that holds a receive in its ring when
-/// `in_ring`, so worker one waits in its ring rather than on its futex.
-/// Returns worker one's thread and the receive's peer.
-fn occupy_worker_one(context: &Context, in_ring: bool) -> (ThreadId, Option<UnixStream>) {
-    if !in_ring {
-        return (spawn_elsewhere(context, async {}).1, None);
-    }
-    let (socket, peer) = UnixStream::pair().unwrap();
-    socket.set_nonblocking(true).unwrap();
-    let (_, other) = spawn_elsewhere(context, async move {
-        let fd: Arc<OwnedFd> = Arc::new(socket.into());
-        let _ = Operation::register(Request::Recv(RecvRequest {
-            fd,
-            buf: IoBufMut::with_capacity(1),
-            offset: 0,
-            len: 1,
-            exact: true,
-            deadline: None,
-        }))
-        .await;
-    });
-    (other, Some(peer))
-}
-
 /// A push racing a worker's park reaches it in either wait. A push before the
 /// worker publishes itself idle finds no idle bit, so the worker's look at the
 /// inject queue after publishing must find it. A push after the worker finds
@@ -3311,16 +3350,6 @@ fn test_push_racing_a_park_reaches_the_worker() {
                 );
             });
         }
-    }
-}
-
-/// A spin outlasting the test's timeout, so only a push's wake signal can end
-/// it, as no message is published.
-fn endless_spinner() -> SpinnerConfig {
-    SpinnerConfig {
-        budget_us: 60_000_000,
-        max_budget_us: 60_000_000,
-        quick_wake_us: 60_000_000,
     }
 }
 
@@ -3674,22 +3703,6 @@ fn test_wake_from_a_destructor_during_teardown_leaves_no_runnable() {
     }
 }
 
-/// A waker whose destruction panics, so releasing its timer fails the worker
-/// that holds it.
-struct PanicOnDrop;
-
-impl ArcWake for PanicOnDrop {
-    fn wake_by_ref(_: &Arc<Self>) {}
-}
-
-impl Drop for PanicOnDrop {
-    fn drop(&mut self) {
-        if !thread::panicking() {
-            panic!("injected pool worker failure during shutdown");
-        }
-    }
-}
-
 /// A pool worker that fails during shutdown, after the pool has closed, still
 /// fails the runner.
 #[test]
@@ -3780,19 +3793,6 @@ fn test_task_panic_during_root_destruction_is_not_observed() {
             result.map_err(|panic| extract_panic_message(&*panic)),
             Ok(7)
         );
-    }
-}
-
-/// Wakes a stored task waker, which queues that task on the current worker,
-/// then panics, failing the worker with the task's runnable still queued.
-struct WakeThenPanic(Mutex<Option<Waker>>);
-
-impl ArcWake for WakeThenPanic {
-    fn wake_by_ref(this: &Arc<Self>) {
-        if let Some(waker) = this.0.lock().take() {
-            waker.wake();
-        }
-        panic!("injected pool worker callback failure");
     }
 }
 
