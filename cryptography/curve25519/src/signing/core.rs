@@ -145,7 +145,9 @@ fn decompress_terms<B: Backend>(
 /// Hashes the challenges `R || A || M` of unit `unit`, with `M` the framed message.
 ///
 /// The unit's curve work cannot split, but long messages make its hashing worth spreading across
-/// workers, so [`Sha512::hash_many_with`] splits the challenges across `strategy`.
+/// workers. [`Sha512::hash_many_with`] splits the challenges across `strategy` only between whole
+/// batches of the SHA-512 kernel, so a unit can spread only where that kernel hashes fewer than
+/// [`LANES`] messages at once.
 fn hash_unit(
     items: &[Item<'_>],
     unit: usize,
@@ -247,8 +249,9 @@ fn signature_unit<B: Backend>(
 /// term recoded at `width`. Returns `None` if any `s` is non-canonical or any `R` fails to
 /// decompress.
 ///
-/// A strategy batch may hold a single unit, and a unit may spread its hashing further (see
-/// [`hash_unit`]), so a batch of a few long messages can still use every worker.
+/// A strategy batch may hold a single unit. Where the SHA-512 kernel hashes fewer than [`LANES`]
+/// messages at once, a unit can spread its hashing further (see [`hash_unit`]), so a batch of a few
+/// long messages can still use more workers than it has units.
 ///
 /// The phase needs no `A` point and no grouping, so it runs while [`verify_pipeline`] sorts the
 /// keys.

@@ -344,11 +344,9 @@ commonware_macros::stability_scope!(BETA {
         /// Hash the concatenation of `parts` in a single shot, splitting the
         /// work across `strategy` when the hash function allows it.
         ///
-        /// Hash functions with a tree mode (e.g. BLAKE3) may hash the subtrees of
-        /// a long message across `strategy`. Others ignore it. Implementations
-        /// are free to specialize this for small, fixed-shape inputs (e.g.
-        /// hashing a pair of digests) to avoid the overhead of the streaming
-        /// machinery.
+        /// The digest does not depend on `strategy`. Implementations are free to
+        /// specialize this for small, fixed-shape inputs (e.g. hashing a pair of
+        /// digests) to avoid the overhead of the streaming machinery.
         fn hash_with(parts: &[&[u8]], strategy: &impl Strategy) -> Self::Digest;
 
         /// Hash two messages, each given as a concatenation of parts, in a
@@ -372,9 +370,7 @@ commonware_macros::stability_scope!(BETA {
 
         /// Like [`Hasher::hash_many`], but splits the messages across `strategy`.
         ///
-        /// Implementations that hash several messages at once (e.g. one per SIMD
-        /// lane) split `messages` into shares that keep those kernels full, and
-        /// use the same kernels in [`Hasher::hash_many`].
+        /// Returns the same digests, in the same order, as [`Hasher::hash_many`].
         fn hash_many_with<M: AsRef<[u8]> + Sync>(
             messages: &[M],
             strategy: &impl Strategy,
