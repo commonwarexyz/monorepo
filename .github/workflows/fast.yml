@@ -99,42 +99,30 @@ jobs:
           echo "All lints passed!"
 
   Tests:
-    name: "Tests (os: ${{ matrix.os }}${{ matrix.flags && format(', flags: \"{0}\"', matrix.flags) }}) (partition: ${{ matrix.partition }}/2)"
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    name: "${{ matrix.os }} / ${{ matrix.variant }}"
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        partition: [1, 2]
-        flags:
-          - "--features commonware-runtime/iouring"
-          - ""
-        exclude:
-          # Only run io_uring features on Ubuntu
-          - os: macos-latest
+        include:
+          - os: ubuntu-latest
+            variant: default
+            flags: ""
+          - os: ubuntu-latest
+            variant: iouring
             flags: "--features commonware-runtime/iouring"
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-    - name: Configure swap
-      uses: ./.github/actions/swap
-    - name: Clear disk space
-      uses: ./.github/actions/disk
-    - name: Run setup
-      uses: ./.github/actions/setup
-      with:
-        additional-cache-key: ${{ matrix.flags || 'default' }}
-        rust-cache-save: ${{ matrix.partition == 1 }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
-    - name: Install just & nextest
-      uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
-      with:
-        tool: just@1.43.0,cargo-nextest@0.9.133
-    - name: Run tests
-      run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
+          - os: macos-latest
+            variant: default
+            flags: ""
+    uses: ./.github/workflows/fast-tests.yml
+    with:
+      os: ${{ matrix.os }}
+      variant: ${{ matrix.variant }}
+      flags: ${{ matrix.flags }}
+    secrets:
+      SCCACHE_R2_BUCKET: ${{ secrets.SCCACHE_R2_BUCKET }}
+      SCCACHE_R2_ENDPOINT: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+      SCCACHE_R2_ACCESS_KEY_ID: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+      SCCACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
 
   Tests-Subset:
     name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\"${{ matrix.rustflags && format(', rustflags: \"{0}\"', matrix.rustflags) || '' }}, cpu: \"${{ matrix.sde && format('sde -{0}', matrix.sde) || matrix.qemu && format('qemu -cpu {0}', matrix.qemu) || 'native' }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) || '' }}\")"
