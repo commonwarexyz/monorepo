@@ -113,7 +113,7 @@ jobs:
           - os: macos-latest
             variant: default
             flags: ""
-    uses: ./.github/workflows/fast-tests.yml
+    uses: ./.github/workflows/tests.yml
     with:
       os: ${{ matrix.os }}
       variant: ${{ matrix.variant }}
@@ -359,6 +359,28 @@ jobs:
             exit 1
           fi
           echo "All tests passed!"
+
+  # The slow tests run in the Tests job from the same builds as the fast tests. Branch protection
+  # requires this check alongside Fast-Tests.
+  Slow-Tests-Gate:
+    name: "Slow-Tests"
+    runs-on: ubuntu-latest
+    needs: Tests
+    if: always()
+    steps:
+      - name: Checkout swap action
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          sparse-checkout: .github/actions/swap
+      - name: Configure swap
+        uses: ./.github/actions/swap
+      - name: Check test results
+        run: |
+          if [ "${{ needs.Tests.result }}" != "success" ]; then
+            echo "Tests failed or were cancelled"
+            exit 1
+          fi
+          echo "All tests passed successfully!"
 
   Dependencies:
     runs-on: ubuntu-latest

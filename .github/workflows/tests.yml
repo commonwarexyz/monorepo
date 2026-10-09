@@ -1,4 +1,4 @@
-name: Fast tests
+name: Tests
 
 on:
   workflow_call:
@@ -30,6 +30,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The fast and slow nextest profiles only select which tests run, so one build of the test
+  # binaries serves both.
   Build:
     runs-on: ${{ inputs.os }}
     timeout-minutes: 180
@@ -57,15 +59,15 @@ jobs:
     - name: Upload tests
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
       with:
-        name: fast-tests-${{ inputs.os }}-${{ inputs.variant }}
+        name: tests-${{ inputs.os }}-${{ inputs.variant }}
         path: ${{ runner.temp }}/tests.tar.zst
         if-no-files-found: error
         compression-level: 0
         retention-days: 1
         overwrite: true
 
-  Tests:
-    name: "Run (${{ matrix.partition }}/2)"
+  Fast:
+    name: "Fast (${{ matrix.partition }}/${{ strategy.job-total }})"
     needs: Build
     runs-on: ${{ inputs.os }}
     timeout-minutes: 45
@@ -86,10 +88,40 @@ jobs:
     - name: Download tests
       uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
       with:
-        name: fast-tests-${{ inputs.os }}-${{ inputs.variant }}
+        name: tests-${{ inputs.os }}-${{ inputs.variant }}
         path: ${{ runner.temp }}
-    - name: Run tests
+    - name: Run fast tests
       run: >-
         cargo-nextest nextest run --archive-file "$RUNNER_TEMP/tests.tar.zst"
         --workspace-remap "$GITHUB_WORKSPACE"
-        --partition hash:${{ matrix.partition }}/2 --verbose
+        --partition hash:${{ matrix.partition }}/${{ strategy.job-total }} --verbose
+
+  Slow:
+    name: "Slow (${{ matrix.partition }}/${{ strategy.job-total }})"
+    needs: Build
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
+    - name: Clear disk space
+      uses: ./.github/actions/disk
+    - name: Install nextest
+      uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+      with:
+        tool: cargo-nextest@0.9.133
+    - name: Download tests
+      uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+      with:
+        name: tests-${{ inputs.os }}-${{ inputs.variant }}
+        path: ${{ runner.temp }}
+    - name: Run slow tests
+      run: >-
+        cargo-nextest nextest run --archive-file "$RUNNER_TEMP/tests.tar.zst"
+        --workspace-remap "$GITHUB_WORKSPACE"
+        --partition hash:${{ matrix.partition }}/${{ strategy.job-total }} --verbose --profile slow
