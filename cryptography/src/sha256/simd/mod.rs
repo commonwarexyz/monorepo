@@ -17,218 +17,168 @@
 //! back to serial hashing.
 //!
 //! AVX-512 hashes batches of 16 equal-length contiguous messages in independent
-//! SIMD lanes, producing the ordinary SHA-256 digest of each message.
+//! SIMD lanes, producing the ordinary SHA-256 digest of each message. The batch
+//! algorithm uses `commonware_simd` operations shared with emulated profiles.
 
-use super::{DIGEST_LENGTH, Digest};
+use super::{DIGEST_LENGTH, Digest, Sha256};
+use crate::Hasher;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+use commonware_simd::{Operation, Simd, dispatch};
+#[cfg(feature = "std")]
+use std::vec::Vec;
 
-#[cfg(all(target_arch = "aarch64", any(target_feature = "sha2", feature = "std")))]
-mod aarch64;
-#[cfg(all(
-    target_arch = "x86_64",
-    any(
-        all(
-            target_feature = "avx512f",
-            target_feature = "avx512bw",
-            target_feature = "avx512vl",
-        ),
-        all(
-            target_feature = "sha",
-            target_feature = "avx2",
-            target_feature = "ssse3",
-            target_feature = "sse4.1",
-        ),
-        feature = "std",
-    ),
-))]
-mod x86_64;
+mod batch;
+mod constants;
+mod pair;
 
 /// The MMR node's position prefix length (an 8-byte big-endian position).
 const POSITION_LEN: usize = 8;
 
-/// The MMR node message length: an 8-byte position and two 32-byte digests.
-const MMR_NODE_LEN: usize = POSITION_LEN + 2 * DIGEST_LENGTH;
-const _: () = assert!(MMR_NODE_LEN == 72);
+/// Independent messages in a full batch.
+const X16_LANES: usize = 16;
 
-/// The BMT node message length: two 32-byte digests (no position).
-const BMT_NODE_LEN: usize = 2 * DIGEST_LENGTH;
-const _: () = assert!(BMT_NODE_LEN == 64);
+/// Minimum active messages for the sixteen-lane kernel.
+///
+/// Uses [ISA-L's shortage cutoff] to keep up to six messages on serial SHA.
+///
+/// [ISA-L's shortage cutoff]: https://github.com/intel/isa-l_crypto/blob/f22c49aef162d7632bde4f22dc7491b22f0a7fc2/sha256_mb/sha256_job.asm#L38-L46
+const MINIMUM_X16_BATCH_LEN: usize = 7;
 
-/// Independent 32-bit message lanes in a 512-bit vector.
-#[cfg(target_arch = "x86_64")]
-pub(super) const X16_LANES: usize = 16;
-
-/// Return whether AVX-512 software SHA-256 is available for 16 messages.
-#[cfg(target_arch = "x86_64")]
+/// Hash independent messages in input order using one selected backend.
 #[inline]
-fn supports_hash_x16() -> bool {
-    cfg_if::cfg_if! {
-        if #[cfg(all(
-            target_feature = "avx512f",
-            target_feature = "avx512bw",
-            target_feature = "avx512vl",
-        ))] {
-            true
-        } else if #[cfg(feature = "std")] {
-            std::arch::is_x86_feature_detected!("avx512f")
-                && std::arch::is_x86_feature_detected!("avx512bw")
-                && std::arch::is_x86_feature_detected!("avx512vl")
-        } else {
-            false
+pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Digest> {
+    struct HashMany<'a, M>(&'a [M]);
+
+    impl<S: Simd, M: AsRef<[u8]>> Operation<S> for HashMany<'_, M> {
+        type Output = Vec<Digest>;
+
+        #[inline(always)]
+        fn portable(self, simd: S) -> Self::Output {
+            if S::U32_LANES < X16_LANES {
+                return self
+                    .0
+                    .iter()
+                    .map(|message| Sha256::hash(&[message.as_ref()]))
+                    .collect();
+            }
+
+            // Adjacent equal-length runs preserve the kernel's length requirement
+            // and the resulting digests' input order.
+            let mut digests = Vec::with_capacity(self.0.len());
+            for run in self
+                .0
+                .chunk_by(|left, right| left.as_ref().len() == right.as_ref().len())
+            {
+                for messages in run.chunks(X16_LANES) {
+                    if messages.len() >= MINIMUM_X16_BATCH_LEN {
+                        // Spare lanes borrow the first input; only active lanes contribute output.
+                        let mut inputs = [messages[0].as_ref(); X16_LANES];
+                        for (input, message) in inputs[1..].iter_mut().zip(&messages[1..]) {
+                            *input = message.as_ref();
+                        }
+                        let output = simd.execute(batch::hash::<S>(inputs));
+                        digests.extend_from_slice(&output[..messages.len()]);
+                    } else {
+                        digests.extend(
+                            messages
+                                .iter()
+                                .map(|message| Sha256::hash(&[message.as_ref()])),
+                        );
+                    }
+                }
+            }
+            digests
         }
     }
+
+    dispatch(HashMany(messages))
 }
 
-/// Minimum active lanes for an available x16 kernel.
-///
-/// Uses [ISA-L's shortage cutoffs]: keep up to six messages on SHA-NI, or one
-/// message on the software fallback. These are initial tuning choices for the
-/// local batch.
-///
-/// [ISA-L's shortage cutoffs]: https://github.com/intel/isa-l_crypto/blob/f22c49aef162d7632bde4f22dc7491b22f0a7fc2/sha256_mb/sha256_job.asm#L38-L46
-#[cfg(target_arch = "x86_64")]
-#[inline]
-pub(super) fn minimum_x16_batch_len() -> Option<usize> {
-    if !supports_hash_x16() {
-        return None;
-    }
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "std")] {
-            let sha = std::arch::is_x86_feature_detected!("sha");
-        } else {
-            let sha = cfg!(target_feature = "sha");
-        }
-    }
-    Some(if sha { 7 } else { 2 })
-}
-
-/// Hash 16 equal-length contiguous messages with AVX-512 software SHA-256.
-#[cfg(target_arch = "x86_64")]
+/// Hash sixteen equal-length messages when the selected backend has enough lanes.
+#[cfg(test)]
 #[inline]
 pub(super) fn hash_x16(messages: [&[u8]; X16_LANES]) -> Option<[Digest; X16_LANES]> {
     let len = messages[0].len();
-    if !supports_hash_x16() || !messages[1..].iter().all(|message| message.len() == len) {
+    if !messages[1..].iter().all(|message| message.len() == len) {
         return None;
     }
 
-    cfg_if::cfg_if! {
-        if #[cfg(any(
-            feature = "std",
-            all(
-                target_feature = "avx512f",
-                target_feature = "avx512bw",
-                target_feature = "avx512vl",
-            ),
-        ))] {
-            // SAFETY: `supports_hash_x16` established every required target
-            // feature and equal lengths were established above.
-            let digests = unsafe { x86_64::hash_x16_equal(messages) };
-            Some(digests)
-        } else {
-            None
+    struct HashBatch<'a>([&'a [u8]; X16_LANES]);
+
+    impl<S: Simd> Operation<S> for HashBatch<'_> {
+        type Output = Option<[Digest; X16_LANES]>;
+
+        #[inline(always)]
+        fn portable(self, simd: S) -> Self::Output {
+            if S::U32_LANES < X16_LANES {
+                return None;
+            }
+            Some(simd.execute(batch::hash::<S>(self.0)))
         }
     }
+
+    dispatch(HashBatch(messages))
 }
 
 /// Hash two node-length messages, each given as parts, with the pair-hashing
 /// kernel for the current CPU.
 ///
-/// Returns `None` when the kernel cannot be used: the required CPU features
-/// are unavailable, or the messages don't match one of the known node shapes
-/// (a position and two digests, or two digests) as their exact constituent
-/// parts.
+/// Returns `None` when the selected backend has fewer than four lanes, or the
+/// messages don't match one of the known node shapes (a position and two
+/// digests, or two digests) as their exact constituent parts.
 ///
 /// Inlined aggressively so the shape matching constant-folds at call sites
 /// with fixed-shape inputs (e.g. merkle nodes).
 #[inline(always)]
 pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Digest)> {
+    struct Pair<'a, const PREFIX: usize> {
+        left_pos: &'a [u8; PREFIX],
+        left_a: &'a [u8; DIGEST_LENGTH],
+        left_b: &'a [u8; DIGEST_LENGTH],
+        right_pos: &'a [u8; PREFIX],
+        right_a: &'a [u8; DIGEST_LENGTH],
+        right_b: &'a [u8; DIGEST_LENGTH],
+    }
+
+    impl<S: Simd, const PREFIX: usize> Operation<S> for Pair<'_, PREFIX> {
+        type Output = Option<(Digest, Digest)>;
+
+        #[inline(always)]
+        fn portable(self, simd: S) -> Self::Output {
+            if S::U32_LANES < 4 {
+                return None;
+            }
+            Some(simd.execute(pair::hash::<S, PREFIX>(
+                self.left_pos,
+                self.left_a,
+                self.left_b,
+                self.right_pos,
+                self.right_a,
+                self.right_b,
+            )))
+        }
+    }
+
     match (left, right) {
-        ([left_pos, left_left, left_right], [right_pos, right_left, right_right]) => dispatch_mmr(
-            (*left_pos).try_into().ok()?,
-            (*left_left).try_into().ok()?,
-            (*left_right).try_into().ok()?,
-            (*right_pos).try_into().ok()?,
-            (*right_left).try_into().ok()?,
-            (*right_right).try_into().ok()?,
-        ),
-        ([left_a, left_b], [right_a, right_b]) => dispatch_bmt(
-            (*left_a).try_into().ok()?,
-            (*left_b).try_into().ok()?,
-            (*right_a).try_into().ok()?,
-            (*right_b).try_into().ok()?,
-        ),
+        ([left_pos, left_a, left_b], [right_pos, right_a, right_b]) => {
+            dispatch(Pair::<POSITION_LEN> {
+                left_pos: (*left_pos).try_into().ok()?,
+                left_a: (*left_a).try_into().ok()?,
+                left_b: (*left_b).try_into().ok()?,
+                right_pos: (*right_pos).try_into().ok()?,
+                right_a: (*right_a).try_into().ok()?,
+                right_b: (*right_b).try_into().ok()?,
+            })
+        }
+        ([left_a, left_b], [right_a, right_b]) => dispatch(Pair::<0> {
+            left_pos: &[],
+            left_a: (*left_a).try_into().ok()?,
+            left_b: (*left_b).try_into().ok()?,
+            right_pos: &[],
+            right_a: (*right_a).try_into().ok()?,
+            right_b: (*right_b).try_into().ok()?,
+        }),
         _ => None,
     }
 }
-
-/// Dispatch two node-length messages, given as their constituent parts, to
-/// the available kernel.
-///
-/// `aarch64_kernel`/`x86_64_kernel` name the arch-specific kernel functions
-/// to invoke once the required CPU features are confirmed. `args` lists the
-/// parts each kernel takes.
-macro_rules! define_dispatch {
-    ($name:ident, $aarch64_kernel:ident, $x86_64_kernel:ident, ($($arg:ident: $ty:ty),+ $(,)?)) => {
-        #[inline(always)]
-        fn $name($($arg: $ty),+) -> Option<(Digest, Digest)> {
-            cfg_if::cfg_if! {
-                if #[cfg(all(target_arch = "aarch64", target_feature = "sha2"))] {
-                    // SAFETY: The sha2 target feature is statically enabled.
-                    Some(unsafe { aarch64::$aarch64_kernel($($arg),+) })
-                } else if #[cfg(all(target_arch = "aarch64", feature = "std"))] {
-                    if std::arch::is_aarch64_feature_detected!("sha2") {
-                        // SAFETY: The sha2 target feature was just detected.
-                        return Some(unsafe { aarch64::$aarch64_kernel($($arg),+) });
-                    }
-                    None
-                } else if #[cfg(all(
-                    target_arch = "x86_64",
-                    target_feature = "sha",
-                    target_feature = "avx2",
-                    target_feature = "ssse3",
-                    target_feature = "sse4.1",
-                ))] {
-                    // SAFETY: The required target features are statically enabled.
-                    Some(unsafe { x86_64::$x86_64_kernel($($arg),+) })
-                } else if #[cfg(all(target_arch = "x86_64", feature = "std"))] {
-                    if std::arch::is_x86_feature_detected!("sha")
-                        && std::arch::is_x86_feature_detected!("avx2")
-                        && std::arch::is_x86_feature_detected!("ssse3")
-                        && std::arch::is_x86_feature_detected!("sse4.1")
-                    {
-                        // SAFETY: The required target features were just detected.
-                        return Some(unsafe { x86_64::$x86_64_kernel($($arg),+) });
-                    }
-                    None
-                } else {
-                    let _ = ($($arg),+);
-                    None
-                }
-            }
-        }
-    };
-}
-
-define_dispatch!(
-    dispatch_mmr,
-    hash_pair_72,
-    hash_pair_72,
-    (
-        left_pos: &[u8; POSITION_LEN],
-        left_left: &[u8; DIGEST_LENGTH],
-        left_right: &[u8; DIGEST_LENGTH],
-        right_pos: &[u8; POSITION_LEN],
-        right_left: &[u8; DIGEST_LENGTH],
-        right_right: &[u8; DIGEST_LENGTH],
-    )
-);
-define_dispatch!(
-    dispatch_bmt,
-    hash_pair_64,
-    hash_pair_64,
-    (
-        left_a: &[u8; DIGEST_LENGTH],
-        left_b: &[u8; DIGEST_LENGTH],
-        right_a: &[u8; DIGEST_LENGTH],
-        right_b: &[u8; DIGEST_LENGTH],
-    )
-);
