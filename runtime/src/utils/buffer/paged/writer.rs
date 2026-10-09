@@ -63,6 +63,7 @@ use commonware_utils::Widen;
 use std::{
     marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
+    ops::Range,
     sync::Arc,
 };
 use tracing::warn;
@@ -965,6 +966,14 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     /// Returns the size of the blob.
     pub const fn size(&self) -> u64 {
         self.buffer.size()
+    }
+
+    /// Drop this blob's cached pages that end within `(range.start, range.end]` (logical byte
+    /// offsets). Callers advancing a boundary pass the previous boundary as `range.start`, so each
+    /// page is dropped once. The bytes remain readable.
+    pub fn evict_cached(&self, range: Range<u64>) {
+        self.cache_ref
+            .evict_ending_in(self.id, range, self.buffer.size());
     }
 
     /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync.
