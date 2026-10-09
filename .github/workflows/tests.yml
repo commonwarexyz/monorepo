@@ -66,14 +66,37 @@ jobs:
         retention-days: 1
         overwrite: true
 
-  Fast:
-    name: "Fast (${{ matrix.partition }}/${{ strategy.job-total }})"
+  # Fast and slow partitions share one matrix, so the first failing partition cancels the others.
+  Run:
+    name: "${{ matrix.suite }} (${{ matrix.partition }}/${{ matrix.partitions }})"
     needs: Build
     runs-on: ${{ inputs.os }}
     timeout-minutes: 45
     strategy:
       matrix:
-        partition: [1, 2]
+        include:
+          - { suite: Fast, profile: default, partition: 1, partitions: 2 }
+          - { suite: Fast, profile: default, partition: 2, partitions: 2 }
+          - { suite: Slow, profile: slow, partition: 1, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 2, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 3, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 4, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 5, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 6, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 7, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 8, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 9, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 10, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 11, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 12, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 13, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 14, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 15, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 16, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 17, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 18, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 19, partitions: 20 }
+          - { suite: Slow, profile: slow, partition: 20, partitions: 20 }
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -88,36 +111,8 @@ jobs:
       with:
         name: tests-${{ inputs.os }}-${{ inputs.variant }}
         path: ${{ runner.temp }}
-    - name: Run fast tests
+    - name: Run tests
       run: >-
         cargo-nextest nextest run --archive-file "$RUNNER_TEMP/tests.tar.zst"
-        --workspace-remap "$GITHUB_WORKSPACE"
-        --partition hash:${{ matrix.partition }}/${{ strategy.job-total }} --verbose
-
-  Slow:
-    name: "Slow (${{ matrix.partition }}/${{ strategy.job-total }})"
-    needs: Build
-    runs-on: ${{ inputs.os }}
-    timeout-minutes: 45
-    strategy:
-      matrix:
-        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-    - name: Configure swap
-      uses: ./.github/actions/swap
-    - name: Install nextest
-      uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
-      with:
-        tool: cargo-nextest@0.9.133
-    - name: Download tests
-      uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
-      with:
-        name: tests-${{ inputs.os }}-${{ inputs.variant }}
-        path: ${{ runner.temp }}
-    - name: Run slow tests
-      run: >-
-        cargo-nextest nextest run --archive-file "$RUNNER_TEMP/tests.tar.zst"
-        --workspace-remap "$GITHUB_WORKSPACE"
-        --partition hash:${{ matrix.partition }}/${{ strategy.job-total }} --verbose --profile slow
+        --workspace-remap "$GITHUB_WORKSPACE" --profile ${{ matrix.profile }}
+        --partition hash:${{ matrix.partition }}/${{ matrix.partitions }} --verbose
