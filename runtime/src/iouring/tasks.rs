@@ -45,12 +45,10 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Shards per worker, so workers inserting and removing at once seldom
-/// share a lock.
+/// Shards for each pool worker. A task's shard comes from hashing its address,
+/// so with several shards per worker, workers inserting and removing tasks at
+/// the same time rarely contend for the same shard lock.
 const SHARDS_PER_WORKER: usize = 4;
-
-/// Most shards.
-const MAX_SHARDS: usize = 1 << 16;
 
 /// A task's links in its shard's list, touched only under that shard's lock.
 #[derive(Default)]
@@ -182,8 +180,11 @@ pub struct Tasks {
 }
 
 impl Tasks {
-    /// A set sized for `workers` workers, with four shards per worker rounded
-    /// up to a power of two.
+    /// A set for a pool of `workers` workers, with [`SHARDS_PER_WORKER`]
+    /// shards for each. The worker count is rounded up to a power of two, so the
+    /// top bits of a task's hash select its shard. A pool has at most
+    /// [`MAX_WORKERS`](super::pool::MAX_WORKERS) workers, so a set has at most
+    /// 256 shards.
     pub fn new(workers: usize) -> Self {
         // Loom requires every execution to make the same choices, but a task's
         // shard hashes its heap address, which can change between executions,
@@ -192,8 +193,6 @@ impl Tasks {
             return Self::with_shards(1);
         }
 
-        // Clamped first, so rounding up cannot overflow.
-        let workers = workers.min(MAX_SHARDS / SHARDS_PER_WORKER);
         Self::with_shards(workers.next_power_of_two() * SHARDS_PER_WORKER)
     }
 
