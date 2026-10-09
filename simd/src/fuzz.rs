@@ -346,8 +346,23 @@ fn test_profile() {
 
 #[test]
 fn test_selected_profile() {
-    let selected = expected_backend();
+    let mut output = [0; 8];
+    let selected = dispatch(Child(&mut output));
+    assert_eq!(selected, expected_backend());
+    assert_eq!(output, [1; 8]);
     std::eprintln!("instruction differential backend: {selected:?}");
+    if let Ok(expected) = std::env::var("COMMONWARE_SIMD_EXPECT_BACKEND") {
+        if !expected.is_empty() {
+            let path = match expected.as_str() {
+                "scalar" => Path::Portable,
+                "ice_lake" => Path::IceLake,
+                "neon" => Path::Neon,
+                "arm_v9" => Path::ArmV9,
+                _ => panic!("unknown expected SIMD backend: {expected}"),
+            };
+            assert_eq!(selected.0, path, "unexpected SIMD dispatch backend");
+        }
+    }
     #[cfg(all(target_arch = "aarch64", feature = "std"))]
     if std::arch::is_aarch64_feature_detected!("neon")
         && std::arch::is_aarch64_feature_detected!("sha2")
@@ -355,9 +370,20 @@ fn test_selected_profile() {
         assert!(matches!(selected.0, Path::Neon | Path::ArmV9));
     }
     if selected.0 == Path::Portable {
-        let mut u = Unstructured::new(&[1; 32]);
-        let len = u.len();
-        Plan::Load.run(&mut u).unwrap();
-        assert_eq!(u.len(), len);
+        for plan in [
+            Plan::Load,
+            Plan::Store,
+            Plan::Splat,
+            Plan::Add,
+            Plan::ShortMemory,
+            #[cfg(not(miri))]
+            Plan::Common,
+            #[cfg(not(miri))]
+            Plan::Profile,
+        ] {
+            let mut u = Unstructured::new(&[]);
+            plan.run(&mut u).unwrap();
+            assert!(u.is_empty());
+        }
     }
 }
