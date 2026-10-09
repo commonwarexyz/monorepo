@@ -9,6 +9,7 @@ use criterion::criterion_main;
 use rand::Rng;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
+mod append_sync;
 mod fixed_append;
 mod fixed_append_buffered;
 mod fixed_read_random;
@@ -21,6 +22,7 @@ mod variable_read_random;
 mod variable_replay;
 
 criterion_main!(
+    append_sync::benches,
     fixed_append::benches,
     fixed_append_buffered::benches,
     fixed_read_random::benches,

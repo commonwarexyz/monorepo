@@ -5282,7 +5282,6 @@ mod tests {
                 replay_buffer: NZUsize!(1024),
             };
 
-            // === Phase 1: Create journal with data and prune ===
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -5301,7 +5300,6 @@ mod tests {
             let journal = journal.sync().await.unwrap();
             drop(journal);
 
-            // === Phase 2: Simulate complete offsets partition loss ===
             // Remove both the offsets data partition and its metadata partition
             context
                 .remove(&format!("{}-blobs", cfg.offsets_partition()), None)
@@ -5312,7 +5310,8 @@ mod tests {
                 .await
                 .expect("Failed to remove offsets metadata partition");
 
-            // === Phase 3: Verify this is detected as unrecoverable ===
+            // Without the offsets partition the pruned prefix cannot be reconciled, so init reports
+            // corruption.
             let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
@@ -5339,7 +5338,6 @@ mod tests {
                 replay_buffer: NZUsize!(1024),
             };
 
-            // === Setup: Create journal with data ===
             let mut variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -5352,13 +5350,14 @@ mod tests {
             let variable = variable.sync().await.unwrap();
             drop(variable);
 
-            // === Simulate data loss: Delete data partition but keep offsets ===
+            // Lose the data partition while the offsets still describe every item.
             context
                 .remove(&cfg.data_partition(), None)
                 .await
                 .expect("Failed to remove data partition");
 
-            // === Verify init aligns the mismatch ===
+            // Init aligns the offsets to the missing data, so the size survives but every item is
+            // pruned.
             let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Should align offsets to match empty data");
@@ -5863,11 +5862,11 @@ mod tests {
                 replay_buffer: NZUsize!(1024),
             };
 
-            // === Phase 1: Create journal and append data ===
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
+            // Fill the journal so pruning everything leaves a nonzero size with nothing to read.
             for i in 0..100u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
@@ -5876,7 +5875,7 @@ mod tests {
             assert_eq!(bounds.end, 100);
             assert_eq!(bounds.start, 0);
 
-            // === Phase 2: Prune all data ===
+            // Pruning everything keeps the size at 100 and leaves no readable position.
             let pruned;
             (journal, pruned) = journal.prune(100).await.unwrap();
             assert!(pruned);
@@ -5894,9 +5893,8 @@ mod tests {
                 ));
             }
 
+            // A reopen must recover the size and the empty bounds without any data blobs.
             journal.sync().await.unwrap();
-
-            // === Phase 3: Re-init and verify position preserved ===
             let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
@@ -5914,8 +5912,7 @@ mod tests {
                 ));
             }
 
-            // === Phase 4: Append new data ===
-            // Next append should get position 100
+            // The next append continues at position 100, which becomes the only retained item.
             (journal, _) = journal.append(&10000).await.unwrap();
             let bounds = journal.bounds();
             assert_eq!(bounds.end, 101);
@@ -5940,7 +5937,6 @@ mod tests {
     fn test_variable_recovery_prune_crash_offsets_behind() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
                 partition: "recovery-prune-crash".into(),
                 items_per_section: NZU64!(10),
@@ -6070,7 +6066,6 @@ mod tests {
     fn test_variable_recovery_offsets_ahead_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
                 partition: "recovery-offsets-ahead".into(),
                 items_per_section: NZU64!(10),
@@ -6296,7 +6291,6 @@ mod tests {
     fn test_variable_recovery_append_crash_offsets_behind() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // === Setup: Create Variable wrapper with partial data ===
             let cfg = Config {
                 partition: "recovery-append-crash".into(),
                 items_per_section: NZU64!(10),
@@ -6324,9 +6318,8 @@ mod tests {
             }
             // Offsets journal still has only 15 entries
 
+            // A reopen rebuilds the missing offsets by replaying the data blobs.
             variable.sync().await.unwrap();
-
-            // === Verify recovery ===
             let variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
@@ -7196,7 +7189,6 @@ mod tests {
     fn test_variable_recovery_multiple_prunes_crash() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
                 partition: "recovery-multiple-prunes".into(),
                 items_per_section: NZU64!(10),
@@ -7261,7 +7253,6 @@ mod tests {
     fn test_variable_recovery_offsets_behind_data_multi_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // === Setup: Create Variable wrapper with data across multiple blobs ===
             let cfg = Config {
                 partition: "recovery-rewind-crash".into(),
                 items_per_section: NZU64!(10),
@@ -7286,9 +7277,8 @@ mod tests {
             // Keep offsets for positions 0-4, while data still contains all 25 items.
             let variable = variable.test_truncate_offsets(5).await.unwrap();
 
+            // A reopen rebuilds the truncated offsets from every data blob.
             variable.sync().await.unwrap();
-
-            // === Verify recovery ===
             let mut variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
@@ -7806,7 +7796,6 @@ mod tests {
                 replay_buffer: NZUsize!(1024),
             };
 
-            // === Phase 1: Create journal with one full blob ===
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -7819,13 +7808,12 @@ mod tests {
             assert_eq!(bounds.end, 10);
             assert_eq!(bounds.start, 0);
 
-            // === Phase 2: Prune to create empty journal ===
+            // Pruning the only blob leaves an empty journal whose size is still 10.
             (journal, _) = journal.prune(10).await.unwrap();
             let bounds = journal.bounds();
             assert_eq!(bounds.end, 10);
             assert!(bounds.is_empty()); // Empty!
 
-            // === Phase 3: Append directly to data blobs to simulate crash ===
             // Manually append to data blobs only (bypassing Variable's append logic)
             // This simulates the case where data was synced but offsets wasn't
             for i in 10..20u64 {
@@ -7840,7 +7828,7 @@ mod tests {
             // Close without syncing offsets
             drop(journal);
 
-            // === Phase 4: Verify recovery succeeds ===
+            // A reopen must recover the unsynced offsets from the data appended after the prune.
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Should recover from crash after data sync but before offsets sync");
@@ -9667,25 +9655,28 @@ mod tests {
         });
     }
 
-    /// Test contiguous variable journal with items_per_section=1.
-    ///
-    /// This is a regression test for a bug where reading from size()-1 fails
-    /// when using items_per_section=1, particularly after pruning and restart.
+    /// A config that stores one item per section under the given partition.
+    fn single_item_per_section_config(context: &deterministic::Context) -> Config<()> {
+        Config {
+            partition: "single-item-per-blob".into(),
+            items_per_section: NZU64!(1),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(context, LARGE_PAGE_SIZE, NZUsize!(10)),
+            write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
+        }
+    }
+
+    /// With one item per section, appends, tail reads, pruning, appends past the prune, and a
+    /// restart all keep every retained position readable and the bounds intact.
     #[test_traced]
     fn test_single_item_per_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "single-item-per-blob".into(),
-                items_per_section: NZU64!(1),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(1024),
-            };
+            let cfg = single_item_per_section_config(&context);
 
-            // === Test 1: Basic single item operation ===
+            // A fresh journal starts empty, and its first synced item is readable at the tail.
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -9708,7 +9699,7 @@ mod tests {
             let value = journal.read(journal.size() - 1).await.unwrap();
             assert_eq!(value, 0);
 
-            // === Test 2: Multiple items with single item per blob ===
+            // Each further append fills its own section, and the tail stays readable at size() - 1.
             for i in 1..10u64 {
                 let pos;
                 (journal, pos) = journal.append(&(i * 100)).await.unwrap();
@@ -9725,10 +9716,9 @@ mod tests {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }
 
+            // Pruning the first five positions keeps the size but moves the start. Reads below the
+            // start report ItemPruned while the tail stays readable.
             journal = journal.sync().await.unwrap();
-
-            // === Test 3: Pruning with single item per blob ===
-            // Prune to position 5 (removes positions 0-4)
             let pruned;
             (journal, pruned) = journal.prune(5).await.unwrap();
             assert!(pruned);
@@ -9756,7 +9746,7 @@ mod tests {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }
 
-            // Append more items after pruning
+            // Appends after the prune continue at the old size, each readable at the tail.
             for i in 10..15u64 {
                 let pos;
                 (journal, pos) = journal.append(&(i * 100)).await.unwrap();
@@ -9767,9 +9757,8 @@ mod tests {
                 assert_eq!(value, i * 100);
             }
 
+            // A reopen recovers the size and pruned start, so every retained position reads back.
             journal.sync().await.unwrap();
-
-            // === Test 4: Restart persistence with single item per blob ===
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
@@ -9791,8 +9780,34 @@ mod tests {
 
             journal.destroy().await.unwrap();
 
-            // === Test 5: Restart after pruning with non-zero index (KEY SCENARIO) ===
-            // Fresh journal for this test
+            // Destroy removes the journal state, so the same config reopens empty and accepts new
+            // writes.
+            let mut journal = Journal::<_, u64>::init(context.child("after_destroy"), cfg)
+                .await
+                .unwrap();
+            assert!(journal.bounds().is_empty());
+            assert_eq!(journal.size(), 0);
+            for i in 0..10u64 {
+                (journal, _) = journal.append(&((i + 1000) * 100)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            assert_eq!(journal.bounds().end, 10);
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), (i + 1000) * 100);
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A one-item-per-section journal that is pruned and reopened keeps its bounds and reads every
+    /// retained position, including the tail. Reading the tail after a prune and restart once
+    /// failed for this configuration.
+    #[test_traced]
+    fn test_single_item_per_blob_restart_after_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = single_item_per_section_config(&context);
+
             let mut journal = Journal::<_, u64>::init(context.child("third"), cfg.clone())
                 .await
                 .unwrap();
@@ -9832,9 +9847,34 @@ mod tests {
 
             journal.destroy().await.unwrap();
 
-            // === Test 6: Prune all items (edge case) ===
-            // This tests the scenario where prune removes everything.
-            // Callers must check bounds().is_empty() before reading.
+            // Destroy removes the journal state, so the same config reopens empty and accepts new
+            // writes.
+            let mut journal = Journal::<_, u64>::init(context.child("after_destroy"), cfg)
+                .await
+                .unwrap();
+            assert!(journal.bounds().is_empty());
+            assert_eq!(journal.size(), 0);
+            for i in 0..10u64 {
+                (journal, _) = journal.append(&((i + 1000) * 1000)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            assert_eq!(journal.bounds().end, 10);
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), (i + 1000) * 1000);
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Pruning every item of a one-item-per-section journal keeps its size, empties its bounds, and
+    /// reports the tail position as pruned until a new append.
+    #[test_traced]
+    fn test_single_item_per_blob_prune_all() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = single_item_per_section_config(&context);
+
+            // Callers must check bounds().is_empty() before reading once everything is pruned.
             let mut journal = Journal::<_, u64>::init(context.child("fifth"), cfg.clone())
                 .await
                 .unwrap();

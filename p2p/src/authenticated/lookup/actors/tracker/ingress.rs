@@ -23,7 +23,6 @@ use std::{collections::VecDeque, net::IpAddr};
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
 pub enum Message<C: PublicKey> {
-    // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
     Register {
         index: u64,
@@ -33,7 +32,6 @@ pub enum Message<C: PublicKey> {
     /// Update addresses for multiple peers without creating a new peer set.
     Overwrite { peers: Map<C, Address> },
 
-    // ---------- Used by peer set provider ----------
     /// Fetch primary and secondary peers for a given ID.
     PeerSet {
         /// The index of the peer set to fetch.
@@ -47,14 +45,12 @@ pub enum Message<C: PublicKey> {
         responder: oneshot::Sender<PeerSetSubscription<C>>,
     },
 
-    // ---------- Used by blocker ----------
     /// Block a peer, disconnecting them if currently connected and preventing future connections
     /// for as long as the peer remains in at least one active peer set.
     Block { public_key: C },
     /// Subscribe to the set of peers this node currently blocks.
     SubscribeBlocked { sender: ring::Sender<Set<C>> },
 
-    // ---------- Used by peer ----------
     /// Notify the tracker that a peer has been successfully connected.
     Connect {
         /// The public key of the peer.
@@ -64,7 +60,6 @@ pub enum Message<C: PublicKey> {
         peer: peer::Mailbox,
     },
 
-    // ---------- Used by dialer ----------
     /// Request a list of dialable peers.
     Dialable {
         /// One-shot channel to send the dialable peers and next query deadline.
@@ -84,7 +79,6 @@ pub enum Message<C: PublicKey> {
         reservation: oneshot::Sender<Option<(Reservation<C>, Ingress)>>,
     },
 
-    // ---------- Used by listener ----------
     /// Check if a peer is acceptable (can accept an incoming connection from them).
     Acceptable {
         /// The public key of the peer to check.
@@ -113,7 +107,6 @@ pub enum Message<C: PublicKey> {
         reservation: oneshot::Sender<Option<Reservation<C>>>,
     },
 
-    // ---------- Used by reservation ----------
     /// Release a reservation.
     Release {
         /// The metadata of the reservation to release.

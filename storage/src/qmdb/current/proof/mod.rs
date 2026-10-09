@@ -42,6 +42,7 @@ use crate::{
         },
     },
 };
+use ahash::AHashMap;
 use bytes::BufMut;
 use commonware_codec::{Buf, Encode, EncodeSize, Read, ReadExt as _, Write, varint::UInt};
 use commonware_cryptography::{Digest, Hasher};
@@ -247,7 +248,8 @@ pub struct RangeProofSpec<F: Family, D: Digest> {
 }
 
 impl<F: Graftable, D: Digest> RangeProof<F, D> {
-    /// Create a new range proof for the provided `range` of operations.
+    /// Create a new range proof for the provided `range` of operations, fetching the digests of
+    /// its [merkle::RangePlan] from `storage` and building with [Self::build].
     pub async fn new<H: Hasher<Digest = D>, S: Storage<Family = F, Digest = D>, const N: usize>(
         status: &impl BitmapReadable<N>,
         storage: &S,
@@ -255,9 +257,41 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         range: Range<Location<F>>,
         ops_root: D,
     ) -> Result<Self, Error<F>> {
-        // Snapshot ops_leaves once and thread through every derivation that needs it so the
-        // pruned <= graftable <= complete invariant holds across all derivations.
         let ops_leaves = Location::try_from(storage.size())?;
+        let plan = merkle::RangePlan::new(ops_leaves, range)?;
+        let positions = plan.positions();
+        let digests = storage.get_nodes(&positions).await?;
+        let fetched: AHashMap<_, _> = positions.into_iter().zip(digests).collect();
+        Self::build::<H, N>(
+            status,
+            plan,
+            |pos| fetched.get(&pos).copied(),
+            inactivity_floor,
+            ops_root,
+        )
+    }
+
+    /// Build the range proof planned by `plan` from digests already in memory.
+    ///
+    /// `get_node` supplies the digest at each of the plan's positions as the grafted view of the
+    /// ops tree serves them, like [crate::qmdb::current::db::Db::grafted_storage]: plain ops-tree
+    /// digests below the grafting height and bitmap-authenticated grafted digests at and above it.
+    /// `status` supplies the bitmap chunks of [required_chunks]. The plan's leaf count, the digests,
+    /// `status`, `inactivity_floor`, and `ops_root` must all describe one snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [merkle::RangePlan::build], and [Error::DataCorrupted] if the bitmap
+    /// and the plan's leaf count imply more than one pending chunk or pruning beyond the graftable
+    /// chunks.
+    pub fn build<H: Hasher<Digest = D>, const N: usize>(
+        status: &impl BitmapReadable<N>,
+        plan: merkle::RangePlan<F>,
+        get_node: impl Fn(Position<F>) -> Option<D>,
+        inactivity_floor: Location<F>,
+        ops_root: D,
+    ) -> Result<Self, Error<F>> {
+        let ops_leaves = plan.leaves();
         let grafting_height = grafting::height::<N>();
         let inactive_peaks = grafting::chunk_aligned_inactive_peaks::<F>(
             ops_leaves,
@@ -266,14 +300,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         )?;
 
         let hasher = qmdb::hasher::<H>();
-        let proof = merkle::verification::historical_range_proof(
-            &hasher,
-            storage,
-            ops_leaves,
-            range,
-            inactive_peaks,
-        )
-        .await?;
+        let proof = plan.build(&hasher, inactive_peaks, get_node)?;
 
         let partial_chunk_digest =
             partial_chunk::<_, N>(status).map(|(chunk, _)| hasher.digest(chunk.as_slice()));
@@ -2499,7 +2526,7 @@ mod tests {
         (bitmap, ops, grafted)
     }
 
-    async fn check_constructor_reads<F: Graftable>() {
+    async fn check_constructor_reads<F: Graftable + PartialEq>() {
         for leaves in [1, 7, 8, 9, 10, 11, 16, 17, 18, 24, 25] {
             let graftable = grafting::graftable_chunks::<F>(leaves, grafting::height::<1>());
             for pruned in 0..=graftable {
@@ -2537,6 +2564,25 @@ mod tests {
                     .unwrap()
                     .collect::<Vec<_>>();
                     assert!(required.windows(2).all(|pair| pair[0] < pair[1]));
+                    let ops_leaves = Location::new(leaves);
+                    let planned = location.map_or_else(
+                        || {
+                            merkle::RangePlan::new(ops_leaves, floor..ops_leaves)
+                                .unwrap()
+                                .positions()
+                        },
+                        |loc| {
+                            merkle::ElementPlan::new(ops_leaves, loc)
+                                .unwrap()
+                                .positions()
+                        },
+                    );
+                    let fetched: BTreeMap<_, _> = planned
+                        .iter()
+                        .copied()
+                        .zip(storage.get_nodes(&planned).await.unwrap())
+                        .collect();
+                    let get_node = |pos: Position<F>| fetched.get(&pos).copied();
                     let preloaded = PreloadedBitmap {
                         bitmap: &bitmap,
                         chunks: required
@@ -2552,6 +2598,16 @@ mod tests {
                             )
                             .await
                             .unwrap();
+                        let built =
+                            constant::OperationProof::<F, sha256::Digest, 1>::build::<Sha256>(
+                                &preloaded,
+                                merkle::ElementPlan::new(ops_leaves, loc).unwrap(),
+                                get_node,
+                                floor,
+                                ops_root,
+                            )
+                            .unwrap();
+                        assert_eq!(built, proof);
                         assert!(
                             proof.verify::<Sha256, _>(hasher.digest(&(*loc).to_be_bytes()), &root,)
                         );
@@ -2573,6 +2629,15 @@ mod tests {
                         )
                         .await
                         .unwrap();
+                        let built = RangeProof::build::<Sha256, 1>(
+                            &preloaded,
+                            merkle::RangePlan::new(ops_leaves, floor..ops_leaves).unwrap(),
+                            get_node,
+                            floor,
+                            ops_root,
+                        )
+                        .unwrap();
+                        assert_eq!(built, proof);
                         let elements = (*floor..leaves)
                             .map(|loc| hasher.digest(&loc.to_be_bytes()))
                             .collect::<Vec<_>>();
@@ -2603,6 +2668,24 @@ mod tests {
     async fn required_chunks_match_constructor_reads() {
         check_constructor_reads::<mmr::Family>().await;
         check_constructor_reads::<mmb::Family>().await;
+    }
+
+    #[test_async]
+    async fn operation_proof_build_rejects_pruned_locations() {
+        type F = mmr::Family;
+        let (bitmap, ops, _) = fixture::<F>(16, 1).await;
+        let ops_root = ops.root(&qmdb::hasher::<Sha256>(), 0).unwrap();
+        let plan = merkle::ElementPlan::new(Location::new(16), Location::new(3)).unwrap();
+        assert!(matches!(
+            constant::OperationProof::<F, sha256::Digest, 1>::build::<Sha256>(
+                &bitmap,
+                plan,
+                |_| None,
+                Location::new(8),
+                ops_root,
+            ),
+            Err(Error::OperationPruned(loc)) if *loc == 3
+        ));
     }
 
     #[test]

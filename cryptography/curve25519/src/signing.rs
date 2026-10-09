@@ -64,13 +64,12 @@ pub struct SigningKey {
 }
 
 impl SigningKey {
-    fn from_seed(seed: [u8; 32]) -> Self {
-        let seed = Zeroizing::new(seed);
+    fn from_seed(seed: &[u8; 32]) -> Self {
         // Following: https://www.rfc-editor.org/rfc/rfc8032.html#section-5.1.5.
         // The first half becomes our secret scalar material, while the second half
         // is the private prefix we use to derive deterministic nonces.
-        let h: Zeroizing<[u8; 64]> =
-            Zeroizing::new(sha2::Sha512::new().chain(&seed[..]).finalize_fixed().into());
+        let mut h = Zeroizing::new([0u8; 64]);
+        FixedOutput::finalize_into(sha2::Sha512::new().chain(seed), (&mut *h).into());
         let mut scalar_le_bytes: Zeroizing<[u8; 32]> =
             Zeroizing::new(h[..32].try_into().expect("h is 64 bytes"));
         let prefix: Zeroizing<[u8; 32]> =
@@ -109,12 +108,10 @@ impl SigningKey {
     }
 
     fn sign_message(&self, msg: &[u8]) -> Signature {
-        let nonce_digest: Zeroizing<[u8; 64]> = Zeroizing::new(
-            sha2::Sha512::new()
-                .chain(self.prefix.as_slice())
-                .chain(msg)
-                .finalize_fixed()
-                .into(),
+        let mut nonce_digest = Zeroizing::new([0u8; 64]);
+        FixedOutput::finalize_into(
+            sha2::Sha512::new().chain(self.prefix.as_slice()).chain(msg),
+            (&mut *nonce_digest).into(),
         );
         let nonce = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&nonce_digest));
         let nonce_bytes = Zeroizing::new(nonce.to_bytes());
@@ -186,7 +183,7 @@ impl Random for SigningKey {
     fn random(mut rng: impl rand_core::CryptoRng) -> Self {
         let mut seed = Zeroizing::new([0u8; 32]);
         rng.fill_bytes(&mut seed[..]);
-        Self::from_seed(*seed)
+        Self::from_seed(&seed)
     }
 }
 
@@ -203,9 +200,11 @@ impl FixedSize for SigningKey {
 impl Read for SigningKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let seed = Zeroizing::new(<[u8; Self::SIZE]>::read_cfg(buf, cfg)?);
-        Ok(Self::from_seed(*seed))
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let mut seed = Zeroizing::new([0u8; Self::SIZE]);
+        buf.try_copy_to_slice(&mut seed[..])
+            .map_err(|_| commonware_codec::Error::EndOfBuffer)?;
+        Ok(Self::from_seed(&seed))
     }
 }
 
@@ -213,7 +212,7 @@ impl Read for SigningKey {
 impl arbitrary::Arbitrary<'_> for SigningKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed: Zeroizing<[u8; Self::SIZE]> = Zeroizing::new(u.arbitrary()?);
-        Ok(Self::from_seed(*seed))
+        Ok(Self::from_seed(&seed))
     }
 }
 
@@ -559,7 +558,7 @@ mod tests {
     fn batch_entries_use_union_unique_framing() {
         // Signing frames each message with `union_unique`. The pairs include an empty namespace
         // and message, and a 200-byte namespace whose length prefix takes two bytes.
-        let signer = SigningKey::from_seed([3; 32]);
+        let signer = SigningKey::from_seed(&[3; 32]);
         let key = signer.verifying_key();
         let pairs = [
             (&b""[..], &b""[..]),
@@ -640,7 +639,7 @@ mod tests {
         const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SIGNING_TEST";
         const WRONG_NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SIGNING_TEST_WRONG";
 
-        let signing_key = SigningKey::from_seed([42; 32]);
+        let signing_key = SigningKey::from_seed(&[42; 32]);
         let verifying_key = signing_key.verifying_key();
         let message = b"message";
         let signature = signing_key.sign(NAMESPACE, message);
@@ -661,7 +660,7 @@ mod tests {
             (signer.public_key(), signer.sign(namespace, msg))
         }
 
-        let signing_key = SigningKey::from_seed([5; 32]);
+        let signing_key = SigningKey::from_seed(&[5; 32]);
         let (verifying_key, signature) = sign(&signing_key, b"namespace", b"message");
         assert_eq!(verifying_key, signing_key.verifying_key());
         assert_eq!(signature, signing_key.sign(b"namespace", b"message"));
