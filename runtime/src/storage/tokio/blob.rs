@@ -47,6 +47,15 @@ mod aio {
     /// each task keeps a full queue in flight.
     pub(super) const AIO_SUBMISSION: usize = 256;
 
+    /// Reads issued per `io_submit` call before the completions that have landed are reaped.
+    ///
+    /// The kernel spends about 2 us issuing each direct read, so a whole submission takes
+    /// longer to issue than one read takes to complete. Reaping between slices lets the
+    /// earliest completions reach the stream while the rest of the submission is still being
+    /// issued, at the cost of one non-blocking `io_getevents` per slice; slices much smaller
+    /// than this pay more in per-call overhead than they return.
+    const AIO_SLICE: usize = 32;
+
     /// A pending read: its index in the batch and the physical file range.
     pub(super) struct Read {
         pub(super) index: usize,
@@ -231,21 +240,48 @@ mod aio {
             })
             .collect();
 
+        let ptrs: Vec<*mut Iocb> = iocbs.iter_mut().map(|iocb| iocb as *mut Iocb).collect();
+        let deliver = |event: &IoEvent| -> Result<(), Error> {
+            let i = event.data as usize;
+            let read = &batch[i];
+
+            // A superset ending past the file completes short but still covers its range. A
+            // read that failed or stopped before the end of its range (for example, it was
+            // interrupted or capped at the most one read returns) is served by a positioned
+            // read, which fails only where read_at would.
+            let (_, skip, start, _) = spans[i];
+            let item = if event.res < 0 || (event.res as usize) < skip + read.len {
+                read_positioned(file, pool, read)?
+            } else {
+                // SAFETY: this completed request initialized the requested range, which
+                // is disjoint from every other request's destination in the slab.
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(slab.ptr.add(start + skip), read.len) };
+                let mut buf = pool.alloc(read.len);
+                buf.put_slice(bytes);
+                (read.index, buf.into())
+            };
+            let _ = tx.send(Ok(item));
+            Ok(())
+        };
+
         // A failed submission accepted none of the requests passed to it. The first of them may
         // be one the kernel rejects (for example, a superset ending beyond the largest signed
         // file offset), so it is served here and the rest are submitted again.
-        let ptrs: Vec<*mut Iocb> = iocbs.iter_mut().map(|iocb| iocb as *mut Iocb).collect();
+        let mut events = vec![IoEvent::default(); n];
         let mut next = 0;
         let mut accepted = 0;
+        let mut completed = 0;
         while next < n {
-            // SAFETY: `ptrs[next..]` are valid iocbs whose buffers lie in the slab, which outlives
-            // every accepted request; the context holds at least `n` slots because
-            // `n <= AIO_SUBMISSION`.
+            let count = (n - next).min(AIO_SLICE);
+            // SAFETY: `ptrs[next..next + count]` are valid iocbs whose buffers lie in the slab,
+            // which outlives every accepted request; the context holds at least `n` slots
+            // because `n <= AIO_SUBMISSION`.
             let r = unsafe {
                 libc::syscall(
                     libc::SYS_io_submit,
                     active.0,
-                    (n - next) as libc::c_long,
+                    count as libc::c_long,
                     ptrs.as_ptr().add(next),
                 )
             };
@@ -256,56 +292,54 @@ mod aio {
             }
             next += r as usize;
             accepted += r as usize;
+            if next < n {
+                let got = reap(&active, &mut events[..accepted - completed], false)?;
+                events[..got].iter().try_for_each(&deliver)?;
+                completed += got;
+            }
         }
-
-        let mut events = vec![IoEvent::default(); accepted];
-        let mut completed = 0;
         while completed < accepted {
-            // SAFETY: `events` has room for every accepted request still in flight.
+            let got = reap(&active, &mut events[..accepted - completed], true)?;
+            events[..got].iter().try_for_each(&deliver)?;
+            completed += got;
+        }
+        Ok(active)
+    }
+
+    /// Reap up to `events.len()` completions from `ctx` into `events`, waiting for at least one
+    /// when `wait` is set and returning whatever has landed otherwise.
+    fn reap(ctx: &Context, events: &mut [IoEvent], wait: bool) -> Result<usize, Error> {
+        if events.is_empty() {
+            return Ok(0);
+        }
+        let zero = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let timeout: *const libc::timespec = if wait { std::ptr::null() } else { &zero };
+        loop {
+            // SAFETY: `events` has room for `events.len()` events and `timeout` is null or a
+            // valid timespec.
             let got = unsafe {
                 libc::syscall(
                     libc::SYS_io_getevents,
-                    active.0,
-                    1 as libc::c_long,
-                    (accepted - completed) as libc::c_long,
+                    ctx.0,
+                    wait as libc::c_long,
+                    events.len() as libc::c_long,
                     events.as_mut_ptr(),
-                    std::ptr::null::<libc::timespec>(),
+                    timeout,
                 )
             };
-            if got < 0 {
-                // A signal interrupts the wait before it reaps anything, and the kernel never
-                // restarts it.
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
+            if got >= 0 {
+                return Ok(got as usize);
+            }
+            // A signal interrupts the wait before it reaps anything, and the kernel never
+            // restarts it.
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
                 return Err(err.into());
             }
-            for event in &events[..got as usize] {
-                let i = event.data as usize;
-                let read = &batch[i];
-
-                // A superset ending past the file completes short but still covers its range. A
-                // read that failed or stopped before the end of its range (for example, it was
-                // interrupted or capped at the most one read returns) is served by a positioned
-                // read, which fails only where read_at would.
-                let (_, skip, start, _) = spans[i];
-                let item = if event.res < 0 || (event.res as usize) < skip + read.len {
-                    read_positioned(file, pool, read)?
-                } else {
-                    // SAFETY: this completed request initialized the requested range, which
-                    // is disjoint from every other request's destination in the slab.
-                    let bytes =
-                        unsafe { std::slice::from_raw_parts(slab.ptr.add(start + skip), read.len) };
-                    let mut buf = pool.alloc(read.len);
-                    buf.put_slice(bytes);
-                    (read.index, buf.into())
-                };
-                let _ = tx.send(Ok(item));
-            }
-            completed += got as usize;
         }
-        Ok(active)
     }
 
     /// Serve `batch` without native AIO: one blocking task per read, as
