@@ -38,10 +38,10 @@ libfuzzer_sys::fuzz_target!(
     init: {
         let selected = dispatch(Backend);
         eprintln!("instruction differential backend: {selected}");
-        if let Ok(expected) = std::env::var("COMMONWARE_SIMD_EXPECT_BACKEND") {
-            if !expected.is_empty() {
-                assert_eq!(selected, expected, "unexpected SIMD dispatch backend");
-            }
+        if let Ok(expected) = std::env::var("COMMONWARE_SIMD_EXPECT_BACKEND")
+            && !expected.is_empty()
+        {
+            assert_eq!(selected, expected, "unexpected SIMD dispatch backend");
         }
     },
     |input: &[u8]| {
