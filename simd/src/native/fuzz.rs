@@ -159,10 +159,13 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     check!(u64_shr::<0>(na); (ea));
     check!(u64_shr::<1>(na); (ea));
     check!(u64_shr::<63>(na); (ea));
-    assert_eq!(n.u64_extract::<0>(na), e.u64_extract::<0>(ea));
-    check!(u64_insert::<0>(na, b[0]); (ea, b[0]));
-    assert_eq!(n.u64_extract::<1>(na), e.u64_extract::<1>(ea));
-    check!(u64_insert::<1>(na, b[0]); (ea, b[0]));
+    macro_rules! lanes { ($($lane:literal),*) => { $(
+        if $lane < N::U64_LANES {
+            assert_eq!(n.u64_extract::<$lane>(na), e.u64_extract::<$lane>(ea));
+            check!(u64_insert::<$lane>(na, b[0]); (ea, b[0]));
+        }
+    )* }; }
+    lanes!(0, 1, 2, 3, 4, 5, 6, 7);
     Ok(())
 }
 
@@ -443,52 +446,26 @@ pub fn ice_lake<N: IceLake, E: IceLake>(
 pub fn arm_v9<N: ArmV9, E: ArmV9>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     let a: [u32; 4] = u.arbitrary()?;
     let b: [u32; 4] = u.arbitrary()?;
-    assert_eq!(
-        words(
-            n,
-            n.u32_xor_rotate_right::<0>(n.u32_load(&a), n.u32_load(&b))
-        ),
-        words(
-            e,
-            e.u32_xor_rotate_right::<0>(e.u32_load(&a), e.u32_load(&b))
-        )
-    );
-    assert_eq!(
-        words(
-            n,
-            n.u32_xor_rotate_right::<1>(n.u32_load(&a), n.u32_load(&b))
-        ),
-        words(
-            e,
-            e.u32_xor_rotate_right::<1>(e.u32_load(&a), e.u32_load(&b))
-        )
-    );
-    assert_eq!(
-        words(
-            n,
-            n.u32_xor_rotate_right::<7>(n.u32_load(&a), n.u32_load(&b))
-        ),
-        words(
-            e,
-            e.u32_xor_rotate_right::<7>(e.u32_load(&a), e.u32_load(&b))
-        )
-    );
-    assert_eq!(
-        words(
-            n,
-            n.u32_xor_rotate_right::<31>(n.u32_load(&a), n.u32_load(&b))
-        ),
-        words(
-            e,
-            e.u32_xor_rotate_right::<31>(e.u32_load(&a), e.u32_load(&b))
-        )
+    let na = n.u32_load(&a);
+    let nb = n.u32_load(&b);
+    let ea = e.u32_load(&a);
+    let eb = e.u32_load(&b);
+    macro_rules! rotations { ($($rotation:literal),*) => { $(
+        assert_eq!(
+            words(n, n.u32_xor_rotate_right::<$rotation>(na, nb)),
+            words(e, e.u32_xor_rotate_right::<$rotation>(ea, eb)),
+        );
+    )* }; }
+    rotations!(
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30, 31
     );
     Ok(())
 }
 
 #[cfg(all(test, not(miri)))]
 mod tests {
-    use super::{bytes, words};
+    use super::{bytes, longs, words};
     use crate::Simd;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -606,6 +583,91 @@ mod tests {
                 assert!(
                     catch_unwind(AssertUnwindSafe(|| simd.u32_permute2(av, bv, &indices))).is_err()
                 );
+            }
+        }
+    }
+
+    fn register_contracts<S: Simd>(simd: S) {
+        let input: [u8; 64] =
+            core::array::from_fn(|i| (i as u8).wrapping_mul(73).wrapping_add(0x81));
+        let value = simd.u8_load(&input);
+        macro_rules! byte_shifts { ($($n:literal),*) => { $(
+            let mut expected = [0xa5; 66];
+            for i in 0..S::U8_LANES { expected[i + 1] = input[i] << $n; }
+            assert_eq!(bytes(simd, simd.u8_shl::<$n>(value)), expected);
+            for i in 0..S::U8_LANES { expected[i + 1] = input[i] >> $n; }
+            assert_eq!(bytes(simd, simd.u8_shr::<$n>(value)), expected);
+        )* }; }
+        byte_shifts!(0, 1, 2, 3, 4, 5, 6, 7);
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u8_shl::<8>(value))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u8_shr::<8>(value))).is_err());
+
+        let input: [u32; 16] = core::array::from_fn(|i| 0xfedc_ba98u32.rotate_left(i as u32));
+        let value = simd.u32_load(&input);
+        macro_rules! word_shifts { ($($n:literal),*) => { $(
+            let mut expected = [0xa5a5_a5a5; 18];
+            for i in 0..S::U32_LANES { expected[i + 1] = input[i] << $n; }
+            assert_eq!(words(simd, simd.u32_shl::<$n>(value)), expected);
+            for i in 0..S::U32_LANES { expected[i + 1] = input[i] >> $n; }
+            assert_eq!(words(simd, simd.u32_shr::<$n>(value)), expected);
+            for i in 0..S::U32_LANES { expected[i + 1] = input[i].rotate_right($n); }
+            assert_eq!(words(simd, simd.u32_rotate_right::<$n>(value)), expected);
+        )* }; }
+        word_shifts!(
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31
+        );
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_shl::<32>(value))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_shr::<32>(value))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_rotate_right::<32>(value))).is_err());
+
+        let input: [u64; 8] =
+            core::array::from_fn(|i| 0xfedc_ba98_7654_3210u64.rotate_left(i as u32 * 7));
+        let value = simd.u64_load(&input);
+        macro_rules! long_shifts { ($($n:literal),*) => { $(
+            let mut expected = [0xa5a5_a5a5_a5a5_a5a5; 10];
+            for i in 0..S::U64_LANES { expected[i + 1] = input[i] << $n; }
+            assert_eq!(longs(simd, simd.u64_shl::<$n>(value)), expected);
+            for i in 0..S::U64_LANES { expected[i + 1] = input[i] >> $n; }
+            assert_eq!(longs(simd, simd.u64_shr::<$n>(value)), expected);
+        )* }; }
+        long_shifts!(
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
+            46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63
+        );
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_shl::<64>(value))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_shr::<64>(value))).is_err());
+        macro_rules! lanes { ($($n:literal),*) => { $(
+            if $n < S::U64_LANES {
+                assert_eq!(simd.u64_extract::<$n>(value), input[$n]);
+                let mut expected = [0xa5a5_a5a5_a5a5_a5a5; 10];
+                expected[1..1 + S::U64_LANES].copy_from_slice(&input[..S::U64_LANES]);
+                expected[$n + 1] = !input[$n];
+                assert_eq!(longs(simd, simd.u64_insert::<$n>(value, !input[$n])), expected);
+            } else {
+                assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_extract::<$n>(value))).is_err());
+                assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_insert::<$n>(value, 0))).is_err());
+            }
+        )* }; }
+        lanes!(0, 1, 2, 3, 4, 5, 6, 7);
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_extract::<8>(value))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_insert::<8>(value, 0))).is_err());
+    }
+
+    #[test]
+    fn native_register_contracts() {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(simd) = crate::native::NativeIceLake::new() {
+            register_contracts(simd);
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if let Some(simd) = crate::native::NativeNeon::new() {
+                register_contracts(simd);
+            }
+            if let Some(simd) = crate::native::NativeArmV9::new() {
+                register_contracts(simd);
             }
         }
     }
