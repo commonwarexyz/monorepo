@@ -46,10 +46,12 @@
 //! queue clears the lowest set bit to claim that worker and wakes it, so each
 //! parked worker is woken by at most one push. Each side fences between its
 //! store and its load, so at least one of them sees the other's store: either
-//! the worker finds the push and runs it, or the pusher finds the worker's bit,
-//! so the idle set is not empty and the pusher wakes one idle worker, not
-//! necessarily that one. A push is therefore never left queued with every
-//! worker asleep.
+//! the worker finds the push and runs it, or the pusher finds the worker's bit
+//! and tries to claim an idle worker, not necessarily that one. It wakes nobody
+//! only if other pushes or the workers themselves clear every bit first, and
+//! each cleared bit belongs to a worker that runs again and looks at the queue
+//! before it parks. A push is therefore never left queued with every worker
+//! asleep.
 //!
 //! ```text
 //! push                              parking worker i
@@ -91,14 +93,14 @@
 //! Shutdown closes the task set before the global queue, so a runnable the
 //! closed queue refuses belongs to a task that teardown clears or already has
 //! cleared. On the runner's normal path the pool stops after the supervision
-//! tree is aborted, so the other workers destroy only cancelled tasks, apart
-//! from one that failed earlier, which drains the set as soon as the pool
-//! closes. Worker zero stops the pool from its own cleanup, so an unwind that
-//! skips the runner's shutdown still releases the barrier. No worker closes
-//! its mailbox, drops the messages it took from it, or closes its ring until
-//! every pool worker has drained the set and finished its last poll, since a
-//! task polled on one worker can hold registrations on another, whose mailbox
-//! forwards their results.
+//! tree is aborted, so the other workers destroy only cancelled tasks and the
+//! runner's metrics task. A worker that failed earlier is the exception: it
+//! drains the set as soon as the pool closes. Worker zero stops the pool from
+//! its own cleanup, so an unwind that skips the runner's shutdown still
+//! releases the barrier. No worker closes its mailbox, drops the messages it
+//! took from it, or closes its ring until every pool worker has drained the
+//! set and finished its last poll, since a task polled on one worker can hold
+//! registrations on another, whose mailbox forwards their results.
 //!
 //! The barrier's state is [`Closing`], under a lock of its own: `closed`
 //! releases the workers waiting in [`Pool::wait_closed`], `stopped` ends the roots
@@ -306,8 +308,8 @@ impl Pool {
 
     /// Whether the global queue holds runnables, read without the lock. After
     /// a worker publishes itself idle, the fence pairing between [`Self::push`]
-    /// and [`Self::park_begin`] ensures that a push it misses here wakes some
-    /// idle worker, not necessarily this one.
+    /// and [`Self::park_begin`] ensures that a push it misses here leaves some
+    /// worker, not necessarily this one, woken or running to take it.
     pub fn has_global(&self) -> bool {
         self.global_len.load(Ordering::Acquire) != 0
     }
@@ -374,10 +376,12 @@ impl Pool {
             }
         }
 
-        // No worker was published as idle. By the fence pairing in `push`,
-        // any worker that publishes itself from here on finds this push when
-        // it looks at the queue again, and a running worker takes it at its
-        // next look.
+        // No published worker was left to claim. Each bit cleared since the
+        // first load, by another push or by its worker, belongs to a worker
+        // that runs again and looks at the queue before it parks. By the
+        // fence pairing in `push`, any worker that publishes itself from here
+        // on finds this push when it looks at the queue again, and a running
+        // worker takes it at its next look.
     }
 
     /// Publish that worker `index` is about to park. The caller then looks
@@ -428,8 +432,8 @@ impl Pool {
         self.progress.notify_all();
     }
 
-    /// End the root of every pool worker after worker zero, which starts its
-    /// shutdown. Repeated calls do nothing.
+    /// End the root of every pool worker other than worker zero. Ending a
+    /// worker's root starts its shutdown. Repeated calls do nothing.
     pub fn stop(&self) {
         // Set the flag before waking the roots: a root polled after its wake
         // sees it, and one not polled yet sees it on its first poll.
@@ -568,8 +572,8 @@ impl Drop for Threads {
 ///
 /// Once started, the worker sends every failure to `failures` and wakes worker
 /// zero's root, which takes the failure before its next poll. A failure that
-/// ends the worker early goes before cleanup, since cleanup waits for the
-/// runner to close the pool, and only the interrupted root makes it do so.
+/// ends the worker early goes before cleanup, since cleanup waits for the pool
+/// to close, which happens only once worker zero's root ends.
 fn run(
     shared: Arc<Shared>,
     index: u32,

@@ -1648,9 +1648,9 @@ impl Worker {
 
         // On the runner's normal path, worker zero gets here after the
         // supervision tree is aborted, so the workers it stops destroy only
-        // cancelled tasks. Stopping them here rather than in the runner also
-        // releases the barrier below when an unwind skips the runner's
-        // shutdown.
+        // cancelled tasks and the runner's metrics task. Stopping them here
+        // rather than in the runner also releases the barrier below when an
+        // unwind skips the runner's shutdown.
         if role.owns_runner() {
             shared.pool.stop();
         }
@@ -1994,8 +1994,8 @@ impl Worker {
             }
 
             // Publish idleness before the last look at the global queue. A push
-            // racing this check either shows up here or wakes an idle worker,
-            // not necessarily this one.
+            // racing this check either shows up here or leaves some worker, not
+            // necessarily this one, woken or running to take it.
             if let (Some(pool), Some(index)) = (pool, index) {
                 #[cfg(test)]
                 tests::at_park(pool, index, tests::ParkPoint::BeforeIdle);
@@ -2095,10 +2095,11 @@ impl Drop for TaskRoot {
 /// first on its calling thread.
 ///
 /// The root future need not be Send and always runs on the calling thread.
-/// Spawned futures run on whichever pool worker takes them. The runner waits
-/// for every pool worker, dedicated worker cleanup, and retained writes and
-/// syncs before returning or resuming a panic. Native thread-local destruction
-/// may follow.
+/// Ordinary spawned futures run on whichever pool worker takes them, and
+/// dedicated and blocking ones on threads of their own. The runner waits for
+/// every pool worker, dedicated worker cleanup, and retained writes and syncs
+/// before returning or resuming a panic. Native thread-local destruction may
+/// follow.
 pub struct Runner {
     /// Settings validated before any runtime resources are created.
     cfg: Config,
