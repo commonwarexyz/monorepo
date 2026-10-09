@@ -147,11 +147,20 @@ jobs:
         path: lcov-${{ steps.path-normalization.outputs.flags }}-${{ matrix.partition }}.info
         retention-days: 1
 
+  # Branch protection requires this check, and a skipped job would satisfy it, so it always runs
+  # and fails unless every coverage partition succeeded.
   Upload:
     name: Upload
     runs-on: ubuntu-latest
     needs: Coverage
+    if: always()
     steps:
+    - name: Check coverage results
+      run: |
+        if [ "${{ needs.Coverage.result }}" != "success" ]; then
+          echo "Coverage failed or was cancelled"
+          exit 1
+        fi
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Configure swap
