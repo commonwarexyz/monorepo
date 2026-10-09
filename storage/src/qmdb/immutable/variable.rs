@@ -268,6 +268,8 @@ mod tests {
         test_variable_get_many_unexpected_data => run_get_many_unexpected_data, open;
         test_variable_apply_after_ancestor_dropped => run_apply_after_ancestor_dropped, open;
         test_variable_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
+        test_variable_reads_stop_at_a_dropped_applied_ancestor =>
+            run_reads_stop_at_a_dropped_applied_ancestor, open_with_max;
         test_variable_merkleize_across_prune => run_merkleize_across_prune, open;
         test_variable_stale_fork_refuses => run_stale_fork_refuses, open;
         test_variable_descendant_apply_makes_parent_reads_stale =>

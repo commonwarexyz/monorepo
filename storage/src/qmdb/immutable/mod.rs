@@ -804,6 +804,92 @@ pub(super) mod tests {
         commonware_parallel::Sequential,
     >;
 
+    /// Reads consult an applied ancestor's retained diff only while that ancestor is alive, and
+    /// stop at the first dropped one: the database answers for its keys and for every older
+    /// ancestor's. A database re-initialized below the dropped ancestors' tips is back on the
+    /// chain's boundary, so their retained diffs answer again.
+    #[boxed]
+    pub(crate) async fn run_reads_stop_at_a_dropped_applied_ancestor<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db"), None).await.unwrap();
+        let seed = db
+            .new_batch()
+            .set(Sha256::fill(0u8), Sha256::fill(100u8))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(seed).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let boundary = db.bounds().end;
+
+        // One key per level: a1 (older) and a2 (newer) get applied, b stays pending.
+        let a1 = db
+            .new_batch()
+            .set(Sha256::fill(1u8), Sha256::fill(101u8))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let a2 = a1
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(2u8), Sha256::fill(102u8))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let b = a2
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(3u8), Sha256::fill(103u8))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let child = b.new_batch::<Sha256>();
+        let (db, _) = db.apply_batch(Arc::clone(&a1)).await.unwrap();
+        let (db, _) = db.apply_batch(Arc::clone(&a2)).await.unwrap();
+        let db = db.commit().await.unwrap();
+
+        let keys: Vec<_> = (0..4u8).map(Sha256::fill).collect();
+        let key_refs: Vec<_> = keys.iter().collect();
+        let expected: Vec<_> = (0..4u8)
+            .map(|i| Some(Sha256::fill(i.wrapping_add(100))))
+            .collect();
+
+        // Applied and alive, then the newer applied ancestor dropped while the older stays
+        // alive, then both dropped: every read stays exact.
+        macro_rules! check {
+            ($db:expr) => {{
+                for (key, expected) in keys.iter().zip(&expected) {
+                    assert_eq!(b.get(key, $db).await.unwrap(), *expected);
+                    assert_eq!(child.get(key, $db).await.unwrap(), *expected);
+                }
+                assert_eq!(b.get_many(&key_refs, $db).await.unwrap(), expected);
+                assert_eq!(child.get_many(&key_refs, $db).await.unwrap(), expected);
+            }};
+        }
+        check!(&db);
+        drop(a2);
+        check!(&db);
+        drop(a1);
+        check!(&db);
+
+        // Below the applied ancestors' tips, their retained diffs answer again.
+        drop(db);
+        let db = open_db(context.child("reopen"), Some(boundary))
+            .await
+            .unwrap();
+        check!(&db);
+
+        db.destroy().await.unwrap();
+    }
+
     /// Reads stay exact after the ancestor batches are dropped, because merkleization
     /// retains their diffs.
     #[boxed]

@@ -434,6 +434,11 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
     /// 1:1 with `bounds.ancestors` (same length, same ordering).
     pub(crate) ancestor_diffs: Vec<Arc<DiffVec<U::Key, F, U::Value>>>,
 
+    /// Weak references to the batches behind `ancestor_diffs`, 1:1 with them. Reads use them
+    /// to stop consulting retained diffs at the first applied ancestor that was dropped (see
+    /// [`Self::read_diffs`]).
+    pub(crate) ancestor_links: Vec<Weak<Self>>,
+
     /// Locations at `bounds.db` for keys whose retained ancestor diffs cross a dropped prefix.
     /// Only overlapping keys are retained, bounding this by the live speculative suffix rather
     /// than the committed history.
@@ -1529,6 +1534,7 @@ where
             .collect()
         });
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
+        let ancestor_links: Vec<_> = self.ancestors.iter().map(Arc::downgrade).collect();
         let ancestors: Vec<_> = self.ancestors.iter().map(|a| a.commitment()).collect();
 
         let batch = Arc::new(MerkleizedBatch {
@@ -1537,6 +1543,7 @@ where
             parent: self.ancestors.first().map(Arc::downgrade),
             total_active_keys: total_active_keys as usize,
             ancestor_diffs,
+            ancestor_links,
             ancestor_base_locs,
             bounds: chain::Bounds {
                 base: self.base_state,
@@ -2058,18 +2065,28 @@ where
     /// Resolve keys against this batch's mutations and ancestor diffs, returning partial
     /// results and the unresolved slots that still need committed DB reads.
     ///
+    /// With `db_size`, the size of the database the read was proven compatible with, applied
+    /// ancestors that were dropped are left to the database (see
+    /// [`MerkleizedBatch::read_diffs`]). Staged reads pass `None` and consult every retained
+    /// diff: a staged resolution is reused at merkleize, where [`StagedLoc::superseded`]
+    /// interprets a committed location relative to the chain boundary.
+    ///
     /// `on_diff_hit` is invoked with each slot resolved by an ancestor diff entry (slots
     /// resolved by this batch's mutations do not report), so staged reads can record
     /// ancestor resolutions.
     fn resolve_uncommitted_reads<'a>(
         &self,
         keys: &[&'a U::Key],
+        db_size: Option<Location<F>>,
         strategy: &S,
         on_diff_hit: impl FnMut(usize, &DiffEntry<F, U::Value>),
     ) -> UncommittedReadResolution<'a, U::Key, U::Value> {
         let diffs: Vec<_> = self.base.parent().map_or_else(Vec::new, |parent| {
             let mut diffs = vec![parent.diff.as_slice()];
-            diffs.extend(parent.ancestor_diffs.iter().map(|diff| diff.as_slice()));
+            match db_size {
+                Some(size) => diffs.extend(parent.read_diffs(size).map(|diff| diff.as_slice())),
+                None => diffs.extend(parent.ancestor_diffs.iter().map(|diff| diff.as_slice())),
+            }
             diffs
         });
         resolve_reads(
@@ -2155,8 +2172,12 @@ where
             return db.get_many(keys).await;
         }
 
-        let (mut results, unresolved) =
-            self.resolve_uncommitted_reads(keys, db.strategy(), |_, _| {});
+        let (mut results, unresolved) = self.resolve_uncommitted_reads(
+            keys,
+            Some(db.commitment().size),
+            db.strategy(),
+            |_, _| {},
+        );
         Self::fill_committed_reads(
             unresolved,
             db,
@@ -2237,7 +2258,7 @@ where
         // normal mutation (whose cost -- location gathering, a journal re-read, and
         // per-key ancestor re-resolution -- otherwise grows with ancestor overlap).
         let (mut results, unresolved) =
-            self.resolve_uncommitted_reads(keys, db.strategy(), |slot, entry| {
+            self.resolve_uncommitted_reads(keys, None, db.strategy(), |slot, entry| {
                 let Some(cached) = U::STAGES_ANCESTORS else {
                     return;
                 };
@@ -3023,7 +3044,7 @@ where
         if self.total_active_keys == 0 {
             return Ok(None);
         }
-        if let Some(next) = self.find_cyclic_neighbor::<true>(key) {
+        if let Some(next) = self.find_cyclic_neighbor::<true>(key, db.commitment().size) {
             return Ok((next > *key).then_some(next));
         }
         db.get_next_key(key).await
@@ -3052,14 +3073,14 @@ where
         if self.total_active_keys == 0 {
             return Ok(None);
         }
-        if let Some(prev) = self.find_cyclic_neighbor::<false>(key) {
+        if let Some(prev) = self.find_cyclic_neighbor::<false>(key, db.commitment().size) {
             return Ok((prev < *key).then_some(prev));
         }
         db.get_prev_key(key).await
     }
 
     /// Find a cyclic neighbor from the retained diff chain, if it owns the query's span.
-    fn find_cyclic_neighbor<const NEXT: bool>(&self, key: &K) -> Option<K> {
+    fn find_cyclic_neighbor<const NEXT: bool>(&self, key: &K, db_size: Location<F>) -> Option<K> {
         // Diffs and their operation chunks are both visited newest-first. Retained items
         // keep ordered links available even after the ancestor batch handles are dropped.
         let mut end = *self.bounds.tip.size;
@@ -3114,7 +3135,7 @@ where
         // Membership changes emit affected predecessors and created keys, so the newest
         // matching layer owns the query's span in the final batch view.
         iter::once(&self.diff)
-            .chain(&self.ancestor_diffs)
+            .chain(self.read_diffs(db_size))
             .find_map(find)
     }
 }
@@ -3128,6 +3149,28 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
+    }
+
+    /// Retained ancestor diffs a read consults before a database that sits on this chain at
+    /// `db_size` operations: every unapplied ancestor's, then applied ancestors' only while
+    /// their batches are alive. The walk ends at the first applied ancestor that was dropped.
+    /// The database already holds its writes and every older ancestor's, so an older retained
+    /// layer could return a value it has since superseded.
+    ///
+    /// Each layer is classified as the walk reaches it, so a read that hits early does no work
+    /// for the layers behind it.
+    fn read_diffs(
+        &self,
+        db_size: Location<F>,
+    ) -> impl Iterator<Item = &Arc<DiffVec<U::Key, F, U::Value>>> {
+        self.ancestor_diffs
+            .iter()
+            .zip(&self.ancestor_links)
+            .zip(&self.bounds.ancestors)
+            .take_while(move |((_, link), ancestor)| {
+                ancestor.size > db_size || link.strong_count() > 0
+            })
+            .map(|((diff, _), _)| diff)
     }
 
     /// Return the operations this batch appends to the log and the location of the first.
@@ -3274,7 +3317,7 @@ where
         if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
             return Ok(entry.value().cloned());
         }
-        for diff in &self.ancestor_diffs {
+        for diff in self.read_diffs(db.commitment().size) {
             if let Some(entry) = lookup_sorted(diff.as_slice(), key) {
                 return Ok(entry.value().cloned());
             }
@@ -3306,8 +3349,7 @@ where
         }
 
         let diffs: Vec<_> = self
-            .ancestor_diffs
-            .iter()
+            .read_diffs(db.commitment().size)
             .map(|diff| diff.as_slice())
             .collect();
         let (mut results, unresolved) = resolve_reads(
@@ -3384,6 +3426,7 @@ where
             parent: None,
             total_active_keys: self.active_keys,
             ancestor_diffs: Vec::new(),
+            ancestor_links: Vec::new(),
             ancestor_base_locs: Vec::new(),
             bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
@@ -6810,6 +6853,226 @@ pub(crate) mod tests {
             assert_eq!(db.get(&key_c).await.unwrap(), Some(value_c));
             assert_eq!(db.get(&untouched).await.unwrap(), Some(untouched_value));
             child.merkleize(&db, None, &mut Proportional).await.unwrap();
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Reads consult an applied ancestor's retained diff only while that ancestor is alive.
+    /// Once it is dropped, the database answers for its keys and for every older ancestor's,
+    /// since the dropped ancestor may have superseded their values.
+    #[test]
+    fn reads_stop_at_a_dropped_applied_ancestor() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("dropped-applied-reads", &context);
+            let db = TestDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let lookups = || crate::qmdb::any::test::counter(&context, "lookups_requested_total");
+
+            let key = Sha256::hash(&[b"key"]);
+            let older = Sha256::hash(&[b"older"]);
+            let newer = Sha256::hash(&[b"newer"]);
+            let key_b = Sha256::hash(&[b"key-b"]);
+            let value_b = Sha256::hash(&[b"value-b"]);
+            let a1 = db
+                .new_batch()
+                .write(key, Some(older))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let a2 = a1
+                .new_batch::<Sha256>()
+                .write(key, Some(newer))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let b = a2
+                .new_batch::<Sha256>()
+                .write(key_b, Some(value_b))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let child = b.new_batch::<Sha256>();
+            let keys = [&key, &key_b];
+            let expected = vec![Some(newer), Some(value_b)];
+
+            // Unapplied ancestors answer from their retained diffs.
+            let before = lookups();
+            assert_eq!(b.get(&key, &db).await.unwrap(), Some(newer));
+            assert_eq!(child.get_many(&keys, &db).await.unwrap(), expected);
+            assert_eq!(lookups() - before, 0);
+
+            // Applied ancestors keep answering from memory while they are alive.
+            let (db, _) = db.apply_batch(Arc::clone(&a1)).await.unwrap();
+            let (db, _) = db.apply_batch(Arc::clone(&a2)).await.unwrap();
+            let before = lookups();
+            assert_eq!(b.get(&key, &db).await.unwrap(), Some(newer));
+            assert_eq!(child.get_many(&keys, &db).await.unwrap(), expected);
+            assert_eq!(lookups() - before, 0);
+
+            // Dropping the newer applied ancestor sends its key to the database, even though
+            // the older applied ancestor is alive and still holds the superseded value.
+            drop(a2);
+            let before = lookups();
+            assert_eq!(b.get(&key, &db).await.unwrap(), Some(newer));
+            assert_eq!(lookups() - before, 1);
+            assert_eq!(child.get_many(&keys, &db).await.unwrap(), expected);
+            assert_eq!(lookups() - before, 2);
+            drop(a1);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A database re-initialized below an applied ancestor's tip is back on the chain's
+    /// boundary, so reads consult that ancestor's retained diff again.
+    #[test]
+    fn reads_consult_a_dropped_ancestor_again_below_its_tip() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("dropped-ancestor-reinit", &context);
+            let db = TestDb::init(context.child("initial"), config.clone(), None)
+                .await
+                .unwrap();
+            let lookups = || crate::qmdb::any::test::counter(&context, "lookups_requested_total");
+
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let seed = db
+                .new_batch()
+                .write(Sha256::hash(&[b"seed"]), Some(Sha256::hash(&[b"seeded"])))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let boundary = db.bounds().end;
+
+            let a = db
+                .new_batch()
+                .write(key, Some(value))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let b = a
+                .new_batch::<Sha256>()
+                .write(
+                    Sha256::hash(&[b"other"]),
+                    Some(Sha256::hash(&[b"other-value"])),
+                )
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(a).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let before = lookups();
+            assert_eq!(b.get(&key, &db).await.unwrap(), Some(value));
+            assert_eq!(lookups() - before, 1);
+
+            // Below `a`'s tip the database no longer holds its write, so the retained diff
+            // answers again.
+            drop(db);
+            let db = TestDb::init(context.child("reopen"), config, Some(boundary))
+                .await
+                .unwrap();
+            let before = lookups();
+            assert_eq!(b.get(&key, &db).await.unwrap(), Some(value));
+            assert_eq!(lookups() - before, 0);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A staged write of a key an applied, dropped ancestor wrote records the same superseded
+    /// location as an explicit write of it: staged reads keep consulting every retained diff, so
+    /// the resolution stays in the chain's frame when the batch is applied at the boundary.
+    #[test]
+    fn staged_write_of_applied_ancestor_key_matches_explicit_write() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("staged-applied-ancestor", &context);
+            let db = TestDb::init(context, config, None).await.unwrap();
+
+            let key = Sha256::hash(&[b"key"]);
+            let other = Sha256::hash(&[b"other"]);
+            let seed = db
+                .new_batch()
+                .write(key, Some(Sha256::hash(&[b"seed"])))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+
+            // `a` rewrites the key; `p` is merkleized while `a` is alive, then `a` is applied
+            // and dropped.
+            let a = db
+                .new_batch()
+                .write(key, Some(Sha256::hash(&[b"a"])))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let p = a
+                .new_batch::<Sha256>()
+                .write(other, Some(Sha256::hash(&[b"p"])))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(a).await.unwrap();
+
+            let value = Sha256::hash(&[b"new"]);
+            let (_, staged) = p.new_batch::<Sha256>().stage(&[&key], &db).await.unwrap();
+            let staged = staged
+                .merkleize(vec![(0, Some(value))], vec![], None, &db, &mut Hold)
+                .await
+                .unwrap();
+            let explicit = p
+                .new_batch::<Sha256>()
+                .write(key, Some(value))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+
+            assert_eq!(staged.root(), explicit.root());
+            assert_eq!(
+                lookup_sorted(staged.diff.as_slice(), &key)
+                    .unwrap()
+                    .base_old_loc(),
+                lookup_sorted(explicit.diff.as_slice(), &key)
+                    .unwrap()
+                    .base_old_loc()
+            );
 
             db.destroy().await.unwrap();
         });
