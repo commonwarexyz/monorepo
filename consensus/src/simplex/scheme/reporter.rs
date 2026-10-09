@@ -55,7 +55,7 @@ pub struct AttributableReporter<
 
 impl<
     E: CryptoRng + Send + 'static,
-    S: certificate::Scheme + Clone,
+    S: certificate::Scheme,
     D: Digest,
     T: Strategy,
     R: Reporter<Activity = Activity<S, D>>,

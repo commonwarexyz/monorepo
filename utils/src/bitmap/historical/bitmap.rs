@@ -334,39 +334,6 @@ impl<const N: usize> CleanBitMap<N> {
         self.commits.clear();
     }
 
-    /// Push bits to extend the bitmap to target length.
-    fn push_to_length(&self, state: &mut Prunable<N>, target_len: u64) {
-        while state.len() < target_len {
-            let remaining = target_len - state.len();
-            let next_bit = state.len() % Prunable::<N>::CHUNK_SIZE_BITS;
-
-            // If we're at a chunk boundary and need at least a full chunk, push an entire chunk
-            if next_bit == 0 && remaining >= Prunable::<N>::CHUNK_SIZE_BITS {
-                state.push_chunk(&[0u8; N]);
-            } else {
-                // Otherwise push individual bits
-                state.push(false);
-            }
-        }
-    }
-
-    /// Pop bits to shrink the bitmap to target length.
-    /// Optimized to pop entire chunks when possible.
-    fn pop_to_length(&self, state: &mut Prunable<N>, target_len: u64) {
-        while state.len() > target_len {
-            let excess = state.len() - target_len;
-            let next_bit = state.len() % Prunable::<N>::CHUNK_SIZE_BITS;
-
-            // If at chunk boundary and we need to remove at least a full chunk, pop entire chunk
-            if next_bit == 0 && excess >= Prunable::<N>::CHUNK_SIZE_BITS {
-                state.pop_chunk();
-            } else {
-                // Otherwise pop individual bits
-                state.pop();
-            }
-        }
-    }
-
     /// Apply a reverse diff to transform newer_state into the previous state (in-place).
     ///
     /// Algorithm:
@@ -395,9 +362,9 @@ impl<const N: usize> CleanBitMap<N> {
 
         // Phase 2: Adjust bitmap structure to target length
         if newer_state.len() < target_len {
-            self.push_to_length(newer_state, target_len);
-        } else if newer_state.len() > target_len {
-            self.pop_to_length(newer_state, target_len);
+            newer_state.extend_to(target_len);
+        } else {
+            newer_state.truncate(target_len);
         }
 
         // Phase 3: Update chunk data
@@ -412,7 +379,7 @@ impl<const N: usize> CleanBitMap<N> {
                     newer_state.set_chunk_by_index(chunk_index, old_data);
                 }
                 ChunkDiff::Added => {
-                    // Chunk didn't exist in target - already handled by pop_to_length.
+                    // Chunk didn't exist in target - already removed in phase 2.
                     // We can break here because there are no more modifications to apply.
                     // Added can only occur after all Modified. If we encounter Added, we know
                     // there are no Removed. (diff.chunk_diffs can't have both Added and Removed.)
@@ -782,9 +749,7 @@ impl<const N: usize> DirtyBitMap<N> {
         // Shrink to length before appends (handles net pops)
         let target_len_before_appends =
             self.state.projected_len - self.state.appended_bits.len() as u64;
-        while self.current.len() > target_len_before_appends {
-            self.current.pop();
-        }
+        self.current.truncate(target_len_before_appends);
         // Grow by appending new bits
         for &bit in &self.state.appended_bits {
             self.current.push(bit);

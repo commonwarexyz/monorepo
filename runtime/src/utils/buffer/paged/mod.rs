@@ -14,18 +14,18 @@
 //! Throughout this module, an unqualified page size always denotes the logical size (matching
 //! the configured value); only physical sizes carry a qualified `physical_page_size` name.
 //!
-//! # Storage-page alignment
+//! # Blob-page alignment
 //!
-//! Physical page `p` begins at blob offset `p * physical_page_size`, and a blob created with
-//! the default layout ([crate::DEFAULT_BLOB_LAYOUT]) begins its data on a 4096-byte boundary.
-//! Choosing a logical page size such that the physical page size is a power of two (see
-//! [page_size]) therefore makes every physical page either fit within a single 4096-byte
-//! storage page or start on a 4096-byte boundary and span whole storage pages. Blobs with the
-//! unaligned [crate::BlobLayout::V0] layout begin their data at offset 8 and never align,
-//! regardless of the page size chosen.
+//! Physical page `p` begins at blob offset `p * physical_page_size`, and a blob created with the
+//! default layout ([crate::DEFAULT_BLOB_LAYOUT]) begins its data on a blob-page boundary (see
+//! [crate::BLOB_PAGE_SIZE]). Choosing a logical page size such that the physical page size is a
+//! power of two (see [page_size]) therefore makes every physical page either fit within a single
+//! blob page or start on a blob-page boundary and span whole blob pages. Blobs with the unaligned
+//! [crate::BlobLayout::V0] layout begin their data at offset 8 and never align, regardless of the
+//! page size chosen.
 //!
 //! Alignment is a performance property, not a correctness requirement: any page size works, but
-//! physical pages that straddle storage-page boundaries amplify cold random reads.
+//! physical pages that straddle blob-page boundaries amplify cold random reads.
 //!
 //! Two checksums are stored so that re-writing a partial page cannot destroy the valid checksum
 //! for its last durable contents. Each rewrite covers the whole physical page: the new checksum
@@ -65,22 +65,11 @@ pub use writer::{Append, Recovering, Recovery, Writer};
 /// Size in bytes of the checksum record appended to each logical page.
 pub const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 
-/// The storage-page granularity physical pages should align to (see the module docs).
-pub(crate) const STORAGE_PAGE_SIZE: u64 = 4096;
-
-// The alignment reasoning above assumes blobs created with the default layout place their
-// data on a storage-page boundary.
-const _: () = assert!(
-    crate::DEFAULT_BLOB_LAYOUT
-        .data_offset()
-        .is_multiple_of(STORAGE_PAGE_SIZE)
-);
-
 const CHECKSUM_SLOT_LEN_SIZE: usize = u16::SIZE;
 const CHECKSUM_SLOT_SIZE: usize = CHECKSUM_SLOT_LEN_SIZE + crc32::Digest::SIZE;
 
 /// The logical page size whose physical page occupies exactly `physical_page_size` bytes on disk
-/// (see the module docs on storage-page alignment).
+/// (see the module docs on blob-page alignment).
 ///
 /// This selects a page size for a store. It is not a migration path: a store that already holds
 /// data cannot be reopened under a different page size, as the mismatched pages fail their

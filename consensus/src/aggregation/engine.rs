@@ -78,7 +78,6 @@ pub struct Engine<
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     T: Strategy,
 > {
-    // ---------- Interfaces ----------
     context: ContextCell<E>,
     automaton: A,
     monitor: M,
@@ -125,14 +124,12 @@ pub struct Engine<
     /// A map of heights with a certificate. Cached in memory if needed to send to other peers.
     confirmed: BTreeMap<Height, Certificate<P::Scheme, D>>,
 
-    // ---------- Rebroadcasting ----------
     /// The frequency at which to rebroadcast pending heights.
     rebroadcast_timeout: Duration,
 
     /// A set of deadlines for rebroadcasting `Height` values that do not have a certificate.
     rebroadcast_deadlines: PrioritySet<Height, SystemTime>,
 
-    // ---------- Journal ----------
     /// Journal for storing acks signed by this node.
     journal: Option<Journal<E, Activity<P::Scheme, D>>>,
     journal_partition: String,
@@ -142,11 +139,9 @@ pub struct Engine<
     journal_compression: Option<u8>,
     journal_page_cache: CacheRef,
 
-    // ---------- Network ----------
     /// Whether to send acks as priority messages.
     priority_acks: bool,
 
-    // ---------- Metrics ----------
     /// Metrics
     metrics: metrics::Metrics,
 }
@@ -435,8 +430,6 @@ impl<
         }
     }
 
-    // ---------- Handling ----------
-
     /// Handles a digest returned by the automaton.
     async fn handle_digest(
         mut self,
@@ -649,8 +642,6 @@ impl<
         self
     }
 
-    // ---------- Validation ----------
-
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
     /// Returns an error if the ack is invalid.
@@ -726,8 +717,6 @@ impl<
 
         Ok(())
     }
-
-    // ---------- Helpers ----------
 
     /// Requests the digest from the automaton.
     ///
@@ -839,8 +828,6 @@ impl<
 
         self
     }
-
-    // ---------- Journal ----------
 
     /// Returns the section of the journal for the given `height`.
     const fn get_journal_section(&self, height: Height) -> u64 {

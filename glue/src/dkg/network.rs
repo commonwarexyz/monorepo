@@ -36,7 +36,7 @@ use thiserror::Error;
 /// [`EpochInfo`](crate::dkg::types::EpochInfo) rejects a directory for which
 /// [`matches`](Self::matches) returns `false`.
 pub trait Directory<P: PublicKey>:
-    Clone + Debug + PartialEq + Eq + Send + Sync + 'static + Read + Write + EncodeSize
+    Clone + Debug + Eq + Send + Sync + 'static + Read + Write + EncodeSize
 {
     /// Derives codec configuration for a directory containing exactly `peers`.
     fn codec_config(peers: &Set<P>) -> Self::Cfg;

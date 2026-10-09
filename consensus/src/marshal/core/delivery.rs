@@ -4,14 +4,14 @@ use crate::simplex::{
     types::{Finalization, Notarization},
 };
 use bytes::Bytes;
-use commonware_cryptography::certificate::{Scheme as CertificateScheme, Scoped};
+use commonware_cryptography::certificate::Scoped;
 use commonware_utils::channel::oneshot;
 
 /// A resolver delivery whose certificate is parsed and awaits batch verification.
 ///
 /// Each item carries the scope it was admitted under so verification does not
 /// depend on the provider still serving that epoch.
-pub(super) enum PendingVerification<S: CertificateScheme, V: Variant>
+pub(super) enum PendingVerification<S, V: Variant>
 where
     S: Scheme<V::Commitment>,
 {
@@ -29,7 +29,7 @@ where
     },
 }
 
-impl<S: CertificateScheme, V: Variant> PendingVerification<S, V>
+impl<S, V: Variant> PendingVerification<S, V>
 where
     S: Scheme<V::Commitment>,
 {

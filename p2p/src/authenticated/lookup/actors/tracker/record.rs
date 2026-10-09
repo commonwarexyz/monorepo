@@ -65,8 +65,6 @@ pub struct Record {
 }
 
 impl Record {
-    // ---------- Constructors ----------
-
     /// Create a new record with a known address.
     pub const fn known(addr: types::Address) -> Self {
         Self {
@@ -94,8 +92,6 @@ impl Record {
             next_dial_at: SystemTime::UNIX_EPOCH,
         }
     }
-
-    // ---------- Setters ----------
 
     /// Update the record with a new address.
     ///
@@ -180,8 +176,6 @@ impl Record {
         self.status = Status::Inert;
         self.stale_connection = false;
     }
-
-    // ---------- Getters ----------
 
     /// Returns `true` if this peer can be blocked.
     ///
