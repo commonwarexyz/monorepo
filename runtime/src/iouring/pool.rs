@@ -452,7 +452,7 @@ fn run(
             None,
         )?;
         if let Some(panic) = worker.take_panic() {
-            failures.notify(panic);
+            report(&pool, &failures, panic);
         }
         worker.cleanup();
         Ok::<_, Panic>(worker.take_panic())
@@ -469,6 +469,13 @@ fn run(
                 mem::forget(error);
             }
         }
-        None => failures.notify(panic),
+        None => report(&pool, &failures, panic),
     }
+}
+
+/// Send a pool worker's failure to the runner, then wake worker zero's root,
+/// which takes the failure before its next poll.
+fn report(pool: &Table, failures: &Panicker, panic: Panic) {
+    failures.notify(panic);
+    let _ = pool.mailbox(0).send(Message::WakeRoot);
 }
