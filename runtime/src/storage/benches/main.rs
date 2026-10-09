@@ -39,12 +39,16 @@ fn main() -> Result<()> {
 
     cfg_if! {
         if #[cfg(all(target_os = "linux", feature = "iouring"))] {
-            let runtime_cfg = iouring::Config::default()
+            let mut runtime_cfg = iouring::Config::default()
+                .with_worker_threads(cfg.worker_threads)
                 .with_storage_directory(cfg.root.clone())
                 .with_ring_config(iouring::RingConfig {
                     size: cfg.effective_ring_size().unwrap(),
                     ..Default::default()
                 });
+            if let Some(global_queue_interval) = cfg.global_queue_interval {
+                runtime_cfg = runtime_cfg.with_global_queue_interval(global_queue_interval);
+            }
             let report = iouring::Runner::new(runtime_cfg)
                 .start(|context| async { run_benchmark(&cfg, context).await });
         } else {
