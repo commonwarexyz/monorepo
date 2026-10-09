@@ -306,10 +306,11 @@ impl Config {
     /// Set the number of pool workers, including the calling thread. Defaults
     /// to 1.
     ///
-    /// Must be between 1 and 64. Each worker has its own ring. A task runs on
-    /// the pool worker that wakes it, and spawns and wakes from outside the
-    /// pool go to any worker. I/O and sleeps stay on the worker that registered
-    /// them. Dedicated and blocking threads are additional to this count.
+    /// Must be between 1 and 64. Each worker has its own ring. A task woken
+    /// while idle runs on the pool worker that wakes it, and spawns and wakes
+    /// from outside the pool go to any worker. I/O and sleeps stay on the
+    /// worker that registered them. Dedicated and blocking threads are
+    /// additional to this count.
     pub const fn with_worker_threads(mut self, workers: usize) -> Self {
         self.worker_threads = workers;
         self
@@ -708,12 +709,13 @@ impl Shared {
 ///
 /// Ordinary children run on the pool, including those spawned by dedicated and
 /// blocking tasks. Task factories run on their caller, while returned futures
-/// run on whichever pool worker wakes them. Resources and pending I/O and sleep
-/// futures can move between workers. Registrations stay on their original
-/// worker. Closing that worker causes unresolved I/O futures to fail and
-/// unresolved sleeps to panic when polled. Pool workers close only at shutdown,
-/// after every pool task has been dropped. Detached sync completion handles can
-/// be awaited on any thread.
+/// run on the pool, moving to the worker that wakes them while idle. Resources
+/// and pending I/O and sleep futures can move between workers. Registrations
+/// stay on their original worker. Closing that worker causes unresolved I/O
+/// futures to fail and unresolved sleeps to panic when polled. Pool workers
+/// close only at shutdown, after every pool task has been dropped, while
+/// dedicated and blocking tasks may still run. Detached sync completion handles
+/// can be awaited on any thread.
 pub struct Context {
     /// User-facing task and metric namespace.
     name: String,
@@ -1390,8 +1392,8 @@ pub struct Worker {
     inbox: Vec<Message>,
     /// Mailbox publication sequence acknowledged when whole batches enter the inbox.
     processed_seq: u32,
-    /// Takes of a runnable so far, which time the looks at the pool's inject
-    /// queue.
+    /// Calls to [`Self::next_runnable`] so far, which time its looks at the
+    /// pool's inject queue.
     tick: u32,
     /// False until kernel retirement and callback cleanup have finished.
     finished: bool,
