@@ -84,10 +84,11 @@
 //! Each turn polls a bounded batch of tasks and checks the root's wake flag,
 //! services I/O and timers, and applies a bounded batch of mailbox messages.
 //! Deferred callbacks run between these phases. A pool worker takes a share of
-//! the inject queue every [`INJECT_INTERVAL`] takes and whenever its own queue
-//! is empty. Before parking, the worker checks readiness again because polls
-//! and callbacks can have produced more work, and a pool worker publishes
-//! itself in the idle set before its last look at the inject queue.
+//! the inject queue every [`Config::with_global_queue_interval`] takes and
+//! whenever its own queue is empty. Before parking, the worker checks readiness
+//! again because polls and callbacks can have produced more work, and a pool
+//! worker publishes itself in the idle set before its last look at the inject
+//! queue.
 //!
 //! ## Shutdown
 //!
@@ -134,7 +135,7 @@
 use super::{
     driver::Driver,
     mailbox::{Cancel, Forward, Mailbox, Message},
-    pool::{INJECT_INTERVAL, MAX_WORKERS, Pool, Table},
+    pool::{MAX_WORKERS, Pool, Table},
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
@@ -247,6 +248,9 @@ impl Default for RingConfig {
 pub struct Config {
     /// Pool workers, including the calling thread.
     worker_threads: usize,
+    /// Polls between a pool worker's looks at the inject queue, defaulting to
+    /// 31.
+    global_queue_interval: u32,
     /// Per-worker ring capacity and operation wheel tick.
     ring_config: RingConfig,
     /// Idle spinning policy, shared by all workers.
@@ -287,6 +291,7 @@ impl Config {
 
         Self {
             worker_threads: 2,
+            global_queue_interval: 31,
             ring_config,
             idle_spinner: SpinnerConfig::default(),
             thread_stack_size: utils::thread::system_thread_stack_size(),
@@ -313,6 +318,20 @@ impl Config {
     /// additional to this count.
     pub const fn with_worker_threads(mut self, workers: usize) -> Self {
         self.worker_threads = workers;
+        self
+    }
+
+    /// Set how many tasks a pool worker polls between looks at the pool's
+    /// inject queue, which holds tasks spawned or woken outside the worker, as
+    /// tokio's global queue does. Defaults to 31, the default of tokio's
+    /// current-thread scheduler. A worker whose own queue is empty looks at
+    /// once.
+    ///
+    /// Must be nonzero. A smaller interval starts work from outside the worker
+    /// sooner at the cost of more synchronization, and 1 looks before every
+    /// poll.
+    pub const fn with_global_queue_interval(mut self, interval: u32) -> Self {
+        self.global_queue_interval = interval;
         self
     }
 
@@ -430,6 +449,12 @@ impl Config {
         self.worker_threads
     }
 
+    /// Return how many tasks a pool worker polls between looks at the inject
+    /// queue.
+    pub const fn global_queue_interval(&self) -> u32 {
+        self.global_queue_interval
+    }
+
     /// Return per-worker ring configuration.
     pub const fn ring_config(&self) -> &RingConfig {
         &self.ring_config
@@ -491,6 +516,10 @@ impl Config {
             (1..=MAX_WORKERS).contains(&self.worker_threads),
             "worker threads ({}) must be between 1 and {MAX_WORKERS}",
             self.worker_threads,
+        );
+        assert!(
+            self.global_queue_interval != 0,
+            "global queue interval must be nonzero"
         );
         assert!(self.ring_config.size != 0, "ring size must be nonzero");
         self.ring_config.size = self
@@ -1392,9 +1421,11 @@ pub struct Worker {
     inbox: Vec<Message>,
     /// Mailbox publication sequence acknowledged when whole batches enter the inbox.
     processed_seq: u32,
-    /// Calls to [`Self::next_runnable`] so far, which time its looks at the
+    /// Calls to [`Self::next_runnable`] left before its next look at the
     /// pool's inject queue.
-    tick: u32,
+    until_inject: u32,
+    /// Calls between two looks at the inject queue, from the configuration.
+    inject_interval: u32,
     /// False until kernel retirement and callback cleanup have finished.
     finished: bool,
 }
@@ -1406,6 +1437,7 @@ impl Worker {
         if matches!(local.role, Role::Pool(_)) {
             local.shared.pool.enter();
         }
+        let inject_interval = local.shared.cfg.global_queue_interval;
         let local = Rc::new(RefCell::new(local));
         let mut worker = Self {
             local: local.clone(),
@@ -1414,7 +1446,8 @@ impl Worker {
             panics: Panics::default(),
             inbox: Vec::new(),
             processed_seq: 0,
-            tick: 0,
+            until_inject: inject_interval,
+            inject_interval,
             finished: false,
         };
         worker.scope = Some(Scope::install(local));
@@ -1775,9 +1808,9 @@ impl Worker {
     }
 
     /// Take the next runnable to poll: a share of the pool's inject queue
-    /// every [`INJECT_INTERVAL`] takes, otherwise the oldest local runnable,
-    /// otherwise a share of the inject queue. A one-off worker polls only its
-    /// root, so its queue stays empty.
+    /// every [`Config::with_global_queue_interval`] calls, otherwise the
+    /// oldest local runnable, otherwise a share of the inject queue. A one-off
+    /// worker polls only its root, so its queue stays empty.
     ///
     /// The drive loop is instantiated in the caller's crate, so the common
     /// case is inlined there and the inject queue sits behind a call.
@@ -1789,9 +1822,12 @@ impl Worker {
         };
 
         // The interval counts every take, so runnables queued here cannot
-        // keep the inject queue waiting however fast they requeue.
-        self.tick = self.tick.wrapping_add(1);
-        if !self.tick.is_multiple_of(INJECT_INTERVAL) {
+        // keep the inject queue waiting however fast they requeue. A
+        // countdown keeps a division off this path.
+        self.until_inject -= 1;
+        if self.until_inject == 0 {
+            self.until_inject = self.inject_interval;
+        } else {
             if let Some(runnable) = self.local.borrow_mut().ready.pop() {
                 return Some(runnable);
             }

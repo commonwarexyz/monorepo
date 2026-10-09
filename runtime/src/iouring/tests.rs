@@ -386,10 +386,11 @@ fn test_config_validation_before_startup() {
         ..SpinnerConfig::default()
     });
     let invalid_workers = [0, MAX_WORKERS + 1].map(|workers| config().with_worker_threads(workers));
+    let invalid_interval = config().with_global_queue_interval(0);
 
     for invalid in invalid_layouts
         .into_iter()
-        .chain([invalid_spinner])
+        .chain([invalid_spinner, invalid_interval])
         .chain(invalid_workers)
     {
         let directory = invalid.storage_directory().clone();
@@ -3366,66 +3367,68 @@ fn test_spinning_worker_sleeps_after_a_signalled_spin() {
 }
 
 /// A worker whose own queue never runs dry still takes from the inject queue
-/// every interval, and takes a share of it, so a burst of foreign wakes waits
-/// about one interval in all rather than one interval each.
+/// every configured interval, and takes a share of it, so a burst of foreign
+/// wakes waits about one interval in all rather than one interval each.
 #[test]
 fn test_busy_worker_takes_a_share_of_the_inject_queue_every_interval() {
     const BURST: usize = 64;
-    Runner::new(config()).start(|context| async move {
-        let stop = Arc::new(AtomicBool::new(false));
-        let yields = Arc::new(AtomicUsize::new(0));
-        let yielder = context.child("yielder").spawn({
-            let stop = stop.clone();
-            let yields = yields.clone();
-            move |_| async move {
-                while !stop.load(Ordering::Relaxed) {
-                    let count = yields.fetch_add(1, Ordering::Relaxed);
-                    assert!(count < 100_000, "inject queue starved");
-                    reschedule().await;
+    for interval in [config().global_queue_interval(), 4] {
+        Runner::new(config().with_global_queue_interval(interval)).start(|context| async move {
+            let stop = Arc::new(AtomicBool::new(false));
+            let yields = Arc::new(AtomicUsize::new(0));
+            let yielder = context.child("yielder").spawn({
+                let stop = stop.clone();
+                let yields = yields.clone();
+                move |_| async move {
+                    while !stop.load(Ordering::Relaxed) {
+                        let count = yields.fetch_add(1, Ordering::Relaxed);
+                        assert!(count < 100_000, "inject queue starved");
+                        reschedule().await;
+                    }
                 }
+            });
+
+            // Idle tasks waiting for a wake from outside the pool.
+            let lags = Arc::new(Mutex::new(Vec::new()));
+            let mut senders = Vec::new();
+            let mut waiters = Vec::new();
+            for _ in 0..BURST {
+                let (sender, receiver) = oneshot::channel::<usize>();
+                senders.push(sender);
+                let lags = lags.clone();
+                let yields = yields.clone();
+                waiters.push(context.child("waiter").spawn(move |_| async move {
+                    let before = receiver.await.unwrap();
+                    lags.lock().push(yields.load(Ordering::Relaxed) - before);
+                }));
             }
+            for _ in 0..4 {
+                reschedule().await;
+            }
+
+            let before = yields.load(Ordering::Relaxed);
+            thread::spawn(move || {
+                for sender in senders {
+                    sender.send(before).unwrap();
+                }
+            })
+            .join()
+            .unwrap();
+            for waiter in waiters {
+                waiter.await.unwrap();
+            }
+            stop.store(true, Ordering::Relaxed);
+            yielder.await.unwrap();
+
+            let lags = lags.lock();
+            assert_eq!(lags.len(), BURST);
+            let last = lags.iter().max().unwrap();
+            assert!(
+                *last <= 2 * interval as usize,
+                "last foreign wake waited {last} polls with interval {interval}"
+            );
         });
-
-        // Idle tasks waiting for a wake from outside the pool.
-        let lags = Arc::new(Mutex::new(Vec::new()));
-        let mut senders = Vec::new();
-        let mut waiters = Vec::new();
-        for _ in 0..BURST {
-            let (sender, receiver) = oneshot::channel::<usize>();
-            senders.push(sender);
-            let lags = lags.clone();
-            let yields = yields.clone();
-            waiters.push(context.child("waiter").spawn(move |_| async move {
-                let before = receiver.await.unwrap();
-                lags.lock().push(yields.load(Ordering::Relaxed) - before);
-            }));
-        }
-        for _ in 0..4 {
-            reschedule().await;
-        }
-
-        let before = yields.load(Ordering::Relaxed);
-        thread::spawn(move || {
-            for sender in senders {
-                sender.send(before).unwrap();
-            }
-        })
-        .join()
-        .unwrap();
-        for waiter in waiters {
-            waiter.await.unwrap();
-        }
-        stop.store(true, Ordering::Relaxed);
-        yielder.await.unwrap();
-
-        let lags = lags.lock();
-        assert_eq!(lags.len(), BURST);
-        let last = lags.iter().max().unwrap();
-        assert!(
-            *last <= 2 * INJECT_INTERVAL as usize,
-            "last foreign wake waited {last} polls"
-        );
-    });
+    }
 }
 
 /// A task that completes on a worker other than the one that spawned it
