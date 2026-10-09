@@ -10,7 +10,11 @@ use commonware_codec::{
 use commonware_macros::stability;
 #[stability(ALPHA)]
 use commonware_math::algebra::{FieldNTT, Ring};
-use commonware_math::poly::{Interpolator, Poly};
+use commonware_math::{
+    algebra::Space,
+    poly::{Interpolator, Poly},
+};
+#[stability(ALPHA)]
 use commonware_parallel::Sequential;
 use commonware_utils::{NZU32, Participant, ordered::Set};
 #[stability(ALPHA)]
@@ -92,13 +96,22 @@ impl Mode {
         }
     }
 
-    /// Compute the scalars for all participants.
-    #[cfg(feature = "std")]
-    pub(crate) fn all_scalars(self, total: NonZeroU32) -> Vec<Scalar> {
+    /// Evaluate `poly` at the point for one participant.
+    ///
+    /// This will return `None` only if `i >= total`.
+    pub(crate) fn eval<K: Space<Scalar>>(
+        self,
+        poly: &Poly<K>,
+        total: NonZeroU32,
+        i: Participant,
+    ) -> Option<K> {
+        if i.get() >= total.get() {
+            return None;
+        }
         match self {
-            Self::NonZeroCounter => (0..total.get())
-                .map(|i| Scalar::from_u64(i as u64 + 1))
-                .collect(),
+            // Scaling by the integer i + 1 matches multiplying by the scalar
+            // i + 1, because `K` is a module over the scalar field.
+            Self::NonZeroCounter => Some(poly.eval_u64(i.get() as u64 + 1)),
             #[cfg(not(any(
                 commonware_stability_BETA,
                 commonware_stability_GAMMA,
@@ -106,18 +119,7 @@ impl Mode {
                 commonware_stability_EPSILON,
                 commonware_stability_RESERVED
             )))]
-            Self::RootsOfUnity => {
-                let size = (total.get() as u64).next_power_of_two();
-                let lg_size = size.ilog2() as u8;
-                let w = Scalar::root_of_unity(lg_size).expect("domain too large for NTT");
-                (0..total.get())
-                    .scan(Scalar::one(), |state, _| {
-                        let val = state.clone();
-                        *state *= &w;
-                        Some(val)
-                    })
-                    .collect()
-            }
+            Self::RootsOfUnity => Some(poly.eval_msm(&self.scalar(total, i)?, &Sequential)),
         }
     }
 
@@ -331,13 +333,8 @@ impl<V: Variant> Sharing<V> {
         self.mode
     }
 
-    pub(crate) fn scalar(&self, i: Participant) -> Option<Scalar> {
-        self.mode.scalar(self.total, i)
-    }
-
-    #[cfg(feature = "std")]
-    fn all_scalars(&self) -> Vec<Scalar> {
-        self.mode.all_scalars(self.total)
+    fn eval(&self, i: Participant) -> Option<V::Public> {
+        self.mode.eval(&self.poly, self.total, i)
     }
 
     /// Return the number of participants required to recover the secret.
@@ -375,13 +372,9 @@ impl<V: Variant> Sharing<V> {
     /// calls are idempotent, and cheap.
     #[cfg(feature = "std")]
     pub fn precompute_partial_publics(&self) {
-        // NOTE: once we add more interpolation methods, this can be smarter.
-        self.evals
-            .iter()
-            .zip(self.all_scalars())
-            .for_each(|(e, s)| {
-                e.get_or_init(|| self.poly.eval_msm(&s, &Sequential));
-            })
+        for (i, e) in self.evals.iter().enumerate() {
+            e.get_or_init(|| self.eval(Participant::from_usize(i)).expect("i < total"));
+        }
     }
 
     /// Get the partial public key associated with a given participant.
@@ -394,16 +387,11 @@ impl<V: Variant> Sharing<V> {
                 self.evals
                     .get(usize::from(i))
                     .map(|e| {
-                        *e.get_or_init(|| {
-                            self.poly
-                                .eval_msm(&self.scalar(i).expect("i < total"), &Sequential)
-                        })
+                        *e.get_or_init(|| self.eval(i).expect("i < total"))
                     })
                     .ok_or(Error::InvalidIndex)
             } else {
-                Ok(self
-                    .poly
-                    .eval_msm(&self.scalar(i).ok_or(Error::InvalidIndex)?, &Sequential))
+                self.eval(i).ok_or(Error::InvalidIndex)
             }
         }
     }
@@ -483,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_scalars_matches_scalar() {
+    fn test_eval_matches_scalar() {
         minifuzz::test(|u| {
             let mode = match u.int_in_range(0u8..=1)? {
                 0 => Mode::NonZeroCounter,
@@ -493,11 +481,15 @@ mod tests {
             let total = NonZeroU32::new(u.int_in_range(1u32..=512u32)?).expect("range is non-zero");
             let index = u.int_in_range(0u32..=total.get() - 1)?;
             let participant = Participant::new(index);
+            let degree = u.int_in_range(0u32..=8)?;
+            let seed: u64 = u.arbitrary()?;
+            let poly: Poly<<MinSig as Variant>::Public> =
+                Poly::commit(Poly::new(TestRng::new(seed), degree));
 
-            let scalars = mode.all_scalars(total);
+            let scalar = mode.scalar(total, participant).expect("index is in range");
             assert_eq!(
-                scalars[usize::from(participant)].clone(),
-                mode.scalar(total, participant).expect("index is in range")
+                mode.eval(&poly, total, participant),
+                Some(poly.eval_msm(&scalar, &Sequential))
             );
             Ok(())
         });

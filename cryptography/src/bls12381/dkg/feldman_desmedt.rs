@@ -361,7 +361,7 @@ use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Ring as _},
     poly::{Interpolator, Poly},
 };
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 #[cfg(feature = "arbitrary")]
 use commonware_utils::N3f1;
 use commonware_utils::{
@@ -834,11 +834,10 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         pub_msg: &DealerPubMsg<V>,
         priv_msg: &DealerPrivMsg,
     ) -> bool {
-        let scalar = self
+        let expected = self
             .mode
-            .scalar(self.num_players(), player)
+            .eval(&pub_msg.commitment, self.num_players(), player)
             .expect("Player::new validates the participant index");
-        let expected = pub_msg.commitment.eval_msm(&scalar, &Sequential);
         priv_msg
             .share
             .expose(|share| expected == V::Public::generator() * share)
@@ -906,6 +905,10 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         }
         if !P::verify_batch(&mut *rng, &ack_batch, |_, entry| *entry, strategy) {
             return Err(DealerLogError::Fault(FaultReason::InvalidAck));
+        }
+        // With no reveals, both sides are zero.
+        if reveal_eval_points.is_empty() {
+            return Ok(DealerLogOutcome::Available);
         }
         let lhs = log.pub_msg.commitment.lin_comb_eval(
             reveal_eval_points
@@ -1787,10 +1790,9 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             .map(|pk| {
                 (
                     pk.clone(),
-                    DealerPrivMsg::new(my_poly.eval_msm(
-                        &info.player_scalar(pk).expect("player should exist"),
-                        &Sequential,
-                    )),
+                    DealerPrivMsg::new(
+                        my_poly.eval(&info.player_scalar(pk).expect("player should exist")),
+                    ),
                 )
             })
             .collect::<Vec<_>>();
@@ -2044,10 +2046,10 @@ impl<V: Variant, S: Signer> Player<V, S> {
             let Some(ack) = log.get_ack(&this.me_pub) else {
                 return false;
             };
-            // Only trust this ack if the signature is valid for this round.
-            transcript_for_ack(&this.transcript, dealer, &log.pub_msg)
-                .verify(&this.me_pub, &ack.sig)
-                && !this.view.contains_key(dealer)
+            !this.view.contains_key(dealer)
+                // Only trust this ack if the signature is valid for this round.
+                && transcript_for_ack(&this.transcript, dealer, &log.pub_msg)
+                    .verify(&this.me_pub, &ack.sig)
         }) {
             // If so, we have a problem, because we're missing a dealing that we're
             // supposed to have, and that we publicly committed to having.
@@ -2190,11 +2192,10 @@ pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
         .enumerate()
         .map(|(i, p)| {
             let participant = Participant::from_usize(i);
-            let eval = private.eval_msm(
+            let eval = private.eval(
                 &mode
                     .scalar(n, participant)
                     .expect("player index should be valid"),
-                &Sequential,
             );
             let share = Share::new(participant, Private::new(eval));
             (p.clone(), share)
@@ -2239,6 +2240,7 @@ mod test_plan {
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
+    use commonware_parallel::Sequential;
     use commonware_utils::{Faults, N3f1, TestRng, TryCollect};
     use core::num::NonZeroI32;
     use std::collections::BTreeSet;
@@ -2716,9 +2718,8 @@ mod test_plan {
                                 .map(|pk| {
                                     (
                                         pk.clone(),
-                                        DealerPrivMsg::new(my_poly.eval_msm(
+                                        DealerPrivMsg::new(my_poly.eval(
                                             &info.player_scalar(pk).expect("player should exist"),
-                                            &Sequential,
                                         )),
                                     )
                                 })
@@ -3297,6 +3298,7 @@ mod test {
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_invariants::minifuzz;
+    use commonware_parallel::Sequential;
     use commonware_utils::{N3f1, TestRng, test_rng};
     use core::num::NonZeroI32;
 

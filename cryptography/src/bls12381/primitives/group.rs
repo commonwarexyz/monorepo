@@ -1382,6 +1382,14 @@ impl Additive for G1 {
     fn zero() -> Self {
         Self(blst_p1::default())
     }
+
+    fn double(&mut self) {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_p1_double supports in-place (ret==a). Raw pointer avoids aliased refs.
+        unsafe {
+            blst_p1_double(ptr, ptr);
+        }
+    }
 }
 
 impl<'a> MulAssign<&'a Scalar> for G1 {
@@ -1804,6 +1812,14 @@ impl<'a> Sub<&'a Self> for G2 {
 impl Additive for G2 {
     fn zero() -> Self {
         Self(blst_p2::default())
+    }
+
+    fn double(&mut self) {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_p2_double supports in-place (ret==a). Raw pointer avoids aliased refs.
+        unsafe {
+            blst_p2_double(ptr, ptr);
+        }
     }
 }
 
