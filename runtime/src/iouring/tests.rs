@@ -273,7 +273,7 @@ pub enum ParkPoint {
     /// After the worker's last readiness check, before it publishes itself
     /// idle.
     BeforeIdle,
-    /// After the worker publishes itself idle and finds the inject queue
+    /// After the worker publishes itself idle and finds the global queue
     /// empty, before it waits.
     BeforeWait,
 }
@@ -356,7 +356,7 @@ fn wait_started(started: &Mutex<Option<ThreadId>>) -> ThreadId {
 }
 
 /// Spawn `f` from a thread outside the pool, so its first runnable goes to the
-/// inject queue, and block the calling worker until another worker has started
+/// global queue, and block the calling worker until another worker has started
 /// it. Returns the task's handle and the thread that started it.
 fn spawn_elsewhere<T, Fut>(context: &Context, f: Fut) -> (Handle<T>, ThreadId)
 where
@@ -991,7 +991,7 @@ fn test_aborted_context_skips_factories_for_every_placement() {
 fn test_closed_task_set_skips_local_and_foreign_factories() {
     for foreign in [false, true] {
         Runner::new(config()).start(|context| async move {
-            // Close only the set, leaving the worker and the inject queue open,
+            // Close only the set, leaving the worker and the global queue open,
             // so the refusal comes from the spawn's check of the set.
             context.shared.tasks.close();
 
@@ -1887,7 +1887,7 @@ fn test_shutdown_cancels_tasks_before_destruction() {
         /// Registered locally but never polled.
         Local,
         /// Registered from another thread, with its first runnable still in
-        /// the inject queue.
+        /// the global queue.
         Foreign,
         /// Polled once and suspended before shutdown.
         Pending,
@@ -1986,7 +1986,7 @@ fn test_foreign_spawn_joins_the_task_set_before_its_worker_runs() {
         assert_eq!(context.shared.tasks.live(), 1);
 
         // The root has not yielded, so no worker has taken the first runnable
-        // from the inject queue, yet the set already retains the task.
+        // from the global queue, yet the set already retains the task.
         let remote = context.child("foreign");
         let handle = thread::spawn(move || remote.spawn(|_| async {}))
             .join()
@@ -2033,7 +2033,7 @@ fn test_shutdown_between_registration_and_first_runnable_clears_the_task() {
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert!(!polled.load(Ordering::Relaxed));
 
-    // The pool's inject queue has closed, so delivery discards the runnable,
+    // The pool's global queue has closed, so delivery discards the runnable,
     // and the handle is already closed.
     release.send(()).unwrap();
     let handle = publisher.join().unwrap();
@@ -2382,7 +2382,7 @@ fn test_queued_foreign_task_disposal_is_contained_at_shutdown() {
             let remote = context.child("queued_foreign");
 
             // Joining only the publisher leaves its accepted task in the
-            // inject queue when this root completes its first poll.
+            // global queue when this root completes its first poll.
             thread::spawn(move || {
                 remote.spawn(move |_| async move {
                     let _payload = payload;
@@ -2869,7 +2869,7 @@ fn test_tasks_spread_across_workers_and_complete() {
                 }));
             }
 
-            // Worker zero keeps the first spawn and injects the rest, so with
+            // Worker zero keeps the first spawn and queues the rest globally, so with
             // other workers they start while the root holds this one.
             if count > 1 {
                 let deadline = Instant::now() + TEST_TIMEOUT;
@@ -3275,7 +3275,7 @@ fn test_operation_and_sleep_follow_their_task_to_another_worker() {
 }
 
 /// A wake on a pool worker queues the woken task on that worker, even while
-/// another worker is parked and could take it from the inject queue.
+/// another worker is parked and could take it from the global queue.
 #[test]
 fn test_wake_on_a_pool_worker_keeps_the_task_there() {
     Runner::new(config().with_worker_threads(3)).start(|context| async move {
@@ -3309,7 +3309,7 @@ fn test_wake_on_a_pool_worker_keeps_the_task_there() {
 
 /// A push racing a worker's park reaches it in either wait. A push before the
 /// worker publishes itself idle finds no idle bit, so the worker's look at the
-/// inject queue after publishing must find it. A push after the worker finds
+/// global queue after publishing must find it. A push after the worker finds
 /// the queue empty claims its idle bit and wakes it. Either way the worker
 /// leaves the idle set.
 #[test]
@@ -3353,7 +3353,7 @@ fn test_push_racing_a_park_reaches_the_worker() {
     }
 }
 
-/// A push into the inject queue ends a spinning worker's spin through its
+/// A push into the global queue ends a spinning worker's spin through its
 /// wake signal.
 #[test]
 fn test_push_ends_a_spin_through_the_wake_signal() {
@@ -3395,11 +3395,11 @@ fn test_spinning_worker_sleeps_after_a_signalled_spin() {
     });
 }
 
-/// A worker whose own queue never runs dry still takes from the inject queue
+/// A worker whose own queue never runs dry still takes from the global queue
 /// every configured interval, and takes a share of it, so a burst of foreign
 /// wakes waits about one interval in all rather than one interval each.
 #[test]
-fn test_busy_worker_takes_a_share_of_the_inject_queue_every_interval() {
+fn test_busy_worker_takes_a_share_of_the_global_queue_every_interval() {
     const BURST: usize = 64;
     for interval in [config().global_queue_interval(), 4] {
         Runner::new(config().with_global_queue_interval(interval)).start(|context| async move {
@@ -3411,7 +3411,7 @@ fn test_busy_worker_takes_a_share_of_the_inject_queue_every_interval() {
                 move |_| async move {
                     while !stop.load(Ordering::Relaxed) {
                         let count = yields.fetch_add(1, Ordering::Relaxed);
-                        assert!(count < 100_000, "inject queue starved");
+                        assert!(count < 100_000, "global queue starved");
                         reschedule().await;
                     }
                 }
@@ -3564,7 +3564,7 @@ fn test_shutdown_while_a_task_is_mid_poll_on_another_worker() {
             assert!(this.set(task.clone()).is_ok());
             assert!(shared.tasks.insert(task).is_ok());
 
-            // From outside the pool, so the runnable goes to the inject queue
+            // From outside the pool, so the runnable goes to the global queue
             // and worker one starts it while the root holds this worker.
             thread::spawn(move || runnable.spawn()).join().unwrap();
             let other = wait_started(&polled);
@@ -3663,7 +3663,7 @@ fn test_shutdown_retains_a_taken_forward_until_polling_ends() {
 
 /// Teardown clears two idle tasks whose destructors wake each other, so
 /// whichever is cleared first wakes the other while it is still idle, on a
-/// closing worker. The closing worker's wake goes to the closed inject queue,
+/// closing worker. The closing worker's wake goes to the closed global queue,
 /// which discards it, rather than leaving a runnable in its own queue.
 #[test]
 fn test_wake_from_a_destructor_during_teardown_leaves_no_runnable() {

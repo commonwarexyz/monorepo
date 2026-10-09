@@ -25,7 +25,7 @@ cfg_if::cfg_if! {
 pub enum Message {
     /// Wake the root future. The root is pinned on its worker and has no
     /// runnable, so unlike a task it cannot move to the waking worker or the
-    /// inject queue, and wakes from other threads reach it here.
+    /// global queue, and wakes from other threads reach it here.
     WakeRoot,
     /// Transfer observation of an operation or timer to a channel.
     Forward(Forward),
