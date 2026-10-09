@@ -252,36 +252,36 @@ impl Pool {
         self.inject_len.load(Ordering::Acquire) != 0
     }
 
-    /// Take the oldest runnable from the inject queue.
-    #[cfg(test)]
-    #[must_use]
-    pub fn pop(&self) -> Option<Runnable> {
-        if !self.has_inject() {
-            return None;
-        }
-        let mut inject = self.inject();
-        let runnable = inject.runnables.pop_front();
-        self.inject_len
-            .store(inject.runnables.len(), Ordering::Release);
-        runnable
-    }
-
     /// Take a share of the inject queue: one runnable more than an even split
     /// between the workers, at most [`INJECT_BATCH`].
     /// Returns the oldest and queues the rest in `ready`.
     #[must_use]
     pub fn take(&self, ready: &mut Ready) -> Option<Runnable> {
+        // The queue is usually empty, so the mirrored length answers that
+        // without the lock.
         if !self.has_inject() {
             return None;
         }
         let mut inject = self.inject();
+
+        // One more than an even split, so a lone runnable still moves and a
+        // burst spreads over the workers that look. Another take may have
+        // emptied the queue since the check above, so the share never exceeds
+        // what is left.
         let len = inject.runnables.len();
         let count = (len / self.workers() + 1).min(INJECT_BATCH).min(len);
+
+        // The caller polls the oldest next, and the rest join the tail of its
+        // own queue, behind the work already there.
         let mut taken = inject.runnables.drain(..count);
         let first = taken.next();
         for runnable in taken {
             ready.push(runnable);
         }
+
+        // Store the new length before unlocking, so the mirror's stores follow
+        // the queue's own order and a stale length never overwrites a newer
+        // one.
         self.inject_len
             .store(inject.runnables.len(), Ordering::Release);
         first
@@ -289,6 +289,11 @@ impl Pool {
 
     /// Wake one parked worker, if any.
     fn notify(&self) {
+        // Clearing a worker's idle bit claims it, so a push that loses the
+        // exchange to another push retries with the bits that remain, and
+        // each parked worker is woken by at most one push. The exchange can
+        // also fail spuriously or because a worker published or withdrew its
+        // bit, and the retry uses the set as it is now.
         let mut idle = self.idle.load(Ordering::SeqCst);
         while idle != 0 {
             let index = idle.trailing_zeros();
@@ -299,12 +304,20 @@ impl Pool {
                 Ordering::SeqCst,
             ) {
                 Ok(_) => {
+                    // The worker's wake source latches a wake that arrives
+                    // before it blocks, so the claimed worker wakes either
+                    // way.
                     self.mailboxes[index as usize].waker.wake();
                     return;
                 }
                 Err(actual) => idle = actual,
             }
         }
+
+        // No worker was published as idle. By the fence pairing in `push`,
+        // any worker that publishes itself from here on finds this push when
+        // it looks at the queue again, and a running worker takes it at its
+        // next look.
     }
 
     /// Publish that worker `index` is about to park. The caller then looks
@@ -319,12 +332,6 @@ impl Pool {
     /// Withdraw worker `index` from the idle set once it runs again.
     pub fn park_end(&self, index: u32) {
         self.idle.fetch_and(!(1 << index), Ordering::SeqCst);
-    }
-
-    /// Whether worker `index` is published in the idle set.
-    #[cfg(test)]
-    pub fn is_idle(&self, index: u32) -> bool {
-        self.idle.load(Ordering::SeqCst) & (1 << index) != 0
     }
 
     /// Count one more pool worker that shutdown waits for.
@@ -355,6 +362,8 @@ impl Pool {
     /// End the root of every pool worker after worker zero, which starts its
     /// shutdown. Repeated calls do nothing.
     pub fn stop(&self) {
+        // Set the flag before waking the roots: a root polled after its wake
+        // sees it, and one not polled yet sees it on its first poll.
         {
             let mut closing = self.closing();
             if closing.stopped {
@@ -362,6 +371,11 @@ impl Pool {
             }
             closing.stopped = true;
         }
+
+        // Worker zero, which calls this, polls the runner's root rather than
+        // a stop root, so it is skipped. The others close their mailboxes only
+        // after the shutdown barrier, which worker zero has not reached yet,
+        // so every send succeeds.
         for mailbox in self.mailboxes.iter().skip(1) {
             let _ = mailbox.send(Message::WakeRoot);
         }
@@ -522,4 +536,30 @@ fn run(
 fn report(pool: &Pool, failures: &Panicker, panic: Panic) {
     failures.notify(panic);
     let _ = pool.mailbox(0).send(Message::WakeRoot);
+}
+
+/// Test-only access to the pool's queue and idle set.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    impl Pool {
+        /// Take the oldest runnable from the inject queue.
+        #[must_use]
+        pub fn pop(&self) -> Option<Runnable> {
+            if !self.has_inject() {
+                return None;
+            }
+            let mut inject = self.inject();
+            let runnable = inject.runnables.pop_front();
+            self.inject_len
+                .store(inject.runnables.len(), Ordering::Release);
+            runnable
+        }
+
+        /// Whether worker `index` is published in the idle set.
+        pub fn is_idle(&self, index: u32) -> bool {
+            self.idle.load(Ordering::SeqCst) & (1 << index) != 0
+        }
+    }
 }
