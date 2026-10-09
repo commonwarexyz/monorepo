@@ -1422,11 +1422,6 @@ impl Worker {
             }
         };
 
-        #[cfg(test)]
-        if role == Role::Pool(0) {
-            tests::after_root();
-        }
-
         // Include work spawned by root destruction in the shutdown barrier.
         if role == Role::Pool(0) {
             shared.workers.close();
