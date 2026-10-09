@@ -631,10 +631,23 @@ fn run(
     }
 }
 
-/// Test-only access to the pool's queue and idle set.
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iouring::{
+        task::{
+            Task,
+            tests::{refs, task_of},
+        },
+        tasks::Tasks,
+    };
+    use std::{future::pending, sync::Weak, thread, time::Duration};
+
+    /// Bound on a test's wait for another thread.
+    const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// How long a test watches for a thread that must stay blocked.
+    const BLOCKED: Duration = Duration::from_millis(20);
 
     impl Pool {
         /// Take the oldest runnable from the inject queue.
@@ -654,5 +667,145 @@ mod tests {
         pub fn is_idle(&self, index: u32) -> bool {
             self.idle.load(Ordering::SeqCst) & (1 << index) != 0
         }
+    }
+
+    /// A pool of `workers` workers with no runner.
+    fn pool(workers: usize) -> Pool {
+        Pool::new(
+            (0..workers)
+                .map(|_| Arc::new(Mailbox::new().unwrap()))
+                .collect(),
+        )
+    }
+
+    /// A task that no set retains, with its first runnable.
+    fn task(set: &Tasks) -> (Task, Runnable) {
+        Task::new(pending::<()>(), set, Weak::new())
+    }
+
+    /// Push a new task's first runnable into `pool`, returning the task.
+    fn push(pool: &Pool, set: &Tasks) -> Task {
+        let (task, runnable) = task(set);
+        assert!(pool.push(runnable).is_ok());
+        task
+    }
+
+    #[test]
+    fn test_take_moves_a_bounded_share_of_the_inject_queue() {
+        for (workers, queued, taken) in [(4, 8, 3), (1, 129, 128)] {
+            let pool = pool(workers);
+            let set = Tasks::new(1);
+            let tasks: Vec<Task> = (0..queued).map(|_| push(&pool, &set)).collect();
+
+            let mut ready = Ready::default();
+            let mut moved = vec![pool.take(&mut ready).unwrap()];
+            while let Some(runnable) = ready.pop() {
+                moved.push(runnable);
+            }
+            assert_eq!(moved.len(), taken);
+            for (runnable, task) in moved.iter().zip(&tasks) {
+                assert_eq!(task_of(runnable).as_ptr(), task.as_ptr());
+            }
+
+            for runnable in moved {
+                runnable.discard();
+            }
+            pool.close();
+            for task in tasks {
+                task.clear();
+            }
+        }
+    }
+
+    #[test]
+    fn test_closed_queue_refuses_pushes_and_discards_its_runnables() {
+        let pool = pool(1);
+        let set = Tasks::new(1);
+        let queued = push(&pool, &set);
+        assert_eq!(refs(&queued), 2);
+
+        pool.close();
+        assert!(!pool.has_inject());
+        assert_eq!(refs(&queued), 1);
+
+        let (late, runnable) = task(&set);
+        pool.push(runnable).unwrap_err().discard();
+        assert_eq!(refs(&late), 1);
+        queued.clear();
+        late.clear();
+    }
+
+    #[test]
+    fn test_push_wakes_one_idle_worker_lowest_first() {
+        let pool = pool(3);
+        let set = Tasks::new(1);
+        let mut tasks = Vec::new();
+        pool.park_begin(1);
+        pool.park_begin(2);
+
+        tasks.push(push(&pool, &set));
+        assert!(!pool.is_idle(1) && pool.is_idle(2));
+        assert!(pool.mailbox(1).waker.signalled());
+        assert!(!pool.mailbox(2).waker.signalled());
+
+        tasks.push(push(&pool, &set));
+        assert!(!pool.is_idle(2));
+        assert!(pool.mailbox(2).waker.signalled());
+
+        // With no worker published, and one that withdrew, a push wakes nobody.
+        pool.park_begin(0);
+        pool.park_end(0);
+        tasks.push(push(&pool, &set));
+        assert!(!pool.mailbox(0).waker.signalled());
+
+        while let Some(runnable) = pool.pop() {
+            runnable.discard();
+        }
+        for task in tasks {
+            task.clear();
+        }
+    }
+
+    #[test]
+    fn test_stop_wakes_every_other_root_once() {
+        let pool = pool(3);
+        assert!(!pool.is_stopped());
+        pool.stop();
+        pool.stop();
+        assert!(pool.is_stopped());
+
+        assert!(!pool.mailbox(0).waker.pending(0));
+        for index in 1..3 {
+            let mut messages = Vec::new();
+            assert!(pool.mailbox(index).take(&mut messages));
+            assert!(matches!(messages.as_slice(), [Message::WakeRoot]));
+        }
+    }
+
+    #[test]
+    fn test_workers_wait_for_the_close_and_for_every_finish() {
+        let pool = Arc::new(pool(2));
+        pool.enter();
+        pool.enter();
+        let (progress, observed) = mpsc::channel();
+        let other = thread::spawn({
+            let pool = pool.clone();
+            move || {
+                pool.wait_closed();
+                progress.send("closed").unwrap();
+                pool.finish();
+                progress.send("finished").unwrap();
+            }
+        });
+
+        assert!(observed.recv_timeout(BLOCKED).is_err());
+        pool.close();
+        assert_eq!(observed.recv_timeout(TEST_TIMEOUT).unwrap(), "closed");
+
+        // The other worker waits until this one finishes too.
+        assert!(observed.recv_timeout(BLOCKED).is_err());
+        pool.finish();
+        assert_eq!(observed.recv_timeout(TEST_TIMEOUT).unwrap(), "finished");
+        other.join().unwrap();
     }
 }
