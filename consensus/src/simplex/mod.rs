@@ -1257,7 +1257,7 @@ mod tests {
                     let finalizations = reporter.finalizations.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
-                        let Some(finalization) = finalizations.get(&view) else {
+                        let Some((finalization, _)) = finalizations.get(&view) else {
                             continue;
                         };
                         let Some(digest) = finalized.get(&view) else {
@@ -1445,7 +1445,7 @@ mod tests {
                     .iter()
                     .find(|(view, _)| !view.is_term_start(term_length))
                     .or_else(|| eligible.first())
-                    .map(|(view, finalization)| (**view, (*finalization).clone()))
+                    .map(|(view, (finalization, _))| (**view, finalization.clone()))
                     .expect("non-genesis floor finalization missing")
             };
             assert!(floor_view > View::zero());
@@ -1972,7 +1972,7 @@ mod tests {
                     .finalizations
                     .lock()
                     .get(&required_view)
-                    .cloned()
+                    .map(|(finalization, _)| finalization.clone())
                     .unwrap_or_else(|| panic!("reporter {idx} missing tip finalization"));
                 assert_eq!(
                     finalization.proposal.round.view(),
@@ -2352,8 +2352,8 @@ mod tests {
     /// while a higher same-term notarization survives in some journals. Nodes
     /// stuck below that view must be able to fetch the exact-view notarization
     /// (a higher-view floor cannot substitute for certification's per-view
-    /// parent requirement) or the cluster wedges permanently (see
-    /// [`resolver::State::get`]).
+    /// parent requirement) or the cluster wedges permanently (see the resolver's
+    /// `State::produce`).
     #[test_group("slow")]
     #[test_traced]
     fn test_unclean_shutdown_stable_leader_optimistic() {
@@ -5990,8 +5990,6 @@ mod tests {
             .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // ========== Build the certificates manually ==========
-
             // Helper: assemble finalization from explicit signer indices
             let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
                 let votes: Vec<_> = (0..=quorum)
@@ -6052,8 +6050,6 @@ mod tests {
             let mut injector_sender =
                 start_certificate_injector(&context, &mut oracle, &participants, &link).await;
 
-            // ========== Broadcast certificates over recovered network. ==========
-
             // View F:
             let msg = Certificate::<_, D>::Notarization(b0_notarization).encode();
             injector_sender.send(Recipients::All, msg, true);
@@ -6081,8 +6077,6 @@ mod tests {
                 };
                 injector_sender.send(recipient, msg, true);
             }
-
-            // ========== Create engines ==========
 
             // Start engines after preloading certificates into each participant's
             // recovered channel (ensuring processing before any leader attempts to issue a
@@ -6183,8 +6177,6 @@ mod tests {
             // Allow started engines to consume preloaded certificates.
             context.sleep(Duration::from_secs(2)).await;
 
-            // ========== Assert the exact certificates are seen in each view ==========
-
             // Assert the exact certificates in view F
             // All participants should have finalized B_0
             let view = View::new(f_view);
@@ -6241,8 +6233,6 @@ mod tests {
                 let nullifies = reporter.nullifies.lock();
                 assert!(!nullifies.contains_key(&next_view), "reporter {i}");
             }
-
-            // ========== Reconnect all participants ==========
 
             // Reconnect all participants fully using the helper
             link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
@@ -7869,7 +7859,7 @@ mod tests {
                     let finalizations = reporter.finalizations.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
-                        let Some(finalization) = finalizations.get(&view) else {
+                        let Some((finalization, _)) = finalizations.get(&view) else {
                             continue;
                         };
                         let Some(digest) = finalized.get(&view) else {
@@ -8335,7 +8325,7 @@ mod tests {
                 let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
                 for reporter in reporters.iter().skip(honest_start) {
                     let finalizations = reporter.finalizations.lock();
-                    for (view, finalization) in finalizations.iter() {
+                    for (view, (finalization, _)) in finalizations.iter() {
                         let digest = finalization.proposal.payload;
                         if let Some(existing) = finalized_at_view.get(view) {
                             assert_eq!(

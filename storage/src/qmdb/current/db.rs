@@ -218,8 +218,10 @@ where
         self.any.get_many(keys).await
     }
 
-    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
-    /// retained operations respectively.
+    /// Return the retained operation range `[start, end)`.
+    ///
+    /// Proof generation also requires the necessary Merkle nodes to be retained. Proofs against
+    /// [`Self::root`] also require the operations' bitmap chunks to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         self.any.bounds()
     }
@@ -357,9 +359,10 @@ where
     /// # Errors
     ///
     /// Returns [Error::OperationPruned] if `start_loc` falls in a pruned bitmap chunk. Returns
-    /// [`crate::merkle::Error::LocationOverflow`] if `start_loc` >
-    /// [`crate::merkle::Family::MAX_LEAVES`]. Returns [`crate::merkle::Error::RangeOutOfBounds`] if
-    /// `start_loc` >= number of leaves in the tree.
+    /// [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`] with
+    /// [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has been
+    /// pruned. Returns [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc` >= number of
+    /// leaves in the tree.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.current.db.range_proof",
@@ -428,10 +431,11 @@ where
     /// Returns the most recent location from which this database can safely be synced, and the
     /// upper bound on [`Self::prune`]'s `prune_loc`.
     ///
-    /// Callers constructing a sync [`Target`](crate::qmdb::sync::Target) may use this value, or
-    /// any earlier retained location, as `range.start`. Values *above* this boundary are unsafe:
-    /// the receiver's grafted-pin derivation requires absorption-settled state for every fully
-    /// pruned chunk, which this value guarantees.
+    /// Callers constructing a sync [`Target`](crate::qmdb::sync::Target) may use as `range.start`
+    /// any location at or below this value that this database can still prove. Not every
+    /// location in [`Self::bounds`] is provable. Values *above* this boundary are unsafe: the
+    /// receiver's grafted-pin derivation requires absorption-settled state for every fully pruned
+    /// chunk, which this value guarantees.
     ///
     /// # Computation
     ///
@@ -535,8 +539,6 @@ where
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > [`Self::sync_boundary`].
-    /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` >
-    ///   [crate::merkle::Family::MAX_LEAVES].
     /// - Returns [Error::DataCorrupted] if internal grafted-tree state is inconsistent (a pinned
     ///   or retained node is missing, or the prune location overflows a [Position]).
     #[tracing::instrument(name = "qmdb.current.db.prune", level = "info", skip_all)]
@@ -1186,8 +1188,12 @@ mod tests {
     use crate::{
         merkle::{Bagging::ForwardFold, hasher::Standard as StandardHasher, mmb, mmr},
         qmdb::{
-            any::traits::{DbAny, UnmerkleizedBatch as _},
+            any::{
+                test::{Choice, Inspect as _, Script},
+                traits::{DbAny, UnmerkleizedBatch as _},
+            },
             current::{tests::fixed_config, unordered::fixed},
+            floor::Proportional,
         },
         translator::OneCap,
     };
@@ -1391,7 +1397,7 @@ mod tests {
             let value = Sha256::hash(&[&(idx + count).to_be_bytes()]);
             batch = batch.write(key, Some(value));
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
@@ -1417,7 +1423,7 @@ mod tests {
                 let value = Sha256::hash(&[&(idx + 100).to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
             let (start, ops) = merkleized.operations();
             let (db, range) = db.apply_batch(merkleized).await.unwrap();
             assert_eq!(start, range.start);
@@ -1444,7 +1450,7 @@ mod tests {
             let merkleized = db
                 .new_batch()
                 .write(key, Some(value))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -1470,65 +1476,124 @@ mod tests {
     /// recoverable: the metadata durably records a bitmap boundary derived from a floor that
     /// may exist only in buffered operations, and reopening panics if the recovered floor
     /// lies below that boundary.
+    ///
+    /// The floor advances past the durable commit's floor through proportional rewrites of every
+    /// key, or with `fixed`, through a fixed policy that replaces or evicts every update.
+    async fn prune_dropped_before_log_prune(ctx: deterministic::Context, fixed: bool) {
+        let partition = if fixed {
+            "prune-park-fixed"
+        } else {
+            "prune-park"
+        };
+        let db = MmrDb::init(
+            ctx.child("storage"),
+            fixed_config::<OneCap>(partition, &ctx),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Establish a durable state, then apply (but do not commit) a batch that advances the
+        // in-memory floor well past the durable commit's floor.
+        let db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
+        let durable_floor = db.inactivity_floor_loc();
+        let keys: Vec<_> = (0..512u64)
+            .map(|idx| Sha256::hash(&[&idx.to_be_bytes()]))
+            .collect();
+        let (merkleized, expected) = if fixed {
+            // Replace every update of a key with an even first byte and evict the rest.
+            let replacement = Sha256::hash(&[b"fixed-prune-value"]);
+            let value = |key: &sha256::Digest| (key.as_ref()[0] % 2 == 0).then_some(replacement);
+            let mut policy = Script::new(usize::MAX, u64::MAX, |key: &sha256::Digest| {
+                value(key).map_or(Choice::Evict, Choice::Replace)
+            });
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None, &mut policy)
+                .await
+                .unwrap();
+            let mut visited: Vec<_> = policy.visited.iter().map(|(_, key, _)| *key).collect();
+            visited.sort();
+            let mut sorted = keys.clone();
+            sorted.sort();
+            assert_eq!(visited, sorted);
+            let expected: Vec<_> = keys.iter().map(|key| (*key, value(key))).collect();
+            (merkleized, expected)
+        } else {
+            let expected: Vec<_> = (0..512u64)
+                .zip(&keys)
+                .map(|(idx, key)| (*key, Some(Sha256::hash(&[&(idx + 1024).to_be_bytes()]))))
+                .collect();
+            let merkleized = expected
+                .iter()
+                .fold(db.new_batch(), |batch, (key, value)| {
+                    batch.write(*key, *value)
+                })
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            (merkleized, expected)
+        };
+        assert!(expected.iter().any(|(_, value)| value.is_some()));
+        let (mut db, _) = db.apply_batch(merkleized).await.unwrap();
+        assert!(db.sync_boundary() > durable_floor);
+        for (key, value) in &expected {
+            assert_eq!(db.get(key).await.unwrap(), *value);
+        }
+        db.assert_exact().await;
+        let bounds = db.bounds();
+        let floor = db.inactivity_floor_loc();
+        let root = db.root();
+
+        // Drop the production prune future while it is parked after the metadata sync, before
+        // the log prune: a genuine cancellation at that await.
+        db.halt_before_prune_log = true;
+        let boundary = db.sync_boundary();
+        {
+            let fut = db.prune(boundary);
+            futures::pin_mut!(fut);
+            assert!(
+                futures::poll!(fut.as_mut()).is_pending(),
+                "prune must park before the log prune"
+            );
+        }
+
+        // Reopening must succeed and recover the post-batch state: prune committed the buffered
+        // operations before durably recording the pruning metadata that depends on them.
+        // Asserting the advanced floor, root, and persisted pruned boundary proves the drop
+        // happened after both the commit and the metadata sync.
+        let db = MmrDb::init(
+            ctx.child("reopen"),
+            fixed_config::<OneCap>(partition, &ctx),
+            None,
+        )
+        .await
+        .expect("prune crash must leave the db recoverable");
+        assert_eq!(db.bounds(), bounds);
+        assert_eq!(db.inactivity_floor_loc(), floor);
+        assert_eq!(db.root(), root);
+        assert!(db.any.bitmap.pruned_bits() > *durable_floor);
+        for (key, value) in &expected {
+            assert_eq!(db.get(key).await.unwrap(), *value);
+        }
+        db.assert_exact().await;
+        db.destroy().await.unwrap();
+    }
+
+    /// A proportional rewrite of every key leaves its prune recoverable when dropped between the
+    /// metadata sync and the log prune.
     #[test_traced]
     fn test_current_prune_dropped_before_log_prune() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            let db = MmrDb::init(
-                ctx.child("storage"),
-                fixed_config::<OneCap>("prune-park", &ctx),
-                None,
-            )
-            .await
-            .unwrap();
+        deterministic::Runner::default()
+            .start(|ctx| async move { prune_dropped_before_log_prune(ctx, false).await });
+    }
 
-            // Establish a durable state, then apply (but do not commit) a batch that rewrites
-            // every key, advancing the in-memory floor well past the durable commit's floor.
-            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
-            let durable_floor = db.inactivity_floor_loc();
-            let mut batch = db.new_batch();
-            for idx in 0..512u64 {
-                let key = Sha256::hash(&[&idx.to_be_bytes()]);
-                let value = Sha256::hash(&[&(idx + 1024).to_be_bytes()]);
-                batch = batch.write(key, Some(value));
-            }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
-            let (mut db, _) = db.apply_batch(merkleized).await.unwrap();
-            assert!(db.sync_boundary() > durable_floor);
-            let bounds = db.bounds();
-            let floor = db.inactivity_floor_loc();
-            let root = db.root();
-
-            // Drop the production prune future while it is parked after the metadata sync,
-            // before the log prune: a genuine cancellation at that await.
-            db.halt_before_prune_log = true;
-            let boundary = db.sync_boundary();
-            {
-                let fut = db.prune(boundary);
-                futures::pin_mut!(fut);
-                assert!(
-                    futures::poll!(fut.as_mut()).is_pending(),
-                    "prune must park before the log prune"
-                );
-            }
-
-            // Reopening must succeed and recover the post-batch state: prune committed the
-            // buffered operations before durably recording the pruning metadata that depends
-            // on them. Asserting the advanced floor, root, and persisted pruned boundary
-            // proves the drop happened after both the commit and the metadata sync.
-            let db = MmrDb::init(
-                ctx.child("reopen"),
-                fixed_config::<OneCap>("prune-park", &ctx),
-                None,
-            )
-            .await
-            .expect("prune crash must leave the db recoverable");
-            assert_eq!(db.bounds(), bounds);
-            assert_eq!(db.inactivity_floor_loc(), floor);
-            assert_eq!(db.root(), root);
-            assert!(db.any.bitmap.pruned_bits() > *durable_floor);
-            db.destroy().await.unwrap();
-        });
+    /// A fixed policy that replaces or evicts every update leaves its prune recoverable when
+    /// dropped between the metadata sync and the log prune.
+    #[test_traced]
+    fn test_current_fixed_policy_prune_dropped_before_log_prune() {
+        deterministic::Runner::default()
+            .start(|ctx| async move { prune_dropped_before_log_prune(ctx, true).await });
     }
 
     #[test_traced]

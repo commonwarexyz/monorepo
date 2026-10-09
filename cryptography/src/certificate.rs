@@ -224,7 +224,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     type PublicKey: PublicKey;
 
     /// Certificate assembled from a set of attestations.
-    type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
+    type Certificate: Clone + Debug + Eq + Hash + Send + Sync + Codec;
 
     /// Verifies a certificate that was recovered or received from the network.
     ///
@@ -352,7 +352,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
 /// provided defaults to take advantage of scheme-specific batching strategies.
 pub trait Scheme: Verifier {
     /// Signature emitted by individual participants.
-    type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
+    type Signature: Clone + Debug + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
 
     /// Returns the index of "self" in the participant set, if available.
     /// Returns `None` if the scheme is a verifier-only instance.

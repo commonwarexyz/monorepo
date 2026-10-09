@@ -32,6 +32,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, ReadOptions};
+use commonware_utils::NZU64;
 use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -312,10 +313,7 @@ where
     }
 
     /// Create a speculative batch atop this journal.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, C::Item, S>
-    where
-        C::Item: Encode,
-    {
+    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, C::Item, S> {
         let root = self.merkle.to_batch();
         UnmerkleizedBatch {
             inner: root.new_batch(),
@@ -377,12 +375,10 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [Error::Merkle] with [merkle::Error::LocationOverflow] if `start_loc` >
-    ///   [Family::MAX_LEAVES].
     /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >= current
     ///   item count.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
-    ///   pruned.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] or [Error::Merkle] with
+    ///   [merkle::Error::ElementPruned] if a required item or Merkle node has been pruned.
     pub async fn proof(
         &self,
         start_loc: Location<F>,
@@ -405,10 +401,13 @@ where
     ) -> Result<Proof<F, H::Digest>, Error<F>> {
         let end = batch.size();
         let start = Location::new(end - batch.items().len() as u64);
-        self.merkle
-            .with_mem(|mem| {
-                batch.range_proof(mem, &self.hasher, start..Location::new(end), inactive_peaks)
-            })
+        batch
+            .range_proof(
+                self.merkle.mem(),
+                &self.hasher,
+                start..Location::new(end),
+                inactive_peaks,
+            )
             .map_err(Error::Merkle)
     }
 
@@ -422,17 +421,15 @@ where
         batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
     ) -> Result<Vec<H::Digest>, Error<F>> {
         let start = Location::new(batch.size() - batch.items().len() as u64);
-        self.merkle
-            .with_mem(|mem| {
-                F::nodes_to_pin(start)
-                    .map(|pos| {
-                        batch
-                            .get_node(pos)
-                            .or_else(|| mem.get_node(pos))
-                            .ok_or(merkle::Error::ElementPruned(pos))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
+        let mem = self.merkle.mem();
+        F::nodes_to_pin(start)
+            .map(|pos| {
+                batch
+                    .get_node(pos)
+                    .or_else(|| mem.get_node(pos))
+                    .ok_or(merkle::Error::ElementPruned(pos))
             })
+            .collect::<Result<Vec<_>, _>>()
             .map_err(Error::Merkle)
     }
 
@@ -446,8 +443,8 @@ where
     ///
     /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >=
     ///   `historical_leaves` or `historical_leaves` > number of items in the journal.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
-    ///   pruned.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] or [Error::Merkle] with
+    ///   [merkle::Error::ElementPruned] if a required item or Merkle node has been pruned.
     pub async fn historical_proof(
         &self,
         historical_leaves: Location<F>,
@@ -623,7 +620,7 @@ where
         merkle: Merkle<F, E, H::Digest, S>,
         journal: C,
         hasher: StandardHasher<H>,
-        apply_batch_size: u64,
+        apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
         let merkle = Self::align(merkle, &journal, &hasher, apply_batch_size).await?;
 
@@ -647,7 +644,7 @@ where
         mut merkle: Merkle<F, E, H::Digest, S>,
         journal: &C,
         hasher: &StandardHasher<H>,
-        apply_batch_size: u64,
+        apply_batch_size: NonZeroU64,
     ) -> Result<Merkle<F, E, H::Digest, S>, Error<F>> {
         let journal_size = journal.bounds().end;
         let mut merkle_leaves = merkle.leaves();
@@ -666,7 +663,7 @@ where
             );
 
             while merkle_leaves < journal_size {
-                let count = apply_batch_size.min(journal_size - *merkle_leaves);
+                let count = apply_batch_size.get().min(journal_size - *merkle_leaves);
                 let mut items = Vec::with_capacity(count as usize);
                 for _ in 0..count {
                     items.push(journal.read(*merkle_leaves).await?);
@@ -674,7 +671,7 @@ where
                 }
 
                 let batch = merkle.new_batch().add_many(hasher, &items);
-                let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
+                let batch = batch.merkleize(merkle.mem(), hasher);
                 merkle = merkle.apply_batch(&batch)?;
             }
             return Ok(merkle);
@@ -694,9 +691,7 @@ where
         let loc;
         (self.journal, loc) = self.journal.append(item).await?;
         let unmerkleized_batch = self.merkle.new_batch().add(&self.hasher, &encoded_item);
-        let batch = self
-            .merkle
-            .with_mem(|mem| unmerkleized_batch.merkleize(mem, &self.hasher));
+        let batch = unmerkleized_batch.merkleize(self.merkle.mem(), &self.hasher);
         self.merkle = self.merkle.apply_batch(&batch)?;
 
         Ok((self, Location::new(loc)))
@@ -768,10 +763,12 @@ where
         Ok(self)
     }
 
-    /// Prune both the Merkle structure and journal to the given location.
+    /// Prune journal items before `prune_loc`, then raise the Merkle pruning boundary to the
+    /// journal's retained start if it is lower.
     ///
     /// # Returns
-    /// The new pruning boundary, which may be less than the requested `prune_loc`.
+    /// The journal's retained start, which may be less than `prune_loc`. After state sync, the
+    /// Merkle pruning boundary can remain above the returned start.
     #[boxed]
     pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
         let (journal, boundary, _) = self.prune_inner(prune_loc).await?;
@@ -911,7 +908,7 @@ where
 }
 
 /// The number of items to apply to the Merkle structure in a single batch.
-const APPLY_BATCH_SIZE: u64 = 1 << 16;
+const APPLY_BATCH_SIZE: NonZeroU64 = NZU64!(1 << 16);
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
@@ -1198,7 +1195,7 @@ pub trait BackingRecovery: Send + Sync + Sized {
 /// A [Mutable] journal that can back an authenticated [Journal].
 pub trait Backing<E: Context>: Mutable {
     /// The configuration needed to initialize this journal.
-    type Config: Clone + Send;
+    type Config: Clone + Send + Sync;
 
     /// Initialization-owned storage used to select and validate the retained prefix.
     type Recovery: BackingRecovery<Journal = Self>;
@@ -1211,6 +1208,54 @@ pub trait Backing<E: Context>: Mutable {
         cfg: Self::Config,
         max_size: Option<u64>,
     ) -> impl Future<Output = Result<Self::Recovery, JournalError>> + Send;
+
+    /// Open recovery storage reset to an empty journal at `size`, discarding stored items
+    /// without reading them. Returns [JournalError::SizeOverflow] for `u64::MAX`.
+    fn clear(
+        context: E,
+        cfg: Self::Config,
+        size: u64,
+    ) -> impl Future<Output = Result<Self::Recovery, JournalError>> + Send;
+
+    /// Positions stored items may occupy, determined without reading them.
+    ///
+    /// The start is the retained start and the end bounds every stored item. A pending reset
+    /// yields an empty span at its target.
+    fn span(
+        context: E,
+        cfg: &Self::Config,
+    ) -> impl Future<Output = Result<Range<u64>, JournalError>> + Send;
+}
+
+/// Whether `span` contains `position` or is empty exactly at it.
+fn covers(span: &Range<u64>, position: u64) -> bool {
+    position == span.start || span.contains(&position)
+}
+
+/// A [Backing] journal's storage, as [Stored::open] leaves it.
+pub(crate) enum Stored<E: Context, J: Backing<E>> {
+    /// Recovery opened bounded at the requested end.
+    Opened(J::Recovery),
+
+    /// Storage whose span cannot hold the requested position, left unopened.
+    Unopened { context: E, cfg: J::Config },
+}
+
+impl<E: Context, J: Backing<E>> Stored<E, J> {
+    /// Open recovery bounded at `max_size` when [Backing::span] contains `position` or is empty
+    /// exactly at it. Otherwise return the storage unopened.
+    pub(crate) async fn open(
+        context: E,
+        cfg: J::Config,
+        position: u64,
+        max_size: u64,
+    ) -> Result<Self, JournalError> {
+        if !covers(&J::span(context.child("span"), &cfg).await?, position) {
+            return Ok(Self::Unopened { context, cfg });
+        }
+        let recovery = J::recover(context, cfg, Some(max_size)).await?;
+        Ok(Self::Opened(recovery))
+    }
 }
 
 /// Recover the portion useful for state sync, or reset an unusable local range.
@@ -1221,20 +1266,14 @@ pub(crate) async fn init_sync<E: Context, J: Backing<E>>(
 ) -> Result<J, JournalError> {
     assert!(!range.is_empty(), "range must not be empty");
 
-    // Sync targets describe the same append-only log. Recover local history before choosing the
-    // prefix to reuse for this target.
-    let pending = J::recover(context, cfg, None).await?;
-    let bounds = pending.bounds();
-
-    // A fresh journal already aligned with the sync start needs no reset.
-    if bounds == (0..0) && range.start == 0 {
-        return pending.finish(0).await;
-    }
-
-    // Fetch the range anew when its start is pruned or local progress does not reach it.
-    if bounds.start > range.start || bounds.end <= range.start {
-        return pending.reset(range.start).await?.finish(range.start).await;
-    }
+    // Storage whose span cannot hold the sync start is cleared without reading stored items.
+    // The span end reflects blob capacity, which can overstate the recovered end when the tail
+    // is short or has a gap, so an opened prefix that does not cover the sync start is reset.
+    let pending = match Stored::<E, J>::open(context, cfg, range.start, range.end).await? {
+        Stored::Opened(pending) if covers(&pending.bounds(), range.start) => pending,
+        Stored::Opened(pending) => pending.reset(range.start).await?,
+        Stored::Unopened { context, cfg } => J::clear(context, cfg, range.start).await?,
+    };
 
     // Publish the retained prefix before pruning complete sections below the sync start.
     let journal = pending.finish(range.end).await?;
@@ -1315,9 +1354,8 @@ mod tests {
         journal: &TestJournal<F>,
         batch: &MerkleizedBatch<F, Digest, TestOp<F>, Sequential>,
     ) -> Digest {
-        journal
-            .merkle
-            .with_mem(|mem| batch.root(mem, &journal.hasher, 0))
+        batch
+            .root(journal.merkle.mem(), &journal.hasher, 0)
             .unwrap()
     }
 
@@ -1357,7 +1395,7 @@ mod tests {
             .await
             .unwrap();
             let batch = merkle.new_batch().add(&hasher, &Sha256::fill(1));
-            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(merkle.mem(), &hasher);
             _ = merkle.apply_batch(&batch).unwrap().sync().await.unwrap();
             let merkle = Merkle::<mmr::Family, _, Digest, Sequential>::prepare(
                 merkle_context,
@@ -1481,7 +1519,7 @@ mod tests {
             let batch = journal.new_batch();
             assert_eq!(batch.hasher.root_bagging(), BackwardFold);
 
-            let merkleized = journal.merkle.with_mem(|mem| batch.merkleize(mem));
+            let merkleized = batch.merkleize(journal.merkle.mem());
             let child: UnmerkleizedBatch<mmr::Family, Sha256, TestOp<mmr::Family>, Sequential> =
                 merkleized.new_batch();
             assert_eq!(child.hasher.root_bagging(), BackwardFold);
@@ -1693,7 +1731,7 @@ mod tests {
                 }
                 batch
             };
-            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(merkle.mem(), &hasher);
             merkle = merkle.apply_batch(&batch).unwrap();
         }
 
@@ -1796,7 +1834,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let serial = TestJournal::<F>::align(serial, &journal, &hasher, 7)
+        let serial = TestJournal::<F>::align(serial, &journal, &hasher, NZU64!(7))
             .await
             .unwrap();
 
@@ -1811,7 +1849,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let parallel = ParallelJournal::<F>::align(parallel, &journal, &hasher, 7)
+        let parallel = ParallelJournal::<F>::align(parallel, &journal, &hasher, NZU64!(7))
             .await
             .unwrap();
 
@@ -3367,8 +3405,8 @@ mod tests {
         let b2 = b2.add(op_b);
 
         // Merkleize and verify independent roots.
-        let m1 = journal.merkle.with_mem(|mem| b1.merkleize(mem));
-        let m2 = journal.merkle.with_mem(|mem| b2.merkleize(mem));
+        let m1 = b1.merkleize(journal.merkle.mem());
+        let m2 = b2.merkleize(journal.merkle.mem());
         assert_ne!(batch_root(&journal, &m1), batch_root(&journal, &m2));
         assert_ne!(batch_root(&journal, &m1), original_root);
         assert_ne!(batch_root(&journal, &m2), original_root);
@@ -3407,10 +3445,10 @@ mod tests {
 
         let (merkleized_a, merkleized_b) = {
             let batch_a = journal.new_batch().add(op_a.clone());
-            let merkleized_a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
+            let merkleized_a = batch_a.merkleize(journal.merkle.mem());
 
             let batch_b = merkleized_a.new_batch::<Sha256>().add(op_b.clone());
-            let merkleized_b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
+            let merkleized_b = batch_b.merkleize(journal.merkle.mem());
             (merkleized_a, merkleized_b)
         };
 
@@ -3450,13 +3488,13 @@ mod tests {
 
         // Apply batch A.
         let batch_a = journal.new_batch().add(op_a.clone());
-        let merkleized_a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
+        let merkleized_a = batch_a.merkleize(journal.merkle.mem());
         journal = journal.apply_batch(&merkleized_a).await.unwrap();
         assert_eq!(*journal.size(), 11);
 
         // Apply batch B (built on top of the committed A).
         let batch_b = journal.new_batch().add(op_b.clone());
-        let merkleized_b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
+        let merkleized_b = batch_b.merkleize(journal.merkle.mem());
         let expected_root = batch_root(&journal, &merkleized_b);
         journal = journal.apply_batch(&merkleized_b).await.unwrap();
 
@@ -3489,9 +3527,9 @@ mod tests {
 
         // Create two batches from the same base.
         let batch_a = journal.new_batch().add(op_a.clone());
-        let merkleized_a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
+        let merkleized_a = batch_a.merkleize(journal.merkle.mem());
         let batch_b = journal.new_batch().add(op_b);
-        let merkleized_b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
+        let merkleized_b = batch_b.merkleize(journal.merkle.mem());
 
         // Apply A, then commit and sync so the recovered state below includes it (reopen
         // selects the last commit operation during initialization).
@@ -3546,11 +3584,11 @@ mod tests {
 
         // Parent batch, then fork two children.
         let parent_batch = journal.new_batch().add(create_operation::<F>(10));
-        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
+        let parent = parent_batch.merkleize(journal.merkle.mem());
         let batch_a = parent.new_batch::<Sha256>().add(create_operation::<F>(20));
-        let child_a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
+        let child_a = batch_a.merkleize(journal.merkle.mem());
         let batch_b = parent.new_batch::<Sha256>().add(create_operation::<F>(30));
-        let child_b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
+        let child_b = batch_b.merkleize(journal.merkle.mem());
 
         // Apply child_a, then child_b should be stale.
         journal = journal.apply_batch(&child_a).await.unwrap();
@@ -3582,9 +3620,9 @@ mod tests {
 
         // Create parent, then child.
         let parent_batch = journal.new_batch().add(create_operation::<F>(1));
-        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
+        let parent = parent_batch.merkleize(journal.merkle.mem());
         let child_batch = parent.new_batch::<Sha256>().add(create_operation::<F>(2));
-        let child = journal.merkle.with_mem(|mem| child_batch.merkleize(mem));
+        let child = child_batch.merkleize(journal.merkle.mem());
 
         let expected_root = batch_root(&journal, &child);
 
@@ -3613,9 +3651,9 @@ mod tests {
 
         // Create parent, then child.
         let parent_batch = journal.new_batch().add(create_operation::<F>(1));
-        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
+        let parent = parent_batch.merkleize(journal.merkle.mem());
         let child_batch = parent.new_batch::<Sha256>().add(create_operation::<F>(2));
-        let child = journal.merkle.with_mem(|mem| child_batch.merkleize(mem));
+        let child = child_batch.merkleize(journal.merkle.mem());
 
         // Apply child first (full chain) -- parent should now be stale.
         journal = journal.apply_batch(&child).await.unwrap();
@@ -3650,7 +3688,7 @@ mod tests {
             .new_batch()
             .add(create_operation::<F>(10))
             .add(create_operation::<F>(11));
-        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
+        let parent = parent_batch.merkleize(journal.merkle.mem());
 
         // Child: 3 more items.
         let child_batch = parent
@@ -3658,7 +3696,7 @@ mod tests {
             .add(create_operation::<F>(20))
             .add(create_operation::<F>(21))
             .add(create_operation::<F>(22));
-        let child = journal.merkle.with_mem(|mem| child_batch.merkleize(mem));
+        let child = child_batch.merkleize(journal.merkle.mem());
 
         // Apply parent.
         journal = journal.apply_batch(&parent).await.unwrap();
@@ -3696,20 +3734,18 @@ mod tests {
             .add(create_operation::<F>(3))
             .add(create_operation::<F>(4))
             .add(create_operation::<F>(5));
-        let grandparent = journal
-            .merkle
-            .with_mem(|mem| grandparent_batch.merkleize(mem));
+        let grandparent = grandparent_batch.merkleize(journal.merkle.mem());
 
         // Parent: 2 items.
         let parent_batch = grandparent
             .new_batch::<Sha256>()
             .add(create_operation::<F>(6))
             .add(create_operation::<F>(7));
-        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
+        let parent = parent_batch.merkleize(journal.merkle.mem());
 
         // Child: 1 item.
         let child_batch = parent.new_batch::<Sha256>().add(create_operation::<F>(8));
-        let child = journal.merkle.with_mem(|mem| child_batch.merkleize(mem));
+        let child = child_batch.merkleize(journal.merkle.mem());
 
         // Apply grandparent, then parent, then child sequentially.
         journal = journal.apply_batch(&grandparent).await.unwrap();
@@ -3760,13 +3796,11 @@ mod tests {
         for op in &ops {
             batch = batch.add(op.clone());
         }
-        let expected = journal.merkle.with_mem(|mem| batch.merkleize(mem));
+        let expected = batch.merkleize(journal.merkle.mem());
 
         // merkleize_with
         let batch = journal.new_batch();
-        let actual = journal
-            .merkle
-            .with_mem(|mem| merkleize_with(batch, mem, ops));
+        let actual = merkleize_with(batch, journal.merkle.mem(), ops);
 
         assert_eq!(
             batch_root(&journal, &actual),
@@ -3792,9 +3826,7 @@ mod tests {
 
         let ops = vec![create_operation::<F>(10), create_operation::<F>(11)];
         let batch = journal.new_batch();
-        let merkleized = journal
-            .merkle
-            .with_mem(|mem| merkleize_with(batch, mem, ops.clone()));
+        let merkleized = merkleize_with(batch, journal.merkle.mem(), ops.clone());
 
         let expected_root = batch_root(&journal, &merkleized);
         journal = journal.apply_batch(&merkleized).await.unwrap();
@@ -3827,11 +3859,11 @@ mod tests {
 
         // Build chain: A -> B -> C
         let a_batch = journal.new_batch().add(create_operation::<F>(1));
-        let a = journal.merkle.with_mem(|mem| a_batch.merkleize(mem));
+        let a = a_batch.merkleize(journal.merkle.mem());
         let b_batch = a.new_batch::<Sha256>().add(create_operation::<F>(2));
-        let b = journal.merkle.with_mem(|mem| b_batch.merkleize(mem));
+        let b = b_batch.merkleize(journal.merkle.mem());
         let c_batch = b.new_batch::<Sha256>().add(create_operation::<F>(3));
-        let c = journal.merkle.with_mem(|mem| c_batch.merkleize(mem));
+        let c = c_batch.merkleize(journal.merkle.mem());
 
         // Apply A, then apply C directly (skipping B's apply_batch).
         journal = journal.apply_batch(&a).await.unwrap();
@@ -3870,13 +3902,13 @@ mod tests {
             create_empty_journal::<F>(context.child("storage"), "dropped-uncommitted").await;
 
         let a_batch = journal.new_batch().add(create_operation::<F>(1));
-        let a = journal.merkle.with_mem(|mem| a_batch.merkleize(mem));
+        let a = a_batch.merkleize(journal.merkle.mem());
         let b_batch = a.new_batch::<Sha256>().add(create_operation::<F>(2));
-        let b = journal.merkle.with_mem(|mem| b_batch.merkleize(mem));
+        let b = b_batch.merkleize(journal.merkle.mem());
 
         drop(a);
         let c_batch = b.new_batch::<Sha256>().add(create_operation::<F>(3));
-        let c = journal.merkle.with_mem(|mem| c_batch.merkleize(mem));
+        let c = c_batch.merkleize(journal.merkle.mem());
         drop(b);
 
         assert_eq!(c.ancestor_base_leaves, 1);
@@ -3911,15 +3943,15 @@ mod tests {
         for i in 0..8u8 {
             a_batch = a_batch.add(create_operation::<F>(i));
         }
-        let a = journal.merkle.with_mem(|mem| a_batch.merkleize(mem));
+        let a = a_batch.merkleize(journal.merkle.mem());
         let b_batch = a.new_batch::<Sha256>().add(create_operation::<F>(8));
-        let b = journal.merkle.with_mem(|mem| b_batch.merkleize(mem));
+        let b = b_batch.merkleize(journal.merkle.mem());
 
         journal = journal.apply_batch(&a).await.unwrap();
         drop(a);
 
         let c_batch = b.new_batch::<Sha256>().add(create_operation::<F>(9));
-        let c = journal.merkle.with_mem(|mem| c_batch.merkleize(mem));
+        let c = c_batch.merkleize(journal.merkle.mem());
 
         // Only B remains in the retained ancestor suffix.
         assert_eq!(c.ancestor_items.len(), 1);
@@ -4022,13 +4054,13 @@ mod tests {
                 .map(DropMonitor::untracked)
                 .collect();
             let a_batch = journal.new_batch().add_many(a_items);
-            let a = journal.merkle.with_mem(|mem| a_batch.merkleize(mem));
+            let a = a_batch.merkleize(journal.merkle.mem());
             let b_items = (8..10u8)
                 .map(create_operation::<mmr::Family>)
                 .map(DropMonitor::untracked)
                 .collect();
             let b_batch = a.new_batch::<Sha256>().add_many(b_items);
-            let b = journal.merkle.with_mem(|mem| b_batch.merkleize(mem));
+            let b = b_batch.merkleize(journal.merkle.mem());
 
             let ancestor = Arc::downgrade(&a.inner);
             let c_batch = b.new_batch::<Sha256>();

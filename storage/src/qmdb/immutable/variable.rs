@@ -214,6 +214,8 @@ mod tests {
     }
 
     immutable_tests! {
+        test_variable_merkleize_foreign_db => run_merkleize_foreign_db, pair;
+        test_variable_merkleize_stale_sibling => run_merkleize_stale_sibling, open;
         test_variable_empty => run_empty, open;
         test_variable_build_basic => run_build_basic, open;
         test_variable_proof_verify => run_proof_verify, open;
@@ -235,8 +237,7 @@ mod tests {
         test_variable_batch_empty_batch => run_batch_empty_batch, open;
         test_variable_batch_chained_merkleized_get => run_batch_chained_merkleized_get, open;
         test_variable_batch_large => run_batch_large, open;
-        test_variable_batch_chained_key_override => run_batch_chained_key_override, open;
-        test_variable_batch_sequential_key_override => run_batch_sequential_key_override, open_small_sections;
+        test_variable_prune_collision_bucket => run_prune_collision_bucket, open_small_sections;
         test_variable_batch_metadata => run_batch_metadata, open;
         test_variable_stale_batch_rejected => run_stale_batch_rejected, open;
         test_variable_stale_batch_chained => run_stale_batch_chained, open;
@@ -268,13 +269,6 @@ mod tests {
         test_variable_apply_after_ancestor_dropped => run_apply_after_ancestor_dropped, open;
         test_variable_bounded_initialization_preserves_collision_bucket =>
             run_bounded_initialization_preserves_collision_bucket, open_with_max;
-        test_variable_bounded_initialization_after_reopen_repeated_key_gap =>
-            run_bounded_initialization_after_reopen_repeated_key_gap, open_with_max;
-        test_variable_bounded_initialization_after_reopen_mixed_gap_retained =>
-            run_bounded_initialization_after_reopen_mixed_gap_retained, open_with_max;
-        test_variable_bounded_initialization_repeated_key => run_bounded_initialization_repeated_key, open_with_max;
-        test_variable_bounded_initialization_after_reopen_repeated_key_retained =>
-            run_bounded_initialization_after_reopen_repeated_key_retained, open_with_max;
     }
 
     #[boxed]
@@ -295,13 +289,15 @@ mod tests {
             .set(k1, v1)
             .set(k2, v2)
             .merkleize(&db, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
         let compact_batch = compact
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
             .merkleize(&compact, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(retained.root(), compact_batch.root());
 

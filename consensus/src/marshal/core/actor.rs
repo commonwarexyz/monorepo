@@ -1,11 +1,11 @@
 use super::{
-    Buffer, ExpectedCommitment, Retirement, Variant,
+    Buffer, ExpectedCommitment, Variant,
     acks::{PendingAck, PendingAcks},
     cache,
     certified::Certified,
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
-    floor::{Floor, State as FloorState},
+    floor::{Floor, Processed, State as FloorState},
     mailbox::{CommitmentFallback, Mailbox, Message},
     staged::Staged,
     stream::Stream,
@@ -52,7 +52,7 @@ use commonware_utils::{
 };
 use futures::{
     FutureExt as _, TryFutureExt as _,
-    future::{join, join_all},
+    future::{self, join, join_all},
     try_join,
 };
 use rand_core::CryptoRng;
@@ -108,14 +108,11 @@ where
     T: Strategy,
     A: Acknowledgement,
 {
-    // ---------- Context ----------
     context: ContextCell<E>,
 
-    // ---------- Message Passing ----------
     // Mailbox
     mailbox: mailbox::Receiver<Message<P::Scheme, V>>,
 
-    // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
     provider: P,
     // Epoch configuration
@@ -129,15 +126,12 @@ where
     // Strategy for parallel operations
     strategy: T,
 
-    // ---------- State ----------
-    // Current durable floor and any update awaiting its anchor block
+    // Durable floor and floor updates not yet applied
     floor: FloorState<P::Scheme, V::Commitment>,
     // Application delivery cursor
     stream: Stream<E>,
     // Pending application acknowledgements
-    pending_acks: PendingAcks<V, A>,
-    // Acknowledgements cleared while a floor transition owns application progress
-    cleared_acks: Vec<(Height, V::Commitment)>,
+    pending_acks: PendingAcks<A>,
     // Highest known finalized height
     tip: Height,
     // Outstanding subscriptions for blocks
@@ -151,7 +145,6 @@ where
     // capacity to absorb finalization bursts while earlier blocks are processed
     staged: Staged<V::Block>,
 
-    // ---------- Storage ----------
     // Prunable cache
     cache: cache::Manager<E, V, P::Scheme>,
     // Finalizations stored by height
@@ -159,7 +152,6 @@ where
     // Finalized blocks stored by height
     finalized_blocks: FB,
 
-    // ---------- Metrics ----------
     // Latest height metric
     finalized_height: Gauge,
     // Latest processed height
@@ -213,7 +205,7 @@ where
 
         // Genesis is a local anchor. A floor finalization is verified and
         // resolved after `run` receives the resolver and buffer.
-        let pending_floor_anchor = match config.start {
+        let configured = match config.start {
             Start::Genesis(anchor) => {
                 assert_eq!(
                     anchor.height(),
@@ -233,6 +225,10 @@ where
             last_processed_height,
         )
         .await;
+        let last_processed = match last_processed_height {
+            Some(height) => Some(Self::processed(&finalized_blocks, height).await),
+            None => None,
+        };
 
         // Create metrics
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");
@@ -240,16 +236,8 @@ where
         if let Some(last_processed_height) = last_processed_height {
             let _ = processed_height.try_set(last_processed_height.get());
         }
-        let floor_state = pending_floor_anchor.map_or_else(
-            || FloorState::resolved(last_processed_height, last_processed_round),
-            |finalization| {
-                FloorState::awaiting_anchor(
-                    last_processed_height,
-                    last_processed_round,
-                    finalization,
-                )
-            },
-        );
+        let floor_state =
+            FloorState::new(configured, Floor::new(last_processed, last_processed_round));
         let floor = floor_state.snapshot();
 
         // Initialize mailbox
@@ -267,7 +255,6 @@ where
                 floor: floor_state,
                 stream,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
-                cleared_acks: Vec::new(),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
                 certified: Certified::new(),
@@ -390,17 +377,15 @@ where
         let mut waiters = AbortablePool::<Result<V::Block, SubscriptionKeyFor<V>>>::default();
 
         // Observe durable syncs that no consensus caller awaits (the
-        // notarization and finalization paths). A flush failure inside
-        // `start_sync` is reported only through the returned handle, so every
-        // handle must be observed to apply the fatal policy. This pool does
-        // so without blocking the actor on a sync.
+        // notarization and finalization paths), so a failure applies the fatal
+        // policy without waiting for a later archive call or blocking the actor.
         let mut syncs = Pool::<PooledSync>::default();
 
         // Anchor all startup work under a single root span. Tip recovery, floor
         // installation, gap repair, and the initial dispatch all run before any
         // mailbox message arrives, so without this root their work would emit as
         // orphan traces.
-        (self, application, buffer, resolver) = async move {
+        (self, application, buffer, resolver, waiters) = async move {
             // Get tip and send to application
             let tip = self.get_latest().await;
             if let Some((height, digest, round)) = tip {
@@ -415,14 +400,14 @@ where
             self.cache = self.cache.load_persisted_epochs().await;
 
             // A configured floor follows the same path as `SetFloor`: verify it,
-            // then apply a local anchor or fetch the anchor block.
-            if let Some(finalization) = self.floor.take_pending_anchor() {
+            // then apply a local anchor or await it from the buffer or peers.
+            if let Some(finalization) = self.floor.take_configured() {
                 self = self
                     .install_floor(
                         finalization,
-                        false,
                         &mut resolver,
                         &mut buffer,
+                        &mut waiters,
                         &mut application,
                     )
                     .await;
@@ -440,7 +425,7 @@ where
             // Attempt to dispatch the next finalized block to the application, if it is ready.
             self = self.try_dispatch_blocks(&mut application).await;
 
-            (self, application, buffer, resolver)
+            (self, application, buffer, resolver, waiters)
         }
         .instrument(info_span!("marshal.actor.start"))
         .await;
@@ -564,29 +549,28 @@ where
     {
         // Start with the ack that woke this `select_loop!` arm.
         let mut pending = Some(self.pending_acks.complete_current(result));
-        let mut processed_commitments = Vec::new();
-        let processed_round = loop {
-            let (height, commitment, result) = pending.take().expect("pending ack must exist");
+        loop {
+            let (height, result) = pending.take().expect("pending ack must exist");
             match result {
                 Ok(()) => {
                     // Apply in-memory progress updates for this acknowledged
                     // block. The metadata sync below makes drained updates durable.
-                    self.update_processed_height(height, resolver);
+                    // Only archived blocks are dispatched, so the block is stored.
+                    self.update_processed(Processed::Block(height), resolver);
                     self = self
                         .update_processed_round(height, buffer, application, resolver)
                         .await;
                 }
                 Err(e) => return Err((height, e)),
             }
-            processed_commitments.push(commitment);
 
             // Opportunistically drain any additional already-ready acks so we
             // can persist one metadata sync for the whole batch below.
             match self.pending_acks.pop_ready() {
                 Some(next) => pending = Some(next),
-                None => break self.floor.round(),
+                None => break,
             }
-        };
+        }
 
         // Persist buffered progress updates once after draining all ready acks.
         self.stream = self
@@ -594,13 +578,6 @@ where
             .sync()
             .await
             .expect("failed to sync application progress");
-
-        // The round is an inclusive floor. Retire every exact commitment even if
-        // sparse certificates leave it above that floor.
-        buffer.retire(Retirement {
-            round_floor: processed_round,
-            exact_retirements: processed_commitments,
-        });
 
         // Refill the application dispatch pipeline.
         Ok(self.try_dispatch_blocks(application).await)
@@ -868,8 +845,21 @@ where
                 let finalization = self.get_finalization_by_height(height).await;
                 response.send_lossy(finalization);
             }
-            Message::GetProcessedHeight { response, .. } => {
-                response.send_lossy(self.stream.processed_height());
+            Message::GetProcessed { response, .. } => {
+                response.send_lossy(self.floor.processed());
+            }
+            Message::GetAnchor { response, .. } => {
+                let anchor = match self.floor.processed() {
+                    Some(processed) => {
+                        let block = self
+                            .get_finalized_block(processed.anchor())
+                            .await
+                            .expect("processed position must be backed by a stored block");
+                        Some((processed, block))
+                    }
+                    None => None,
+                };
+                response.send_lossy(anchor);
             }
             Message::HintFinalized {
                 height, targets, ..
@@ -932,7 +922,7 @@ where
             }
             Message::SetFloor { finalization, .. } => {
                 self = self
-                    .install_floor(finalization, true, resolver, buffer, application)
+                    .install_floor(finalization, resolver, buffer, waiters, application)
                     .await;
             }
             Message::Prune { height, .. } => {
@@ -1183,13 +1173,13 @@ where
             .insert(span, key, response, waiters, buffer);
     }
 
-    /// Verifies and installs a floor, fetching the anchor block if needed.
+    /// Verifies and installs a floor, awaiting the anchor block from the buffer or peers if needed.
     async fn install_floor<Buf, R>(
         mut self: Box<Self>,
         finalization: Finalization<P::Scheme, V::Commitment>,
-        skip_if_superseded: bool,
         resolver: &mut R,
         buffer: &mut Buf,
+        waiters: &mut AbortablePool<'_, Result<V::Block, SubscriptionKeyFor<V>>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> Box<Self>
     where
@@ -1222,14 +1212,15 @@ where
             .put_finalization(round, digest, &finalization)
             .await;
 
-        // A pending anchor at the same or a newer floor already blocks
+        // A pending floor at the same or a newer round already blocks
         // progress. Keep waiting for it instead of replacing it.
-        if skip_if_superseded && self.floor.has_pending_anchor_at_or_after(round) {
+        if self.floor.pending_supersedes(round) {
             return self;
         }
 
+        // A local anchor replaces any older pending floor and installs through ingest.
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-            self.floor.await_anchor(finalization);
+            self.floor.set_pending(finalization, None);
             let anchored;
             (self, anchored) = self.ingest(block, buffer, application, resolver).await;
             assert!(anchored, "failed to ingest pending floor anchor");
@@ -1237,12 +1228,19 @@ where
         }
 
         // The pending floor owns the next application sync point. Drop any
-        // in-flight acks before they can advance the processed height past it,
-        // but retain their heights and commitments until the anchor makes the floor active.
-        self.cleared_acks.extend(self.pending_acks.clear());
+        // in-flight acks before they can advance the processed height past it.
+        self.pending_acks.clear();
+
+        // The pending floor holds the waiter, which is released when the floor is
+        // replaced, applied, or superseded. Reporting a closed subscription as an
+        // error would cancel every caller subscription on the anchor, so the waiter
+        // stays pending instead. The fetch below is issued either way.
+        let aborter = buffer
+            .subscribe_by_commitment(commitment)
+            .map(|rx| waiters.push(rx.or_else(|_| future::pending())));
+        self.floor.set_pending(finalization, aborter);
 
         debug!(?round, ?commitment, "starting fetch for floor block");
-        self.floor.await_anchor(finalization);
         self.floor
             .fetch_if_permitted(resolver, Request::finalized_by_round(commitment, round))
             .ignore();
@@ -1297,23 +1295,20 @@ where
     ) -> (Box<Self>, bool) {
         self.block_subscriptions.notify(block.clone());
 
-        if !self.floor.matches_pending_anchor(V::commitment(&block)) {
+        let Some(finalization) = self.floor.take_matching(V::commitment(&block)) else {
             return (self, false);
-        }
+        };
 
         self = self
-            .apply_pending_floor(block, buffer, application, resolver)
+            .apply_floor(finalization, block, buffer, application, resolver)
             .await;
         (self, true)
     }
 
-    /// Applies the pending floor transition using its matching anchor block.
-    ///
-    /// # Panics
-    ///
-    /// Panics if no pending floor anchor is installed.
-    async fn apply_pending_floor<Buf: Buffer<V>>(
+    /// Applies the floor transition that `finalization` announces using its anchor block.
+    async fn apply_floor<Buf: Buffer<V>>(
         mut self: Box<Self>,
+        finalization: Finalization<P::Scheme, V::Commitment>,
         block: V::Block,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
@@ -1339,10 +1334,6 @@ where
                 existing = %self.floor.processed_height(),
                 "floor not updated, at or below existing"
             );
-            let finalization = self
-                .floor
-                .take_pending_anchor()
-                .expect("pending floor anchor missing");
             self = self
                 .update_processed_round_floor(
                     height,
@@ -1352,11 +1343,6 @@ where
                     resolver,
                 )
                 .await;
-            let commitments = self.take_superseded_ack_commitments();
-            buffer.retire(Retirement {
-                round_floor: self.floor.round(),
-                exact_retirements: commitments,
-            });
             let repaired;
             (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
             if repaired {
@@ -1366,10 +1352,6 @@ where
         }
 
         let digest = block.digest();
-        let finalization = self
-            .floor
-            .take_pending_anchor()
-            .expect("pending floor anchor missing");
         let round = finalization.round();
         let stored: V::StoredBlock = block.into();
         (self.finalized_blocks, self.finalizations_by_height) = try_join!(
@@ -1393,7 +1375,8 @@ where
         let dispatch_floor = height
             .previous()
             .expect("floor anchor above processed height must have predecessor");
-        self.update_processed_height(dispatch_floor, resolver);
+        let processed = Self::processed(&self.finalized_blocks, dispatch_floor).await;
+        self.update_processed(processed, resolver);
 
         // Release staged blocks skipped by the floor transition
         self.staged.retain(height);
@@ -1411,18 +1394,10 @@ where
 
         // Drop all pending acknowledgement waiters so any in-flight application
         // acks for blocks below the new floor cannot rewrite the processed floor.
-        self.cleared_acks.extend(self.pending_acks.clear());
+        self.pending_acks.clear();
 
-        // The active floor retires round-bound entries and every commitment whose
-        // acknowledgement it superseded.
-        let commitments = self.take_superseded_ack_commitments();
-        buffer.retire(Retirement {
-            round_floor: self.floor.round(),
-            exact_retirements: commitments,
-        });
-
-        // The floor is durable, so cache/finalized data below it can be pruned.
-        self = self.prune_after_floor(height).await;
+        // Keep the processed block so the application can restart from it.
+        self = self.prune_after_floor(dispatch_floor).await;
 
         // Keep caller-owned block subscriptions alive across the floor update. Resolver pruning
         // stops obsolete network work, but later local ingress can still satisfy these waiters,
@@ -1435,20 +1410,10 @@ where
         self.try_dispatch_blocks(application).await
     }
 
-    /// Takes cleared acknowledgement commitments covered by the active processed-height floor.
-    ///
-    /// Cleared acknowledgements above the floor are re-dispatched and remain live.
-    fn take_superseded_ack_commitments(&mut self) -> Vec<V::Commitment> {
-        let processed_height = self.floor.processed_height();
-        std::mem::take(&mut self.cleared_acks)
-            .into_iter()
-            .filter_map(|(height, commitment)| (height <= processed_height).then_some(commitment))
-            .collect()
-    }
-
     /// Handle a deliver message from the resolver. Block delivers are handled
     /// immediately. Finalized/Notarized delivers are parsed and structurally
     /// validated, then collected into `delivers` for batch certificate verification.
+    /// A notarized delivery's block is decoded only after its certificate verifies.
     async fn handle_deliver<Buf: Buffer<V>>(
         mut self: Box<Self>,
         message: ResolverDelivery<V>,
@@ -1638,30 +1603,15 @@ where
                     return self;
                 }
 
-                // Notarization alone does not prove the commitment encodes the block,
-                // so decoding must recompute it
-                let commitment = notarization.proposal.payload;
-                if !V::check_payload(scheme.as_ref(), commitment) {
-                    response.send_lossy(false);
-                    return self;
-                }
-                let block_cfg = V::block_cfg(
-                    &self.block_codec_config,
-                    ExpectedCommitment::Untrusted(commitment),
-                );
-                let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
-                    response.send_lossy(false);
-                    return self;
-                };
-
-                if V::commitment(&block) != notarization.proposal.payload {
+                // The payload must be valid under the epoch's scheme.
+                if !V::check_payload(scheme.as_ref(), notarization.proposal.payload) {
                     response.send_lossy(false);
                     return self;
                 }
                 delivers.push(PendingVerification::Notarized {
                     scoped: Scoped::scheme(scheme),
                     notarization,
-                    block,
+                    block: value,
                     response,
                 });
             }
@@ -1773,10 +1723,25 @@ where
                     response,
                     ..
                 } => {
+                    // Notarization alone does not prove the commitment encodes the block,
+                    // so decoding must recompute it.
+                    let commitment = notarization.proposal.payload;
+                    let block_cfg = V::block_cfg(
+                        &self.block_codec_config,
+                        ExpectedCommitment::Untrusted(commitment),
+                    );
+                    let Ok(block) = V::Block::decode_cfg(block, &block_cfg) else {
+                        response.send_lossy(false);
+                        continue;
+                    };
+                    if V::commitment(&block) != commitment {
+                        response.send_lossy(false);
+                        continue;
+                    }
+
                     // Valid notarization received.
                     response.send_lossy(true);
                     let round = notarization.round();
-                    let commitment = notarization.proposal.payload;
                     let digest = V::commitment_to_inner(commitment);
                     debug!(?round, ?digest, "received notarization");
 
@@ -1848,8 +1813,6 @@ where
         Some((epoch, scoped))
     }
 
-    // -------------------- Application Dispatch --------------------
-
     /// Attempt to dispatch the next finalized block to the application if ready.
     ///
     /// Dispatch finalized blocks to the application until the pipeline is full
@@ -1883,7 +1846,7 @@ where
     ///   try_dispatch_blocks  ->  sends durable blocks to app, enqueues pending acks
     ///
     /// Iteration M (ack handler, M > N):
-    ///   ack handler       ->  update_processed_height  ->  metadata buffered
+    ///   ack handler       ->  update_processed         ->  metadata buffered
     ///   stream.sync       ->  metadata durable
     /// ```
     async fn try_dispatch_blocks(
@@ -1916,22 +1879,18 @@ where
                 },
             };
             let height = block.height();
-            let commitment = V::commitment(&block);
             assert_eq!(height, next_height, "finalized block height mismatch");
 
             let (ack, ack_waiter) = A::handle();
             application.report(Update::Block(V::into_shared(block), ack));
             self.pending_acks.enqueue(PendingAck {
                 height,
-                commitment,
                 receiver: ack_waiter,
             });
             self.staged.retain(height.next());
         }
         self
     }
-
-    // -------------------- Prunable Storage --------------------
 
     /// Sync both finalization archives to durable storage, blocking the actor
     /// until they are durable.
@@ -2016,8 +1975,6 @@ where
         });
         self
     }
-
-    // -------------------- Immutable Storage --------------------
 
     /// Get a finalized block from the immutable archive.
     async fn get_finalized_block(&self, height: Height) -> Option<V::Block> {
@@ -2170,8 +2127,6 @@ where
             finalization.round(),
         ))
     }
-
-    // -------------------- Mixed Storage --------------------
 
     /// Looks for a block in cache and finalized storage by digest.
     async fn find_block_in_storage(
@@ -2393,19 +2348,32 @@ where
 
     /// Buffers a processed height update in memory and metrics. Does NOT sync
     /// to durable storage. Sync metadata after buffered updates to make them durable.
-    fn update_processed_height(
+    fn update_processed(
         &mut self,
-        height: Height,
+        processed: Processed,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
+        let height = processed.height();
         self.stream.acknowledge(height);
-        self.floor.set_processed_height(height);
+        self.floor.set_processed(processed);
         let _ = self
             .processed_height
             .try_set(self.floor.processed_height().get());
 
         // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_height_floor::<V::Commitment>(height));
+    }
+
+    /// Classifies a processed height by whether its block is stored.
+    ///
+    /// A floor installed above a missing predecessor records that predecessor as processed. The
+    /// floor block is stored before the processed height is recorded.
+    async fn processed(finalized_blocks: &FB, height: Height) -> Processed {
+        match finalized_blocks.get(ArchiveID::Index(height.get())).await {
+            Ok(Some(_)) => Processed::Block(height),
+            Ok(None) => Processed::Absent(height),
+            Err(err) => panic!("failed to get processed block: {err}"),
+        }
     }
 
     /// Returns the latest recoverable round at or immediately after the processed height.
@@ -2497,7 +2465,7 @@ where
             return self;
         }
 
-        self.floor.set_processed_round(round);
+        self.floor.set_round(round);
 
         // Retain view-indexed cache data for a window behind the previously
         // processed finalized block.
@@ -2511,15 +2479,10 @@ where
         resolver.retain(handler::above_round_floor::<V::Commitment>(round));
 
         // A superseded anchor is an ancestor of a processed block, so the floor
-        // it announced is already active. Retire the acks it displaced and resume.
-        if self.floor.take_superseded_anchor(round).is_none() {
+        // it announced is already active. Resume repair and dispatch.
+        if self.floor.take_superseded(round).is_none() {
             return self;
         }
-        let commitments = self.take_superseded_ack_commitments();
-        buffer.retire(Retirement {
-            round_floor: round,
-            exact_retirements: commitments,
-        });
         let repaired;
         (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
         if repaired {

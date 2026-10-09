@@ -1124,13 +1124,13 @@ impl<K: Hash + Eq> GhostQueue<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{NZUsize, sync::RwLock};
+    use crate::NZUsize;
     use core::cell::{Cell, RefCell};
     use proptest::{prelude::*, test_runner::TestCaseResult};
     use std::{
         collections::{HashMap, HashSet, VecDeque},
         rc::Rc,
-        sync::{Arc, Barrier},
+        sync::Barrier,
         thread,
     };
 
@@ -2291,26 +2291,19 @@ mod tests {
             cache.put(key, key);
         }
         let slot = cache.find_slot(&1).unwrap();
-        let cache = Arc::new(RwLock::new(cache));
-        let barrier = Arc::new(Barrier::new(5));
-        let mut threads = Vec::new();
-        for _ in 0..4 {
-            let cache = Arc::clone(&cache);
-            let barrier = Arc::clone(&barrier);
-            threads.push(thread::spawn(move || {
-                barrier.wait();
-                for _ in 0..1_000 {
-                    let guard = cache.read();
-                    assert_eq!(guard.get_at(slot, &1), Some(&1));
-                }
-            }));
-        }
-        barrier.wait();
-        for thread in threads {
-            thread.join().unwrap();
-        }
+        let barrier = Barrier::new(5);
+        thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    barrier.wait();
+                    for _ in 0..1_000 {
+                        assert_eq!(cache.get_at(slot, &1), Some(&1));
+                    }
+                });
+            }
+            barrier.wait();
+        });
 
-        let mut cache = Arc::try_unwrap(cache).unwrap().into_inner();
         cache.put(41, 41);
         assert!(cache.main_keys().contains(&1));
         cache.check_invariants();
