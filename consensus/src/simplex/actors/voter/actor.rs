@@ -72,7 +72,7 @@ struct Request<V: Viewable, F>(
     V,
     /// Span tracking the request from issuance to processed response.
     Span,
-    /// Pending response or retained result.
+    /// Pending response, or the retained state of a handoff request.
     F,
 );
 
@@ -120,9 +120,9 @@ enum ProposalState<D> {
     /// The automaton has not answered a handoff request yet.
     Handoff(oneshot::Receiver<Handoff<D>>),
     /// A handoff without a pending build: the application responded with [`Handoff::Wait`],
-    /// or we cancelled its build (see [`State::pending_handoff_abandonment`]). An ordinary
-    /// request for the same context follows exact parent certification, unless we voted to
-    /// nullify the request's view.
+    /// or we cancelled its build (see [`State::pending_handoff_abandonment`]). Once the exact
+    /// parent certifies or finalizes, an ordinary request for the same context follows, unless
+    /// we voted to nullify the request's view. A replacement parent can supersede it first.
     Waiting,
     /// A relayed candidate whose proposal broadcast and notarize vote require parent
     /// certification.
@@ -508,9 +508,9 @@ impl<
         pending_verify: &mut PendingVerification<D, S::PublicKey>,
     ) {
         // Retain requests for the current and optimistic future views. Drop requests for exited
-        // views, and requests whose captured parent is no longer valid once a replacement parent
-        // is selectable. Certification of an exited view continues after its verification
-        // receiver is dropped.
+        // views, and a proposal request whose captured parent is no longer valid once a
+        // replacement parent is selectable. Certification of an exited view continues after its
+        // verification receiver is dropped.
         let current_view = self.state.current_view();
         if let Some(request) = pending_propose.as_ref() {
             let reason = if request.view() < current_view {
@@ -534,10 +534,9 @@ impl<
             *pending_verify = None;
         }
 
-        // Cancel a pending handoff build once State::pending_handoff_abandonment reports why it
-        // should stop. Dropping the receiver cancels the build. The request then waits: an
-        // ordinary request for the same context follows if the parent certifies, and
-        // supersession replaces it once another parent is selectable.
+        // Cancel a pending handoff build once State::pending_handoff_abandonment reports a reason.
+        // Dropping the receiver cancels the build, and the request then waits (see
+        // [`ProposalState::Waiting`]).
         if let Some(Request(ProposalRequest::Handoff(context), _, state)) = pending_propose.as_mut()
             && matches!(state, ProposalState::Handoff(_))
             && let Some(reason) = self.state.pending_handoff_abandonment(context)
@@ -546,14 +545,16 @@ impl<
             *state = ProposalState::Waiting;
         }
 
-        // Resolve waiting and closed handoffs once their exact parent certifies or finalizes.
-        // Parent certification does not cancel an unanswered request or discard a held result. A
-        // waiting handoff releases its build latch, so the ordinary request below asks for the
-        // same context on the certified parent, unless we voted to nullify its view, where we can
-        // no longer record a proposal. A closed response forfeits the view. Held builds become
-        // eligible at the next response poll. Certification and finalization are recorded only
-        // in iterations that end with a journal sync, and responses are polled only in later
-        // iterations, so nothing built on the parent is consumed before its evidence is durable.
+        // Resolve a waiting or closed handoff once its exact parent certifies or finalizes.
+        //
+        // A waiting handoff releases its build latch, so the ordinary request below asks for the
+        // same context on the certified parent. If we voted to nullify the request's view, no
+        // proposal can be recorded there, so no ordinary request follows. A closed response
+        // forfeits the view.
+        //
+        // Certification and finalization are recorded only in iterations that end with a journal
+        // sync, and responses are polled only in later iterations, so nothing built on the
+        // parent is consumed before its evidence is durable.
         if let Some(Request(request, _, state)) = pending_propose.as_ref()
             && matches!(state, ProposalState::Waiting | ProposalState::Closed)
             && self.state.proposal_parent_certified(request.context())
@@ -773,8 +774,6 @@ impl<
             return None;
         }
 
-        // Record the proposal only if the parent captured for the build is
-        // still valid.
         if !self.state.proposed(&context, proposed) {
             if is_handoff {
                 self.record_handoff_abandoned(HandoffAbandonedReason::IneligibleAtRecording);
@@ -791,8 +790,8 @@ impl<
         // crash can do is relay a different payload for the same round after
         // restart (see [Plan::Propose]).
         //
-        // This plan also follows a candidate already relayed while held (see
-        // [Plan::Prepare]); a relay that sent it then does not send it again.
+        // A released held candidate, already relayed under [Plan::Prepare], also reaches this
+        // broadcast (see [Plan::Propose]).
         let _ = self.relay.broadcast(
             proposed,
             Plan::Propose {

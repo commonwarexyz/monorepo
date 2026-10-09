@@ -247,9 +247,9 @@
 //!
 //! ### Pipelined Handoff
 //!
-//! A pipelined handoff lets the incoming leader build or reuse its term-start proposal before
-//! the parent certifies. The application decides, per request, whether to prepare a candidate
-//! and whether consensus may vote for it before the parent certifies.
+//! A pipelined handoff lets the incoming leader prepare its term-start proposal before the parent
+//! certifies. The application decides, per request, whether to prepare a candidate and whether
+//! consensus may vote for it before the parent certifies.
 //!
 //! Handoff requests require a [`elector::Scheduled`] elector, which knows the incoming leader
 //! before the certificate that unlocks the term exists. A [`elector::Dynamic`] elector never
@@ -296,11 +296,11 @@
 //! `prepare` hook and builds through its ordinary proposal path. The decision is final for the
 //! request.
 //!
-//! Asking for the ancestry runs the ordinary construction checks, which may re-propose the epoch
-//! boundary block without the application: such a block is staged. A build that yields no block
-//! answers `Wait`. With `Stage`, construction and distribution overlap parent certification while
-//! consensus holds the vote. An application can choose it for any handoff whose outgoing leader
-//! it does not trust.
+//! Asking for the ancestry runs the ordinary construction checks. When the parent is the last block
+//! of the epoch, the marshal re-proposes it without the application and answers
+//! [`crate::Handoff::Stage`]. A build that yields no block answers `Wait`. With `Stage`,
+//! construction and distribution overlap parent certification while consensus holds the vote. An
+//! application can choose it for any handoff whose outgoing leader it does not trust.
 //!
 //! With [`crate::Handoff::Vote`], rotating leaders can pipeline every view. The leader
 //! distributes each proposal in parallel with its parent's votes, allowing network-bound view time
@@ -690,8 +690,8 @@ impl Lookahead {
     /// Returns the lowest view whose direct notarization can anchor
     /// `view` inside the optimistic *issuance* window, or `None` when
     /// `view` can never be issued optimistically, either because
-    /// optimism is disabled or because `view` starts a term, whose
-    /// proposals peers verify only on explicitly certified ancestry.
+    /// optimism is disabled or because `view` starts a term and peers
+    /// verify a term-start proposal only on explicitly certified ancestry.
     ///
     /// An anchor below the floor fails the hop bound exactly like no
     /// anchor at all, so a caller decides membership by asking whether
@@ -790,8 +790,8 @@ cfg_if::cfg_if! {
             /// tolerate multiple candidates per round (at most one is ever
             /// referenced by the proposer's signed votes).
             ///
-            /// The proposer's notarize vote follows this plan. A payload already
-            /// sent by [`Plan::Prepare`] is not sent again.
+            /// The proposer's notarize vote follows this plan. A relay that already
+            /// sent the payload for the matching [`Plan::Prepare`] does not send it again.
             Propose {
                 /// The round in which the block was proposed.
                 round: Round,
@@ -1917,8 +1917,7 @@ mod tests {
     ///
     /// Every application uses `handoff` to answer handoff proposal requests.
     ///
-    /// Every caller uses [`CLUSTER_LEADER_TIMEOUT`] and [`CLUSTER_CERTIFICATION_TIMEOUT`]. Runs
-    /// stay free of nullifications only while the link latency stays below
+    /// Runs stay free of nullifications only while the link latency stays below
     /// [`CLUSTER_LEADER_TIMEOUT`], since a view's proposal arrives about one link latency after
     /// the view starts.
     async fn setup_round_robin_cluster(
@@ -2067,8 +2066,8 @@ mod tests {
         });
     }
 
-    /// A pipelined handoff lets the boundary view notarize about one link latency
-    /// after the outgoing tip. Waiting for parent certification takes two.
+    /// A pipelined handoff lets each term-start view notarize about one link latency
+    /// after its parent. Waiting for parent certification takes two.
     ///
     /// Without the handoff, intra-term optimism refills the pipeline one view
     /// after the boundary stall. The handoff therefore barely changes average
@@ -8572,6 +8571,7 @@ mod tests {
                 // Each scripted round drives one full leader term, so the
                 // adversarial prefix spans `rounds * term_length` views.
                 let prefix_end = View::new(Widen::widen(scenario.rounds().len()) * term_length.get());
+
                 let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
                 let mut reporters = Vec::new();
                 let mut engine_handlers = Vec::new();

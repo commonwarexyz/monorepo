@@ -282,7 +282,7 @@ pub enum CommitmentFallback {
     ///
     /// Use this when the caller knows a round and commitment from consensus but not the
     /// proposal height, such as proposal construction, verification of a known child, or
-    /// certification of a notarized candidate. The round may not be notarized yet, as with
+    /// certification of a notarized candidate. The round might not be notarized yet, as with
     /// the uncertified parent of a pipelined handoff. Peers serve the request only once they
     /// hold its notarization, so until then only local availability completes it. An unresolved
     /// request remains eligible until the processed finalized-round floor reaches its round. Do
@@ -954,9 +954,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Requests the broadcast of a held term-start candidate without persisting it.
     ///
-    /// The candidate stays staged on the propose path until consensus locks it in,
-    /// which persists it through [`Self::verified_deferred`], or certification
-    /// flushes it. A candidate that is abandoned before then is never stored.
+    /// The caller keeps the candidate staged and persists it later through
+    /// [`Self::verified_deferred`], once consensus requests its propose broadcast or certification
+    /// needs it. A candidate abandoned before then is never stored.
     pub fn prepared(
         &self,
         round: Round,

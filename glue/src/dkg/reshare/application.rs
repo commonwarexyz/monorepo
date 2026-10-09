@@ -217,9 +217,10 @@ where
     /// selection (a dealer-log request from the midpoint on, or the final block's epoch info).
     ///
     /// A height that would carry this node's dealer log is left to [`Self::propose`] without
-    /// asking the inner application, and the reservation is released: a prepared block is
-    /// discarded whenever its parent fails to certify, and a reservation kept for it would
-    /// withhold the log from later proposals until finalization reaches that height.
+    /// asking the inner application, and the reservation is released. Consensus can discard a
+    /// prepared block without notice, as when its parent fails to certify or consensus cancels the
+    /// request, and a reservation kept for it would withhold the log from later proposals until
+    /// finalization reaches that height.
     #[tracing::instrument(
         name = "dkg.reshare.application.prepare",
         level = "info",

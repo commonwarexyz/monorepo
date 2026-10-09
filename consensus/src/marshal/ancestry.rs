@@ -44,9 +44,9 @@ pub trait Parent<B: Block>: Send + 'static {
     /// Fetches the parent and returns its ancestry when the proposal is the application's to
     /// build.
     ///
-    /// Returns `None` when the marshal handles the view itself: it found the epoch boundary
-    /// block or it cannot build on this parent. Return [`Handoff::Wait`](crate::Handoff::Wait)
-    /// then; the marshal discards any block.
+    /// Returns `None` when the marshal answers consensus itself: it found the epoch boundary
+    /// block, which it re-proposes, or it cannot build on this parent. Return
+    /// [`Handoff::Wait`](crate::Handoff::Wait) then; the marshal discards any block.
     fn ancestry(self) -> impl Future<Output = Option<impl Ancestry<B>>> + Send;
 }
 

@@ -196,7 +196,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// replaced before it certifies, the proposer can relay another candidate for the same
         /// view.
         ///
-        /// A relay may instead hold the candidate until consensus requests the broadcast that
+        /// A relay may defer sending the candidate until consensus requests the broadcast that
         /// precedes the proposer's vote.
         Stage(D),
         /// Request an ordinary proposal after the parent certifies.
@@ -235,7 +235,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// context once the parent certifies, unless it has already voted to nullify this view.
         ///
         /// Consensus requests the relay of a [`Handoff::Stage`] candidate as soon as it arrives.
-        /// Its notarize vote is cast once the parent certifies or finalizes.
         ///
         /// Closing the response forfeits the local proposal opportunity for this view once the
         /// parent certifies or finalizes, and the view then times out as a missing proposal.
@@ -427,13 +426,13 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Asking for the ancestry runs the marshal's proposal checks. The ancestry is absent when
         /// they find the epoch boundary block or a parent the marshal cannot build on. The marshal
         /// then answers consensus itself and discards whatever this method returns. A block
-        /// returned without asking for the ancestry is discarded too, so the checks always precede
-        /// a staged block.
+        /// returned without asking for the ancestry is discarded too, so the checks always run
+        /// before the marshal keeps a prepared block.
         ///
-        /// With [`Handoff::Vote`] or [`Handoff::Stage`], the marshal stages the returned block
-        /// as it would a proposal. With [`Handoff::Wait`], consensus waits for parent
-        /// certification before requesting [`Self::propose`] for the same context. The decision
-        /// is final for the request.
+        /// With [`Handoff::Vote`] or [`Handoff::Stage`], the marshal keeps the returned block for
+        /// relay as it would a proposal. With [`Handoff::Wait`], consensus waits for parent
+        /// certification before requesting [`Self::propose`] for the same context. The decision is
+        /// final for the request.
         ///
         /// With deferred or coded verification, a prepared build can start before this node
         /// has verified the parent's contents. The parent may later fail certification,

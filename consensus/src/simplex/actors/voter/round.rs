@@ -440,7 +440,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             .map(|start| now.duration_since(start).unwrap_or_default())
     }
 
-    /// Returns time since first local view entry, without falling back to proposal recording.
+    /// Returns time since the local node first entered this view, ignoring when it built its own
+    /// proposal. None if it never entered the view.
     pub fn elapsed_since_entry(&self, now: SystemTime) -> Option<Duration> {
         self.entered_at
             .map(|start| now.duration_since(start).unwrap_or_default())

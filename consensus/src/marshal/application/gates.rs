@@ -14,7 +14,7 @@ use tracing::debug;
 
 /// A proposal staged for its relay broadcast.
 pub(crate) struct Staged<B> {
-    /// The staged block.
+    /// The block, shared with the relay send and the eventual persist.
     pub(crate) block: Arc<B>,
     /// Delivers the durable-sync handle once marshal persists the block.
     pub(crate) ack: oneshot::Sender<Handle<()>>,
@@ -106,8 +106,8 @@ impl<D: Digest, B> Gates<D, B> {
     /// Returns the staged proposal for `(round, digest)` for a send that does not
     /// persist it, and marks it sent so the lock-in broadcast only persists it.
     ///
-    /// The entry stays staged: a held candidate may still be abandoned, and it
-    /// is stored only once consensus locks it in.
+    /// The entry stays staged: a held candidate may still be abandoned, so it is stored only by the
+    /// lock-in broadcast or by certification.
     pub(crate) fn send_staged(&self, round: Round, digest: D) -> Option<Arc<B>> {
         let mut inner = self.inner.lock();
         let staged = inner.proposals.get_mut(&(round, digest))?;

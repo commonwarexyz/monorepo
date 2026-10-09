@@ -180,12 +180,9 @@ where
 ///
 /// Implements the consensus [`Application`](commonware_consensus::Application) and receives
 /// finalized blocks from marshal as a [`Reporter`]. The mailbox forwards proposal, verification,
-/// and reporting calls to the actor. If the actor stops before responding, `propose` returns `None`
-/// and `verify` panics with "stateful actor dropped during verify".
-///
-/// `prepare` decides through a retained clone of the application, including after the actor
-/// stops, so a decision other than [`Handoff::Wait`] does not guarantee that the proposal can
-/// be built.
+/// and reporting calls to the actor. If the actor stops before responding, `propose` returns
+/// `None`, `prepare` returns [`Handoff::Wait`], and `verify` panics with "stateful actor dropped
+/// during verify".
 pub struct Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -286,8 +283,9 @@ where
 
     /// Decides through [`Application::prepare`] before any work, so a [`Handoff::Wait`]
     /// decision never touches the parent or the actor queue. Otherwise the ancestry is fetched,
-    /// the block is built as an ordinary proposal by the processing actor (which owns the
-    /// database batches), and the decision is attached to the result.
+    /// the block is built as an ordinary proposal by the actor (which owns the database batches),
+    /// and the decision is attached to the block. An absent ancestry or a proposal that builds no
+    /// block returns [`Handoff::Wait`].
     async fn prepare(
         &mut self,
         context: (E, Self::Context),

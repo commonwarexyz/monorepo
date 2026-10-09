@@ -718,7 +718,7 @@ where
             }
 
             // Special case: If the parent block is the last block in the epoch,
-            // re-propose it as to not produce any blocks that will be cut out
+            // re-propose it so as not to produce any blocks that will be cut out
             // by the epoch transition.
             let last_in_epoch = epocher
                 .last(consensus_context.epoch())
@@ -1057,10 +1057,10 @@ where
     /// Prepares a term-start proposal on an uncertified parent.
     ///
     /// The application receives the parent as a [`Parent`](crate::marshal::ancestry::Parent)
-    /// handle. Asking the handle for the ancestry runs the same checks as [`Self::propose`], in
-    /// the same order, and the epoch boundary block, which those checks re-propose without the
-    /// application, answers [`Handoff::Stage`]. An application that declines without asking
-    /// costs no lookup or fetch, and one that declines on its first poll is answered
+    /// handle. Asking the handle for the ancestry runs the same checks as [`Self::propose`], in the
+    /// same order. When those checks find the epoch boundary block, the marshal re-proposes it
+    /// without the application and answers [`Handoff::Stage`]. An application that declines without
+    /// asking costs no lookup or fetch, and if it also completes on its first poll, it is answered
     /// [`Handoff::Wait`] on this task without a spawn. A round without a scheme answers
     /// [`Handoff::Wait`] as well.
     #[allow(clippy::async_yields_async)]

@@ -5422,9 +5422,9 @@ mod tests {
     }
 
     /// A leader that relays a candidate before voting may abandon it and relay a replacement
-    /// for the same round. The replacement's shards reach every participant, and a participant
-    /// that discovers only the replacement verifies its assigned shard and reconstructs the
-    /// block, and never reconstructs the abandoned candidate.
+    /// for the same round. The replacement's shards reach every participant. A participant that
+    /// discovers only the replacement verifies its assigned shard and reconstructs that block,
+    /// but never the abandoned candidate.
     #[test_traced]
     fn test_replacement_proposal_in_same_round_reaches_peers() {
         let fixture: Fixture<C> = Fixture {

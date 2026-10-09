@@ -529,11 +529,11 @@ where
     /// Prepares a term-start proposal on an uncertified parent.
     ///
     /// The application receives the parent as a [`Parent`](crate::marshal::ancestry::Parent)
-    /// handle. Asking the handle for the ancestry runs the same checks as [`Self::propose`], in
-    /// the same order, and the epoch boundary block, which those checks re-propose without the
-    /// application, answers [`Handoff::Stage`]. An application that declines without asking
-    /// costs no fetch, and one that declines on its first poll is answered [`Handoff::Wait`] on
-    /// this task without a spawn.
+    /// handle. Asking the handle for the ancestry runs the same checks as [`Self::propose`], in the
+    /// same order. When those checks find the epoch boundary block, the marshal re-proposes it
+    /// without the application and answers [`Handoff::Stage`]. An application that declines without
+    /// asking costs no fetch, and if it also completes on its first poll, it is answered
+    /// [`Handoff::Wait`] on this task without a spawn.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
     async fn prepare(

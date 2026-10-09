@@ -272,7 +272,7 @@ fn retained_pipeline_handoff(first: First) {
                 build_release_tx.send_lossy(());
                 completed_rx.await.unwrap();
                 // Keep the parent uncertified for three link delays so the
-                // observer receives any vote cast when the build completes.
+                // peer receives any vote cast when the build completes.
                 let quiet_until = context.current() + 3 * LINK.latency;
                 loop {
                     select! {

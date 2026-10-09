@@ -3698,10 +3698,10 @@ mod tests {
                     "{kind:?}: re-proposed boundary block must be stored at the re-proposal round"
                 );
 
-                // An accepted handoff uses the automatic boundary re-proposal path, and a
-                // block the application returns regardless of the absent ancestry is
-                // discarded. The re-proposed block carries no application decision, so it
-                // is staged.
+                // An accepted handoff takes the automatic boundary re-proposal path, and the
+                // marshal discards the block that the application returns despite the absent
+                // ancestry. The re-proposed block carries no application decision, so it is
+                // answered Stage.
                 let pipeline_round =
                     Round::new(Epoch::zero(), View::new(boundary_height.get() + 2));
                 let pipeline_context = Ctx {
@@ -3773,8 +3773,8 @@ mod tests {
                 let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
                 let round = Round::new(Epoch::zero(), View::new(2));
 
-                // Before the crash, the relay broadcast of a block built on a parent that
-                // replay has since replaced persisted it at the round.
+                // Before the crash, the relay broadcast persisted a block at the round. Replay
+                // has since replaced the block's parent.
                 let setup = StandardHarness::setup_validator(
                     context.child("validator").with_attribute("index", 0),
                     &mut oracle,
@@ -4056,8 +4056,6 @@ mod tests {
                     "{kind:?}: a stored block must not replace the application's build"
                 );
 
-                // An application that asks builds on the fetched parent and is answered under
-                // its decision.
                 for (label, decision) in [
                     ("staging", Handoff::Stage(())),
                     ("voting", Handoff::Vote(())),
@@ -4093,7 +4091,7 @@ mod tests {
 
     /// Deferred votes on a block before checking its parent link, so a pipelined
     /// handoff can request a build on a parent whose link was never validated. The
-    /// build must only walk ancestry through the parent that the block's consensus
+    /// build may walk ancestry only through the parent that the tip's own consensus
     /// context names.
     ///
     /// The application returns its block even when the parent handle yields no

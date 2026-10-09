@@ -266,8 +266,9 @@ mod tests {
         (votes, certificate)
     }
 
-    /// Returns the schemes of every participant except `local_index`, whose votes form
-    /// certificates that an honest local voter could observe only from its peers.
+    /// Returns the schemes of every participant except `local_index`. A certificate built from
+    /// their votes lacks the local voter's share, so an honest local voter could observe it
+    /// only from its peers.
     fn peers<S: Clone>(schemes: &[S], local_index: usize) -> Vec<S> {
         schemes
             .iter()
@@ -3960,9 +3961,9 @@ mod tests {
         });
     }
 
-    /// A pipelined handoff proposes and notarizes across the term boundary
-    /// before any certificate forms. Voting for the outgoing term's final
-    /// view is enough for the incoming leader to issue its proposal.
+    /// A pipelined handoff proposes and casts its notarize vote across the term boundary
+    /// before any certificate forms. Voting for the outgoing term's final view is enough for
+    /// the incoming leader to issue its proposal.
     #[test_traced]
     fn test_pipelined_handoff_proposes_across_term_boundary() {
         let n = 5;
@@ -4080,8 +4081,8 @@ mod tests {
         });
     }
 
-    /// A locally pipelined term-start vote may notarize before its parent
-    /// certifies, but application certification requests remain parent-first.
+    /// A locally pipelined term-start proposal may notarize before its parent certifies, but
+    /// application certification requests remain parent-first.
     #[test_traced]
     fn test_pipelined_handoff_certifies_parent_before_child() {
         let n = 1;
@@ -4199,8 +4200,8 @@ mod tests {
         });
     }
 
-    /// Leader timeout of [`HandoffFixture`] voters and their restarted replacements, which
-    /// timeout assertions also wait past.
+    /// Leader timeout of [`HandoffFixture`] voters and their restarted replacements. Timeout
+    /// assertions wait past it.
     const HANDOFF_LEADER_TIMEOUT: Duration = Duration::from_secs(10);
 
     /// Certification timeout of [`HandoffFixture`] voters and their restarted replacements.
@@ -5029,8 +5030,8 @@ mod tests {
             let mut fixture = HandoffFixture::new(&mut context, Handoff::Stage(())).await;
             let certified = fixture.certify_parent(&context).await;
 
-            // The parent's certification times out while its certification and the
-            // handoff build are both pending.
+            // The parent's certification times out while it and the handoff build are both pending,
+            // so we vote to nullify view 2.
             wait_for_local_nullify(&context, &mut fixture.batcher, View::new(2)).await;
             wait_for_handoff_abandoned(&context, "ParentNullify").await;
             assert!(
@@ -5253,10 +5254,12 @@ mod tests {
     }
 
     /// Pins the request contract for one view: at most two prepare requests and one ordinary
-    /// proposal request. The second prepare follows only the notarization of an equivocating
-    /// outgoing leader's other block at the parent view, which replaces the parent this node
-    /// voted for, and the ordinary request follows the replacement's certification after the
-    /// second prepare answers `Wait`. Nothing follows the ordinary request.
+    /// proposal request.
+    ///
+    /// The second prepare follows only the notarization of an equivocating outgoing leader's
+    /// other block at the parent view, which replaces the parent this node voted for. The
+    /// ordinary request follows the replacement's certification after the second prepare
+    /// answers `Wait`. Nothing follows the ordinary request.
     #[test_traced]
     fn test_pipelined_handoff_request_contract() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
@@ -5521,8 +5524,8 @@ mod tests {
         });
     }
 
-    /// A dropped handoff response is a terminal application failure for the
-    /// optimistic child, even if its parent later certifies.
+    /// A dropped handoff response forfeits the term-start view once its parent certifies: the
+    /// voter nullifies the view without requesting an ordinary proposal on that parent.
     #[test_traced]
     fn test_pipelined_handoff_dropped_response_nullifies_after_parent_certification() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
@@ -5729,10 +5732,10 @@ mod tests {
         reissue_handoff_after_parent_nullification(Unanswered::Closed);
     }
 
-    /// The incoming leader's handoff build rests on an outgoing chain it verified and voted
-    /// for. A conflicting notarization at the chain's first view invalidates that ancestry, so
-    /// the voter cancels the build before any timeout, live or after a restart replays its
-    /// votes.
+    /// The incoming leader's handoff build rests on an outgoing chain A1 to A3 that it verified
+    /// and voted for. A conflicting notarization for B1 at the chain's first view invalidates that
+    /// ancestry, so the voter cancels the build before any timeout, live or after a restart
+    /// replays its votes.
     fn displaced_ancestor_cancels_before_timeout(restart: bool) {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|mut context| async move {
             let n = 4;

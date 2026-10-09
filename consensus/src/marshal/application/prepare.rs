@@ -28,7 +28,7 @@ use tracing::{Instrument as _, Span, debug, warn};
 ///
 /// The handle reports the same outcome to the marshal with a unit ancestry.
 pub(crate) enum Resolved<D, S, A, M = ()> {
-    /// The marshal re-proposes the epoch boundary block under `id`.
+    /// The marshal re-proposes the epoch boundary block, identified by the first field.
     Reuse(D, Arc<S>),
     /// The marshal cannot build on this parent.
     Skip,
@@ -42,12 +42,11 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
 /// The staging log name of a re-proposed epoch boundary block.
 pub(crate) const BOUNDARY_BLOCK: &str = "re-proposed boundary block";
 
-/// A parent the marshal fetches only when the application asks for it.
+/// A parent the marshal fetches only when the application asks for its ancestry.
 ///
-/// `resolve` holds the marshal's proposal checks, which run only when the application asks for
-/// the ancestry. The handle reports their outcome to the marshal before it answers the
-/// application, so the marshal can tell a block built on the fetched ancestry from one built
-/// without it.
+/// `resolve` holds the marshal's proposal checks. The handle reports their outcome to the
+/// marshal before it answers the application, so the marshal can tell a block built on the
+/// fetched ancestry from one built without it.
 struct Lazy<F, D, S, M> {
     resolve: F,
     report: oneshot::Sender<Resolved<D, S, (), M>>,
@@ -127,8 +126,10 @@ where
 ///
 /// A build that completes on its first poll without asking for the parent, as the default
 /// [`Application::prepare`] does, is answered [`Handoff::Wait`] on the caller's task without
-/// spawning. Any other build is driven by a task spawned from `context` until it completes or
-/// consensus drops the receiver, which cancels the build and its wait for the parent.
+/// spawning. A build that completes on its first poll after its parent resolved is answered
+/// from a spawned task. Any other build is driven by a task spawned from `context` until it
+/// completes or consensus drops the receiver, which cancels the build and its wait for the
+/// parent.
 ///
 /// `seal` turns a block the application built into the staged form and its identifier.
 fn drive<E, B, D, S, Fut, M>(

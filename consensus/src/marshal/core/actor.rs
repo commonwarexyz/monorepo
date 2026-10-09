@@ -666,7 +666,7 @@ where
                 // (durability is not required until certify). A leader that
                 // crashes here rebuilds after restart and may broadcast a
                 // different block for the same round. This is tolerated: a
-                // block no journaled vote names cannot be notarized, extra
+                // block that no journaled vote names cannot be notarized, extra
                 // block bytes cannot form a conflicting certificate (unlike
                 // votes), and block storage holds multiple candidates per
                 // round (see [Mailbox::get_verified]).
@@ -681,9 +681,9 @@ where
                 recipients,
                 ..
             } => {
-                // A held candidate is only sent. It is stored by the later
-                // [Message::Verified] that the lock-in requests, so an abandoned
-                // candidate costs no storage write.
+                // A held candidate is only sent. A later [Message::Verified],
+                // requested by the lock-in or by certification, stores it, so
+                // an abandoned candidate costs no storage write.
                 buffer.send(round, block, recipients);
             }
             Message::Verified {

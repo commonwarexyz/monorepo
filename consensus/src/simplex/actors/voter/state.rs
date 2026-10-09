@@ -867,14 +867,14 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             self.failed_certifications.insert(artifact.view());
         }
 
-        // Replay visits parents before children. A parent round without a direct
-        // certificate retains the local vote's proposal, so a child's binding to that
-        // payload is a fact we can restore. A parent round that already holds a
-        // certificate retains only the certified payload, which need not be the one the
-        // child was voted against, so no binding is recorded for that child: it is not
-        // checked against the local vote, and a conflicting certificate does not cancel a
-        // handoff build on it; the build stops once a nullification in its term invalidates
-        // the ancestry or this node votes to nullify the view it waits in.
+        // Replay visits parents before children. A parent round without a direct certificate still
+        // holds our local vote's proposal, so the child's binding to that payload can be restored.
+        //
+        // A parent round that already holds a certificate retains only the certified payload, which
+        // need not be the one the child was voted against. No binding is recorded for such a child,
+        // so it is not checked against the local vote, and that certificate does not cancel a
+        // handoff build that rests on the child. The build stops only once a nullification in its
+        // term invalidates the ancestry or this node votes to nullify the view it waits in.
         let binding = if let Artifact::Notarize(notarize) = artifact {
             self.views
                 .get(&notarize.proposal.parent)
@@ -992,11 +992,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 }
             };
 
-            // A term start on an uncertified parent is a pipelined handoff. Skip it while we
-            // wait in a view at or below that parent that we voted to nullify, without
-            // claiming the build request: if the parent certifies after all, the view becomes
-            // an ordinary candidate. A response that is ready on issue can be consumed before
-            // the actor reconciles pending builds, so the request must not be issued at all.
+            // A term start on an uncertified parent is a pipelined handoff. Skip it, without
+            // claiming the build request, while we wait at or below that parent in a view we voted
+            // to nullify. If the parent certifies after all, the view becomes an ordinary
+            // candidate. The request must not be issued at all, because a response that is ready on
+            // issue can be consumed before the actor reconciles pending builds.
             let is_handoff = view.is_term_start(self.term_length())
                 && !self.parent_certified((parent_view, parent_payload));
             if is_handoff && self.gave_up_below(parent_view) {
@@ -1484,8 +1484,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     // The `*_parent_ready` predicates answer whether a proposal's required
     // parent is settled enough to act on. Certification and finalization
     // require `explicit_parent_ready`. Notarize issuance inside the optimistic
-    // window uses `optimistic_parent_ready`, which delegates to its ancestry
-    // resolver so issuance and proposal construction share one ancestry rule.
+    // window uses `optimistic_parent_ready`, which delegates to
+    // `optimistic_ancestry_payload` so issuance and proposal construction share
+    // one ancestry rule.
 
     /// Returns the payload of `view`'s explicitly certified (or finalized)
     /// proposal, the strongest form of ancestry.
@@ -1563,8 +1564,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// certificate-backed payload when one exists, otherwise our own verified,
     /// unequivocated, notarize-broadcast proposal; recursively, so the whole
     /// uncertified chain rests on views we voted for ourselves.
-    /// For an ancestor without a direct certificate, a recorded parent binding must match
-    /// the resolved parent payload.
+    ///
+    /// For an ancestor without a direct certificate, its recorded parent binding must
+    /// also match the resolved parent payload.
     fn optimistic_ancestry_payload(&self, view: View) -> Option<&D> {
         if view == GENESIS_VIEW {
             return Some(self.genesis.as_ref().expect("genesis must be present"));
@@ -1631,9 +1633,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return;
         }
 
-        // Before the outgoing view notarizes, a pipelined handoff can build only on our own
-        // vote (see [`Self::optimistic_ancestry_payload`]). Stamp the incoming leader only after
-        // we broadcast that vote. Otherwise the outgoing view's notarization elects the leader.
+        // Before the outgoing view notarizes, a pipelined handoff can build only on our own vote
+        // (see [`Self::optimistic_ancestry_payload`]), so stamp the incoming leader only after we
+        // broadcast it.
         if !self
             .views
             .get(&view)
@@ -1779,8 +1781,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.parent_payload_for(proposal.view(), proposal.parent)
     }
 
-    /// [`Self::parent_payload`] for a `(view, parent)` pair, so callers
-    /// without a completed proposal share the same ancestry rule.
+    /// Applies the [`Self::parent_payload`] rule to a `(view, parent)` pair, for callers
+    /// without a completed proposal.
     fn parent_payload_for(&self, view: View, parent: View) -> Result<D, ParentPayloadError> {
         self.validate_parent_span(view, parent)?;
 
@@ -6013,9 +6015,8 @@ mod tests {
             );
             state.set_genesis(test_genesis());
 
-            // Replay is ordered by view, so the parent's certificate and
-            // certification restore before the vote. Restore them first so the
-            // vote sits on explicitly certified ancestry.
+            // Replay is ordered by view, so the parent's certificate and certification are
+            // restored before the vote, leaving the vote on explicitly certified ancestry.
             let parent = Proposal::new(
                 Rnd::new(epoch, View::new(1)),
                 GENESIS_VIEW,
@@ -7289,7 +7290,6 @@ mod tests {
     fn pipelined_handoff_certification_barrier_survives_restart() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            // The journal holds an early vote issued before the restart.
             let (
                 Fixture {
                     schemes, verifier, ..
@@ -7298,6 +7298,7 @@ mod tests {
             ) = setup_state_with_handoff(&mut context, 1, 0, 9);
             certify_view_4(&mut state, &verifier, &schemes);
 
+            // The journal holds an early vote issued before the restart.
             let tip = fetch_proposal(5, 4, 65);
             let tip_vote = Notarize::sign(&schemes[0], tip.clone()).expect("tip vote");
             state.replay(&Artifact::Notarize(tip_vote));
@@ -7571,9 +7572,9 @@ mod tests {
         });
     }
 
-    /// The automaton is asked to propose at most once per view: a build rejected because its
-    /// parent failed local certification keeps the view's request claimed, even after a
-    /// finalization makes that parent usable again.
+    /// A build rejected because its parent failed local certification keeps the view's request
+    /// claimed, even after a finalization makes that parent usable again, so the automaton is
+    /// not asked to propose for that view again.
     #[test]
     fn rejected_build_keeps_single_propose_per_view() {
         let runtime = deterministic::Runner::default();

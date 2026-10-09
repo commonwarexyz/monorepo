@@ -133,12 +133,10 @@ pub fn genesis<H: Hasher>(epoch: Epoch) -> H::Digest {
 
 type Latency = (f64, f64);
 
-/// Observer invoked on every `Message::Propose` and `Message::Handoff` request. Used by tests to
-/// detect spurious propose calls.
+/// Callback that receives the context of each ordinary or handoff proposal request.
 type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Send + 'static>;
 
-/// Handler that takes ownership of the handoff proposal the mock would send and
-/// its response so tests can decide when it completes.
+/// Callback that receives a built handoff proposal's round, the proposal, and its response sender.
 type HandoffController<D> =
     Box<dyn Fn(Round, Handoff<D>, oneshot::Sender<Handoff<D>>) + Send + 'static>;
 
@@ -147,8 +145,7 @@ type HandoffController<D> =
 type VerifyObserver<H, P> =
     Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
 
-/// Handler that takes ownership of a certification response so tests can
-/// decide when it completes.
+/// Callback that receives a certification request's round, payload, and response sender.
 type CertificationController<D> = Box<dyn Fn(Round, D, oneshot::Sender<bool>) + Send + 'static>;
 
 /// Behavior used to resolve application certification requests.
@@ -292,16 +289,16 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.drop_proposals = drop;
     }
 
-    /// When set, `Message::Propose` requests, and `Message::Handoff` requests that a non-Wait
-    /// decision would answer, are held open indefinitely: the response sender is parked in
+    /// When set, `Message::Propose` requests, and `Message::Handoff` requests unless the handoff
+    /// decision is `Wait`, are held open indefinitely: the response sender is parked in
     /// `pending_proposes` or `pending_handoffs`, keeping the oneshot alive so the caller's
-    /// `receiver` never resolves. This simulates a propose that is still in flight at the
-    /// moment the voter crashes.
+    /// `receiver` never resolves. This simulates a propose that is still in flight at the moment
+    /// the voter crashes.
     pub const fn set_stall_proposals(&mut self, stall: bool) {
         self.stall_proposals = stall;
     }
 
-    /// Sets the decision attached to handoff candidates.
+    /// Sets the handoff decision, which defaults to `Wait`.
     pub const fn set_handoff(&mut self, handoff: Handoff<()>) {
         self.handoff = handoff;
     }
@@ -419,7 +416,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
             .sleep(Duration::from_millis(duration as u64))
             .await;
 
-        // Use the configured behavior to complete or retain the response.
+        // Complete, hand off, park, or drop the response as configured.
         match &self.should_certify {
             Certifier::Always => {
                 response.send_lossy(true);
@@ -435,9 +432,9 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
 
     fn broadcast(&mut self, payload: H::Digest, plan: Plan<P>) {
         let (contents, recipients) = match plan {
-            // A held candidate is sent once, when it is prepared. Its
-            // [`Plan::Propose`] broadcast does not send it again, mirroring
-            // marshal's relay.
+            // A held candidate is sent when consensus requests `Plan::Prepare`.
+            // Its later `Plan::Propose` broadcast does not send it again,
+            // mirroring marshal's relay.
             Plan::Prepare { .. } => {
                 let contents = self.pending.get(&payload).expect("missing payload").clone();
                 self.seen.insert(payload, contents.clone());

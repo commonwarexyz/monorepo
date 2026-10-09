@@ -30,8 +30,9 @@ pub struct MockVerifyingApp<B, S> {
     /// The decision `prepare` attaches to a built block. `Wait` declines without asking for
     /// the parent.
     handoff: Handoff<()>,
-    /// Whether `prepare` asks the parent handle for its ancestry before building. A mock that
-    /// does not returns `propose_result` under its decision anyway, which marshal must discard.
+    /// Whether `prepare` asks the parent handle for its ancestry before building. When false,
+    /// `prepare` returns `propose_result` under its decision without asking, and marshal must
+    /// discard it.
     ask_parent: bool,
     /// Whether `prepare` returns `propose_result` under its decision even when the parent
     /// handle yields no ancestry, which marshal must discard.
@@ -39,7 +40,7 @@ pub struct MockVerifyingApp<B, S> {
     /// Whether `prepare` suspends once before building, so marshal drives it from a task
     /// instead of answering it on its first poll.
     suspend: bool,
-    /// Shared by clones so that only the first proposal build blocks.
+    /// Shared by clones so that only the first proposal build waits on the gate.
     proposal_gate: Option<Arc<Mutex<Option<ProposalGate>>>>,
     /// Blocks for which `verify` returns false.
     pub reject: Option<fn(&B) -> bool>,
@@ -96,8 +97,8 @@ impl<B, S> MockVerifyingApp<B, S> {
         self
     }
 
-    /// Blocks the first proposal build until cancellation. Returns receivers that
-    /// signal when the build starts and that error when it is cancelled.
+    /// Blocks the first proposal build until cancellation. Returns a receiver that
+    /// signals when the build starts and one that errors when the build is cancelled.
     pub fn with_proposal_gate(mut self) -> (Self, oneshot::Receiver<()>, oneshot::Receiver<()>) {
         let (started, started_rx) = oneshot::channel();
         let (dropped, dropped_rx) = oneshot::channel();

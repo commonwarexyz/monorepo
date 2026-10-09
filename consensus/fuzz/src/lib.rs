@@ -62,7 +62,8 @@ const MAX_SLEEP_DURATION: Duration = Duration::from_secs(15);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 
-/// Honest handoff decisions: wait for every parent, prepare and hold, or vote early.
+/// Honest handoff decisions: wait for parent certification, relay early but hold the vote,
+/// or vote early.
 pub const HANDOFF_DECISIONS: [Handoff<()>; 3] =
     [Handoff::Wait, Handoff::Stage(()), Handoff::Vote(())];
 
