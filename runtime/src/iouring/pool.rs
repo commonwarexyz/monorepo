@@ -130,7 +130,7 @@ use super::{
     runtime::{Panic, Role, Shared, Worker},
     task::{Ready, Runnable},
 };
-use crate::utils::{self, Panicker};
+use crate::utils::Panicker;
 use crossbeam_utils::CachePadded;
 use std::{
     collections::VecDeque,
@@ -139,7 +139,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     sync::{Arc, mpsc},
     task::Poll,
-    thread::JoinHandle,
+    thread::{self, JoinHandle},
 };
 
 cfg_if::cfg_if! {
@@ -519,9 +519,13 @@ impl Threads {
             let (ready, started) = mpsc::channel();
             let shared = shared.clone();
             let failures = failures.clone();
-            let handle = utils::thread::spawn(shared.cfg.thread_stack_size(), move || {
-                run(shared, index as u32, ready, failures)
-            });
+            // Linux shows at most 15 bytes of a thread's name, which this
+            // fits for every worker index.
+            let handle = thread::Builder::new()
+                .name(format!("iouring-pool-{index}"))
+                .stack_size(shared.cfg.thread_stack_size())
+                .spawn(move || run(shared, index as u32, ready, failures))
+                .expect("failed to spawn pool worker");
 
             // Keep the handle before waiting, so a worker that fails at startup
             // is still joined.
