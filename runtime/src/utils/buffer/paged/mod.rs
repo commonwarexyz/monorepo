@@ -219,20 +219,6 @@ fn validate_read_ranges(
     Ok(())
 }
 
-/// Read the designated page from the underlying blob and return its logical bytes as a vector if it
-/// passes the integrity check, returning error otherwise. Safely handles partial pages. Caller can
-/// check the length of the returned vector to determine if the page was partial vs full.
-async fn get_page_from_blob(
-    blob: &impl Blob,
-    page_num: u64,
-    page_size: u64,
-    read_options: ReadOptions,
-) -> Result<IoBuf, Error> {
-    let (page, _) =
-        get_page_with_checksum_from_blob(blob, page_num, page_size, read_options).await?;
-    Ok(page)
-}
-
 /// Read the designated page and return both its logical bytes and validated checksum.
 async fn get_page_with_checksum_from_blob(
     blob: &impl Blob,

@@ -725,7 +725,6 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         // concurrently.
         let items_per_blob = self.items_per_blob.get();
         let mut runs = Vec::new();
-        let mut groups = Vec::new();
         let mut group_start = 0;
         while group_start < miss_positions.len() {
             let blob = position_to_blob(miss_positions[group_start], items_per_blob);
@@ -753,22 +752,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 runs.push((run_start, run_end, blob, blob_handle.clone()));
                 run_start = run_end;
             }
-            groups.push((group_start, group_end, blob_handle));
             group_start = group_end;
         }
-
-        // Fill the pages holding every missed frame header with one batched read per blob, so
-        // the per-frame reads below mostly find their frames resident instead of each faulting
-        // in its page on its own. A frame crossing into a following page fetches that page as
-        // before.
-        try_join_all(groups.iter().map(|(start, end, handle)| {
-            handle.fill_pages(
-                miss_offsets[*start..*end]
-                    .iter()
-                    .map(|&offset| (offset, MAX_U32_VARINT_SIZE)),
-            )
-        }))
-        .await?;
 
         let run_items = try_join_all(runs.iter().map(|(run_start, run_end, blob, handle)| {
             self.read_consecutive(handle, *blob, &miss_offsets[*run_start..*run_end])

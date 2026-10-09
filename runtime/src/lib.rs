@@ -806,7 +806,8 @@ stability_scope!(BETA {
         -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
 
-    /// Options that alter one [`Blob::read_at`] or [`Blob::read_at_buf`] operation.
+    /// Options that alter one [`Blob::read_at`], [`Blob::read_at_buf`], or [`Blob::read_many`]
+    /// operation.
     ///
     /// [`ReadOptions::default`] applies no options.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -941,26 +942,17 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
         /// Read every `(offset, len)` range in `ranges`, yielding `(range index, buffer)` as each
-        /// read completes, in any order.
+        /// read completes, in any order. Each buffer holds the `len` bytes at `offset`.
         ///
-        /// One call describes a whole set of independent reads so the backend can keep them in
-        /// flight together and amortize per-request dispatch, and the caller can consume each
-        /// result while the rest are still in flight. A backend that cannot batch reads serves
-        /// each range with [`Blob::read_at`] concurrently.
+        /// Without an error, every range is yielded exactly once. An error need not identify the
+        /// ranges it affects, and those ranges may never be yielded, so treat any error as failing
+        /// the call. Reads may begin before the stream is polled and continue after it is dropped.
         fn read_many(
             &self,
             ranges: &[(u64, usize)],
             options: ReadOptions,
         ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
-            use futures::FutureExt as _;
-            ranges
-                .iter()
-                .enumerate()
-                .map(|(index, &(offset, len))| {
-                    self.read_at(offset, len, options)
-                        .map(move |result| result.map(|bufs| (index, bufs)))
-                })
-                .collect::<futures::stream::FuturesUnordered<_>>()
+            read_each(self, ranges, options)
         }
 
         /// Write every remaining byte in `bufs` to the blob at `offset`.
@@ -1038,6 +1030,24 @@ stability_scope!(BETA {
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send {
             self.as_ref().start_sync()
         }
+    }
+
+    /// Serve `ranges` with one [`Blob::read_at`] per range, all in flight at once: the
+    /// [`Blob::read_many`] of a blob that cannot batch the reads.
+    pub(crate) fn read_each<'a, B: Blob + ?Sized>(
+        blob: &'a B,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send + 'a {
+        use futures::FutureExt as _;
+        ranges
+            .iter()
+            .enumerate()
+            .map(|(index, &(offset, len))| {
+                blob.read_at(offset, len, options)
+                    .map(move |result| result.map(|bufs| (index, bufs)))
+            })
+            .collect::<futures::stream::FuturesUnordered<_>>()
     }
 
     /// Interface that any runtime must implement to provide buffer pools.

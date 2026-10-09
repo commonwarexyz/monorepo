@@ -532,18 +532,6 @@ impl<'a, B: RBlob> Blob<'a, B> {
         }
     }
 
-    /// Fill the page cache with the pages that `ranges` (each `(offset, len)`) touch, using one
-    /// batched blob read, so the reads that follow find them resident.
-    pub(super) async fn fill_pages(
-        &self,
-        ranges: impl Iterator<Item = (u64, usize)> + Send,
-    ) -> Result<(), Error> {
-        match self {
-            Self::Writer(writer) => Ok(writer.fill_pages(ranges).await?),
-            Self::Sealed(sealed) => Ok(sealed.fill_pages(ranges).await?),
-        }
-    }
-
     /// Read up to `len` bytes at `offset`.
     pub(super) async fn read_up_to(
         &self,

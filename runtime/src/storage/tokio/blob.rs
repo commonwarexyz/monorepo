@@ -30,22 +30,22 @@ use tokio::task;
 // span as few submissions as possible.
 const IOVEC_BATCH_SIZE: usize = 1024;
 
-/// Reads one blocking task submits as a single native-AIO batch in [`crate::Blob::read_many`].
-///
-/// A submission is one device queue's worth of reads: NVMe queues hold 256 to 1024 commands,
-/// and a queue depth of 256 saturates the devices this runtime targets. Larger batches split
-/// into that many reads per submitting task, so submission cost spreads across tasks while
-/// each task keeps a full queue in flight.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-const AIO_SUBMISSION: usize = 256;
-
 /// Linux native AIO: submit a batch of `O_DIRECT` reads from one thread and reap completions
 /// as they arrive. Unlike a thread per read, the device sees the whole batch at once and the
 /// submitting thread pays only a few microseconds per read.
 #[cfg(target_os = "linux")]
 mod aio {
     use super::*;
+    use crate::BufMut as _;
     use std::os::unix::fs::OpenOptionsExt as _;
+
+    /// Reads one blocking task submits as a single batch in [`crate::Blob::read_many`].
+    ///
+    /// A submission is one device queue's worth of reads: NVMe queues hold 256 to 1024 commands,
+    /// and a queue depth of 256 saturates the devices this runtime targets. Larger batches split
+    /// into that many reads per submitting task, so submission cost spreads across tasks while
+    /// each task keeps a full queue in flight.
+    pub(super) const AIO_SUBMISSION: usize = 256;
 
     /// A pending read: its index in the batch and the physical file range.
     pub(super) struct Read {
@@ -80,19 +80,16 @@ mod aio {
         ptr: *mut u8,
         len: usize,
     }
-    // SAFETY: the buffer is uniquely owned heap memory.
-    unsafe impl Send for Aligned {}
     impl Aligned {
-        fn new(len: usize) -> Self {
-            let layout = std::alloc::Layout::from_size_align(len, ALIGN).expect("aligned layout");
+        fn new(len: usize) -> Result<Self, Error> {
+            let layout = std::alloc::Layout::from_size_align(len, ALIGN)
+                .map_err(|_| Error::OffsetOverflow)?;
             // SAFETY: `len` is a non-zero multiple of ALIGN.
             let ptr = unsafe { std::alloc::alloc(layout) };
-            assert!(!ptr.is_null(), "aligned allocation failed");
-            Self { ptr, len }
-        }
-        fn as_slice(&self) -> &[u8] {
-            // SAFETY: `ptr` is valid for `len` bytes, which the kernel filled before use.
-            unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+            if ptr.is_null() {
+                std::alloc::handle_alloc_error(layout);
+            }
+            Ok(Self { ptr, len })
         }
     }
     impl Drop for Aligned {
@@ -137,9 +134,19 @@ mod aio {
     /// A long-lived AIO context. Creating one and destroying it each cost an RCU grace period,
     /// so contexts are pooled and reused by submitting threads.
     struct Context(libc::c_ulong);
-    // SAFETY: an aio context handle may be used from any thread.
-    unsafe impl Send for Context {}
+    impl Drop for Context {
+        fn drop(&mut self) {
+            // SAFETY: this handle belongs exclusively to this owner. Successful destruction
+            // waits for every pending request before the destination buffers can be released.
+            let result = unsafe { libc::syscall(libc::SYS_io_destroy, self.0) };
+            if result != 0 {
+                // Without a completion barrier, releasing the buffers would be unsafe.
+                std::process::abort();
+            }
+        }
+    }
 
+    /// Contexts not in use by a submission. None of them holds an outstanding request.
     fn contexts() -> &'static Mutex<Vec<Context>> {
         static POOL: OnceLock<Mutex<Vec<Context>>> = OnceLock::new();
         POOL.get_or_init(|| Mutex::new(Vec::new()))
@@ -160,19 +167,32 @@ mod aio {
                 &mut ctx,
             )
         };
-        (r == 0).then_some(Context(ctx))
+        (r == 0).then(|| Context(ctx))
     }
 
-    /// Submit every read in `batch` through `ctx`, delivering each completion as the kernel
-    /// reports it. On error the context may still own in-flight requests, so it is retired.
+    /// Serve `read` with a positioned read, as [`crate::Blob::read_at`] does for
+    /// [`ReadOptions::DONT_CACHE`].
+    fn read_positioned(file: &Shared, pool: &BufferPool, read: &Read) -> Completion {
+        // SAFETY: read_exact_at fills all `len` bytes before the buffer is yielded.
+        let mut buf = unsafe { pool.alloc_len(read.len) };
+        Blob::read_exact_at(Cache::Disabled, file, buf.as_mut(), read.offset)?;
+        Ok((read.index, buf.into()))
+    }
+
+    /// Submit every read in `batch` through `ctx`, delivering each one as it completes. A read
+    /// the kernel rejects, fails, or completes short is served by [`read_positioned`] instead.
+    /// Returns `ctx` once every submitted read has completed; on error, dropping it waits for the
+    /// reads still in flight.
     fn submit(
-        file: &File,
+        file: &Shared,
         pool: &BufferPool,
-        ctx: &Context,
+        ctx: Context,
         batch: Vec<Read>,
         tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
-    ) -> Result<(), Error> {
-        let fd = file.as_raw_fd() as u32;
+    ) -> Result<Context, Error> {
+        let fd = direct(file)
+            .expect("direct descriptor checked before dispatch")
+            .as_raw_fd() as u32;
         let n = batch.len();
 
         // Every read covers the block-aligned superset of its range, laid out back to back in
@@ -182,11 +202,20 @@ mod aio {
         for read in &batch {
             let aligned_offset = read.offset / ALIGN as u64 * ALIGN as u64;
             let skip = (read.offset - aligned_offset) as usize;
-            let aligned_len = (skip + read.len).div_ceil(ALIGN) * ALIGN;
+            let aligned_len = skip
+                .checked_add(read.len)
+                .and_then(|len| len.checked_next_multiple_of(ALIGN))
+                .ok_or(Error::OffsetOverflow)?;
             spans.push((aligned_offset, skip, slab_len, aligned_len));
-            slab_len += aligned_len;
+            slab_len = slab_len
+                .checked_add(aligned_len)
+                .ok_or(Error::OffsetOverflow)?;
         }
-        let slab = Aligned::new(slab_len);
+        let slab = Aligned::new(slab_len)?;
+
+        // This local drops before the slab. Context destruction waits for pending kernel
+        // writes, including when submission or completion processing unwinds.
+        let active = ctx;
         let mut iocbs: Vec<Iocb> = spans
             .iter()
             .enumerate()
@@ -201,76 +230,107 @@ mod aio {
                 ..Iocb::default()
             })
             .collect();
-        let mut reads: Vec<Option<Read>> = batch.into_iter().map(Some).collect();
 
+        // A failed submission accepted none of the requests passed to it. The first of them may
+        // be one the kernel rejects (for example, a superset ending beyond the largest signed
+        // file offset), so it is served here and the rest are submitted again.
         let ptrs: Vec<*mut Iocb> = iocbs.iter_mut().map(|iocb| iocb as *mut Iocb).collect();
-        let mut submitted = 0;
-        while submitted < n {
-            // SAFETY: `ptrs[submitted..]` are valid iocbs that outlive the batch; the context
-            // holds at least `n` slots because `n <= AIO_SUBMISSION`.
+        let mut next = 0;
+        let mut accepted = 0;
+        while next < n {
+            // SAFETY: `ptrs[next..]` are valid iocbs whose buffers lie in the slab, which outlives
+            // every accepted request; the context holds at least `n` slots because
+            // `n <= AIO_SUBMISSION`.
             let r = unsafe {
                 libc::syscall(
                     libc::SYS_io_submit,
-                    ctx.0,
-                    (n - submitted) as libc::c_long,
-                    ptrs.as_ptr().add(submitted),
+                    active.0,
+                    (n - next) as libc::c_long,
+                    ptrs.as_ptr().add(next),
                 )
             };
             if r < 0 {
-                return Err(std::io::Error::last_os_error().into());
+                let _ = tx.send(Ok(read_positioned(file, pool, &batch[next])?));
+                next += 1;
+                continue;
             }
-            submitted += r as usize;
+            next += r as usize;
+            accepted += r as usize;
         }
 
-        let mut events = vec![IoEvent::default(); n];
+        let mut events = vec![IoEvent::default(); accepted];
         let mut completed = 0;
-        while completed < n {
-            // SAFETY: `events` has room for `n` entries and the pointers in flight stay valid
-            // until every submitted request has completed.
+        while completed < accepted {
+            // SAFETY: `events` has room for every accepted request still in flight.
             let got = unsafe {
                 libc::syscall(
                     libc::SYS_io_getevents,
-                    ctx.0,
+                    active.0,
                     1 as libc::c_long,
-                    (n - completed) as libc::c_long,
+                    (accepted - completed) as libc::c_long,
                     events.as_mut_ptr(),
                     std::ptr::null::<libc::timespec>(),
                 )
             };
             if got < 0 {
-                return Err(std::io::Error::last_os_error().into());
+                // A signal interrupts the wait before it reaps anything, and the kernel never
+                // restarts it.
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err.into());
             }
             for event in &events[..got as usize] {
                 let i = event.data as usize;
-                let read = reads[i].take().expect("each request completes once");
-                if event.res < 0 {
-                    return Err(std::io::Error::from_raw_os_error(-event.res as i32).into());
-                }
-                // A superset ending past the file is short; only the requested range must be
-                // covered.
+                let read = &batch[i];
+
+                // A superset ending past the file completes short but still covers its range. A
+                // read that failed or stopped before the end of its range (for example, it was
+                // interrupted or capped at the most one read returns) is served by a positioned
+                // read, which fails only where read_at would.
                 let (_, skip, start, _) = spans[i];
-                if (event.res as usize) < skip + read.len {
-                    return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
-                }
-                let mut bufs: IoBufsMut = pool.alloc(read.len).into();
-                // SAFETY: `len` bytes are copied in before the buffer is handed on.
-                unsafe { bufs.set_len(read.len) };
-                bufs.copy_from_slice(&slab.as_slice()[start + skip..start + skip + read.len]);
-                let _ = tx.send(Ok((read.index, bufs)));
+                let item = if event.res < 0 || (event.res as usize) < skip + read.len {
+                    read_positioned(file, pool, read)?
+                } else {
+                    // SAFETY: this completed request initialized the requested range, which
+                    // is disjoint from every other request's destination in the slab.
+                    let bytes =
+                        unsafe { std::slice::from_raw_parts(slab.ptr.add(start + skip), read.len) };
+                    let mut buf = pool.alloc(read.len);
+                    buf.put_slice(bytes);
+                    (read.index, buf.into())
+                };
+                let _ = tx.send(Ok(item));
             }
             completed += got as usize;
         }
-        Ok(())
+        Ok(active)
     }
 
-    /// Run one submission on the calling (blocking) thread.
-    pub(super) fn run(
-        file: &Shared,
+    /// Serve `batch` without native AIO: one blocking task per read, as
+    /// [`crate::Blob::read_at`] does.
+    pub(super) fn read_positioned_each(
+        file: &Arc<Shared>,
         pool: &BufferPool,
         batch: Vec<Read>,
         tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
     ) {
-        let direct = direct(file).expect("direct descriptor checked before dispatch");
+        for read in batch {
+            let (file, pool, tx) = (file.clone(), pool.clone(), tx.clone());
+            task::spawn_blocking(move || {
+                let _ = tx.send(read_positioned(&file, &pool, &read));
+            });
+        }
+    }
+
+    /// Run one submission on the calling (blocking) thread.
+    pub(super) fn run(
+        file: &Arc<Shared>,
+        pool: &BufferPool,
+        batch: Vec<Read>,
+        tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
+    ) {
         // Empty ranges need no I/O.
         let (empty, batch): (Vec<Read>, Vec<Read>) =
             batch.into_iter().partition(|read| read.len == 0);
@@ -281,29 +341,197 @@ mod aio {
             return;
         }
         let Some(ctx) = take_context() else {
-            // The kernel's request limit is exhausted: serve this submission through the page
-            // cache on this thread instead.
-            for read in batch {
-                let mut bufs: IoBufsMut = pool.alloc(read.len).into();
-                // SAFETY: `len` bytes are filled by read_bufs_at before the buffer is yielded.
-                unsafe { bufs.set_len(read.len) };
-                let result = Blob::read_bufs_at(
-                    Cache::Disabled,
-                    file,
-                    pool,
-                    &mut bufs,
-                    read.len,
-                    read.offset,
-                );
-                let _ = tx.send(result.map(|()| (read.index, bufs)));
-            }
-            return;
+            // The kernel's request limit is exhausted.
+            return read_positioned_each(file, pool, batch, tx);
         };
-        match submit(direct, pool, &ctx, batch, tx) {
-            Ok(()) => contexts().lock().push(ctx),
+        match submit(file, pool, ctx, batch, tx) {
+            Ok(ctx) => contexts().lock().push(ctx),
             Err(err) => {
                 let _ = tx.send(Err(err));
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::{
+            Blob as _, BufferPoolConfig, Storage as _,
+            storage::{
+                Layout,
+                tokio::{Config, Storage},
+            },
+            telemetry::metrics::Registry,
+        };
+        use std::{
+            path::PathBuf,
+            sync::atomic::{AtomicBool, Ordering},
+            time::Duration,
+        };
+
+        fn pool() -> BufferPool {
+            BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default())
+        }
+
+        /// Open a blob holding `data` in a fresh directory that supports direct I/O.
+        async fn direct_blob(label: &str, data: Vec<u8>) -> (Storage, Blob, PathBuf) {
+            let directory = std::env::temp_dir()
+                .join(format!("storage_tokio_aio_{label}_{}", std::process::id()));
+            let storage = Storage::new(Config::new(directory.clone(), Layout::ALL), pool());
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, data, WriteOptions::SYNC).await.unwrap();
+            assert!(
+                direct(&blob.shared).is_some(),
+                "temporary directory must support O_DIRECT"
+            );
+            (storage, blob, directory)
+        }
+
+        async fn remove(storage: Storage, blob: Blob, directory: PathBuf) {
+            drop(blob);
+            storage.remove("partition", None).await.unwrap();
+            drop(storage);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+
+        #[tokio::test]
+        async fn test_failed_submission_keeps_slab_until_reads_complete() {
+            const LEN: usize = 64 << 10;
+            let (storage, blob, directory) =
+                direct_blob("failed_submission", vec![0xAB; LEN]).await;
+            let pool = pool();
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+            // The kernel accepts the first read and rejects the second (its offset exceeds the
+            // largest signed file offset), whose positioned read then fails, so the submission
+            // returns an error while the first read may still be in flight. A slab released
+            // before that read completes receives the file's bytes after its memory is reused.
+            for _ in 0..20 {
+                let batch = vec![
+                    Read {
+                        index: 0,
+                        offset: 0,
+                        len: LEN,
+                    },
+                    Read {
+                        index: 1,
+                        offset: 1 << 63,
+                        len: ALIGN,
+                    },
+                ];
+                let ctx = take_context().unwrap();
+                assert!(submit(&blob.shared, &pool, ctx, batch, &tx).is_err());
+
+                let canary = Aligned::new(LEN + ALIGN).unwrap();
+                // SAFETY: `canary` owns `canary.len` writable bytes.
+                unsafe { std::ptr::write_bytes(canary.ptr, 0, canary.len) };
+                std::thread::sleep(Duration::from_millis(10));
+                // SAFETY: `canary` owns `canary.len` bytes, initialized above.
+                let bytes = unsafe { std::slice::from_raw_parts(canary.ptr, canary.len) };
+                assert!(!bytes.contains(&0xAB));
+            }
+            remove(storage, blob, directory).await;
+        }
+
+        #[tokio::test]
+        async fn test_submission_survives_signals() {
+            extern "C" fn ignore(_: libc::c_int) {}
+
+            // A handled signal interrupts a blocked io_getevents, which the kernel never restarts.
+            // SAFETY: a zeroed sigaction is valid, `ignore` has the handler ABI, and both
+            // pointers are valid.
+            let previous = unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = ignore as extern "C" fn(libc::c_int) as usize;
+                let mut previous: libc::sigaction = std::mem::zeroed();
+                assert_eq!(libc::sigaction(libc::SIGUSR1, &action, &mut previous), 0);
+                previous
+            };
+
+            // One large read keeps io_getevents waiting long enough to be interrupted.
+            const LEN: usize = 64 << 20;
+            let (storage, blob, directory) = direct_blob("signals", vec![0xAB; LEN]).await;
+            let batch = vec![Read {
+                index: 0,
+                offset: blob.data_offset,
+                len: LEN,
+            }];
+            let shared = blob.shared.clone();
+            let done = Arc::new(AtomicBool::new(false));
+            let (thread_tx, thread_rx) = std::sync::mpsc::channel();
+            let submitter = {
+                let done = done.clone();
+                std::thread::spawn(move || {
+                    // SAFETY: pthread_self has no preconditions.
+                    thread_tx.send(unsafe { libc::pthread_self() }).unwrap();
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                    let ctx = take_context().unwrap();
+                    let result = submit(&shared, &pool(), ctx, batch, &tx);
+                    done.store(true, Ordering::Release);
+                    (result.is_ok(), rx.try_recv().ok(), rx.try_recv().is_err())
+                })
+            };
+            let thread = thread_rx.recv().unwrap();
+            while !done.load(Ordering::Acquire) {
+                // SAFETY: the submitter has not been joined, so its thread id is still valid.
+                unsafe { libc::pthread_kill(thread, libc::SIGUSR1) };
+                std::thread::sleep(Duration::from_micros(10));
+            }
+            let (submitted, first, drained) = submitter.join().unwrap();
+            // SAFETY: restores the action saved above.
+            unsafe { libc::sigaction(libc::SIGUSR1, &previous, std::ptr::null_mut()) };
+            assert!(submitted);
+            assert!(drained);
+            let Some(Ok((0, bufs))) = first else {
+                panic!("expected the read");
+            };
+            assert_eq!(bufs.coalesce().as_ref(), vec![0xAB; LEN].as_slice());
+            remove(storage, blob, directory).await;
+        }
+
+        #[tokio::test]
+        async fn test_reads_without_context_are_served_concurrently() {
+            let data: Vec<u8> = (0..3 * ALIGN).map(|i| (i % 251) as u8).collect();
+            let (storage, blob, directory) = direct_blob("without_context", data.clone()).await;
+
+            // Each read is served on its own blocking task, and one past the end fails alone.
+            let ranges = [
+                (10u64, 5000usize),
+                (ALIGN as u64 - 1, 2),
+                (data.len() as u64, 1),
+            ];
+            let batch = ranges
+                .iter()
+                .enumerate()
+                .map(|(index, &(offset, len))| Read {
+                    index,
+                    offset: offset + blob.data_offset,
+                    len,
+                })
+                .collect();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            read_positioned_each(&blob.shared, &pool(), batch, &tx);
+            drop(tx);
+            let mut served = Vec::new();
+            let mut failed = 0;
+            while let Some(item) = rx.recv().await {
+                match item {
+                    Ok(item) => served.push(item),
+                    Err(_) => failed += 1,
+                }
+            }
+            assert_eq!(failed, 1);
+            served.sort_by_key(|(index, _)| *index);
+            assert_eq!(served.len(), 2);
+            for ((offset, len), (index, bufs)) in ranges.iter().zip(served) {
+                let offset = *offset as usize;
+                assert_eq!(
+                    bufs.coalesce().as_ref(),
+                    &data[offset..offset + len],
+                    "{index}"
+                );
+            }
+            remove(storage, blob, directory).await;
         }
     }
 }
@@ -361,7 +589,7 @@ struct Shared {
     dont_cache_supported: AtomicBool,
     /// Descriptor for direct I/O on the same inode, opened on first use. `None` once the
     /// filesystem has rejected direct I/O.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(target_os = "linux")]
     direct: OnceLock<Option<File>>,
     #[cfg(test)]
     test: Hooks,
@@ -550,6 +778,7 @@ impl Blob {
             key: generation.key.clone(),
             promise: OnceLock::new(),
             dont_cache_supported: AtomicBool::new(true),
+            #[cfg(target_os = "linux")]
             direct: OnceLock::new(),
             #[cfg(test)]
             test: Hooks::default(),
@@ -624,28 +853,6 @@ impl Blob {
     #[cfg(not(target_os = "linux"))]
     fn read_exact_at(_: Cache, file: &Shared, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         file.read_exact_at(buf, offset)?;
-        Ok(())
-    }
-
-    /// Fill `bufs` from `offset` on the calling (blocking) thread, copying through a contiguous
-    /// scratch buffer when `bufs` holds more than one chunk.
-    fn read_bufs_at(
-        cache: Cache,
-        file: &Shared,
-        pool: &BufferPool,
-        bufs: &mut IoBufsMut,
-        len: usize,
-        offset: u64,
-    ) -> Result<(), Error> {
-        if let Some(buf) = bufs.as_single_mut() {
-            // Read directly into the single buffer (zero-copy).
-            return Self::read_exact_at(cache, file, buf.as_mut(), offset);
-        }
-        // Read into a temporary contiguous buffer and copy back to preserve structure.
-        // SAFETY: `len` bytes are filled via read_exact_at below.
-        let mut temp = unsafe { pool.alloc_len(len) };
-        Self::read_exact_at(cache, file, temp.as_mut(), offset)?;
-        bufs.copy_from_slice(temp.as_ref());
         Ok(())
     }
 
@@ -776,24 +983,38 @@ impl crate::Blob for Blob {
             Cache::Enabled
         };
         task::spawn_blocking(move || {
-            Self::read_bufs_at(cache, &file, &pool, &mut bufs, len, offset)?;
+            if let Some(buf) = bufs.as_single_mut() {
+                // Read directly into the single buffer (zero-copy).
+                Self::read_exact_at(cache, &file, buf.as_mut(), offset)?;
+            } else {
+                // Read into a temporary contiguous buffer and copy back to preserve structure.
+                // SAFETY: `len` bytes are filled via read_exact_at below.
+                let mut temp = unsafe { pool.alloc_len(len) };
+                Self::read_exact_at(cache, &file, temp.as_mut(), offset)?;
+                bufs.copy_from_slice(temp.as_ref());
+            }
             Ok(bufs)
         })
         .await
         .map_err(|_| Error::ReadFailed)?
     }
 
+    #[cfg(target_os = "linux")]
     fn read_many(
         &self,
         ranges: &[(u64, usize)],
         options: ReadOptions,
     ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
-        use futures::{FutureExt as _, StreamExt as _, stream};
+        use futures::{StreamExt as _, stream};
 
         // Direct I/O serves a batch the page cache need not retain: the device sees every read
         // at once and no thread blocks per read. Everything else goes through the page cache
         // one read per blocking task.
-        #[cfg(target_os = "linux")]
+        //
+        // Such a batch uses direct I/O on every Linux kernel, so it does not read data the OS
+        // page cache holds. Its concurrency assumes filesystem-native direct I/O (such as ext4
+        // or XFS): a filesystem that serves direct I/O through a buffered fallback stays correct
+        // but completes each submission's reads one at a time.
         if options.contains(ReadOptions::DONT_CACHE) && aio::direct(&self.shared).is_some() {
             let mut reads = Vec::with_capacity(ranges.len());
             for (index, &(offset, len)) in ranges.iter().enumerate() {
@@ -805,27 +1026,26 @@ impl crate::Blob for Blob {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let mut reads = reads.into_iter().peekable();
             while reads.peek().is_some() {
-                let batch: Vec<_> = reads.by_ref().take(AIO_SUBMISSION).collect();
+                let batch: Vec<_> = reads.by_ref().take(aio::AIO_SUBMISSION).collect();
                 let file = self.shared.clone();
                 let pool = self.pool.clone();
                 let tx = tx.clone();
                 task::spawn_blocking(move || aio::run(&file, &pool, batch, &tx));
             }
-            return stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|item| (item, rx))
+            // The stream ends once every range is yielded or at the first error. A submitting
+            // task that ends without reporting its reads (it panicked, or the runtime shut down)
+            // closes the channel early, which is an error.
+            return stream::unfold((rx, ranges.len()), |(mut rx, remaining)| async move {
+                if remaining == 0 {
+                    return None;
+                }
+                let item = rx.recv().await.unwrap_or(Err(Error::ReadFailed));
+                let remaining = if item.is_ok() { remaining - 1 } else { 0 };
+                Some((item, (rx, remaining)))
             })
             .boxed();
         }
-
-        ranges
-            .iter()
-            .enumerate()
-            .map(|(index, &(offset, len))| {
-                self.read_at(offset, len, options)
-                    .map(move |result| result.map(|bufs| (index, bufs)))
-            })
-            .collect::<stream::FuturesUnordered<_>>()
-            .boxed()
+        crate::read_each(self, ranges, options).boxed()
     }
 
     async fn write_at(
@@ -1014,7 +1234,7 @@ mod tests {
         },
         telemetry::metrics::Registry,
     };
-    use futures::FutureExt as _;
+    use futures::{FutureExt as _, TryStreamExt as _};
     use std::{env, ops::RangeInclusive, path::PathBuf, process, sync::mpsc};
 
     fn storage_for_reopen_test(label: &str, layouts: RangeInclusive<Layout>) -> (Storage, PathBuf) {
@@ -1502,7 +1722,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_many_indexes_every_range() {
-        use futures::TryStreamExt as _;
         let (storage, directory) = storage_for_reopen_test("read_many", Layout::ALL);
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
 
@@ -1531,7 +1750,8 @@ mod tests {
                 ranges.push((i * BLOCK as u64 + 100, 2 * BLOCK - 200));
             }
         }
-        assert!(ranges.len() > AIO_SUBMISSION);
+        #[cfg(target_os = "linux")]
+        assert!(ranges.len() > aio::AIO_SUBMISSION);
         let mut bufs: Vec<(usize, IoBufsMut)> = blob
             .read_many(&ranges, ReadOptions::DONT_CACHE)
             .try_collect()
@@ -1557,6 +1777,156 @@ mod tests {
             .await
             .is_err()
         );
+
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_read_many_retired_runtime_reports_error() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (storage, directory) = storage_for_reopen_test("read_many_retired", Layout::ALL);
+        let blob = runtime.block_on(async {
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"data", WriteOptions::SYNC).await.unwrap();
+            blob
+        });
+        if aio::direct(&blob.shared).is_none() {
+            drop(blob);
+            runtime.block_on(storage.remove("partition", None)).unwrap();
+            drop(storage);
+            std::fs::remove_dir_all(directory).unwrap();
+            return;
+        }
+
+        let handle = runtime.handle().clone();
+        drop(runtime);
+        let entered = handle.enter();
+        let result = futures::executor::block_on(
+            blob.read_many(&[(0, 4)], ReadOptions::DONT_CACHE)
+                .try_collect::<Vec<_>>(),
+        );
+        assert!(matches!(result, Err(Error::ReadFailed)));
+        drop(entered);
+        drop(blob);
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_read_many_at_signed_limit() {
+        let (storage, directory) =
+            storage_for_reopen_test("read_many_signed_limit", Layout::V1..=Layout::V1);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+
+        // Only some filesystems (such as tmpfs) hold a file this large and serve direct I/O.
+        let len = i64::MAX as u64 - blob.data_offset;
+        if blob.resize(len).await.is_err() || aio::direct(&blob.shared).is_none() {
+            drop(blob);
+            storage.remove("partition", None).await.unwrap();
+            drop(storage);
+            std::fs::remove_dir_all(directory).unwrap();
+            return;
+        }
+        let offset = len - 1;
+        for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+            assert_eq!(
+                blob.read_at(offset, 1, options)
+                    .await
+                    .unwrap()
+                    .coalesce()
+                    .as_ref(),
+                &[0]
+            );
+        }
+
+        // The block-aligned superset of this byte ends beyond the largest signed file offset,
+        // so the kernel rejects its direct read at submission.
+        let bufs: Vec<_> = blob
+            .read_many(&[(offset, 1)], ReadOptions::DONT_CACHE)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(bufs.len(), 1);
+        let (index, buf) = bufs.into_iter().next().unwrap();
+        assert_eq!(index, 0);
+        assert_eq!(buf.coalesce().as_ref(), &[0]);
+
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "allocates more than 4 GiB"]
+    async fn test_read_many_beyond_single_read_limit() {
+        let (storage, directory) = storage_for_reopen_test("read_many_large", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        assert!(
+            aio::direct(&blob.shared).is_some(),
+            "temporary directory must support O_DIRECT"
+        );
+
+        // Linux returns at most just under 2 GiB from one read, so the direct read of this
+        // range completes short.
+        const LEN: usize = 1 << 31;
+        blob.write_at(LEN as u64 - 1, vec![1], WriteOptions::default())
+            .await
+            .unwrap();
+        let bufs: Vec<_> = blob
+            .read_many(&[(0, LEN)], ReadOptions::DONT_CACHE)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(bufs.len(), 1);
+        let (index, buf) = bufs.into_iter().next().unwrap();
+        assert_eq!(index, 0);
+        let buf = buf.coalesce();
+        assert_eq!(buf.len(), LEN);
+        assert_eq!(buf.as_ref()[LEN - 1], 1);
+
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_read_many_reports_unservable_range() {
+        let (storage, directory) = storage_for_reopen_test("read_many_unservable", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, vec![0u8; 4096], WriteOptions::default())
+            .await
+            .unwrap();
+        assert!(
+            aio::direct(&blob.shared).is_some(),
+            "temporary directory must support O_DIRECT"
+        );
+
+        // No slab can hold these batches: the first range overflows its aligned length, the
+        // second exceeds the largest allocation, and the third pair overflows the slab total.
+        // The call must yield that error rather than end without yielding the ranges.
+        for ranges in [
+            vec![(0, usize::MAX - 10)],
+            vec![(0, 1 << 63)],
+            vec![(0, usize::MAX - 8191), (0, 8192)],
+        ] {
+            let result = blob
+                .read_many(&ranges, ReadOptions::DONT_CACHE)
+                .try_collect::<Vec<_>>()
+                .await;
+            assert!(matches!(result, Err(Error::OffsetOverflow)), "{ranges:?}");
+        }
 
         drop(blob);
         storage.remove("partition", None).await.unwrap();
