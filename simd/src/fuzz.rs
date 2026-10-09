@@ -381,9 +381,11 @@ fn test_selected_profile() {
             #[cfg(not(miri))]
             Plan::Profile,
         ] {
-            let mut u = Unstructured::new(&[]);
-            plan.run(&mut u).unwrap();
-            assert!(u.is_empty());
+            for input in [&[][..], &[1; 32][..]] {
+                let mut u = Unstructured::new(input);
+                plan.run(&mut u).unwrap();
+                assert_eq!(u.len(), input.len());
+            }
         }
     }
 }
