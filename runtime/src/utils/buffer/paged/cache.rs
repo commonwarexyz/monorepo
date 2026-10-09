@@ -546,7 +546,7 @@ impl CacheRef {
 
     /// Drop the cached pages of blob `blob_id` numbered in `pages`, freeing their slots for new
     /// pages. The bytes remain readable from the blob.
-    pub fn evict(&self, blob_id: u64, pages: Range<u64>) {
+    fn evict(&self, blob_id: u64, pages: Range<u64>) {
         // Bound how long one acquisition holds the write lock against readers.
         const PAGES_PER_LOCK: u64 = 4096;
 
