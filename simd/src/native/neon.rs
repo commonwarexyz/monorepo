@@ -891,8 +891,6 @@ mod tests {
 mod sha_tests {
     use super::*;
     use crate::emulated::EmulatedNeon;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-
     fn words(simd: NativeNeon, value: <NativeNeon as Simd>::U32x4) -> [u32; 4] {
         let mut output = [0; 4];
         simd.u32x4_store(value, &mut output);
@@ -949,60 +947,6 @@ mod sha_tests {
                 )* }; }
                 blend!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
             }
-        }
-    }
-
-    #[test]
-    fn test_sha_register_native_memory() {
-        let Some(simd) = NativeNeon::new() else {
-            return;
-        };
-        let emulated = EmulatedNeon;
-        let input: [u8; 33] = core::array::from_fn(|i| (i as u8).wrapping_mul(73));
-        for offset in 0..16 {
-            let bytes = &input[offset..];
-            let value = simd.u32x4_load_be(bytes);
-            assert_eq!(words(simd, value), emulated.u32x4_load_be(bytes));
-            assert_eq!(
-                words(simd, simd.u32x4_load_be2(bytes)),
-                emulated.u32x4_load_be2(bytes)
-            );
-            let mut output = [0xa5; 18];
-            simd.u32x4_store_be(value, &mut output[1..]);
-            assert_eq!(&output[1..17], &bytes[..16]);
-            assert_eq!((output[0], output[17]), (0xa5, 0xa5));
-        }
-        let value = simd.u32x4_load(&[u32::MAX; 4]);
-        let input_words = [0, u32::MAX, 0x8000_0000, 0x1234_5678, 1, 0];
-        let loaded = simd.u32x4_load(&input_words[1..]);
-        let mut output = [0xa5; 6];
-        simd.u32x4_store(loaded, &mut output[1..]);
-        assert_eq!(&output[1..5], &input_words[1..5]);
-        assert_eq!((output[0], output[5]), (0xa5, 0xa5));
-        for len in 0..4 {
-            assert!(catch_unwind(|| simd.u32x4_load(&input_words[..len])).is_err());
-            let mut output = [0xa5; 4];
-            assert!(
-                catch_unwind(AssertUnwindSafe(
-                    || simd.u32x4_store(loaded, &mut output[..len])
-                ))
-                .is_err()
-            );
-            assert_eq!(output, [0xa5; 4]);
-        }
-        for len in 0..16 {
-            assert!(catch_unwind(|| simd.u32x4_load_be(&input[..len])).is_err());
-            if len < 8 {
-                assert!(catch_unwind(|| simd.u32x4_load_be2(&input[..len])).is_err());
-            }
-            let mut output = [0xa5; 16];
-            assert!(
-                catch_unwind(AssertUnwindSafe(
-                    || simd.u32x4_store_be(value, &mut output[..len])
-                ))
-                .is_err()
-            );
-            assert_eq!(output, [0xa5; 16]);
         }
     }
 

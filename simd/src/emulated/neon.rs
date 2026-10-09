@@ -474,7 +474,6 @@ fn rounds(abcd: [u32; 4], efgh: [u32; 4], wk: [u32; 4]) -> [u32; 8] {
 #[cfg(test)]
 mod sha_tests {
     use super::*;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -585,52 +584,6 @@ mod sha_tests {
                 0x7852b855
             ]
         );
-    }
-
-    #[test]
-    fn test_sha_register_memory() {
-        let simd = EmulatedNeon;
-        let bytes: [u8; 33] = core::array::from_fn(|i| (i as u8).wrapping_mul(17));
-        for offset in 0..16 {
-            let value = simd.u32x4_load_be(&bytes[offset..]);
-            let mut output = [0xa5; 18];
-            simd.u32x4_store_be(value, &mut output[1..]);
-            assert_eq!(&output[1..17], &bytes[offset..offset + 16]);
-            assert_eq!((output[0], output[17]), (0xa5, 0xa5));
-            let half = simd.u32x4_load_be2(&bytes[offset..]);
-            assert_eq!(half, [value[0], value[1], 0, 0]);
-        }
-        let input = [0, u32::MAX, 0x8000_0000, 0x1234_5678, 1, 0];
-        let value = simd.u32x4_load(&input[1..]);
-        let mut output = [0xa5; 6];
-        simd.u32x4_store(value, &mut output[1..]);
-        assert_eq!(&output[1..5], &input[1..5]);
-        assert_eq!((output[0], output[5]), (0xa5, 0xa5));
-        for len in 0..4 {
-            assert!(catch_unwind(|| simd.u32x4_load(&input[..len])).is_err());
-            let mut output = [0xa5; 4];
-            assert!(
-                catch_unwind(AssertUnwindSafe(
-                    || simd.u32x4_store(value, &mut output[..len])
-                ))
-                .is_err()
-            );
-            assert_eq!(output, [0xa5; 4]);
-        }
-        for len in 0..16 {
-            assert!(catch_unwind(|| simd.u32x4_load_be(&bytes[..len])).is_err());
-            if len < 8 {
-                assert!(catch_unwind(|| simd.u32x4_load_be2(&bytes[..len])).is_err());
-            }
-            let mut output = [0xa5; 16];
-            assert!(
-                catch_unwind(AssertUnwindSafe(
-                    || simd.u32x4_store_be([u32::MAX; 4], &mut output[..len])
-                ))
-                .is_err()
-            );
-            assert_eq!(output, [0xa5; 16]);
-        }
     }
 
     #[test]

@@ -459,7 +459,8 @@ mod test_utils {
                     .collect::<Vec<_>>()
             );
         }
-        // Every byte pair appears in every lane, including the high half.
+        // All byte pairs appear across the lanes, including both register halves.
+        // Each lane covers all first operands and 16 second operands.
         for a in 0..=255u8 {
             for base in (0..256).step_by(16) {
                 let aa: Vec<u8> = (0..16).map(|i| a.wrapping_add(i as u8 * 13)).collect();
@@ -632,7 +633,17 @@ mod fixed4_tests {
                     .chain(&output[offset + 16..])
                     .all(|b| *b == 0xa5)
             );
+            let mut output = [0xa5; 18];
+            simd.u32x4_store_be(loaded, &mut output[1..]);
+            assert_eq!(&output[1..17], &input[offset..offset + 16]);
+            assert_eq!((output[0], output[17]), (0xa5, 0xa5));
         }
+        let input = [0, u32::MAX, 0x8000_0000, 0x1234_5678, 1, 0];
+        let value = simd.u32x4_load(&input[1..]);
+        let mut output = [0xa5; 6];
+        simd.u32x4_store(value, &mut output[1..]);
+        assert_eq!(&output[1..5], &input[1..5]);
+        assert_eq!((output[0], output[5]), (0xa5, 0xa5));
         for len in 0..16 {
             let mut output = [0xa5; 16];
             assert!(catch_unwind(AssertUnwindSafe(|| simd.u32x4_load_be(&output[..len]))).is_err());
