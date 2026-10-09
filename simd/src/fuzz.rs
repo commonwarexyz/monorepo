@@ -351,17 +351,17 @@ fn test_selected_profile() {
     assert_eq!(selected, expected_backend());
     assert_eq!(output, [1; 8]);
     std::eprintln!("instruction differential backend: {selected:?}");
-    if let Ok(expected) = std::env::var("COMMONWARE_SIMD_EXPECT_BACKEND") {
-        if !expected.is_empty() {
-            let path = match expected.as_str() {
-                "scalar" => Path::Portable,
-                "ice_lake" => Path::IceLake,
-                "neon" => Path::Neon,
-                "arm_v9" => Path::ArmV9,
-                _ => panic!("unknown expected SIMD backend: {expected}"),
-            };
-            assert_eq!(selected.0, path, "unexpected SIMD dispatch backend");
-        }
+    if let Ok(expected) = std::env::var("COMMONWARE_SIMD_EXPECT_BACKEND")
+        && !expected.is_empty()
+    {
+        let path = match expected.as_str() {
+            "scalar" => Path::Portable,
+            "ice_lake" => Path::IceLake,
+            "neon" => Path::Neon,
+            "arm_v9" => Path::ArmV9,
+            _ => panic!("unknown expected SIMD backend: {expected}"),
+        };
+        assert_eq!(selected.0, path, "unexpected SIMD dispatch backend");
     }
     #[cfg(all(target_arch = "aarch64", feature = "std"))]
     if std::arch::is_aarch64_feature_detected!("neon")
