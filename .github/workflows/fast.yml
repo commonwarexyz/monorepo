@@ -101,7 +101,6 @@ jobs:
   Tests:
     name: "${{ matrix.os }} / ${{ matrix.variant }}"
     strategy:
-      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
