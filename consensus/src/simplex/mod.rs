@@ -780,8 +780,7 @@ cfg_if::cfg_if! {
             /// [`Plan::Propose`] for the same payload stores it without sending it
             /// again.
             ///
-            /// A relay may defer the send to the matching [`Plan::Propose`], as the
-            /// coding marshal does.
+            /// A relay may defer the send to the matching [`Plan::Propose`].
             Prepare {
                 /// The round in which the candidate was built.
                 round: Round,

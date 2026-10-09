@@ -1,21 +1,19 @@
-//! Shared consensus-relay plumbing for the standard variant wrappers.
+//! Consensus-relay plumbing shared by the marshal application wrappers.
 
 use crate::{
-    Block,
     marshal::{
         application::gates::{Gates, Staged},
-        core::Mailbox,
-        standard::Standard,
+        core::{Mailbox, Variant},
     },
     simplex::Plan,
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Recipients;
+use std::sync::Arc;
 use tracing::debug;
 
-/// Relays a consensus broadcast [`Plan`] through marshal for the standard
-/// variants ([`super::Deferred`] and [`super::Inline`]).
+/// Relays a consensus broadcast [`Plan`] through marshal for a proposal staged in `gates`.
 ///
 /// A prepare plan sends the staged candidate to all peers and keeps it staged
 /// without storing it. A propose plan locks the staged proposal in: it sends
@@ -24,15 +22,15 @@ use tracing::debug;
 /// forward plan re-sends a stored block to the requested recipients. A propose
 /// plan whose staged proposal was already consumed falls back to a best-effort
 /// forward of the persisted block.
-pub(super) fn broadcast<S, B>(
-    gates: &Gates<B::Digest, B>,
-    marshal: &Mailbox<S, Standard<B>>,
-    commitment: B::Digest,
+pub(crate) fn broadcast<S, V, B>(
+    gates: &Gates<V::Commitment, B>,
+    marshal: &Mailbox<S, V>,
+    commitment: V::Commitment,
     plan: Plan<S::PublicKey>,
 ) -> Feedback
 where
     S: Scheme,
-    B: Block,
+    V: Variant<Block = Arc<B>>,
 {
     match plan {
         Plan::Prepare { round } => {

@@ -4920,6 +4920,129 @@ mod tests {
         });
     }
 
+    /// A prepare relay sends a held candidate without storing it, so an abandoned candidate
+    /// costs no storage write, and a replacement candidate for the same round is sent the same
+    /// way. The propose relay that locks the replacement in stores it without sending it again
+    /// and completes the durability handshake.
+    #[test_traced("WARN")]
+    fn test_coding_prepare_relay_sends_once_and_propose_stores() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "prepare-relay",
+                provider.clone(),
+                buffer.clone(),
+            )
+            .await;
+            let shards = start_shard_mailbox(
+                context.child("shards"),
+                participants.clone(),
+                provider.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let genesis = genesis_block();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let ctx = CodingCtx {
+                round,
+                leader: me,
+                parent: (View::zero(), genesis_coding_commitment(&genesis)),
+            };
+
+            // Stage two candidates for the round as prepare would. The mock application
+            // builds one fixed block, so each candidate is staged by its own wrapper.
+            let mut candidates = Vec::new();
+            for data in [100, 200] {
+                let block = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), data);
+                let digest = block.digest();
+                let commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                    block.clone(),
+                    coding_config,
+                    &Sequential,
+                )
+                .commitment();
+                let mock_app: MockVerifyingApp<CodingB, S> =
+                    MockVerifyingApp::new().with_propose_result(block);
+                let cfg = MarshaledConfig {
+                    application: mock_app,
+                    marshal: marshal.clone(),
+                    shards: shards.clone(),
+                    scheme_provider: provider.clone(),
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    strategy: Sequential,
+                };
+                let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+                let staged = marshaled
+                    .propose(ctx.clone())
+                    .await
+                    .await
+                    .expect("propose should produce a commitment");
+                assert_eq!(staged, commitment);
+                candidates.push((marshaled, commitment, digest));
+            }
+            let (mut abandoned, abandoned_commitment, abandoned_digest) = candidates.remove(0);
+            let (mut replacement, replacement_commitment, replacement_digest) =
+                candidates.remove(0);
+
+            // The early relay sends each held candidate and stores neither.
+            let feedback = abandoned.broadcast(abandoned_commitment, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            let feedback = replacement.broadcast(replacement_commitment, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            while buffer.sends.lock().len() < 2 {
+                reschedule().await;
+            }
+            assert!(
+                marshal.get_verified(round).await.is_none(),
+                "an early relay must not store a candidate"
+            );
+
+            // The lock-in stores the replacement without sending it again, and certification
+            // resolves through the staged durability handshake.
+            let feedback = replacement.broadcast(replacement_commitment, Plan::Propose { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            assert!(
+                replacement
+                    .certify(round, replacement_commitment)
+                    .await
+                    .await
+                    .expect("certify result missing"),
+                "lock-in handshake must resolve certification durably"
+            );
+            assert_eq!(
+                marshal
+                    .get_verified(round)
+                    .await
+                    .map(|block| block.commitment()),
+                Some(replacement_commitment),
+                "lock-in must store the replacement"
+            );
+            assert!(
+                marshal.get_block(&abandoned_digest).await.is_none(),
+                "an abandoned candidate is never stored"
+            );
+            let sends = buffer.sends.lock();
+            assert_eq!(sends.len(), 2, "each candidate is sent once");
+            for ((sent_round, block, recipients), digest) in
+                sends.iter().zip([abandoned_digest, replacement_digest])
+            {
+                assert_eq!(*sent_round, round);
+                assert_eq!(block.digest(), digest);
+                assert!(matches!(recipients, Recipients::All));
+            }
+        });
+    }
+
     /// A leader that crashes between its relay broadcast and the journaling
     /// of its notarize vote holds a verified block for the round on restart.
     /// No vote names that block, so it cannot be notarized, and the restarted

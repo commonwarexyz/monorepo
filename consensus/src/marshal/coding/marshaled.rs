@@ -86,8 +86,9 @@ use crate::{
         Update,
         ancestry::Ancestry,
         application::{
-            gates::{self, GateOutcome, Gates, Staged},
+            gates::{self, GateOutcome, Gates},
             prepare::{self, Resolved},
+            relay,
             validation::{Stage, is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify},
         },
         coding::{
@@ -107,7 +108,6 @@ use commonware_cryptography::{
     certificate::{Provider, Scheme as _, Verifier},
 };
 use commonware_macros::select;
-use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     Clock, Metrics, Spawner, Storage,
@@ -1187,19 +1187,10 @@ where
     fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) -> Feedback {
         // Coding variant does not support targeted forwarding; peers reconstruct
         // blocks from erasure-coded shards.
-        //
-        // A held candidate's shards are sent only once consensus locks it in, so
-        // an early prepare plan is a no-op and the candidate holds as a staged
-        // proposal until then.
-        let Plan::Propose { round } = plan else {
+        if matches!(plan, Plan::Forward { .. }) {
             return Feedback::Ok;
-        };
-
-        let Some(Staged { block, ack, .. }) = self.gates.take_staged(round, commitment) else {
-            debug!(%round, %commitment, "no staged proposal to relay, attempting forwarding");
-            return self.marshal.forward(round, commitment, Recipients::All);
-        };
-        self.marshal.proposed(round, block, Recipients::All, ack)
+        }
+        relay::broadcast(&self.gates, &self.marshal, commitment, plan)
     }
 }
 

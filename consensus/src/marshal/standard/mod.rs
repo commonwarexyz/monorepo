@@ -49,7 +49,6 @@ commonware_macros::stability_scope!(ALPHA {
     mod inline;
     pub use inline::Inline;
 
-    mod relay;
     mod validation;
 });
 
@@ -59,13 +58,16 @@ pub use variant::Standard;
 #[cfg(test)]
 mod tests {
     mod pipeline;
-    use super::{Deferred, Inline, Standard, relay};
+    use super::{Deferred, Inline, Standard};
     use crate::{
         Automaton, CertifiableAutomaton, Handoff, Heightable, Relay, Reporter,
         marshal::{
             Identifier, Update,
             ancestry::BlockProvider,
-            application::gates::{GateOutcome, Gates},
+            application::{
+                gates::{GateOutcome, Gates},
+                relay,
+            },
             config::{Config, Start},
             core::{
                 Actor, CommitmentFallback, DigestFallback, Mailbox, Processed, cache,

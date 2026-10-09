@@ -195,7 +195,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// stored only when consensus locks it in for that vote. If the parent is replaced
         /// before it certifies, the proposer can relay another candidate for the same view.
         ///
-        /// A relay may instead hold the candidate until the lock-in, as the coding marshal does.
+        /// A relay may instead hold the candidate until the lock-in.
         Stage(D),
         /// Request an ordinary proposal after the parent certifies.
         Wait,

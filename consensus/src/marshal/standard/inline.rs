@@ -53,10 +53,11 @@ use crate::{
         application::{
             gates::{GateOutcome, Gates},
             prepare::{self, Resolved},
+            relay,
         },
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
-            Standard, relay,
+            Standard,
             validation::{
                 Decision, ParentCheck, await_and_validate_parent, precheck_epoch_and_reproposal,
                 run_app_verify,
