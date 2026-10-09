@@ -216,6 +216,25 @@ impl<B: Blob> View<'_, B> {
         Ok(buf.into())
     }
 
+    /// Fill the page cache with every page below `tail_offset` that `ranges` (each
+    /// `(offset, len)`) touch and that is not resident, using one batched blob read.
+    ///
+    /// Bytes at or beyond `tail_offset` live in memory and are skipped. Reads that follow find
+    /// the filled pages resident; a page evicted in between is fetched again by that read.
+    pub async fn fill_pages(
+        &self,
+        ranges: impl Iterator<Item = (u64, usize)>,
+    ) -> Result<(), Error> {
+        let tail_offset = self.tail_offset;
+        let below_tail = ranges.filter_map(|(offset, len)| {
+            let end = offset.checked_add(len as u64)?.min(tail_offset);
+            (offset < end).then(|| (offset, (end - offset) as usize))
+        });
+        self.cache_ref
+            .fill_missing_pages(self.blob, self.id, below_tail)
+            .await
+    }
+
     /// Reads up to `len` bytes starting at `offset`, but only as many as are available.
     ///
     /// Returns the buffer (truncated to actual bytes read) and the number of bytes read. Returns an
@@ -267,6 +286,23 @@ impl<B: Blob> View<'_, B> {
         let blob_reads = cache_ranges.len();
         if cache_ranges.is_empty() {
             return Ok(offsets.len());
+        }
+
+        // Fill every page the misses need with one batched blob read, then serve the misses
+        // from the cache in bulk. The per-range path below only fetches pages evicted or
+        // faulted in the meantime.
+        self.cache_ref
+            .fill_missing_pages(
+                self.blob,
+                self.id,
+                cache_ranges
+                    .iter()
+                    .map(|(buf, offset)| (*offset, buf.len())),
+            )
+            .await?;
+        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+        if cache_ranges.is_empty() {
+            return Ok(offsets.len() - blob_reads);
         }
 
         // Slow path: read remaining ranges from the underlying blob, concurrently.

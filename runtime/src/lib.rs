@@ -940,6 +940,29 @@ stability_scope!(BETA {
             options: ReadOptions,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
+        /// Read every `(offset, len)` range in `ranges`, yielding `(range index, buffer)` as each
+        /// read completes, in any order.
+        ///
+        /// One call describes a whole set of independent reads so the backend can keep them in
+        /// flight together and amortize per-request dispatch, and the caller can consume each
+        /// result while the rest are still in flight. A backend that cannot batch reads serves
+        /// each range with [`Blob::read_at`] concurrently.
+        fn read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+            use futures::FutureExt as _;
+            ranges
+                .iter()
+                .enumerate()
+                .map(|(index, &(offset, len))| {
+                    self.read_at(offset, len, options)
+                        .map(move |result| result.map(|bufs| (index, bufs)))
+                })
+                .collect::<futures::stream::FuturesUnordered<_>>()
+        }
+
         /// Write every remaining byte in `bufs` to the blob at `offset`.
         ///
         /// The buffers are treated as one logical byte sequence in chunk order.
@@ -985,6 +1008,14 @@ stability_scope!(BETA {
             options: ReadOptions,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send {
             self.as_ref().read_at(offset, len, options)
+        }
+
+        fn read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+            self.as_ref().read_many(ranges, options)
         }
 
         fn write_at(

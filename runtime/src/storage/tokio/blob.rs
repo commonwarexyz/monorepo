@@ -41,6 +41,284 @@ use tokio::task;
 // span as few submissions as possible.
 const IOVEC_BATCH_SIZE: usize = 1024;
 
+/// Reads one blocking task submits as a single native-AIO batch in [`crate::Blob::read_many`].
+///
+/// A submission is one device queue's worth of reads: NVMe queues hold 256 to 1024 commands,
+/// and a queue depth of 256 saturates the devices this runtime targets. Larger batches split
+/// into that many reads per submitting task, so submission cost spreads across tasks while
+/// each task keeps a full queue in flight.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const AIO_SUBMISSION: usize = 256;
+
+/// Linux native AIO: submit a batch of `O_DIRECT` reads from one thread and reap completions
+/// as they arrive. Unlike a thread per read, the device sees the whole batch at once and the
+/// submitting thread pays only a few microseconds per read.
+#[cfg(target_os = "linux")]
+mod aio {
+    use super::*;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    /// A pending read: its index in the batch and the physical file range.
+    pub(super) struct Read {
+        pub(super) index: usize,
+        pub(super) offset: u64,
+        pub(super) len: usize,
+    }
+
+    /// One completed read, sent to the stream as soon as the kernel reports it.
+    pub(super) type Completion = Result<(usize, IoBufsMut), Error>;
+
+    /// Lazily open an `O_DIRECT` descriptor on the blob's inode. `None` when the filesystem
+    /// rejects direct I/O, in which case callers read through the page cache instead.
+    pub(super) fn direct(file: &Shared) -> Option<&File> {
+        file.direct
+            .get_or_init(|| {
+                let path = format!("/proc/self/fd/{}", file.as_raw_fd());
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true).custom_flags(libc::O_DIRECT);
+                options.open(path).ok()
+            })
+            .as_ref()
+    }
+
+    /// Alignment direct I/O requires of buffer addresses, file offsets, and lengths: the largest
+    /// logical block size of supported devices.
+    const ALIGN: usize = 4096;
+
+    /// A block-aligned heap buffer: one submission's reads land here before being copied into
+    /// their pool buffers.
+    struct Aligned {
+        ptr: *mut u8,
+        len: usize,
+    }
+    // SAFETY: the buffer is uniquely owned heap memory.
+    unsafe impl Send for Aligned {}
+    impl Aligned {
+        fn new(len: usize) -> Self {
+            let layout = std::alloc::Layout::from_size_align(len, ALIGN).expect("aligned layout");
+            // SAFETY: `len` is a non-zero multiple of ALIGN.
+            let ptr = unsafe { std::alloc::alloc(layout) };
+            assert!(!ptr.is_null(), "aligned allocation failed");
+            Self { ptr, len }
+        }
+        fn as_slice(&self) -> &[u8] {
+            // SAFETY: `ptr` is valid for `len` bytes, which the kernel filled before use.
+            unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+        }
+    }
+    impl Drop for Aligned {
+        fn drop(&mut self) {
+            let layout =
+                std::alloc::Layout::from_size_align(self.len, ALIGN).expect("aligned layout");
+            // SAFETY: allocated in `new` with the same layout.
+            unsafe { std::alloc::dealloc(self.ptr, layout) };
+        }
+    }
+
+    /// Kernel ABI (`struct iocb`, little-endian layout).
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct Iocb {
+        aio_data: u64,
+        aio_key: u32,
+        aio_rw_flags: u32,
+        aio_lio_opcode: u16,
+        aio_reqprio: i16,
+        aio_fildes: u32,
+        aio_buf: u64,
+        aio_nbytes: u64,
+        aio_offset: i64,
+        aio_reserved2: u64,
+        aio_flags: u32,
+        aio_resfd: u32,
+    }
+
+    /// Kernel ABI (`struct io_event`).
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct IoEvent {
+        data: u64,
+        obj: u64,
+        res: i64,
+        res2: i64,
+    }
+
+    const IOCB_CMD_PREAD: u16 = 0;
+
+    /// A long-lived AIO context. Creating one and destroying it each cost an RCU grace period,
+    /// so contexts are pooled and reused by submitting threads.
+    struct Context(libc::c_ulong);
+    // SAFETY: an aio context handle may be used from any thread.
+    unsafe impl Send for Context {}
+
+    fn contexts() -> &'static Mutex<Vec<Context>> {
+        static POOL: OnceLock<Mutex<Vec<Context>>> = OnceLock::new();
+        POOL.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    /// Take a pooled context or create one sized for a full submission. `None` when the kernel's
+    /// outstanding-request limit (`fs.aio-max-nr`) is exhausted.
+    fn take_context() -> Option<Context> {
+        if let Some(ctx) = contexts().lock().pop() {
+            return Some(ctx);
+        }
+        let mut ctx: libc::c_ulong = 0;
+        // SAFETY: `io_setup` writes the new context handle to the valid out pointer.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_io_setup,
+                AIO_SUBMISSION as libc::c_ulong,
+                &mut ctx,
+            )
+        };
+        (r == 0).then_some(Context(ctx))
+    }
+
+    /// Submit every read in `batch` through `ctx`, delivering each completion as the kernel
+    /// reports it. On error the context may still own in-flight requests, so it is retired.
+    fn submit(
+        file: &File,
+        pool: &BufferPool,
+        ctx: &Context,
+        batch: Vec<Read>,
+        tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
+    ) -> Result<(), Error> {
+        let fd = file.as_raw_fd() as u32;
+        let n = batch.len();
+
+        // Every read covers the block-aligned superset of its range, laid out back to back in
+        // one aligned slab; the requested bytes are copied into pool buffers on completion.
+        let mut spans = Vec::with_capacity(n);
+        let mut slab_len = 0usize;
+        for read in &batch {
+            let aligned_offset = read.offset / ALIGN as u64 * ALIGN as u64;
+            let skip = (read.offset - aligned_offset) as usize;
+            let aligned_len = (skip + read.len).div_ceil(ALIGN) * ALIGN;
+            spans.push((aligned_offset, skip, slab_len, aligned_len));
+            slab_len += aligned_len;
+        }
+        let slab = Aligned::new(slab_len);
+        let mut iocbs: Vec<Iocb> = spans
+            .iter()
+            .enumerate()
+            .map(|(i, &(aligned_offset, _, start, aligned_len))| Iocb {
+                aio_data: i as u64,
+                aio_lio_opcode: IOCB_CMD_PREAD,
+                aio_fildes: fd,
+                // SAFETY: `start + aligned_len <= slab_len`.
+                aio_buf: unsafe { slab.ptr.add(start) } as u64,
+                aio_nbytes: aligned_len as u64,
+                aio_offset: aligned_offset as i64,
+                ..Iocb::default()
+            })
+            .collect();
+        let mut reads: Vec<Option<Read>> = batch.into_iter().map(Some).collect();
+
+        let ptrs: Vec<*mut Iocb> = iocbs.iter_mut().map(|iocb| iocb as *mut Iocb).collect();
+        let mut submitted = 0;
+        while submitted < n {
+            // SAFETY: `ptrs[submitted..]` are valid iocbs that outlive the batch; the context
+            // holds at least `n` slots because `n <= AIO_SUBMISSION`.
+            let r = unsafe {
+                libc::syscall(
+                    libc::SYS_io_submit,
+                    ctx.0,
+                    (n - submitted) as libc::c_long,
+                    ptrs.as_ptr().add(submitted),
+                )
+            };
+            if r < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            submitted += r as usize;
+        }
+
+        let mut events = vec![IoEvent::default(); n];
+        let mut completed = 0;
+        while completed < n {
+            // SAFETY: `events` has room for `n` entries and the pointers in flight stay valid
+            // until every submitted request has completed.
+            let got = unsafe {
+                libc::syscall(
+                    libc::SYS_io_getevents,
+                    ctx.0,
+                    1 as libc::c_long,
+                    (n - completed) as libc::c_long,
+                    events.as_mut_ptr(),
+                    std::ptr::null::<libc::timespec>(),
+                )
+            };
+            if got < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            for event in &events[..got as usize] {
+                let i = event.data as usize;
+                let read = reads[i].take().expect("each request completes once");
+                if event.res < 0 {
+                    return Err(std::io::Error::from_raw_os_error(-event.res as i32).into());
+                }
+                // A superset ending past the file is short; only the requested range must be
+                // covered.
+                let (_, skip, start, _) = spans[i];
+                if (event.res as usize) < skip + read.len {
+                    return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+                }
+                let mut bufs: IoBufsMut = pool.alloc(read.len).into();
+                // SAFETY: `len` bytes are copied in before the buffer is handed on.
+                unsafe { bufs.set_len(read.len) };
+                bufs.copy_from_slice(&slab.as_slice()[start + skip..start + skip + read.len]);
+                let _ = tx.send(Ok((read.index, bufs)));
+            }
+            completed += got as usize;
+        }
+        Ok(())
+    }
+
+    /// Run one submission on the calling (blocking) thread.
+    pub(super) fn run(
+        file: &Shared,
+        pool: &BufferPool,
+        batch: Vec<Read>,
+        tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
+    ) {
+        let direct = direct(file).expect("direct descriptor checked before dispatch");
+        // Empty ranges need no I/O.
+        let (empty, batch): (Vec<Read>, Vec<Read>) =
+            batch.into_iter().partition(|read| read.len == 0);
+        for read in empty {
+            let _ = tx.send(Ok((read.index, IoBufsMut::default())));
+        }
+        if batch.is_empty() {
+            return;
+        }
+        let Some(ctx) = take_context() else {
+            // The kernel's request limit is exhausted: serve this submission through the page
+            // cache on this thread instead.
+            for read in batch {
+                let mut bufs: IoBufsMut = pool.alloc(read.len).into();
+                // SAFETY: `len` bytes are filled by read_bufs_at before the buffer is yielded.
+                unsafe { bufs.set_len(read.len) };
+                let result = Blob::read_bufs_at(
+                    Cache::Disabled,
+                    file,
+                    pool,
+                    &mut bufs,
+                    read.len,
+                    read.offset,
+                );
+                let _ = tx.send(result.map(|()| (read.index, bufs)));
+            }
+            return;
+        };
+        match submit(direct, pool, &ctx, batch, tx) {
+            Ok(()) => contexts().lock().push(ctx),
+            Err(err) => {
+                let _ = tx.send(Err(err));
+            }
+        }
+    }
+}
+
 /// Page-cache policy for one positioned I/O request.
 enum Cache {
     /// Use the operating system's normal page-cache behavior.
@@ -92,8 +370,8 @@ struct Shared {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: AtomicBool,
-    /// The file reopened with `O_DIRECT` for aligned uncached reads, opened on first use. `None`
-    /// if the filesystem does not support `O_DIRECT`.
+    /// The file reopened with `O_DIRECT` for uncached reads, opened on first use. `None` if the
+    /// filesystem does not support `O_DIRECT`.
     #[cfg(target_os = "linux")]
     direct: OnceLock<Option<File>>,
     #[cfg(test)]
@@ -416,6 +694,28 @@ impl Blob {
         Ok(())
     }
 
+    /// Fill `bufs` from `offset` on the calling (blocking) thread, copying through a contiguous
+    /// scratch buffer when `bufs` holds more than one chunk.
+    fn read_bufs_at(
+        cache: Cache,
+        file: &Shared,
+        pool: &BufferPool,
+        bufs: &mut IoBufsMut,
+        len: usize,
+        offset: u64,
+    ) -> Result<(), Error> {
+        if let Some(buf) = bufs.as_single_mut() {
+            // Read directly into the single buffer (zero-copy).
+            return Self::read_exact_at(cache, file, buf.as_mut(), offset);
+        }
+        // Read into a temporary contiguous buffer and copy back to preserve structure.
+        // SAFETY: `len` bytes are filled via read_exact_at below.
+        let mut temp = unsafe { pool.alloc_len(len) };
+        Self::read_exact_at(cache, file, temp.as_mut(), offset)?;
+        bufs.copy_from_slice(temp.as_ref());
+        Ok(())
+    }
+
     fn write_single_at(file: &File, offset: u64, buf: &[u8]) -> Result<(), Error> {
         file.write_all_at(buf, offset)?;
         Ok(())
@@ -567,6 +867,51 @@ impl crate::Blob for Blob {
         })
         .await
         .map_err(|_| Error::ReadFailed)?
+    }
+
+    fn read_many(
+        &self,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+        use futures::{FutureExt as _, StreamExt as _, stream};
+
+        // Direct I/O serves a batch the page cache need not retain: the device sees every read
+        // at once and no thread blocks per read. Everything else goes through the page cache
+        // one read per blocking task.
+        #[cfg(target_os = "linux")]
+        if options.contains(ReadOptions::DONT_CACHE) && aio::direct(&self.shared).is_some() {
+            let mut reads = Vec::with_capacity(ranges.len());
+            for (index, &(offset, len)) in ranges.iter().enumerate() {
+                let Some(offset) = offset.checked_add(self.data_offset) else {
+                    return stream::iter(vec![Err(Error::OffsetOverflow)]).boxed();
+                };
+                reads.push(aio::Read { index, offset, len });
+            }
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut reads = reads.into_iter().peekable();
+            while reads.peek().is_some() {
+                let batch: Vec<_> = reads.by_ref().take(AIO_SUBMISSION).collect();
+                let file = self.shared.clone();
+                let pool = self.pool.clone();
+                let tx = tx.clone();
+                task::spawn_blocking(move || aio::run(&file, &pool, batch, &tx));
+            }
+            return stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|item| (item, rx))
+            })
+            .boxed();
+        }
+
+        ranges
+            .iter()
+            .enumerate()
+            .map(|(index, &(offset, len))| {
+                self.read_at(offset, len, options)
+                    .map(move |result| result.map(|bufs| (index, bufs)))
+            })
+            .collect::<stream::FuturesUnordered<_>>()
+            .boxed()
     }
 
     async fn write_at(
@@ -1275,6 +1620,70 @@ mod tests {
             }
         }
         drop(file);
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_read_many_indexes_every_range() {
+        use futures::TryStreamExt as _;
+        let (storage, directory) = storage_for_reopen_test("read_many", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+
+        // 64 blocks of 4096 bytes, each filled with its index.
+        const BLOCK: usize = 4096;
+        const BLOCKS: u64 = 64;
+        let data: Vec<u8> = (0..BLOCKS)
+            .flat_map(|i| std::iter::repeat_n(i as u8, BLOCK))
+            .collect();
+        blob.write_at(0, data, WriteOptions::default())
+            .await
+            .unwrap();
+
+        // Whole aligned blocks (served in place by direct I/O), small unaligned ranges inside
+        // and across blocks (served through an aligned superset), an empty range, and more
+        // ranges than one submission holds, all out of offset order.
+        let mut ranges: Vec<(u64, usize)> = Vec::new();
+        for i in (0..BLOCKS).rev() {
+            ranges.push((i * BLOCK as u64, BLOCK));
+            ranges.push((i * BLOCK as u64 + 7, 10));
+            if i > 0 {
+                ranges.push((i * BLOCK as u64 - 3, 6));
+            }
+            ranges.push((i * BLOCK as u64, 0));
+            if i + 2 <= BLOCKS {
+                ranges.push((i * BLOCK as u64 + 100, 2 * BLOCK - 200));
+            }
+        }
+        assert!(ranges.len() > AIO_SUBMISSION);
+        let mut bufs: Vec<(usize, IoBufsMut)> = blob
+            .read_many(&ranges, ReadOptions::DONT_CACHE)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(bufs.len(), ranges.len());
+        bufs.sort_by_key(|(index, _)| *index);
+        for (i, ((offset, len), (index, bufs))) in ranges.iter().zip(bufs).enumerate() {
+            assert_eq!(index, i);
+            let expected: Vec<u8> = (*offset..*offset + *len as u64)
+                .map(|o| (o / BLOCK as u64) as u8)
+                .collect();
+            assert_eq!(bufs.coalesce().as_ref(), expected.as_slice(), "range {i}");
+        }
+
+        // A range past the end fails the batch.
+        assert!(
+            blob.read_many(
+                &[(0, BLOCK), (BLOCKS * BLOCK as u64 - 1, 2)],
+                ReadOptions::DONT_CACHE,
+            )
+            .try_collect::<Vec<_>>()
+            .await
+            .is_err()
+        );
+
         drop(blob);
         storage.remove("partition", None).await.unwrap();
         drop(storage);
