@@ -147,7 +147,12 @@ impl Metrics {
 /// A SHA-256 digest.
 type Digest = [u8; 32];
 
+/// Marks the start of an event in the audit stream. Field lengths never reach `u64::MAX`, so
+/// the marker cannot be mistaken for a field's length prefix.
+const EVENT_MARKER: u64 = u64::MAX;
+
 /// Hashes an unambiguous sequence of fields for deterministic runtime auditing.
+#[derive(Clone)]
 pub(crate) struct AuditHasher(Sha256);
 
 impl AuditHasher {
@@ -180,13 +185,13 @@ impl AuditHasher {
 
 /// Track the state of the runtime for determinism auditing.
 pub struct Auditor {
-    digest: Mutex<Digest>,
+    hasher: Mutex<AuditHasher>,
 }
 
 impl Default for Auditor {
     fn default() -> Self {
         Self {
-            digest: Digest::default().into(),
+            hasher: AuditHasher::new().into(),
         }
     }
 }
@@ -199,14 +204,10 @@ impl Auditor {
     where
         F: FnOnce(&mut AuditHasher),
     {
-        let mut digest = self.digest.lock();
-
-        let mut hasher = AuditHasher::new();
-        hasher.update(digest.as_ref());
+        let mut hasher = self.hasher.lock();
+        hasher.0.update(EVENT_MARKER.to_be_bytes());
         hasher.update(label);
         payload(&mut hasher);
-
-        *digest = hasher.finalize();
     }
 
     /// Generate a representation of the current state of the runtime.
@@ -214,7 +215,7 @@ impl Auditor {
     /// This can be used to ensure that logic running on top
     /// of the runtime is interacting deterministically.
     pub fn state(&self) -> String {
-        let hash = self.digest.lock();
+        let hash = self.hasher.lock().clone().finalize();
         hex(hash.as_ref())
     }
 }
@@ -2089,6 +2090,35 @@ mod tests {
         let state_b = run_with_metric("ab", "c");
 
         assert_ne!(state_a, state_b);
+    }
+
+    #[test]
+    fn test_auditor_separates_events() {
+        // Two events, the second with no payload.
+        let split = Auditor::default();
+        split.event(b"a", |hasher| hasher.update(b"x"));
+        split.event(b"b", |_| {});
+
+        // One event whose payload ends with the second event's label.
+        let joined = Auditor::default();
+        joined.event(b"a", |hasher| {
+            hasher.update(b"x");
+            hasher.update(b"b");
+        });
+
+        assert_ne!(split.state(), joined.state());
+    }
+
+    #[test]
+    fn test_auditor_state_does_not_record_event() {
+        let auditor = Auditor::default();
+        let empty = auditor.state();
+        assert_eq!(empty, auditor.state());
+
+        auditor.event(b"a", |_| {});
+        let after = auditor.state();
+        assert_ne!(empty, after);
+        assert_eq!(after, auditor.state());
     }
 
     #[test]
