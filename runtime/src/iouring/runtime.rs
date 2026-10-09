@@ -309,27 +309,20 @@ impl Config {
     }
 
     /// Set the number of pool workers, including the calling thread. Defaults
-    /// to 2, as in the tokio runtime.
+    /// to 2.
     ///
-    /// Must be between 1 and 64. Each worker has its own ring. A task woken
-    /// while idle runs on the pool worker that wakes it, and spawns and wakes
-    /// from outside the pool go to any worker. I/O and sleeps stay on the
-    /// worker that registered them. Dedicated and blocking threads are
-    /// additional to this count.
+    /// Must be between 1 and 64. Each worker has its own ring. Dedicated and
+    /// blocking threads are additional to this count.
     pub const fn with_worker_threads(mut self, workers: usize) -> Self {
         self.worker_threads = workers;
         self
     }
 
-    /// Set how many tasks a pool worker polls between looks at the pool's
-    /// inject queue, which holds tasks spawned or woken outside the worker, as
-    /// tokio's global queue does. Defaults to 31, the default of tokio's
-    /// current-thread scheduler. A worker whose own queue is empty looks at
-    /// once.
+    /// Set how many tasks a busy pool worker polls between checks for tasks
+    /// spawned or woken outside it. Defaults to 31.
     ///
-    /// Must be nonzero. A smaller interval starts work from outside the worker
-    /// sooner at the cost of more synchronization, and 1 looks before every
-    /// poll.
+    /// Must be nonzero. A smaller interval starts such tasks sooner at the cost
+    /// of more synchronization, and 1 checks before every poll.
     pub const fn with_global_queue_interval(mut self, interval: u32) -> Self {
         self.global_queue_interval = interval;
         self
@@ -449,8 +442,8 @@ impl Config {
         self.worker_threads
     }
 
-    /// Return how many tasks a pool worker polls between looks at the inject
-    /// queue.
+    /// Return how many tasks a busy pool worker polls between checks for tasks
+    /// spawned or woken outside it.
     pub const fn global_queue_interval(&self) -> u32 {
         self.global_queue_interval
     }
