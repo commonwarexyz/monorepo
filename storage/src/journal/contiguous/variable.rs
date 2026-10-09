@@ -236,6 +236,7 @@ struct ReplayState<'a, B: RBlob, V: Codec> {
 impl<B: RBlob, V: Codec> ReplayState<'_, B, V> {
     /// Buffer the next frame and read its header. Returns the payload size and the offset of the
     /// following frame.
+    #[commonware_macros::stability(ALPHA)]
     async fn next_frame(&mut self) -> Result<(usize, u64), Error> {
         // A short read before a frame header is corruption for replay: bounds and offsets say
         // this item exists, so EOF here means the data blob is shorter than expected.
@@ -288,13 +289,71 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
             if self.pos == self.end_pos {
                 return (!batch.is_empty()).then_some((batch, self));
             }
-            let (item_size, next_offset) = match self.next_frame().await {
-                Ok(frame) => frame,
+
+            // Inline rather than `next_frame`: awaiting it per item slowed every replay ~20%.
+            // A short read before a frame header is corruption for replay: bounds and offsets say
+            // this item exists, so EOF here means the data blob is shorter than expected.
+            match self.replay.ensure(MAX_U32_VARINT_SIZE).await {
+                Ok(true) => {}
+                Ok(false) if self.replay.remaining() == 0 => {
+                    batch.push(Err(Error::Corruption(format!(
+                        "data blob {} ended before position {}",
+                        self.blob, self.pos
+                    ))));
+                    self.pos = self.end_pos;
+                    return Some((batch, self));
+                }
+                Ok(false) => {}
                 Err(err) => {
                     batch.push(Err(err));
                     self.pos = self.end_pos;
                     return Some((batch, self));
                 }
+            }
+
+            // Keep the initial byte count for classifying a failed header read.
+            let before_remaining = self.replay.remaining();
+            let (item_size, varint_len) = match self.replay.read_length() {
+                Ok(result) => result,
+                Err(err) => {
+                    if self.replay.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
+                        batch.push(Err(Error::Corruption(format!(
+                            "incomplete frame header in data blob {} at offset {}",
+                            self.blob, self.offset
+                        ))));
+                    } else {
+                        batch.push(Err(err));
+                    }
+                    self.pos = self.end_pos;
+                    return Some((batch, self));
+                }
+            };
+
+            match self.replay.ensure(item_size).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    batch.push(Err(Error::Corruption(format!(
+                        "incomplete frame in data blob {} at offset {}",
+                        self.blob, self.offset
+                    ))));
+                    self.pos = self.end_pos;
+                    return Some((batch, self));
+                }
+                Err(err) => {
+                    batch.push(Err(err));
+                    self.pos = self.end_pos;
+                    return Some((batch, self));
+                }
+            }
+
+            let next_offset = self
+                .offset
+                .checked_add(varint_len as u64)
+                .and_then(|offset| offset.checked_add(item_size as u64));
+            let Some(next_offset) = next_offset else {
+                batch.push(Err(Error::OffsetOverflow));
+                self.pos = self.end_pos;
+                return Some((batch, self));
             };
             let item_len = next_offset - self.offset;
 
