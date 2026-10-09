@@ -361,7 +361,7 @@ impl CacheRef {
                             waiting.push((page_num, offset_in_page, piece));
                         }
                     }
-                    offset += len as u64;
+                    offset += Widen::widen(len);
                     buf = rest;
                 }
             }
@@ -689,7 +689,7 @@ fn cacheable_page(page: IoBufMut, page_num: u64, page_size: NonZeroU16) -> Resul
     // We should never be fetching partial pages through the page cache. This can happen if a
     // non-last page is corrupted and falls back to a partial CRC.
     let expected: usize = page_size.widen();
-    if checksum.len as usize != expected {
+    if usize::from(checksum.len) != expected {
         error!(
             page_num,
             expected = page_size,

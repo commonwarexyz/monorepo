@@ -210,15 +210,16 @@ mod aio {
         batch: Vec<Read>,
         tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
     ) -> Result<Context, Error> {
-        let fd = direct.as_raw_fd() as u32;
+        let fd = u32::try_from(direct.as_raw_fd()).expect("an open descriptor is non-negative");
         let n = batch.len();
 
         // Every read covers the block-aligned superset of its range, laid out back to back in
         // one aligned slab; the requested bytes are copied into pool buffers on completion.
         let mut spans = Vec::with_capacity(n);
         let mut slab_len = 0usize;
+        let align: u64 = Widen::widen(ALIGN);
         for read in &batch {
-            let aligned_offset = read.offset / ALIGN as u64 * ALIGN as u64;
+            let aligned_offset = read.offset / align * align;
             let skip = (read.offset - aligned_offset) as usize;
             let aligned_len = skip
                 .checked_add(read.len)
@@ -238,12 +239,14 @@ mod aio {
             .iter()
             .enumerate()
             .map(|(i, &(aligned_offset, _, start, aligned_len))| Iocb {
-                aio_data: i as u64,
+                aio_data: Widen::widen(i),
                 aio_lio_opcode: IOCB_CMD_PREAD,
                 aio_fildes: fd,
                 // SAFETY: `start + aligned_len <= slab_len`.
-                aio_buf: unsafe { slab.ptr.add(start) } as u64,
-                aio_nbytes: aligned_len as u64,
+                aio_buf: Widen::widen(unsafe { slab.ptr.add(start) }.addr()),
+                aio_nbytes: Widen::widen(aligned_len),
+                // An offset past the largest signed file offset wraps negative; the kernel
+                // rejects it at submission and the read is served positioned.
                 aio_offset: aligned_offset as i64,
                 ..Iocb::default()
             })

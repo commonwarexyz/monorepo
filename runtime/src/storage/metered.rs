@@ -5,6 +5,7 @@ use crate::{
         traces::TracedExt as _,
     },
 };
+use commonware_utils::Widen;
 use std::{ops::RangeInclusive, sync::Arc};
 use tracing::{Instrument as _, Span, field::Empty};
 
@@ -156,11 +157,13 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         ranges: &[(u64, usize)],
         options: ReadOptions,
     ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
-        self.metrics.storage_reads.inc_by(ranges.len() as u64);
+        self.metrics
+            .storage_reads
+            .inc_by(Widen::widen(ranges.len()));
         self.metrics.storage_read_bytes.inc_by(
             ranges
                 .iter()
-                .fold(0, |sum, &(_, len)| sum.saturating_add(len as u64)),
+                .fold(0, |sum, &(_, len)| sum.saturating_add(Widen::widen(len))),
         );
         self.inner.read_many(ranges, options)
     }
