@@ -194,9 +194,14 @@ where
             // its supervision subtree even if that destruction unwinds.
             let _guard = guard;
 
-            // Run future with panic catching and abort support
-            let result =
-                Abortable::new(AssertUnwindSafe(f).catch_unwind(), abort_registration).await;
+            // Run future with panic catching and abort support. Abortable only gets a pointer to
+            // the pinned future: Miri rejects its `&self` over a future that borrows from itself
+            // (rust-lang/rust#137750).
+            let result = {
+                let future = AssertUnwindSafe(f).catch_unwind();
+                pin_mut!(future);
+                Abortable::new(future, abort_registration).await
+            };
 
             // Handle result
             match result {
@@ -606,7 +611,7 @@ mod tests {
     use crate::{
         Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic,
         telemetry::metrics::raw::Gauge,
-        utils::{extract_panic_message, supervision::Tree},
+        utils::{extract_panic_message, reschedule, supervision::Tree},
     };
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::{FutureExt as _, future, poll, stream::AbortHandle};
@@ -1015,5 +1020,21 @@ mod tests {
         assert_eq!(task.now_or_never(), Some(()));
         assert!(!polled.load(Ordering::SeqCst));
         assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+    }
+
+    /// A task can write through a borrow of its own state after suspending (checked by Miri).
+    #[test]
+    fn task_keeps_self_borrow_across_suspension() {
+        deterministic::Runner::default().start(|context| async move {
+            let handle = context.child("task").spawn(|_| async move {
+                let mut value = 0u8;
+                let borrow = &mut value;
+                *borrow += 1;
+                reschedule().await;
+                *borrow += 1;
+                value
+            });
+            assert_eq!(handle.await.unwrap(), 2);
+        });
     }
 }

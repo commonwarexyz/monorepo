@@ -253,9 +253,9 @@ jobs:
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
-    - name: Run miri tests for runtime::iobuf and runtime::utils::buffer::paged::writer
+    - name: Run miri tests for runtime::iobuf, runtime::utils::buffer::paged::writer, and runtime::utils::handle
       run: |
-        just miri iobuf:: utils::buffer::paged::writer::tests:: -p commonware-runtime --partition hash:${{matrix.partition}}/12
+        just miri iobuf:: utils::buffer::paged::writer::tests:: utils::handle::tests::task_keeps_self_borrow_across_suspension -p commonware-runtime --partition hash:${{matrix.partition}}/12
     - name: Run miri tests for runtime::iouring::task and runtime::iouring::tasks
       run: |
         just miri iouring::task::tests:: iouring::tasks::tests:: -p commonware-runtime --features iouring --partition hash:${{matrix.partition}}/12 --no-tests=pass
