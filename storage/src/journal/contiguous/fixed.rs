@@ -1608,7 +1608,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         }
         let _timer = self.0.metrics.read_many_timer();
         self.0.metrics.read_many_calls.inc();
-        self.0.reader().read_many_uncached_inner(positions).await
+        self.0
+            .reader()
+            .read_many_admission(positions, Admission::Bypass)
+            .await
     }
 
     /// Initialize a new `Journal` instance.
@@ -1823,16 +1826,6 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         positions: &[u64],
     ) -> impl Future<Output = Result<Vec<A>, Error>> + Send {
         self.read_many_admission(positions, Admission::Admit)
-    }
-
-    /// Like [`Self::read_many_inner`], but cache misses do not admit pages into the page cache.
-    /// Suited to bulk scans of items that will not be read again soon.
-    #[commonware_macros::stability(ALPHA)]
-    pub(super) fn read_many_uncached_inner(
-        &self,
-        positions: &[u64],
-    ) -> impl Future<Output = Result<Vec<A>, Error>> + Send {
-        self.read_many_admission(positions, Admission::Bypass)
     }
 
     async fn read_many_admission(
