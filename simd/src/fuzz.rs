@@ -110,33 +110,62 @@ fn memory<N: Simd, E: Simd>(
     u: &mut Unstructured<'_>,
 ) -> arbitrary::Result<()> {
     assert_eq!(N::U64_LANES, E::U64_LANES);
-    let mut a = [0; 9];
-    let mut b = [0; 9];
-    for value in a.iter_mut().chain(b.iter_mut()) {
-        *value = word(u)?;
+    fn input<S: Simd>(u: &mut Unstructured<'_>) -> arbitrary::Result<[u64; 9]> {
+        let mut values = [0; 9];
+        for value in &mut values[1..1 + S::U64_LANES] {
+            *value = word(u)?;
+        }
+        Ok(values)
     }
+    let mut expected = [0xa5a5_a5a5_a5a5_a5a5; 10];
     match plan {
-        Plan::Load => assert_eq!(
-            differential::longs(n, n.u64_load(&a[1..])),
-            differential::longs(e, e.u64_load(&a[1..]))
-        ),
-        Plan::Store => assert_eq!(
-            differential::longs(n, n.u64_insert::<1>(n.u64_splat(a[0]), a[1])),
-            differential::longs(e, e.u64_insert::<1>(e.u64_splat(a[0]), a[1]))
-        ),
-        Plan::Splat => assert_eq!(
-            differential::longs(n, n.u64_splat(a[0])),
-            differential::longs(e, e.u64_splat(a[0]))
-        ),
-        Plan::Add => assert_eq!(
-            differential::longs(n, n.u64_add(n.u64_load(&a[1..]), n.u64_load(&b[1..]))),
-            differential::longs(e, e.u64_add(e.u64_load(&a[1..]), e.u64_load(&b[1..])))
-        ),
+        Plan::Load => {
+            let a = input::<N>(u)?;
+            expected[1..1 + N::U64_LANES].copy_from_slice(&a[1..1 + N::U64_LANES]);
+            assert_eq!(differential::longs(n, n.u64_load(&a[1..])), expected);
+            assert_eq!(differential::longs(e, e.u64_load(&a[1..])), expected);
+        }
+        Plan::Store => {
+            let a = word(u)?;
+            let b = word(u)?;
+            expected[1..1 + N::U64_LANES].fill(a);
+            expected[2] = b;
+            assert_eq!(
+                differential::longs(n, n.u64_insert::<1>(n.u64_splat(a), b)),
+                expected
+            );
+            assert_eq!(
+                differential::longs(e, e.u64_insert::<1>(e.u64_splat(a), b)),
+                expected
+            );
+        }
+        Plan::Splat => {
+            let a = word(u)?;
+            expected[1..1 + N::U64_LANES].fill(a);
+            assert_eq!(differential::longs(n, n.u64_splat(a)), expected);
+            assert_eq!(differential::longs(e, e.u64_splat(a)), expected);
+        }
+        Plan::Add => {
+            let a = input::<N>(u)?;
+            let b = input::<N>(u)?;
+            for i in 1..1 + N::U64_LANES {
+                expected[i] = a[i].wrapping_add(b[i]);
+            }
+            assert_eq!(
+                differential::longs(n, n.u64_add(n.u64_load(&a[1..]), n.u64_load(&b[1..]))),
+                expected,
+            );
+            assert_eq!(
+                differential::longs(e, e.u64_add(e.u64_load(&a[1..]), e.u64_load(&b[1..]))),
+                expected,
+            );
+        }
         #[cfg(test)]
         Plan::ShortMemory => {
+            let value = word(u)?;
             let len = u.int_in_range(0..=N::U64_LANES - 1)?;
-            check_short(n, a[0], len);
-            check_short(e, a[0], len);
+            check_short(n, value, len);
+            check_short(e, value, len);
         }
         _ => unreachable!("instruction check must select its differential helper"),
     }
@@ -281,29 +310,38 @@ fn test_execute() {
     commonware_invariants::minifuzz::test(|u| Plan::Execute.run(u));
 }
 
-#[test]
-fn test_memory() {
-    for plan in [
-        Plan::Load,
-        Plan::Store,
-        Plan::Splat,
-        Plan::Add,
-        Plan::ShortMemory,
-    ] {
-        commonware_invariants::minifuzz::test(|u| plan.run(u));
+#[cfg(test)]
+fn test_native(plan: Plan) {
+    if expected_backend().0 == Path::Portable {
+        return;
     }
+    commonware_invariants::minifuzz::test(|u| plan.run(u));
 }
+
+macro_rules! memory_test {
+    ($name:ident, $plan:ident) => {
+        #[test]
+        fn $name() {
+            test_native(Plan::$plan);
+        }
+    };
+}
+memory_test!(test_load, Load);
+memory_test!(test_store, Store);
+memory_test!(test_splat, Splat);
+memory_test!(test_add, Add);
+memory_test!(test_short_memory, ShortMemory);
 
 #[cfg(not(miri))]
 #[test]
 fn test_common() {
-    commonware_invariants::minifuzz::test(|u| Plan::Common.run(u));
+    test_native(Plan::Common);
 }
 
 #[cfg(not(miri))]
 #[test]
 fn test_profile() {
-    commonware_invariants::minifuzz::test(|u| Plan::Profile.run(u));
+    test_native(Plan::Profile);
 }
 
 #[test]
