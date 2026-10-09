@@ -796,7 +796,7 @@ impl Runnable {
         // inside one can take it here. A closing worker polls nothing more,
         // so its wakes go to the global queue, which runs them elsewhere or
         // has closed.
-        if let Some(local) = Local::serving(&self.0.pool) {
+        if let Some(local) = Local::serving(self.0.owner) {
             let mut local = local.borrow_mut();
             if !local.closing {
                 local.ready.push(self);
@@ -811,7 +811,7 @@ impl Runnable {
     /// only worker. Otherwise it goes to the global queue, which wakes a parked
     /// worker to start it.
     pub fn spawn(self) {
-        if let Some(local) = Local::serving(&self.0.pool) {
+        if let Some(local) = Local::serving(self.0.owner) {
             let mut local = local.borrow_mut();
             if !local.closing && (local.ready.is_empty() || local.workers() == 1) {
                 local.ready.push(self);
