@@ -158,6 +158,14 @@ mod test_utils {
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31
         );
+        macro_rules! word_rotations { ($($n:literal),*) => { $(
+            assert_eq!(words(simd,simd.u32_rotate_right::<$n>(av)),a.iter().map(|x| x.rotate_right($n)).collect::<Vec<_>>());
+        )* }; }
+        word_rotations!(
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31
+        );
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_rotate_right::<32>(av))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_shl::<32>(av))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_shr::<32>(av))).is_err());
         // Rotate every possible source into lane zero, crossing every group boundary.
@@ -219,6 +227,74 @@ mod test_utils {
             .collect();
         let av = simd.u64_load(&a);
         let bv = simd.u64_load(&b);
+        macro_rules! long_shifts { ($($n:literal),*) => { $(
+            assert_eq!(longs(simd,simd.u64_shl::<$n>(av)),a.iter().map(|x| x << $n).collect::<Vec<_>>());
+            assert_eq!(longs(simd,simd.u64_shr::<$n>(av)),a.iter().map(|x| x >> $n).collect::<Vec<_>>());
+        )* }; }
+        long_shifts!(
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
+            46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63
+        );
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_shl::<64>(av))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_shr::<64>(av))).is_err());
+        assert_eq!(
+            longs(simd, simd.u64_add(av, bv)),
+            a.iter()
+                .zip(&b)
+                .map(|(x, y)| x.wrapping_add(*y))
+                .collect::<Vec<_>>()
+        );
+        let boundaries = [
+            0,
+            1,
+            u64::MAX - 1,
+            u64::MAX,
+            (1 << 32) - 1,
+            1 << 32,
+            (1 << 63) - 1,
+            1 << 63,
+        ];
+        for x in boundaries {
+            for y in boundaries {
+                assert_eq!(
+                    longs(simd, simd.u64_add(simd.u64_splat(x), simd.u64_splat(y))),
+                    vec![x.wrapping_add(y); S::U64_LANES]
+                );
+            }
+        }
+        // Exercise carry propagation through every bit in every lane.
+        for bits in 1..=64 {
+            let x = u64::MAX >> (64 - bits);
+            assert_eq!(
+                longs(simd, simd.u64_add(simd.u64_splat(x), simd.u64_splat(1))),
+                vec![x.wrapping_add(1); S::U64_LANES]
+            );
+        }
+        // Distinct operands per lane expose accidental carries between lanes.
+        for seed in 0..256u64 {
+            let a: Vec<u64> = (0..S::U64_LANES)
+                .map(|i| {
+                    seed.wrapping_add(i as u64)
+                        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                        .rotate_left(i as u32 * 7)
+                })
+                .collect();
+            let b: Vec<u64> = (0..S::U64_LANES)
+                .map(|i| {
+                    seed.wrapping_mul(0xd1b5_4a32_d192_ed03)
+                        .wrapping_add(i as u64)
+                        .rotate_right(i as u32 * 13)
+                })
+                .collect();
+            assert_eq!(
+                longs(simd, simd.u64_add(simd.u64_load(&a), simd.u64_load(&b))),
+                a.iter()
+                    .zip(&b)
+                    .map(|(x, y)| x.wrapping_add(*y))
+                    .collect::<Vec<_>>()
+            );
+        }
         for len in 0..S::U64_LANES {
             let mut out = vec![0xa5; len];
             assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_load(&out))).is_err());
