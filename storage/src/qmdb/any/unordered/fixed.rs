@@ -434,9 +434,10 @@ pub(crate) mod test {
     fn test_get_many_fused_sharded_matches_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // The fused path requires parallelism > 1 (the Sequential test config never takes
-            // it) and at least 4096 keys. The tiny test page cache pushes most keys through
-            // the batched miss fallback, and TwoCap produces translated-key collisions.
+            // Sharding requires parallelism > 1 (the Sequential test config never takes it)
+            // and at least two shards' worth of keys, so repeated keys land in different shards.
+            // The tiny test page cache pushes most keys through the batched miss fallback, and
+            // TwoCap produces translated-key collisions.
             type ParTest = Db<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Rayon>;
             let strategy = context.strategy(NZUsize!(2));
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("fused", &context, strategy);
