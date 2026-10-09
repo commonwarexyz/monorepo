@@ -625,7 +625,8 @@ where
         Ok(db)
     }
 
-    /// Sync all database state to disk.
+    /// Sync all database state to disk and save a checkpoint of the Merkle digests, so startup
+    /// replays only operations applied after it.
     #[tracing::instrument(
         name = "qmdb.any.db.sync",
         level = "info",
@@ -647,8 +648,9 @@ where
     /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
-    /// The backing journal also attempts to advance its recovery watermark. Recovery always
-    /// replays retained operations to rebuild Merkle state.
+    /// The backing journal also attempts to advance its recovery watermark, and like
+    /// [Self::commit] it saves a checkpoint of the Merkle digests once enough operations have
+    /// accumulated since the last one.
     ///
     /// A new sync waits for the prior sync before starting. A failed data sync surfaces on the
     /// returned handle and the next durability operation. A recovery-watermark failure surfaces
@@ -673,6 +675,9 @@ where
 
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
+    ///
+    /// Saves a checkpoint of the Merkle digests once enough operations have accumulated since
+    /// the last one.
     #[tracing::instrument(
         name = "qmdb.any.db.commit",
         level = "info",

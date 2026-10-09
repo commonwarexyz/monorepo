@@ -7,8 +7,14 @@
 //!
 //! # Persistence and caching
 //!
-//! Only operations and the pruning frontier are durable. Recovery replays every retained
-//! operation to rebuild the Merkle digests kept in memory. No Merkle node journal is written.
+//! Operations, the pruning frontier, and the digests at or above
+//! [`CacheConfig::resident_height`] (the "resident" digests) are durable. Commits, syncs, starts
+//! of a sync, and prunes append new resident digests to a journal of their own, and all but
+//! prunes note the commit they reach. Syncs and import activations always, and commits and starts
+//! of a sync once enough operations have accumulated, record that commit as the frontier's
+//! checkpoint, so startup restores the digests and replays only later operations. Commits, syncs,
+//! and starts of a sync should follow an operation that ends a commit: a checkpoint past the
+//! commit startup recovers is discarded, and every retained operation is replayed instead.
 //!
 //! [`CacheConfig::resident_height`] selects the lowest height kept in memory (five by default).
 //! Lower nodes are rebuilt on demand from their operations, one aligned region of leaves at a
@@ -63,6 +69,7 @@ mod config;
 mod frontier;
 mod import;
 mod metrics;
+mod resident;
 mod tree;
 #[cfg(test)]
 pub(crate) use config::tests::single_region_cache;
@@ -305,6 +312,10 @@ where
 
     /// Durable pruning boundary and import status.
     pub(crate) frontier: Frontier<F, E, H::Digest>,
+
+    /// Durable resident digests, so startup replays only operations committed after the
+    /// frontier's checkpoint.
+    resident: resident::Digests<F, E, H::Digest>,
 
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the Merkle structure.
@@ -658,27 +669,33 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Begin durably persisting operations.
+    /// Begin durably persisting operations, whose last item ends a commit.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
-    /// Also tries to advance the operation journal's recovery watermark.
+    /// Also tries to advance the operation journal's recovery watermark, and saves a checkpoint
+    /// when [Self::commit] would.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         let handle;
         (self.journal, handle) = self.journal.start_sync().await?;
         self.merkle.flush();
+        // A checkpoint may become durable before its operations; startup drops it if they are lost.
+        (self.resident, self.frontier) = self.resident.advance(&self.merkle, self.frontier).await?;
         Ok((self, handle))
     }
 
-    /// Durably persist operations. Merkle digests are rebuilt from operations on startup.
+    /// Durably persist operations, whose last item ends a commit. Saves a checkpoint once enough
+    /// operations have been committed since the last one, bounding what startup replays.
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
         self.journal = self.journal.commit().await?;
         self.merkle.flush();
+        (self.resident, self.frontier) = self.resident.advance(&self.merkle, self.frontier).await?;
         Ok(self)
     }
 
     /// Build provisional authenticated state from an import staged at `start` with `pins`.
     ///
-    /// Nothing is persisted. [Self::activate] makes the result durable once authenticated.
+    /// Durably discards the resident digests. [Self::activate] persists the rest once
+    /// authenticated.
     pub(crate) async fn from_components(
         import: Import<F, E, H::Digest, S>,
         config: &Config<S>,
@@ -693,6 +710,7 @@ where
     {
         let Import {
             frontier,
+            resident,
             metrics,
             tree,
         } = import;
@@ -711,9 +729,11 @@ where
             _ => Tree::new(start, pins, config, metrics)?,
         };
         let merkle = Self::align(merkle, &journal, &hasher, apply_batch_size).await?;
+        let resident = resident.clear(&merkle).await?;
         Ok(Self {
             merkle,
             frontier,
+            resident,
             journal,
             hasher,
         })
@@ -733,10 +753,12 @@ where
         merkle.replay(journal, hasher, end, apply_batch_size).await
     }
 
-    /// Activate a fully authenticated synchronization result.
+    /// Activate a fully authenticated synchronization result, and save a checkpoint at its end.
     pub(crate) async fn activate(mut self) -> Result<Self, Error<F>> {
         self.journal = self.journal.sync().await?;
         self.frontier = self.frontier.activate_staged().await?;
+        (self.resident, self.frontier) = self.resident.advance(&self.merkle, self.frontier).await?;
+        (self.resident, self.frontier) = self.resident.save(self.frontier).await?;
         Ok(self)
     }
 
@@ -853,6 +875,7 @@ where
             let pins = self.pinned_nodes_at(target).await?;
             self.journal = self.journal.commit().await?;
             self.frontier = self.frontier.activate(target, pins.clone()).await?;
+            self.resident = self.resident.prune(&self.merkle, target).await?;
             self.merkle.prune(target, pins);
         }
         let pruned;
@@ -866,21 +889,27 @@ where
         // `try_join!` contains an await boundary, so destructure first to avoid
         // stack growth from retaining the entire `self` in the future.
         let Self {
-            journal, frontier, ..
+            journal,
+            frontier,
+            resident,
+            ..
         } = self;
         try_join!(
             journal.destroy().map_err(Error::Journal),
             frontier.destroy(),
+            resident.destroy(),
         )?;
 
         Ok(())
     }
 
-    /// Durably persist operations and advance their recovery watermark. Startup still rebuilds
-    /// Merkle digests from retained operations.
+    /// Durably persist operations, whose last item ends a commit, advance their recovery
+    /// watermark, and save a checkpoint there, so startup replays only operations after it.
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         self.journal = self.journal.sync().await?;
         self.merkle.flush();
+        (self.resident, self.frontier) = self.resident.advance(&self.merkle, self.frontier).await?;
+        (self.resident, self.frontier) = self.resident.save(self.frontier).await?;
         Ok(self)
     }
 }
@@ -898,6 +927,8 @@ where
     journal: C::Recovery,
     /// Durable frontier, active or absent.
     frontier: Frontier<F, E, H::Digest>,
+    /// Resident digests, awaiting validation against the frontier's checkpoint.
+    resident: resident::Recovery<E, H::Digest>,
     /// Digests at the frontier, awaiting replay of the selected operations.
     merkle: Tree<F, H::Digest, S>,
     /// Hasher and peak-bagging mode retained for replay and the published journal.
@@ -951,16 +982,20 @@ where
             frontier = frontier.activate(Location::new(0), Vec::new()).await?;
         }
         let end = Location::new(self.selected_end);
-        let merkle = self
-            .merkle
+        let (resident, merkle, frontier) =
+            self.resident.restore(self.merkle, frontier, end).await?;
+        let merkle = merkle
             .replay(&journal, &self.hasher, end, APPLY_BATCH_SIZE)
             .await?;
+        // The selected end is a commit, so a checkpoint may record it.
+        let (resident, frontier) = resident.advance(&merkle, frontier).await?;
 
         // Delete operations below the frontier, left by a crash during pruning or by a sync.
         let (journal, _) = journal.prune(*merkle.bounds().start).await?;
         Ok(Journal {
             merkle,
             frontier,
+            resident,
             journal,
             hasher: self.hasher,
         })
@@ -1044,6 +1079,7 @@ where
             Metrics::new(&context.child("merkle")),
         )?;
 
+        let resident = resident::Recovery::open(context.child("resident"), &merkle_cfg).await;
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
         let bounds = journal.bounds();
         match boundary {
@@ -1079,6 +1115,7 @@ where
         Ok(Recovery {
             journal,
             frontier,
+            resident,
             merkle,
             hasher: StandardHasher::<H>::new(bagging),
             selected_end,
@@ -1475,7 +1512,7 @@ mod tests {
     use commonware_macros::{test_collect_traces, test_traced};
     use commonware_parallel::{Manual, Rayon, Sequential};
     use commonware_runtime::{
-        BufferPooler, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
+        BufferPooler, Metrics as _, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs},
@@ -2805,6 +2842,397 @@ mod tests {
         deterministic::Runner::default().start(recovery_frontier_ahead::<mmb::Family>);
     }
 
+    /// Leaves the journal opened under `label` replayed at startup.
+    fn replayed(context: &Context, label: &str) -> u64 {
+        let metric = format!("{label}_merkle_replayed_leaves_total ");
+        context
+            .encode()
+            .lines()
+            .find_map(|line| line.strip_prefix(&metric)?.parse().ok())
+            .unwrap()
+    }
+
+    /// Append operations `range` to `journal`.
+    async fn append_range<F: Family + PartialEq>(
+        mut journal: TestJournal<F>,
+        range: Range<u8>,
+    ) -> TestJournal<F> {
+        for i in range {
+            (journal, _) = journal.append(&create_operation(i)).await.unwrap();
+        }
+        journal
+    }
+
+    /// Merkle configuration for tests at resident height `height`.
+    fn resident_config(suffix: &str, height: u32) -> MerkleConfig<Sequential> {
+        MerkleConfig {
+            cache: CacheConfig {
+                resident_height: height,
+                ..Default::default()
+            },
+            ..merkle_config(suffix)
+        }
+    }
+
+    /// Open the journal at `suffix` under `label`, with every operation ending a commit.
+    async fn open_at_height<F: Family + PartialEq>(
+        context: &Context,
+        suffix: &str,
+        label: &'static str,
+        height: u32,
+    ) -> TestJournal<F> {
+        TestJournal::<F>::new(
+            context.child(label),
+            resident_config(suffix, height),
+            journal_config(suffix, context),
+            |_| true,
+            ForwardFold,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Assert that every retained operation of `journal` proves against `root`.
+    async fn assert_proves_all<F: Family + PartialEq>(journal: &TestJournal<F>, root: Digest) {
+        for loc in journal.bounds() {
+            let loc = Location::new(loc);
+            let (proof, ops) = journal.proof(loc, NZU64!(1), 0).await.unwrap();
+            assert!(
+                verify_proof(&proof, &ops, loc, &root, &journal.hasher),
+                "location {loc:?}"
+            );
+        }
+    }
+
+    /// A synced journal reopens from its checkpoint, replaying only the operations committed
+    /// after it, and the checkpoint survives pruning.
+    async fn checkpoint_restores<F: Family + PartialEq>(context: Context) {
+        let journal = open_at_height::<F>(&context, "checkpoint", "initial", 2).await;
+        let journal = append_range(journal, 0..200).await.sync().await.unwrap();
+        let journal = append_range(journal, 200..210)
+            .await
+            .commit()
+            .await
+            .unwrap();
+        let root = journal.root(0).unwrap();
+        drop(journal);
+
+        let journal = open_at_height::<F>(&context, "checkpoint", "reopened", 2).await;
+        assert_eq!(journal.root(0).unwrap(), root);
+        assert_eq!(replayed(&context, "reopened"), 10);
+        assert_proves_all(&journal, root).await;
+
+        let (journal, _) = journal.prune(Location::new(100)).await.unwrap();
+        drop(journal);
+        let journal = open_at_height::<F>(&context, "checkpoint", "pruned", 2).await;
+        assert_eq!(journal.root(0).unwrap(), root);
+        assert_eq!(replayed(&context, "pruned"), 10);
+        assert_proves_all(&journal, root).await;
+    }
+
+    #[test]
+    fn test_checkpoint_restores_mmr() {
+        deterministic::Runner::default().start(checkpoint_restores::<mmr::Family>);
+    }
+    #[test]
+    fn test_checkpoint_restores_mmb() {
+        deterministic::Runner::default().start(checkpoint_restores::<mmb::Family>);
+    }
+
+    /// A checkpoint past the commit startup recovers is dropped, and startup replays instead.
+    async fn checkpoint_past_recovered_commit<F: Family + PartialEq>(context: Context) {
+        let open = |label: &'static str| {
+            TestJournal::<F>::new(
+                context.child(label),
+                resident_config("past-commit", 2),
+                journal_config("past-commit", &context),
+                |op: &TestOp<F>| op.is_commit(),
+                ForwardFold,
+            )
+        };
+        let journal = append_range(open("initial").await.unwrap(), 0..100).await;
+        let (journal, _) = journal
+            .append(&TestOp::<F>::CommitFloor(None, Location::new(0)))
+            .await
+            .unwrap();
+        let journal = journal.commit().await.unwrap();
+        let root = journal.root(0).unwrap();
+        // Syncing after operations that end no commit records a checkpoint startup cannot use.
+        drop(append_range(journal, 101..120).await.sync().await.unwrap());
+
+        let journal = open("reopened").await.unwrap();
+        assert_eq!(journal.size(), Location::new(101));
+        assert_eq!(journal.root(0).unwrap(), root);
+        assert_eq!(replayed(&context, "reopened"), 101);
+        assert!(journal.frontier.checkpoint().is_none());
+    }
+
+    #[test]
+    fn test_checkpoint_past_recovered_commit_mmr() {
+        deterministic::Runner::default().start(checkpoint_past_recovered_commit::<mmr::Family>);
+    }
+    #[test]
+    fn test_checkpoint_past_recovered_commit_mmb() {
+        deterministic::Runner::default().start(checkpoint_past_recovered_commit::<mmb::Family>);
+    }
+
+    /// Digests written ahead of the checkpoint, as when a save stops before recording it, are
+    /// discarded on restore, and the next save continues after the checkpoint.
+    async fn checkpoint_behind_digests<F: Family + PartialEq>(context: Context) {
+        let journal = open_at_height::<F>(&context, "behind", "initial", 2).await;
+        let mut journal = append_range(journal, 0..200).await.sync().await.unwrap();
+        let root = journal.root(0).unwrap();
+        let location = Location::new(100);
+        let digests = journal.pinned_nodes_at(location).await.unwrap();
+        journal.frontier = journal
+            .frontier
+            .save_checkpoint(frontier::Checkpoint {
+                height: 2,
+                peaks: frontier::Boundary { location, digests },
+            })
+            .await
+            .unwrap();
+        drop(journal);
+
+        let journal = open_at_height::<F>(&context, "behind", "restored", 2).await;
+        assert_eq!(journal.root(0).unwrap(), root);
+        assert_eq!(replayed(&context, "restored"), 100);
+        assert_proves_all(&journal, root).await;
+        drop(journal.sync().await.unwrap());
+        let journal = open_at_height::<F>(&context, "behind", "resaved", 2).await;
+        assert_eq!(journal.root(0).unwrap(), root);
+        assert_eq!(replayed(&context, "resaved"), 0);
+        assert_proves_all(&journal, root).await;
+    }
+
+    #[test]
+    fn test_checkpoint_behind_digests_mmr() {
+        deterministic::Runner::default().start(checkpoint_behind_digests::<mmr::Family>);
+    }
+    #[test]
+    fn test_checkpoint_behind_digests_mmb() {
+        deterministic::Runner::default().start(checkpoint_behind_digests::<mmb::Family>);
+    }
+
+    /// A checkpoint whose peaks disagree with its resident digests is dropped, and startup
+    /// replays the operations rather than trusting either, then saves a sound checkpoint.
+    async fn checkpoint_disagreeing_with_digests<F: Family + PartialEq>(context: Context) {
+        let journal = open_at_height::<F>(&context, "disagree", "initial", 2).await;
+        let mut journal = append_range(journal, 0..200).await.sync().await.unwrap();
+        let root = journal.root(0).unwrap();
+        let location = journal.frontier.checkpoint().unwrap().peaks.location;
+        let digests = F::nodes_to_pin(location)
+            .map(|_| Sha256::fill(0xff))
+            .collect();
+        journal.frontier = journal
+            .frontier
+            .save_checkpoint(frontier::Checkpoint {
+                height: 2,
+                peaks: frontier::Boundary { location, digests },
+            })
+            .await
+            .unwrap();
+        drop(journal);
+
+        let journal = open_at_height::<F>(&context, "disagree", "reopened", 2).await;
+        assert_eq!(journal.root(0).unwrap(), root);
+        assert_eq!(replayed(&context, "reopened"), 200);
+        assert!(journal.frontier.checkpoint().is_none());
+        assert_proves_all(&journal, root).await;
+        drop(journal.sync().await.unwrap());
+        let journal = open_at_height::<F>(&context, "disagree", "resaved", 2).await;
+        assert_eq!(journal.root(0).unwrap(), root);
+        assert_eq!(replayed(&context, "resaved"), 0);
+        assert_proves_all(&journal, root).await;
+    }
+
+    #[test]
+    fn test_checkpoint_disagreeing_with_digests_mmr() {
+        deterministic::Runner::default().start(checkpoint_disagreeing_with_digests::<mmr::Family>);
+    }
+    #[test]
+    fn test_checkpoint_disagreeing_with_digests_mmb() {
+        deterministic::Runner::default().start(checkpoint_disagreeing_with_digests::<mmb::Family>);
+    }
+
+    /// A bounded open below the checkpoint drops it, so digests of the discarded operations are
+    /// never restored over different ones appended later.
+    async fn checkpoint_dropped_by_bounded_open<F: Family + PartialEq>(context: Context) {
+        let journal = open_at_height::<F>(&context, "bounded", "initial", 2).await;
+        let journal = append_range(journal, 0..100).await.commit().await.unwrap();
+        let root = journal.root(0).unwrap();
+        drop(append_range(journal, 100..200).await.sync().await.unwrap());
+
+        let journal = TestJournal::<F>::init_at_most(
+            context.child("bounded"),
+            resident_config("bounded", 2),
+            journal_config("bounded", &context),
+            100,
+            |_| true,
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        assert_eq!(journal.root(0).unwrap(), root);
+        assert!(journal.frontier.checkpoint().is_none());
+        let journal = append_range(journal, 200..250).await.sync().await.unwrap();
+        let root = journal.root(0).unwrap();
+        drop(journal);
+
+        let journal = open_at_height::<F>(&context, "bounded", "reopened", 2).await;
+        assert_eq!(journal.root(0).unwrap(), root);
+        assert_eq!(replayed(&context, "reopened"), 0);
+        assert_proves_all(&journal, root).await;
+    }
+
+    #[test]
+    fn test_checkpoint_dropped_by_bounded_open_mmr() {
+        deterministic::Runner::default().start(checkpoint_dropped_by_bounded_open::<mmr::Family>);
+    }
+    #[test]
+    fn test_checkpoint_dropped_by_bounded_open_mmb() {
+        deterministic::Runner::default().start(checkpoint_dropped_by_bounded_open::<mmb::Family>);
+    }
+
+    /// A checkpoint saved under another resident height is replayed over rather than restored,
+    /// since that height fixes each digest's index. One saved under the new height restores.
+    async fn checkpoint_resident_height_change<F: Family + PartialEq>(context: Context) {
+        let journal = open_at_height::<F>(&context, "height", "initial", 2).await;
+        let journal = append_range(journal, 0..200).await.sync().await.unwrap();
+        let root = journal.root(0).unwrap();
+        drop(journal);
+
+        for (label, height, expected) in
+            [("raised", 3, 200), ("lowered", 1, 200), ("resaved", 1, 0)]
+        {
+            let journal = open_at_height::<F>(&context, "height", label, height).await;
+            assert_eq!(journal.root(0).unwrap(), root);
+            assert_eq!(replayed(&context, label), expected);
+            assert_proves_all(&journal, root).await;
+            drop(journal.sync().await.unwrap());
+        }
+    }
+
+    #[test]
+    fn test_checkpoint_resident_height_change_mmr() {
+        deterministic::Runner::default().start(checkpoint_resident_height_change::<mmr::Family>);
+    }
+    #[test]
+    fn test_checkpoint_resident_height_change_mmb() {
+        deterministic::Runner::default().start(checkpoint_resident_height_change::<mmb::Family>);
+    }
+
+    /// Starting a sync appends the resident digests it reaches and notes its commit, so a later
+    /// save records it.
+    async fn start_sync_advances_checkpoint<F: Family + PartialEq>(context: Context) {
+        let journal = open_at_height::<F>(&context, "start-sync", "initial", 2).await;
+        let journal = append_range(journal, 0..100).await.commit().await.unwrap();
+        let (mut journal, handle) = append_range(journal, 100..150)
+            .await
+            .start_sync()
+            .await
+            .unwrap();
+        handle.await.unwrap();
+        let root = journal.root(0).unwrap();
+        // A sync would advance on its own, hiding a start of a sync that did not.
+        (journal.resident, journal.frontier) =
+            journal.resident.save(journal.frontier).await.unwrap();
+        drop(journal);
+
+        let journal = open_at_height::<F>(&context, "start-sync", "reopened", 2).await;
+        assert_eq!(journal.root(0).unwrap(), root);
+        assert_eq!(replayed(&context, "reopened"), 0);
+        assert_proves_all(&journal, root).await;
+    }
+
+    #[test]
+    fn test_start_sync_advances_checkpoint_mmr() {
+        deterministic::Runner::default().start(start_sync_advances_checkpoint::<mmr::Family>);
+    }
+    #[test]
+    fn test_start_sync_advances_checkpoint_mmb() {
+        deterministic::Runner::default().start(start_sync_advances_checkpoint::<mmb::Family>);
+    }
+
+    /// Pruning past the last commit keeps the digests the tree drops, so the next checkpoint
+    /// restores.
+    async fn prune_past_last_commit<F: Family + PartialEq>(context: Context) {
+        let journal = open_at_height::<F>(&context, "prune-ahead", "initial", 2).await;
+        let journal = append_range(journal, 0..20).await.commit().await.unwrap();
+        let journal = append_range(journal, 20..200).await;
+        let (journal, boundary) = journal.prune(Location::new(150)).await.unwrap();
+        assert!(boundary > Location::new(20));
+        let journal = journal.sync().await.unwrap();
+        let root = journal.root(0).unwrap();
+        drop(journal);
+
+        let journal = open_at_height::<F>(&context, "prune-ahead", "reopened", 2).await;
+        assert_eq!(journal.root(0).unwrap(), root);
+        assert_eq!(replayed(&context, "reopened"), 0);
+        assert_proves_all(&journal, root).await;
+    }
+
+    #[test]
+    fn test_prune_past_last_commit_mmr() {
+        deterministic::Runner::default().start(prune_past_last_commit::<mmr::Family>);
+    }
+    #[test]
+    fn test_prune_past_last_commit_mmb() {
+        deterministic::Runner::default().start(prune_past_last_commit::<mmb::Family>);
+    }
+
+    /// Activating an import records a checkpoint at its end, so reopening replays nothing.
+    async fn activation_saves_checkpoint<F: Family + PartialEq>(context: Context) {
+        let source = create_journal_with_ops::<F>(context.child("source"), "source", 50).await;
+        let root = source.root(0).unwrap();
+        let start = Location::new(20);
+        let pins = source.pinned_nodes_at(start).await.unwrap();
+        let Journal {
+            journal: ops,
+            frontier,
+            resident,
+            hasher,
+            ..
+        } = source;
+        drop((frontier, resident));
+
+        let cfg = resident_config("activate", 2);
+        let import = Import::begin(context.child("import"), &cfg)
+            .await
+            .unwrap()
+            .stage(start, pins.clone())
+            .await
+            .unwrap();
+        let journal =
+            TestJournal::<F>::from_components(import, &cfg, ops, hasher, start, pins, NZU64!(7))
+                .await
+                .unwrap();
+        drop(journal.activate().await.unwrap());
+
+        let journal = TestJournal::<F>::new(
+            context.child("reopened"),
+            cfg,
+            journal_config("source", &context),
+            |_| true,
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        assert_eq!(journal.bounds(), 20..50);
+        assert_eq!(journal.root(0).unwrap(), root);
+        assert_eq!(replayed(&context, "reopened"), 0);
+        assert_proves_all(&journal, root).await;
+    }
+
+    #[test]
+    fn test_activation_saves_checkpoint_mmr() {
+        deterministic::Runner::default().start(activation_saves_checkpoint::<mmr::Family>);
+    }
+    #[test]
+    fn test_activation_saves_checkpoint_mmb() {
+        deterministic::Runner::default().start(activation_saves_checkpoint::<mmb::Family>);
+    }
+
     /// Building from an import reuses the digests that authenticated its operations, unless the
     /// staged boundary has since moved.
     async fn from_components_reuses_authenticated_tree<F: Family + PartialEq>(context: Context) {
@@ -2817,10 +3245,11 @@ mod tests {
         let Journal {
             journal: mut ops,
             frontier,
+            resident,
             mut hasher,
             ..
         } = journal;
-        drop(frontier);
+        drop((frontier, resident));
 
         for (staged, staged_pins, reused) in [(start, &pins, true), (moved, &moved_pins, false)] {
             let mut import = Import::begin(context.child("import"), &cfg).await.unwrap();

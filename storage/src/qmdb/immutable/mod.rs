@@ -158,7 +158,8 @@ where
 /// Configuration for an [Immutable] authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, J, S: Strategy> {
-    /// Configuration for durable pruning metadata and the volatile Merkle digest cache.
+    /// Configuration for the authenticated journal: its frontier, resident digests, and digest
+    /// cache.
     pub merkle_config: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
@@ -572,8 +573,9 @@ where
         self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 
-    /// Sync all database state to disk. This isn't necessary to ensure durability of committed
-    /// operations.
+    /// Sync all database state to disk and save a checkpoint of the Merkle digests, so startup
+    /// replays only operations applied after it. This isn't necessary to ensure durability of
+    /// committed operations.
     #[tracing::instrument(name = "qmdb.immutable.db.sync", level = "info", skip_all)]
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         let _timer = self.metrics.sync_timer();
@@ -586,8 +588,9 @@ where
     /// calls.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
-    /// The backing journal also attempts to advance its recovery watermark. Recovery always
-    /// replays retained operations to rebuild Merkle state.
+    /// The backing journal also attempts to advance its recovery watermark, and like
+    /// [Self::commit] it saves a checkpoint of the Merkle digests once enough operations have
+    /// accumulated since the last one.
     ///
     /// A new sync waits for the prior sync before starting. A failed data sync surfaces on the
     /// returned handle and the next durability operation. A recovery-watermark failure surfaces
@@ -601,6 +604,9 @@ where
     }
 
     /// Durably commit the journal state published by prior [`Immutable::apply_batch`] calls.
+    ///
+    /// Saves a checkpoint of the Merkle digests once enough operations have accumulated since
+    /// the last one.
     #[tracing::instrument(name = "qmdb.immutable.db.commit", level = "info", skip_all)]
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
         let _timer = self.metrics.commit_timer();

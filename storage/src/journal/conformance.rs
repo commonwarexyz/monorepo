@@ -43,12 +43,16 @@ fn fill_variable_item<const COMPRESSED: bool>(
     }
 }
 
-fn authenticated_merkle_config(prefix: &str) -> crate::journal::authenticated::Config<Sequential> {
-    crate::journal::authenticated::Config {
+/// A low resident height, so the checkpoint each sync saves holds many resident digests.
+fn authenticated_config(prefix: &str) -> authenticated::Config<Sequential> {
+    authenticated::Config {
         metadata_partition: format!("{prefix}-merkle-metadata"),
         replay_buffer: REPLAY_BUFFER,
         strategy: Sequential,
-        cache: Default::default(),
+        cache: authenticated::CacheConfig {
+            resident_height: 2,
+            ..Default::default()
+        },
     }
 }
 
@@ -74,7 +78,7 @@ where
     let mut journal =
         authenticated::Journal::<F, _, fixed::Journal<_, u64>, Sha256, Sequential>::new(
             context.child("authenticated"),
-            authenticated_merkle_config(&prefix),
+            authenticated_config(&prefix),
             authenticated_journal_config(&prefix, &context),
             |_| true,
             crate::merkle::Bagging::ForwardFold,
