@@ -157,9 +157,11 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         options: ReadOptions,
     ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
         self.metrics.storage_reads.inc_by(ranges.len() as u64);
-        self.metrics
-            .storage_read_bytes
-            .inc_by(ranges.iter().map(|&(_, len)| len as u64).sum());
+        self.metrics.storage_read_bytes.inc_by(
+            ranges
+                .iter()
+                .fold(0, |sum, &(_, len)| sum.saturating_add(len as u64)),
+        );
         self.inner.read_many(ranges, options)
     }
 
@@ -290,6 +292,22 @@ mod tests {
         );
         assert_eq!(storage.metrics.storage_reads.get(), 2);
         assert_eq!(storage.metrics.storage_read_bytes.get(), 8);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[tokio::test]
+    async fn test_metered_read_many_aggregate_overflow() {
+        let mut registry = Registry::default();
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        let ranges = [(u64::MAX, usize::MAX), (u64::MAX, 1)];
+
+        // Constructing the stream accounts requests before the backend performs any read.
+        let reads = blob.read_many(&ranges, ReadOptions::DONT_CACHE);
+        assert_eq!(storage.metrics.storage_reads.get(), 2);
+        assert_eq!(storage.metrics.storage_read_bytes.get(), u64::MAX);
+        drop(reads);
     }
 
     /// Test that a failed open does not count an open blob.

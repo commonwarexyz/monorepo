@@ -1,22 +1,27 @@
 //! Cold random-read harness for QMDB: seeds a large unordered fixed-value `any` DB on the tokio
-//! runtime, then times batches of random keys that are (almost certainly) in no cache, reporting
-//! device statistics from /proc/diskstats alongside each batch (Linux; zeros elsewhere).
+//! runtime, then times batches of random keys, reporting device statistics from /proc/diskstats
+//! alongside each batch (Linux; zeros elsewhere). Pages a batch reads stay in the page cache, so
+//! until the cache fills a later batch of the same run finds about
+//! `batch * iteration / log pages` of its keys resident; size `keys` so this stays small.
 //!
 //! Usage:
 //!   cargo bench -p commonware-storage --bench cold_read -- key=value ...
 //!
-//! Without arguments the harness no-ops, so blanket `cargo bench` invocations skip it. Seed once
-//! with `phase=seed`, drop the OS page cache, then run `phase=read` variants against the same
-//! directory (a DB can only be reopened with the page size it was seeded with):
+//! Without a `phase` argument the harness no-ops, so blanket `cargo bench` invocations (with no
+//! arguments, libtest or Criterion flags, or a benchmark name filter) skip it; with one, every
+//! argument must be one of the `key=value` options below. Seed once with `phase=seed`, drop the
+//! OS page cache, then run `phase=read` variants against the same directory. Always pass the
+//! `page` and `logical` the DB was seeded with: reopening it with another page size truncates
+//! it. The stage and pipeline modes commit to the DB.
 //!
 //! - dir: storage directory (default /tmp/qmdb-cold)
 //! - keys: seeded keys (default 10,000,000); seed: keys per seeding batch (default 1,000,000)
-//! - phase: seed, read, both (default both), or blob (raw blob reads of the first log blob
-//!   through the runtime, no QMDB or page cache; modes blob_read_at and blob_read_many)
+//! - phase (required): seed, read, both, or blob (raw blob reads of the first log blob through
+//!   the runtime, no QMDB or page cache; modes blob_read_at and blob_read_many)
 //! - batch: random keys per timed batch (default 1500); iters: timed batches (default 20)
-//! - mode: get_many (default), chunked (8 concurrent get_many), get_concurrent (one `get` per
-//!   key, joined), get_serial (one `get` at a time), stage (stage, merkleize, apply, commit),
-//!   pipeline (prefetch the next batch with get_many while staging and committing this one),
+//! - mode: get_many (default), chunked (up to 8 concurrent get_many), get_concurrent (one `get`
+//!   per key, joined), get_serial (one `get` at a time), stage (stage, merkleize, apply, commit),
+//!   pipeline (prefetch the next batch with get_many while staging this one, then commit),
 //!   or sustained (keep `depth` independent get_many batches in flight for 2 x iters batches
 //!   and report the whole run: the steady-state device throughput a pipelined caller sees)
 //! - page: physical page size, a power of two (default 4096); logical: logical page size
@@ -29,7 +34,7 @@
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
-    Runner as _, Spawner, Strategizer,
+    Blob as _, ReadOptions, Runner as _, Spawner, Strategizer,
     buffer::paged::{self, CacheRef},
     tokio::{Config as RConfig, Runner},
 };
@@ -41,7 +46,7 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{NZU64, NZUsize, TestRng};
-use futures::{future::try_join_all, join};
+use futures::{StreamExt as _, future::try_join_all, join, stream::FuturesUnordered};
 use rand::{Rng as _, RngExt as _};
 use std::{collections::HashMap, hint::black_box, num::NonZeroUsize, time::Instant};
 
@@ -58,6 +63,12 @@ type AnyDb<E> = commonware_storage::qmdb::any::unordered::fixed::Db<
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 const REPLAY_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
+
+/// Options `main` accepts as `key=value` arguments (see the module docs).
+const OPTIONS: [&str; 17] = [
+    "dir", "keys", "batch", "iters", "page", "cache", "blob", "workers", "blocking", "mode",
+    "disk", "seed", "phase", "threads", "rseed", "logical", "depth",
+];
 
 #[derive(Clone)]
 struct Args {
@@ -239,22 +250,27 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
             }
             "get_serial" => {
                 for k in &refs {
-                    black_box(db.get(k).await.unwrap());
+                    let value = db.get(k).await.unwrap();
+                    assert!(value.is_some());
+                    black_box(value);
                 }
             }
             "get_concurrent" => {
                 let values = try_join_all(refs.iter().map(|k| db.get(k))).await.unwrap();
+                assert!(values.iter().all(|value| value.is_some()));
                 black_box(values);
             }
             "chunked" => {
-                let chunk = (refs.len() / 8).max(1);
+                let chunk = refs.len().div_ceil(8).max(1);
                 let values = try_join_all(refs.chunks(chunk).map(|c| db.get_many(c)))
                     .await
                     .unwrap();
+                assert!(values.iter().flatten().all(|value| value.is_some()));
                 black_box(values);
             }
             "stage" => {
                 let (values, staged) = db.new_batch().stage(&refs, &db).await.unwrap();
+                assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
                 let t_stage = start.elapsed();
                 let updates: Vec<(usize, Option<Digest>)> = (0..refs.len())
@@ -286,6 +302,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                     if iter + 1 < args.iters {
                         let t = Instant::now();
                         let v = db.get_many(&next_refs).await.unwrap();
+                        assert!(v.iter().all(|value| value.is_some()));
                         black_box(v);
                         t.elapsed()
                     } else {
@@ -298,6 +315,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                     (out, t.elapsed())
                 };
                 let (t_prefetch, ((values, staged), t_stage)) = join!(prefetch, stage);
+                assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
                 let updates: Vec<(usize, Option<Digest>)> = (0..refs.len())
                     .map(|i| {
@@ -325,10 +343,9 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
             "sustained" => {
                 // Keep `depth` independent batches in flight for the whole run, refilling as each
                 // completes, as a pipelined application does; one iteration covers all batches.
-                use futures::StreamExt as _;
                 let depth = args.depth;
                 let total = args.iters * 2;
-                let mut rng2 = TestRng::new(args.rseed + 99);
+                let mut rng2 = TestRng::new(args.rseed.wrapping_add(99));
                 let pool: Vec<Vec<Digest>> = (0..total)
                     .map(|_| {
                         let mut keys: Vec<Digest> = (0..args.batch)
@@ -343,15 +360,20 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                 let db_ref = &db;
                 let read_batch = move |i: usize| async move {
                     let refs: Vec<&Digest> = pool[i].iter().collect();
-                    db_ref.get_many(&refs).await.unwrap().len()
+                    let values = db_ref.get_many(&refs).await.unwrap();
+                    assert!(values.iter().all(|value| value.is_some()));
+                    values.len()
                 };
                 let mut next = 0;
-                let mut inflight = futures::stream::FuturesUnordered::new();
+                let mut inflight = FuturesUnordered::new();
                 while inflight.len() < depth && next < total {
                     inflight.push(read_batch(next));
                     next += 1;
                 }
-                let t = Instant::now();
+
+                // Time the run from its first read; generating the key pool above is setup.
+                let before = diskstats(&args.disk);
+                let start = Instant::now();
                 let mut done = 0;
                 while let Some(n) = inflight.next().await {
                     black_box(n);
@@ -363,7 +385,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                 }
                 detail = format!(
                     " depth={depth} batches={done} ms_per_batch={:.2}",
-                    t.elapsed().as_secs_f64() * 1000.0 / done as f64
+                    start.elapsed().as_secs_f64() * 1000.0 / done as f64
                 );
                 drop(inflight);
                 // One sustained run is the whole measurement.
@@ -406,16 +428,23 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
 }
 
 fn main() {
-    let raw: Vec<String> = std::env::args().filter(|a| a != "--bench").collect();
-    let kv: HashMap<String, String> = raw
-        .iter()
+    let raw: Vec<String> = std::env::args()
         .skip(1)
-        .filter_map(|a| a.split_once('='))
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .filter(|a| a != "--bench")
         .collect();
-    if kv.is_empty() {
+    if !raw.iter().any(|a| a.starts_with("phase=")) {
         return;
     }
+    let kv: HashMap<String, String> = raw
+        .iter()
+        .map(|a| {
+            let (k, v) = a
+                .split_once('=')
+                .unwrap_or_else(|| panic!("expected key=value, got {a}"));
+            assert!(OPTIONS.contains(&k), "unknown option {k}");
+            (k.to_string(), v.to_string())
+        })
+        .collect();
     let get = |k: &str, d: &str| kv.get(k).cloned().unwrap_or_else(|| d.to_string());
     let args = Args {
         dir: get("dir", "/tmp/qmdb-cold"),
@@ -430,12 +459,17 @@ fn main() {
         mode: get("mode", "get_many"),
         disk: get("disk", "nvme1n1"),
         seed: get("seed", "1000000").parse().unwrap(),
-        phase: get("phase", "both"),
+        phase: kv["phase"].clone(),
         threads: get("threads", "8").parse().unwrap(),
         rseed: get("rseed", "1234").parse().unwrap(),
         logical: kv.get("logical").map(|v| v.parse().unwrap()),
         depth: get("depth", "2").parse().unwrap(),
     };
+    assert!(
+        ["seed", "read", "both", "blob"].contains(&args.phase.as_str()),
+        "unknown phase {}",
+        args.phase
+    );
     eprintln!(
         "cold_read args: dir={} keys={} batch={} iters={} page={} cache={} blob={} workers={} blocking={} mode={} disk={} phase={}",
         args.dir,
@@ -462,8 +496,6 @@ fn main() {
 /// random 4 KiB physical pages of the log's first data blob per iteration, issued either as
 /// concurrent `read_at` calls (one blocking task per read on tokio) or as one `read_many`.
 async fn blob_phase<E: Ctx>(ctx: &E, args: &Args) {
-    use commonware_runtime::{Blob as _, ReadOptions};
-    use futures::{StreamExt as _, stream::FuturesUnordered};
     let (blob, size) = ctx
         .open("cold-log-blobs", &0u64.to_be_bytes())
         .await
@@ -493,17 +525,13 @@ async fn blob_phase<E: Ctx>(ctx: &E, args: &Args) {
             }
             "blob_read_many" => {
                 let ranges: Vec<(u64, usize)> = offsets.iter().map(|&o| (o, 4096)).collect();
-                let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                let counted = count.clone();
+                let mut count = 0;
                 let mut reads = std::pin::pin!(blob.read_many(&ranges, ReadOptions::DONT_CACHE));
                 while let Some(read) = reads.next().await {
                     black_box(read.unwrap());
-                    counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    count += 1;
                 }
-                assert_eq!(
-                    count.load(std::sync::atomic::Ordering::Relaxed),
-                    ranges.len()
-                );
+                assert_eq!(count, ranges.len());
             }
             other => panic!("unknown blob mode {other}"),
         }
@@ -528,7 +556,7 @@ async fn blob_phase<E: Ctx>(ctx: &E, args: &Args) {
     );
 }
 
-async fn run<E: Ctx + Spawner + Strategizer>(ctx: E, args: Args) {
+async fn run<E: Ctx + Strategizer>(ctx: E, args: Args) {
     if args.phase == "blob" {
         blob_phase(&ctx, &args).await;
         return;
@@ -539,6 +567,14 @@ async fn run<E: Ctx + Spawner + Strategizer>(ctx: E, args: Args) {
             .await
             .unwrap();
         eprintln!("init: {:?} bounds={:?}", start.elapsed(), db.bounds());
+        if *db.bounds().end > 1 || args.phase == "read" {
+            // Sequential seeding commits a prefix of the keyspace before any timed updates.
+            let last = args.keys.checked_sub(1).expect("keys must be positive");
+            assert!(
+                db.get(&key(last)).await.unwrap().is_some(),
+                "database seed is incomplete; seed a fresh directory"
+            );
+        }
         let db = if args.phase != "read" {
             seed(db, &args).await
         } else {
