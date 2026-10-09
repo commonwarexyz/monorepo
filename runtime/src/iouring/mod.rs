@@ -1,7 +1,7 @@
 //! Task execution and I/O on Linux io_uring.
 //!
 //! [`Runner`] polls ordinary tasks and drives their I/O on a pool of
-//! [`Config::with_worker_threads`] workers, one by default, each with its own
+//! [`Config::with_worker_threads`] workers, two by default, each with its own
 //! ring. The first worker runs on the calling thread and also polls the root.
 //! A task woken while idle moves to the pool worker that woke it, and one woken
 //! during its poll stays on its poller. Tasks spawned or woken from outside the

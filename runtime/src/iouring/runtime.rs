@@ -239,7 +239,7 @@ impl Default for RingConfig {
 
 /// Configuration for the native io_uring runtime.
 ///
-/// A pool of [`Self::with_worker_threads`] workers, one by default, polls
+/// A pool of [`Self::with_worker_threads`] workers, two by default, polls
 /// ordinary tasks, the first on the thread calling [`crate::Runner::start`].
 /// Tasks marked dedicated or blocking each receive a fresh thread and ring.
 /// Shutdown completes retained writes and syncs without a configured time limit.
@@ -286,7 +286,7 @@ impl Config {
         let suffix = sys_rng().next_u64();
 
         Self {
-            worker_threads: 1,
+            worker_threads: 2,
             ring_config,
             idle_spinner: SpinnerConfig::default(),
             thread_stack_size: utils::thread::system_thread_stack_size(),
@@ -304,7 +304,7 @@ impl Config {
     }
 
     /// Set the number of pool workers, including the calling thread. Defaults
-    /// to 1.
+    /// to 2, as in the tokio runtime.
     ///
     /// Must be between 1 and 64. Each worker has its own ring. A task woken
     /// while idle runs on the pool worker that wakes it, and spawns and wakes
