@@ -784,7 +784,7 @@ impl Task {
 /// only when its task is complete, or when another reference is obliged to
 /// clear the task: the closed task set's, which teardown drains, or the
 /// [`Task`] a refused registration returns to its caller.
-#[must_use = "a runnable must be scheduled, polled, or discarded"]
+#[must_use = "a runnable must be spawned, scheduled, polled, or discarded"]
 pub struct Runnable(Task);
 
 impl Runnable {

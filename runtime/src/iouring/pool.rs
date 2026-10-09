@@ -6,6 +6,8 @@
 //! shutdown barrier. Every task's header reaches it through a weak
 //! reference, so a wake from any thread can find the task's pool.
 //!
+//! # Placement
+//!
 //! A runnable woken on a worker of its own pool joins that worker's ready
 //! queue, and a new task stays on a pool worker with nothing else queued or no
 //! other worker. Every other push goes to the inject queue: wakes and spawns
@@ -14,28 +16,71 @@
 //! every [`INJECT_INTERVAL`] takes, so a busy worker cannot keep a burst
 //! waiting one interval per runnable.
 //!
+//! # Waking a parked worker
+//!
 //! A push into the inject queue wakes one parked worker. A worker publishes
-//! itself in the idle set before its last look at the queue, so either the
-//! pusher finds its bit or the worker finds the push:
+//! itself in the idle set before its last look at the queue. Each side fences
+//! between its store and its load, so at least one of them sees the other's
+//! store: either the pusher finds the worker's bit and wakes it, or the worker
+//! finds the push and runs it.
 //!
 //! ```text
-//! push                     parking worker i
-//!   queue the runnable       set idle bit i
-//!   fence(SeqCst)            fence(SeqCst)
-//!   claim an idle bit ---+-> recheck the inject queue
-//!                        |
-//!   wake its worker <----+   arm the wake source, block
+//! push                              parking worker i
+//!   queue the runnable                set idle bit i
+//!   fence(SeqCst)                     fence(SeqCst)
+//!   load the idle set                 load the inject queue length
+//!   any bit set: clear the lowest     nonzero: clear bit i and run
+//!     and wake its worker             zero: arm the wake source and block
 //! ```
 //!
 //! A wake that arrives before the worker arms its wait is latched by the
 //! worker's wake source, so the wait returns at once.
 //!
+//! # Lifecycle
+//!
+//! Worker zero runs on the runner's thread. It starts the others one at a
+//! time, each creating its ring and joining the shutdown barrier before the
+//! next starts, and builds the root only once all of them run. The root of
+//! every other worker ends when worker zero stops the pool.
+//!
+//! ```text
+//! worker zero                            worker i (1..n)
+//!   Table::new (every mailbox)
+//!   enter, start worker i ------------->   enter, report ready
+//!   build and drive the root               drive tasks
+//!   root ends: close the task set,
+//!     then the inject queue
+//!   abort the supervision tree
+//!   stop the pool --------------------->   root ends
+//!   drain the set from shard 0             drain the set from its shards
+//!   finish <=========== barrier ==========> finish
+//!   close mailbox, drop inbox, ring        close mailbox, drop inbox, ring
+//!   join <------------------------------   exit
+//!   take a failure reported late
+//! ```
+//!
 //! Shutdown closes the task set before the inject queue, so a runnable the
-//! closed queue refuses belongs to a task the set still retains. Every pool
-//! worker then drains the set, and no worker closes its mailbox, drops the
-//! messages it took from it, or closes its ring until all of them have
-//! drained it and finished their last poll, since a task polled on one worker
-//! can hold registrations on another, whose mailbox forwards their results.
+//! closed queue refuses belongs to a task the set still retains. On the
+//! runner's normal path the pool stops after the supervision tree is aborted,
+//! so the other workers destroy only cancelled tasks, apart from one that
+//! failed earlier, which drains the set as soon as the pool closes. Worker
+//! zero stops the pool from its own cleanup, so an unwind that skips the
+//! runner's shutdown still releases the barrier. No worker closes its
+//! mailbox, drops the messages it took from it, or closes its ring until every
+//! pool worker has drained the set and finished its last poll, since a task
+//! polled on one worker can hold registrations on another, whose mailbox
+//! forwards their results.
+//!
+//! # Failures
+//!
+//! A pool worker that fails sends the failure to the runner's pool failure
+//! channel, then wakes worker zero's root, which takes the failure before its
+//! next poll and unwinds with it, whether or not task panics are caught. A
+//! worker that fails while the pool runs reports before its cleanup, since
+//! cleanup waits for the pool to close, which needs the root to end. The
+//! channel outlives the root, so a failure after the root completes is taken
+//! once the pool is joined. Only the first failure is delivered. A later one
+//! is leaked rather than dropped, since its destructor may panic.
 
 use super::{
     mailbox::{Mailbox, Message},
@@ -67,7 +112,8 @@ cfg_if::cfg_if! {
 }
 
 /// Takes between two looks at the inject queue while a worker has work of its
-/// own, tokio's default `global_queue_interval`.
+/// own, the default `global_queue_interval` of tokio's current-thread
+/// scheduler.
 pub const INJECT_INTERVAL: u32 = 31;
 
 /// Most runnables one take moves from the inject queue, as tokio caps it at
