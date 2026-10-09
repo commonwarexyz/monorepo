@@ -395,20 +395,28 @@ impl<D: Digest, C: Codec, Dir> MockBlock<D, C, Dir> {
         let context_enc = context.encode();
         let timestamp_be = timestamp.to_be_bytes();
         let digest = payload.as_ref().map_or_else(
-            || H::hash(&[&parent, &height_be, &context_enc, &timestamp_be, &[0]]),
+            || {
+                H::hash(
+                    &[&parent, &height_be, &context_enc, &timestamp_be, &[0]],
+                    &Sequential,
+                )
+            },
             |payload| {
-                H::hash(&[
-                    &parent,
-                    &height_be,
-                    &context_enc,
-                    &timestamp_be,
-                    &[1],
-                    &payload.max_participants.get().to_be_bytes(),
-                    &u32::try_from(payload.bytes.len())
-                        .expect("payload too large")
-                        .to_be_bytes(),
-                    &payload.bytes,
-                ])
+                H::hash(
+                    &[
+                        &parent,
+                        &height_be,
+                        &context_enc,
+                        &timestamp_be,
+                        &[1],
+                        &payload.max_participants.get().to_be_bytes(),
+                        &u32::try_from(payload.bytes.len())
+                            .expect("payload too large")
+                            .to_be_bytes(),
+                        &payload.bytes,
+                    ],
+                    &Sequential,
+                )
             },
         );
         Self {
@@ -535,7 +543,7 @@ impl Automaton for MockApplication {
     async fn propose(&mut self, _context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (sender, receiver) = oneshot::channel();
         self.proposals.lock().push(_context);
-        sender.send_lossy(Sha256::hash(&[b"proposal"]));
+        sender.send_lossy(Sha256::hash(&[b"proposal"], &Sequential));
         receiver
     }
 
@@ -633,7 +641,7 @@ pub(crate) fn scheme_fixture_n(context: &mut deterministic::Context, n: u32) -> 
 }
 
 pub(crate) fn genesis_block(leader: TestPublicKey) -> TestBlock {
-    let digest = Sha256::hash(&[b""]);
+    let digest = Sha256::hash(&[b""], &Sequential);
     let context = TestContext {
         round: Round::new(Epoch::zero(), View::zero()),
         leader,

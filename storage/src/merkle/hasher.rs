@@ -2,6 +2,7 @@
 
 use crate::merkle::{Bagging, Error, Family, Location, Position};
 use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_parallel::Sequential;
 use core::marker::PhantomData;
 
 /// A trait for computing the various digests of a Merkle-family structure.
@@ -177,7 +178,7 @@ impl<H: CHasher> Standard<H> {
 
     /// Hash a sequence of byte slices into a single digest.
     pub fn hash(&self, parts: &[&[u8]]) -> H::Digest {
-        H::hash(parts)
+        H::hash(parts, &Sequential)
     }
 
     /// Compute the digest of a byte slice.
@@ -208,6 +209,7 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
         H::hash_pair(
             &[&(*left_pos).to_be_bytes(), left_left, left_right],
             &[&(*right_pos).to_be_bytes(), right_left, right_right],
+            &Sequential,
         )
     }
 }
@@ -367,7 +369,7 @@ mod tests {
     }
 
     fn test_digest<H: CHasher>(value: u8) -> H::Digest {
-        H::hash(&[&[value]])
+        H::hash(&[&[value]], &Sequential)
     }
 
     fn test_leaf_digest<H: CHasher>() {

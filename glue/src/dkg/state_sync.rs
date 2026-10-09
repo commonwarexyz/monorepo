@@ -444,7 +444,7 @@ mod tests {
         let proposal = Proposal::new(
             Round::new(epoch, View::new(1)),
             View::zero(),
-            Sha256::hash(&[b"state sync floor"]),
+            Sha256::hash(&[b"state sync floor"], &Sequential),
         );
         let finalizes = fixture
             .schemes

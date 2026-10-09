@@ -1,8 +1,7 @@
 //! Fuzzing utilities for [Hasher] implementations.
 //!
-//! For any hasher, the one-shot [Hasher::hash], [Hasher::hash_with],
-//! [Hasher::hash_pair], [Hasher::hash_many], and [Hasher::hash_many_with]
-//! entrypoints must agree with streaming the same bytes through
+//! For any hasher, the one-shot [Hasher::hash], [Hasher::hash_pair], and
+//! [Hasher::hash_many] entrypoints must agree with streaming the same bytes through
 //! [Hasher::update], whether they hash on the calling thread or split the work
 //! across workers. Implementations are free to specialize the one-shot
 //! entrypoints for fixed shapes (e.g. with assembly kernels), so the inputs
@@ -14,7 +13,7 @@ use crate::{
     blake3::{MIN_SPLIT_LEN, MIN_SUBTREE_LEN},
 };
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_parallel::Strategy;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::TestRng;
 use core::{fmt::Debug, marker::PhantomData};
 use rand::Rng as _;
@@ -133,7 +132,7 @@ impl<H: Hasher> Plan<H> {
     }
 
     /// Check that every entrypoint agrees with a single [Hasher::update]
-    /// over the concatenated message, with [Hasher::hash_with] across
+    /// over the concatenated message, both on the calling thread and across
     /// `strategy`.
     pub fn run(self, strategy: &impl Strategy) {
         let left: Vec<&[u8]> = self.left.iter().map(Vec::as_slice).collect();
@@ -161,18 +160,20 @@ impl<H: Hasher> Plan<H> {
         assert_eq!(streamed_left, expected_left);
         assert_eq!(streamed_right, expected_right);
 
-        assert_eq!(H::hash(&left), expected_left);
-        assert_eq!(H::hash(&right), expected_right);
-        assert_eq!(H::hash_with(&left, strategy), expected_left);
-        assert_eq!(H::hash_with(&right, strategy), expected_right);
-        let (left_digest, right_digest) = H::hash_pair(&left, &right);
+        assert_eq!(H::hash(&left, &Sequential), expected_left);
+        assert_eq!(H::hash(&right, &Sequential), expected_right);
+        assert_eq!(H::hash(&left, strategy), expected_left);
+        assert_eq!(H::hash(&right, strategy), expected_right);
+        let (left_digest, right_digest) = H::hash_pair(&left, &right, &Sequential);
+        assert_eq!(left_digest, expected_left);
+        assert_eq!(right_digest, expected_right);
+        let (left_digest, right_digest) = H::hash_pair(&left, &right, strategy);
         assert_eq!(left_digest, expected_left);
         assert_eq!(right_digest, expected_right);
     }
 }
 
-/// Contiguous messages to hash through [Hasher::hash_many] and
-/// [Hasher::hash_many_with].
+/// Contiguous messages to hash through [Hasher::hash_many].
 pub struct BatchPlan<H: Hasher> {
     messages: Vec<Vec<u8>>,
     _hasher: PhantomData<H>,
@@ -224,13 +225,13 @@ impl<H: Hasher> BatchPlan<H> {
                 hasher.finalize().1
             })
             .collect::<Vec<_>>();
-        assert_eq!(H::hash_many(&self.messages), expected);
-        assert_eq!(H::hash_many_with(&self.messages, strategy), expected);
+        assert_eq!(H::hash_many(&self.messages, &Sequential), expected);
+        assert_eq!(H::hash_many(&self.messages, strategy), expected);
     }
 }
 
 /// A message long enough to split into BLAKE3 subtrees, given as parts, to
-/// hash through [Hasher::hash_with] across workers.
+/// hash through [Hasher::hash] across workers.
 pub struct ParallelPlan<H: Hasher> {
     seed: u64,
     len: usize,
@@ -290,7 +291,7 @@ impl<H: Hasher> ParallelPlan<H> {
 
         let mut hasher = H::default();
         hasher.update(&message);
-        assert_eq!(H::hash_with(&parts, strategy), hasher.finalize().1);
+        assert_eq!(H::hash(&parts, strategy), hasher.finalize().1);
     }
 }
 
@@ -299,7 +300,7 @@ mod tests {
     use super::*;
     use crate::{Blake3, Sha256};
     use commonware_invariants::minifuzz;
-    use commonware_parallel::Rayon;
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::NZUsize;
     use std::sync::Arc;
 
@@ -391,11 +392,8 @@ mod tests {
             .collect::<Vec<_>>();
         for count in 0..=messages.len() {
             let messages = &messages[..count];
-            assert_eq!(Blake3::hash_many(messages), expected[..count]);
-            assert_eq!(
-                Blake3::hash_many_with(messages, &strategy),
-                expected[..count]
-            );
+            assert_eq!(Blake3::hash_many(messages, &Sequential), expected[..count]);
+            assert_eq!(Blake3::hash_many(messages, &strategy), expected[..count]);
         }
     }
 

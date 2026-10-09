@@ -978,7 +978,7 @@ mod tests {
                 directory: directory.clone(),
             };
 
-            let genesis_digest = Sha256::hash(&[b""]);
+            let genesis_digest = Sha256::hash(&[b""], &Sequential);
             let genesis: AddressedBlock = mocks::MockBlock::new::<Sha256>(
                 mocks::TestContext {
                     round: Round::new(Epoch::zero(), View::zero()),

@@ -78,6 +78,7 @@ use crate::{
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_parallel::Sequential;
 
 /// Size of the internal [LtHash] state in bytes.
 const LTHASH_SIZE: usize = 2048;
@@ -142,7 +143,7 @@ impl LtHash {
         for (chunk, val) in bytes.as_chunks_mut::<2>().0.iter_mut().zip(&self.state) {
             *chunk = val.to_le_bytes();
         }
-        Blake3::hash(&[&bytes])
+        Blake3::hash(&[&bytes], &Sequential)
     }
 
     /// Reset the [LtHash] to the initial zero state.

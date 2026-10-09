@@ -76,7 +76,7 @@ impl<S> Scheme<S> {
 
         // Hash the signer and signature bytes to derive a deterministic starting
         // point for the single-bit flip search.
-        let digest = Sha256::hash(&[&signer.encode(), &encoded]);
+        let digest = Sha256::hash(&[&signer.encode(), &encoded], &Sequential);
 
         // Start from a deterministic but non-trivial bit so tests do not always
         // mutate the same low-order bit first.

@@ -1,17 +1,17 @@
 //! BLAKE3 implementation of the [Hasher] trait.
 //!
-//! This implementation uses the [blake3] crate to generate BLAKE3 digests. [Hasher::hash_with]
+//! This implementation uses the [blake3] crate to generate BLAKE3 digests. [Hasher::hash]
 //! splits a message of at least 128 KiB along the BLAKE3 tree and hashes the subtrees across the
 //! given strategy.
 //!
 //! # Example
 //! ```rust
 //! use commonware_cryptography::{Hasher, blake3::Blake3};
-//! use commonware_parallel::Rayon;
+//! use commonware_parallel::{Rayon, Sequential};
 //! use std::num::NonZeroUsize;
 //!
 //! // Hash data in a single shot
-//! let digest = Blake3::hash(&[b"hello,", b"world!"]);
+//! let digest = Blake3::hash(&[b"hello,", b"world!"], &Sequential);
 //! println!("digest: {:?}", digest);
 //!
 //! // Or stream data incrementally
@@ -25,8 +25,8 @@
 //! let strategy = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
 //! let message = vec![7u8; 1 << 20];
 //! assert_eq!(
-//!     Blake3::hash_with(&[&message], &strategy),
-//!     Blake3::hash(&[&message]),
+//!     Blake3::hash(&[&message], &strategy),
+//!     Blake3::hash(&[&message], &Sequential),
 //! );
 //! ```
 
@@ -54,7 +54,7 @@ pub type CoreBlake3 = blake3::Hasher;
 
 const DIGEST_LENGTH: usize = blake3::OUT_LEN;
 
-/// Divisor of a message's length that bounds each subtree [`Hasher::hash_with`] hashes as one
+/// Divisor of a message's length that bounds each subtree [`Hasher::hash`] hashes as one
 /// task, so that a split message spreads across at least this many tasks.
 const SUBTREES: usize = 8;
 
@@ -65,7 +65,7 @@ pub(crate) const MIN_SUBTREE_LEN: usize = 16 * CHUNK_LEN;
 /// Upper clamp, in bytes, on the subtree bound: 64 chunks, enough to amortize the cost of a fork.
 const MAX_SUBTREE_LEN: usize = 64 * CHUNK_LEN;
 
-/// Length, in bytes, of the shortest message [`Hasher::hash_with`] splits: [`SUBTREES`] subtrees of
+/// Length, in bytes, of the shortest message [`Hasher::hash`] splits: [`SUBTREES`] subtrees of
 /// [`MIN_SUBTREE_LEN`] bytes.
 pub(crate) const MIN_SPLIT_LEN: usize = SUBTREES * MIN_SUBTREE_LEN;
 
@@ -174,7 +174,7 @@ pub struct Blake3 {
 impl Hasher for Blake3 {
     type Digest = Digest;
 
-    fn hash_with(parts: &[&[u8]], strategy: &impl Strategy) -> Self::Digest {
+    fn hash(parts: &[&[u8]], strategy: &impl Strategy) -> Self::Digest {
         // A message shorter than `MIN_SPLIT_LEN` hashes on the calling thread. A total that
         // overflows `usize` (possible only when parts alias) hashes serially, since the streaming
         // hasher counts bytes in a `u64`.
@@ -191,8 +191,12 @@ impl Hasher for Blake3 {
         }
     }
 
-    fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
-        (Self::hash(left), Self::hash(right))
+    fn hash_pair(
+        left: &[&[u8]],
+        right: &[&[u8]],
+        strategy: &impl Strategy,
+    ) -> (Self::Digest, Self::Digest) {
+        (Self::hash(left, strategy), Self::hash(right, strategy))
     }
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
@@ -234,7 +238,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Digest {
         // Generate random bytes and compute their Blake3 hash
         let len = u.int_in_range(0..=256)?;
         let data = u.bytes(len)?;
-        Ok(Blake3::hash(&[data]))
+        Ok(Blake3::hash(&[data], &commonware_parallel::Sequential))
     }
 }
 
@@ -353,11 +357,11 @@ mod tests {
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Test one-shot hasher
-        let hash = Blake3::hash(&[msg]);
+        let hash = Blake3::hash(&[msg], &Sequential);
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
 
         // Test multi-part one-shot hasher
-        let hash = Blake3::hash(&[b"hello", b" world"]);
+        let hash = Blake3::hash(&[b"hello", b" world"], &Sequential);
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
 
@@ -394,7 +398,7 @@ mod tests {
             hasher.update(&input);
             let (_, digest) = hasher.finalize();
             assert_eq!(digest.as_ref(), expected, "len {len}");
-            let digest = Blake3::hash_with(&[&input], &strategy);
+            let digest = Blake3::hash(&[&input], &strategy);
             assert_eq!(digest.as_ref(), expected, "len {len}");
             let digest = hash_subtrees(&[&input], len, &strategy);
             assert_eq!(digest.as_ref(), expected, "len {len}");
@@ -440,8 +444,8 @@ mod tests {
                 message.chunks(1000).collect(),
             ];
             for parts in &splits {
-                assert_eq!(Blake3::hash(parts), expected, "len={len}");
-                assert_eq!(Blake3::hash_with(parts, &strategy), expected, "len={len}");
+                assert_eq!(Blake3::hash(parts, &Sequential), expected, "len={len}");
+                assert_eq!(Blake3::hash(parts, &strategy), expected, "len={len}");
                 if len > CHUNK_LEN {
                     assert_eq!(
                         hash_subtrees(parts, len, &Sequential),
@@ -494,7 +498,7 @@ mod tests {
 
             // Hash, then release the worker and compare its job count.
             let message = &data[..len];
-            let digest = Blake3::hash_with(&[message], &strategy);
+            let digest = Blake3::hash(&[message], &strategy);
             done.store(true, Relaxed);
             assert_eq!(digest, blake3::hash(message).into(), "len={len}");
             assert_eq!(receiver.recv().unwrap(), jobs, "len={len}");

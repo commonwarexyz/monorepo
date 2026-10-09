@@ -1242,11 +1242,15 @@ mod tests {
     impl<D: DigestTrait> Hasher for TestHasher<D> {
         type Digest = D;
 
-        fn hash_with(_parts: &[&[u8]], _strategy: &impl Strategy) -> Self::Digest {
+        fn hash(_parts: &[&[u8]], _strategy: &impl Strategy) -> Self::Digest {
             D::EMPTY
         }
 
-        fn hash_pair(_left: &[&[u8]], _right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+        fn hash_pair(
+            _left: &[&[u8]],
+            _right: &[&[u8]],
+            _strategy: &impl Strategy,
+        ) -> (Self::Digest, Self::Digest) {
             (D::EMPTY, D::EMPTY)
         }
 

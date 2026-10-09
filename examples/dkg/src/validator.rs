@@ -565,7 +565,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(1), View::new(1)),
                 View::zero(),
-                Sha256::hash(&[b"floor"]),
+                Sha256::hash(&[b"floor"], &Sequential),
             );
             let finalizes = schemes
                 .iter()

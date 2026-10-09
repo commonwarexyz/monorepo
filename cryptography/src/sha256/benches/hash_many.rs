@@ -1,5 +1,5 @@
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_parallel::Rayon;
+use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{NZUsize, test_rng};
 use criterion::{Criterion, criterion_group};
 use rand::Rng;
@@ -24,21 +24,21 @@ fn bench_hash_many(c: &mut Criterion) {
                     b.iter(|| {
                         messages
                             .iter()
-                            .map(|&message| Sha256::hash(&[message]))
+                            .map(|&message| Sha256::hash(&[message], &Sequential))
                             .collect::<Vec<_>>()
                     })
                 },
             );
             c.bench_function(
                 &format!("{}::batch/count={count} len={len} conc=1", module_path!()),
-                |b| b.iter(|| Sha256::hash_many(messages)),
+                |b| b.iter(|| Sha256::hash_many(messages, &Sequential)),
             );
             c.bench_function(
                 &format!(
                     "{}::batch/count={count} len={len} conc={CONCURRENCY}",
                     module_path!()
                 ),
-                |b| b.iter(|| Sha256::hash_many_with(messages, &strategy)),
+                |b| b.iter(|| Sha256::hash_many(messages, &strategy)),
             );
         }
     }

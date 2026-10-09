@@ -136,16 +136,27 @@ commonware_macros::stability_scope!(BETA {
     #[derive(Debug)]
     pub struct Batches<'scope, S: Strategy> {
         strategy: &'scope S,
+        len: usize,
+        // Empty for a whole-input run, which needs no ranges until it prepares its one batch.
         ranges: Vec<Range<usize>>,
     }
 
     impl<'scope, S: Strategy> Batches<'scope, S> {
         /// Returns the single batch `0..len`, executed on the calling thread.
-        fn whole(strategy: &'scope S, len: usize) -> Self {
+        const fn whole(strategy: &'scope S, len: usize) -> Self {
             Self {
                 strategy,
-                ranges: iter::once(0..len).collect(),
+                len,
+                ranges: Vec::new(),
             }
+        }
+
+        /// Returns whether the strategy supplied the whole input as one batch, which executes on
+        /// the calling thread.
+        ///
+        /// Such a run can process the input directly rather than preparing its single batch.
+        pub const fn is_whole(&self) -> bool {
+            self.ranges.is_empty()
         }
 
         /// Prepare and map batches, collecting results in batch order.
@@ -159,8 +170,11 @@ commonware_macros::stability_scope!(BETA {
             F: Fn(I::Item) -> R + Send + Sync,
             R: Send,
         {
-            if self.ranges.len() == 1 {
-                prepare(self.ranges).into_iter().map(map_op).collect()
+            if self.is_whole() {
+                prepare(iter::once(0..self.len).collect())
+                    .into_iter()
+                    .map(map_op)
+                    .collect()
             } else {
                 self.strategy.map_collect_vec(prepare(self.ranges), map_op)
             }
@@ -182,8 +196,11 @@ commonware_macros::stability_scope!(BETA {
             R: Send,
             E: Send,
         {
-            if self.ranges.len() == 1 {
-                prepare(self.ranges).into_iter().map(map_op).collect()
+            if self.is_whole() {
+                prepare(iter::once(0..self.len).collect())
+                    .into_iter()
+                    .map(map_op)
+                    .collect()
             } else {
                 self.strategy.try_map_collect_vec(prepare(self.ranges), map_op)
             }
@@ -1211,6 +1228,7 @@ commonware_macros::stability_scope!(BETA {
             self.strategy.try_run_batches(len, minimum_batch_len, multiplier, |batches| {
                 run(Batches {
                     strategy: self,
+                    len: batches.len,
                     ranges: batches.ranges,
                 })
             })
@@ -1796,6 +1814,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     let manual = self.manual();
                     run(Batches {
                         strategy: &manual.strategy,
+                        len,
                         ranges,
                     })
                 }
@@ -2134,6 +2153,7 @@ mod test {
             let caller = std::thread::current().id();
             let (result, items) = strategy.run_batches(len, minimum, usize::MAX, |batches| {
                 calls.fetch_add(1, Ordering::Relaxed);
+                assert!(batches.is_whole());
                 (
                     *owned,
                     batches.map_collect_vec(
@@ -2194,6 +2214,7 @@ mod test {
         // Run an extent that could form four batches.
         let thread = std::thread::current().id();
         let items = strategy.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
+            assert!(batches.is_whole());
             batches.map_collect_vec(
                 |ranges| ranges,
                 |range| (range, std::thread::current().id()),
@@ -2224,7 +2245,10 @@ mod test {
                 len,
                 NonZeroUsize::new(minimum).unwrap(),
                 usize::MAX,
-                |batches| batches.map_collect_vec(|ranges| ranges, |range| range),
+                |batches| {
+                    assert!(!batches.is_whole());
+                    batches.map_collect_vec(|ranges| ranges, |range| range)
+                },
             );
             assert_eq!(ranges.len(), 8.min(len / minimum));
             assert_eq!(ranges.first().unwrap().start, 0);

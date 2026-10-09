@@ -281,7 +281,7 @@ mod tests {
         };
         let inner = InnerBlock::new::<Sha256>(
             context,
-            Sha256::hash(&[b"parent"]),
+            Sha256::hash(&[b"parent"], &Sequential),
             Height::new(7),
             1_234_567,
         );

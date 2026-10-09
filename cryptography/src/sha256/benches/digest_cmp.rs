@@ -1,11 +1,12 @@
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
+use commonware_parallel::Sequential;
 use criterion::{BatchSize, Criterion, criterion_group};
 use std::hint::black_box;
 
 fn bench_digest_cmp(c: &mut Criterion) {
     for n in [10u64, 100, 1_000, 10_000, 50_000, 100_000] {
         let digests: Vec<Digest> = (0..n)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()[..]]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()[..]], &Sequential))
             .collect();
         c.bench_function(&format!("{}/op=sort n={n}", module_path!()), |b| {
             b.iter_batched(

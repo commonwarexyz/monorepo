@@ -8,7 +8,7 @@ use commonware_cryptography::{
     blake3::{Blake3 as OurBlake3, Digest},
     fuzz::{BatchPlan, ParallelPlan, Plan},
 };
-use commonware_parallel::{Manual, Rayon, Strategy as _};
+use commonware_parallel::{Manual, Rayon, Sequential, Strategy as _};
 use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use std::sync::LazyLock;
@@ -44,7 +44,7 @@ fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
 
     // The one-shot API should agree with streaming.
     let parts: Vec<&[u8]> = chunks.iter().map(|c| c.as_slice()).collect();
-    assert_eq!(OurBlake3::hash(&parts), our_result);
+    assert_eq!(OurBlake3::hash(&parts, &Sequential), our_result);
 }
 
 fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
@@ -95,7 +95,7 @@ fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
 }
 
 fn fuzz_diff_hash(data: &[u8]) {
-    let our_hash_result = OurBlake3::hash(&[data]);
+    let our_hash_result = OurBlake3::hash(&[data], &Sequential);
     let mut ref_hasher = RefBlake3::new();
     assert_eq!(
         our_hash_result.as_ref(),
@@ -104,7 +104,7 @@ fn fuzz_diff_hash(data: &[u8]) {
 }
 
 fn fuzz_digest_operations(data: &[u8]) {
-    let hash_result = OurBlake3::hash(&[data]);
+    let hash_result = OurBlake3::hash(&[data], &Sequential);
     let digest_from_hash = hash_result;
 
     let slice_ref: &[u8] = &digest_from_hash;
@@ -163,7 +163,7 @@ fn fuzz_from_hash_and_deref(data: &[u8]) {
     assert_eq!(slice, our_digest.as_ref());
 
     // Verify the conversion worked correctly
-    let our_hash = OurBlake3::hash(&[data]);
+    let our_hash = OurBlake3::hash(&[data], &Sequential);
     assert_eq!(our_digest.as_ref(), our_hash.as_ref());
 }
 

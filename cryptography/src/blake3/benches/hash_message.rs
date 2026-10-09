@@ -1,5 +1,5 @@
 use commonware_cryptography::{Hasher, blake3::Blake3};
-use commonware_parallel::Rayon;
+use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{NZUsize, test_rng};
 use criterion::{Criterion, criterion_group};
 use rand::Rng;
@@ -17,7 +17,7 @@ fn bench_hash_message(c: &mut Criterion) {
         let msg = msg.as_slice();
         c.bench_function(
             &format!("{}/msg_len={} conc=1", module_path!(), msg.len()),
-            |b| b.iter(|| Blake3::hash(&[msg])),
+            |b| b.iter(|| Blake3::hash(&[msg], &Sequential)),
         );
         c.bench_function(
             &format!(
@@ -25,7 +25,7 @@ fn bench_hash_message(c: &mut Criterion) {
                 module_path!(),
                 msg.len()
             ),
-            |b| b.iter(|| Blake3::hash_with(&[msg], &strategy)),
+            |b| b.iter(|| Blake3::hash(&[msg], &strategy)),
         );
     }
 }

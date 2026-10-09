@@ -16,6 +16,7 @@ use commonware_cryptography::{
     sha256::Digest,
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _, deterministic,
 };
@@ -73,14 +74,14 @@ impl EncodeSize for FuzzRequest {
 impl Committable for FuzzRequest {
     type Commitment = Digest;
     fn commitment(&self) -> Self::Commitment {
-        Sha256::hash(&[&self.id.encode()])
+        Sha256::hash(&[&self.id.encode()], &Sequential)
     }
 }
 
 impl Digestible for FuzzRequest {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
-        Sha256::hash(&[&self.encode()])
+        Sha256::hash(&[&self.encode()], &Sequential)
     }
 }
 
@@ -115,14 +116,14 @@ impl EncodeSize for FuzzResponse {
 impl Committable for FuzzResponse {
     type Commitment = Digest;
     fn commitment(&self) -> Self::Commitment {
-        Sha256::hash(&[&self.id.encode()])
+        Sha256::hash(&[&self.id.encode()], &Sequential)
     }
 }
 
 impl Digestible for FuzzResponse {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
-        Sha256::hash(&[&self.encode()])
+        Sha256::hash(&[&self.encode()], &Sequential)
     }
 }
 

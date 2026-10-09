@@ -561,6 +561,7 @@ mod tests {
         Hasher as _,
         sha256::{Digest as Sha256Digest, Sha256},
     };
+    use commonware_parallel::Sequential;
     use commonware_utils::vec::NonEmptyVec;
     use std::collections::BTreeSet;
 
@@ -651,7 +652,7 @@ mod tests {
 
     #[test]
     fn test_subject_block_encoding() {
-        let commitment = Sha256::hash(&[b"test"]);
+        let commitment = Sha256::hash(&[b"test"], &Sequential);
         let request = Key::<D>::Block(commitment);
 
         // Test encoding
@@ -737,7 +738,7 @@ mod tests {
         let notarized = Key::<D>::Notarized {
             round: Round::new(Epoch::new(333), View::new(150)),
         };
-        let block = Key::<D>::Block(Sha256::hash(&[b"block"]));
+        let block = Key::<D>::Block(Sha256::hash(&[b"block"], &Sequential));
         let stale_finalized = Annotation::Finalized(Finalized::ByHeight {
             height: Height::new(100),
         });
@@ -787,7 +788,7 @@ mod tests {
     #[test]
     fn test_round_floor_predicate() {
         let floor = Round::new(Epoch::new(1), View::new(10));
-        let block = Key::<D>::Block(Sha256::hash(&[b"block"]));
+        let block = Key::<D>::Block(Sha256::hash(&[b"block"], &Sequential));
         let higher_notarized = Key::<D>::Notarized {
             round: Round::new(Epoch::new(1), View::new(11)),
         };
@@ -833,7 +834,7 @@ mod tests {
 
     #[test]
     fn test_encode_size() {
-        let commitment = Sha256::hash(&[&[0u8; 32]]);
+        let commitment = Sha256::hash(&[&[0u8; 32]], &Sequential);
         let r1 = Key::<D>::Block(commitment);
         let r2 = Key::<D>::Finalized {
             height: Height::new(u64::MAX),
@@ -851,8 +852,8 @@ mod tests {
     #[test]
     fn test_request_ord_same_variant() {
         // Test ordering within the same variant
-        let commitment1 = Sha256::hash(&[b"test1"]);
-        let commitment2 = Sha256::hash(&[b"test2"]);
+        let commitment1 = Sha256::hash(&[b"test1"], &Sequential);
+        let commitment2 = Sha256::hash(&[b"test2"], &Sequential);
         let block1 = Key::<D>::Block(commitment1);
         let block2 = Key::<D>::Block(commitment2);
 
@@ -898,7 +899,7 @@ mod tests {
 
     #[test]
     fn test_request_ord_cross_variant() {
-        let commitment = Sha256::hash(&[b"test"]);
+        let commitment = Sha256::hash(&[b"test"], &Sequential);
         let block = Key::<D>::Block(commitment);
         let finalized = Key::<D>::Finalized {
             height: Height::new(100),
@@ -927,8 +928,8 @@ mod tests {
 
     #[test]
     fn test_request_partial_ord() {
-        let commitment1 = Sha256::hash(&[b"test1"]);
-        let commitment2 = Sha256::hash(&[b"test2"]);
+        let commitment1 = Sha256::hash(&[b"test1"], &Sequential);
+        let commitment2 = Sha256::hash(&[b"test2"], &Sequential);
         let block1 = Key::<D>::Block(commitment1);
         let block2 = Key::<D>::Block(commitment2);
         let finalized = Key::<D>::Finalized {
@@ -960,9 +961,9 @@ mod tests {
 
     #[test]
     fn test_request_ord_sorting() {
-        let commitment1 = Sha256::hash(&[b"a"]);
-        let commitment2 = Sha256::hash(&[b"b"]);
-        let commitment3 = Sha256::hash(&[b"c"]);
+        let commitment1 = Sha256::hash(&[b"a"], &Sequential);
+        let commitment2 = Sha256::hash(&[b"b"], &Sequential);
+        let commitment3 = Sha256::hash(&[b"c"], &Sequential);
 
         let requests = vec![
             Key::<D>::Notarized {
@@ -1047,7 +1048,7 @@ mod tests {
         assert!(max_finalized < min_notarized);
 
         // Test self-comparison
-        let commitment = Sha256::hash(&[b"self"]);
+        let commitment = Sha256::hash(&[b"self"], &Sequential);
         let block = Key::<D>::Block(commitment);
         assert_eq!(block.cmp(&block), std::cmp::Ordering::Equal);
         assert_eq!(min_finalized.cmp(&min_finalized), std::cmp::Ordering::Equal);

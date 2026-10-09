@@ -549,7 +549,7 @@ mod tests {
             }
         }
         let output = Output {
-            root: Keccak256::hash(&[&0u64.to_be_bytes()]).0,
+            root: Keccak256::hash(&[&0u64.to_be_bytes()], &Sequential).0,
             elements: vec![],
             proof: vec![],
             leaves: 0,

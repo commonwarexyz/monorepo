@@ -237,14 +237,14 @@ pub(crate) mod test {
 
             let seed_a = db_a
                 .new_batch()
-                .write(Sha256::hash(&[b"a"]), Some(vec![1]))
+                .write(Sha256::hash(&[b"a"], &Sequential), Some(vec![1]))
                 .merkleize(&db_a, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db_a, _) = db_a.apply_batch(seed_a).await.unwrap();
             let seed_b = db_b
                 .new_batch()
-                .write(Sha256::hash(&[b"b"]), Some(vec![2]))
+                .write(Sha256::hash(&[b"b"], &Sequential), Some(vec![2]))
                 .merkleize(&db_b, None, &mut Proportional)
                 .await
                 .unwrap();
@@ -253,7 +253,9 @@ pub(crate) mod test {
             assert_eq!(db_a.bounds().end, db_b.bounds().end);
             assert_ne!(db_a.root(), db_b.root());
 
-            let batch = db_a.new_batch().write(Sha256::hash(&[b"a"]), Some(vec![3]));
+            let batch = db_a
+                .new_batch()
+                .write(Sha256::hash(&[b"a"], &Sequential), Some(vec![3]));
             assert!(matches!(
                 batch.merkleize(&db_b, None, &mut Proportional).await,
                 Err(Error::StaleBatch)
@@ -296,7 +298,7 @@ pub(crate) mod test {
                 .unwrap();
             let mut batch = db.new_batch();
             for i in 0u64..500 {
-                let k = Sha256::hash(&[&i.to_be_bytes()]);
+                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
                 let v = vec![(i % 251) as u8; (i % 40 + 1) as usize];
                 batch = batch.write(k, Some(v));
             }
@@ -307,11 +309,11 @@ pub(crate) mod test {
             // Commit 2: update a third and delete a seventh so the replay carries churn.
             let mut batch = db.new_batch();
             for i in (0u64..500).step_by(3) {
-                let k = Sha256::hash(&[&i.to_be_bytes()]);
+                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
                 batch = batch.write(k, Some(vec![0xAB; (i % 17 + 1) as usize]));
             }
             for i in (1u64..500).step_by(7) {
-                let k = Sha256::hash(&[&i.to_be_bytes()]);
+                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
                 batch = batch.write(k, None);
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
@@ -337,7 +339,7 @@ pub(crate) mod test {
                     "root mismatch at concurrency={concurrency}"
                 );
                 for i in 0u64..500 {
-                    let k = Sha256::hash(&[&i.to_be_bytes()]);
+                    let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
                     assert_eq!(
                         db.get(&k).await.unwrap(),
                         expected_value(i),

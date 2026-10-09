@@ -423,7 +423,7 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> CertifiableBlock for CodedBlock<
 pub fn hash_context<H: Hasher, C: EncodeSize + Write>(context: &C) -> H::Digest {
     let mut buf = Vec::with_capacity(context.encode_size());
     context.write(&mut buf);
-    H::hash(&[&buf])
+    H::hash(&[&buf], &Sequential)
 }
 
 impl<B: Block + PartialEq, C: Scheme, H: Hasher> PartialEq for CodedBlock<B, C, H> {
@@ -721,7 +721,11 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(
+            Sha256::hash(&[b"parent"], &Sequential),
+            Height::new(42),
+            1_234_567,
+        );
         let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
 
         let encoded = coded_block.encode();
@@ -748,7 +752,11 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(
+            Sha256::hash(&[b"parent"], &Sequential),
+            Height::new(42),
+            1_234_567,
+        );
         let expected =
             CodedBlock::<TestBlock, RS, H>::new(block.clone(), EXPECTED_CONFIG, &Sequential)
                 .commitment();
@@ -778,10 +786,14 @@ mod test {
         };
 
         // Build an expected commitment that differs only in its coding root.
-        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(
+            Sha256::hash(&[b"parent"], &Sequential),
+            Height::new(42),
+            1_234_567,
+        );
         let coded = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let commitment = coded.commitment();
-        let wrong_root = Sha256::hash(&[b"wrong root"]);
+        let wrong_root = Sha256::hash(&[b"wrong root"], &Sequential);
         assert_ne!(wrong_root, commitment.root());
         let expected = Commitment::<TestBlock, RS, H>::from((
             commitment.block(),
@@ -815,7 +827,11 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(
+            Sha256::hash(&[b"parent"], &Sequential),
+            Height::new(42),
+            1_234_567,
+        );
         let coded = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let decoded = CodedBlock::<TestBlock, RS, H>::decode_cfg(
             coded.encode(),
@@ -843,7 +859,11 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(
+            Sha256::hash(&[b"parent"], &Sequential),
+            Height::new(42),
+            1_234_567,
+        );
         let expected =
             CodedBlock::<TestBlock, RS, H>::new(block.clone(), EXPECTED_CONFIG, &Sequential)
                 .commitment();
@@ -872,8 +892,16 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let other = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(43), 1_234_567);
+        let block = TestBlock::new(
+            Sha256::hash(&[b"parent"], &Sequential),
+            Height::new(42),
+            1_234_567,
+        );
+        let other = TestBlock::new(
+            Sha256::hash(&[b"parent"], &Sequential),
+            Height::new(43),
+            1_234_567,
+        );
         let expected = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential).commitment();
         assert_ne!(other.digest(), expected.block());
         let encoded = (other, CONFIG).encode();
@@ -904,12 +932,16 @@ mod test {
 
         // A trusted commitment is not re-encoded at decode, so a root that does
         // not encode the block is only caught when shards are generated.
-        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(
+            Sha256::hash(&[b"parent"], &Sequential),
+            Height::new(42),
+            1_234_567,
+        );
         let coded = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let commitment = coded.commitment();
         let expected = Commitment::<TestBlock, RS, H>::from((
             commitment.block(),
-            Sha256::hash(&[b"wrong root"]),
+            Sha256::hash(&[b"wrong root"], &Sequential),
             commitment.context(),
             commitment.config(),
         ));
@@ -932,7 +964,11 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(
+            Sha256::hash(&[b"parent"], &Sequential),
+            Height::new(42),
+            1_234_567,
+        );
         let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let cloned = coded_block.clone();
 
@@ -950,7 +986,11 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(
+            Sha256::hash(&[b"parent"], &Sequential),
+            Height::new(42),
+            1_234_567,
+        );
         let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let stored = StoredCodedBlock::<TestBlock, RS, H>::new(coded_block.clone());
 
@@ -974,7 +1014,11 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(
+            Sha256::hash(&[b"parent"], &Sequential),
+            Height::new(42),
+            1_234_567,
+        );
         let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let original_commitment = coded_block.commitment();
         let original_digest = coded_block.digest();
@@ -995,7 +1039,11 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(
+            Sha256::hash(&[b"parent"], &Sequential),
+            Height::new(42),
+            1_234_567,
+        );
         let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let stored = StoredCodedBlock::<TestBlock, RS, H>::new(coded_block);
 

@@ -1102,7 +1102,7 @@ mod tests {
     };
 
     fn test_digest(v: usize) -> Digest {
-        Sha256::hash(&[&v.to_be_bytes()])
+        Sha256::hash(&[&v.to_be_bytes()], &Sequential)
     }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(111);
@@ -1933,7 +1933,10 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(journal.size(), expected_size);
-            let (journal, _) = journal.append(&Sha256::hash(&[b"orphan"])).await.unwrap();
+            let (journal, _) = journal
+                .append(&Sha256::hash(&[b"orphan"], &Sequential))
+                .await
+                .unwrap();
             let journal = journal.sync().await.unwrap();
             assert_eq!(journal.size(), expected_size + 1);
         }
@@ -5569,7 +5572,10 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(journal.size(), valid_size);
-            let (journal, _) = journal.append(&Sha256::hash(&[b"orphan"])).await.unwrap();
+            let (journal, _) = journal
+                .append(&Sha256::hash(&[b"orphan"], &Sequential))
+                .await
+                .unwrap();
             let journal = journal.sync().await.unwrap();
             assert_eq!(journal.size(), valid_size + 1);
         }

@@ -645,7 +645,7 @@ mod tests {
         assert_eq!(N % 32, 0);
         let mut vec: Vec<u8> = Vec::new();
         for _ in 0..N / 32 {
-            vec.extend(Sha256::hash(&[s]).iter());
+            vec.extend(Sha256::hash(&[s], &Sequential).iter());
         }
 
         vec.try_into().unwrap()

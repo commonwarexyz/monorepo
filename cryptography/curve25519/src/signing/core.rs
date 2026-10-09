@@ -74,7 +74,7 @@ pub(super) struct Item<'a> {
 /// coefficients and verdict deterministic functions of `(items, seed)`, identical at every thread
 /// count.
 fn batch_coefficients(seed: &[u8; 32], block: u64) -> [Scalar; 4] {
-    let digest = Sha512::hash(&[seed, &block.to_le_bytes()]).0;
+    let digest = Sha512::hash(&[seed, &block.to_le_bytes()], &Sequential).0;
     core::array::from_fn(|k| {
         let mut bytes = [0u8; 16];
         bytes.copy_from_slice(&digest[k * 16..(k + 1) * 16]);
@@ -145,7 +145,7 @@ fn decompress_terms<B: Backend>(
 /// Hashes the challenges `R || A || M` of unit `unit`, with `M` the framed message.
 ///
 /// The unit's curve work cannot split, but long messages make its hashing worth spreading across
-/// workers. [`Sha512::hash_many_with`] splits the challenges across `strategy` only between whole
+/// workers. [`Sha512::hash_many`] splits the challenges across `strategy` only between whole
 /// batches of the SHA-512 kernel, so a unit can spread only where that kernel hashes fewer than
 /// [`LANES`] messages at once.
 fn hash_unit(
@@ -179,7 +179,7 @@ fn hash_unit(
         *input = &challenges[start..end];
         start = end;
     }
-    Sha512::hash_many_with(&inputs[..lanes.len()], strategy)
+    Sha512::hash_many(&inputs[..lanes.len()], strategy)
 }
 
 /// Processes unit `unit` into `partition`, recoding its `R` terms at `width`. `digests` holds
@@ -665,7 +665,11 @@ impl WithBackend for Verify<'_> {
             return false;
         };
         let h = Scalar::from_bytes_mod_order_wide(
-            &Sha512::hash(&[&self.sig.r, self.a_bytes.as_bytes(), self.msg]).0,
+            &Sha512::hash(
+                &[&self.sig.r, self.a_bytes.as_bytes(), self.msg],
+                &Sequential,
+            )
+            .0,
         );
 
         // With `v = u*h (mod L)`, `[8](u*s*B - u*R - v*A) = u*[8](s*B - R - h*A)` because `[8]`
@@ -1096,7 +1100,7 @@ mod tests {
             for (i, item) in items.iter().enumerate() {
                 let z = batch_coefficients(&seed, (i / 4) as u64)[i % 4];
                 let h = Scalar::from_bytes_mod_order_wide(
-                    &Sha512::hash(&[item.r, item.key.as_bytes(), item.message]).0,
+                    &Sha512::hash(&[item.r, item.key.as_bytes(), item.message], &Sequential).0,
                 );
                 assert_eq!(
                     zh[i / LANES][i % LANES].to_bytes(),
@@ -1234,7 +1238,7 @@ mod tests {
 
         // With `A = B` and `s = h`, the equation `s*B = R + h*A` holds for `R` the identity.
         let challenge = |r: &[u8; 32], key: &[u8; 32]| {
-            Scalar::from_bytes_mod_order_wide(&Sha512::hash(&[r, key, &message]).0)
+            Scalar::from_bytes_mod_order_wide(&Sha512::hash(&[r, key, &message], &Sequential).0)
         };
         let bad_r = item(invalid, basepoint, challenge(&invalid, &basepoint));
         let good_r = item(identity, basepoint, challenge(&identity, &basepoint));

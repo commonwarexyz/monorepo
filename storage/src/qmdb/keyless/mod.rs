@@ -572,7 +572,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::qmdb::{verify_proof, verify_proof_and_pinned_nodes};
     use commonware_cryptography::Sha256;
-    use commonware_parallel::Strategy;
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{Supervisor as _, deterministic};
     use commonware_utils::NZU64;
     use std::{future::Future, pin::Pin};
@@ -1908,7 +1908,7 @@ pub(crate) mod tests {
             let expected_ops = std::cmp::min(max_ops, *db.bounds().end - start_loc);
             assert_eq!(ops.len() as u64, expected_ops);
 
-            let wrong_root = Sha256::hash(&[&[0xFF; 32]]);
+            let wrong_root = Sha256::hash(&[&[0xFF; 32]], &Sequential);
             assert!(!verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(start_loc),

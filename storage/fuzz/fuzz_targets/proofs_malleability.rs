@@ -3,6 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
+use commonware_parallel::Sequential;
 use commonware_storage::{
     bmt::Builder as BmtBuilder,
     merkle::{
@@ -264,7 +265,7 @@ fn fuzz(input: FuzzInput) {
     let digests: Vec<Digest> = input
         .elements
         .iter()
-        .map(|&v| Sha256::hash(&[&[v]]))
+        .map(|&v| Sha256::hash(&[&[v]], &Sequential))
         .collect();
 
     match input.proof {

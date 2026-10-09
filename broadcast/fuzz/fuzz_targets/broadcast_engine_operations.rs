@@ -12,6 +12,7 @@ use commonware_cryptography::{
     sha256::Digest,
 };
 use commonware_p2p::{Recipients, simulated::Network};
+use commonware_parallel::Sequential;
 use commonware_runtime::{BufMut, Clock, Quota, Runner, Supervisor as _, deterministic};
 use commonware_utils::{
     NZUsize, Probability, TestRng, channel::oneshot, futures::Pool, probability, vec::Bounded,
@@ -55,7 +56,7 @@ pub struct FuzzMessage {
 impl Digestible for FuzzMessage {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
-        Sha256::hash(&[&self.encode()])
+        Sha256::hash(&[&self.encode()], &Sequential)
     }
 }
 

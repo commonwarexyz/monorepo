@@ -127,11 +127,12 @@ mod tests {
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, deterministic};
     use core::ops::Range;
 
     fn test_digest(v: u8) -> Digest {
-        Sha256::hash(&[&[v]])
+        Sha256::hash(&[&[v]], &Sequential)
     }
 
     fn test_hasher() -> Standard<Sha256> {

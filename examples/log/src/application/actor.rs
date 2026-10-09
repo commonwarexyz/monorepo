@@ -6,6 +6,7 @@ use super::{
 use commonware_actor::mailbox::{self, Receiver};
 use commonware_cryptography::Hasher;
 use commonware_formatting::hex;
+use commonware_parallel::Sequential;
 use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use rand_core::Rng;
 use tracing::info;
@@ -51,7 +52,7 @@ impl<R: Rng + Spawner + Metrics, H: Hasher> Application<R, H> {
                     self.context.fill_bytes(&mut msg);
 
                     // Hash the message
-                    let digest = H::hash(&[&msg]);
+                    let digest = H::hash(&[&msg], &Sequential);
                     info!(msg = hex(&msg), payload = ?digest, "proposed");
 
                     // Send digest to consensus

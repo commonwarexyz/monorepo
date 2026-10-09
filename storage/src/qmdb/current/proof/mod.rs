@@ -719,11 +719,11 @@ mod tests {
         type F = mmb::Family;
         for partial_chunk in [
             None,
-            Some((0u64, Sha256::hash(&[b"partial-zero"]))),
-            Some((123u64, Sha256::hash(&[b"partial-nonzero"]))),
+            Some((0u64, Sha256::hash(&[b"partial-zero"], &Sequential))),
+            Some((123u64, Sha256::hash(&[b"partial-nonzero"], &Sequential))),
         ] {
             let witness: OpsRootWitness<F, _> = OpsRootWitness {
-                grafted_root: Sha256::hash(&[b"grafted"]),
+                grafted_root: Sha256::hash(&[b"grafted"], &Sequential),
                 pending_chunk_digest: None,
                 partial_chunk,
             };
@@ -738,11 +738,11 @@ mod tests {
     fn test_ops_root_witness_root_matches_verify() {
         type F = mmb::Family;
 
-        let ops_root = Sha256::hash(&[b"ops root"]);
+        let ops_root = Sha256::hash(&[b"ops root"], &Sequential);
         let witness: OpsRootWitness<F, _> = OpsRootWitness {
-            grafted_root: Sha256::hash(&[b"grafted root"]),
-            pending_chunk_digest: Some(Sha256::hash(&[b"pending chunk"])),
-            partial_chunk: Some((13, Sha256::hash(&[b"partial chunk"]))),
+            grafted_root: Sha256::hash(&[b"grafted root"], &Sequential),
+            pending_chunk_digest: Some(Sha256::hash(&[b"pending chunk"], &Sequential)),
+            partial_chunk: Some((13, Sha256::hash(&[b"partial chunk"], &Sequential))),
         };
 
         let root = witness.root::<Sha256>(&ops_root);
@@ -750,7 +750,7 @@ mod tests {
         assert!(witness.verify::<Sha256>(&ops_root, &root));
         assert_ne!(root, ops_root);
 
-        let wrong_ops_root = Sha256::hash(&[b"wrong ops root"]);
+        let wrong_ops_root = Sha256::hash(&[b"wrong ops root"], &Sequential);
         assert!(!witness.verify::<Sha256>(&wrong_ops_root, &root));
     }
 
@@ -767,12 +767,12 @@ mod tests {
             leaves: mmb::Location::new(42),
             inactive_peaks: 0,
             digests: vec![
-                Sha256::hash(&[b"d0"]),
-                Sha256::hash(&[b"d1"]),
-                Sha256::hash(&[b"d2"]),
+                Sha256::hash(&[b"d0"], &Sequential),
+                Sha256::hash(&[b"d1"], &Sequential),
+                Sha256::hash(&[b"d2"], &Sequential),
             ],
         };
-        let ops_root = Sha256::hash(&[b"ops-root"]);
+        let ops_root = Sha256::hash(&[b"ops-root"], &Sequential);
 
         let cases = [
             // Minimal: no optional fields or prefix/suffix witnesses.
@@ -785,15 +785,15 @@ mod tests {
             // All optional fields populated.
             RangeProof {
                 proof,
-                pending_chunk_digest: Some(Sha256::hash(&[b"pending"])),
-                partial_chunk_digest: Some(Sha256::hash(&[b"partial"])),
+                pending_chunk_digest: Some(Sha256::hash(&[b"pending"], &Sequential)),
+                partial_chunk_digest: Some(Sha256::hash(&[b"partial"], &Sequential)),
                 ops_root,
             },
             // Default proof with only partial chunk digest.
             RangeProof {
                 proof: Proof::<F, sha256::Digest>::default(),
                 pending_chunk_digest: None,
-                partial_chunk_digest: Some(Sha256::hash(&[b"only-partial"])),
+                partial_chunk_digest: Some(Sha256::hash(&[b"only-partial"], &Sequential)),
                 ops_root,
             },
         ];
@@ -815,11 +815,11 @@ mod tests {
             proof: Proof::<F, sha256::Digest> {
                 leaves: mmb::Location::new(42),
                 inactive_peaks: 0,
-                digests: vec![Sha256::hash(&[b"d0"])],
+                digests: vec![Sha256::hash(&[b"d0"], &Sequential)],
             },
             pending_chunk_digest: None,
             partial_chunk_digest: None,
-            ops_root: Sha256::hash(&[b"ops-root"]),
+            ops_root: Sha256::hash(&[b"ops-root"], &Sequential),
         };
 
         let encoded = proof.encode();
@@ -841,11 +841,11 @@ mod tests {
             proof: Proof::<mmb::Family, sha256::Digest> {
                 leaves: mmb::Location::new(42),
                 inactive_peaks: 0,
-                digests: vec![Sha256::hash(&[b"d0"])],
+                digests: vec![Sha256::hash(&[b"d0"], &Sequential)],
             },
-            pending_chunk_digest: Some(Sha256::hash(&[b"pending"])),
+            pending_chunk_digest: Some(Sha256::hash(&[b"pending"], &Sequential)),
             partial_chunk_digest: None,
-            ops_root: Sha256::hash(&[b"ops-root"]),
+            ops_root: Sha256::hash(&[b"ops-root"], &Sequential),
         };
         let encoded = proof.encode();
 
@@ -875,11 +875,11 @@ mod tests {
             proof: Proof::<F, sha256::Digest> {
                 leaves: mmb::Location::new(7),
                 inactive_peaks: 0,
-                digests: vec![Sha256::hash(&[b"sib"])],
+                digests: vec![Sha256::hash(&[b"sib"], &Sequential)],
             },
             pending_chunk_digest: None,
             partial_chunk_digest: None,
-            ops_root: Sha256::hash(&[b"ops"]),
+            ops_root: Sha256::hash(&[b"ops"], &Sequential),
         };
 
         let chunk: [u8; N] = core::array::from_fn(|i| i as u8);
@@ -907,11 +907,11 @@ mod tests {
             proof: Proof::<F, sha256::Digest> {
                 leaves: mmb::Location::new(7),
                 inactive_peaks: 0,
-                digests: vec![Sha256::hash(&[b"sib"])],
+                digests: vec![Sha256::hash(&[b"sib"], &Sequential)],
             },
             pending_chunk_digest: None,
             partial_chunk_digest: None,
-            ops_root: Sha256::hash(&[b"ops"]),
+            ops_root: Sha256::hash(&[b"ops"], &Sequential),
         };
         let total_digests = range_proof_digest_count(&range_proof);
         let proof = constant::OperationProof::<F, sha256::Digest, N> {
@@ -2236,7 +2236,7 @@ mod tests {
                 &operations,
                 &slices,
                 N,
-                &Sha256::hash(&[b"wrong root"]),
+                &Sha256::hash(&[b"wrong root"], &Sequential),
             ));
 
             for loc in [start, Location::new(leaves - 1)] {
@@ -2260,10 +2260,16 @@ mod tests {
                 assert_eq!(dynamic.loc, loc);
                 assert_eq!(dynamic.chunk.as_ref(), native.chunk.as_slice());
                 assert!(dynamic.verify::<Sha256, _>(operations[0], &root));
-                assert!(!dynamic.verify::<Sha256, _>(Sha256::hash(&[b"wrong operation"]), &root,));
                 assert!(
-                    !dynamic.verify::<Sha256, _>(operations[0], &Sha256::hash(&[b"wrong root"]),)
+                    !dynamic.verify::<Sha256, _>(
+                        Sha256::hash(&[b"wrong operation"], &Sequential),
+                        &root,
+                    )
                 );
+                assert!(!dynamic.verify::<Sha256, _>(
+                    operations[0],
+                    &Sha256::hash(&[b"wrong root"], &Sequential),
+                ));
 
                 let mut inactive = dynamic;
                 let mut chunk = inactive.chunk.to_vec();
@@ -2378,7 +2384,7 @@ mod tests {
             &root,
         ));
         let mut wrong_operations = operations;
-        wrong_operations[0] = Sha256::hash(&[b"wrong operation"]);
+        wrong_operations[0] = Sha256::hash(&[b"wrong operation"], &Sequential);
         assert!(!proof.verify_with_chunk_size::<Sha256, _>(
             start,
             &wrong_operations,

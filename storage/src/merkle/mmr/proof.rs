@@ -13,9 +13,10 @@ mod tests {
         proof::{Blueprint, ElementPlan, multi_proof_positions},
     };
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
+    use commonware_parallel::Sequential;
 
     fn test_digest(v: u8) -> Digest {
-        Sha256::hash(&[&[v]])
+        Sha256::hash(&[&[v]], &Sequential)
     }
 
     #[test]

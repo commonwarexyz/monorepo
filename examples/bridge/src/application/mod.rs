@@ -8,6 +8,7 @@ use std::num::NonZeroUsize;
 
 mod actor;
 pub use actor::Application;
+use commonware_parallel::Sequential;
 use commonware_stream::{Receiver, Sender};
 mod ingress;
 
@@ -17,7 +18,7 @@ const GENESIS: &[u8] = b"commonware is neat";
 /// Returns the initial payload for the single consensus epoch.
 pub fn genesis<H: Hasher>() -> H::Digest {
     // Use the digest of the genesis message as the initial payload.
-    H::hash(&[GENESIS])
+    H::hash(&[GENESIS], &Sequential)
 }
 
 /// Configuration for the application.

@@ -63,6 +63,7 @@ use common::{
     AnyOFixP3Db, AnyUFixP64kDb, Digest, any_fix_cfg_full, gen_random_kv, make_fixed_value,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     Runner as _, Spawner as _, Supervisor as _,
     tokio::{Config, Context, Runner},
@@ -492,7 +493,7 @@ async fn run_gets<D: DbAny<Mmr, Key = Digest> + 'static>(
                     None => {
                         for _ in 0..gets {
                             let index = rng.random_range(0..keyspace);
-                            let key = Sha256::hash(&[&index.to_be_bytes()]);
+                            let key = Sha256::hash(&[&index.to_be_bytes()], &Sequential);
                             if db.get(&key).await.unwrap().is_some() {
                                 found += 1;
                             }
@@ -505,7 +506,7 @@ async fn run_gets<D: DbAny<Mmr, Key = Digest> + 'static>(
                             let keys: Vec<_> = (0..n)
                                 .map(|_| {
                                     let index = rng.random_range(0..keyspace);
-                                    Sha256::hash(&[&index.to_be_bytes()])
+                                    Sha256::hash(&[&index.to_be_bytes()], &Sequential)
                                 })
                                 .collect();
                             let refs: Vec<_> = keys.iter().collect();

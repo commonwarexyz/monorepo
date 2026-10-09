@@ -44,7 +44,7 @@ use commonware_cryptography::{
     sha256::{self, Digest as Sha256Digest},
 };
 use commonware_p2p::{Blocker, Receiver, Sender};
-use commonware_parallel::Strategy;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{
     BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
     buffer::paged::CacheRef, spawn_cell,
@@ -220,7 +220,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Digestible for Block<V, D> {
     type Digest = sha256::Digest;
 
     fn digest(&self) -> sha256::Digest {
-        Sha256::hash(&[&self.encode()])
+        Sha256::hash(&[&self.encode()], &Sequential)
     }
 }
 

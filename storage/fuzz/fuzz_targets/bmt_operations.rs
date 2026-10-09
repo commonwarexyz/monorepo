@@ -3,6 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{Copying, Decode, Encode};
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest as Sha256Digest};
+use commonware_parallel::Sequential;
 use commonware_storage::bmt::{Builder, Proof};
 use libfuzzer_sys::fuzz_target;
 
@@ -124,7 +125,7 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::AddLeaf { value } => {
                 if let Some(ref mut b) = builder {
-                    let digest = Sha256::hash(&[&value.to_be_bytes()]);
+                    let digest = Sha256::hash(&[&value.to_be_bytes()], &Sequential);
                     b.add(&digest);
                     leaf_values.push(*value);
                 }
@@ -155,7 +156,7 @@ fn fuzz(input: FuzzInput) {
                 position,
             } => {
                 if let (Some(p), Some(t)) = (&proof, &tree) {
-                    let leaf_digest = Sha256::hash(&[&leaf_value.to_be_bytes()]);
+                    let leaf_digest = Sha256::hash(&[&leaf_value.to_be_bytes()], &Sequential);
                     let root = t.root();
                     let _ = p.verify_element_inclusion::<Sha256>(&leaf_digest, *position, &root);
                 }
@@ -184,7 +185,7 @@ fn fuzz(input: FuzzInput) {
                 leaf_values.clear();
 
                 for i in 0..count {
-                    let digest = Sha256::hash(&[&(i as u64).to_be_bytes()]);
+                    let digest = Sha256::hash(&[&(i as u64).to_be_bytes()], &Sequential);
                     b.add(&digest);
                     leaf_values.push(i as u64);
                 }
@@ -208,7 +209,7 @@ fn fuzz(input: FuzzInput) {
                     // Convert leaf values to digests
                     let leaf_digests: Vec<_> = leaf_values
                         .iter()
-                        .map(|v| Sha256::hash(&[&v.to_be_bytes()]))
+                        .map(|v| Sha256::hash(&[&v.to_be_bytes()], &Sequential))
                         .collect();
 
                     // Verify range proof
@@ -267,7 +268,7 @@ fn fuzz(input: FuzzInput) {
                             let leaf_digests: Vec<_> = leaf_values
                                 [start_idx..start_idx + actual_count]
                                 .iter()
-                                .map(|v| Sha256::hash(&[&v.to_be_bytes()]))
+                                .map(|v| Sha256::hash(&[&v.to_be_bytes()], &Sequential))
                                 .collect();
 
                             // Verify with wrong position (verify_start instead of proof_start)
@@ -290,7 +291,7 @@ fn fuzz(input: FuzzInput) {
                     // Generate tampered digests
                     let tampered_digests: Vec<_> = tampered_values
                         .iter()
-                        .map(|v| Sha256::hash(&[&v.to_be_bytes()]))
+                        .map(|v| Sha256::hash(&[&v.to_be_bytes()], &Sequential))
                         .collect();
 
                     // Verify with tampered digests
@@ -317,7 +318,7 @@ fn fuzz(input: FuzzInput) {
                     let element_digests: Vec<_> = elements
                         .iter()
                         .take(20) // Limit elements
-                        .map(|(v, pos)| (Sha256::hash(&[&v.to_be_bytes()]), *pos))
+                        .map(|(v, pos)| (Sha256::hash(&[&v.to_be_bytes()], &Sequential), *pos))
                         .collect();
                     let root = t.root();
                     let _ = mp.verify_multi_inclusion::<Sha256>(&element_digests, &root);
@@ -348,7 +349,7 @@ fn fuzz(input: FuzzInput) {
                     let tampered_digests: Vec<_> = tampered_elements
                         .iter()
                         .take(20)
-                        .map(|(v, pos)| (Sha256::hash(&[&v.to_be_bytes()]), *pos))
+                        .map(|(v, pos)| (Sha256::hash(&[&v.to_be_bytes()], &Sequential), *pos))
                         .collect();
                     let root = t.root();
                     let _ = mp.verify_multi_inclusion::<Sha256>(&tampered_digests, &root);
@@ -368,7 +369,7 @@ fn fuzz(input: FuzzInput) {
                         .filter_map(|&pos| {
                             leaf_values
                                 .get(pos as usize)
-                                .map(|v| (Sha256::hash(&[&v.to_be_bytes()]), pos))
+                                .map(|v| (Sha256::hash(&[&v.to_be_bytes()], &Sequential), pos))
                         })
                         .collect();
                     let root = t.root();
@@ -387,7 +388,7 @@ fn fuzz(input: FuzzInput) {
                         .filter_map(|&pos| {
                             leaf_values
                                 .get(pos as usize)
-                                .map(|v| (Sha256::hash(&[&v.to_be_bytes()]), pos))
+                                .map(|v| (Sha256::hash(&[&v.to_be_bytes()], &Sequential), pos))
                         })
                         .collect();
                     let root = t.root();
@@ -406,7 +407,7 @@ fn fuzz(input: FuzzInput) {
                         .filter_map(|&pos| {
                             leaf_values
                                 .get(pos as usize)
-                                .map(|v| (Sha256::hash(&[&v.to_be_bytes()]), pos))
+                                .map(|v| (Sha256::hash(&[&v.to_be_bytes()], &Sequential), pos))
                         })
                         .collect();
                     unsorted_elements.reverse();
@@ -420,7 +421,7 @@ fn fuzz(input: FuzzInput) {
             } => {
                 if let (Some(mp), Some(t)) = (&multi_proof, &tree) {
                     // Create an element with an out-of-bounds position
-                    let fake_digest = Sha256::hash(&[&0u64.to_be_bytes()]);
+                    let fake_digest = Sha256::hash(&[&0u64.to_be_bytes()], &Sequential);
                     let elements = vec![(fake_digest, *out_of_bounds_position)];
                     let root = t.root();
                     let _ = mp.verify_multi_inclusion::<Sha256>(&elements, &root);
@@ -444,7 +445,7 @@ fn fuzz(input: FuzzInput) {
                         .filter_map(|&pos| {
                             leaf_values
                                 .get(pos as usize)
-                                .map(|v| (Sha256::hash(&[&v.to_be_bytes()]), pos))
+                                .map(|v| (Sha256::hash(&[&v.to_be_bytes()], &Sequential), pos))
                         })
                         .collect();
                     // Create a wrong root by hashing the real root with some modifier
@@ -465,7 +466,8 @@ fn fuzz(input: FuzzInput) {
                     if let Ok(mp) = t.multi_proof([*position])
                         && let Some(v) = leaf_values.get(*position as usize)
                     {
-                        let elements = vec![(Sha256::hash(&[&v.to_be_bytes()]), *position)];
+                        let elements =
+                            vec![(Sha256::hash(&[&v.to_be_bytes()], &Sequential), *position)];
                         let root = t.root();
                         let _ = mp.verify_multi_inclusion::<Sha256>(&elements, &root);
                     }
@@ -475,7 +477,7 @@ fn fuzz(input: FuzzInput) {
             BmtOperation::VerifyMultiProofDuplicatePositions { position } => {
                 if let (Some(mp), Some(t)) = (&multi_proof, &tree) {
                     // Try verifying with duplicate positions in elements
-                    let digest = Sha256::hash(&[&0u64.to_be_bytes()]);
+                    let digest = Sha256::hash(&[&0u64.to_be_bytes()], &Sequential);
                     let elements = vec![(digest, *position), (digest, *position)];
                     let root = t.root();
                     let _ = mp.verify_multi_inclusion::<Sha256>(&elements, &root);

@@ -150,6 +150,7 @@ mod tests {
     use commonware_cryptography::{
         Committable, Digestible, Hasher, Sha256, sha256::Digest as Sha256Digest,
     };
+    use commonware_parallel::Sequential;
     use commonware_utils::NZU64;
 
     type TestCommitment = Commitment<TestBlock, ReedSolomon<Sha256>, Sha256>;
@@ -256,7 +257,7 @@ mod tests {
     ) -> TestCommitment {
         TestCommitment::from((
             digest,
-            Sha256::hash(&[root_label]),
+            Sha256::hash(&[root_label], &Sequential),
             hash_context::<Sha256, _>(&context),
             config,
         ))
@@ -269,8 +270,8 @@ mod tests {
         let parent_context = Round::new(Epoch::new(0), View::new(6));
         let context = Round::new(Epoch::new(0), View::new(7));
 
-        let parent_digest = Sha256::hash(&[b"parent"]);
-        let digest = Sha256::hash(&[b"block"]);
+        let parent_digest = Sha256::hash(&[b"parent"], &Sequential);
+        let digest = Sha256::hash(&[b"block"], &Sequential);
 
         let parent_commitment =
             commitment_for(parent_digest, parent_context, config, b"parent_root");
@@ -278,7 +279,7 @@ mod tests {
 
         let parent = TestBlock {
             digest: parent_digest,
-            parent: Sha256::hash(&[b"grandparent"]),
+            parent: Sha256::hash(&[b"grandparent"], &Sequential),
             height: Height::new(6),
             context: parent_context,
             commitment: parent_commitment,
@@ -340,7 +341,7 @@ mod tests {
     fn test_validate_block_commitment_error() {
         let fixture = baseline_fixture();
         let wrong = commitment_for(
-            Sha256::hash(&[b"other_block"]),
+            Sha256::hash(&[b"other_block"], &Sequential),
             fixture.context,
             fixture.config,
             b"other_root",
@@ -362,7 +363,7 @@ mod tests {
     fn test_validate_block_parent_commitment_error() {
         let fixture = baseline_fixture();
         let wrong = commitment_for(
-            Sha256::hash(&[b"other_parent"]),
+            Sha256::hash(&[b"other_parent"], &Sequential),
             fixture.parent.context,
             fixture.config,
             b"other_parent_root",
@@ -401,7 +402,7 @@ mod tests {
     fn test_validate_block_parent_digest_error() {
         let fixture = baseline_fixture();
         let mut block = fixture.block.clone();
-        block.parent = Sha256::hash(&[b"wrong_parent"]);
+        block.parent = Sha256::hash(&[b"wrong_parent"], &Sequential);
         assert_eq!(
             validate_block(
                 &fixture.epocher,
@@ -526,7 +527,7 @@ mod tests {
     fn test_validate_reconstruction_block_digest_error() {
         let fixture = baseline_fixture();
         let wrong_commitment = commitment_for(
-            Sha256::hash(&[b"wrong_block_digest"]),
+            Sha256::hash(&[b"wrong_block_digest"], &Sequential),
             fixture.context,
             fixture.config,
             b"block_root",

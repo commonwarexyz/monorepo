@@ -5941,13 +5941,13 @@ pub(crate) mod tests {
             let config = fixed_db_config::<OneCap>("operations-match-applied-log", &context);
             let db = TestDb::init(context, config, None).await.unwrap();
 
-            let key_a = Sha256::hash(&[b"operations-a"]);
-            let key_b = Sha256::hash(&[b"operations-b"]);
+            let key_a = Sha256::hash(&[b"operations-a"], &Sequential);
+            let key_b = Sha256::hash(&[b"operations-b"], &Sequential);
 
             let seed = db
                 .new_batch()
-                .write(key_a, Some(Sha256::hash(&[b"seed-a"])))
-                .write(key_b, Some(Sha256::hash(&[b"seed-b"])))
+                .write(key_a, Some(Sha256::hash(&[b"seed-a"], &Sequential)))
+                .write(key_b, Some(Sha256::hash(&[b"seed-b"], &Sequential)))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
@@ -5963,13 +5963,13 @@ pub(crate) mod tests {
             // merkleized on top of a pending ancestor.
             let parent = db
                 .new_batch()
-                .write(key_a, Some(Sha256::hash(&[b"parent-a"])))
+                .write(key_a, Some(Sha256::hash(&[b"parent-a"], &Sequential)))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let child = parent
                 .new_batch::<Sha256>()
-                .write(key_b, Some(Sha256::hash(&[b"child-b"])))
+                .write(key_b, Some(Sha256::hash(&[b"child-b"], &Sequential)))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
@@ -6033,7 +6033,7 @@ pub(crate) mod tests {
             // mid-mountain, so its artifacts are refused rather than returned unverifiable.
             let late = db
                 .new_batch()
-                .write(key_a, Some(Sha256::hash(&[b"late-a"])))
+                .write(key_a, Some(Sha256::hash(&[b"late-a"], &Sequential)))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
@@ -6055,7 +6055,7 @@ pub(crate) mod tests {
             // A batch built on the flushed store reads every node below it from the pinned peaks.
             let flushed = db
                 .new_batch()
-                .write(key_b, Some(Sha256::hash(&[b"flushed-b"])))
+                .write(key_b, Some(Sha256::hash(&[b"flushed-b"], &Sequential)))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
@@ -6098,21 +6098,25 @@ pub(crate) mod tests {
             let config = fixed_db_config::<OneCap>("mixed-ancestor-overlaps", &context);
             let db = TestDb::init(context, config, None).await.unwrap();
 
-            let key_update = Sha256::hash(&[b"update-through-all-layers"]);
-            let key_recreate_then_delete = Sha256::hash(&[b"recreate-then-delete"]);
-            let key_delete_from_uncommitted = Sha256::hash(&[b"delete-from-uncommitted"]);
-            let key_uncommitted_create = Sha256::hash(&[b"uncommitted-create"]);
+            let key_update = Sha256::hash(&[b"update-through-all-layers"], &Sequential);
+            let key_recreate_then_delete = Sha256::hash(&[b"recreate-then-delete"], &Sequential);
+            let key_delete_from_uncommitted =
+                Sha256::hash(&[b"delete-from-uncommitted"], &Sequential);
+            let key_uncommitted_create = Sha256::hash(&[b"uncommitted-create"], &Sequential);
 
             let seed = db
                 .new_batch()
-                .write(key_update, Some(Sha256::hash(&[b"seed-update"])))
+                .write(
+                    key_update,
+                    Some(Sha256::hash(&[b"seed-update"], &Sequential)),
+                )
                 .write(
                     key_recreate_then_delete,
-                    Some(Sha256::hash(&[b"seed-recreate"])),
+                    Some(Sha256::hash(&[b"seed-recreate"], &Sequential)),
                 )
                 .write(
                     key_delete_from_uncommitted,
-                    Some(Sha256::hash(&[b"seed-delete"])),
+                    Some(Sha256::hash(&[b"seed-delete"], &Sequential)),
                 )
                 .merkleize(&db, None, &mut Proportional)
                 .await
@@ -6121,11 +6125,14 @@ pub(crate) mod tests {
 
             let applied = db
                 .new_batch()
-                .write(key_update, Some(Sha256::hash(&[b"committed-update"])))
+                .write(
+                    key_update,
+                    Some(Sha256::hash(&[b"committed-update"], &Sequential)),
+                )
                 .write(key_recreate_then_delete, None)
                 .write(
                     key_delete_from_uncommitted,
-                    Some(Sha256::hash(&[b"committed-delete-base"])),
+                    Some(Sha256::hash(&[b"committed-delete-base"], &Sequential)),
                 )
                 .merkleize(&db, None, &mut Proportional)
                 .await
@@ -6133,21 +6140,24 @@ pub(crate) mod tests {
 
             let pending = applied
                 .new_batch::<Sha256>()
-                .write(key_update, Some(Sha256::hash(&[b"uncommitted-update"])))
+                .write(
+                    key_update,
+                    Some(Sha256::hash(&[b"uncommitted-update"], &Sequential)),
+                )
                 .write(
                     key_recreate_then_delete,
-                    Some(Sha256::hash(&[b"uncommitted-recreate"])),
+                    Some(Sha256::hash(&[b"uncommitted-recreate"], &Sequential)),
                 )
                 .write(key_delete_from_uncommitted, None)
                 .write(
                     key_uncommitted_create,
-                    Some(Sha256::hash(&[b"uncommitted-create"])),
+                    Some(Sha256::hash(&[b"uncommitted-create"], &Sequential)),
                 )
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
 
-            let final_update = Sha256::hash(&[b"child-update"]);
+            let final_update = Sha256::hash(&[b"child-update"], &Sequential);
             let child = pending
                 .new_batch::<Sha256>()
                 .write(key_update, Some(final_update))
@@ -6168,7 +6178,7 @@ pub(crate) mod tests {
             assert_eq!(db.get(&key_delete_from_uncommitted).await.unwrap(), None);
             assert_eq!(
                 db.get(&key_uncommitted_create).await.unwrap(),
-                Some(Sha256::hash(&[b"uncommitted-create"]))
+                Some(Sha256::hash(&[b"uncommitted-create"], &Sequential))
             );
 
             db.destroy().await.unwrap();

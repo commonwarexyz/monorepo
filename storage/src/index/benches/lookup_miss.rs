@@ -1,5 +1,6 @@
 use super::{Digest, DummyMetrics};
 use commonware_cryptography::{Hasher, Sha256};
+use commonware_parallel::Sequential;
 use commonware_storage::{
     index::{Unordered, unordered},
     translator::{EightCap, FourCap, Translator, TwoCap},
@@ -62,7 +63,7 @@ fn translated_key_misses<T: Translator>(
     let mut misses = Vec::with_capacity(count);
     let mut i = inserted_keys.len() as u64;
     while misses.len() < count {
-        let key = Sha256::hash(&[&i.to_be_bytes()]);
+        let key = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
         // Keep translated misses distinct so we do not benchmark repeated probes into the
         // same empty bucket.
         if seen.insert(translator.transform(&key)) {
@@ -78,7 +79,7 @@ fn bench_lookup_miss(c: &mut Criterion) {
 
     // Keys inserted into the index: hash(0), hash(1), ...
     let inserted_keys: Vec<_> = (0..max_items)
-        .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+        .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
         .collect();
 
     for items in N_ITEMS {

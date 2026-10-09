@@ -288,7 +288,7 @@ pub(crate) mod test {
         deterministic::Runner::default().start(|context| async move {
             let db = create_test_db(context.child("staged")).await;
 
-            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()], &Sequential);
 
             let mut seed = db.new_batch();
             for i in 0..200u64 {
@@ -362,7 +362,7 @@ pub(crate) mod test {
         deterministic::Runner::default().start(|context| async move {
             let db = create_test_db(context.child("staged_ancestor")).await;
 
-            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()], &Sequential);
 
             // Committed base state, so the grandparent's write of key(0) supersedes a
             // committed location. Its create of key(100) supersedes none.
@@ -451,7 +451,7 @@ pub(crate) mod test {
                 };
                 let db = create_test_db(context.child(label)).await;
 
-                let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+                let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()], &Sequential);
 
                 // Committed base state: the grandparent's write of key(0) and the parent's
                 // write of key(1) supersede committed locations. key(100) is created by
@@ -578,7 +578,7 @@ pub(crate) mod test {
                 let mut batch = db.new_batch();
                 for i in 0..ELEMENTS {
                     batch = batch.write(
-                        Sha256::hash(&[&i.to_be_bytes()]),
+                        Sha256::hash(&[&i.to_be_bytes()], &Sequential),
                         Some(vec![(i % 255) as u8; ((i % 13) + 7) as usize]),
                     );
                 }
@@ -593,7 +593,7 @@ pub(crate) mod test {
             // Re-apply the updates and commit them this time.
             let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&[&i.to_be_bytes()]);
+                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 batch = batch.write(k, Some(v));
             }
@@ -609,7 +609,7 @@ pub(crate) mod test {
                     if i % 3 != 0 {
                         continue;
                     }
-                    let k = Sha256::hash(&[&i.to_be_bytes()]);
+                    let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
                     let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                     batch = batch.write(k, Some(v));
                 }
@@ -627,7 +627,7 @@ pub(crate) mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = Sha256::hash(&[&i.to_be_bytes()]);
+                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 batch = batch.write(k, Some(v));
             }
@@ -643,7 +643,7 @@ pub(crate) mod test {
                     if i % 7 != 1 {
                         continue;
                     }
-                    let k = Sha256::hash(&[&i.to_be_bytes()]);
+                    let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
                     batch = batch.write(k, None);
                 }
                 let _ = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
@@ -660,7 +660,7 @@ pub(crate) mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = Sha256::hash(&[&i.to_be_bytes()]);
+                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
                 batch = batch.write(k, None);
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
@@ -727,8 +727,8 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let db = open_db(context.child("storage")).await;
 
-            let key1 = Sha256::hash(&[&[1]]);
-            let key2 = Sha256::hash(&[&[2]]);
+            let key1 = Sha256::hash(&[&[1]], &Sequential);
+            let key2 = Sha256::hash(&[&[2]], &Sequential);
 
             // Create two batches from the same DB state.
             let batch_a = db
@@ -773,7 +773,7 @@ pub(crate) mod test {
     fn test_staged_merkleize_rejects_stale_sibling() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db(context.child("storage")).await;
-            let key = Sha256::hash(&[b"key"]);
+            let key = Sha256::hash(&[b"key"], &Sequential);
 
             let seed = db
                 .new_batch()
@@ -812,7 +812,7 @@ pub(crate) mod test {
     fn test_prepared_staged_merkleize_retains_ancestors() {
         deterministic::Runner::default().start(|context| async move {
             let db = create_test_db(context.child("prepared")).await;
-            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()], &Sequential);
             let mut seed = db.new_batch();
             for i in 0..64 {
                 seed = seed.write(key(i), Some(to_bytes(i)));
@@ -897,8 +897,8 @@ pub(crate) mod test {
             let db_b = AnyTest::init(context.child("b"), create_test_config(1, &context), None)
                 .await
                 .unwrap();
-            let key_a = Sha256::hash(&[b"a"]);
-            let key_b = Sha256::hash(&[b"b"]);
+            let key_a = Sha256::hash(&[b"a"], &Sequential);
+            let key_b = Sha256::hash(&[b"b"], &Sequential);
 
             let seed_a = db_a
                 .new_batch()
@@ -943,17 +943,17 @@ pub(crate) mod test {
             // A writes 1 key, B writes 5 keys -- different total_size.
             let batch_a = db
                 .new_batch()
-                .write(Sha256::hash(&[&[1]]), Some(vec![10]))
+                .write(Sha256::hash(&[&[1]], &Sequential), Some(vec![10]))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let batch_b = db
                 .new_batch()
-                .write(Sha256::hash(&[&[2]]), Some(vec![20]))
-                .write(Sha256::hash(&[&[3]]), Some(vec![30]))
-                .write(Sha256::hash(&[&[4]]), Some(vec![40]))
-                .write(Sha256::hash(&[&[5]]), Some(vec![50]))
-                .write(Sha256::hash(&[&[6]]), Some(vec![60]))
+                .write(Sha256::hash(&[&[2]], &Sequential), Some(vec![20]))
+                .write(Sha256::hash(&[&[3]], &Sequential), Some(vec![30]))
+                .write(Sha256::hash(&[&[4]], &Sequential), Some(vec![40]))
+                .write(Sha256::hash(&[&[5]], &Sequential), Some(vec![50]))
+                .write(Sha256::hash(&[&[6]], &Sequential), Some(vec![60]))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
@@ -979,9 +979,9 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let db = open_db(context.child("storage")).await;
 
-            let key1 = Sha256::hash(&[&[1]]);
-            let key2 = Sha256::hash(&[&[2]]);
-            let key3 = Sha256::hash(&[&[3]]);
+            let key1 = Sha256::hash(&[&[1]], &Sequential);
+            let key2 = Sha256::hash(&[&[2]], &Sequential);
+            let key3 = Sha256::hash(&[&[3]], &Sequential);
 
             // Chain: DB <- A <- B <- C
             let a = db
@@ -1027,19 +1027,19 @@ pub(crate) mod test {
             // A conventional fork after a shared parent remains stale.
             let common_parent = db
                 .new_batch()
-                .write(Sha256::hash(&[&[10]]), Some(vec![10]))
+                .write(Sha256::hash(&[&[10]], &Sequential), Some(vec![10]))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let sibling_a = common_parent
                 .new_batch::<Sha256>()
-                .write(Sha256::hash(&[&[11]]), Some(vec![11]))
+                .write(Sha256::hash(&[&[11]], &Sequential), Some(vec![11]))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let sibling_b = common_parent
                 .new_batch::<Sha256>()
-                .write(Sha256::hash(&[&[12]]), Some(vec![12]))
+                .write(Sha256::hash(&[&[12]], &Sequential), Some(vec![12]))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
@@ -1052,19 +1052,19 @@ pub(crate) mod test {
             // Build equal-size sibling parents, then extend only one sibling.
             let parent_a = db
                 .new_batch()
-                .write(Sha256::hash(&[&[1]]), Some(vec![10]))
+                .write(Sha256::hash(&[&[1]], &Sequential), Some(vec![10]))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let parent_b = db
                 .new_batch()
-                .write(Sha256::hash(&[&[2]]), Some(vec![20]))
+                .write(Sha256::hash(&[&[2]], &Sequential), Some(vec![20]))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let child_b = parent_b
                 .new_batch::<Sha256>()
-                .write(Sha256::hash(&[&[3]]), Some(vec![30]))
+                .write(Sha256::hash(&[&[3]], &Sequential), Some(vec![30]))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
@@ -1089,8 +1089,8 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let db = open_db(context.child("storage")).await;
 
-            let key1 = Sha256::hash(&[&[1]]);
-            let key2 = Sha256::hash(&[&[2]]);
+            let key1 = Sha256::hash(&[&[1]], &Sequential);
+            let key2 = Sha256::hash(&[&[2]], &Sequential);
 
             // Create parent, then child.
             let parent = db
@@ -1123,8 +1123,8 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let db = open_db(context.child("storage")).await;
 
-            let key1 = Sha256::hash(&[&[1]]);
-            let key2 = Sha256::hash(&[&[2]]);
+            let key1 = Sha256::hash(&[&[1]], &Sequential);
+            let key2 = Sha256::hash(&[&[2]], &Sequential);
 
             // Create parent, then child.
             let parent = db

@@ -189,7 +189,7 @@ impl Digestible for Block {
     type Digest = sha256::Digest;
 
     fn digest(&self) -> sha256::Digest {
-        Sha256::hash(&[&self.encode()])
+        Sha256::hash(&[&self.encode()], &Sequential)
     }
 }
 
@@ -493,7 +493,7 @@ impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
         dealer: P,
         private: DealerPrivMsg,
     ) {
-        let dealer = Sha256::hash(&[&dealer]);
+        let dealer = Sha256::hash(&[&dealer], &Sequential);
         self.put(key(DEALING, epoch, Some(dealer)), private).await;
     }
 
@@ -502,7 +502,7 @@ impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
         epoch: Epoch,
         dealer: &P,
     ) -> Option<DealerPrivMsg> {
-        let dealer = Sha256::hash(&[dealer]);
+        let dealer = Sha256::hash(&[dealer], &Sequential);
         self.get(&key(DEALING, epoch, Some(dealer))).await
     }
 

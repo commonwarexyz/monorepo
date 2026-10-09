@@ -263,6 +263,7 @@ mod tests {
     use super::*;
     use crate::types::{Epoch, View};
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest as Sha256Digest};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
 
     type D = Sha256Digest;
@@ -284,7 +285,7 @@ mod tests {
     #[test]
     fn test_insert_and_take_returns_task() {
         let tasks = TestGates::new();
-        let digest = Sha256::hash(&[b"block"]);
+        let digest = Sha256::hash(&[b"block"], &Sequential);
         tasks.insert(round(1), digest, pending_task());
 
         assert!(tasks.take(round(1), digest).is_some());
@@ -297,14 +298,18 @@ mod tests {
     #[test]
     fn test_take_absent_key_is_none() {
         let tasks = TestGates::new();
-        assert!(tasks.take(round(1), Sha256::hash(&[b"missing"])).is_none());
+        assert!(
+            tasks
+                .take(round(1), Sha256::hash(&[b"missing"], &Sequential))
+                .is_none()
+        );
     }
 
     #[test]
     fn test_take_distinguishes_rounds_and_digests() {
         let tasks = TestGates::new();
-        let digest_a = Sha256::hash(&[b"a"]);
-        let digest_b = Sha256::hash(&[b"b"]);
+        let digest_a = Sha256::hash(&[b"a"], &Sequential);
+        let digest_b = Sha256::hash(&[b"b"], &Sequential);
         tasks.insert(round(1), digest_a, pending_task());
         tasks.insert(round(2), digest_a, pending_task());
         tasks.insert(round(1), digest_b, pending_task());
@@ -317,7 +322,7 @@ mod tests {
     #[test]
     fn test_retain_after_drops_at_and_below_boundary() {
         let tasks = TestGates::new();
-        let digest = Sha256::hash(&[b"block"]);
+        let digest = Sha256::hash(&[b"block"], &Sequential);
         tasks.insert(round(1), digest, pending_task());
         tasks.insert(round(2), digest, pending_task());
         tasks.insert(round(3), digest, pending_task());
@@ -341,7 +346,7 @@ mod tests {
     #[test]
     fn test_retain_after_spans_epochs() {
         let tasks = TestGates::new();
-        let digest = Sha256::hash(&[b"block"]);
+        let digest = Sha256::hash(&[b"block"], &Sequential);
         let early = Round::new(Epoch::zero(), View::new(100));
         let late = Round::new(Epoch::new(1), View::zero());
         tasks.insert(early, digest, pending_task());
@@ -363,13 +368,17 @@ mod tests {
     fn test_retain_after_empty_map_is_noop() {
         let tasks = TestGates::new();
         tasks.retain_after(&round(5));
-        assert!(tasks.take(round(5), Sha256::hash(&[b"x"])).is_none());
+        assert!(
+            tasks
+                .take(round(5), Sha256::hash(&[b"x"], &Sequential))
+                .is_none()
+        );
     }
 
     #[test]
     fn test_default_matches_new() {
         let default = <TestGates as Default>::default();
-        let digest = Sha256::hash(&[b"block"]);
+        let digest = Sha256::hash(&[b"block"], &Sequential);
         default.insert(round(1), digest, pending_task());
         assert!(default.take(round(1), digest).is_some());
     }
@@ -426,7 +435,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|_| async move {
             for verdict in [true, false] {
-                let digest = Sha256::hash(&[b"block"]);
+                let digest = Sha256::hash(&[b"block"], &Sequential);
                 let (task_tx, task_rx) = oneshot::channel();
                 let (tx, rx) = oneshot::channel();
                 task_tx.send_lossy(GateOutcome::Ready(verdict));
@@ -440,7 +449,7 @@ mod tests {
     fn test_drive_recover_publishes_fallback_verdict() {
         let runner = deterministic::Runner::default();
         runner.start(|_| async move {
-            let digest = Sha256::hash(&[b"block"]);
+            let digest = Sha256::hash(&[b"block"], &Sequential);
             let (task_tx, task_rx) = oneshot::channel();
             let (tx, rx) = oneshot::channel();
             task_tx.send_lossy(GateOutcome::Recover);
@@ -455,7 +464,7 @@ mod tests {
     fn test_drive_dropped_sender_publishes_fallback_verdict() {
         let runner = deterministic::Runner::default();
         runner.start(|_| async move {
-            let digest = Sha256::hash(&[b"block"]);
+            let digest = Sha256::hash(&[b"block"], &Sequential);
             let (task_tx, task_rx) = oneshot::channel();
             let (tx, rx) = oneshot::channel();
             drop(task_tx);
@@ -470,7 +479,7 @@ mod tests {
     fn test_drive_abandons_when_consensus_receiver_dropped() {
         let runner = deterministic::Runner::default();
         runner.start(|_| async move {
-            let digest = Sha256::hash(&[b"block"]);
+            let digest = Sha256::hash(&[b"block"], &Sequential);
             let (_task_tx, task_rx) = oneshot::channel();
             let (tx, rx) = oneshot::channel();
             drop(rx);
@@ -483,7 +492,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let gates = TestGates::new();
-            let digest = Sha256::hash(&[b"block"]);
+            let digest = Sha256::hash(&[b"block"], &Sequential);
             let (tx, rx) = oneshot::channel();
 
             context.spawn({
@@ -514,7 +523,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let gates = TestGates::new();
-            let digest = Sha256::hash(&[b"block"]);
+            let digest = Sha256::hash(&[b"block"], &Sequential);
             let (tx, rx) = oneshot::channel();
 
             context.spawn({

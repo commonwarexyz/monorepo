@@ -39,7 +39,7 @@ mod tests {
     use std::num::{NonZeroU16, NonZeroUsize};
 
     fn test_digest(v: usize) -> Digest {
-        Sha256::hash(&[&v.to_be_bytes()])
+        Sha256::hash(&[&v.to_be_bytes()], &Sequential)
     }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(111);

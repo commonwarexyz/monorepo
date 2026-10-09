@@ -9,6 +9,7 @@ use alloy_sol_types::{SolType, SolValue, abi::AbiDecoderConfig};
 use clap::{Args, Subcommand, ValueEnum};
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Hasher, Keccak256, Sha256, keccak256};
+use commonware_parallel::Sequential;
 use commonware_storage::merkle::{
     Bagging, Family, Location, Proof, hasher::Standard, mem::Mem, mmb, mmr,
 };
@@ -152,7 +153,7 @@ pub(crate) struct RangeArgs {
 
 /// Raw elements are deterministic across tree families, hash functions, and generation modes.
 pub(super) fn leaf(seed: u64, index: u64) -> [u8; 32] {
-    Keccak256::hash(&[&seed.to_be_bytes(), &index.to_be_bytes()]).0
+    Keccak256::hash(&[&seed.to_be_bytes(), &index.to_be_bytes()], &Sequential).0
 }
 
 /// Return QMDB's sparse witness positions in the production proof's canonical order.
@@ -754,7 +755,10 @@ mod tests {
 
     fn empty_tree<F: Family, H: Hasher>() {
         let mut output = Output {
-            root: H::hash(&[&0u64.to_be_bytes()]).as_ref().try_into().unwrap(),
+            root: H::hash(&[&0u64.to_be_bytes()], &Sequential)
+                .as_ref()
+                .try_into()
+                .unwrap(),
             elements: Vec::new(),
             proof: Vec::new(),
             leaves: 0,

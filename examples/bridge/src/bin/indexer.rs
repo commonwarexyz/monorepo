@@ -172,7 +172,7 @@ fn main() {
                         };
 
                         // Compute digest
-                        let digest = Sha256::hash(&[&incoming.block.encode()]);
+                        let digest = Sha256::hash(&[&incoming.block.encode()], &Sequential);
 
                         // Store block
                         network.insert(digest, incoming.block);

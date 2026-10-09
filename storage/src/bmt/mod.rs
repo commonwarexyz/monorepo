@@ -23,10 +23,11 @@
 //! ```rust
 //! use commonware_storage::bmt::{Builder, Tree};
 //! use commonware_cryptography::{Sha256, sha256::Digest, Hasher as _};
+//! use commonware_parallel::Sequential;
 //!
 //! // Create transactions and compute their digests
 //! let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
-//! let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(&[*tx])).collect();
+//! let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(&[*tx], &Sequential)).collect();
 //!
 //! // Build a Merkle Tree from the digests
 //! let mut builder = Builder::<Sha256>::new(digests.len());
@@ -50,6 +51,7 @@ use alloc::{
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_parallel::Sequential;
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
@@ -99,7 +101,7 @@ impl<H: Hasher> Builder<H> {
         let position: u32 = self.leaves.len().try_into().expect("too many leaves");
         assert!(position < u32::MAX, "too many leaves");
 
-        let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
+        let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()], &Sequential);
         self.leaves.push(digest);
         position
     }
@@ -140,7 +142,7 @@ impl<D: Digest> Tree<D> {
         let mut empty = false;
         let leaf_count = leaves.len() as u32;
         if leaves.is_empty() {
-            leaves.push(H::hash(&[]));
+            leaves.push(H::hash(&[], &Sequential));
             empty = true;
         }
 
@@ -159,19 +161,25 @@ impl<D: Digest> Tree<D> {
             for group in current_level.chunks(4) {
                 match group {
                     [a, b, c, d] => {
-                        let (left, right) =
-                            H::hash_pair(&[a.as_ref(), b.as_ref()], &[c.as_ref(), d.as_ref()]);
+                        let (left, right) = H::hash_pair(
+                            &[a.as_ref(), b.as_ref()],
+                            &[c.as_ref(), d.as_ref()],
+                            &Sequential,
+                        );
                         next_level.push(left);
                         next_level.push(right);
                     }
                     [a, b, c] => {
-                        let (left, right) =
-                            H::hash_pair(&[a.as_ref(), b.as_ref()], &[c.as_ref(), c.as_ref()]);
+                        let (left, right) = H::hash_pair(
+                            &[a.as_ref(), b.as_ref()],
+                            &[c.as_ref(), c.as_ref()],
+                            &Sequential,
+                        );
                         next_level.push(left);
                         next_level.push(right);
                     }
-                    [a, b] => next_level.push(H::hash(&[a.as_ref(), b.as_ref()])),
-                    [a] => next_level.push(H::hash(&[a.as_ref(), a.as_ref()])),
+                    [a, b] => next_level.push(H::hash(&[a.as_ref(), b.as_ref()], &Sequential)),
+                    [a] => next_level.push(H::hash(&[a.as_ref(), a.as_ref()], &Sequential)),
                     _ => unreachable!("chunks(4) yields at most 4 elements"),
                 }
             }
@@ -184,7 +192,10 @@ impl<D: Digest> Tree<D> {
         // Compute the finalized root: H(leaf_count || tree_root)
         // This binds the root to the tree size, preventing malleability attacks.
         let tree_root = levels.last().first();
-        let root = H::hash(&[&leaf_count.to_be_bytes(), tree_root.as_ref()]);
+        let root = H::hash(
+            &[&leaf_count.to_be_bytes(), tree_root.as_ref()],
+            &Sequential,
+        );
 
         Self {
             empty,
@@ -495,7 +506,7 @@ impl<D: Digest> Proof<D> {
         }
 
         // Compute the position-hashed leaf
-        let mut computed = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
+        let mut computed = H::hash(&[&position.to_be_bytes(), leaf.as_ref()], &Sequential);
 
         // Track level size to handle odd-sized levels
         let mut level_size = self.leaf_count as usize;
@@ -520,7 +531,7 @@ impl<D: Digest> Proof<D> {
             };
 
             // Compute the parent digest
-            computed = H::hash(&[left_node.as_ref(), right_node.as_ref()]);
+            computed = H::hash(&[left_node.as_ref(), right_node.as_ref()], &Sequential);
 
             // Move up the tree
             position /= 2;
@@ -534,7 +545,10 @@ impl<D: Digest> Proof<D> {
 
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
-        let finalized = H::hash(&[&self.leaf_count.to_be_bytes(), computed.as_ref()]);
+        let finalized = H::hash(
+            &[&self.leaf_count.to_be_bytes(), computed.as_ref()],
+            &Sequential,
+        );
 
         if finalized == *root {
             Ok(())
@@ -560,8 +574,11 @@ impl<D: Digest> Proof<D> {
         if elements.is_empty() {
             if self.leaf_count == 0 && self.siblings.is_empty() {
                 // Compute finalized empty root: H(0 || empty_tree_root)
-                let empty_tree_root = H::hash(&[]);
-                let finalized = H::hash(&[&0u32.to_be_bytes(), empty_tree_root.as_ref()]);
+                let empty_tree_root = H::hash(&[], &Sequential);
+                let finalized = H::hash(
+                    &[&0u32.to_be_bytes(), empty_tree_root.as_ref()],
+                    &Sequential,
+                );
                 if finalized == *root {
                     return Ok(());
                 } else {
@@ -585,12 +602,13 @@ impl<D: Digest> Proof<D> {
             let (digest_a, digest_b) = H::hash_pair(
                 &[&pos_a.to_be_bytes(), leaf_a.as_ref()],
                 &[&pos_b.to_be_bytes(), leaf_b.as_ref()],
+                &Sequential,
             );
             sorted.push((*pos_a, digest_a));
             sorted.push((*pos_b, digest_b));
         }
         for (leaf, position) in leaf_remainder {
-            let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
+            let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()], &Sequential);
             sorted.push((*position, digest));
         }
         sorted.sort_unstable_by_key(|(pos, _)| *pos);
@@ -656,12 +674,13 @@ impl<D: Digest> Proof<D> {
                 let (digest_a, digest_b) = H::hash_pair(
                     &[left_a.as_ref(), right_a.as_ref()],
                     &[left_b.as_ref(), right_b.as_ref()],
+                    &Sequential,
                 );
                 next_level.push((pos_a, digest_a));
                 next_level.push((pos_b, digest_b));
             }
             for &(pos, left, right) in parent_remainder {
-                next_level.push((pos, H::hash(&[left.as_ref(), right.as_ref()])));
+                next_level.push((pos, H::hash(&[left.as_ref(), right.as_ref()], &Sequential)));
             }
             parents.clear();
 
@@ -683,7 +702,10 @@ impl<D: Digest> Proof<D> {
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
         let tree_root = current[0].1;
-        let finalized = H::hash(&[&self.leaf_count.to_be_bytes(), tree_root.as_ref()]);
+        let finalized = H::hash(
+            &[&self.leaf_count.to_be_bytes(), tree_root.as_ref()],
+            &Sequential,
+        );
 
         if finalized == *root {
             Ok(())
@@ -747,7 +769,7 @@ mod tests {
     fn issue_2837_regression() {
         // Create a tree with 255 leaves (as in the issue report)
         let digests: Vec<Digest> = (0..255u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         let mut builder = Builder::<Sha256>::new(255);
@@ -789,7 +811,10 @@ mod tests {
     fn test_tampered_proof_no_siblings() {
         // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
-        let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(&[*tx])).collect();
+        let digests: Vec<Digest> = txs
+            .iter()
+            .map(|tx| Sha256::hash(&[*tx], &Sequential))
+            .collect();
         let element = &digests[0];
 
         // Build tree
@@ -818,7 +843,10 @@ mod tests {
     fn test_tampered_proof_extra_sibling() {
         // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
-        let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(&[*tx])).collect();
+        let digests: Vec<Digest> = txs
+            .iter()
+            .map(|tx| Sha256::hash(&[*tx], &Sequential))
+            .collect();
         let element = &digests[0];
 
         // Build tree
@@ -847,7 +875,10 @@ mod tests {
     fn test_invalid_proof_wrong_element() {
         // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
-        let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(&[*tx])).collect();
+        let digests: Vec<Digest> = txs
+            .iter()
+            .map(|tx| Sha256::hash(&[*tx], &Sequential))
+            .collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(txs.len());
@@ -861,7 +892,7 @@ mod tests {
         let proof = tree.proof(2).unwrap();
 
         // Use a wrong element (e.g. hash of a different transaction).
-        let wrong_leaf = Sha256::hash(&[b"wrong_tx"]);
+        let wrong_leaf = Sha256::hash(&[b"wrong_tx"], &Sequential);
         assert!(
             proof
                 .verify_element_inclusion::<Sha256>(&wrong_leaf, 2, &root)
@@ -873,7 +904,10 @@ mod tests {
     fn test_invalid_proof_wrong_index() {
         // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
-        let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(&[*tx])).collect();
+        let digests: Vec<Digest> = txs
+            .iter()
+            .map(|tx| Sha256::hash(&[*tx], &Sequential))
+            .collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(txs.len());
@@ -898,7 +932,10 @@ mod tests {
     fn test_invalid_proof_wrong_root() {
         // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
-        let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(&[*tx])).collect();
+        let digests: Vec<Digest> = txs
+            .iter()
+            .map(|tx| Sha256::hash(&[*tx], &Sequential))
+            .collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(txs.len());
@@ -911,7 +948,7 @@ mod tests {
         let proof = tree.proof(0).unwrap();
 
         // Use a wrong root (hash of a different input).
-        let wrong_root = Sha256::hash(&[b"wrong_root"]);
+        let wrong_root = Sha256::hash(&[b"wrong_root"], &Sequential);
         assert!(
             proof
                 .verify_element_inclusion::<Sha256>(&digests[0], 0, &wrong_root)
@@ -923,7 +960,10 @@ mod tests {
     fn test_invalid_proof_serialization_truncated() {
         // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3"];
-        let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(&[*tx])).collect();
+        let digests: Vec<Digest> = txs
+            .iter()
+            .map(|tx| Sha256::hash(&[*tx], &Sequential))
+            .collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(txs.len());
@@ -945,7 +985,10 @@ mod tests {
     fn test_invalid_proof_serialization_extra() {
         // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3"];
-        let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(&[*tx])).collect();
+        let digests: Vec<Digest> = txs
+            .iter()
+            .map(|tx| Sha256::hash(&[*tx], &Sequential))
+            .collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(txs.len());
@@ -967,7 +1010,10 @@ mod tests {
     fn test_invalid_proof_modified_hash() {
         // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
-        let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(&[*tx])).collect();
+        let digests: Vec<Digest> = txs
+            .iter()
+            .map(|tx| Sha256::hash(&[*tx], &Sequential))
+            .collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(txs.len());
@@ -981,7 +1027,7 @@ mod tests {
         let mut proof = tree.proof(2).unwrap();
 
         // Modify the first hash in the proof.
-        proof.siblings[0] = Sha256::hash(&[b"modified"]);
+        proof.siblings[0] = Sha256::hash(&[b"modified"], &Sequential);
         assert!(
             proof
                 .verify_element_inclusion::<Sha256>(&digests[2], 2, &root)
@@ -993,7 +1039,10 @@ mod tests {
     fn test_odd_tree_duplicate_index_proof() {
         // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3"];
-        let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(&[*tx])).collect();
+        let digests: Vec<Digest> = txs
+            .iter()
+            .map(|tx| Sha256::hash(&[*tx], &Sequential))
+            .collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(txs.len());
@@ -1029,7 +1078,7 @@ mod tests {
     fn test_range_proof_basic() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1064,7 +1113,7 @@ mod tests {
     fn test_range_proof_single_element() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1088,7 +1137,7 @@ mod tests {
     fn test_range_proof_full_tree() {
         // Create test data
         let digests: Vec<Digest> = (0..7u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1112,7 +1161,7 @@ mod tests {
     fn test_range_proof_edge_cases() {
         // Create test data
         let digests: Vec<Digest> = (0..15u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1152,7 +1201,7 @@ mod tests {
     fn test_range_proof_invalid_range() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1173,7 +1222,7 @@ mod tests {
     fn test_range_proof_tampering() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1190,9 +1239,9 @@ mod tests {
 
         // Test with wrong leaves
         let wrong_leaves = vec![
-            Sha256::hash(&[b"wrong1"]),
-            Sha256::hash(&[b"wrong2"]),
-            Sha256::hash(&[b"wrong3"]),
+            Sha256::hash(&[b"wrong1"], &Sequential),
+            Sha256::hash(&[b"wrong2"], &Sequential),
+            Sha256::hash(&[b"wrong3"], &Sequential),
         ];
         assert!(
             range_proof
@@ -1211,7 +1260,7 @@ mod tests {
         let mut tampered_proof = range_proof.clone();
         assert!(!tampered_proof.siblings.is_empty());
         // Tamper with the first sibling
-        tampered_proof.siblings[0] = Sha256::hash(&[b"tampered"]);
+        tampered_proof.siblings[0] = Sha256::hash(&[b"tampered"], &Sequential);
         assert!(
             tampered_proof
                 .verify_range_inclusion::<Sha256>(2, range_leaves, &root)
@@ -1219,7 +1268,7 @@ mod tests {
         );
 
         // Test with wrong root
-        let wrong_root = Sha256::hash(&[b"wrong_root"]);
+        let wrong_root = Sha256::hash(&[b"wrong_root"], &Sequential);
         assert!(
             range_proof
                 .verify_range_inclusion::<Sha256>(2, range_leaves, &wrong_root)
@@ -1232,7 +1281,7 @@ mod tests {
         // Test range proofs for trees of various sizes
         for tree_size in [1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64] {
             let digests: Vec<Digest> = (0..tree_size as u32)
-                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+                .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
                 .collect();
 
             // Build tree
@@ -1269,7 +1318,7 @@ mod tests {
     fn test_range_proof_malicious_wrong_position() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1301,7 +1350,7 @@ mod tests {
     fn test_range_proof_malicious_reordered_leaves() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1328,7 +1377,7 @@ mod tests {
     fn test_range_proof_malicious_extra_siblings() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1344,7 +1393,9 @@ mod tests {
         let range_leaves = &digests[2..4];
 
         // Tamper by adding extra siblings
-        range_proof.siblings.push(Sha256::hash(&[b"extra"]));
+        range_proof
+            .siblings
+            .push(Sha256::hash(&[b"extra"], &Sequential));
         assert!(
             range_proof
                 .verify_range_inclusion::<Sha256>(2, range_leaves, &root)
@@ -1356,7 +1407,7 @@ mod tests {
     fn test_range_proof_malicious_missing_siblings() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1387,7 +1438,7 @@ mod tests {
     fn test_range_proof_integer_overflow_protection() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1407,7 +1458,7 @@ mod tests {
     fn test_range_proof_malicious_wrong_tree_structure() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1423,7 +1474,9 @@ mod tests {
         let range_leaves = &digests[2..4];
 
         // Add extra sibling (simulating proof from different tree structure)
-        range_proof.siblings.push(Sha256::hash(&[b"fake_level"]));
+        range_proof
+            .siblings
+            .push(Sha256::hash(&[b"fake_level"], &Sequential));
         assert!(
             range_proof
                 .verify_range_inclusion::<Sha256>(2, range_leaves, &root)
@@ -1447,7 +1500,7 @@ mod tests {
         // Test various power-of-2 boundary conditions
         for tree_size in [1, 2, 4, 8, 16, 32] {
             let digests: Vec<Digest> = (0..tree_size as u32)
-                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+                .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
                 .collect();
 
             // Build tree
@@ -1538,7 +1591,7 @@ mod tests {
         );
 
         // Should fail with non-empty leaves
-        let non_empty_leaves = vec![Sha256::hash(&[b"leaf"])];
+        let non_empty_leaves = vec![Sha256::hash(&[b"leaf"], &Sequential)];
         assert!(
             range_proof
                 .verify_range_inclusion::<Sha256>(0, &non_empty_leaves, &root)
@@ -1546,7 +1599,7 @@ mod tests {
         );
 
         // Should fail with wrong root
-        let wrong_root = Sha256::hash(&[b"wrong"]);
+        let wrong_root = Sha256::hash(&[b"wrong"], &Sequential);
         assert!(
             range_proof
                 .verify_range_inclusion::<Sha256>(0, empty_leaves, &wrong_root)
@@ -1585,8 +1638,8 @@ mod tests {
         }
 
         // The root should be the hash of empty data
-        let empty = Sha256::hash(&[b""]);
-        let expected_root = Sha256::hash(&[&0u32.to_be_bytes(), &empty]);
+        let empty = Sha256::hash(&[b""], &Sequential);
+        let expected_root = Sha256::hash(&[&0u32.to_be_bytes(), &empty], &Sequential);
         assert_eq!(roots[0], expected_root);
     }
 
@@ -1597,7 +1650,7 @@ mod tests {
     fn test_range_proof_siblings_usage(#[case] start: u32, #[case] count: u32) {
         // This test ensures that all siblings in a range proof are actually used during verification
         let digests: Vec<Digest> = (0..16u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1621,7 +1674,7 @@ mod tests {
         // For each sibling, try tampering with it and verify the proof fails
         for sibling_idx in 0..range_proof.siblings.len() {
             let mut tampered_proof = range_proof.clone();
-            tampered_proof.siblings[sibling_idx] = Sha256::hash(&[b"tampered"]);
+            tampered_proof.siblings[sibling_idx] = Sha256::hash(&[b"tampered"], &Sequential);
             assert!(
                 tampered_proof
                     .verify_range_inclusion::<Sha256>(start, &digests[start as usize..end], &root)
@@ -1636,7 +1689,7 @@ mod tests {
         #[values(3, 5, 7, 9, 11, 13, 15)] tree_size: usize,
     ) {
         let digests: Vec<Digest> = (0..tree_size as u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1663,7 +1716,7 @@ mod tests {
     fn test_multi_proof_basic() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1693,7 +1746,7 @@ mod tests {
     fn test_multi_proof_single_element() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1721,7 +1774,7 @@ mod tests {
     fn test_multi_proof_all_elements() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1754,7 +1807,7 @@ mod tests {
     fn test_multi_proof_adjacent_elements() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1784,7 +1837,7 @@ mod tests {
     fn test_multi_proof_sparse_positions() {
         // Create test data
         let digests: Vec<Digest> = (0..16u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1834,7 +1887,7 @@ mod tests {
     fn test_multi_proof_empty_positions() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1855,7 +1908,7 @@ mod tests {
     fn test_multi_proof_duplicate_positions_error() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1880,7 +1933,7 @@ mod tests {
     fn test_multi_proof_unsorted_input() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1909,7 +1962,7 @@ mod tests {
         // Test multi-proofs for trees of various sizes
         for tree_size in [1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32] {
             let digests: Vec<Digest> = (0..tree_size as u32)
-                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+                .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
                 .collect();
 
             // Build tree
@@ -1960,7 +2013,7 @@ mod tests {
     fn test_multi_proof_wrong_elements() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -1977,7 +2030,7 @@ mod tests {
 
         // Verify with wrong elements
         let wrong_elements = [
-            (Sha256::hash(&[b"wrong1"]), 0),
+            (Sha256::hash(&[b"wrong1"], &Sequential), 0),
             (digests[3], 3),
             (digests[5], 5),
         ];
@@ -1992,7 +2045,7 @@ mod tests {
     fn test_multi_proof_wrong_positions() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -2024,7 +2077,7 @@ mod tests {
     fn test_multi_proof_wrong_root() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -2044,7 +2097,7 @@ mod tests {
             .collect();
 
         // Verify with wrong root
-        let wrong_root = Sha256::hash(&[b"wrong_root"]);
+        let wrong_root = Sha256::hash(&[b"wrong_root"], &Sequential);
         assert!(
             multi_proof
                 .verify_multi_inclusion::<Sha256>(&elements, &wrong_root)
@@ -2056,7 +2109,7 @@ mod tests {
     fn test_multi_proof_tampering() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -2079,7 +2132,7 @@ mod tests {
         // Tamper with sibling
         assert!(!multi_proof.siblings.is_empty());
         let mut modified = multi_proof.clone();
-        modified.siblings[0] = Sha256::hash(&[b"tampered"]);
+        modified.siblings[0] = Sha256::hash(&[b"tampered"], &Sequential);
         assert!(
             modified
                 .verify_multi_inclusion::<Sha256>(&elements, &root)
@@ -2088,7 +2141,7 @@ mod tests {
 
         // Add extra sibling
         let mut extra = multi_proof.clone();
-        extra.siblings.push(Sha256::hash(&[b"extra"]));
+        extra.siblings.push(Sha256::hash(&[b"extra"], &Sequential));
         assert!(
             extra
                 .verify_multi_inclusion::<Sha256>(&elements, &root)
@@ -2109,7 +2162,7 @@ mod tests {
     fn test_multi_proof_deduplication() {
         // Create test data
         let digests: Vec<Digest> = (0..16u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -2141,7 +2194,7 @@ mod tests {
     fn test_multi_proof_serialization() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -2178,7 +2231,7 @@ mod tests {
     fn test_multi_proof_serialization_truncated() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -2204,7 +2257,7 @@ mod tests {
     fn test_multi_proof_serialization_extra() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -2241,7 +2294,7 @@ mod tests {
     fn test_multi_proof_invalid_position() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -2266,7 +2319,7 @@ mod tests {
     fn test_multi_proof_verify_invalid_position() {
         // Create test data
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         // Build tree
@@ -2295,7 +2348,7 @@ mod tests {
         // Test odd-sized trees that require node duplication
         for tree_size in [3, 5, 7, 9, 11, 13, 15] {
             let digests: Vec<Digest> = (0..tree_size as u32)
-                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+                .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
                 .collect();
 
             // Build tree
@@ -2327,7 +2380,7 @@ mod tests {
     fn test_multi_proof_verify_empty_elements() {
         // Create a valid proof and try to verify with empty elements
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2370,7 +2423,7 @@ mod tests {
         );
 
         // Should fail with wrong root
-        let wrong_root = Sha256::hash(&[b"not_empty"]);
+        let wrong_root = Sha256::hash(&[b"not_empty"], &Sequential);
         assert!(
             default_proof
                 .verify_multi_inclusion::<Sha256>(empty_elements, &wrong_root)
@@ -2381,7 +2434,7 @@ mod tests {
     #[test]
     fn test_multi_proof_single_leaf_tree() {
         // Edge case: tree with exactly one leaf
-        let digest = Sha256::hash(&[b"only_leaf"]);
+        let digest = Sha256::hash(&[b"only_leaf"], &Sequential);
 
         // Build single-leaf tree
         let mut builder = Builder::<Sha256>::new(1);
@@ -2411,7 +2464,7 @@ mod tests {
         );
 
         // Verify with wrong digest fails
-        let wrong_digest = Sha256::hash(&[b"wrong"]);
+        let wrong_digest = Sha256::hash(&[b"wrong"], &Sequential);
         let wrong_elements = [(wrong_digest, 0u32)];
         assert!(
             multi_proof
@@ -2434,7 +2487,7 @@ mod tests {
     fn test_multi_proof_malicious_leaf_count_zero() {
         // Attacker sets leaf_count = 0 but provides siblings
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2466,7 +2519,7 @@ mod tests {
     fn test_multi_proof_malicious_leaf_count_larger() {
         // Attacker inflates leaf_count to claim proof is for larger tree
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2502,7 +2555,7 @@ mod tests {
     fn test_multi_proof_malicious_leaf_count_smaller() {
         // Attacker deflates leaf_count to claim proof is for smaller tree
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2535,7 +2588,7 @@ mod tests {
     fn test_multi_proof_mismatched_element_count() {
         // Provide more or fewer elements than the proof was generated for
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2572,7 +2625,7 @@ mod tests {
     fn test_multi_proof_swapped_siblings() {
         // Swap the order of siblings in the proof
         let digests: Vec<Digest> = (0..8u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2610,7 +2663,7 @@ mod tests {
         // Attacker sets massive leaf_count trying to cause DoS via memory allocation
         // The verify function should NOT allocate proportional to leaf_count
         let digests: Vec<Digest> = (0..4u32)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
             .collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2650,7 +2703,7 @@ mod tests {
             let mut digests = Vec::with_capacity(n);
             let mut builder = Builder::<Sha256>::new(n);
             for i in 0..n {
-                let digest = Sha256::hash(&[&i.to_be_bytes()]);
+                let digest = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
                 builder.add(&digest);
                 digests.push(digest);
             }
@@ -2681,7 +2734,7 @@ mod tests {
                 // Modify a sibling hash and ensure the proof fails
                 if !proof.siblings.is_empty() {
                     let mut update_tamper = proof.clone();
-                    update_tamper.siblings[0] = Sha256::hash(&[b"tampered"]);
+                    update_tamper.siblings[0] = Sha256::hash(&[b"tampered"], &Sequential);
                     assert!(
                         update_tamper
                             .verify_element_inclusion::<Sha256>(leaf, i as u32, &root)
@@ -2692,7 +2745,9 @@ mod tests {
 
                 // Add a sibling hash and ensure the proof fails
                 let mut add_tamper = proof.clone();
-                add_tamper.siblings.push(Sha256::hash(&[b"tampered"]));
+                add_tamper
+                    .siblings
+                    .push(Sha256::hash(&[b"tampered"], &Sequential));
                 assert!(
                     add_tamper
                         .verify_element_inclusion::<Sha256>(leaf, i as u32, &root)

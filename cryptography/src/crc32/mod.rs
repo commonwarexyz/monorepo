@@ -83,7 +83,7 @@ impl Crc32 {
 impl Hasher for Crc32 {
     type Digest = Digest;
 
-    fn hash_with(parts: &[&[u8]], _strategy: &impl Strategy) -> Self::Digest {
+    fn hash(parts: &[&[u8]], _strategy: &impl Strategy) -> Self::Digest {
         let mut hasher = Self::default();
         for part in parts {
             hasher.update(part);
@@ -91,8 +91,12 @@ impl Hasher for Crc32 {
         hasher.finalize().1
     }
 
-    fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
-        (Self::hash(left), Self::hash(right))
+    fn hash_pair(
+        left: &[&[u8]],
+        right: &[&[u8]],
+        strategy: &impl Strategy,
+    ) -> (Self::Digest, Self::Digest) {
+        (Self::hash(left, strategy), Self::hash(right, strategy))
     }
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
@@ -118,7 +122,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Digest {
         // Generate random bytes and compute their CRC32 checksum
         let len = u.int_in_range(0..=256)?;
         let data = u.bytes(len)?;
-        Ok(Crc32::hash(&[data]))
+        Ok(Crc32::hash(&[data], &commonware_parallel::Sequential))
     }
 }
 
@@ -201,6 +205,7 @@ mod tests {
     use super::*;
     use crate::Hasher;
     use commonware_codec::{Copying, DecodeExt, Encode};
+    use commonware_parallel::Sequential;
     use crc::{CRC_32_ISCSI, Crc};
 
     /// Reference CRC32C implementation from the [`crc`](https://crates.io/crates/crc) crate.
@@ -396,11 +401,11 @@ mod tests {
         assert_eq!(digest, digest2);
 
         // Test Hasher::hash convenience method
-        let hash = Crc32::hash(&[msg]);
+        let hash = Crc32::hash(&[msg], &Sequential);
         assert_eq!(hash.as_u32(), expected);
 
         // Test multi-part one-shot
-        let hash = Crc32::hash(&[b"hello", b" world"]);
+        let hash = Crc32::hash(&[b"hello", b" world"], &Sequential);
         assert_eq!(hash.as_u32(), expected);
     }
 
@@ -416,7 +421,7 @@ mod tests {
         let (mut hasher, digest) = hasher.finalize();
         assert_eq!(
             digest.as_u32(),
-            Crc32::hash(&[prefix.as_slice(), suffix.as_slice()]).as_u32()
+            Crc32::hash(&[prefix.as_slice(), suffix.as_slice()], &Sequential).as_u32()
         );
 
         hasher.update(suffix);

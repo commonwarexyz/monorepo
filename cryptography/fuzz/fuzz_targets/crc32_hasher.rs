@@ -7,7 +7,7 @@ use commonware_cryptography::{
     crc32::{Crc32 as OurCrc32, Digest},
     fuzz::Plan,
 };
-use commonware_parallel::{Manual, Rayon, Strategy as _};
+use commonware_parallel::{Manual, Rayon, Sequential, Strategy as _};
 use commonware_utils::NZUsize;
 use crc::{CRC_32_ISCSI, Crc};
 use libfuzzer_sys::fuzz_target;
@@ -56,7 +56,7 @@ fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
 
     // The one-shot API should agree with streaming.
     let parts: Vec<&[u8]> = chunks.iter().map(|c| c.as_slice()).collect();
-    assert_eq!(OurCrc32::hash(&parts), our_result);
+    assert_eq!(OurCrc32::hash(&parts, &Sequential), our_result);
 }
 
 fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
@@ -125,7 +125,7 @@ fn fuzz_digest_u32_roundtrip(data: &[u8]) {
 }
 
 fn fuzz_diff_hash(data: &[u8]) {
-    let our_hash_result = OurCrc32::hash(&[data]);
+    let our_hash_result = OurCrc32::hash(&[data], &Sequential);
     let ref_result = CRC32C_REF.checksum(data);
     assert_eq!(our_hash_result.as_u32(), ref_result);
 }

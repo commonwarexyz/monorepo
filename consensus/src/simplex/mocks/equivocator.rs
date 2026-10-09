@@ -13,6 +13,7 @@ use crate::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher, certificate};
 use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
 use commonware_utils::ordered::Quorum;
 use rand::{Rng, RngExt as _, seq::IteratorRandom};
@@ -125,8 +126,8 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: H
             let payload_b = (next_round, parent, self.context.random::<u64>()).encode();
 
             // Compute digests
-            let digest_a = H::hash(&[&payload_a]);
-            let digest_b = H::hash(&[&payload_b]);
+            let digest_a = H::hash(&[&payload_a], &Sequential);
+            let digest_b = H::hash(&[&payload_b], &Sequential);
 
             let proposal_a = Proposal::new(next_round, view, digest_a);
             let proposal_b = Proposal::new(next_round, view, digest_b);
