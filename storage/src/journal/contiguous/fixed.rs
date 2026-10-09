@@ -956,6 +956,21 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
 }
 
 impl<E: Context, A: CodecFixedShared> Inner<E, A> {
+    /// Drop cached pages that hold only items below `position`, continuing from the previous
+    /// call. See [super::Mutable::evict_cached_before].
+    pub(super) fn evict_cached_before(&mut self, position: u64) {
+        let position = position.clamp(self.bounds.start, self.bounds.end);
+        let items_per_blob = self.items_per_blob.get();
+        let blob = super::position_to_blob(position, items_per_blob);
+        let Ok(first) = first_in_blob(self.bounds.start, blob, items_per_blob) else {
+            return;
+        };
+        let Ok(offset) = Self::items_to_bytes(position - first) else {
+            return;
+        };
+        self.blobs.evict_cached_before(blob, offset);
+    }
+
     /// Size of each entry in bytes. Evaluating this rejects zero-size item types at compile
     /// time, which would otherwise divide by zero in the chunk math.
     pub const CHUNK_SIZE: NonZeroUsize = match NonZeroUsize::new(A::SIZE) {
@@ -2046,6 +2061,10 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
 }
 
 impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
+    fn evict_cached_before(&mut self, min_position: u64) {
+        self.0.evict_cached_before(min_position);
+    }
+
     async fn append(self, item: &Self::Item) -> Result<(Self, u64), Error> {
         Self::append(self, item).await
     }

@@ -1606,6 +1606,23 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
 }
 
 impl<E: Context, V: CodecShared> Inner<E, V> {
+    /// Drop cached data and offsets pages that hold only items below `position`, continuing from
+    /// the previous call. See [Mutable::evict_cached_before].
+    fn evict_cached_before(&mut self, position: u64) {
+        let position = position.clamp(self.bounds.start, self.bounds.end);
+        let blob = super::position_to_blob(position, self.items_per_blob.get());
+
+        // The item's offset bounds the eviction within its blob. Without a cached offset, only
+        // earlier blobs are dropped, since a lookup could cost a read.
+        let offset = if position < self.bounds.end {
+            self.offsets.reader().try_read_sync(position).unwrap_or(0)
+        } else {
+            u64::MAX
+        };
+        self.blobs.evict_cached_before(blob, offset);
+        self.offsets.evict_cached_before(position);
+    }
+
     /// See [Journal::init].
     #[boxed]
     pub(crate) async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
@@ -2587,6 +2604,10 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
 }
 
 impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
+    fn evict_cached_before(&mut self, min_position: u64) {
+        self.0.evict_cached_before(min_position);
+    }
+
     async fn append(self, item: &Self::Item) -> Result<(Self, u64), Error> {
         Self::append(self, item).await
     }
