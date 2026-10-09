@@ -540,28 +540,6 @@ impl Panicker {
         // Send the panic
         let _ = sender.send(panic);
     }
-
-    /// Notifies like [`Self::notify`], logged as a worker failure rather than a
-    /// task panic, and leaks a payload it does not deliver rather than dropping
-    /// it, since its destructor may panic.
-    #[cfg(all(target_os = "linux", feature = "iouring"))]
-    #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn notify_or_forget(&self, panic: Panic) {
-        let err = extract_panic_message(&*panic);
-        error!(?err, "worker failed");
-
-        // Take the sender under the lock, then deliver without holding it.
-        let sender = if self.catch {
-            None
-        } else {
-            self.sender.lock().take()
-        };
-        let undelivered = match sender {
-            Some(sender) => sender.send(panic).err(),
-            None => Some(panic),
-        };
-        std::mem::forget(undelivered);
-    }
 }
 
 /// A handle that will be notified when a panic occurs.

@@ -81,8 +81,7 @@
 //! worker that fails while the pool runs reports before its cleanup, since
 //! cleanup waits for the pool to close, which needs the root to end. The
 //! channel outlives the root, so a failure after the root completes is taken
-//! once the pool is joined. Only the first failure is delivered. A later one
-//! is leaked rather than dropped, since its destructor may panic.
+//! once the pool is joined. Only the first failure is delivered.
 
 use super::{
     mailbox::{Mailbox, Message},
@@ -519,6 +518,6 @@ fn run(
 /// Send a pool worker's failure to the runner, then wake worker zero's root,
 /// which takes the failure before its next poll.
 fn report(pool: &Table, failures: &Panicker, panic: Panic) {
-    failures.notify_or_forget(panic);
+    failures.notify(panic);
     let _ = pool.mailbox(0).send(Message::WakeRoot);
 }
