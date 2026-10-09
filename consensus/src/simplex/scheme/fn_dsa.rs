@@ -10,6 +10,10 @@
 //! than ML-DSA signatures (666 bytes for [`FnDsa512`](commonware_cryptography::fn_dsa::FnDsa512),
 //! 1280 bytes for [`FnDsa1024`](commonware_cryptography::fn_dsa::FnDsa1024)).
 //!
+//! [`EllipsoidalFalcon512`](commonware_cryptography::fn_dsa::EllipsoidalFalcon512) uses the same
+//! individual-signature certificate flow with a distinct experimental signing profile. It is
+//! not standard FN-DSA and is not assigned a NIST security category.
+//!
 //! **Experimental**: FIPS 206 is unpublished and the signature and key encodings may change
 //! (see [commonware_cryptography::fn_dsa]).
 

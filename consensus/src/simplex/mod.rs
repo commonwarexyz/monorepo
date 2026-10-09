@@ -704,7 +704,7 @@ mod tests {
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         certificate::mocks::Fixture,
         ed25519::{PrivateKey, PublicKey},
-        fn_dsa::{FnDsa512, FnDsa1024},
+        fn_dsa::{EllipsoidalFalcon512, FnDsa512, FnDsa1024},
         sha256::{Digest as Sha256Digest, Digest as D},
     };
     use commonware_macros::{select, test_group, test_traced};
@@ -748,6 +748,7 @@ mod tests {
             $cb!($($args)*, ed25519, RoundRobin, ed25519::fixture, RoundRobin::default());
             $cb!($($args)*, fn_dsa_512, RoundRobin, fn_dsa::fixture::<FnDsa512, _>, RoundRobin::default());
             $cb!($($args)*, fn_dsa_1024, RoundRobin, fn_dsa::fixture::<FnDsa1024, _>, RoundRobin::default());
+            $cb!($($args)*, ellipsoidal_falcon_512, RoundRobin, fn_dsa::fixture::<EllipsoidalFalcon512, _>, RoundRobin::default());
             $cb!($($args)*, ml_dsa, RoundRobin, ml_dsa::fixture, RoundRobin::default());
             $cb!($($args)*, secp256r1, RoundRobin, secp256r1::fixture, RoundRobin::default());
         };

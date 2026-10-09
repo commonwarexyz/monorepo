@@ -32,27 +32,36 @@ const PRIVATE_KEY_LENGTH: usize = 32;
 /// signature vector.
 const SIGNATURE_PREFIX_LENGTH: usize = 1 + 40;
 
-/// Largest supported degree, used to size scratch buffers for every variant.
+/// Largest standard degree, used to size the standard signature decoder's scratch buffer.
 const MAX_DEGREE: usize = 1 << FN_DSA_LOGN_1024;
 
 mod sealed {
-    /// Binds a [super::Variant] to the fn-dsa types that implement its degree.
+    use super::PRIVATE_KEY_LENGTH;
+    #[cfg(not(feature = "std"))]
+    use alloc::vec::Vec;
+    use zeroize::Zeroizing;
+
+    /// Owns each profile's key material, signing, and canonical encoding rules.
     pub trait Sealed {
-        /// Base-2 logarithm of the ring degree.
-        const LOGN: u32;
-        type KeyPairGenerator: fn_dsa::KeyPairGenerator;
-        type SigningKey: fn_dsa::SigningKey;
-        type VerifyingKey: fn_dsa::VerifyingKey + Send + Sync + 'static;
+        const PUBLIC_KEY_SIZE: usize;
+        const SIGNATURE_SIZE: usize;
+        const PUBLIC_KEY_HEADER: u8;
+        const SIGNATURE_HEADER: u8;
+        type VerifyingKey: Send + Sync + 'static;
+
+        fn keygen(seed: &[u8; PRIVATE_KEY_LENGTH]) -> (Zeroizing<Vec<u8>>, Vec<u8>);
+        fn sign(secret: &[u8], payload: &[u8], out: &mut [u8]) -> Option<()>;
+        fn decode_public_key(raw: &[u8]) -> Option<Self::VerifyingKey>;
+        fn verify(key: &Self::VerifyingKey, payload: &[u8], signature: &[u8]) -> bool;
+        fn signature_is_well_formed(raw: &[u8]) -> bool;
     }
 }
 
-/// An FN-DSA parameter set.
+/// A Falcon signing profile.
 ///
-/// The trait is sealed: it is implemented only by [FnDsa512] and [FnDsa1024].
-pub trait Variant:
-    sealed::Sealed + Clone + Copy + Debug + PartialEq + Eq + PartialOrd + Ord + Hash + Send + Sync + 'static
-{
-}
+/// The trait is sealed: it is implemented only by [FnDsa512], [FnDsa1024], and
+/// [EllipsoidalFalcon512].
+pub trait Variant: sealed::Sealed + Copy + Debug + Ord + Hash + Send + Sync + 'static {}
 
 /// FN-DSA with degree 512 (Falcon-512, NIST security category 1).
 ///
@@ -60,29 +69,113 @@ pub trait Variant:
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FnDsa512;
 
-impl sealed::Sealed for FnDsa512 {
-    const LOGN: u32 = FN_DSA_LOGN_512;
-    type KeyPairGenerator = KeyPairGenerator512;
-    type SigningKey = SigningKey512;
-    type VerifyingKey = VerifyingKey512;
-}
-
-impl Variant for FnDsa512 {}
-
 /// FN-DSA with degree 1024 (Falcon-1024, NIST security category 5).
 ///
 /// Public keys are 1793 bytes and signatures 1280 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FnDsa1024;
 
-impl sealed::Sealed for FnDsa1024 {
-    const LOGN: u32 = FN_DSA_LOGN_1024;
-    type KeyPairGenerator = KeyPairGenerator1024;
-    type SigningKey = SigningKey1024;
-    type VerifyingKey = VerifyingKey1024;
+macro_rules! standard_variant {
+    ($variant:ty, $logn:expr, $keygen:ty, $signing:ty, $verifying:ty) => {
+        impl sealed::Sealed for $variant {
+            const PUBLIC_KEY_SIZE: usize = vrfy_key_size($logn);
+            const SIGNATURE_SIZE: usize = signature_size($logn);
+            const PUBLIC_KEY_HEADER: u8 = $logn as u8;
+            const SIGNATURE_HEADER: u8 = 0x30 | $logn as u8;
+            type VerifyingKey = $verifying;
+
+            fn keygen(seed: &[u8; PRIVATE_KEY_LENGTH]) -> (Zeroizing<Vec<u8>>, Vec<u8>) {
+                let mut secret = Zeroizing::new(vec![0u8; sign_key_size($logn)]);
+                let mut public = vec![0u8; Self::PUBLIC_KEY_SIZE];
+                <$keygen>::default().keygen(
+                    $logn,
+                    &mut SeedRng::new(seed),
+                    &mut secret,
+                    &mut public,
+                );
+                (secret, public)
+            }
+
+            fn sign(secret: &[u8], payload: &[u8], out: &mut [u8]) -> Option<()> {
+                let mut key = <$signing>::decode(secret)?;
+                key.sign(&mut ZeroRng, &DOMAIN_NONE, &HASH_ID_RAW, payload, out)
+            }
+
+            fn decode_public_key(raw: &[u8]) -> Option<Self::VerifyingKey> {
+                <$verifying>::decode(raw)
+            }
+
+            fn verify(key: &Self::VerifyingKey, payload: &[u8], signature: &[u8]) -> bool {
+                key.verify(signature, &DOMAIN_NONE, &HASH_ID_RAW, payload)
+            }
+
+            fn signature_is_well_formed(raw: &[u8]) -> bool {
+                if raw.len() != Self::SIGNATURE_SIZE || raw[0] != Self::SIGNATURE_HEADER {
+                    return false;
+                }
+                let mut s2 = [0i16; MAX_DEGREE];
+                fn_dsa_comm::codec::comp_decode(
+                    &raw[SIGNATURE_PREFIX_LENGTH..],
+                    &mut s2[..1 << $logn],
+                )
+            }
+        }
+
+        impl Variant for $variant {}
+    };
 }
 
-impl Variant for FnDsa1024 {}
+standard_variant!(
+    FnDsa512,
+    FN_DSA_LOGN_512,
+    KeyPairGenerator512,
+    SigningKey512,
+    VerifyingKey512
+);
+standard_variant!(
+    FnDsa1024,
+    FN_DSA_LOGN_1024,
+    KeyPairGenerator1024,
+    SigningKey1024,
+    VerifyingKey1024
+);
+
+/// Experimental degree-512 ellipsoidal Falcon profile.
+///
+/// This profile has distinct key and signature encodings and is not standard FN-DSA.
+/// It has no assigned NIST security category.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EllipsoidalFalcon512;
+
+impl sealed::Sealed for EllipsoidalFalcon512 {
+    const PUBLIC_KEY_SIZE: usize = super::ellipsoidal::PUBLIC_KEY_SIZE;
+    const SIGNATURE_SIZE: usize = super::ellipsoidal::SIGNATURE_SIZE;
+    const PUBLIC_KEY_HEADER: u8 = super::ellipsoidal::PUBLIC_KEY_HEADER;
+    const SIGNATURE_HEADER: u8 = super::ellipsoidal::SIGNATURE_HEADER;
+    type VerifyingKey = super::ellipsoidal::VerifyingKey;
+
+    fn keygen(seed: &[u8; PRIVATE_KEY_LENGTH]) -> (Zeroizing<Vec<u8>>, Vec<u8>) {
+        super::ellipsoidal::keygen(seed)
+    }
+
+    fn sign(secret: &[u8], payload: &[u8], out: &mut [u8]) -> Option<()> {
+        super::ellipsoidal::sign(secret, payload, out)
+    }
+
+    fn decode_public_key(raw: &[u8]) -> Option<Self::VerifyingKey> {
+        Self::VerifyingKey::decode(raw)
+    }
+
+    fn verify(key: &Self::VerifyingKey, payload: &[u8], signature: &[u8]) -> bool {
+        key.verify(payload, signature)
+    }
+
+    fn signature_is_well_formed(raw: &[u8]) -> bool {
+        super::ellipsoidal::signature_is_well_formed(raw)
+    }
+}
+
+impl Variant for EllipsoidalFalcon512 {}
 
 /// Expands a seed into the byte stream that fn-dsa key generation consumes.
 struct SeedRng(SHAKE256);
@@ -131,7 +224,7 @@ macro_rules! impl_rng {
 impl_rng!(SeedRng, |self, dest| self.0.extract(dest));
 impl_rng!(ZeroRng, |self, dest| dest.fill(0));
 
-/// FN-DSA Private Key.
+/// A private key for a Falcon profile.
 ///
 /// The key is identified by its 32-byte seed. The encoded signing key and the derived
 /// [PublicKey] are computed once when the key is created or decoded and are shared between
@@ -147,14 +240,7 @@ pub struct PrivateKey<V: Variant> {
 impl<V: Variant> PrivateKey<V> {
     /// Generates the key pair determined by a seed.
     fn expand(seed: &[u8; PRIVATE_KEY_LENGTH]) -> Self {
-        let mut signing_key = Zeroizing::new(vec![0u8; sign_key_size(V::LOGN)]);
-        let mut verifying_key = vec![0u8; vrfy_key_size(V::LOGN)];
-        V::KeyPairGenerator::default().keygen(
-            V::LOGN,
-            &mut SeedRng::new(seed),
-            &mut signing_key,
-            &mut verifying_key,
-        );
+        let (signing_key, verifying_key) = V::keygen(seed);
         let public_key =
             PublicKey::new(verifying_key).expect("generated verifying keys always decode");
         Self {
@@ -174,12 +260,9 @@ impl<V: Variant> crate::Signer for PrivateKey<V> {
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
         let payload = union_unique(namespace, msg);
 
-        // fn-dsa signs through a mutable scratch context derived from the signing key, so each
-        // signature decodes its own context and concurrent signers share no mutable state.
-        let mut key = V::SigningKey::decode(&self.signing_key)
-            .expect("generated signing keys always decode");
+        // Each profile owns its per-call signing scratch; cloned keys share only immutable bytes.
         let mut raw = vec![0u8; Signature::<V>::SIZE];
-        key.sign(&mut ZeroRng, &DOMAIN_NONE, &HASH_ID_RAW, &payload, &mut raw)
+        V::sign(&self.signing_key, &payload, &mut raw)
             .expect("signing with a generated key cannot fail");
         Signature {
             raw: Bytes::from(raw),
@@ -223,8 +306,11 @@ impl<V: Variant> FixedSize for PrivateKey<V> {
 
 impl<V: Variant> PartialEq for PrivateKey<V> {
     fn eq(&self, other: &Self) -> bool {
-        self.seed
-            .expose(|a| other.seed.expose(|b| a.as_slice().ct_eq(b.as_slice()).into()))
+        self.seed.expose(|a| {
+            other
+                .seed
+                .expose(|b| a.as_slice().ct_eq(b.as_slice()).into())
+        })
     }
 }
 
@@ -252,12 +338,11 @@ impl<V: Variant> arbitrary::Arbitrary<'_> for PrivateKey<V> {
     }
 }
 
-/// FN-DSA Public Key.
+/// A public key for a Falcon profile.
 ///
-/// Equality, ordering, and hashing use the encoded key. Decoding rejects encodings with the
-/// wrong header byte or a coefficient that is not reduced modulo `q = 12289`, so every decoded
-/// key has exactly one encoding. Decoding converts the key to the form verification uses once,
-/// and clones share it.
+/// Equality, ordering, and hashing use the encoded key. Decoding enforces the profile's
+/// canonical encoding rules and converts the key to the form verification uses once.
+/// Clones share the decoded key.
 #[derive(Clone)]
 pub struct PublicKey<V: Variant> {
     inner: Arc<PublicKeyInner<V>>,
@@ -270,7 +355,7 @@ struct PublicKeyInner<V: Variant> {
 
 impl<V: Variant> PublicKey<V> {
     fn new(raw: Vec<u8>) -> Option<Self> {
-        let key = V::VerifyingKey::decode(&raw)?;
+        let key = V::decode_public_key(&raw)?;
         Some(Self {
             inner: Arc::new(PublicKeyInner { raw, key }),
         })
@@ -289,12 +374,7 @@ impl<V: Variant> crate::Verifier for PublicKey<V> {
     type Signature = Signature<V>;
 
     fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Self::Signature) -> bool {
-        self.inner.key.verify(
-            &sig.raw,
-            &DOMAIN_NONE,
-            &HASH_ID_RAW,
-            &union_unique(namespace, msg),
-        )
+        V::verify(&self.inner.key, &union_unique(namespace, msg), &sig.raw)
     }
 }
 
@@ -316,7 +396,7 @@ impl<V: Variant> Read for PublicKey<V> {
 }
 
 impl<V: Variant> FixedSize for PublicKey<V> {
-    const SIZE: usize = vrfy_key_size(V::LOGN);
+    const SIZE: usize = V::PUBLIC_KEY_SIZE;
 }
 
 impl<V: Variant> Span for PublicKey<V> {}
@@ -381,29 +461,15 @@ impl<V: Variant> arbitrary::Arbitrary<'_> for PublicKey<V> {
     }
 }
 
-/// FN-DSA Signature.
+/// A signature for a Falcon profile.
 ///
-/// Decoding performs the same parsing as verification: it accepts only the header byte of the
-/// variant followed by a 40-byte nonce and the canonical compressed encoding of a vector within
-/// the coefficient bound (unused trailing bits must be zero), so a decoded signature has exactly
-/// one encoding. Whether the vector is short enough for the signed message is checked by
-/// verification. Decoding copies the signature out of its buffer: signatures outlive the
+/// Decoding enforces the profile's canonical encoding rules. Verification checks validity for
+/// the signed message. Decoding copies the signature out of its buffer: signatures outlive the
 /// messages that carry them, so a retained signature must not keep a pooled network buffer alive.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Signature<V: Variant> {
     raw: Bytes,
     _variant: PhantomData<V>,
-}
-
-impl<V: Variant> Signature<V> {
-    /// Returns whether verification can parse the encoding.
-    fn is_well_formed(raw: &[u8]) -> bool {
-        if raw[0] != 0x30 | V::LOGN as u8 {
-            return false;
-        }
-        let mut s2 = [0i16; MAX_DEGREE];
-        fn_dsa_comm::codec::comp_decode(&raw[SIGNATURE_PREFIX_LENGTH..], &mut s2[..1 << V::LOGN])
-    }
 }
 
 impl<V: Variant> crate::Signature for Signature<V> {}
@@ -422,7 +488,7 @@ impl<V: Variant> Read for Signature<V> {
         let mut raw = BytesMut::zeroed(Self::SIZE);
         buf.copy_to_slice(&mut raw);
         let raw = raw.freeze();
-        if !Self::is_well_formed(&raw) {
+        if !V::signature_is_well_formed(&raw) {
             return Err(CodecError::Invalid(NAME, "Invalid Signature"));
         }
         Ok(Self {
@@ -433,7 +499,7 @@ impl<V: Variant> Read for Signature<V> {
 }
 
 impl<V: Variant> FixedSize for Signature<V> {
-    const SIZE: usize = signature_size(V::LOGN);
+    const SIZE: usize = V::SIGNATURE_SIZE;
 }
 
 impl<V: Variant> Span for Signature<V> {}
@@ -532,14 +598,14 @@ mod tests {
         assert!(!public_key.verify(NAMESPACE, MESSAGE, &signature));
     }
 
-    fn verify_accepts_randomized_signature<V: Variant>() {
+    fn verify_accepts_randomized_signature<V: Variant, K: fn_dsa::SigningKey>() {
         let private_key = private_key::<V>(1);
         let public_key = private_key.public_key();
         let deterministic = private_key.sign(NAMESPACE, MESSAGE);
 
         // Sign the same payload with non-zero signing randomness.
         let payload = union_unique(NAMESPACE, MESSAGE);
-        let mut key = V::SigningKey::decode(&private_key.signing_key).unwrap();
+        let mut key = K::decode(&private_key.signing_key).unwrap();
         let mut raw = vec![0u8; Signature::<V>::SIZE];
         key.sign(
             &mut SeedRng::new(&[7; PRIVATE_KEY_LENGTH]),
@@ -574,18 +640,25 @@ mod tests {
         let original = PrivateKey::<V>::random(test_rng()).public_key();
         let encoded = original.encode();
         assert_eq!(encoded.len(), PublicKey::<V>::SIZE);
-        assert_eq!(encoded[0], V::LOGN as u8);
+        assert_eq!(encoded[0], V::PUBLIC_KEY_HEADER);
 
         let decoded = PublicKey::<V>::decode(encoded).unwrap();
         assert_eq!(original, decoded);
         assert_eq!(decoded.as_ref(), original.as_ref());
 
         assert!(matches!(
-            PublicKey::<V>::decode(vec![V::LOGN as u8; PublicKey::<V>::SIZE - 1]),
+            PublicKey::<V>::decode(vec![V::PUBLIC_KEY_HEADER; PublicKey::<V>::SIZE - 1]),
             Err(CodecError::EndOfBuffer)
         ));
         assert!(matches!(
-            PublicKey::<V>::decode(original.encode().iter().copied().chain([0]).collect::<Vec<_>>()),
+            PublicKey::<V>::decode(
+                original
+                    .encode()
+                    .iter()
+                    .copied()
+                    .chain([0])
+                    .collect::<Vec<_>>()
+            ),
             Err(CodecError::ExtraData(1))
         ));
     }
@@ -600,7 +673,11 @@ mod tests {
         let valid = private_key::<V>(1).public_key().to_vec();
 
         // Header bytes of the other degree, of a signing key, and of a toy degree.
-        for header in [V::LOGN as u8 ^ 0x03, 0x50 | V::LOGN as u8, 0x08] {
+        for header in [
+            V::PUBLIC_KEY_HEADER ^ 0x03,
+            0x50 | V::PUBLIC_KEY_HEADER,
+            0x08,
+        ] {
             let mut raw = valid.clone();
             raw[0] = header;
             invalid(raw);
@@ -614,12 +691,12 @@ mod tests {
 
         // All ones.
         let mut raw = vec![0xFF; PublicKey::<V>::SIZE];
-        raw[0] = V::LOGN as u8;
+        raw[0] = V::PUBLIC_KEY_HEADER;
         invalid(raw);
 
         // The zero polynomial is a valid encoding that verifies no signature.
         let mut raw = vec![0; PublicKey::<V>::SIZE];
-        raw[0] = V::LOGN as u8;
+        raw[0] = V::PUBLIC_KEY_HEADER;
         let zero = PublicKey::<V>::decode(raw).unwrap();
         let signature = private_key::<V>(1).sign(NAMESPACE, MESSAGE);
         assert!(!zero.verify(NAMESPACE, MESSAGE, &signature));
@@ -629,7 +706,7 @@ mod tests {
         let original = private_key::<V>(1).sign(NAMESPACE, MESSAGE);
         let encoded = original.encode();
         assert_eq!(encoded.len(), Signature::<V>::SIZE);
-        assert_eq!(encoded[0], 0x30 | V::LOGN as u8);
+        assert_eq!(encoded[0], V::SIGNATURE_HEADER);
 
         let decoded = Signature::<V>::decode(encoded.clone()).unwrap();
         assert_eq!(original, decoded);
@@ -662,7 +739,7 @@ mod tests {
         let valid = signature_bytes::<V>();
 
         // Header bytes of the other degree and without the signature tag.
-        for header in [0x30 | (V::LOGN as u8 ^ 0x03), V::LOGN as u8] {
+        for header in [V::SIGNATURE_HEADER ^ 0x03, V::PUBLIC_KEY_HEADER] {
             let mut raw = valid.clone();
             raw[0] = header;
             invalid(raw);
@@ -709,6 +786,47 @@ mod tests {
         assert_ne!(a.sign(NAMESPACE, MESSAGE), a.sign(NAMESPACE, b"other"));
     }
 
+    #[cfg(feature = "std")]
+    fn concurrent_clones<V: Variant>() {
+        let key = private_key::<V>(7);
+        let expected = key.sign(NAMESPACE, MESSAGE);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let clone = key.clone();
+                    assert!(Arc::ptr_eq(&key.signing_key, &clone.signing_key));
+                    assert!(Arc::ptr_eq(&key.public_key.inner, &clone.public_key.inner));
+                    scope.spawn(move || clone.sign(NAMESPACE, MESSAGE))
+                })
+                .collect();
+            for handle in handles {
+                assert_eq!(handle.join().unwrap(), expected);
+            }
+        });
+    }
+
+    #[test]
+    fn profile_key_encodings_are_distinct() {
+        let standard = private_key::<FnDsa512>(1).public_key().encode();
+        let ellipsoidal = private_key::<EllipsoidalFalcon512>(1).public_key().encode();
+        assert!(PublicKey::<EllipsoidalFalcon512>::decode(standard).is_err());
+        assert!(PublicKey::<FnDsa512>::decode(ellipsoidal).is_err());
+    }
+
+    #[test]
+    fn standard_512_encodings() {
+        verify_accepts_randomized_signature::<FnDsa512, SigningKey512>();
+        decode_public_key_rejects_malformed_encodings::<FnDsa512>();
+        decode_signature_rejects_malformed_encodings::<FnDsa512>();
+    }
+
+    #[test]
+    fn standard_1024_encodings() {
+        verify_accepts_randomized_signature::<FnDsa1024, SigningKey1024>();
+        decode_public_key_rejects_malformed_encodings::<FnDsa1024>();
+        decode_signature_rejects_malformed_encodings::<FnDsa1024>();
+    }
+
     fn private_key_redacted<V: Variant>() {
         let private_key = PrivateKey::<V>::random(test_rng());
         let seed = commonware_formatting::hex(&private_key.encode());
@@ -729,14 +847,13 @@ mod tests {
         sign_and_verify,
         namespace_is_bound,
         verify_rejects_tampered_signature,
-        verify_accepts_randomized_signature,
         codec_private_key,
         codec_public_key,
-        decode_public_key_rejects_malformed_encodings,
         codec_signature,
         decode_signature_rejects_wrong_length,
-        decode_signature_rejects_malformed_encodings,
         determinism,
+        #[cfg(feature = "std")]
+        concurrent_clones,
         private_key_redacted,
         from_private_key_to_public_key,
     );
@@ -749,10 +866,13 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<PrivateKey<FnDsa512>> => 1024,
             CodecConformance<PrivateKey<FnDsa1024>> => 1024,
+            CodecConformance<PrivateKey<EllipsoidalFalcon512>> => 1024,
             CodecConformance<PublicKey<FnDsa512>> => 1024,
             CodecConformance<PublicKey<FnDsa1024>> => 1024,
+            CodecConformance<PublicKey<EllipsoidalFalcon512>> => 1024,
             CodecConformance<Signature<FnDsa512>> => 1024,
             CodecConformance<Signature<FnDsa1024>> => 1024,
+            CodecConformance<Signature<EllipsoidalFalcon512>> => 1024,
         }
     }
 }
