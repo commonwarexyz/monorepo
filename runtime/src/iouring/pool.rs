@@ -519,8 +519,6 @@ impl Threads {
             let (ready, started) = mpsc::channel();
             let shared = shared.clone();
             let failures = failures.clone();
-            // Linux shows at most 15 bytes of a thread's name, which this
-            // fits for every worker index.
             let handle = thread::Builder::new()
                 .name(format!("iouring-pool-{index}"))
                 .stack_size(shared.cfg.thread_stack_size())
