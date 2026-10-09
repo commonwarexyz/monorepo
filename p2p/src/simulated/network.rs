@@ -35,7 +35,7 @@ use futures::{Sink, future};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
@@ -176,8 +176,10 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Sender for peer sources to subscribe through the main ingress path.
     ingress_sender: mpsc::UnboundedSender<ingress::Message<P, E>>,
 
-    // A map from a pair of public keys (from, to) to a link between the two peers
-    links: HashMap<(P, P), Link>,
+    // A map from a pair of public keys (from, to) to a link between the two peers.
+    //
+    // Ordered so that dropping the network closes links in a reproducible order.
+    links: BTreeMap<(P, P), Link>,
 
     // A map from a public key to a peer
     peers: BTreeMap<P, Peer<P>>,
@@ -242,7 +244,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 next_addr,
                 ingress: oracle_receiver,
                 ingress_sender: oracle_mailbox.clone(),
-                links: HashMap::new(),
+                links: BTreeMap::new(),
                 peers: BTreeMap::new(),
                 peer_sets: BTreeMap::new(),
                 peer_ref_counts: BTreeMap::new(),
@@ -1336,8 +1338,10 @@ impl<P: PublicKey> Peer<P> {
 
         // Spawn router
         context.child("router").spawn(|context| async move {
-            // Map of channels to mailboxes (senders to particular channels)
-            let mut mailboxes = HashMap::new();
+            // Map of channels to mailboxes (senders to particular channels).
+            //
+            // Ordered so that dropping the router closes mailboxes in a reproducible order.
+            let mut mailboxes = BTreeMap::new();
 
             // Continually listen for control messages and outbound messages
             select_loop! {

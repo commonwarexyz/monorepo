@@ -13,7 +13,7 @@ use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner, telemetry::m
 use commonware_utils::{IpAddrExt, PrioritySet, SystemTimeExt, ordered::Set};
 use rand_core::Rng;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
+    collections::{BTreeMap, HashSet, btree_map::Entry},
     net::IpAddr,
     num::NonZeroUsize,
     time::{Duration, SystemTime},
@@ -67,7 +67,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     peer_connection_cooldown: Duration,
 
     /// The records of all peers.
-    peers: HashMap<C, Record>,
+    peers: BTreeMap<C, Record>,
 
     /// Primary and secondary peer sets indexed by peer set ID.
     peer_sets: BTreeMap<u64, PeerSetsAtIndex<C>>,
@@ -87,7 +87,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given local node information.
     pub fn init(context: E, myself: C, cfg: Config, releaser: Releaser<C>) -> Self {
         // Create the list of peers and add myself.
-        let mut peers = HashMap::new();
+        let mut peers = BTreeMap::new();
         peers.insert(myself, Record::myself());
 
         let metrics = Metrics::init(&context);
@@ -394,7 +394,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 DialStatus::Unavailable => {}
             }
         }
-        peers.sort();
 
         Dialable {
             peers,

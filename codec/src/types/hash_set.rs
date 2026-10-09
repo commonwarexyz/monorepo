@@ -14,6 +14,10 @@ use std::{collections::HashSet, hash::Hash};
 
 const HASHSET_TYPE: &str = "HashSet";
 
+#[cfg_attr(
+    dylint_lib = "hash_order",
+    expect(hash_iteration, reason = "items are sorted before encoding")
+)]
 impl<K: Ord + Write, S> Write for HashSet<K, S> {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
@@ -38,6 +42,10 @@ impl<K: Ord + Write, S> Write for HashSet<K, S> {
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "hash_order",
+    expect(hash_iteration, reason = "sizes are summed in any order")
+)]
 impl<K: EncodeSize, S> EncodeSize for HashSet<K, S> {
     fn encode_size(&self) -> usize {
         let mut size = self.len().encode_size();
@@ -103,8 +111,6 @@ mod tests {
         let decoded = HashSet::<K>::decode_cfg(encoded, &config_tuple).expect("decode_cfg failed");
         assert_eq!(set, &decoded);
     }
-
-    // --- HashSet Tests ---
 
     #[test]
     fn test_empty_hashset() {

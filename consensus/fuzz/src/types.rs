@@ -1,6 +1,6 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::sha256::Digest as Sha256Digest;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Message types the disrupter can send.
 #[derive(Debug, Clone, Arbitrary)]
@@ -35,7 +35,7 @@ pub struct Finalization {
 
 /// Per-replica state: (notarizations, nullifications, finalizations) keyed by view.
 pub type ReplicaState = (
-    HashMap<u64, Notarization>,
-    HashMap<u64, Nullification>,
-    HashMap<u64, Finalization>,
+    BTreeMap<u64, Notarization>,
+    BTreeMap<u64, Nullification>,
+    BTreeMap<u64, Finalization>,
 );

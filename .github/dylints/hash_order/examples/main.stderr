@@ -1,0 +1,408 @@
+error: iteration over a hash collection
+  --> $DIR/main.rs:63:13
+   |
+LL |     let _ = map.iter().next();
+   |             ^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+   = note: `#[deny(hash_iteration)]` on by default
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:64:13
+   |
+LL |     let _ = map.iter().count();
+   |             ^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:65:13
+   |
+LL |     let _ = map.keys().last();
+   |             ^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:66:21
+   |
+LL |     let _: Vec<_> = map.values().collect();
+   |                     ^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:67:26
+   |
+LL |     let _: BTreeSet<_> = map.keys().copied().collect();
+   |                          ^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:68:5
+   |
+LL |     map.values_mut().for_each(|value| *value += 1);
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:69:5
+   |
+LL |     map.iter_mut().for_each(|(_, value)| *value += 1);
+   |     ^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:70:5
+   |
+LL |     map.retain(|key, _| *key > 0);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:71:13
+   |
+LL |     let _ = set.iter().all(|&item| item > 0);
+   |             ^^^^^^^^^^
+   |
+   = note: `std::collections::HashSet<u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:72:13
+   |
+LL |     let _ = set.difference(&other).next();
+   |             ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashSet<u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:73:13
+   |
+LL |     let _ = set.union(&other).min_by_key(|item| **item % 2);
+   |             ^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashSet<u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:74:21
+   |
+LL |     let _: Vec<_> = set.drain().collect();
+   |                     ^^^^^^^^^^^
+   |
+   = note: `std::collections::HashSet<u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:75:13
+   |
+LL |     let _ = HashMap::iter(&map).next();
+   |             ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:76:13
+   |
+LL |     let _ = map.extract_if(|key, _| *key > 0).count();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:77:13
+   |
+LL |     let _ = map.clone().into_keys().count();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:78:30
+   |
+LL |     let mut sorted: Vec<_> = set.iter().collect();
+   |                              ^^^^^^^^^^
+   |
+   = note: `std::collections::HashSet<u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:82:14
+   |
+LL |     for _ in &map {}
+   |              ^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:83:14
+   |
+LL |     for _ in &mut map {}
+   |              ^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:84:14
+   |
+LL |     for _ in map.clone() {}
+   |              ^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:85:21
+   |
+LL |     let _: Vec<_> = map.clone().into_iter().collect();
+   |                     ^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:89:18
+   |
+LL |     pairs.extend(&map);
+   |                  ^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:90:28
+   |
+LL |     let _ = Vec::from_iter(set.clone());
+   |                            ^^^^^^^^^^^
+   |
+   = note: `std::collections::HashSet<u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:91:32
+   |
+LL |     let _ = [1u8].iter().chain(&other).next();
+   |                                ^^^^^^
+   |
+   = note: `std::collections::HashSet<u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:92:28
+   |
+LL |     let _ = std::iter::zip(&other, 0..).next();
+   |                            ^^^^^^
+   |
+   = note: `std::collections::HashSet<u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:94:18
+   |
+LL |     whole.extend(&set);
+   |                  ^^^^
+   |
+   = note: `std::collections::HashSet<u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:95:33
+   |
+LL |     let _ = BTreeMap::from_iter(map.clone());
+   |                                 ^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:96:13
+   |
+LL |     let _ = Holder(map.clone()).visit().count();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:100:13
+   |
+LL |     let _ = brown.keys().next();
+   |             ^^^^^^^^^^^^
+   |
+   = note: `hashbrown::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:101:14
+   |
+LL |     for _ in &brown {}
+   |              ^^^^^^
+   |
+   = note: `hashbrown::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:103:13
+   |
+LL |     let _ = fast.values().next();
+   |             ^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8, ahash::RandomState>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:104:14
+   |
+LL |     for _ in &fast {}
+   |              ^^^^^
+   |
+   = note: `ahash::AHashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:109:13
+   |
+LL |     let _ = table.iter_buckets().next();
+   |             ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `hashbrown::HashTable<u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:110:13
+   |
+LL |     let _ = table.iter_hash(0).next();
+   |             ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `hashbrown::HashTable<u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:111:13
+   |
+LL |     let _ = table.get_bucket(0);
+   |             ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `hashbrown::HashTable<u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:112:58
+   |
+LL |     let keys: fn(&HashMap<u8, u8>) -> Keys<'_, u8, u8> = HashMap::keys;
+   |                                                          ^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:114:41
+   |
+LL |     let _ = [&map].into_iter().flat_map(HashMap::keys).next();
+   |                                         ^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:115:57
+   |
+LL |     let rows: fn(HashMap<u8, u8>) -> Option<(u8, u8)> = first_row::<HashMap<u8, u8>>;
+   |                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:117:23
+   |
+LL |     let _ = first_row(map.clone());
+   |                       ^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:118:13
+   |
+LL |     let _ = map.clone().first();
+   |             ^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:119:26
+   |
+LL |     let _ = first_by_ref(&map);
+   |                          ^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:120:13
+   |
+LL |     let _ = std::iter::once(&map).flatten().next();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:121:21
+   |
+LL |     let _: Vec<_> = map.par_iter().map(|(key, _)| *key).collect();
+   |                     ^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:122:13
+   |
+LL |     let _ = map.par_iter().count();
+   |             ^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:124:31
+   |
+LL |     parallel_pairs.par_extend(map.clone());
+   |                               ^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u8, u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: iteration over a hash collection
+  --> $DIR/main.rs:125:5
+   |
+LL |     for _ in Opaque(set.clone()).all() {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashSet<u8>` visits entries in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`, or if the order cannot matter, add `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`
+
+error: aborting due to 45 previous errors
+

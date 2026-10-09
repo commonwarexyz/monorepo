@@ -12,7 +12,7 @@ use commonware_storage::{
 };
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
-use std::{collections::HashSet, num::NonZeroUsize};
+use std::{collections::BTreeSet, num::NonZeroUsize};
 
 const MAX_MUTATIONS: usize = 50;
 
@@ -318,7 +318,7 @@ fn fuzz(input: FuzzInput) {
                 .iter()
                 .filter(|_| !digests.is_empty())
                 .map(|&p| (p as u32) % (digests.len() as u32))
-                .collect::<HashSet<_>>()
+                .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
 

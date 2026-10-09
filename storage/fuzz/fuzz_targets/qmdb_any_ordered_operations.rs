@@ -29,7 +29,7 @@ use commonware_storage_fuzz::{
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     num::{NonZeroU16, NonZeroU64},
 };
 
@@ -97,9 +97,9 @@ async fn commit_pending<F: MerkleFamily>(
     db: GenericDb<F>,
     plan: &Plan,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
-    committed_state: &mut HashMap<RawKey, RawValue>,
-    pending_inserts: &mut HashMap<RawKey, RawValue>,
-    pending_deletes: &mut HashSet<RawKey>,
+    committed_state: &mut BTreeMap<RawKey, RawValue>,
+    pending_inserts: &mut BTreeMap<RawKey, RawValue>,
+    pending_deletes: &mut BTreeSet<RawKey>,
 ) -> GenericDb<F> {
     let inherited = db.inactivity_floor_loc();
     let mut batch = db.new_batch();
@@ -113,14 +113,14 @@ async fn commit_pending<F: MerkleFamily>(
         .await
         .expect("commit should not fail");
     let db = db.commit().await.expect("commit fsync should not fail");
-    for key in pending_deletes.drain() {
+    for key in std::mem::take(pending_deletes) {
         committed_state.remove(&key);
     }
-    committed_state.extend(pending_inserts.drain());
+    committed_state.extend(std::mem::take(pending_inserts));
 
     // Check the floor walk against the post-write state, then replay its decisions into it.
     *committed_state = policy.check_raw(
-        committed_state.drain(),
+        std::mem::take(committed_state),
         inherited,
         db.inactivity_floor_loc(),
         db.bounds().end - 1,
@@ -131,7 +131,7 @@ async fn commit_pending<F: MerkleFamily>(
 /// Check strict, non-wrapping neighbors against the committed model, excluding queued writes.
 async fn assert_neighbors<F: MerkleFamily>(
     db: &GenericDb<F>,
-    committed_state: &HashMap<RawKey, RawValue>,
+    committed_state: &BTreeMap<RawKey, RawValue>,
     key: RawKey,
 ) {
     let query = Key::new(key);
@@ -192,10 +192,10 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
 
             // committed_state tracks state after apply_batch. pending_expected tracks
             // uncommitted mutations that haven't been applied yet.
-            let mut committed_state: HashMap<RawKey, RawValue> = HashMap::new();
-            let mut pending_inserts: HashMap<RawKey, RawValue> = HashMap::new();
-            let mut pending_deletes: HashSet<RawKey> = HashSet::new();
-            let mut all_keys: HashSet<RawKey> = HashSet::new();
+            let mut committed_state: BTreeMap<RawKey, RawValue> = BTreeMap::new();
+            let mut pending_inserts: BTreeMap<RawKey, RawValue> = BTreeMap::new();
+            let mut pending_deletes: BTreeSet<RawKey> = BTreeSet::new();
+            let mut all_keys: BTreeSet<RawKey> = BTreeSet::new();
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
             // Every commit walks the floor under the plan of the most recent Commit operation.

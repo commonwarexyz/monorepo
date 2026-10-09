@@ -22,7 +22,7 @@ use commonware_utils::{
 };
 use rand::{RngExt as _, seq::SliceRandom};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
@@ -493,7 +493,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
         // Track which receivers have pending messages from which senders
         // Receiver index -> set of sender indices that have pending messages for this receiver
-        let mut pending_by_receiver: HashMap<u8, HashSet<u8>> = HashMap::new();
+        let mut pending_by_receiver: BTreeMap<u8, HashSet<u8>> = BTreeMap::new();
 
         for op in input.operations.into_iter() {
             match op {
@@ -636,7 +636,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     let peer_set_size = (peer_set_size as usize).clamp(1, topology.peers.len());
 
                     // Build a random subset of peer IDs (using a set to avoid duplicates)
-                    let mut peer_ids = HashSet::new();
+                    let mut peer_ids = BTreeSet::new();
                     for _ in 0..peer_set_size {
                         let id = context.random::<u64>() as usize % topology.peers.len();
                         peer_ids.insert(id as PeerId);

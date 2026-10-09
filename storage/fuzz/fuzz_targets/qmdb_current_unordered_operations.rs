@@ -17,7 +17,7 @@ use commonware_storage_fuzz::floor::{Plan, Recorder};
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     num::{NonZeroU16, NonZeroU64},
 };
 
@@ -105,8 +105,8 @@ async fn commit_pending<F: Graftable>(
     db: Db<F>,
     plan: &Plan,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
-    committed_state: &mut HashMap<RawKey, Option<RawValue>>,
-    pending_expected: &mut HashMap<RawKey, Option<RawValue>>,
+    committed_state: &mut BTreeMap<RawKey, Option<RawValue>>,
+    pending_expected: &mut BTreeMap<RawKey, Option<RawValue>>,
 ) -> Db<F> {
     let inherited = db.inactivity_floor_loc();
     let mut batch = db.new_batch();
@@ -120,7 +120,7 @@ async fn commit_pending<F: Graftable>(
         .await
         .expect("commit should not fail");
     let db = db.commit().await.expect("commit fsync should not fail");
-    committed_state.extend(pending_expected.drain());
+    committed_state.extend(std::mem::take(pending_expected));
 
     // Check the floor walk against the post-write state, then replay its decisions into it.
     let live = policy.check_raw(
@@ -179,9 +179,9 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
 
         // committed_state tracks state after apply_batch. pending_expected tracks
         // uncommitted mutations that haven't been applied yet.
-        let mut committed_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
-        let mut pending_expected: HashMap<RawKey, Option<RawValue>> = HashMap::new();
-        let mut all_keys = std::collections::HashSet::new();
+        let mut committed_state: BTreeMap<RawKey, Option<RawValue>> = BTreeMap::new();
+        let mut pending_expected: BTreeMap<RawKey, Option<RawValue>> = BTreeMap::new();
+        let mut all_keys = std::collections::BTreeSet::new();
         let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
         let mut committed_op_count = Location::<F>::new(1);
 

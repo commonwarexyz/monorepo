@@ -23,7 +23,7 @@ use commonware_stream::{
 use commonware_utils::{TryCollect, ordered::Set, probability, union};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -50,7 +50,7 @@ fn main() {
     let hosts_file = matches.get_one::<String>("hosts").unwrap();
     let hosts_file = std::fs::read_to_string(hosts_file).expect("Could not read hosts file");
     let hosts: Hosts = serde_yaml::from_str(&hosts_file).expect("Could not parse hosts file");
-    let peers: HashMap<PublicKey, IpAddr> = hosts
+    let peers: BTreeMap<PublicKey, IpAddr> = hosts
         .hosts
         .into_iter()
         .map(|host| {

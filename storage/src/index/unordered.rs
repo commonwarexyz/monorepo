@@ -108,6 +108,13 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
 
     /// Visit every value held by the index (inline and overflow), in unspecified order.
     #[commonware_macros::stability(ALPHA)]
+    #[cfg_attr(
+        dylint_lib = "hash_order",
+        expect(
+            hash_iteration,
+            reason = "the visit order is unspecified and callers only aggregate"
+        )
+    )]
     pub(crate) fn for_each_value(&self, mut f: impl FnMut(&V)) {
         for v in self.map.values() {
             f(v);

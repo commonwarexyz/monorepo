@@ -793,7 +793,7 @@ mod tests {
         Receiver<PublicKey>,
     );
     type TestRegistration = (TestChannel, TestChannel, TestChannel);
-    type TestRegistrations = HashMap<PublicKey, TestRegistration>;
+    type TestRegistrations = BTreeMap<PublicKey, TestRegistration>;
 
     /// Builds a [Lookahead] with a term length of 5.
     fn test_lookahead(optimistic_views: u64) -> Lookahead {
@@ -903,7 +903,7 @@ mod tests {
         oracle: &mut Oracle<PublicKey, deterministic::Context>,
         validators: &[PublicKey],
     ) -> TestRegistrations {
-        let mut registrations = HashMap::new();
+        let mut registrations = BTreeMap::new();
         for validator in validators.iter() {
             let registration = register_validator(oracle, validator.clone()).await;
             registrations.insert(validator.clone(), registration);
@@ -1436,11 +1436,10 @@ mod tests {
             // minimum eligible view.
             let (floor_view, floor_finalization) = {
                 let finalizations = reporters[0].finalizations.lock();
-                let mut eligible: Vec<_> = finalizations
+                let eligible: Vec<_> = finalizations
                     .iter()
                     .filter(|(view, _)| **view > View::zero() && **view < tip_at_join)
                     .collect();
-                eligible.sort_by_key(|(view, _)| view.get());
                 eligible
                     .iter()
                     .find(|(view, _)| !view.is_term_start(term_length))
@@ -2214,7 +2213,7 @@ mod tests {
                 // Create engines
                 let elector = elector.clone();
                 let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
-                let mut reporters = HashMap::new();
+                let mut reporters = BTreeMap::new();
                 let mut engine_handlers = Vec::new();
                 for (idx, validator) in participants.iter().enumerate() {
                     // Create scheme context
@@ -4054,6 +4053,10 @@ mod tests {
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
                     for faults in faulter.values() {
+                        #[cfg_attr(
+                            dylint_lib = "hash_order",
+                            expect(hash_iteration, reason = "faults are counted or fail the test")
+                        )]
                         for fault in faults.iter() {
                             match fault {
                                 Activity::ConflictingNotarize(_) => {
@@ -5284,6 +5287,10 @@ mod tests {
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
                     for faults in faulter.values() {
+                        #[cfg_attr(
+                            dylint_lib = "hash_order",
+                            expect(hash_iteration, reason = "faults are counted or fail the test")
+                        )]
                         for fault in faults.iter() {
                             match fault {
                                 Activity::NullifyFinalize(_) => {
@@ -6319,7 +6326,7 @@ mod tests {
     fn start_certified_split_engines<S, L>(
         context: &deterministic::Context,
         cfg: CertifiedSplitEngineConfig<'_, S, L>,
-    ) -> HashMap<usize, CertifiedSplitReporter<S, L>>
+    ) -> BTreeMap<usize, CertifiedSplitReporter<S, L>>
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         L: elector::Config<S>,
@@ -6336,7 +6343,7 @@ mod tests {
             skip_timeout,
         } = cfg;
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
-        let mut reporters = HashMap::new();
+        let mut reporters = BTreeMap::new();
 
         for (idx, validator) in participants.iter().enumerate() {
             let registration = registrations

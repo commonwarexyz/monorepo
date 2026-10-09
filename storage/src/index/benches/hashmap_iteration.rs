@@ -14,6 +14,10 @@ struct MockIndex {
     _len: u32,
 }
 
+#[cfg_attr(
+    dylint_lib = "hash_order",
+    expect(hash_iteration, reason = "this benchmark measures hash map iteration")
+)]
 fn bench_hashmap_iteration(c: &mut Criterion) {
     for n in N_ITEMS {
         for k in [4, 8, 16, 32] {

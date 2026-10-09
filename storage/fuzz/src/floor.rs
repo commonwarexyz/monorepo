@@ -35,7 +35,7 @@ use commonware_storage::{
 };
 use commonware_utils::sequence::FixedBytes;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     fmt::Debug,
 };
 
@@ -375,7 +375,7 @@ impl<const KN: usize, const VN: usize> Recorder<FixedBytes<KN>, FixedBytes<VN>> 
         inherited: Location<F>,
         floor: Location<F>,
         commit: Location<F>,
-    ) -> HashMap<[u8; KN], [u8; VN]> {
+    ) -> BTreeMap<[u8; KN], [u8; VN]> {
         let mut model = state
             .into_iter()
             .map(|(key, value)| (FixedBytes::new(key), FixedBytes::new(value)))

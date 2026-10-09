@@ -27,7 +27,7 @@ use commonware_storage::{
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     num::NonZeroU16,
 };
 
@@ -120,8 +120,8 @@ fn burst_value(mut value: RawValue, offset: u8) -> RawValue {
 
 fn expected_value_for_key(
     key: LogicalKey,
-    committed_state: &HashMap<LogicalKey, Option<RawValue>>,
-    pending_expected: &HashMap<LogicalKey, Option<RawValue>>,
+    committed_state: &BTreeMap<LogicalKey, Option<RawValue>>,
+    pending_expected: &BTreeMap<LogicalKey, Option<RawValue>>,
 ) -> Option<RawValue> {
     match pending_expected.get(&key).copied() {
         Some(value) => value,
@@ -131,8 +131,8 @@ fn expected_value_for_key(
 
 fn find_live_key(
     preferred: LogicalKey,
-    committed_state: &HashMap<LogicalKey, Option<RawValue>>,
-    pending_expected: &HashMap<LogicalKey, Option<RawValue>>,
+    committed_state: &BTreeMap<LogicalKey, Option<RawValue>>,
+    pending_expected: &BTreeMap<LogicalKey, Option<RawValue>>,
 ) -> Option<LogicalKey> {
     for offset in 0..LOGICAL_KEY_SPACE {
         let candidate = burst_key(preferred, offset);
@@ -210,8 +210,8 @@ async fn commit_pending(
     db: Db,
     reference_db: Db,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
-    committed_state: &mut HashMap<LogicalKey, Option<RawValue>>,
-    pending_expected: &mut HashMap<LogicalKey, Option<RawValue>>,
+    committed_state: &mut BTreeMap<LogicalKey, Option<RawValue>>,
+    pending_expected: &mut BTreeMap<LogicalKey, Option<RawValue>>,
 ) -> (Db, Db) {
     if pending_writes.is_empty() {
         assert_matches_reference(&db, &reference_db, "empty commit");
@@ -221,7 +221,7 @@ async fn commit_pending(
     let writes = std::mem::take(pending_writes);
     let db = apply_pending(db, &writes).await;
     let reference_db = apply_pending(reference_db, &writes).await;
-    committed_state.extend(pending_expected.drain());
+    committed_state.extend(std::mem::take(pending_expected));
     assert_matches_reference(&db, &reference_db, "commit");
     (db, reference_db)
 }
@@ -279,9 +279,9 @@ async fn reopen_pruned_db(
 async fn bootstrap_pruned_state(
     mut db: Db,
     mut reference_db: Db,
-    committed_state: &mut HashMap<LogicalKey, Option<RawValue>>,
-    pending_expected: &mut HashMap<LogicalKey, Option<RawValue>>,
-    all_keys: &mut HashSet<LogicalKey>,
+    committed_state: &mut BTreeMap<LogicalKey, Option<RawValue>>,
+    pending_expected: &mut BTreeMap<LogicalKey, Option<RawValue>>,
+    all_keys: &mut BTreeSet<LogicalKey>,
 ) -> (Db, Db) {
     // `step as u8` intentionally wraps for step >= 256; uniqueness is not required here,
     // we just need to drive the inactivity floor forward.
@@ -319,9 +319,9 @@ struct ReopenEnv<'a> {
 async fn drive_post_prune_window(
     mut db: Db,
     mut reference_db: Db,
-    committed_state: &mut HashMap<LogicalKey, Option<RawValue>>,
-    pending_expected: &mut HashMap<LogicalKey, Option<RawValue>>,
-    all_keys: &mut HashSet<LogicalKey>,
+    committed_state: &mut BTreeMap<LogicalKey, Option<RawValue>>,
+    pending_expected: &mut BTreeMap<LogicalKey, Option<RawValue>>,
+    all_keys: &mut BTreeSet<LogicalKey>,
     reopen: &mut ReopenEnv<'_>,
 ) -> (Db, Db) {
     let midpoint = POST_PRUNE_WINDOW_STEPS / 2;
@@ -394,9 +394,9 @@ fn fuzz(data: FuzzInput) {
         .await
         .expect("init reference current db");
 
-        let mut committed_state: HashMap<LogicalKey, Option<RawValue>> = HashMap::new();
-        let mut pending_expected: HashMap<LogicalKey, Option<RawValue>> = HashMap::new();
-        let mut all_keys = HashSet::new();
+        let mut committed_state: BTreeMap<LogicalKey, Option<RawValue>> = BTreeMap::new();
+        let mut pending_expected: BTreeMap<LogicalKey, Option<RawValue>> = BTreeMap::new();
+        let mut all_keys = BTreeSet::new();
         let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
         let mut issued_writes = 0usize;
         let mut forced_window_ran = false;

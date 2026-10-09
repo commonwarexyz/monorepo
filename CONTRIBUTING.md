@@ -24,6 +24,11 @@ This repository uses the default cargo and clippy formatting rules for `.rs` fil
 $ just lint
 ```
 
+> [!NOTE]
+> This includes the custom lints under `.github/dylints`, which need
+> `cargo install cargo-dylint dylint-link --version 6.0.0 --locked` and build with the nightly pinned in
+> `.github/dylints/rust-toolchain`. To run them for one crate, run `just dylint -p <crate>`.
+
 To fix formatting automatically, run:
 
 ```bash

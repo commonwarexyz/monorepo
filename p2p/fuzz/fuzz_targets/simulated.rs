@@ -11,7 +11,7 @@ use commonware_utils::{NZUsize, Probability};
 use libfuzzer_sys::fuzz_target;
 use rand::RngExt as _;
 use std::{
-    collections::{HashMap, HashSet, VecDeque, hash_map},
+    collections::{BTreeMap, BTreeSet, VecDeque, btree_map},
     num::NonZeroU32,
     time::Duration,
 };
@@ -138,17 +138,17 @@ fn fuzz(input: FuzzInput) {
         // Each peer can register multiple channels for message segregation
         // The receiver gets messages from ALL senders on that channel, not per-sender streams
         #[allow(clippy::type_complexity)]
-        let mut channels: HashMap<
+        let mut channels: BTreeMap<
             (usize, u8),
             (
                 commonware_p2p::simulated::Sender<ed25519::PublicKey, deterministic::Context>,
                 commonware_p2p::simulated::Receiver<ed25519::PublicKey>,
             ),
-        > = HashMap::new();
+        > = BTreeMap::new();
 
         // Track expected messages: (to_idx, sender_pk, channel_id) -> queue of messages
         // Messages may be dropped (unreliable links) but those delivered must match expectations
-        let mut expected_msgs: HashMap<(usize, ed25519::PublicKey, u8), VecDeque<IoBuf>> = HashMap::new();
+        let mut expected_msgs: BTreeMap<(usize, ed25519::PublicKey, u8), VecDeque<IoBuf>> = BTreeMap::new();
 
         for op in input.operations.into_iter() {
             match op {
@@ -160,7 +160,7 @@ fn fuzz(input: FuzzInput) {
                     let idx = (peer_idx as usize) % peer_pks.len();
 
                     // Only register if not already registered
-                    if let hash_map::Entry::Vacant(e) = channels.entry((idx, channel_id))
+                    if let btree_map::Entry::Vacant(e) = channels.entry((idx, channel_id))
                         && let Ok((sender, receiver)) = oracle
                             .control(peer_pks[idx].clone())
                             .register(channel_id as u64, TEST_QUOTA)
@@ -218,7 +218,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::ReceiveMessages => {
                     // Attempt to receive one message from each receiver channel with pending messages
-                    let receiver_channels: HashSet<(usize, u8)> = expected_msgs
+                    let receiver_channels: BTreeSet<(usize, u8)> = expected_msgs
                         .keys()
                         .map(|(to_idx, _sender_pk, channel_id)| (*to_idx, *channel_id))
                         .collect();

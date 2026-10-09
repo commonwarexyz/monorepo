@@ -26,7 +26,7 @@ use commonware_utils::{
 use libfuzzer_sys::fuzz_target;
 use rand::RngExt as _;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
@@ -317,7 +317,7 @@ fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|context| async move {
         let mut peers: Vec<PrivateKey> = Vec::new();
-        let mut mailboxes: HashMap<usize, Mailbox<PublicKey, FuzzRequest>> = HashMap::new();
+        let mut mailboxes: BTreeMap<usize, Mailbox<PublicKey, FuzzRequest>> = BTreeMap::new();
         let mut handlers: HashMap<usize, FuzzHandler> = HashMap::new();
         let mut monitors: HashMap<usize, FuzzMonitor> = HashMap::new();
         let mut restarts = 0usize;

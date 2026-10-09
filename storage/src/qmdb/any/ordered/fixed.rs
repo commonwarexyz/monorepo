@@ -336,7 +336,7 @@ pub(crate) mod test {
                     }
                 }
                 // Dedup last-write-wins.
-                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                let mut m: BTreeMap<Digest, Option<Digest>> = BTreeMap::new();
                 for (k, v) in out {
                     m.insert(k, v);
                 }
@@ -1019,7 +1019,7 @@ pub(crate) mod test {
 
     /// P=3 allocates `2^24` partition slots (~800 MB per index), so it is too memory-heavy for the
     /// default suite. Run it explicitly with `--ignored` (and ideally `--release`). Only serial and
-    /// one offset-parallel reopen are checked -- enough to validate the offset-based range build and
+    /// one offset-parallel reopen are checked, enough to validate the offset-based range build and
     /// merge at the largest prefix width without the full worker-count sweep.
     #[test_traced("WARN")]
     #[ignore]
@@ -1169,7 +1169,7 @@ pub(crate) mod test {
                     let v = Sha256::hash(&[&((i + 1) * 10000).to_be_bytes()]);
                     batch = batch.write(k, Some(v));
                 }
-                // Don't merkleize/apply -- simulates uncommitted writes
+                // Skip merkleize and apply to simulate uncommitted writes.
             }
 
             // Insert operations without applying, then drop without cleanup.
@@ -1245,7 +1245,7 @@ pub(crate) mod test {
                     let v = Sha256::hash(&[&((i + 1) * 10000).to_be_bytes()]);
                     batch = batch.write(k, Some(v));
                 }
-                // Don't merkleize/apply -- simulates uncommitted writes
+                // Skip merkleize and apply to simulate uncommitted writes.
             }
 
             // Insert operations without applying then drop without cleanup.

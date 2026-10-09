@@ -43,7 +43,7 @@ pub use simplex::{
     SimplexBls12381MultisigMinSig, SimplexEd25519, SimplexSecp256r1,
 };
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     num::{NonZeroU16, NonZeroUsize},
     panic,
     sync::Arc,
@@ -244,7 +244,7 @@ async fn setup_network<P: simplex::Simplex>(
     Oracle<Ed25519PublicKey, deterministic::Context>,
     Vec<Ed25519PublicKey>,
     Vec<P::Scheme>,
-    HashMap<Ed25519PublicKey, NetworkChannels>,
+    BTreeMap<Ed25519PublicKey, NetworkChannels>,
 ) {
     let Fixture {
         participants,

@@ -42,30 +42,12 @@ impl<P: PublicKey> SafeTip<P> {
     ///
     /// Panics if the validator set is empty.
     pub fn init(&mut self, validators: &Set<P>) {
-        // Ensure the validator set is not empty
         assert!(!validators.is_empty());
-
-        // Get the number of validators and the maximum number of faults
-        let n = validators.len();
-        let f = validators.max_faults::<N3f1>() as usize;
-
-        // Initialize the tips map
-        let mut tips = HashMap::with_capacity(n);
-        for validator in validators {
-            tips.insert(validator.clone(), Height::default());
-        }
-
-        // Initialize the heaps
-        let mut lo = BTreeMap::new();
-        lo.insert(Height::default(), n - f);
-        let mut hi = BTreeMap::new();
-        if f > 0 {
-            hi.insert(Height::default(), f);
-        }
-
-        self.tips = tips;
-        self.hi = hi;
-        self.lo = lo;
+        self.tips = validators
+            .iter()
+            .map(|validator| (validator.clone(), Height::default()))
+            .collect();
+        self.rebuild(validators);
     }
 
     /// Updates the validator set. New validators are added with a default tip of 0.
@@ -74,77 +56,32 @@ impl<P: PublicKey> SafeTip<P> {
     ///
     /// Panics if the new validator set is not the same size as the existing set.
     pub fn reconcile(&mut self, validators: &Set<P>) {
-        // Verify the new validator set size
         assert!(
             validators.len() == self.tips.len(),
             "Validator set size mismatch"
         );
+        let old = std::mem::take(&mut self.tips);
+        self.tips = validators
+            .iter()
+            .map(|validator| {
+                let tip = old.get(validator).copied().unwrap_or_default();
+                (validator.clone(), tip)
+            })
+            .collect();
+        self.rebuild(validators);
+    }
 
-        // Get the set of exiting validators.
-        let mut exiting_vals = Vec::new();
-        for val in self.tips.keys() {
-            if validators.position(val).is_none() {
-                exiting_vals.push(val.clone());
-            }
-        }
-
-        // Remove validators that are no longer in the set.
-        // Their old tip value gets set to the default value.
-        for val in exiting_vals {
-            // Remove the validator from the set of validators.
-            let old = self.tips.remove(&val).unwrap();
-            let new = Height::default();
-
-            // Update the heaps. Since the value is decreasing (or stays at 0), there are four
-            // cases, which we check in order-of-preference:
-            // 1. No-op. The value was already `0`.
-            // 2. The value can remain in the `lo` heap.
-            // 3. The value can remain in the `hi` heap.
-            // 4. The value must be moved from the `hi` heap to the `lo` heap.
-
-            // Case 1: No-op
-            if old == new {
-                continue;
-            }
-
-            // Case 2: The value can remain in the `lo` heap.
-            if self.lo.contains_key(&old) {
-                dec(self.lo.entry(old));
-                inc(self.lo.entry(new));
-                continue;
-            }
-
-            // At this point, we know that the old value is in the `hi` heap. If every single value
-            // in the `lo` heap is less-than-or-equal-to the new value, then the value can remain in
-            // the `hi` heap.
-            let stay_in_hi: bool = self
-                .lo
-                .last_entry()
-                .map(|e| *e.key())
-                .is_none_or(|max_lo| max_lo <= new);
-
-            // Case 3: The value can remain in the `hi` heap.
-            if stay_in_hi {
-                dec(self.hi.entry(old));
-                inc(self.hi.entry(new));
-                continue;
-            }
-
-            // Case 4: The value must be moved from the `hi` heap to the `lo` heap.
-            dec(self.hi.entry(old));
-            inc(self.lo.entry(new));
-
-            // Move the maximum value from the `lo` heap to the `hi` heap.
-            let max_lo = *self.lo.last_entry().expect("Empty lo heap").key();
-            assert!(max_lo > new); // Sanity-check
-            dec(self.lo.entry(max_lo));
-            inc(self.hi.entry(max_lo));
-        }
-
-        // Add new validators with default height
-        for new_val in validators {
-            self.tips.entry(new_val.clone()).or_default();
-        }
+    /// Rebuilds the heaps from the tips: the `f` highest tips form `hi` and the rest form `lo`.
+    fn rebuild(&mut self, validators: &Set<P>) {
+        let f = validators.max_faults::<N3f1>() as usize;
+        let mut tips: Vec<Height> = validators
+            .iter()
+            .map(|validator| self.tips[validator])
+            .collect();
+        tips.sort_unstable();
+        let (lo, hi) = tips.split_at(tips.len() - f);
+        self.lo = counts(lo);
+        self.hi = counts(hi);
     }
 
     /// Updates the tip for the given validator.
@@ -219,6 +156,15 @@ impl<P: PublicKey> SafeTip<P> {
             .map(|(k, _)| *k)
             .expect("Empty validator set")
     }
+}
+
+/// Counts how many validators report each height.
+fn counts(heights: &[Height]) -> BTreeMap<Height, usize> {
+    let mut counts = BTreeMap::new();
+    for &height in heights {
+        inc(counts.entry(height));
+    }
+    counts
 }
 
 /// Increments the value of the entry in the map.

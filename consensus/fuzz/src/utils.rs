@@ -2,7 +2,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
 use commonware_runtime::{Clock, Quota};
-use std::{collections::HashMap, num::NonZeroU32};
+use std::{collections::BTreeMap, num::NonZeroU32};
 
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -100,7 +100,7 @@ pub async fn link_peers<P: PublicKey, E: Clock>(
 pub async fn register<P: PublicKey, E: Clock>(
     oracle: &mut Oracle<P, E>,
     validators: &[P],
-) -> HashMap<
+) -> BTreeMap<
     P,
     (
         (Sender<P, E>, Receiver<P>),
@@ -108,7 +108,7 @@ pub async fn register<P: PublicKey, E: Clock>(
         (Sender<P, E>, Receiver<P>),
     ),
 > {
-    let mut registrations = HashMap::new();
+    let mut registrations = BTreeMap::new();
     for validator in validators.iter() {
         let control = oracle.control(validator.clone());
         let pending = control.register(0, TEST_QUOTA).await.unwrap();

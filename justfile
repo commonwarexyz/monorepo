@@ -158,9 +158,20 @@ check-publish-order:
 cooldown:
     ./.github/scripts/check_dependency_cooldown.sh
 
-# Run custom Dylint lints
-dylint:
-    cargo {{ nightly_version }} dylint --all --workspace -- --all-targets
+# Run custom Dylint lints, for the workspace or for one crate with `-p <crate>`
+dylint *args='--workspace':
+    cargo {{ nightly_version }} dylint --all {{ args }} -- --all-targets
+
+# Test custom Dylint lints against their UI fixtures
+test-dylints:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The fixture harness cannot see rustc invocations through a compiler wrapper. One shared
+    # target directory builds the dependencies common to every lint once.
+    target="$PWD/target/dylint-tests"
+    for lint in .github/dylints/*/; do
+        (cd "$lint" && RUSTC_WRAPPER= CARGO_TARGET_DIR="$target" cargo test)
+    done
 
 # Run all fuzz tests in a given directory.
 #

@@ -9,7 +9,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 use tracing::debug;
 
 /// A proposal staged for its relay broadcast: the block and the ack that
@@ -26,12 +26,15 @@ pub(crate) enum GateOutcome {
 }
 
 /// The registries behind [`Gates`], sharing one lock.
+///
+/// Ordered maps make `retain_after` drop entries, and wake the tasks parked on
+/// their channels, in a reproducible order.
 struct Inner<D: Digest, B> {
     /// In-flight certification gate tasks, consumed by certification.
-    certifications: HashMap<(Round, D), oneshot::Receiver<GateOutcome>>,
+    certifications: BTreeMap<(Round, D), oneshot::Receiver<GateOutcome>>,
     /// Proposals staged for their relay broadcast, consumed by the relay (or
     /// by certification when no broadcast was requested).
-    proposals: HashMap<(Round, D), Staged<B>>,
+    proposals: BTreeMap<(Round, D), Staged<B>>,
 }
 
 /// A shared, thread-safe registry of in-flight certification gate tasks and
@@ -68,8 +71,8 @@ impl<D: Digest, B> Gates<D, B> {
     pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
-                certifications: HashMap::new(),
-                proposals: HashMap::new(),
+                certifications: BTreeMap::new(),
+                proposals: BTreeMap::new(),
             })),
         }
     }
@@ -531,5 +534,68 @@ mod tests {
             assert!(gates.take_staged(round(1), digest).is_none());
             assert!(gate.await.is_err(), "gate must be abandoned, not resolved");
         });
+    }
+
+    /// Registers a certification gate and stages a proposal for each of several rounds, parks
+    /// every owner on its channel, then prunes all of them with one `retain_after`.
+    ///
+    /// Returns the order in which the owners observed the pruning and the auditor state.
+    fn prune_parked_owners(seed: u64) -> (Vec<(u64, &'static str)>, String) {
+        const ROUNDS: u64 = 8;
+        deterministic::Runner::seeded(seed).start(|context| async move {
+            let gates = TestGates::new();
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            let mut owners = Vec::new();
+
+            // Gate owners park on receiver closure, like in-flight deferred verification.
+            for view in 1..=ROUNDS {
+                let digest = Sha256::hash(&[b"gate", &view.to_be_bytes()]);
+                let (mut task_tx, task_rx) = oneshot::channel();
+                gates.insert(round(view), digest, task_rx);
+                owners.push(context.child("gate").spawn({
+                    let observed = observed.clone();
+                    move |_| async move {
+                        task_tx.closed().await;
+                        observed.lock().push((view, "gate"));
+                    }
+                }));
+            }
+
+            // Stage owners park on their persist ack. Awaiting each published id also lets
+            // every gate owner park before pruning.
+            for view in 1..=ROUNDS {
+                let digest = Sha256::hash(&[b"staged", &view.to_be_bytes()]);
+                let (tx, rx) = oneshot::channel();
+                owners.push(context.child("stage").spawn({
+                    let gates = gates.clone();
+                    let observed = observed.clone();
+                    move |_| async move {
+                        gates
+                            .stage(round(view), digest, Arc::new(view), tx, "test")
+                            .await;
+                        observed.lock().push((view, "staged"));
+                    }
+                }));
+                assert_eq!(rx.await.expect("id published"), digest);
+            }
+
+            gates.retain_after(&round(ROUNDS));
+            for owner in owners {
+                owner.await.unwrap();
+            }
+            let observed = observed.lock().clone();
+            (observed, context.auditor().state())
+        })
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5152.
+    ///
+    /// Pruning drops channels whose owners are parked on them. Runs with the same
+    /// seed must wake those owners in the same order.
+    #[test]
+    fn pr_5152_regression() {
+        for seed in 0..8 {
+            assert_eq!(prune_parked_owners(seed), prune_parked_owners(seed));
+        }
     }
 }

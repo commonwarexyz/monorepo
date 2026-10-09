@@ -33,6 +33,7 @@ Use `just` commands, which run tests through `nextest`. Start with the narrowest
 just test -p <crate> <test_name>  # focused iteration
 just test -p <crate>              # changed crate
 just clippy -p <crate>            # changed crate linting
+just dylint -p <crate>            # custom lints (needs cargo-dylint and dylint-link)
 just lint                         # workspace-wide lint, docs, and stability checks
 just pre-pr                       # before opening a PR
 ```
@@ -45,6 +46,7 @@ Async protocol tests must use the deterministic runtime. Use `commonware_utils::
 
 - Keep `mod.rs` minimal, use `cfg_if!` for platform-specific implementations, and put imports at module scope.
 - Use `thiserror` for error types.
+- Hash-collection order varies between runs and breaks deterministic replay. Use `BTreeMap` or `BTreeSet` for collections that are iterated or whose dropped values wake another task, such as channel endpoints. The `hash_iteration` and `hash_drop` dylints flag both cases. A hot lookup map may stay hashed when its order cannot matter. Mark each flagged site with `#[cfg_attr(dylint_lib = "hash_order", expect(<lint>, reason = "..."))]` stating why.
 - Label runtime actors with `context.child(...)`; use `context.shared(true).spawn()` for CPU-intensive work in async code.
 - Benchmark names use `module_path!()` and the format `module::operation/key=value key=value`.
 - When diagnosing a bug, add a failing test before claiming the cause. Mutable storage-operation failures are fatal: do not keep using that database instance or report its inconsistent state as a defect.

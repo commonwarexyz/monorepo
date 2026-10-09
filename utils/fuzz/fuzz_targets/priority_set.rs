@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_utils::PrioritySet;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 #[derive(Arbitrary, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct Item(u32);
@@ -48,7 +48,7 @@ enum FuzzInput {
 
 fn fuzz(input: Vec<FuzzInput>) {
     let mut set: PrioritySet<Item, Priority> = PrioritySet::new();
-    let mut expected_items: HashSet<Item> = HashSet::new();
+    let mut expected_items: BTreeSet<Item> = BTreeSet::new();
 
     for op in input {
         match op {

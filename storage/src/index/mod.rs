@@ -272,7 +272,7 @@ mod tests {
     use commonware_utils::sync::Mutex;
     use rand::RngExt as _;
     use std::{
-        collections::{HashMap, HashSet},
+        collections::{BTreeMap, HashSet},
         sync::Arc,
         thread,
     };
@@ -674,7 +674,7 @@ mod tests {
         index: &mut I,
         mut fill: impl FnMut(&mut [u8]),
     ) {
-        let mut expected = HashMap::new();
+        let mut expected = BTreeMap::new();
         let mut translated = HashSet::new();
         cfg_if::cfg_if! {
             if #[cfg(miri)] {

@@ -15,7 +15,7 @@ use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner, telemetry::m
 use commonware_utils::{PrioritySet, SystemTimeExt, ordered::Set as OrderedSet};
 use rand::{Rng, seq::IteratorRandom};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     num::NonZeroUsize,
     ops::Deref,
     time::{Duration, SystemTime},
@@ -71,7 +71,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     peer_connection_cooldown: Duration,
 
     /// The records of all peers.
-    peers: HashMap<C, Record<C>>,
+    peers: BTreeMap<C, Record<C>>,
 
     /// Primary and secondary peer sets indexed by peer set ID.
     ///
@@ -100,7 +100,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         releaser: Releaser<C>,
     ) -> Self {
         // Create the list of peers and add the bootstrappers.
-        let mut peers = HashMap::new();
+        let mut peers = BTreeMap::new();
         for (peer, ingress) in bootstrappers {
             peers.insert(peer, Record::bootstrapper(ingress));
         }
@@ -457,7 +457,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 DialStatus::Unavailable => {}
             }
         }
-        peers.sort();
 
         Dialable {
             peers,

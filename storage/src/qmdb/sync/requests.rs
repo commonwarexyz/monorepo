@@ -10,14 +10,10 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::future::Aborted;
-use std::{
-    collections::{BTreeMap, HashMap},
-    future::Future,
-    ops::Range,
-};
+use std::{collections::BTreeMap, future::Future, ops::Range};
 
 /// Unique identifier for a fetch request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Id(u64);
 
 /// Mutable request state kept while the request is still tracked.
@@ -36,7 +32,7 @@ pub(super) struct Requests<F: Family, Op, D: Digest, E> {
 
     /// Active requests keyed by ID. Removing an entry drops its [`Aborter`],
     /// which aborts and drops the request's future.
-    tracked: HashMap<Id, TrackedRequest<F>>,
+    tracked: BTreeMap<Id, TrackedRequest<F>>,
 
     /// Reverse index from location to request ID, for gap detection.
     by_location: BTreeMap<Location<F>, Id>,
@@ -47,7 +43,7 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         Self {
             futures: AbortablePool::default(),
             next_id: 0,
-            tracked: HashMap::new(),
+            tracked: BTreeMap::new(),
             by_location: BTreeMap::new(),
         }
     }

@@ -21,7 +21,7 @@ use commonware_utils::channel::{
 use rand::{Rng, RngExt as _};
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -411,12 +411,14 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
     }
 
     async fn run(mut self) {
-        // Setup digest tracking
+        // Track verifications waiting for their payload.
+        //
+        // Ordered so that dropping the application closes them in a reproducible order.
         #[allow(clippy::type_complexity)]
-        let mut waiters: HashMap<
+        let mut waiters: BTreeMap<
             H::Digest,
             Vec<(Context<H::Digest, P>, oneshot::Sender<bool>)>,
-        > = HashMap::new();
+        > = BTreeMap::new();
 
         // Handle actions
         select_loop! {
@@ -494,6 +496,75 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                     }
                 }
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::View;
+    use commonware_cryptography::{Sha256, Signer as _, ed25519::PrivateKey};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_utils::sync::Mutex;
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5152.
+    ///
+    /// Aborting the application drops every verification still waiting for its
+    /// payload, which wakes the task awaiting each response. The waiters must
+    /// close in the same order for two runs with the same seed to match.
+    #[test]
+    fn pr_5152_regression() {
+        fn run(seed: u64) -> (Vec<u8>, String) {
+            deterministic::Runner::seeded(seed).start(|context| async move {
+                let me = PrivateKey::from_seed(0).public_key();
+                let (application, mut mailbox) = Application::<_, Sha256, _>::new(
+                    context.child("application"),
+                    Config {
+                        relay: Arc::new(Relay::new()),
+                        me: me.clone(),
+                        propose_latency: (1.0, 0.0),
+                        verify_latency: (1.0, 0.0),
+                        certify_latency: (1.0, 0.0),
+                        should_certify: Certifier::Always,
+                    },
+                );
+                let handle = application.start();
+
+                // Park a task on the verification of each payload the application has not seen.
+                let round = Round::new(Epoch::new(0), View::new(1));
+                let closed = Arc::new(Mutex::new(Vec::new()));
+                let mut waiters = Vec::new();
+                for seed in 0..8u8 {
+                    let request = Context {
+                        round,
+                        leader: me.clone(),
+                        parent: (View::new(0), genesis::<Sha256>(Epoch::new(0))),
+                    };
+                    let response = mailbox.verify(request, Sha256::hash(&[&[seed]])).await;
+                    let closed = closed.clone();
+                    waiters.push(context.child("waiter").spawn(move |_| async move {
+                        assert!(response.await.is_err());
+                        closed.lock().push(seed);
+                    }));
+                }
+
+                // The application answers requests in order, so a certification response means
+                // every verification above is waiting.
+                let certified = mailbox.certify(round, Sha256::hash(&[b"certify"])).await;
+                assert!(certified.await.unwrap());
+
+                handle.abort();
+                assert!(handle.await.is_err());
+                for waiter in waiters {
+                    waiter.await.unwrap();
+                }
+                let closed = closed.lock().clone();
+                (closed, context.auditor().state())
+            })
+        }
+        for seed in 0..8 {
+            assert_eq!(run(seed), run(seed));
         }
     }
 }

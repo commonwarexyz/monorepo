@@ -178,7 +178,7 @@ pub(crate) mod test {
     use futures::{FutureExt as _, Stream};
     use rand::Rng;
     use std::{
-        collections::HashMap,
+        collections::BTreeMap,
         future::{Future, ready},
         sync::Arc,
         time::Duration,
@@ -673,7 +673,7 @@ pub(crate) mod test {
             // pure function of the immutable log, so only a state check can catch a snapshot
             // rebuilt into the wrong index.
             let ops = create_test_ops(10_000);
-            let mut expected = HashMap::new();
+            let mut expected = BTreeMap::new();
             for op in &ops {
                 match op {
                     Operation::Update(Update(key, value)) => {
@@ -924,7 +924,7 @@ pub(crate) mod test {
 
     /// `P=2` allocates 65,536 hash sub-indexes per index instance (each pre-sizing its map), which
     /// is too memory-heavy for the default suite, and the range/offset arithmetic is shared with
-    /// the ordered variant's P=2 coverage -- so the unordered sweep runs at P=1 only.
+    /// the ordered variant's P=2 coverage, so the unordered sweep runs at P=1 only.
     #[test_traced("WARN")]
     fn test_unordered_partitioned_p1_parallel_init_equivalence() {
         deterministic::Runner::default().start(|context| async move {
@@ -1285,7 +1285,7 @@ pub(crate) mod test {
                     }
                 }
                 // Dedup last-write-wins.
-                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                let mut m: BTreeMap<Digest, Option<Digest>> = BTreeMap::new();
                 for (k, v) in out {
                     m.insert(k, v);
                 }
