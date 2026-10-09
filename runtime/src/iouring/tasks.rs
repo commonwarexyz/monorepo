@@ -2,11 +2,10 @@
 //! future. Root futures, including the tasks one-off workers run as their
 //! roots, belong to their workers instead.
 //!
-//! [`Tasks`] is a sharded intrusive list, as tokio's `OwnedTasks`. Each shard
-//! is a mutex over a doubly linked list threaded through the task cells, whose
-//! [`Links`] sit in a trailer after the future. Any thread inserts or removes a
-//! task in constant time with only the task in hand, and the set allocates
-//! nothing per task.
+//! [`Tasks`] is a sharded intrusive list. Each shard is a mutex over a doubly
+//! linked list threaded through the task cells, whose [`Links`] sit in a
+//! trailer after the future. Any thread inserts or removes a task in constant
+//! time with only the task in hand, and the set allocates nothing per task.
 //!
 //! A task's shard is the top bits of its cell address times a Fibonacci
 //! hashing constant. Cells are cache-line aligned and the allocator places
@@ -46,10 +45,11 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Shards per worker, as in tokio.
+/// Shards per worker, so workers inserting and removing at once seldom
+/// share a lock.
 const SHARDS_PER_WORKER: usize = 4;
 
-/// Most shards, as in tokio.
+/// Most shards.
 const MAX_SHARDS: usize = 1 << 16;
 
 /// A task's links in its shard's list, touched only under that shard's lock.
@@ -183,7 +183,7 @@ pub struct Tasks {
 
 impl Tasks {
     /// A set sized for `workers` workers, with four shards per worker rounded
-    /// up to a power of two, as tokio sizes its own.
+    /// up to a power of two.
     pub fn new(workers: usize) -> Self {
         // Loom requires every execution to make the same choices, but a task's
         // shard hashes its heap address, which can change between executions,
@@ -204,7 +204,7 @@ impl Tasks {
             "shard count must be a power of two"
         );
 
-        // Starting at one keeps every identity nonzero, as tokio's are.
+        // Starting at one keeps every identity nonzero.
         // Wrapping would take 2^64 sets.
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NonZeroU64::new(NEXT_ID.fetch_add(1, Ordering::Relaxed))

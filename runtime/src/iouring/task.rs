@@ -533,8 +533,8 @@ struct Cell<F> {
     header: Header,
     /// The future, `None` once completed or cleared.
     future: UnsafeCell<Option<F>>,
-    /// Links in the task set, after the future as in tokio's trailer,
-    /// since only insertion, removal, and teardown touch them.
+    /// Links in the task set, after the future, since only insertion,
+    /// removal, and teardown touch them.
     links: Links,
     /// Sets the cell's alignment with a zero-sized field.
     _align: [CachePadded<()>; 0],
