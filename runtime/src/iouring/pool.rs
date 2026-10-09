@@ -476,6 +476,6 @@ fn run(
 /// Send a pool worker's failure to the runner, then wake worker zero's root,
 /// which takes the failure before its next poll.
 fn report(pool: &Table, failures: &Panicker, panic: Panic) {
-    failures.notify(panic);
+    failures.notify_or_forget(panic);
     let _ = pool.mailbox(0).send(Message::WakeRoot);
 }

@@ -312,19 +312,6 @@ pub fn at_park(pool: &Table, index: u32, point: ParkPoint) {
 }
 
 thread_local! {
-    /// Callback run once by this thread's runner after its root completes and
-    /// before worker zero closes the pool.
-    static AFTER_ROOT: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
-}
-
-/// Run the callback a test installed for the window after the root.
-pub fn after_root() {
-    if let Some(callback) = AFTER_ROOT.with(RefCell::take) {
-        callback();
-    }
-}
-
-thread_local! {
     /// Callback run once by this thread's runner after the pool has closed and
     /// before the supervision tree is aborted.
     static BEFORE_ABORT: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
@@ -3769,65 +3756,6 @@ fn test_wake_from_a_destructor_during_teardown_leaves_no_runnable() {
     }
 }
 
-/// A waker whose wake reports through `failed` and then panics, so a timer
-/// expiring on its worker fails that worker through its callback batch.
-struct FailingWake(Arc<AtomicBool>);
-
-impl ArcWake for FailingWake {
-    fn wake_by_ref(this: &Arc<Self>) {
-        this.0.store(true, Ordering::SeqCst);
-        panic!("injected pool worker callback failure");
-    }
-}
-
-/// Start a task on another worker that registers a sleep there whose wake
-/// fails that worker once the sleep expires.
-fn fail_worker_one(context: &Context, failed: Arc<AtomicBool>) {
-    let (handle, _) = spawn_elsewhere(context, {
-        let context = context.child("faulty");
-        async move {
-            let sleep = context.sleep(Duration::from_millis(100));
-            let mut sleep = pin!(sleep);
-            let waker = waker(Arc::new(FailingWake(failed)));
-            assert!(
-                sleep
-                    .as_mut()
-                    .poll(&mut TaskContext::from_waker(&waker))
-                    .is_pending()
-            );
-            pending::<()>().await;
-        }
-    });
-    mem::forget(handle);
-}
-
-/// A pool worker that fails after the root has completed, before worker zero
-/// closes the pool, still fails the runner.
-#[test]
-fn test_pool_worker_failure_after_the_root_completes_fails_the_runner() {
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        Runner::new(config().with_worker_threads(2)).start(|context| {
-            // Hold worker zero between its root and the pool's close until
-            // worker one has failed and reported.
-            let failed = Arc::new(AtomicBool::new(false));
-            AFTER_ROOT.with(|slot| {
-                let failed = failed.clone();
-                *slot.borrow_mut() = Some(Box::new(move || {
-                    let deadline = Instant::now() + TEST_TIMEOUT;
-                    while !failed.load(Ordering::SeqCst) {
-                        assert!(Instant::now() < deadline, "worker one never failed");
-                        thread::sleep(Duration::from_millis(1));
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }));
-            });
-            async move { fail_worker_one(&context, failed) }
-        });
-    }));
-    let panic = result.expect_err("a pool worker failure must fail the runner");
-    assert!(extract_panic_message(&*panic).contains("injected pool worker callback failure"));
-}
-
 /// A waker whose destruction panics, so releasing its timer fails the worker
 /// that holds it.
 struct PanicOnDrop;
@@ -3873,6 +3801,94 @@ fn test_pool_worker_failure_during_shutdown_fails_the_runner() {
     assert!(
         extract_panic_message(&*panic).contains("injected pool worker failure during shutdown")
     );
+}
+
+/// A waker whose wake reports through `failed` and then panics, so a timer
+/// expiring on its worker fails that worker through its callback batch.
+struct FailingWake(Arc<AtomicBool>);
+
+impl ArcWake for FailingWake {
+    fn wake_by_ref(this: &Arc<Self>) {
+        this.0.store(true, Ordering::SeqCst);
+        panic!("injected pool worker callback failure");
+    }
+}
+
+/// A waker whose release panics with a payload whose destructor panics again.
+struct ReleasePanicsWithPayload(Arc<AtomicUsize>);
+
+impl ArcWake for ReleasePanicsWithPayload {
+    fn wake_by_ref(_: &Arc<Self>) {}
+}
+
+impl Drop for ReleasePanicsWithPayload {
+    fn drop(&mut self) {
+        if !thread::panicking() {
+            panic_any(PanicPayload {
+                drops: self.0.clone(),
+                panics: true,
+            });
+        }
+    }
+}
+
+/// A pool worker that fails after the root completes, then again during its
+/// cleanup, fails the runner with its first failure, and the second payload is
+/// leaked rather than dropped.
+#[test]
+fn test_late_pool_worker_failure_outlives_a_second_failure() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        Runner::new(config().with_worker_threads(2)).start(|context| {
+            // Worker zero waits between the root and the pool's stop until
+            // worker one has failed.
+            let failed = Arc::new(AtomicBool::new(false));
+            BEFORE_ABORT.with(|slot| {
+                let failed = failed.clone();
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    let deadline = Instant::now() + TEST_TIMEOUT;
+                    while !failed.load(Ordering::SeqCst) {
+                        assert!(Instant::now() < deadline, "worker one never failed");
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                }));
+            });
+            let drops = drops.clone();
+            async move {
+                let (handle, _) = spawn_elsewhere(&context, {
+                    let context = context.child("faulty");
+                    async move {
+                        // Cleanup releases this waker, failing worker one again.
+                        let long = context.sleep(Duration::from_secs(3600));
+                        let mut long = pin!(long);
+                        let release = waker(Arc::new(ReleasePanicsWithPayload(drops)));
+                        assert!(
+                            long.as_mut()
+                                .poll(&mut TaskContext::from_waker(&release))
+                                .is_pending()
+                        );
+                        drop(release);
+
+                        let short = context.sleep(Duration::from_millis(20));
+                        let mut short = pin!(short);
+                        let fail = waker(Arc::new(FailingWake(failed)));
+                        assert!(
+                            short
+                                .as_mut()
+                                .poll(&mut TaskContext::from_waker(&fail))
+                                .is_pending()
+                        );
+                        drop(fail);
+                        pending::<()>().await;
+                    }
+                });
+                mem::forget(handle);
+            }
+        })
+    }));
+    let panic = result.expect_err("a pool worker failure must fail the runner");
+    assert!(extract_panic_message(&*panic).contains("injected pool worker callback failure"));
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
 }
 
 /// An unwind between the root and the runner's shutdown still stops the other
