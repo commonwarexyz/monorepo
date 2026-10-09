@@ -584,7 +584,7 @@ run target *args:
         cd ../consensus/fuzz && just run "$@" ;;
     esac
 
-# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--fuzz-targets GLOB]... [--state-targets GLOB]... [--invariants LIST]... [--skip-campaign] [--skip-synthesis] [--parallel] [--tmux] [--state-reaching] [-- -fork=8]
+# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--fuzz-targets GLOB]... [--state-targets GLOB]... [--invariants LIST]... [--skip-campaign] [--skip-synthesis] [--rebaseline] [--parallel] [--tmux] [--state-reaching] [-- -fork=8]
 fuzz target *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -607,7 +607,8 @@ fuzz target *args:
     # --skip-synthesis fuzzes the scaffolds a synthesis already built, whatever
     # their verdicts, because a synthesis refuses a checkout that drifted from its
     # baseline, as one does once an upstream fix is merged into it; it needs
-    # --state-reaching.
+    # --state-reaching. --rebaseline instead lets that synthesis accept the merge
+    # and revalidate every scaffold (synthesize --rebaseline).
     # --invariants LIST goes to the campaign, which binds only the invariants it
     # names, so it needs a campaign and a profile.
     # Both pattern flags reach the listing and the synthesis as --match, whose one
@@ -631,6 +632,7 @@ fuzz target *args:
     windows=no
     campaign=yes
     synthesis=yes
+    rebaseline=()
     narrowed=no
     cards=no
     reaching=no
@@ -641,6 +643,7 @@ fuzz target *args:
       case "$1" in
         --skip-campaign)        campaign=no; shift ;;
         --skip-synthesis)       synthesis=no; shift ;;
+        --rebaseline)           rebaseline=(--rebaseline); shift ;;
         --parallel|--parallels) parallel=yes; shift ;;
         --tmux)                 parallel=yes; windows=yes; shift ;;
         --state-reaching)       reaching=yes; shift ;;
@@ -683,6 +686,10 @@ fuzz target *args:
     fi
     if [ "$synthesis" = no ] && [ "$reaching" = no ]; then
         echo "just fuzz: --skip-synthesis needs --state-reaching" >&2
+        exit 1
+    fi
+    if [ "${#rebaseline[@]}" -gt 0 ] && { [ "$reaching" = no ] || [ "$synthesis" = no ]; }; then
+        echo "just fuzz: --rebaseline goes to synthesis; it needs --state-reaching, without --skip-synthesis" >&2
         exit 1
     fi
     if [ "$every" = no ] && [ "$narrowed" = yes ]; then
@@ -734,7 +741,7 @@ fuzz target *args:
     kind=target
     if [ "$reaching" = yes ]; then
         if [ "$synthesis" = yes ]; then
-            python3 scripts/statelens.py synthesize --profile "$profile" ${patterns[@]+"${patterns[@]}"}
+            python3 scripts/statelens.py synthesize --profile "$profile" ${rebaseline[@]+"${rebaseline[@]}"} ${patterns[@]+"${patterns[@]}"}
             list
         fi
         if [ "${#names[@]}" -eq 0 ]; then
@@ -904,7 +911,7 @@ prefixed with `statelens:`.
 | `code` | `code build [--subsystem S]`, and `code defs|refs|callers|callees NAME [--tests] [--all]` (section 5.7) | 0 done, 1 usage, no index, or no symbol matching NAME |
 | `coverage` | `coverage [--profile P] [TARGET...]`; replays the corpus of each StateLens target under coverage instrumentation and writes an HTML report per target plus a merged one (section 7.13). A positional name is a profile or a target, as `just fuzz` reads it; a scaffold's name is accepted like a variant's, and a profile covers its scaffolds with its variants (section 18.9). A target with no corpus is skipped | 0 done, 1 usage or an unknown target, 2 no corpus anywhere, no `llvm-tools-preview`, or a failed coverage run |
 | `targets` | `targets [--profile P] [--state-reaching] [--match GLOB]...`; the StateLens targets `P` builds, one per line, which is what `just fuzz <profile>` reads rather than parsing a campaign summary. `--match` keeps the targets a shell pattern names, by variant name or by the original target's, and is what `just fuzz <profile> --fuzz-targets GLOB` passes. With `--state-reaching` it lists the scaffolds of the selected pairs (card, base) instead, and a `TS-NNNN` pattern names a card; `just fuzz` forwards `--state-targets` and `--fuzz-targets` alike as `--match`, having checked each pattern's form, and with `--skip-synthesis` this listing alone names the scaffolds that run (section 18.9) | 0 done, 1 a pattern that names no target; with `--state-reaching`, 0 done, also with no scaffold yet, 1 no card and base selected or a selected card with a lint problem |
-| `synthesize` | `synthesize [--agent A] [--profile P] [--match GLOB]... [--redo]`, where `P` is `simplex` or `marshal`, by default the profile of `SL/campaign/meta.json`; writes, builds and checks one scaffold per selected card on each selected base, every candidate base with no base pattern, on a checkout a campaign of `P` instrumented (section 18.6) | 0 at least one scaffold exists for the selection, 1 usage or nothing selected, 2 a failed precondition, an edit outside the edit contract's scope, a missing anchor, or a `--redo` that does not apply, 3 no scaffold built |
+| `synthesize` | `synthesize [--agent A] [--profile P] [--match GLOB]... [--redo]`, where `P` is `simplex` or `marshal`, by default the profile of `SL/campaign/meta.json`; writes, builds and checks one scaffold per selected card on each selected base, every candidate base with no base pattern, on a checkout a campaign of `P` instrumented, at the campaign's base commit or past it only by commits that touch only `SL/` (section 18.6.2, Preconditions) | 0 at least one scaffold exists for the selection, 1 usage or nothing selected, 2 a failed precondition, an edit outside the edit contract's scope, a missing anchor, or a `--redo` that does not apply, 3 no scaffold built |
 | `reach-verdict` | `reach-verdict --card CARD --module MODULE --canonical LOG [--canonical-code N] [--control LOG] [--control-code N]`; the reach verdict of one scaffold from replays captured outside synthesis, through the same `card_history`, `first_run` and `reach_verdict` the synthesis uses (section 18.8): prints the verdict, then the reasons, annotations and control reason one per line. `SL/scripts/differential.sh` is its caller (section 18.10.1) | 0 REACHED, 1 any other verdict |
 | `test-gate` | `test-gate [--profile P]`; runs the test gate's command (section 7.7) on the checkout as it stands, then, for a profile that has them, the component tests, which are reported and not gated. With no `--profile` it takes the profile from `SL/campaign/meta.json` | 0 gate passed, 1 no profile, 4 gate failed |
 | `ast` | `ast sites NAME [PATH...] [--writes-only] [--tests]`, `ast notes [--pattern RE] [PATH...] [--tests]`; a `PATH` is a file or a directory (section 5.8) | 0 done, including no sites, 1 usage or rust-analyzer absent |
@@ -4848,7 +4855,7 @@ for `design` and `paper`).
 | D59 | Target states are a registry of their own: `SL/target-states/<subsystem>/TS-NNNN.md` for `simplex` and `marshal`, and the git-ignored `SL/target-states.local/<subsystem>/`. One global `TS` counter covers both (as D18), every card is active, and a card has no status field (as D1). A card is a reachability goal, never an oracle, and names no probe label, because labels change with every campaign. The registry reuses the invariant files' machinery: file names, lint and excerpts. | R-TS-REG-1 to R-TS-REG-4 |
 | D60 | Phase 1 writes cards with `extract --states`, one prompt, `state-analyst.md`, for every kind, and the subsystem's analyst part. The kinds are those of section 6.1 plus `test` and `text`. A card goes to the local registry when its source is not public: `kb`, `text`, a path outside the repository, or a run with `--local`. The card is the record of its source: synthesis reads only the card and the code, and no raw input is archived. | R-TS-P1-1 to R-TS-P1-3 |
 | D61 | The runtime template gains a read side (section 9.6): an ordered trace of the guarded probe observations of one input, off unless a scaffold watches, with the call site and the runtime instance of each; the fresh-run hook counts runtime instances. One event sequence per input gives every observation and every helper event (`tick`) its own position, so positions are unique and strictly ordered. Instrumentation never calls it. The counter table and the features are unchanged. | R-TS-FB-1, R-INS-3, R-INS-5 |
-| D62 | `synthesize` is a step of its own, run after a campaign of the same profile on the checkout it instrumented. It never instruments: it adds no probe, assertion or ghost state. Its edits follow the edit contract (R-TS-SYN-3, section 18.6.1), whose guards 1 to 3 compare the tree with a baseline that the campaign's first synthesis takes and every later one reuses. Its agent runs with Phase 2 permissions (D4), as a second role with its own scope (amends R-INS-7). Pairs of a card and a base are synthesized one at a time, because they share one crate. qmdb is refused. | R-TS-SYN-1 to R-TS-SYN-4 |
+| D62 | `synthesize` is a step of its own, run after a campaign of the same profile on the checkout it instrumented: `HEAD` is the campaign's base, or past it only by commits that touch only `SL/`, the method and not the tree the campaign instrumented, which the synthesis says in one console line; anything else is refused (section 18.6.2, Preconditions). It never instruments: it adds no probe, assertion or ghost state. Its edits follow the edit contract (R-TS-SYN-3, section 18.6.1), whose guards 1 to 3 compare the tree with a baseline that the campaign's first synthesis takes and every later one reuses. Its agent runs with Phase 2 permissions (D4), as a second role with its own scope (amends R-INS-7). Pairs of a card and a base are synthesized one at a time, because they share one crate. qmdb is refused. | R-TS-SYN-1 to R-TS-SYN-4 |
 | D63 | Scaffolds are written, not derived: an exception to D5, D24, D57 and Appendix B.1. Per pair (card, base) the agent writes a module `<package>/src/target_states/tsNNNN_<base>.rs` and a thin target `<base>_tsNNNN_statelens.rs` (Appendix B.6): a card yields one scaffold per selected base, and the agent chooses no base; the script owns `target_states/mod.rs` (the helper template and the `pub mod` lines), its anchored declaration in `<package>/src/lib.rs`, and the `[[bin]]` block, the base's renamed (Appendix B.2), which it writes after the agent's attempt; the agent adds the same block only for its own build and removes it again (section 18.7). The name keeps the `<profile>_` prefix and the `_statelens` suffix, so `just run`, the refusal of section 7.1, `clean` and `--fuzz-targets` keep working. Bases with `fuzz_mutator!` are excluded. D15 and the Byzantine guard apply. | R-TS-SC-1, R-TS-SYN-4, R-P2-4 |
 | D64 | Knobs are the first K <= 16 bytes of the base input's own `raw_bytes`, zero-padded. A knob is `domain[byte % len]` with the source value as `domain[0]`, so the empty input is the canonical input and decodes to the source history. The input type, the `run` recipe and the libFuzzer flags are the base's; there is no seed corpus. | R-TS-SC-2, R-TS-NF-1 |
 | D65 | One stage per History event. A stage is held only through a witness record that binds every entity of its line, from an `exact`, `intrinsic` or `construction` witness, and the script recomputes the records and rejects those that do not establish the line. Positions come from the event sequence (D61), and the helper takes them itself, for a stamped entry and for an action it performs, so order checks are strict, and an incarnation is named by the position of the restart that began it. A held stage adds the feature `(site_hash("TS-NNNN"), k, 0)`. The first miss closes the scripted prefix, except in the control run, and the input continues into the base's free-running phase and every oracle. Handoff comes before recovery: the target state is witnessed at the handoff instant, by a fresh read of `En`'s witness inside the handoff call, with every fault the prefix opened still in place, and those faults are released in the continuation, no later than the base's first heal. | R-TS-SC-3, R-TS-SC-4, R-TS-FB-2 |
@@ -5270,8 +5277,20 @@ procedures refer to R-TS-SYN-3 rather than restate what an edit may do.
 failed precondition with code 2. Usage errors and the preconditions that read `meta.json` are
 reported before the agent CLI is checked, an exception to section 12:
 
-- `SL/campaign/meta.json` names the profile, its `base` equals `HEAD`, and its invariants
-  include no `FALSE-` ID, because a false invariant panics in every scaffold;
+- `SL/campaign/meta.json` names the profile, its `base` is `HEAD` or `HEAD` is past it only
+  by commits that touch only `SL/`, and its invariants include no `FALSE-` ID, because a
+  false invariant panics in every scaffold. The base is what the campaign instrumented: the
+  profile roots, the fuzz packages, the runtime, the manifests and `Cargo.lock`. A commit
+  that touches only `SL/`, the method (scripts, prompts, cards, docs, templates, the
+  justfile), leaves that tree unchanged, so a `HEAD` that descends from the base with
+  `git diff --name-only --no-renames <base> HEAD` not empty and every path under `SL/` is
+  accepted with one console line, `HEAD <head> is <n> commit(s) past the campaign base
+  <base>; the commits touch only statelens/, so the instrumented tree is the campaign's`,
+  and the synthesis goes on naming the campaign's base in the prompt's `BASE` and the
+  reports' `Base commit` (`revalidation.json` and `pending/` record no commit). Any other
+  path in that diff, an empty diff, a `HEAD` that does not descend from the base, or a base
+  not in the history exits with code 2: `campaign/meta.json names the base <base>, but
+  HEAD is <head>; synthesize on the checkout the campaign instrumented`;
 - `SL/campaign/summary.txt` reports `READY` or `PANIC (tests)`;
 - the profile's runtime module (section 5.5) exists and contains `pub fn watch(`; otherwise
   "this checkout predates the read side or was cleaned; use a fresh clone";
@@ -5367,8 +5386,25 @@ restores it and drops the pair's line from `target_states/mod.rs`, with a warnin
 `pending/`, and a revalidation record the pair wrote (Finish) stays; one whose pair has a
 report is only deleted, and one that cannot be read, or names no pair, exits with code 2. Then, before `--redo` reverse-applies a diff and before any pair, the script checks
 guards 1 to 3 against `B`; a failure exits with code 2 ("the checkout differs from the
-synthesis baseline: <path>; use a fresh clone"), so a breach an earlier synthesis left behind,
-such as an out-of-scope edit, never passes. The script then inserts the declaration of section
+synthesis baseline: <path>; use a fresh clone", with "rerun with --rebaseline to accept it, or"
+before "use" when the flag would accept the difference), so a breach an earlier synthesis left
+behind, such as an out-of-scope edit, never passes. With `--rebaseline`, an operator's change,
+an upstream merge into the checkout, is accepted when guard 2 passes and guard 3 passes once the
+operator's in-scope files are taken into `B`: those are the files of `B` in the scope that
+differ from it, are not the script's own (the manifest, `Cargo.lock`, `target_states/mod.rs`,
+the crate root with the declaration), lie in no pair's recorded diff and outside
+`target_states/`, and whose `sl_*` calls and runtime calls are as in `B` (a merged file that
+only gains a log line, which guard 3 refuses by itself, is one); guard 3 still requires every
+line the campaign's instrumentation added. The script then records in `revalidation.json` a
+revalidation of every standing scaffold (cause "--rebaseline accepted operator changes to
+<paths>", replays in `after-rebaseline/`), copies the old `state.json`, the accepted paths and
+the old `B` copies of the in-scope files to `SL/campaign/reach/rebaseline-<stamp>/`, writes the
+new copies to `B`, records the current worktree state as `B`'s and prints "synthesis:
+--rebaseline accepted <n> changed path(s) (<paths>); every standing scaffold is revalidated
+before any pair; ...". The revalidation is recorded before `B` changes, so an interrupt between
+them still revalidates on the next run. A guard 2 failure, and a guard 3 failure the operator's
+files do not explain, is never accepted. With nothing to accept the flag prints "synthesis:
+--rebaseline: nothing differs from the baseline". The script then inserts the declaration of section
 5.5 after the profile's anchor, unless it is there; a missing or repeated anchor exits with
 code 2. It writes `SL/campaign/reach/empty`, a file of 0 bytes. After `--redo` and before any
 pair, it reads the report of every scaffold in the package whose card exists, for revalidation
@@ -5521,7 +5557,15 @@ version's attempt:
      pair, in `TS-MMMM_<b>/after-rollback/`, under `## Revalidation after a rollback`; until
      then, those reports keep the verdicts the restored edits gave them. A kept version always
      changes its module, so a pair revalidates every other scaffold that stands, the card's
-     other pairs included; only a pair with none revalidates nothing. A revalidation directory
+     other pairs included; only a pair with none revalidates nothing. When the kept version
+     changed nothing shared but its own module, the revalidation covers only the pairs the run
+     selected and those whose module names the changed one: each other standing scaffold's
+     report gets a section `## Not revalidated after TS-NNNN_<base>` ("- Cause: ...", "- This
+     run did not select the pair; a synthesis that selects it checks it."), the console says
+     "synthesis: <n> scaffold(s) outside the selection not revalidated (...); their reports
+     say so", and a synthesis that selects the pair checks it. A version that edits shared
+     code beyond its module, and every undo (`--redo`, the last check, a rollback,
+     `--rebaseline`), revalidates every standing scaffold as before. A revalidation directory
      that exists stays as it is,
      since a report may name it; the new replays go to `<directory>.<stamp>/`, which the
      report's section names.
@@ -5543,8 +5587,9 @@ it NOT BUILT, printing its line again with `(last check)`, and its report names 
 `revalidation.json` before the undo in the same way. So no version is
 fuzzed with an assertion or probe call, a line the campaign added, or the runtime module
 changed in its text; what these text checks miss is in section 18.11.
-Every scaffold in the package, of this synthesis or an earlier one, is then built once more,
-also when the run synthesized no pair, logged to
+Every scaffold of the run's selection, and every scaffold in the package once a
+revalidation of the run covered them all, of this synthesis or an earlier one, is then built
+once more, also when the run synthesized no pair, logged to
 `SL/campaign/logs/fuzz-build-<scaffold>-last.log`; one that does not build exits with code 2
 ("the last check: the scaffold <scaffold> does not build; see <log>, and undo the pair whose
 edits broke it with --redo or use a fresh clone"). This catches a break that no pair's diff
@@ -5595,9 +5640,11 @@ the pair's name, removed when the pair ends. Prompts and logs go to `SL/campaign
 `SL/campaign/logs/`, named `synthesize-TS-NNNN_<base>-<a>` and `test-TS-NNNN_<base>`.
 
 **Console.** One line per pair, then a `run` and a `replay` line per scaffold of the
-selection, a skipped pair's included, none with a libFuzzer argument:
+selection, a skipped pair's included, none with a libFuzzer argument; the first line only
+when `HEAD` is past the campaign's base (Preconditions):
 
 ~~~
+statelens: HEAD <head> is <n> commit(s) past the campaign base <base>; the commits touch only statelens/, so the instrumented tree is the campaign's
 statelens: cards      <n> tracked, <m> local
 statelens: TS-NNNN    skipped: TS-NNNN on <base> was synthesized as <scaffold>; use --redo
 statelens: TS-NNNN    <verdict>[ (<annotation>, ...)]   <scaffold | no scaffold on <base>>[; <crash note>]
@@ -6320,12 +6367,25 @@ and the scaffolds step 2 listed, those a synthesis already built for the selecti
 are through step 6, whatever their verdicts; the campaign of step 3 still runs unless
 `--skip-campaign`, and the libFuzzer arguments after `--` reach each `just run`. The flag does
 not touch the synthesis, its baseline or its guards, so a synthesis still refuses the drifted
-checkout. A selection no scaffold was built for exits with code 1 as in step 5, and a pattern
+checkout. A commit past the campaign's base that touches only `SL/`, a card or a method fix
+committed in the checkout, is no drift: the synthesis accepts such a `HEAD` with one console
+line (section 18.6.2, Preconditions), its guards still compare the tree with `B`, and
+`--skip-synthesis` is not needed for it; a commit that touches anything else is refused as
+before. A selection no scaffold was built for exits with code 1 as in step 5, and a pattern
 that names no card or base fails in step 2, as without the flag. For
 `just fuzz simplex --tmux --state-reaching --skip-campaign --skip-synthesis --state-targets "TS-000*" --state-targets "TS-001[0]" --fuzz-targets simplex_cert_mock --fuzz-targets simplex_cert_mock_twins_mutator --fuzz-targets simplex_cert_mock_twins_campaign -- -max_total_time=7200`,
 step 2 lists the built scaffolds of the selected pairs, the five patterns given as `--match` in
 order, and step 6 opens the session `statelens-simplex-reach` with one window per scaffold,
 each running `just run <scaffold>` with `-max_total_time=7200`; no `synthesize` runs.
+
+**`--rebaseline`.** To synthesize new cards on such a checkout instead, `--rebaseline` (refused
+without `--state-reaching` and with `--skip-synthesis`: "just fuzz: --rebaseline goes to
+synthesis; it needs --state-reaching, without --skip-synthesis", exit code 1) is passed to the
+`synthesize` call of step 4 only, which accepts the operator's drift, outside its scope and in
+the scope's files whose instrumentation is intact, revalidates every standing scaffold and goes
+on (section 18.6.2, Once per run). A standing scaffold module the operator edited stays as
+edited, and a later `--redo` of that pair fails to reverse-apply its diff until the edit is
+reverted (section 18.11).
 
 **justfile.** New recipes `extract-states` (`python3 scripts/statelens.py extract --states
 "$@"`) and `synthesize` (`python3 scripts/statelens.py synthesize "$@"`). In `fuzz`, the header
@@ -6583,6 +6643,11 @@ assertions (`finish` and the scenario's own `assert_eq!`s) can.
 
 ### 18.11 Known limitations
 
+- `--rebaseline` does not record an operator edit of a standing scaffold module, or of a file a
+  pair's diff changed, as that pair's version, so a `--redo` of the pair stops with "the diff of
+  <pair> does not apply in reverse" until the edit is reverted; and it judges an in-scope file
+  by its `sl_*` and runtime calls, so a merge that only moves a probe within its file is
+  accepted like any other change of that file.
 - Most probe values carry no view, digest or other identity, so a probe binds few entities, and
   many stages need an exact observable or end `unverifiable`. A beacon a later campaign adds is
   the remedy; synthesis never adds one.
@@ -6604,10 +6669,13 @@ assertions (`finish` and the scenario's own `assert_eq!`s) can.
   build and three replays of every other scaffold that stands, since a module can use a
   sibling module.
 - A card on b selected bases is b pairs, each with its own attempts, builds, replays and gate,
-  and each kept pair revalidates every other standing scaffold, the card's other pairs
-  included: a card on all 20 simplex bases (21 targets less Mallory; marshal has 13) costs up
-  to 20 syntheses and 20 x (S - 1) revalidation builds with three replays each, S being the
-  scaffolds that stand when each pair finishes. `--fuzz-targets`, or `<base>_tsNNNN` patterns
+  and each kept pair revalidates the other selected pairs, the card's other pairs included,
+  and every standing scaffold when it edited shared code beyond its module: a card on all 20
+  simplex bases (21 targets less Mallory; marshal has 13) costs up to 20 syntheses and
+  20 x 19 revalidation builds with three replays each. A scaffold outside the selection whose
+  module neither the selection's pairs touch nor names a changed module is only noted, so a
+  change that reaches it through an inherent method or a trait impl a new module adds to a
+  harness type is found only when a synthesis selects it. `--fuzz-targets`, or `<base>_tsNNNN` patterns
   to `synthesize`, bound it. Accepted: the scaffolds of one card on different bases are
   different fuzz targets, and which base reaches the state is what the pairs find out.
 - Revalidation compares an earlier scaffold with the verdict its report records, read at the
@@ -6631,6 +6699,12 @@ assertions (`finish` and the scenario's own `assert_eq!`s) can.
 - A state internal to a Byzantine replica cannot be witnessed under the guard.
 - A checkout instrumented before the read side existed, or cleaned, cannot synthesize; it
   needs a fresh clone and a campaign.
+- Whether `HEAD` is still the campaign's tree is judged by the paths the commits past the base
+  touch, not by their content: a commit that touches a path outside `SL/`, the root
+  `README.md` say, is refused although it leaves the profile roots, the fuzz packages, the
+  runtime and the manifests as they were, and so is an empty diff, as an `--allow-empty`
+  commit leaves; the operator keeps such commits out of the campaign checkout, or takes a
+  fresh clone and a campaign.
 - A test that drives one actor through its mailbox, as TS-0002's does, becomes a History of the
   protocol events that deliver the same inputs (section 18.4), which a cluster may reach rarely,
   or only with a capability the harness lacks, reported as `cannot:`.

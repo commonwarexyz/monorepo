@@ -5553,6 +5553,26 @@ class FuzzRecipe(unittest.TestCase):
             self.assertEqual((code, calls), (1, []), args)
             self.assertIn("just fuzz: --skip-synthesis needs --state-reaching", err, args)
 
+    def test_rebaseline_goes_to_the_synthesis_only(self):
+        code, calls, err = self.fuzz(
+            "simplex", "--state-reaching", "--skip-campaign", "--rebaseline",
+            "--state-targets", "TS-0018", "--fuzz-targets", "simplex_cert_mock",
+            "--", "-max_total_time=5", after=self.lines(self.SCAFFOLDS),
+        )
+        self.assertEqual(code, 0, err)
+        matches = "--match TS-0018 --match simplex_cert_mock"
+        self.assertEqual(calls[:2], [
+            f"python3 scripts/statelens.py targets --profile simplex --state-reaching {matches}",
+            f"python3 scripts/statelens.py synthesize --profile simplex --rebaseline {matches}",
+        ])
+        self.assertEqual(["--rebaseline" in call for call in calls].count(True), 1, calls)
+        for args in (["simplex", "--rebaseline"],
+                     ["simplex", "--state-reaching", "--skip-synthesis", "--rebaseline"]):
+            code, calls, err = self.fuzz(*args)
+            self.assertEqual((code, calls), (1, []), args)
+            self.assertIn("just fuzz: --rebaseline goes to synthesis; it needs --state-reaching, "
+                          "without --skip-synthesis", err, args)
+
     def test_the_drifted_checkout_command_opens_a_window_per_built_scaffold(self):
         # The command that failed on a finished checkout an upstream fix was merged into,
         # with the flag added: the built scaffolds of the selection, one tmux window each,
@@ -6554,6 +6574,13 @@ E2. R: queues certification of a view.
         self.assertEqual(header["fields"]["Stages"].split("; ")[-1], "E4 exact certify")
         self.assertEqual(sl.module_header("//! Control: n/a.\n")["control"], "n/a")
         self.assertIsNone(sl.module_header("//! TS-0004 on x\n")["control"])
+        # A blank header line ends a field: the description after it is not part of Missing.
+        described = ("//! TS-0018 on x\n//! Shape: B\n//! Missing: none\n//!\n"
+                     "//! The base is the Standard driver,\n//! copied below.\n")
+        header = sl.module_header(described)
+        self.assertEqual((header["missing"], header["fields"]["Missing"]), ([], "none"))
+        wrapped = "//! TS-0018 on x\n//! Missing: journal seeding;\n//! a floor\n//!\n//! Text.\n"
+        self.assertEqual(sl.module_header(wrapped)["missing"], ["journal seeding", "a floor"])
 
     def test_best_version(self):
         def result(verdict, k):
@@ -8366,10 +8393,12 @@ class Synthesize(unittest.TestCase):
         self.assertTrue(section.endswith(f"- Replays: {after}/\n"), section)
         for replay in ("canonical", "control", "final"):
             self.assertTrue((self.repo / after / replay / "replay.log").is_file())
-        # TS-0004 is built for the revalidation, TS-0005 twice, TS-0004 for the new version's
-        # revalidation, and both by the last check.
+        # TS-0004 is built for the revalidation and TS-0005 twice; the new version adds only
+        # its own module and the run selected TS-0005 only, so TS-0004 is noted instead of
+        # revalidated again; both by the last check.
+        self.assert_not_revalidated("TS-0004_simplex_a", "TS-0005_simplex_a")
         self.assertEqual(self.builds, [self.FIRST] + [self.SECOND] * 2
-                         + [self.FIRST, self.FIRST, self.SECOND])
+                         + [self.FIRST, self.SECOND])
 
     def test_a_redo_that_breaks_a_kept_scaffold_records_it_not_built(self):
         # TS-0005_simplex_a's scaffold compiles only with TS-0004_simplex_a's accessor, and a --redo of TS-0004
@@ -8519,9 +8548,11 @@ class Synthesize(unittest.TestCase):
         self.assertEqual(self.synthesize("--match", "TS-0005"), 0)
         self.assert_revalidation_completed("--redo")
         self.assertEqual(self.line("TS-0005"), "TS-0005    REACHED 4/4   " + self.SECOND)
-        # TS-0004 is revalidated before the pair, and after its new version.
+        # TS-0004 is revalidated before the pair, and noted, not revalidated, after its new
+        # version, which adds only its own module.
+        self.assert_not_revalidated("TS-0004_simplex_a", "TS-0005_simplex_a")
         self.assertEqual(self.builds, [self.FIRST] + [self.SECOND] * 2
-                         + [self.FIRST, self.FIRST, self.SECOND])
+                         + [self.FIRST, self.SECOND])
 
     def test_a_synthesis_of_no_card_completes_an_interrupted_revalidation(self):
         self.interrupted_redo()
@@ -8612,6 +8643,16 @@ class Synthesize(unittest.TestCase):
         self.assertIsNotNone(owed, "the restore of TS-0005_simplex_a's edits owes TS-0004_simplex_a's revalidation")
         self.assertEqual(json.loads(owed), self.ROLLBACK)
 
+    def assert_not_revalidated(self, key, after):
+        """`key` stood outside the run's selection when `after`'s new version, its own module
+        only, was kept: its report is noted, and the console says so."""
+        self.assertIn(f"\n## Not revalidated after {after}\n\n- Cause: {after} changed ",
+                      self.report(key))
+        self.assertIn("This run did not select the pair; a synthesis that selects it checks it.",
+                      self.report(key))
+        self.assertTrue(any("outside the selection not revalidated" in line and key in line
+                            for line in self.said), self.said)
+
     def assert_rollback_revalidated(self):
         """The next synthesis of TS-0005, whose new version writes only its own files and so
         owes no revalidation of its own, revalidates TS-0004 first: PARTIAL again."""
@@ -8630,9 +8671,12 @@ class Synthesize(unittest.TestCase):
         self.assertTrue(section.endswith(
             "- Replays: statelens/campaign/reach/TS-0004_simplex_a/after-rollback/\n"), section)
         self.assertIsNone(self.read(self.OWED))
-        # TS-0004 is revalidated before the pair, and after its new version.
+        # TS-0004 is revalidated before the pair; the new version adds only its own module,
+        # which TS-0004's does not name, and the run selected TS-0005 only, so TS-0004's
+        # report is noted instead of revalidated again. Both by the last check.
+        self.assert_not_revalidated("TS-0004_simplex_a", "TS-0005_simplex_a")
         self.assertEqual(self.builds, [self.FIRST] + [self.SECOND] * 2
-                         + [self.FIRST, self.FIRST, self.SECOND])
+                         + [self.FIRST, self.SECOND])
 
     def test_a_card_interrupted_after_its_revalidation_rewrote_a_report_owes_it(self):
         # The review's case: TS-0005_simplex_a's accessor raises TS-0004 to REACHED, and the operator
@@ -8937,19 +8981,22 @@ class Synthesize(unittest.TestCase):
         self.assertLess(manifest.index(self.ON_B), manifest.index(self.FIRST))
         self.assertTrue((self.repo / f"consensus/fuzz/simplex/fuzz_targets/{self.ON_B}.rs").is_file())
         self.assertEqual(self.read(self.MODULE_ON_B).splitlines()[0], "//! TS-0004 on simplex_b")
-        # The undo of the first pair's module revalidates the sibling, and so does the new
-        # version; the sibling is built for each, the pair twice, and both by the last check.
+        # The undo of the first pair's module revalidates the sibling; the new version, which
+        # adds only its own module, does not, since the run selected the first pair only:
+        # the sibling's report is noted. The sibling is built once, the pair twice, and both
+        # by the last check.
         self.assertIn(f"synthesis: --redo undid TS-0004_simplex_a, which changed "
                       f"{self.FIRST_MODULE}; revalidating TS-0004_simplex_b", self.said)
+        self.assert_not_revalidated("TS-0004_simplex_b", "TS-0004_simplex_a")
         self.assertEqual(self.builds, [self.ON_B] + [self.FIRST] * 2
-                         + [self.ON_B, self.FIRST, self.ON_B])
+                         + [self.FIRST, self.ON_B])
         report = self.report("TS-0004_simplex_b")
         self.assertIn("- Verdict: REACHED 4/4\n", report)
         section = self.section(report, "Revalidation after --redo")
         self.assertTrue(section.startswith(
             f"- Cause: --redo undid TS-0004_simplex_a, which changed {self.FIRST_MODULE}\n"
             "- Before: REACHED 4/4\n- Now: REACHED 4/4\n"), section)
-        self.assertIn("## Revalidation after TS-0004_simplex_a\n", report)
+        self.assertNotIn("## Revalidation after TS-0004_simplex_a\n", report)
         self.assertIsNone(self.read(self.OWED))
 
     def test_a_pair_that_breaks_its_sibling_is_rolled_back(self):
@@ -9063,6 +9110,150 @@ class Synthesize(unittest.TestCase):
         self.assertIn("predates the read side", "\n".join(self.said))
         (self.repo / "statelens/campaign/meta.json").unlink()
         self.assertEqual(self.synthesize(), 2)
+        self.assertEqual(self.prompts, [])
+
+    def commit(self, message, *paths):
+        """Commits the worktree content of `paths` past HEAD and returns the new HEAD; the
+        stub campaign's uncommitted instrumentation stays in the worktree."""
+        self.run_git("add", "--", *paths)
+        self.run_git("commit", "-qm", message, "--", *paths)
+        return self.run_git("rev-parse", "HEAD").strip()
+
+    def past_base_note(self, head, count):
+        return (f"HEAD {head[:10]} is {count} commit(s) past the campaign base "
+                f"{self.base[:10]}; the commits touch only statelens/, so the instrumented "
+                "tree is the campaign's")
+
+    def test_head_at_the_base_passes_without_a_note(self):
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize(), 0)
+        self.assertFalse([line for line in self.said if "past the campaign base" in line])
+
+    def test_a_commit_touching_only_statelens_past_the_base_passes_with_a_note(self):
+        """A commit of method files (a card, docs, scripts) in the campaign checkout leaves
+        the tree the campaign instrumented unchanged, so synthesis continues on the
+        campaign base and its reports keep naming that base."""
+        self.put("statelens/README.md", "# method\n")
+        head = self.commit("card", "statelens/README.md")
+        self.assertNotEqual(head, self.base)
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize(), 0)
+        self.assertIn(self.past_base_note(head, 1), self.said)
+        self.assertEqual(self.line(), "TS-0004    REACHED 4/4   simplex_a_ts0004_statelens")
+        self.assertIn(f"- Base commit: {self.base}\n", self.report())
+        self.assertNotIn(head, self.report())
+
+    def test_two_commits_touching_only_statelens_past_the_base_pass(self):
+        self.put("statelens/README.md", "# method\n")
+        self.commit("docs", "statelens/README.md")
+        self.put("statelens/docs/plan.md", "# plan\n")
+        head = self.commit("plan", "statelens/docs/plan.md")
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize(), 0)
+        self.assertIn(self.past_base_note(head, 2), self.said)
+
+    def test_a_baseline_taken_at_the_base_survives_a_commit_touching_only_statelens(self):
+        """The operator's sequence: a synthesis at the base takes B, a card is committed,
+        and the next synthesis runs past the base with B taken before the commit."""
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize(), 0)
+        self.put("statelens/README.md", "# method\n")
+        head = self.commit("card", "statelens/README.md")
+        self.said.clear()
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize("--redo"), 0)
+        self.assertEqual([s for s in self.said if "past the campaign base" in s],
+                         [self.past_base_note(head, 1)])
+        self.assertIn(f"- Base commit: {self.base}\n", self.report())
+
+    def test_rebaseline_accepts_an_upstream_merge_and_revalidates_the_scaffolds(self):
+        """The operator merged a fix into the harness outside the scope: synthesis refuses
+        it with a hint, --rebaseline records it in B and revalidates the standing scaffold,
+        and later runs pass without the flag. Guard 3 still refuses with the flag."""
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize(), 0)
+        merged = "consensus/fuzz/core/src/simplex.rs"
+        self.edit(merged, "Sha256", "Sha512")
+        # And one inside the scope, an instrumented file gaining a log line, which guard 3
+        # refuses by itself.
+        twins = "consensus/fuzz/simplex/src/chaos/twins.rs"
+        self.put(twins, self.read(twins) + 'fn log() {\n    eprintln!("skipped");\n}\n')
+        self.said.clear()
+        self.assertEqual(self.synthesize("--redo"), 2)
+        self.assertIn(f"the checkout differs from the synthesis baseline: {merged}; rerun with "
+                      "--rebaseline to accept it, or use a fresh clone", "\n".join(self.said))
+        self.said.clear()
+        self.builds.clear()
+        self.assertEqual(self.synthesize("--rebaseline"), 0)
+        said = "\n".join(self.said)
+        self.assertIn(f"synthesis: --rebaseline accepted 2 changed path(s) ({merged}, {twins}); "
+                      "every standing scaffold is revalidated before any pair", said)
+        self.assertIn(f"synthesis: --rebaseline accepted operator changes to {merged}, {twins}; "
+                      "revalidating TS-0004_simplex_a", said)
+        report = self.report()
+        section = self.section(report, "Revalidation after --rebaseline")
+        self.assertTrue(section.startswith(
+            f"- Cause: --rebaseline accepted operator changes to {merged}, {twins}\n"), section)
+        self.assertIn("statelens/campaign/reach/TS-0004_simplex_a/after-rebaseline/", section)
+        kept = list((self.repo / "statelens/campaign/reach").glob("rebaseline-*"))
+        self.assertEqual([(path / "paths.txt").read_text() for path in kept],
+                         [f"{merged}\n{twins}\n"])
+        self.assertEqual((kept[0] / "files" / twins).read_text(), TWINS)
+        self.assertEqual(self.read(f"statelens/campaign/reach/baseline/files/{twins}"),
+                         self.read(twins))
+        self.assertFalse((self.repo / "statelens/campaign/reach/revalidation.json").exists())
+        # Accepted once: a later run needs no flag, and with nothing to accept the flag says so.
+        self.said.clear()
+        self.assertEqual(self.synthesize(), 0)
+        self.assertNotIn("differs from the synthesis baseline", "\n".join(self.said))
+        self.assertEqual(self.synthesize("--rebaseline"), 0)
+        self.assertIn("synthesis: --rebaseline: nothing differs from the baseline", self.said)
+        # A drift that changes instrumentation is never accepted.
+        voter = "consensus/src/simplex/voter.rs"
+        probe = '        sl_probe!(None, "voter.vote", self.votes, 0u32);\n'
+        self.assertIn(probe, self.read(voter))
+        self.put(voter, self.read(voter).replace(probe, ""))
+        self.said.clear()
+        self.assertEqual(self.synthesize("--rebaseline"), 2)
+        said = "\n".join(self.said)
+        self.assertIn(f"the checkout differs from the synthesis baseline: {voter}; use a fresh "
+                      "clone", said)
+        self.assertNotIn("--rebaseline accepted", said)
+
+    def test_a_commit_past_the_base_touching_the_sut_aborts(self):
+        self.put("consensus/src/simplex/mod.rs",
+                 self.read("consensus/src/simplex/mod.rs") + "// changed\n")
+        head = self.commit("sut", "consensus/src/simplex/mod.rs")
+        self.assertEqual(self.synthesize(), 2)
+        said = "\n".join(self.said)
+        self.assertIn(f"names the base {self.base[:10]}, but HEAD is {head[:10]}", said)
+        self.assertNotIn("past the campaign base", said)
+        self.assertEqual(self.prompts, [])
+
+    def test_a_commit_past_the_base_touching_statelens_and_the_fuzz_package_aborts(self):
+        self.put("statelens/README.md", "# method\n")
+        self.put("consensus/fuzz/simplex/src/lib.rs",
+                 self.read("consensus/fuzz/simplex/src/lib.rs") + "// changed\n")
+        head = self.commit("mixed", "statelens/README.md", "consensus/fuzz/simplex/src/lib.rs")
+        self.assertEqual(self.synthesize(), 2)
+        said = "\n".join(self.said)
+        self.assertIn(f"names the base {self.base[:10]}, but HEAD is {head[:10]}", said)
+        self.assertNotIn("past the campaign base", said)
+        self.assertEqual(self.prompts, [])
+
+    def test_a_head_that_does_not_descend_from_the_base_aborts(self):
+        """meta.json names a sibling of HEAD (another child of the real base): the diff
+        between them touches only statelens/, so only the ancestry check refuses it."""
+        self.put("statelens/README.md", "# method\n")
+        head = self.commit("card", "statelens/README.md")
+        tree = self.run_git("rev-parse", f"{self.base}^{{tree}}").strip()
+        sibling = self.run_git("commit-tree", tree, "-p", self.base, "-m", "sibling").strip()
+        self.meta.update(base=sibling)
+        self.put("statelens/campaign/meta.json", json.dumps(self.meta))
+        self.assertEqual(self.synthesize(), 2)
+        said = "\n".join(self.said)
+        self.assertIn(f"names the base {sibling[:10]}, but HEAD is {head[:10]}", said)
+        self.assertNotIn("past the campaign base", said)
         self.assertEqual(self.prompts, [])
 
     def test_usage_and_campaign_errors_come_before_the_agent_cli(self):

@@ -200,11 +200,12 @@ awaits (R-INS-3). Instrumentation never calls it (prompt 13.7 line; guard 3). Pl
 
 **D62 Synthesis step.** `just synthesize [--profile simplex|marshal] [--match GLOB]... [--redo]`
 on a checkout a campaign of the same profile instrumented: `meta.json` names the profile, `base`
-== HEAD, no `FALSE-` ids, `summary.txt` READY or PANIC (tests), runtime contains `pub fn watch(`,
-`plan.md` exists. Never instruments (no probes, assertions or ghost state); edits follow the edit
-contract (R-TS-SYN-3, guards 1-6). Phase 2 permissions (D4); qmdb refused. A second agent role with
-its own scope (amends R-INS-7). Pairs (card, base) run sequentially (one crate); each pair's diff
-is saved to `campaign/reach/TS-NNNN_<base>.diff`.
+is HEAD or HEAD is past it only by commits that touch only `statelens/` (one console note; the
+revision of 2026-10-09 below), no `FALSE-` ids, `summary.txt` READY or PANIC (tests), runtime
+contains `pub fn watch(`, `plan.md` exists. Never instruments (no probes, assertions or ghost
+state); edits follow the edit contract (R-TS-SYN-3, guards 1-6). Phase 2 permissions (D4); qmdb
+refused. A second agent role with its own scope (amends R-INS-7). Pairs (card, base) run
+sequentially (one crate); each pair's diff is saved to `campaign/reach/TS-NNNN_<base>.diff`.
 
 **D63 Scaffolds are written, not derived** (exception to D5, D24, D57, B.1, G4/G7, marshal
 non-goal PRD:95). Per pair (card, base), one scaffold per selected base, the agent choosing no base
@@ -881,6 +882,82 @@ synthesis still refuses the drifted checkout, which is what the guard is for. Fi
 the re-listing), `scripts/test_statelens.py` (three `FuzzRecipe` tests, one of them the drifted
 checkout's command under stubs), `README.md` (Phase 3 and "Fuzzing the scaffolds"), SPEC 5.3,
 5.4, 18.2 D68, 18.9 and AC-27, PRD R-P2-5, R-TS-P3-1 and AC-27, and D68 above.
+
+## Revision: commits past the campaign base (2026-10-09)
+
+The operator committed method files only (`statelens/README.md`, docs, justfile, tests, this plan
+and the new card `statelens/target-states/simplex/TS-0018.md`) in the campaign checkout, and
+`just fuzz simplex --tmux --state-reaching --skip-campaign --state-targets TS-0018 --fuzz-targets
+simplex_cert_mock ...` failed in `synthesize` with "campaign/meta.json names the base fb14b17c06,
+but HEAD is 665ed667c5; synthesize on the checkout the campaign instrumented" (exit 2):
+`Synthesis.check_campaign` compared the campaign's `base` with HEAD by commit id. The
+precondition's intent is that the campaign instrumented this tree, the profile roots, the fuzz
+packages, the runtime, the manifests and `Cargo.lock`; a commit that touches only `statelens/`
+(the method: scripts, prompts, docs, cards, templates, justfile, README) leaves that tree
+unchanged, so refusing it locked the operator out of synthesis after every card or method fix
+committed in the campaign checkout. D62 is amended: `check_campaign` accepts a HEAD that descends
+from the base when `git diff --name-only --no-renames <base> HEAD` is non-empty and every path
+starts with `statelens/`, prints one note ("HEAD <head> is <n> commit(s) past the campaign base
+<base>; the commits touch only statelens/, so the instrumented tree is the campaign's") and goes
+on with the campaign's base unchanged, so the prompt's `BASE` and the reports' "Base commit"
+keep naming it (`revalidation.json` and `pending/` record no commit). Any other path in that diff, an empty diff,
+a HEAD that does not descend from the base, or a base not in the history aborts exactly as
+before, with the same message. Cards pin citations at a commit (lint rule 10), which this does
+not touch. No other site shares the precondition: `Campaign.setup` defines the base as HEAD and
+`Campaign.check_preconditions` already lets only `statelens/` differ from HEAD; the other HEAD
+reads (`kb extract`'s cited tests, the search index, `clean`) are unrelated to the campaign base.
+Guard 1 compares `git status`, which is relative to HEAD, with B's, which an earlier synthesis
+may have taken at the base; a `statelens/`-only commit leaves the status of every path outside
+`statelens/` unchanged, and guard 1 compares `statelens/` paths with the run's own start, so it
+is unaffected.
+Files: `scripts/statelens.py` (`Synthesis.method_commits`, `check_campaign`),
+`scripts/test_statelens.py` (seven `Synthesize` tests: HEAD at the base, one and two
+`statelens/`-only commits past it, a B taken at the base before such a commit, a commit touching
+the SUT, one touching `statelens/` and the fuzz package, a HEAD that does not descend from the
+base), `README.md` (Phase 3, Synthesis, its
+console and exit table), SPEC 5.4, 18.2 D62, 18.6.2 Preconditions and Console, 18.9 and 18.11,
+PRD R-TS-SYN-1 and R-TS-P3-1, and D62 above.
+
+## Revision: `--rebaseline` (2026-10-09)
+
+The operator merged the harness oracle fix into the campaign checkout to add one card (TS-0018)
+without a new campaign; synthesis refused it ("the checkout differs from the synthesis baseline:
+consensus/fuzz/core/src/lib.rs"), because B never changed. Considered: a fresh clone and a new
+campaign (hours), relaxing the guard automatically (an agent's stray out-of-scope edit would be
+accepted silently), and an explicit flag; the user chose the flag, kept minimal.
+`synthesize --rebaseline` (and `just fuzz ... --state-reaching --rebaseline`, refused without
+`--state-reaching` and with `--skip-synthesis`): after `recover()`, when guards 2 and 3 pass
+against the old B, the paths guard 1 names are accepted, and so are the in-scope files the
+operator changed (not script-owned, in no pair's diff, outside `target_states/`, with `sl_*` and
+runtime calls as in B) once guard 3 passes with them taken into B: the dry run on the real
+checkout found that the fix's log line in `invariants.rs` (an `eprintln!`) fails guard 3 on its
+own, so accepting only guard-1 paths was not enough. A revalidation of every standing
+scaffold is recorded first (`revalidation.json`, key "the operator", tag `after-rebaseline`,
+cause "--rebaseline accepted operator changes to <paths>"), the old `state.json` and the paths go
+to `campaign/reach/rebaseline-<stamp>/`, and B's worktree record is re-taken. Without the flag
+the refusal names it ("rerun with --rebaseline to accept it, or use a fresh clone") when the
+flag would accept the difference. Not covered, recorded in SPEC 18.11: a scaffold module
+the operator edited, or a file a pair's diff changed, is not re-recorded as that pair's version,
+so a `--redo` of that pair needs the edit reverted. Tests:
+`Synthesize.test_rebaseline_accepts_an_upstream_merge_and_revalidates_the_scaffolds`,
+`FuzzRecipe.test_rebaseline_goes_to_the_synthesis_only`.
+
+## Revision: rechecks scoped to the selection (2026-10-09)
+
+The first TS-0018 run on four bases rebuilt and replayed all 19 earlier scaffolds after every
+kept pair (about 22 minutes each, roughly 70 seconds a build) and again in the last build, for
+scaffolds the command never selected; the user stopped it. Now a kept version that changes
+nothing shared but its own module rechecks only the run's selected pairs and the scaffolds whose
+module names the changed one (the review's sibling-helper case of round-2 finding 2 stays
+covered); every other standing scaffold's report gets "## Not revalidated after <pair>", and
+the console says so. A version that edits shared code beyond its module, and every undo
+(`--redo`, the last check, a rollback, `--rebaseline`), still rechecks every standing scaffold,
+and the last build covers the selection unless such a full recheck ran. What is no longer caught
+for unselected scaffolds: a sibling changed through an inherent method or trait impl a new
+module adds to a harness type (SPEC 18.11). Batching the builds into one cargo call was
+considered and left out: with the scoping, a recheck is a few builds. Also fixed: the header
+parser carried a field across a blank `//!` line, so `Missing: none` absorbed the module's
+description into the verdict annotation; a blank header line now ends a field.
 
 ## Follow-ups (not in this change)
 - Variant `run` lines print `-- -rss_limit_mb=4000 -print_final_stats=1` (statelens.py:5650),

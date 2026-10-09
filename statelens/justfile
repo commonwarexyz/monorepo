@@ -40,7 +40,7 @@ run target *args:
         cd ../consensus/fuzz && just run "$@" ;;
     esac
 
-# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--fuzz-targets GLOB]... [--state-targets GLOB]... [--invariants LIST]... [--skip-campaign] [--skip-synthesis] [--parallel] [--tmux] [--state-reaching] [-- -fork=8]
+# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--fuzz-targets GLOB]... [--state-targets GLOB]... [--invariants LIST]... [--skip-campaign] [--skip-synthesis] [--rebaseline] [--parallel] [--tmux] [--state-reaching] [-- -fork=8]
 fuzz target *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -63,7 +63,8 @@ fuzz target *args:
     # --skip-synthesis fuzzes the scaffolds a synthesis already built, whatever
     # their verdicts, because a synthesis refuses a checkout that drifted from its
     # baseline, as one does once an upstream fix is merged into it; it needs
-    # --state-reaching.
+    # --state-reaching. --rebaseline instead lets that synthesis accept the merge
+    # and revalidate every scaffold (synthesize --rebaseline).
     # --invariants LIST goes to the campaign, which binds only the invariants it
     # names, so it needs a campaign and a profile.
     # Both pattern flags reach the listing and the synthesis as --match, whose one
@@ -87,6 +88,7 @@ fuzz target *args:
     windows=no
     campaign=yes
     synthesis=yes
+    rebaseline=()
     narrowed=no
     cards=no
     reaching=no
@@ -97,6 +99,7 @@ fuzz target *args:
       case "$1" in
         --skip-campaign)        campaign=no; shift ;;
         --skip-synthesis)       synthesis=no; shift ;;
+        --rebaseline)           rebaseline=(--rebaseline); shift ;;
         --parallel|--parallels) parallel=yes; shift ;;
         --tmux)                 parallel=yes; windows=yes; shift ;;
         --state-reaching)       reaching=yes; shift ;;
@@ -139,6 +142,10 @@ fuzz target *args:
     fi
     if [ "$synthesis" = no ] && [ "$reaching" = no ]; then
         echo "just fuzz: --skip-synthesis needs --state-reaching" >&2
+        exit 1
+    fi
+    if [ "${#rebaseline[@]}" -gt 0 ] && { [ "$reaching" = no ] || [ "$synthesis" = no ]; }; then
+        echo "just fuzz: --rebaseline goes to synthesis; it needs --state-reaching, without --skip-synthesis" >&2
         exit 1
     fi
     if [ "$every" = no ] && [ "$narrowed" = yes ]; then
@@ -190,7 +197,7 @@ fuzz target *args:
     kind=target
     if [ "$reaching" = yes ]; then
         if [ "$synthesis" = yes ]; then
-            python3 scripts/statelens.py synthesize --profile "$profile" ${patterns[@]+"${patterns[@]}"}
+            python3 scripts/statelens.py synthesize --profile "$profile" ${rebaseline[@]+"${rebaseline[@]}"} ${patterns[@]+"${patterns[@]}"}
             list
         fi
         if [ "${#names[@]}" -eq 0 ]; then

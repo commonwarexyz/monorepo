@@ -282,10 +282,12 @@ cards (see Target-State Synthesis). `--skip-synthesis`, which needs `--state-rea
 the scaffolds synthesis already built in this checkout, whatever their verdicts, without the
 synthesis preflight: the way to keep fuzzing after the checkout drifted from the synthesis
 baseline, for example when an upstream fix was merged into it; synthesis itself still refuses
-such a checkout. `--invariants LIST`, which you may repeat, goes to the campaign, which then binds
-only the invariants it names (see Phase 2); it is refused with `--skip-campaign`, which runs
-no campaign, and with a single target. A double-dash flag `just fuzz` does not know is refused
-rather than passed to libFuzzer, whose own flags take one dash:
+such a checkout, while a commit that touches only `statelens/`, a new card say, is no drift and
+needs no flag (see Synthesis). `--invariants LIST`, which you may repeat, goes to the campaign,
+which then binds only the invariants it names (see Phase 2); it is refused with
+`--skip-campaign`, which runs no campaign, and with a single target. A double-dash flag
+`just fuzz` does not know is refused rather than passed to libFuzzer, whose own flags take
+one dash:
 
 ```
 just fuzz simplex --tmux -- -fork=5
@@ -428,6 +430,18 @@ just synthesize --agent codex
 **`just synthesize` starts an agent with full access to this machine**, as a campaign does, in
 the same disposable clone.
 
+The checkout must still be the one the campaign instrumented: `campaign/meta.json` names the
+commit the campaign ran at, and synthesis refuses a `HEAD` that differs from it (exit code 2,
+`campaign/meta.json names the base <base>, but HEAD is <head>; synthesize on the checkout the
+campaign instrumented`). Commits that touch only `statelens/` are the exception: a card, a
+prompt or a fix to the scripts committed in the checkout leaves the instrumented tree as the
+campaign left it, so a `HEAD` past the base by such commits alone is accepted with one note,
+`HEAD <head> is <n> commit(s) past the campaign base <base>; the commits touch only statelens/,
+so the instrumented tree is the campaign's`, and the prompts and reports keep naming the
+campaign's commit. A commit that also touches anything else, `consensus/`, `runtime/`, a
+manifest or `Cargo.lock`, is refused as before; so is a `HEAD` that does not descend from the
+base, or one past it by commits that change nothing.
+
 The unit of synthesis is a pair of a card and a base, one of the profile's targets: for
 simplex all but `simplex_cert_mock_mallory`, whose custom mutator a scaffold cannot reuse (20
 bases), and for marshal every target (13). A card is synthesized on every base unless `--match`
@@ -446,9 +460,11 @@ three further attempts. The agent never runs its scaffold; only these replays ju
 
 Each pair costs up to four runs of the agent with their builds and replays, a test gate when
 the kept version edited the profile's code, and, because the modules are public siblings in
-one crate, a build and three replays of every other scaffold that stands, the card's other
-pairs included. A card on all 20 simplex bases is 20 such syntheses, each revalidating every
-scaffold that stands. Bound it with base patterns: `<base>_tsNNNN` pins a card to one base,
+one crate, a build and three replays of the other pairs of the run's selection, the card's
+other pairs included. A version that adds only its own module rechecks only those, and any
+scaffold whose module names it; every other scaffold's report gets a "Not revalidated after"
+note, and a synthesis that selects it checks it. A version that edits shared code, and every
+undo, rechecks every scaffold that stands. The last check builds the selection's scaffolds. Bound it with base patterns: `<base>_tsNNNN` pins a card to one base,
 and `--fuzz-targets` does the same for `just fuzz --state-reaching`.
 
 Synthesis never instruments: it adds no probe, assertion or ghost state. The agent may edit the
@@ -487,6 +503,7 @@ next synthesis, before any pair; until then, the reports keep their earlier verd
 you interrupt after the undo and before the reports move finishes when you run it again.
 
 ```
+statelens: HEAD <head> is <n> commit(s) past the campaign base <base>; the commits touch only statelens/, so the instrumented tree is the campaign's
 statelens: cards      <n> tracked, <m> local
 statelens: TS-NNNN    skipped: TS-NNNN on <base> was synthesized as <scaffold>; use --redo
 statelens: TS-NNNN    <verdict>[ (<annotation>, ...)]   <scaffold | no scaffold on <base>>
@@ -495,13 +512,15 @@ statelens: run        cd <repo>/statelens && NIGHTLY_VERSION=<fuzz toolchain> ju
 statelens: replay     cd <repo>/statelens && STATELENS_REACH=1 [<replay env> ]NIGHTLY_VERSION=<fuzz toolchain> just run <scaffold> <repo>/<package>/artifacts/<scaffold>/<crash file>
 ```
 
-One `TS-NNNN` line per pair, and one `run` and `replay` pair of lines per scaffold that exists.
+The first line only when `HEAD` is past the campaign's base by commits that touch only
+`statelens/`; then one `TS-NNNN` line per pair, and one `run` and `replay` pair of lines per
+scaffold that exists.
 
 | Exit code | Result |
 |---|---|
 | 0 | at least one scaffold exists for the selection |
 | 1 | usage error, `qmdb`, or no card and base selected |
-| 2 | a failed precondition (no campaign of the profile at `HEAD`, a false invariant bound, a result other than `READY` or `PANIC (tests)`, no `plan.md`, a checkout instrumented before the read side existed or cleaned, a missing tool, a selected card with a lint problem), a missing or unreadable synthesis record in `campaign/reach/`, a checkout that differs from the baseline, an edit out of scope, a missing anchor, or a `--redo` that does not apply |
+| 2 | a failed precondition (no campaign of the profile at `HEAD`, or at a commit `HEAD` is past only by commits that touch only `statelens/`, a false invariant bound, a result other than `READY` or `PANIC (tests)`, no `plan.md`, a checkout instrumented before the read side existed or cleaned, a missing tool, a selected card with a lint problem), a missing or unreadable synthesis record in `campaign/reach/`, a checkout that differs from the baseline, an edit out of scope, a missing anchor, or a `--redo` that does not apply |
 | 3 | no scaffold built: every selected pair ended NOT BUILT or GATE FAILED |
 
 ### Reports and verdicts
@@ -572,7 +591,14 @@ lint problem, fails before the campaign, and a failed synthesis stops the comman
 `--skip-synthesis` runs no synthesis and fuzzes the scaffolds already built for the selection,
 whatever their verdicts, which is how the third command above keeps fuzzing a checkout that
 drifted from the synthesis baseline (see Phase 3); a selection none was built for fails as it
-does after a synthesis that built none. With a single target, or with `qmdb`,
+does after a synthesis that built none. To synthesize new cards on such a checkout instead, add
+`--rebaseline` (with `--state-reaching`, not with `--skip-synthesis`; also `just synthesize
+--rebaseline`): synthesis accepts the files that drifted, outside its scope and inside it, keeps
+the old record in `campaign/reach/rebaseline-<stamp>/`, rebuilds and replays every existing
+scaffold and rewrites its report ("Revalidation after --rebaseline"), then synthesizes the
+selection. It never accepts a drift that adds, removes or changes a probe or an assertion, drops
+a line the campaign's instrumentation added, or edits the script's own files. A scaffold module you
+edited by hand stays as edited; a later `--redo` of that pair needs the edit reverted first. With a single target, or with `qmdb`,
 `--state-reaching` is refused. As for a variant, libFuzzer gets only the arguments you pass
 after `--`, and crashes land in `<package>/artifacts/<scaffold>/`. libFuzzer runs the empty
 input, the canonical one, first, so a scaffold that fails on its card's own history fails at

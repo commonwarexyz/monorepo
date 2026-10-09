@@ -6544,7 +6544,10 @@ def module_header(text):
             field = match.group(1) if match.group(1) not in fields else None
             if field:
                 fields[field] = match.group(2).strip()
-        elif field and line[3:].strip():
+        elif not line[3:].strip():
+            # A blank header line ends a field: the module's description follows it.
+            field = None
+        elif field:
             fields[field] += " " + line[3:].strip()
     shape = re.match(r"([AB])\b", fields.get("Shape", ""))
     header["shape"] = shape.group(1) if shape else None
@@ -8328,7 +8331,10 @@ UNDO_TAGS = {
     "--redo": "after-redo",
     "the last check": "after-last-check",
     "a rollback": "after-rollback",
+    "--rebaseline": "after-rebaseline",
 }
+# The key under which `--rebaseline` records, in revalidation.json, the paths it accepted.
+REBASELINE_KEY = "the operator"
 # Guard 3 of section 18.6.1: the runtime functions that write ghost state or counters, which
 # only the helper and the scaffolds' thin targets may call anew; the literals of the helper's
 # lines; the assertion and probe macros; and the module attribute that would redirect a
@@ -8649,6 +8655,7 @@ class Synthesis:
         self.agent = agent_name(self.config, args.agent)
         self.patterns = args.match or []
         self.redo = args.redo
+        self.rebaseline = getattr(args, "rebaseline", False)
         self.dir = self.sl_dir / "campaign"
         self.reach = self.dir / "reach"
         try:
@@ -8719,20 +8726,48 @@ class Synthesis:
         # card, base and module, its History and its report's text, read once per run and
         # kept up to date in memory.
         self.standing = {}
+        # The keys of the pairs this run selected, or None for all; `widened` once a
+        # revalidation had to cover every scaffold.
+        self.selected = None
+        self.widened = False
 
     def rel(self, path):
         return Path(path).relative_to(self.repo).as_posix()
 
     # Preconditions (section 18.6.2).
 
+    def method_commits(self, head):
+        """How many commits `head` is past the campaign base when every one of them touches
+        only statelens/ (the method: scripts, prompts, cards, docs), so the tree the campaign
+        instrumented is unchanged; None when `head` does not descend from the base, the base
+        is not in this history, or a commit touches a path outside statelens/."""
+        try:
+            git(self.repo, "merge-base", "--is-ancestor", self.base, head)
+            touched = git(
+                self.repo, "diff", "--name-only", "--no-renames", "-z", self.base, head
+            )
+            count = int(git(self.repo, "rev-list", "--count", f"{self.base}..{head}"))
+        except subprocess.CalledProcessError:
+            return None
+        paths = [path for path in touched.split("\0") if path]
+        if paths and all(path.startswith(f"{SL}/") for path in paths):
+            return count
+        return None
+
     def check_campaign(self):
         """The preconditions that read meta.json, reported before the agent CLI is checked."""
         head = git(self.repo, "rev-parse", "HEAD").strip()
         if self.base != head:
-            raise Abort(
-                2,
-                f"campaign/meta.json names the base {self.base[:10] or 'none'}, but HEAD is "
-                f"{head[:10]}; synthesize on the checkout the campaign instrumented",
+            past = self.method_commits(head)
+            if past is None:
+                raise Abort(
+                    2,
+                    f"campaign/meta.json names the base {self.base[:10] or 'none'}, but HEAD is "
+                    f"{head[:10]}; synthesize on the checkout the campaign instrumented",
+                )
+            say(
+                f"HEAD {head[:10]} is {past} commit(s) past the campaign base {self.base[:10]}; "
+                "the commits touch only statelens/, so the instrumented tree is the campaign's"
             )
         false = [
             str(item) for item in self.meta.get("invariants", ()) if str(item).startswith("FALSE-")
@@ -10253,9 +10288,18 @@ class Synthesis:
             pair, (path for path in set(s0) | set(now) if s0.get(path) != now.get(path))
         )
         others = sorted(other for other in self.standing if other != pair.key)
-        if not shared or not others:
+        if not shared:
             return
         cause = f"{pair.key} changed {', '.join(shared)}"
+        # A version that adds only its own module can change a sibling only through items
+        # of that module, which the siblings outside the selection are noted for; one that
+        # edits shared code rechecks every scaffold.
+        if set(shared) == {f"{self.states}/{pair.module}.rs"}:
+            others = self.within_selection(others, pair.key, cause, pair.module)
+        else:
+            self.widened = True
+        if not others:
+            return
         say(
             f"{pair.key}: the kept version changed {', '.join(shared)}; revalidating "
             f"{', '.join(others)}"
@@ -10302,6 +10346,35 @@ class Synthesis:
             f"{other} with the pair's edits restored: {still or verdict_text(result)}"
         )
         self.live["step"] = "the finish"
+
+    def within_selection(self, keys, after, cause, module):
+        """The pairs of `keys` this run selected or whose module names `module`, the changed
+        one; each of the others gets a note in its report instead of a revalidation, and a
+        synthesis that selects it rechecks it (section 18.6.2, Finish)."""
+        if self.selected is None:
+            return keys
+
+        def names(key):
+            path = self.repo / self.states / f"{self.standing[key]['module']}.rs"
+            return path.is_file() and module in path.read_text(errors="replace")
+
+        chosen = [key for key in keys if key in self.selected or names(key)]
+        skipped = [key for key in keys if key not in chosen]
+        for key in skipped:
+            entry = self.standing[key]
+            entry["report"] = entry["report"].rstrip("\n") + (
+                f"\n\n## Not revalidated after {after}\n\n"
+                f"- Cause: {cause}\n"
+                "- This run did not select the pair; a synthesis that selects it checks it.\n"
+            )
+            (self.reach / f"{key}.md").write_text(entry["report"])
+        if skipped:
+            shown = ", ".join(skipped[:3]) + (", ..." if len(skipped) > 3 else "")
+            say(
+                f"synthesis: {len(skipped)} scaffold(s) outside the selection not revalidated "
+                f"({shown}); their reports say so"
+            )
+        return chosen
 
     def shared_paths(self, pair, paths):
         """The paths of `paths` other than the pair's thin target, the package manifest,
@@ -10378,9 +10451,16 @@ class Synthesis:
         others = sorted(self.standing)
         if not changed or not others:
             return
-        cause = f"{what} undid " + "; ".join(
-            f"{key}, which changed {', '.join(paths)}" for key, paths in changed.items()
-        )
+        self.widened = True
+        undone = [
+            f"{key}, which changed {', '.join(paths)}"
+            for key, paths in changed.items()
+            if key != REBASELINE_KEY
+        ]
+        parts = ["undid " + "; ".join(undone)] if undone else []
+        if REBASELINE_KEY in changed:
+            parts.append(f"accepted operator changes to {', '.join(changed[REBASELINE_KEY])}")
+        cause = f"{what} " + "; ".join(parts)
         say(f"synthesis: {cause}; revalidating {', '.join(others)}")
         # No pair is in progress: `preserve` has no attempt to keep.
         self.live = {"step": None}
@@ -10695,6 +10775,10 @@ class Synthesis:
         since broke, is never handed over while it does not build; one that does not build
         exits with code 2, naming it."""
         for scaffold in scaffold_targets(self.repo, self.profile_name):
+            found = SCAFFOLD_NAME.match(scaffold)
+            key = pair_key("TS-" + found["number"], found["base"]) if found else None
+            if self.selected is not None and not self.widened and key not in self.selected:
+                continue
             binary, _command, _tail, log = self.build(scaffold, "last")
             if binary is None:
                 raise Abort(
@@ -10722,16 +10806,98 @@ class Synthesis:
             # Code the agent wrote also runs after its last run: replays and the test gate.
             self.seal()
 
+    def scope_drift(self):
+        """`--rebaseline`: the files of B in the scope the operator changed: not the script's
+        own, not a scaffold's, and not in any pair's recorded diff, whose sl_* calls and
+        runtime calls are as in B. Guard 3 still checks them, the lines the campaign's
+        instrumentation added included, once they are taken into B."""
+        paired = set()
+        for diff in self.reach.glob("TS-*.diff"):
+            paired |= {path for path, _ in diff_sections(diff.read_text(errors="replace"))}
+        found = []
+        for path in sorted(self.b_files):
+            target = self.repo / path
+            if (
+                path in paired
+                or path in self.owned
+                or path == self.lib_rs
+                or path.startswith(self.states + "/")
+                or not target.is_file()
+            ):
+                continue
+            now = target.read_bytes()
+            if now == self.b_data[path]:
+                continue
+            if path.endswith(".rs"):
+                text, before = now.decode(errors="replace"), self.b_data[path].decode(errors="replace")
+                more = runtime_calls(text, GUARDED_CALLS) - runtime_calls(before, GUARDED_CALLS)
+                if sl_calls(text) != sl_calls(before) or +more:
+                    continue
+            found.append(path)
+        return found
+
+    def accept_drift(self, outside, inside=(), held=None):
+        """`--rebaseline` (section 18.6.2): records the paths outside the scope that differ
+        from B, an upstream merge the operator made, as B's, after guards 2 and 3 passed
+        against the old B, and owes a revalidation of every standing scaffold, since they
+        build on the changed code. The revalidation is recorded before B changes, so an
+        interrupt between the two still revalidates on the next run. The old record stays
+        in `reach/rebaseline-<stamp>/`."""
+        accepted = list(outside) + list(inside)
+        if not accepted:
+            say("synthesis: --rebaseline: nothing differs from the baseline")
+            return
+        self.owe("--rebaseline", REBASELINE_KEY, accepted)
+        kept = self.reach / f"rebaseline-{synthesis_stamp()}"
+        kept.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.baseline_dir / "state.json", kept / "state.json")
+        (kept / "paths.txt").write_text("".join(f"{path}\n" for path in accepted))
+        for path in inside:
+            for directory, content in ((kept, held[path]), (self.baseline_dir, self.b_data[path])):
+                copy = directory / "files" / path
+                copy.parent.mkdir(parents=True, exist_ok=True)
+                copy.write_bytes(content)
+        self.b_worktree = worktree_state(self.repo)
+        self.save_state()
+        shown = ", ".join(accepted[:3]) + (", ..." if len(accepted) > 3 else "")
+        say(
+            f"synthesis: --rebaseline accepted {len(accepted)} changed path(s) ({shown}); "
+            "every standing scaffold is revalidated before any pair; the old record is in "
+            f"{self.rel(kept)}"
+        )
+
     def run_pairs(self, selection):
+        # Rechecks after a kept pair and the last build cover these pairs only.
+        self.selected = {pair.key for pair in selection.pairs}
         self.recover()
-        problems = self.outside_scope()
-        problems += [path for path, _ in self.script_files()]
-        problems += [path for path, _ in self.integrity()]
+        outside = self.outside_scope()
+        guarded = [path for path, _ in self.script_files()]
+        problems = outside + guarded + [path for path, _ in self.integrity()]
+        if problems and not guarded:
+            # The operator's drift inside the scope, taken into B for guard 3, which then
+            # judges only what it still breaks: what --rebaseline would accept.
+            inside = self.scope_drift()
+            held = {path: self.b_data[path] for path in inside}
+            self.b_data.update((path, (self.repo / path).read_bytes()) for path in inside)
+            acceptable = not self.integrity()
+            if self.rebaseline and acceptable:
+                self.accept_drift(outside, inside, held)
+                problems = []
+            else:
+                self.b_data.update(held)
+                guarded = [] if acceptable else problems
+        elif self.rebaseline:
+            # Nothing is refused, but the operator may have changed the scope all the same.
+            inside = self.scope_drift()
+            held = {path: self.b_data[path] for path in inside}
+            self.b_data.update((path, (self.repo / path).read_bytes()) for path in inside)
+            self.accept_drift([], inside, held)
         if problems:
+            hint = "" if guarded else "rerun with --rebaseline to accept it, or "
             raise Abort(
                 2,
-                f"the checkout differs from the synthesis baseline: {problems[0]}; use a fresh "
-                "clone",
+                f"the checkout differs from the synthesis baseline: {problems[0]}; "
+                f"{hint}use a fresh clone",
             )
         if self.redo:
             self.redo_pairs([pair for pair in selection.pairs if pair.skip])
@@ -11202,6 +11368,12 @@ def main(argv):
         "--redo",
         action="store_true",
         help="undo and synthesize again the selected pairs (card, base) that have a report",
+    )
+    synthesize.add_argument(
+        "--rebaseline",
+        action="store_true",
+        help="accept paths outside the scope that differ from the synthesis baseline (an "
+        "upstream merge) and revalidate every scaffold; guards 2 and 3 still refuse",
     )
     reach = commands.add_parser(
         "reach-verdict",
