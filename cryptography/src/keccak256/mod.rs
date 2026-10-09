@@ -173,6 +173,7 @@ mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
     use commonware_formatting::hex;
+    use commonware_parallel::Sequential;
 
     const EMPTY_DIGEST: [u8; DIGEST_LENGTH] =
         hex!("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470");
@@ -217,7 +218,7 @@ mod tests {
                     parts.iter().map(|p| p.to_vec()).collect(),
                     vec![b"abc".to_vec()],
                 )
-                .run();
+                .run(&Sequential);
             }
         }
     }

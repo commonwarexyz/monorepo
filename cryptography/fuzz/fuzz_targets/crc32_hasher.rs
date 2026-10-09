@@ -7,11 +7,19 @@ use commonware_cryptography::{
     crc32::{Crc32 as OurCrc32, Digest},
     fuzz::Plan,
 };
+use commonware_parallel::{Manual, Rayon, Strategy as _};
+use commonware_utils::NZUsize;
 use crc::{CRC_32_ISCSI, Crc};
 use libfuzzer_sys::fuzz_target;
+use std::sync::LazyLock;
 
 /// Reference CRC32C implementation from the `crc` crate.
 const CRC32C_REF: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
+
+/// A strategy that splits every operation across four workers, built once and reused across
+/// invocations because starting a thread pool is expensive.
+static STRATEGY: LazyLock<Manual<Rayon>> =
+    LazyLock::new(|| Rayon::new(NZUsize!(4)).unwrap().manual());
 
 #[derive(Debug, Arbitrary)]
 enum Operation {
@@ -148,6 +156,6 @@ fuzz_target!(|op: Operation| {
         Operation::EncodeDecode(data) => fuzz_encode_decode(&data),
         Operation::DigestU32Roundtrip(data) => fuzz_digest_u32_roundtrip(&data),
         Operation::Determinism(chunks) => fuzz_determinism(&chunks),
-        Operation::HasherPlan(plan) => plan.run(),
+        Operation::HasherPlan(plan) => plan.run(&*STRATEGY),
     }
 });

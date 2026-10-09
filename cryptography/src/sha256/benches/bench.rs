@@ -1,8 +1,5 @@
 use criterion::criterion_main;
 
-#[path = "../../benches/hash_many.rs"]
-mod workload;
-
 mod digest_cmp;
 mod hash_many;
 mod hash_message;

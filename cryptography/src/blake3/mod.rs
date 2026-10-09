@@ -351,6 +351,7 @@ mod tests {
     /// workers, the longest vector splits into two subtrees.
     #[test]
     fn test_official_vectors() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         const VECTORS: [(usize, [u8; DIGEST_LENGTH]); 3] = [
             (
                 16384,
@@ -378,7 +379,7 @@ mod tests {
             hasher.update(&input);
             let (_, digest) = hasher.finalize();
             assert_eq!(digest.as_ref(), expected, "len {len}");
-            let digest = Blake3::hash_with(&[&input], crate::fuzz::parallel());
+            let digest = Blake3::hash_with(&[&input], &strategy);
             assert_eq!(digest.as_ref(), expected, "len {len}");
         }
     }
@@ -389,6 +390,7 @@ mod tests {
     /// down to two chunks.
     #[test]
     fn test_hash_long_messages() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         let data = random((1 << 20) + 5000, 0);
         for len in [
             0,
@@ -419,11 +421,7 @@ mod tests {
             ];
             for parts in &splits {
                 assert_eq!(Blake3::hash(parts), expected, "len={len}");
-                assert_eq!(
-                    Blake3::hash_with(parts, crate::fuzz::parallel()),
-                    expected,
-                    "len={len}"
-                );
+                assert_eq!(Blake3::hash_with(parts, &strategy), expected, "len={len}");
                 if len > CHUNK_LEN {
                     assert_eq!(
                         hash_subtrees(parts, len, &Sequential),

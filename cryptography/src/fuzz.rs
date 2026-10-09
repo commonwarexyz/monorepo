@@ -11,17 +11,10 @@
 
 use crate::{Hasher, blake3::SUBTREE_LEN};
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_parallel::{Manual, Rayon, Strategy as _};
-use commonware_utils::{NZUsize, TestRng};
+use commonware_parallel::Strategy;
+use commonware_utils::TestRng;
 use core::{fmt::Debug, marker::PhantomData};
 use rand::Rng as _;
-use std::sync::OnceLock;
-
-/// A strategy that splits every operation it is given across four workers.
-pub(crate) fn parallel() -> &'static Manual<Rayon> {
-    static STRATEGY: OnceLock<Manual<Rayon>> = OnceLock::new();
-    STRATEGY.get_or_init(|| Rayon::new(NZUsize!(4)).unwrap().manual())
-}
 
 /// Pick a contiguous message length biased toward the boundaries of
 /// SHA-256's specialized paths (the pair kernels at 64 and 72 bytes and the
@@ -136,8 +129,9 @@ impl<H: Hasher> Plan<H> {
     }
 
     /// Check that every entrypoint agrees with a single [Hasher::update]
-    /// over the concatenated message.
-    pub fn run(self) {
+    /// over the concatenated message, with [Hasher::hash_with] across
+    /// `strategy`.
+    pub fn run(self, strategy: &impl Strategy) {
         let left: Vec<&[u8]> = self.left.iter().map(Vec::as_slice).collect();
         let right: Vec<&[u8]> = self.right.iter().map(Vec::as_slice).collect();
 
@@ -165,8 +159,8 @@ impl<H: Hasher> Plan<H> {
 
         assert_eq!(H::hash(&left), expected_left);
         assert_eq!(H::hash(&right), expected_right);
-        assert_eq!(H::hash_with(&left, parallel()), expected_left);
-        assert_eq!(H::hash_with(&right, parallel()), expected_right);
+        assert_eq!(H::hash_with(&left, strategy), expected_left);
+        assert_eq!(H::hash_with(&right, strategy), expected_right);
         let (left_digest, right_digest) = H::hash_pair(&left, &right);
         assert_eq!(left_digest, expected_left);
         assert_eq!(right_digest, expected_right);
@@ -215,8 +209,8 @@ impl<H: Hasher> Arbitrary<'_> for BatchPlan<H> {
 
 impl<H: Hasher> BatchPlan<H> {
     /// Check that batch output positions agree with independent streaming
-    /// hashes, both on the calling thread and across workers.
-    pub fn run(self) {
+    /// hashes, both on the calling thread and across `strategy`.
+    pub fn run(self, strategy: &impl Strategy) {
         let expected = self
             .messages
             .iter()
@@ -227,7 +221,7 @@ impl<H: Hasher> BatchPlan<H> {
             })
             .collect::<Vec<_>>();
         assert_eq!(H::hash_many(&self.messages), expected);
-        assert_eq!(H::hash_many_with(&self.messages, parallel()), expected);
+        assert_eq!(H::hash_many_with(&self.messages, strategy), expected);
     }
 }
 
@@ -276,9 +270,9 @@ impl<H: Hasher> Arbitrary<'_> for ParallelPlan<H> {
 }
 
 impl<H: Hasher> ParallelPlan<H> {
-    /// Check that hashing the parts across workers agrees with streaming the
-    /// message.
-    pub fn run(self) {
+    /// Check that hashing the parts across `strategy` agrees with streaming
+    /// the message.
+    pub fn run(self, strategy: &impl Strategy) {
         // Expand the seed into the message and cut it into parts.
         let mut message = vec![0; self.len];
         TestRng::new(self.seed).fill_bytes(&mut message);
@@ -292,7 +286,7 @@ impl<H: Hasher> ParallelPlan<H> {
 
         let mut hasher = H::default();
         hasher.update(&message);
-        assert_eq!(H::hash_with(&parts, parallel()), hasher.finalize().1);
+        assert_eq!(H::hash_with(&parts, strategy), hasher.finalize().1);
     }
 }
 
@@ -301,22 +295,27 @@ mod tests {
     use super::*;
     use crate::{Blake3, Sha256};
     use commonware_invariants::minifuzz;
+    use commonware_parallel::Rayon;
+    use commonware_utils::NZUsize;
     use std::sync::Arc;
 
     fn test_fuzz<H: Hasher>() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+
         // The generators below always emit at least one part, so pin the
         // zero-parts one-shot to the empty-message digest separately.
-        Plan::<H>::new(vec![], vec![]).run();
+        Plan::<H>::new(vec![], vec![]).run(&strategy);
         minifuzz::Builder::default()
             .with_seed(0)
             .with_search_limit(512)
             .test(|u| {
-                u.arbitrary::<Plan<H>>()?.run();
+                u.arbitrary::<Plan<H>>()?.run(&strategy);
                 Ok(())
             });
     }
 
     fn test_fuzz_hash_many<H: Hasher>() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         let mut saw_empty_batch = false;
         let mut saw_equal_lengths = false;
         let mut saw_partial_batch = false;
@@ -346,7 +345,7 @@ mod tests {
                 saw_equal_two_block_padding |=
                     equal_lengths && plan.messages.len() >= 16 && first_len % 64 >= 56;
                 saw_unequal_lengths |= !equal_lengths;
-                plan.run();
+                plan.run(&strategy);
                 Ok(())
             });
         assert!(saw_empty_batch);
@@ -374,6 +373,7 @@ mod tests {
 
     #[test]
     fn test_hash_many_default_matches_individual_hashes() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         let messages = (0..33)
             .map(|lane| Arc::<[u8]>::from(vec![lane as u8; lane]))
             .collect::<Vec<_>>();
@@ -389,7 +389,7 @@ mod tests {
             let messages = &messages[..count];
             assert_eq!(Blake3::hash_many(messages), expected[..count]);
             assert_eq!(
-                Blake3::hash_many_with(messages, parallel()),
+                Blake3::hash_many_with(messages, &strategy),
                 expected[..count]
             );
         }
@@ -404,6 +404,7 @@ mod tests {
     /// messages that split, cuts at subtree boundaries, and empty middle parts.
     #[test]
     fn test_fuzz_parallel_blake3() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         let mut saw_split = false;
         let mut saw_boundary = false;
         let mut saw_empty = false;
@@ -422,7 +423,7 @@ mod tests {
                     .cuts
                     .windows(2)
                     .any(|pair| pair[0] == pair[1] && inner(&pair[0]));
-                plan.run();
+                plan.run(&strategy);
                 Ok(())
             });
         assert!(saw_split);

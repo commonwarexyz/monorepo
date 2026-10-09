@@ -8,8 +8,16 @@ use commonware_cryptography::{
     blake3::{Blake3 as OurBlake3, Digest},
     fuzz::{BatchPlan, ParallelPlan, Plan},
 };
+use commonware_parallel::{Manual, Rayon, Strategy as _};
+use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
+use std::sync::LazyLock;
 use zeroize::Zeroize;
+
+/// A strategy that splits every operation across four workers, built once and reused across
+/// invocations because starting a thread pool is expensive.
+static STRATEGY: LazyLock<Manual<Rayon>> =
+    LazyLock::new(|| Rayon::new(NZUsize!(4)).unwrap().manual());
 
 #[derive(Debug, Arbitrary)]
 pub struct FuzzInput {
@@ -169,9 +177,9 @@ fn fuzz(input: FuzzInput) {
         5 => fuzz_clone_and_format(&input.chunks),
         6 => fuzz_digest_operations(&input.data),
         7 => fuzz_from_hash_and_deref(&input.data),
-        8 => input.plan.run(),
-        9 => input.batch_plan.run(),
-        10 => input.parallel_plan.run(),
+        8 => input.plan.run(&*STRATEGY),
+        9 => input.batch_plan.run(&*STRATEGY),
+        10 => input.parallel_plan.run(&*STRATEGY),
         _ => unreachable!(),
     }
 }

@@ -203,7 +203,33 @@ impl Hasher for Sha256 {
 
     #[cfg(target_arch = "x86_64")]
     fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
-        hash_batch(messages)
+        let Some(minimum) = simd::minimum_x16_batch_len() else {
+            return messages
+                .iter()
+                .map(|message| Self::hash(&[message.as_ref()]))
+                .collect();
+        };
+
+        // Adjacent equal-length runs satisfy the kernel's length requirement and
+        // keep the resulting digests in input order.
+        let mut digests = Vec::with_capacity(messages.len());
+        for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
+            for batch in run.chunks(simd::X16_LANES) {
+                if batch.len() >= minimum {
+                    // Spare lanes borrow the first input; only active lanes contribute output.
+                    let mut inputs = [batch[0].as_ref(); simd::X16_LANES];
+                    for (input, message) in inputs[1..].iter_mut().zip(&batch[1..]) {
+                        *input = message.as_ref();
+                    }
+                    if let Some(batch_digests) = simd::hash_x16(inputs) {
+                        digests.extend_from_slice(&batch_digests[..batch.len()]);
+                        continue;
+                    }
+                }
+                digests.extend(batch.iter().map(|message| Self::hash(&[message.as_ref()])));
+            }
+        }
+        digests
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -211,13 +237,16 @@ impl Hasher for Sha256 {
         messages: &[M],
         strategy: &impl Strategy,
     ) -> Vec<Self::Digest> {
-        // Shares of whole sixteen-message batches keep the AVX-512 kernel full.
-        let lanes = if simd::minimum_x16_batch_len().is_some() {
+        // Without SHA-NI, every share runs the x16 kernel, which costs the same however few lanes
+        // are active, so shares of whole sixteen-message batches keep it full. With SHA-NI, a
+        // share too small for the kernel hashes on SHA-NI instead, so the strategy may split the
+        // messages one at a time across more workers.
+        let lanes = if simd::minimum_x16_batch_len().is_some() && !simd::supports_sha_ni() {
             simd::X16_LANES
         } else {
             1
         };
-        crate::hash_batches(messages, lanes, BLOCK_LENGTH, strategy, hash_batch)
+        crate::hash_batches(messages, lanes, BLOCK_LENGTH, strategy, Self::hash_many)
     }
 
     #[inline]
@@ -232,43 +261,6 @@ impl Hasher for Sha256 {
         let array: [u8; DIGEST_LENGTH] = finalized.into();
         (self, Digest(array))
     }
-}
-
-/// Hash independent messages in order, sixteen equal-length messages at a time when the AVX-512
-/// kernel is available.
-#[cfg(target_arch = "x86_64")]
-fn hash_batch<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Digest> {
-    let Some(minimum) = simd::minimum_x16_batch_len() else {
-        return messages
-            .iter()
-            .map(|message| hash_specialized(&[message.as_ref()]))
-            .collect();
-    };
-
-    // Adjacent equal-length runs satisfy the kernel's length requirement and
-    // keep the resulting digests in input order.
-    let mut digests = Vec::with_capacity(messages.len());
-    for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
-        for batch in run.chunks(simd::X16_LANES) {
-            if batch.len() >= minimum {
-                // Spare lanes borrow the first input; only active lanes contribute output.
-                let mut inputs = [batch[0].as_ref(); simd::X16_LANES];
-                for (input, message) in inputs[1..].iter_mut().zip(&batch[1..]) {
-                    *input = message.as_ref();
-                }
-                if let Some(batch_digests) = simd::hash_x16(inputs) {
-                    digests.extend_from_slice(&batch_digests[..batch.len()]);
-                    continue;
-                }
-            }
-            digests.extend(
-                batch
-                    .iter()
-                    .map(|message| hash_specialized(&[message.as_ref()])),
-            );
-        }
-    }
-    digests
 }
 
 /// Digest of a SHA-256 hashing operation.
@@ -371,6 +363,8 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::NZUsize;
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
@@ -487,7 +481,7 @@ mod tests {
                 vec![fill + 1; 32],
             ]
         }
-        crate::fuzz::Plan::<Sha256>::new(node(42, 0x11), node(43, 0x33)).run();
+        crate::fuzz::Plan::<Sha256>::new(node(42, 0x11), node(43, 0x33)).run(&Sequential);
     }
 
     /// Deterministically exercise the pair (assembly) kernel with the BMT
@@ -527,22 +521,20 @@ mod tests {
         );
     }
 
-    /// Checks [Sha256::hash_many], on the calling thread and across workers, against hashing
+    /// Checks [Sha256::hash_many], on the calling thread and across `strategy`, against hashing
     /// each message alone.
-    fn check_hash_many(messages: &[&[u8]]) {
+    fn check_hash_many(messages: &[&[u8]], strategy: &impl Strategy) {
         let expected = messages
             .iter()
             .map(|&message| Sha256::hash(&[message]))
             .collect::<Vec<_>>();
         assert_eq!(Sha256::hash_many(messages), expected);
-        assert_eq!(
-            Sha256::hash_many_with(messages, crate::fuzz::parallel()),
-            expected
-        );
+        assert_eq!(Sha256::hash_many_with(messages, strategy), expected);
     }
 
     #[test]
     fn test_hash_many_boundaries_match_individual_hashes() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         for len in (0..=129).chain([255, 256, 1024, 12_634, 50_534]) {
             let messages: [Vec<u8>; 33] = core::array::from_fn(|lane| {
                 (0..len)
@@ -551,26 +543,27 @@ mod tests {
             });
             let refs = messages.each_ref().map(Vec::as_slice);
             for count in [0, 1, 2, 6, 7, 15, 16, 17, 31, 32, 33] {
-                check_hash_many(&refs[..count]);
+                check_hash_many(&refs[..count], &strategy);
             }
         }
 
         let messages: [Vec<u8>; 16] = core::array::from_fn(|lane| vec![lane as u8; 64]);
         let mut refs = messages.each_ref().map(Vec::as_slice);
         refs[9] = &messages[9][..63];
-        check_hash_many(&refs);
+        check_hash_many(&refs, &strategy);
         #[cfg(target_arch = "x86_64")]
         assert!(simd::hash_x16(refs).is_none());
     }
 
     #[test]
     fn test_hash_many_aliased_unaligned_inputs_match_individual_hashes() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         let backing: Vec<u8> = (0..160).map(|i| i as u8).collect();
         let messages: [&[u8]; 16] = core::array::from_fn(|lane| &backing[lane..lane + 129]);
         for count in 1..=messages.len() {
-            check_hash_many(&messages[..count]);
+            check_hash_many(&messages[..count], &strategy);
         }
-        check_hash_many(&[&backing[1..130]; 16]);
+        check_hash_many(&[&backing[1..130]; 16], &strategy);
     }
 
     #[test]
