@@ -13,8 +13,8 @@
 //! restores a retained applied state within its operation cap. [`Db::prune`] bounds the retained
 //! history. Initialization restores the db's in-memory state from an entry. The Merkle is rebuilt
 //! from the stored pinned nodes and operation, and the commit fields are decoded from the
-//! operation. An entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. The witness is
-//! also what lets compact nodes serve compact sync without retaining historical operations.
+//! operation. An entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. Each retained
+//! witness also serves compact sync at its size without retaining historical operations.
 //!
 //! # Inactivity floor
 //!
@@ -615,8 +615,8 @@ where
     /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness
     /// below the boundary may survive.
     ///
-    /// Pruning bounds how far back bounded initialization can reach. The current commit's witness
-    /// always survives. The prune is made durable before this method returns.
+    /// Bounded initialization and compact sync can only use witnesses that survive. The current
+    /// commit's witness always survives. The prune is made durable before this method returns.
     ///
     /// # Errors
     ///
@@ -653,7 +653,12 @@ where
     async fn serve(&self, request: Request<F>) -> source::Result<Self> {
         let response = self
             .witness
-            .compact_state(&self.commit_codec_config, request)?;
+            .compact_state::<H, S, Self::Op>(
+                self.merkle.strategy(),
+                &self.commit_codec_config,
+                request,
+            )
+            .await?;
         Ok((response, None))
     }
 }
@@ -1177,8 +1182,8 @@ mod tests {
         witness::Journal::init(context, cfg).await.unwrap()
     }
 
-    /// The witness serves only the request matching its single committed state. Each mismatch
-    /// reports the same error a pruned operation log would.
+    /// The witness journal refuses requests that match no retained state. Each mismatch reports
+    /// the same error a pruned operation log would.
     #[test_traced("INFO")]
     fn test_serve_refuses_requests_outside_witness() {
         deterministic::Runner::default().start(|context| async move {
@@ -1243,6 +1248,85 @@ mod tests {
             assert_eq!(operations.len(), 1);
             let response = db.serve(boundary(n, n - 1)).await.unwrap().0;
             assert!(matches!(response, Response::Boundary { .. }));
+        });
+    }
+
+    /// The witness journal serves each retained applied state at its size and refuses a size with
+    /// no retained state.
+    #[test_traced("INFO")]
+    fn test_serve_retained_witnesses() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db =
+                open_db::<mmr::Family>(context.child("db"), "keyless-serve-retained").await;
+
+            // Apply two batches and record the target after each.
+            let mut targets = Vec::new();
+            for seed in [1, 2] {
+                let floor = db.inactivity_floor_loc();
+                let batch = db
+                    .new_batch()
+                    .append(U64::new(seed))
+                    .merkleize(&db, Some(U64::new(seed + 10)), floor)
+                    .await
+                    .unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+                targets.push(db.target());
+            }
+            let db = db.sync().await.unwrap();
+
+            // The earlier state is served at its size and verifies against its root.
+            let first = &targets[0];
+            let start = first.size - 1;
+            let request = Request::Boundary {
+                size: first.size,
+                start,
+            };
+            let Response::Boundary {
+                proof,
+                op,
+                pinned_nodes,
+            } = db.serve(request).await.unwrap().0
+            else {
+                panic!("boundary request should get a boundary response");
+            };
+            assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                &proof,
+                start,
+                std::slice::from_ref(&op),
+                &pinned_nodes,
+                &first.root
+            ));
+
+            // An operations request at the earlier size gets the same commit operation.
+            let Response::Operations { proof, operations } = db
+                .serve(Request::Operations {
+                    size: first.size,
+                    start,
+                    max_ops: NZU64!(1),
+                })
+                .await
+                .unwrap()
+                .0
+            else {
+                panic!("operations request should get an operations response");
+            };
+            assert_eq!(operations, vec![op]);
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof,
+                start,
+                &operations,
+                &first.root
+            ));
+
+            // A size between retained states is refused.
+            assert!(matches!(
+                db.serve(Request::Boundary {
+                    size: first.size + 1,
+                    start: first.size,
+                })
+                .await,
+                Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
+            ));
         });
     }
 

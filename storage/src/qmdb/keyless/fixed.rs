@@ -384,11 +384,10 @@ mod tests {
                 source,
                 apply_batch_size: NZU64!(10),
                 fetch_batch_size: NZU64!(5),
-                max_outstanding_requests: 1,
+                max_outstanding_requests: NZUsize!(1),
                 update_rx: None,
                 finish_rx: None,
                 reached_target_tx: None,
-                max_retained_roots: 8,
             })
             .await
             .unwrap();
@@ -992,11 +991,10 @@ mod tests {
                 context: ctx.child("client"),
                 source: target_db.clone(),
                 apply_batch_size: NZU64!(1024),
-                max_outstanding_requests: 1,
+                max_outstanding_requests: NZUsize!(1),
                 update_rx: None,
                 finish_rx: None,
                 reached_target_tx: None,
-                max_retained_roots: 8,
             };
             let synced_db: TestDb<mmr::Family> = sync::sync(config).await.unwrap();
 

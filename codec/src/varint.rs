@@ -34,8 +34,6 @@ use bytes::BufMut;
 use core::{fmt::Debug, mem::size_of};
 use sealed::{SPrim, UPrim};
 
-// ---------- Constants ----------
-
 /// The number of bits in a byte.
 const BITS_PER_BYTE: usize = 8;
 
@@ -154,8 +152,6 @@ impl<U: UPrim> Decoder<U> {
     }
 }
 
-// ---------- Traits ----------
-
 #[doc(hidden)]
 mod sealed {
     use super::*;
@@ -262,8 +258,6 @@ mod sealed {
     impl_sint!(i128, u128);
 }
 
-// ---------- Structs ----------
-
 /// An ergonomic wrapper to allow for encoding and decoding of primitive unsigned integers as
 /// varints rather than the default fixed-width integers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -363,8 +357,6 @@ where
         Ok(Self(value))
     }
 }
-
-// ---------- Helper Functions ----------
 
 /// Encodes an unsigned integer as a varint
 fn write<T: UPrim>(value: T, buf: &mut impl BufMut) {
