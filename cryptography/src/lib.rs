@@ -887,6 +887,20 @@ mod tests {
     }
 
     #[test]
+    fn test_ellipsoidal_falcon_512_contract() {
+        type Key = crate::fn_dsa::PrivateKey<crate::fn_dsa::EllipsoidalFalcon512>;
+        test_validate::<Key>();
+        test_public_key_order::<Key>();
+        test_validate_invalid_public_key::<Key>();
+        test_sign_and_verify::<Key>();
+        test_sign_and_verify_wrong_message::<Key>();
+        test_sign_and_verify_wrong_namespace::<Key>();
+        test_empty_namespace::<Key>();
+        test_signature_determinism::<Key>();
+        test_invalid_signature_publickey_pair::<Key>();
+    }
+
+    #[test]
     fn test_fn_dsa_len() {
         use crate::fn_dsa::{FnDsa512, FnDsa1024, PrivateKey, PublicKey, Signature};
 

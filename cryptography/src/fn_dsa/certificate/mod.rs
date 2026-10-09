@@ -323,9 +323,7 @@ mod tests {
         rng: &mut impl CryptoRng,
         n: u32,
     ) -> (Vec<TestScheme<V>>, TestScheme<V>) {
-        let private_keys: Vec<_> = (0..n)
-            .map(|_| PrivateKey::<V>::random(&mut *rng))
-            .collect();
+        let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::<V>::random(&mut *rng)).collect();
 
         // Use FN-DSA keys as both identity and signing keys.
         let participants: BiMap<PublicKey<V>, PublicKey<V>> = private_keys
@@ -699,12 +697,13 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
-        use crate::fn_dsa::{FnDsa512, FnDsa1024};
+        use crate::fn_dsa::{EllipsoidalFalcon512, FnDsa512, FnDsa1024};
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Certificate<FnDsa512>> => 1024,
             CodecConformance<Certificate<FnDsa1024>> => 1024,
+            CodecConformance<Certificate<EllipsoidalFalcon512>> => 1024,
         }
     }
 }
