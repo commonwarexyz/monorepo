@@ -1952,6 +1952,67 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A batched direct read goes through its own open file description, and the kernel writes
+    /// the range's dirty pages back before a direct read, so the batch sees every buffered write
+    /// that completed before it, synced or not.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_read_many_sees_unsynced_buffered_writes() {
+        let (storage, directory) = storage_for_reopen_test("read_many_coherent", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        assert!(
+            aio::open_direct(&blob.shared).is_some(),
+            "temporary directory must support O_DIRECT"
+        );
+
+        const BLOCK: usize = 4096;
+        const RANGES: [(u64, usize); 3] =
+            [(0, BLOCK), (BLOCK as u64, BLOCK), (BLOCK as u64 + 100, 300)];
+        async fn read_all(blob: &Blob) -> Vec<Vec<u8>> {
+            let mut bufs: Vec<(usize, IoBufsMut)> = blob
+                .read_many(&RANGES, ReadOptions::DONT_CACHE)
+                .try_collect()
+                .await
+                .unwrap();
+            bufs.sort_by_key(|(index, _)| *index);
+            bufs.into_iter()
+                .map(|(_, bufs)| bufs.coalesce().as_ref().to_vec())
+                .collect()
+        }
+
+        // Two buffered, unsynced generations of the same blocks; each batched read sees the
+        // latest one.
+        for generation in [0x11u8, 0x22] {
+            let data = vec![generation; 2 * BLOCK];
+            blob.write_at(0, data.clone(), WriteOptions::default())
+                .await
+                .unwrap();
+            let bufs = read_all(&blob).await;
+            for ((offset, len), buf) in RANGES.iter().zip(bufs) {
+                let offset = *offset as usize;
+                assert_eq!(
+                    buf,
+                    &data[offset..offset + len],
+                    "generation {generation:#x}"
+                );
+            }
+        }
+
+        // A partial buffered overwrite inside the second block is seen too.
+        blob.write_at(BLOCK as u64 + 150, vec![0x33; 100], WriteOptions::default())
+            .await
+            .unwrap();
+        let bufs = read_all(&blob).await;
+        assert_eq!(&bufs[2][..50], &[0x22; 50]);
+        assert_eq!(&bufs[2][50..150], &[0x33; 100]);
+        assert_eq!(&bufs[2][150..], &[0x22; 150]);
+
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_read_many_reports_unservable_range() {
