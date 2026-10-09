@@ -5729,6 +5729,10 @@ mod tests {
         reissue_handoff_after_parent_nullification(Unanswered::Closed);
     }
 
+    /// The incoming leader's handoff build rests on an outgoing chain it verified and voted
+    /// for. A conflicting notarization at the chain's first view invalidates that ancestry, so
+    /// the voter cancels the build before any timeout, live or after a restart replays its
+    /// votes.
     fn displaced_ancestor_cancels_before_timeout(restart: bool) {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|mut context| async move {
             let n = 4;
@@ -5857,7 +5861,8 @@ mod tests {
                 assert_eq!(requests[0].parent, (View::new(3), parent_payload));
             }
 
-            // Only the outgoing leader equivocates: peers 0 and 1 see B1, while local 3 voted A1.
+            // Only the outgoing leader equivocates: validators 0, 1, and 2 notarize B1, while
+            // local 3 voted A1.
             let round = Round::new(epoch, View::new(1));
             let contents = (round, genesis, 4u64).encode();
             let conflicting = Proposal::new(round, View::zero(), Sha256::hash(&[contents.as_ref()]));
@@ -5878,7 +5883,7 @@ mod tests {
             mailbox.recovered(Certificate::Notarization(notarization));
             let certified = take_certification_request(&context, &certifications, View::new(1)).await;
 
-            // Certification waits behind the build, so cancellation must precede its completion.
+            // Hold B1's certification: the build must be cancelled while it is still pending.
             select! {
                 _ = response.closed() => {},
                 _ = context.sleep(Duration::from_millis(500)) => {

@@ -285,9 +285,9 @@ where
     }
 
     /// Decides through [`Application::prepare`] before any work, so a [`Handoff::Wait`]
-    /// decision never touches the parent or the actor queue. Otherwise the ancestry is fetched
-    /// and the build runs as an ordinary proposal through the processing actor, which alone can
-    /// prepare its database batches, and the decision is attached to the result.
+    /// decision never touches the parent or the actor queue. Otherwise the ancestry is fetched,
+    /// the block is built as an ordinary proposal by the processing actor (which owns the
+    /// database batches), and the decision is attached to the result.
     async fn prepare(
         &mut self,
         context: (E, Self::Context),

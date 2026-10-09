@@ -435,8 +435,9 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
 
     fn broadcast(&mut self, payload: H::Digest, plan: Plan<P>) {
         let (contents, recipients) = match plan {
-            // A held candidate is sent once, when it is prepared. Its lock-in
-            // does not send it again, mirroring marshal's relay.
+            // A held candidate is sent once, when it is prepared. Its
+            // [`Plan::Propose`] broadcast does not send it again, mirroring
+            // marshal's relay.
             Plan::Prepare { .. } => {
                 let contents = self.pending.get(&payload).expect("missing payload").clone();
                 self.seen.insert(payload, contents.clone());

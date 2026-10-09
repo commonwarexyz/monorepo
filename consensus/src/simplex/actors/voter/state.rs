@@ -867,10 +867,14 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             self.failed_certifications.insert(artifact.view());
         }
 
-        // Replay visits parents before children. Without a parent certificate, the
-        // parent's retained proposal is our local vote and identifies the context
-        // in which we voted for this child. A certificate can replace that proposal,
-        // so it cannot recover the original binding.
+        // Replay visits parents before children. A parent round without a direct
+        // certificate retains the local vote's proposal, so a child's binding to that
+        // payload is a fact we can restore. A parent round that already holds a
+        // certificate retains only the certified payload, which need not be the one the
+        // child was voted against, so no binding is recorded for that child: it is not
+        // checked against the local vote, and a conflicting certificate does not cancel a
+        // handoff build on it; the build stops once a nullification in its term invalidates
+        // the ancestry or this node votes to nullify the view it waits in.
         let binding = if let Artifact::Notarize(notarize) = artifact {
             self.views
                 .get(&notarize.proposal.parent)
@@ -1037,7 +1041,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns whether we voted to nullify the current view and that view is at or below
     /// `parent`. A handoff on an uncertified `parent` then neither starts nor keeps a
     /// pending build: it waits for `parent` to certify and may then proceed as an ordinary
-    /// request. A candidate already held for the lock-in is kept and released once `parent`
+    /// request. A candidate already held for its vote is kept and released once `parent`
     /// certifies.
     fn gave_up_below(&self, parent: View) -> bool {
         self.view <= parent && self.voted_nullify(self.view)
@@ -1559,7 +1563,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// certificate-backed payload when one exists, otherwise our own verified,
     /// unequivocated, notarize-broadcast proposal; recursively, so the whole
     /// uncertified chain rests on views we voted for ourselves.
-    /// A recorded parent binding must match the resolved parent payload.
+    /// For an ancestor without a direct certificate, a recorded parent binding must match
+    /// the resolved parent payload.
     fn optimistic_ancestry_payload(&self, view: View) -> Option<&D> {
         if view == GENESIS_VIEW {
             return Some(self.genesis.as_ref().expect("genesis must be present"));
@@ -1661,7 +1666,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     fn verification_matches(&self, view: View) -> bool {
-        // The response applies only to the proposal and parent supplied for verification.
+        // A recorded binding names the proposal and parent payload that were checked; a vote
+        // or verification verdict applies only while both still match.
         let Some(round) = self.views.get(&view) else {
             return true;
         };
@@ -7562,6 +7568,62 @@ mod tests {
                 .construct_notarize(View::new(6))
                 .expect("rebuilt proposal should be votable");
             assert_eq!(notarize.proposal, rebuilt);
+        });
+    }
+
+    /// The automaton is asked to propose at most once per view: a build rejected because its
+    /// parent failed local certification keeps the view's request claimed, even after a
+    /// finalization makes that parent usable again.
+    #[test]
+    fn rejected_build_keeps_single_propose_per_view() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+
+            // Enter the local signer's term at view 6 on certified view-4 ancestry, then
+            // propose and vote for the term start, which the peers notarize.
+            let certified = certify_view_4(&mut state, &verifier, &schemes);
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(5)));
+            assert!(state.add_nullification(nullification));
+            assert_eq!(state.current_view(), View::new(6));
+            let start = state
+                .try_propose()
+                .expect("term start should be proposed on certified ancestry")
+                .into_context();
+            assert_eq!(start.parent, (View::new(4), certified.payload));
+            let term_start = fetch_proposal(6, 4, 66);
+            assert!(state.proposed(&start, term_start.payload));
+            assert!(state.construct_notarize(View::new(6)).is_some());
+            let notarization = build_notarization(&verifier, &schemes[..3], &term_start);
+            assert!(state.add_notarization(notarization).0);
+
+            // The next view in the term is requested on the notarized term start.
+            let request = state
+                .try_propose()
+                .expect("next view should be proposed on the notarized term start");
+            assert!(matches!(request, ProposalRequest::Regular(_)));
+            let ctx = request.into_context();
+            assert_eq!(ctx.round.view(), View::new(7));
+            assert_eq!(ctx.parent, (View::new(6), term_start.payload));
+
+            // Local certification rejects the parent while the automaton is building, so the
+            // build is neither superseded nor recorded.
+            assert!(state.certified(View::new(6), false).is_some());
+            let child = fetch_proposal(7, 6, 67);
+            assert!(!state.supersede_proposal_request(&ctx));
+            assert!(!state.proposed(&ctx, child.payload));
+
+            // Finalizing the parent restores it as ancestry, but the view's request stays
+            // claimed.
+            let finalization = build_finalization(&verifier, &schemes, &term_start);
+            assert!(state.add_finalization(finalization).0);
+            assert!(state.try_propose().is_none());
         });
     }
 

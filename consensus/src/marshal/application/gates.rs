@@ -37,7 +37,7 @@ struct Inner<D: Digest, B> {
     /// In-flight certification gate tasks, consumed by certification.
     certifications: HashMap<(Round, D), oneshot::Receiver<GateOutcome>>,
     /// Proposals staged for their relay broadcast, consumed by the lock-in
-    /// broadcast (or by certification when no lock-in was requested).
+    /// broadcast (or by certification when it arrives first).
     proposals: HashMap<(Round, D), Staged<B>>,
 }
 
@@ -98,7 +98,7 @@ impl<D: Digest, B> Gates<D, B> {
     /// Removes and returns the staged proposal for `(round, digest)`, if present.
     ///
     /// The taken block and ack are handed to marshal exactly once: by the lock-in
-    /// broadcast, or by certification when no lock-in was ever requested.
+    /// broadcast, or by certification if it arrives first.
     pub(crate) fn take_staged(&self, round: Round, digest: D) -> Option<Staged<B>> {
         self.inner.lock().proposals.remove(&(round, digest))
     }
@@ -157,8 +157,8 @@ impl<D: Digest, B> Gates<D, B> {
     /// published so the relay broadcast and `certify` always find them.
     ///
     /// The handle arrives once marshal persists the staged block, which happens
-    /// when consensus locks it in with a propose broadcast (or at certification
-    /// when no lock-in was requested), so this await can outlive the round. A real
+    /// when consensus locks it in with a propose broadcast, or at certification
+    /// if that arrives first, so this await can outlive the round. A real
     /// sync failure panics here (the fatal policy, annotated with `name`). A
     /// dropped ack means the marshal actor is gone, the staged entry was pruned
     /// without ever being taken, or the same block was staged again for the

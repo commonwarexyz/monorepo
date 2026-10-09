@@ -3762,8 +3762,9 @@ mod tests {
         });
     }
 
-    /// An unverified ancestor can claim any height, including one with no successor. A parent
-    /// at the maximum height is rejected as non-contiguous instead of overflowing.
+    /// An unverified ancestor can claim any height, including one with no successor. An
+    /// ancestor whose height is not contiguous with the cursor is rejected, including a height
+    /// of `u64::MAX`.
     #[test]
     fn execution_rebuild_pending_rejects_parent_at_max_height() {
         deterministic::Runner::default().start(|context| async move {

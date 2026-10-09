@@ -265,7 +265,7 @@
 //! * [`crate::Handoff::Stage`]: relay the candidate now and hold the proposer's notarize vote
 //!   until the parent certifies or finalizes (see [`Plan::Prepare`]).
 //! * [`crate::Handoff::Vote`]: relay the candidate and cast the proposer's notarize vote
-//!   before the parent certifies.
+//!   without waiting for the parent to certify.
 //! * Closed response: time out the view as a missing proposal once the parent certifies or
 //!   finalizes.
 //!
@@ -8499,7 +8499,7 @@ mod tests {
     {
         let honest_handoffs = Arc::new(AtomicUsize::new(0));
         let twin_handoffs = Arc::new(AtomicUsize::new(0));
-        let early_votes = Arc::new(Mutex::new(0u64));
+        let early_vote_series = Arc::new(Mutex::new(0u64));
         let n = campaign.n;
         let faults = N3f1::max_faults(n) as usize;
         let cases = twins::cases(
@@ -8533,7 +8533,7 @@ mod tests {
             let elector = elector.clone();
             let honest_handoffs = honest_handoffs.clone();
             let twin_handoffs = twin_handoffs.clone();
-            let early_votes = early_votes.clone();
+            let early_vote_series = early_vote_series.clone();
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
             let rng: deterministic::BoxDynRng = Box::new(StdRng::from_rng(&mut *rng));
@@ -8845,7 +8845,7 @@ mod tests {
                 }
                 join_all(finalizers).await;
                 if campaign.handoffs {
-                    *early_votes.lock() += u64::from(count_nonzero_metric_lines(
+                    *early_vote_series.lock() += u64::from(count_nonzero_metric_lines(
                         &context.encode(),
                         &[
                             "_handoff_events_total{",
@@ -8945,7 +8945,7 @@ mod tests {
         }
         if campaign.handoffs {
             assert!(
-                *early_votes.lock() > 0,
+                *early_vote_series.lock() > 0,
                 "campaign must vote for prefix handoffs before certification"
             );
             assert!(

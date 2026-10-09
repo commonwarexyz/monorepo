@@ -33,8 +33,9 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
     /// The marshal cannot build on this parent.
     Skip,
     /// The parent is fetched and the application may build on its ancestry. The timer
-    /// measures the application's build from this point. The captured metadata
-    /// is passed to the sealing callback after the build completes.
+    /// measures the application's build from this point; the metadata (the coding
+    /// configuration, or unit for standard blocks) is passed to the sealing callback with
+    /// the built block.
     Build(A, Timer, M),
 }
 
@@ -43,9 +44,10 @@ pub(crate) const BOUNDARY_BLOCK: &str = "re-proposed boundary block";
 
 /// A parent the marshal fetches only when the application asks for it.
 ///
-/// `resolve` is the marshal's proposal checks, which run only once the application asks. The
-/// handle reports their outcome to the marshal before it answers the application, so the
-/// marshal can tell a block built on the fetched ancestry from one built without it.
+/// `resolve` holds the marshal's proposal checks, which run only when the application asks for
+/// the ancestry. The handle reports their outcome to the marshal before it answers the
+/// application, so the marshal can tell a block built on the fetched ancestry from one built
+/// without it.
 struct Lazy<F, D, S, M> {
     resolve: F,
     report: oneshot::Sender<Resolved<D, S, (), M>>,

@@ -208,8 +208,8 @@ where
         proposed
     }
 
-    /// Builds a term-start block on a parent that has not certified, in place of
-    /// [`Self::propose`].
+    /// Prepares a term-start block on an uncertified parent unless this node's dealer log is
+    /// due at that height.
     ///
     /// The payload depends on the parent's height, so the parent is fetched before the inner
     /// application is asked. The inner application then receives the fetched ancestry as its
@@ -217,9 +217,9 @@ where
     /// selection (a dealer-log request from the midpoint on, or the final block's epoch info).
     ///
     /// A height that would carry this node's dealer log is left to [`Self::propose`] without
-    /// asking the inner application, and the reservation is released: consensus can abandon a
-    /// prepared block without notice, and a reservation kept for it would withhold the log
-    /// from later proposals until finalization passes that height.
+    /// asking the inner application, and the reservation is released: a prepared block is
+    /// discarded whenever its parent fails to certify, and a reservation kept for it would
+    /// withhold the log from later proposals until finalization reaches that height.
     #[tracing::instrument(
         name = "dkg.reshare.application.prepare",
         level = "info",
@@ -662,6 +662,18 @@ mod tests {
                     midpoint.height().next()
                 );
 
+                // The released log is served to the ordinary proposal at the same height.
+                let proposed = app
+                    .propose(
+                        (context.child("propose"), block_context(&midpoint, 2)),
+                        ancestry::from_iter([Arc::new(midpoint.clone())]),
+                        (),
+                    )
+                    .await
+                    .expect("the ordinary proposal builds");
+                assert!(proposed.payload() == Some(payload.clone()));
+                assert!(inner.proposed() == vec![Some(payload.clone())]);
+
                 // Before the midpoint no dealer log is reserved, so the decision is forwarded.
                 let prepared = app
                     .prepare(
@@ -673,8 +685,51 @@ mod tests {
                 match (decision, prepared) {
                     (Handoff::Vote(()), Handoff::Vote(block))
                     | (Handoff::Stage(()), Handoff::Stage(block)) => {
-                        assert!(inner.proposed() == vec![None]);
+                        assert!(inner.proposed() == vec![Some(payload.clone()), None]);
                         assert!(block.payload().is_none());
+                    }
+                    (Handoff::Wait, Handoff::Wait) => {
+                        assert!(
+                            inner.proposed() == vec![Some(payload.clone())],
+                            "a declined prepare builds nothing"
+                        );
+                    }
+                    _ => panic!("the wrapper must forward the inner decision"),
+                }
+            }
+        });
+    }
+
+    /// A prepare request for an epoch's final block forwards the inner application's decision,
+    /// and the block it builds carries the epoch info selected for that height.
+    #[test]
+    fn prepare_forwards_final_epoch_info() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = mocks::genesis_block(leader().public_key());
+            let payload = epoch_payload(7);
+            for decision in [Handoff::Vote(()), Handoff::Stage(()), Handoff::Wait] {
+                let inner = RecordingApp {
+                    handoff: decision,
+                    ..RecordingApp::accepting()
+                };
+                let mut app = wrapper_with_inner(
+                    &context,
+                    EpochInfoResponse::Available(Some(payload.clone())),
+                    inner.clone(),
+                );
+                let prepared = app
+                    .prepare(
+                        (context.child("app"), block_context(&parent, 1)),
+                        ancestry::from_iter([Arc::new(parent.clone())]),
+                        (),
+                    )
+                    .await;
+                match (decision, prepared) {
+                    (Handoff::Vote(()), Handoff::Vote(block))
+                    | (Handoff::Stage(()), Handoff::Stage(block)) => {
+                        assert!(inner.proposed() == vec![Some(payload.clone())]);
+                        assert!(block.payload() == Some(payload.clone()));
                     }
                     (Handoff::Wait, Handoff::Wait) => {
                         assert!(

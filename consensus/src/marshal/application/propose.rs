@@ -19,13 +19,15 @@ use rand_core::Rng;
 use std::{future::Future, sync::Arc};
 use tracing::{Instrument as _, Span, debug};
 
-/// Answers a propose request for `consensus_context` from a task spawned from `context`.
+/// Answers a propose request for `consensus_context` from a task spawned from `context` and
+/// instrumented with `span`.
 ///
-/// `checks` resolves the parent. The epoch boundary block is re-proposed as is, a parent the
-/// marshal cannot build on closes the receiver, and otherwise `application` builds on the
-/// fetched ancestry under the span `build_span` returns. `seal` turns the built block into its
-/// staged form and identifier. The block is staged before its identifier is sent. Consensus
-/// dropping the receiver cancels the wait for the parent and the build.
+/// `checks` resolves the parent. The epoch boundary block is re-proposed as is. A parent the
+/// marshal cannot build on, or a build that produces no block, closes the receiver. Otherwise
+/// `application` builds on the fetched ancestry under the span `build_span` returns, and
+/// `seal` turns the built block, with the metadata the checks resolved, into the block's staged
+/// form and identifier. The block is staged before its identifier is sent. Dropping the
+/// receiver cancels the wait for the parent and the build.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn request<E, A, D, P, S, N, Fut, M>(
     context: &E,

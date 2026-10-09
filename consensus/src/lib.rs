@@ -179,8 +179,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// `Handoff<()>` is the same decision without a payload, and [`map`](Self::map) attaches one.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Handoff<D> {
-        /// Relay the candidate and cast the proposer's notarize vote at once, before the parent
-        /// certifies.
+        /// Relay the candidate and cast the proposer's notarize vote without waiting for the
+        /// parent to certify.
         ///
         /// This trusts the outgoing leader not to equivocate and to complete its term: the
         /// proposal is usable only if every uncertified view it builds on certifies.
@@ -196,7 +196,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// replaced before it certifies, the proposer can relay another candidate for the same
         /// view.
         ///
-        /// A relay may instead hold the candidate until the proposer votes for it.
+        /// A relay may instead hold the candidate until consensus requests the broadcast that
+        /// precedes the proposer's vote.
         Stage(D),
         /// Request an ordinary proposal after the parent certifies.
         Wait,
@@ -234,8 +235,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// context once the parent certifies, unless it has already voted to nullify this view.
         ///
         /// Consensus requests the relay of a [`Handoff::Stage`] candidate as soon as it arrives.
-        /// Its notarize vote is cast once the parent certifies or finalizes, and the candidate is
-        /// stored then.
+        /// Its notarize vote is cast once the parent certifies or finalizes.
         ///
         /// Closing the response forfeits the local proposal opportunity for this view once the
         /// parent certifies or finalizes, and the view then times out as a missing proposal.

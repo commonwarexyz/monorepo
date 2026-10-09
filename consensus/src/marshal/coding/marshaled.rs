@@ -702,10 +702,10 @@ where
             parent_timer.observe(&*context);
 
             // Coding validators vote before reconstructing a block, so an uncertified handoff
-            // parent can carry any height. Build only on a parent inside the request's epoch,
-            // since one outside it can never certify. A parent at view zero is the epoch's
-            // genesis block, which for a later epoch is the previous epoch's boundary block and
-            // lies outside the epoch.
+            // parent can carry any height. Build only on a parent whose height maps to the
+            // request's epoch, since any other parent can never certify. A parent at view zero
+            // is the epoch's genesis: for a later epoch that is the previous epoch's boundary
+            // block, whose height maps to the previous epoch.
             if parent_view != View::zero()
                 && !is_block_in_expected_epoch(&epocher, parent.height(), consensus_context.epoch())
             {

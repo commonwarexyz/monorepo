@@ -10700,8 +10700,8 @@ mod tests {
                     "the held candidate must not be stored"
                 );
 
-                // Nullifying the outgoing view allows the incoming leader to fall back to
-                // the certified predecessor. Both parent contexts reuse the boundary block.
+                // After the outgoing view is nullified, the incoming leader proposes on the
+                // certified predecessor. Both parent contexts name the boundary block.
                 let replacement_context = Ctx {
                     parent: (boundary_round.view(), digest),
                     ..held_context.clone()

@@ -148,7 +148,6 @@ mod tests {
         }
     }
 
-
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
     type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
@@ -5220,6 +5219,88 @@ mod tests {
                 };
                 assert_eq!(decision, expected, "parent height {height:?}");
             }
+        });
+    }
+
+    /// The genesis parent of a later epoch is the previous epoch's boundary block, whose
+    /// height maps to the previous epoch. A handoff on that parent at view zero must still
+    /// build the epoch's first block rather than decline as a parent outside the epoch.
+    #[test_traced("WARN")]
+    fn test_coding_prepare_builds_on_epoch_genesis() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let genesis = genesis_block();
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+
+            // Store the last block of epoch 0, which is the genesis of epoch 1.
+            let boundary_height = epocher.last(Epoch::zero()).expect("epoch 0 exists");
+            let boundary_round = Round::new(Epoch::zero(), View::new(BLOCKS_PER_EPOCH.get()));
+            let boundary_ctx = CodingCtx {
+                round: boundary_round,
+                leader: participants[1].clone(),
+                parent: (View::zero(), genesis_coding_commitment(&genesis)),
+            };
+            let boundary_block =
+                make_coding_block(boundary_ctx, genesis.digest(), boundary_height, 1);
+            let boundary_digest = boundary_block.digest();
+            let boundary = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                boundary_block,
+                coding_config,
+                &Sequential,
+            );
+            let boundary_commitment = boundary.commitment();
+            assert!(setup.mailbox.verified(boundary_round, boundary).await);
+
+            // The first proposal of epoch 1 names the boundary block at view zero.
+            let ctx = CodingCtx {
+                round: Round::new(Epoch::new(1), View::new(1)),
+                leader: me.clone(),
+                parent: (View::zero(), boundary_commitment),
+            };
+            let child = make_coding_block(ctx.clone(), boundary_digest, boundary_height.next(), 2);
+            let child_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                child.clone(),
+                coding_config,
+                &Sequential,
+            )
+            .commitment();
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new()
+                    .with_handoff(Handoff::Stage(()))
+                    .with_propose_result(child),
+                marshal: setup.mailbox.clone(),
+                shards: setup.extra.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher,
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+            let decision = marshaled
+                .prepare(ctx)
+                .await
+                .await
+                .expect("prepare must return a decision");
+            assert_eq!(decision, Handoff::Stage(child_commitment));
         });
     }
 

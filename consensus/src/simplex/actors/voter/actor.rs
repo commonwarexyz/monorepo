@@ -107,7 +107,7 @@ enum ProposalResponse<D> {
     /// An ordinary candidate.
     Proposed(D),
     /// A held candidate released by parent certification. It was relayed when held, so only
-    /// the lock-in and the vote remain.
+    /// the [`Plan::Propose`] broadcast and the vote remain.
     Released(D),
     /// A response from a handoff request.
     Handoff(Handoff<D>),
@@ -124,7 +124,8 @@ enum ProposalState<D> {
     /// request for the same context follows exact parent certification, unless we voted to
     /// nullify the request's view.
     Waiting,
-    /// A relayed candidate whose lock-in and notarize vote require parent certification.
+    /// A relayed candidate whose proposal broadcast and notarize vote require parent
+    /// certification.
     ///
     /// Once its parent has certified, the select loop consumes the result only
     /// after the journal sync that follows that certification.
@@ -790,8 +791,8 @@ impl<
         // crash can do is relay a different payload for the same round after
         // restart (see [Plan::Propose]).
         //
-        // This is also the lock-in for a candidate that was relayed while held:
-        // the relay requests its storage, and certification awaits its durability.
+        // This plan also follows a candidate already relayed while held (see
+        // [Plan::Prepare]); a relay that sent it then does not send it again.
         let _ = self.relay.broadcast(
             proposed,
             Plan::Propose {
@@ -1325,8 +1326,8 @@ impl<
                         if !self.state.proposal_parent_certified(request.context()) =>
                     {
                         // Relay the held candidate now so its distribution overlaps parent
-                        // certification. The relay stores nothing and names no proposal
-                        // (see [Plan::Prepare]); the lock-in and the vote wait for the parent.
+                        // certification. The relay names no proposal (see [Plan::Prepare]);
+                        // the proposal broadcast and the vote wait for the parent.
                         self.record_handoff_event(HandoffEventKind::CandidateReturned);
                         self.record_handoff_event(HandoffEventKind::Held);
                         let _ = self.relay.broadcast(
