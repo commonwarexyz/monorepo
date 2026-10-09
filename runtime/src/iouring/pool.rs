@@ -1,11 +1,12 @@
-//! The pool of workers that poll ordinary tasks: its shared scheduling state
-//! and its threads.
+//! The pool of workers that poll ordinary tasks.
 //!
-//! [`Pool`] is created before any worker starts. It holds every pool
-//! worker's mailbox, the pool-wide inject queue, the idle set, and the
-//! shutdown barrier. Every task's header reaches it through a weak
-//! reference, so a wake from any thread can find the task's pool.
-//! [`Threads`] starts and joins the threads of the workers after worker zero.
+//! [`Pool`] is the state the workers share: every worker's mailbox, the
+//! pool-wide inject queue, the idle set, and the shutdown barrier. The runner
+//! creates it before any worker starts, every worker reaches it through the
+//! runner's shared services, and every task's header holds a weak reference to
+//! it, so a wake from any thread can find the task's pool without keeping the
+//! pool alive. [`Threads`] starts the workers after worker zero, each on a
+//! thread of its own, and joins them at shutdown.
 //!
 //! # Placement
 //!
@@ -19,13 +20,34 @@
 //!
 //! [global queue interval]: super::Config::with_global_queue_interval
 //!
+//! # Inject queue
+//!
+//! The inject queue is a [`VecDeque`] behind one pool-wide mutex, with its
+//! length mirrored in an atomic. Workers read the mirror to decide whether
+//! there is anything to take, so a worker that finds nothing, the common case,
+//! never locks. A take moves a share of the queue into the taking worker's own
+//! queue under one lock: one runnable more than an even split between the
+//! workers, at most [`INJECT_BATCH`]. The mirror is stored only under the lock,
+//! so its stores follow the queue's own order.
+//!
+//! ```text
+//! push   lock, refuse if closed, append, store the length, unlock, wake
+//! take   load the length (zero: done), lock, move a share, store the
+//!        length, unlock
+//! close  lock, refuse later pushes, store zero, take the rest, unlock,
+//!        discard what was taken
+//! ```
+//!
 //! # Waking a parked worker
 //!
-//! A push into the inject queue wakes one parked worker. A worker publishes
-//! itself in the idle set before its last look at the queue. Each side fences
-//! between its store and its load, so at least one of them sees the other's
-//! store: either the pusher finds the worker's bit and wakes it, or the worker
-//! finds the push and runs it.
+//! The idle set is one `u64` with a bit per worker, which is why a pool has
+//! at most [`MAX_WORKERS`] workers. A worker sets its bit before its last look at
+//! the inject queue and clears it once it runs again. A push into the inject
+//! queue clears the lowest set bit to claim that worker and wakes it, so each
+//! parked worker is woken by at most one push. Each side fences between its
+//! store and its load, so at least one of them sees the other's store: either
+//! the pusher finds the worker's bit and wakes it, or the worker finds the push
+//! and runs it.
 //!
 //! ```text
 //! push                              parking worker i
@@ -37,7 +59,9 @@
 //! ```
 //!
 //! A wake that arrives before the worker arms its wait is latched by the
-//! worker's wake source, so the wait returns at once.
+//! worker's wake source, so the wait returns at once. A woken worker that finds
+//! the queue already emptied by another worker publishes itself and parks
+//! again.
 //!
 //! # Lifecycle
 //!
@@ -74,6 +98,12 @@
 //! polled on one worker can hold registrations on another, whose mailbox
 //! forwards their results.
 //!
+//! The barrier's state is [`Closing`], under a lock of its own: `closed`
+//! releases the workers waiting in [`Pool::wait_closed`], `stopped` ends the roots
+//! of the workers after worker zero, and `active` counts the workers
+//! [`Pool::finish`] waits for. One condition variable signals both the close
+//! and the last finish.
+//!
 //! # Failures
 //!
 //! A pool worker that fails sends the failure to the runner's pool failure
@@ -83,6 +113,13 @@
 //! cleanup waits for the pool to close, which needs the root to end. The
 //! channel outlives the root, so a failure after the root completes is taken
 //! once the pool is joined. Only the first failure is delivered.
+//!
+//! # Testing
+//!
+//! The unit tests here check the queue, the idle set, and the barrier one call
+//! at a time. The loom models in `task.rs` race pushes from outside the pool
+//! against parking workers with real task state, and the runtime tests in
+//! `tests.rs` hook each step of a worker's park, startup, and shutdown.
 
 use super::{
     mailbox::{Mailbox, Message},
@@ -121,43 +158,53 @@ const INJECT_BATCH: usize = 128;
 /// one bit of a `u64`.
 pub const MAX_WORKERS: usize = 64;
 
-/// Runnables waiting for any worker of the pool.
+/// The inject queue's contents, guarded by the pool-wide lock.
 struct Inject {
-    /// Whether pushes are still accepted.
+    /// Whether pushes are still accepted. Shutdown clears it, after which a
+    /// push hands its runnable back to the caller.
     open: bool,
-    /// Runnables in arrival order.
+    /// Runnables waiting for any worker, oldest first.
     runnables: VecDeque<Runnable>,
 }
 
-/// Progress of the pool's shutdown.
+/// Progress of the pool's shutdown, guarded by its own lock and signalled
+/// through the pool's `progress` condition variable.
 struct Closing {
-    /// Whether the task set and the inject queue have closed.
+    /// Whether worker zero has closed the task set and the inject queue. Pool
+    /// workers wait for it before they drain the set.
     closed: bool,
-    /// Whether worker zero has stopped the other pool workers.
+    /// Whether worker zero has stopped the pool, which ends the root of every
+    /// other worker.
     stopped: bool,
-    /// Pool workers that may still poll a task or clear one from the set.
+    /// Workers that have entered the barrier and not yet finished, which may
+    /// still poll a task or clear one from the set.
     active: usize,
 }
 
-/// Scheduling state shared by every pool worker and by task wakers.
+/// State shared by a pool's workers, the wakers of its tasks, and its runner.
 pub struct Pool {
-    /// Every pool worker's mailbox, indexed by worker.
+    /// Every pool worker's mailbox, indexed by worker. All exist before any
+    /// worker starts, so a push can wake any worker from the first spawn on.
     mailboxes: Box<[Arc<Mailbox>]>,
-    /// One bit per worker that is parked or about to park.
+    /// Bit `i` is set while worker `i` is parked or about to park. Padded,
+    /// like the two fields after it, so parks, pushes, and takes do not contend
+    /// for one cache line.
     idle: CachePadded<AtomicU64>,
-    /// Inject queue length, mirrored outside the lock.
+    /// The inject queue's length, stored under its lock and read without it.
     inject_len: CachePadded<AtomicUsize>,
-    /// Runnables waiting for any worker of the pool.
+    /// The inject queue.
     inject: CachePadded<Mutex<Inject>>,
     /// Shutdown progress, which workers wait on through `progress`.
     closing: Mutex<Closing>,
-    /// Signalled when the pool closes and when the last active worker finishes.
+    /// Signalled when the pool closes and when the last active worker
+    /// finishes.
     progress: Condvar,
 }
 
 impl Pool {
     /// The state for a pool whose workers own `mailboxes`, in worker order.
     pub fn new(mailboxes: Vec<Arc<Mailbox>>) -> Self {
+        // The idle set has one bit per worker.
         assert!(
             (1..=MAX_WORKERS).contains(&mailboxes.len()),
             "an io_uring pool has 1 to {MAX_WORKERS} workers"
@@ -179,7 +226,7 @@ impl Pool {
         }
     }
 
-    /// Workers in the pool.
+    /// Number of workers in the pool, worker zero included.
     pub fn workers(&self) -> usize {
         self.mailboxes.len()
     }
@@ -191,6 +238,7 @@ impl Pool {
 
     /// Lock the inject queue.
     fn inject(&self) -> MutexGuard<'_, Inject> {
+        // Loom's mutex reports poisoning, the standard build's does not.
         cfg_if::cfg_if! {
             if #[cfg(feature = "loom")] {
                 let inject = self.inject.lock().unwrap();
@@ -213,7 +261,8 @@ impl Pool {
         closing
     }
 
-    /// Wait on `progress` with `closing` held.
+    /// Wait on `progress` with `closing` held, returning the guard once
+    /// signalled or woken spuriously. Callers recheck their condition.
     fn wait<'a>(&self, closing: MutexGuard<'a, Closing>) -> MutexGuard<'a, Closing> {
         cfg_if::cfg_if! {
             if #[cfg(feature = "loom")] {
@@ -226,8 +275,9 @@ impl Pool {
         }
     }
 
-    /// Queue `runnable` for any worker and wake a parked one, or return it
-    /// once the queue has closed.
+    /// Queue `runnable` for any worker and wake a parked one. Once the queue
+    /// has closed, returns the runnable for the caller to discard, since the
+    /// closed task set retains its task.
     pub fn push(&self, runnable: Runnable) -> Result<(), Runnable> {
         {
             let mut inject = self.inject();
@@ -235,6 +285,9 @@ impl Pool {
                 return Err(runnable);
             }
             inject.runnables.push_back(runnable);
+
+            // Under the lock, so the mirror's stores follow the queue's own
+            // order.
             self.inject_len
                 .store(inject.runnables.len(), Ordering::Release);
         }
@@ -247,7 +300,10 @@ impl Pool {
         Ok(())
     }
 
-    /// Whether the inject queue holds runnables.
+    /// Whether the inject queue holds runnables, read without the lock. A
+    /// worker that published itself idle and then reads zero here is woken by
+    /// any push it missed, by the fence pairing between [`Self::push`] and
+    /// [`Self::park_begin`].
     pub fn has_inject(&self) -> bool {
         self.inject_len.load(Ordering::Acquire) != 0
     }
@@ -321,7 +377,8 @@ impl Pool {
     }
 
     /// Publish that worker `index` is about to park. The caller then looks
-    /// at the inject queue once more before it blocks.
+    /// at the inject queue once more before it blocks, and calls
+    /// [`Self::park_end`] once it runs again.
     pub fn park_begin(&self, index: u32) {
         self.idle.fetch_or(1 << index, Ordering::SeqCst);
 
@@ -329,12 +386,16 @@ impl Pool {
         fence(Ordering::SeqCst);
     }
 
-    /// Withdraw worker `index` from the idle set once it runs again.
+    /// Withdraw worker `index` from the idle set once it runs again. A push
+    /// that claimed the worker has already cleared its bit, which leaves the set
+    /// unchanged here.
     pub fn park_end(&self, index: u32) {
         self.idle.fetch_and(!(1 << index), Ordering::SeqCst);
     }
 
-    /// Count one more pool worker that shutdown waits for.
+    /// Count one more pool worker that shutdown waits for. Each worker enters
+    /// before it reports itself ready, so [`Self::finish`] waits for every
+    /// worker that started.
     pub fn enter(&self) {
         self.closing().active += 1;
     }
@@ -343,6 +404,8 @@ impl Pool {
     /// workers waiting for the pool to close. The caller has closed the task
     /// set, which retains every discarded runnable's task.
     pub fn close(&self) {
+        // Refuse later pushes and take what is queued under one lock, so every
+        // runnable is either discarded here or handed back to its pusher.
         let runnables = {
             let mut inject = self.inject();
             inject.open = false;
@@ -350,11 +413,13 @@ impl Pool {
             mem::take(&mut inject.runnables)
         };
 
-        // Releasing references runs no user code.
+        // Releasing references runs no user code, since the set still holds a
+        // reference to each task.
         for runnable in runnables {
             runnable.discard();
         }
 
+        // Release every worker waiting in `wait_closed`.
         self.closing().closed = true;
         self.progress.notify_all();
     }
@@ -381,7 +446,8 @@ impl Pool {
         }
     }
 
-    /// Whether worker zero has stopped the pool.
+    /// Whether worker zero has stopped the pool. The root of every worker
+    /// after worker zero polls this.
     fn is_stopped(&self) -> bool {
         self.closing().stopped
     }
@@ -391,6 +457,8 @@ impl Pool {
     /// failure.
     pub fn wait_closed(&self) {
         let mut closing = self.closing();
+
+        // Recheck after every wakeup, since one can be spurious.
         while !closing.closed {
             closing = self.wait(closing);
         }
@@ -401,17 +469,23 @@ impl Pool {
     pub fn finish(&self) {
         let mut closing = self.closing();
         closing.active -= 1;
+
+        // The last worker to finish releases the others.
         if closing.active == 0 {
             self.progress.notify_all();
             return;
         }
+
+        // The others wait for it, rechecking after every wakeup, since one can
+        // be spurious.
         while closing.active != 0 {
             closing = self.wait(closing);
         }
     }
 }
 
-/// The pool workers after worker zero, each on its own thread.
+/// The threads of the pool workers after worker zero, which runs on the
+/// runner's thread.
 #[derive(Default)]
 pub struct Threads {
     /// Join handles in worker order, starting at worker one, each joined once
@@ -440,7 +514,15 @@ impl Threads {
             let handle = utils::thread::spawn(shared.cfg.thread_stack_size(), move || {
                 run(shared, index as u32, ready, failures)
             });
+
+            // Keep the handle before waiting, so a worker that fails at startup
+            // is still joined.
             self.handles.push(handle);
+
+            // One worker at a time: each has entered the barrier and created
+            // its ring before the next starts. A startup failure resumes here,
+            // inside worker zero's root builder, so the runner's root is never
+            // built.
             match started.recv().expect("pool worker exited during startup") {
                 Ok(()) => {}
                 Err(panic) => resume_unwind(panic),
@@ -448,7 +530,8 @@ impl Threads {
         }
     }
 
-    /// Join every worker, resuming the first thread that panicked.
+    /// Join every worker, resuming the first thread that panicked. A later
+    /// payload is leaked rather than dropped, since its destructor may panic.
     pub fn join(&mut self) {
         let mut first: Option<Panic> = None;
         for thread in self.handles.drain(..) {
@@ -479,15 +562,18 @@ impl Drop for Threads {
 /// Run pool worker `index` on its own thread until worker zero stops the
 /// pool. Reports readiness, or the startup failure, through `ready`.
 ///
-/// Once started, the worker sends every failure to `failures`. A failure
-/// that ends it early goes before cleanup, since cleanup waits for the runner
-/// to close the pool, and only the interrupted root makes it do so.
+/// Once started, the worker sends every failure to `failures` and wakes worker
+/// zero's root, which takes the failure before its next poll. A failure that
+/// ends the worker early goes before cleanup, since cleanup waits for the
+/// runner to close the pool, and only the interrupted root makes it do so.
 fn run(
     shared: Arc<Shared>,
     index: u32,
     ready: mpsc::Sender<Result<(), Panic>>,
     failures: Panicker,
 ) {
+    // Kept beyond the worker, so a failure reported after its cleanup can
+    // still wake worker zero's root.
     let pool = shared.pool.clone();
 
     // Readiness is sent only once the worker exists with its ring and TLS.
@@ -499,6 +585,9 @@ fn run(
             Role::Pool(index),
             || {
                 let _ = ready.take().unwrap().send(Ok(()));
+
+                // The root only waits for worker zero to stop the pool, which
+                // wakes it through this worker's mailbox.
                 poll_fn(|_| {
                     if pool.is_stopped() {
                         Poll::Ready(())
@@ -509,8 +598,11 @@ fn run(
             },
             None,
         )?;
+
+        // A failure that ended the drive loop is reported before cleanup.
         if let Some(panic) = worker.take_panic() {
-            report(&pool, &failures, panic);
+            failures.notify(panic);
+            let _ = pool.mailbox(0).send(Message::WakeRoot);
         }
         worker.cleanup();
         Ok::<_, Panic>(worker.take_panic())
@@ -520,22 +612,23 @@ fn run(
         Ok(Ok(Some(panic))) | Ok(Err(panic)) | Err(panic) => panic,
     };
 
-    // A worker that never started must keep the root from running.
     match ready {
+        // A worker that never started must keep the root from running. The
+        // send fails only if the starter is gone, and then the payload is
+        // leaked rather than dropped, since its destructor may panic.
         Some(ready) => {
             if let Err(error) = ready.send(Err(panic)) {
                 mem::forget(error);
             }
         }
-        None => report(&pool, &failures, panic),
-    }
-}
 
-/// Send a pool worker's failure to the runner, then wake worker zero's root,
-/// which takes the failure before its next poll.
-fn report(pool: &Pool, failures: &Panicker, panic: Panic) {
-    failures.notify(panic);
-    let _ = pool.mailbox(0).send(Message::WakeRoot);
+        // A failure during cleanup, or one that escaped the worker, reaches
+        // the runner the same way as one that ended the drive loop.
+        None => {
+            failures.notify(panic);
+            let _ = pool.mailbox(0).send(Message::WakeRoot);
+        }
+    }
 }
 
 /// Test-only access to the pool's queue and idle set.
