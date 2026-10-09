@@ -44,7 +44,7 @@
 //!
 //! The root is pinned separately and passed to [`Worker::drive`]. On a one-off
 //! worker, the selected task runs as that worker's root. Pool workers after
-//! worker zero run a root that waits for their stop signal.
+//! worker zero run a root that ends when worker zero stops the pool.
 //!
 //! ## Task placement
 //!
@@ -1421,8 +1421,9 @@ impl Worker {
 
     /// Create a worker and drive a stack-pinned root, retaining the worker for cleanup.
     ///
-    /// The optional service task runs alongside the root. Only the owning
-    /// runner's worker zero closes runner-wide reservations when its root exits.
+    /// The optional service task runs alongside the root. Only worker zero,
+    /// which owns the runner, closes runner-wide reservations when its root
+    /// exits.
     ///
     /// Root construction, execution, and destruction share a panic boundary.
     /// Startup errors return directly. Later failures are retained in the worker
@@ -1432,7 +1433,6 @@ impl Worker {
         role: Role,
         build: F,
         service: Option<BoxedTask>,
-        owning_runner: bool,
     ) -> Result<(Self, Option<Fut::Output>), Panic>
     where
         F: FnOnce() -> Fut,
@@ -1470,12 +1470,12 @@ impl Worker {
         };
 
         #[cfg(test)]
-        if owning_runner {
+        if role == Role::Pool(0) {
             tests::after_root();
         }
 
         // Include work spawned by root destruction in the shutdown barrier.
-        if owning_runner {
+        if role == Role::Pool(0) {
             shared.workers.close();
         }
         worker.begin_close();
@@ -1497,8 +1497,7 @@ impl Worker {
             // Startup may reject the builder without invoking it. Its captured
             // root keeps the same disposal boundary as an executing spawned task.
             let root = TaskRoot { task: Some(task) };
-            let (mut worker, output) =
-                Self::run(shared.clone(), Role::OneOff, || root, None, false)?;
+            let (mut worker, output) = Self::run(shared.clone(), Role::OneOff, || root, None)?;
             worker.cleanup();
             worker.result(output)
         }));
@@ -1577,10 +1576,10 @@ impl Worker {
     ///
     /// A pool worker first waits for the pool to close, and after draining the
     /// task set waits for every other pool worker to finish polling and
-    /// draining, so worker zero cleans up only after stopping the others.
-    /// Retains callback failures until cleanup finishes. An infrastructure
-    /// failure before kernel retirement aborts the process through
-    /// [`RetirementGuard`].
+    /// draining. Worker zero stops the other pool workers before it drains,
+    /// so they reach that barrier too. Retains callback failures until cleanup
+    /// finishes. An infrastructure failure before kernel retirement aborts the
+    /// process through [`RetirementGuard`].
     pub fn cleanup(&mut self) {
         if self.finished {
             return;
@@ -1598,8 +1597,20 @@ impl Worker {
             let local = self.local.borrow();
             (local.role, local.shared.clone())
         };
-        if matches!(role, Role::Pool(_)) {
+        if let Role::Pool(index) = role {
+            // An unwind out of the park section can leave this worker's idle
+            // bit set, which would spend a push's wake on it while it waits.
+            shared.pool.park_end(index);
             shared.pool.wait_closed();
+        }
+
+        // On the runner's normal path, worker zero gets here after the
+        // supervision tree is aborted, so the workers it stops destroy only
+        // cancelled tasks. Stopping them here rather than in the runner also
+        // releases the barrier below when an unwind skips the runner's
+        // shutdown.
+        if role == Role::Pool(0) {
+            shared.pool.stop();
         }
 
         // Destroy tasks before closing I/O, letting their futures detach
@@ -1609,10 +1620,6 @@ impl Worker {
         // Runnables belong to retained tasks as well.
         self.local.borrow_mut().ready.discard();
         if let Role::Pool(index) = role {
-            // An unwind out of the park section can leave this worker's idle
-            // bit set, which would spend a push's wake on it.
-            shared.pool.park_end(index);
-
             for task in shared.tasks.drain(index as usize) {
                 Panics::contain(|| task.clear());
             }
@@ -2183,14 +2190,15 @@ impl crate::Runner for Runner {
                 })))
             },
             Some(Box::pin(process.collect(Sleep::new))),
-            true,
         )
         .and_then(|(mut worker, output)| {
+            #[cfg(test)]
+            tests::before_abort();
+
             // The root is gone and the pool is closed. Abort ordinary and
-            // one-off tasks, stop the other pool workers, and clean up this
-            // one, which waits for theirs to drain the task set.
+            // one-off tasks, then clean up this worker, which stops the other
+            // pool workers and waits for them to drain the task set.
             worker.panics.run(|| tree.abort());
-            pool.stop();
             worker.cleanup();
             worker.panics.run(|| pool.join());
             if let Some(panic) = pool_failures.try_take() {

@@ -324,6 +324,19 @@ pub fn after_root() {
     }
 }
 
+thread_local! {
+    /// Callback run once by this thread's runner after the pool has closed and
+    /// before the supervision tree is aborted.
+    static BEFORE_ABORT: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+/// Run the callback a test installed for the window before the abort.
+pub fn before_abort() {
+    if let Some(callback) = BEFORE_ABORT.with(RefCell::take) {
+        callback();
+    }
+}
+
 /// Count destruction before injecting a task-disposal panic.
 struct PanickingDrop(Arc<AtomicUsize>);
 
@@ -1769,7 +1782,8 @@ fn test_shutdown_cancels_tasks_before_destruction() {
         }
     }
 
-    /// How far the ordinary tasks progress before the root returns.
+    /// How far the ordinary tasks progress before the root returns with one
+    /// worker. A second worker can also poll the tasks the first leaves queued.
     #[derive(Clone, Copy, Debug)]
     enum Placement {
         /// Registered locally but never polled.
@@ -1781,76 +1795,86 @@ fn test_shutdown_cancels_tasks_before_destruction() {
         Pending,
     }
 
-    for placement in [Placement::Local, Placement::Foreign, Placement::Pending] {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let cancelled = Arc::new(AtomicUsize::new(0));
-        let gauge = raw::Gauge::default();
-        let handles = Runner::new(config()).start(|context| {
-            let drops = &drops;
-            let cancelled = &cancelled;
-            let gauge = &gauge;
+    for workers in [1, 2] {
+        for placement in [Placement::Local, Placement::Foreign, Placement::Pending] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let cancelled = Arc::new(AtomicUsize::new(0));
+            let gauge = raw::Gauge::default();
+            let handles = Runner::new(config().with_worker_threads(workers)).start(|context| {
+                // Hold worker zero between the pool's close and the abort, so a
+                // worker that drained the set before the abort would be caught.
+                if workers > 1 {
+                    BEFORE_ABORT.with(|slot| {
+                        *slot.borrow_mut() =
+                            Some(Box::new(|| thread::sleep(Duration::from_millis(20))));
+                    });
+                }
+                let drops = &drops;
+                let cancelled = &cancelled;
+                let gauge = &gauge;
 
-            async move {
-                // Build both wrappers directly so a shared gauge can check that
-                // the whole subtree is cancelled before either future is destroyed.
-                let tree = Tree::child(&context.tree).0;
-                let descendant = Tree::child(&tree).0;
-                let mut handles = Vec::new();
-                let mut receivers = Vec::new();
+                async move {
+                    // Build both wrappers directly so a shared gauge can check that
+                    // the whole subtree is cancelled before either future is destroyed.
+                    let tree = Tree::child(&context.tree).0;
+                    let descendant = Tree::child(&tree).0;
+                    let mut handles = Vec::new();
+                    let mut receivers = Vec::new();
 
-                for tree in [tree, descendant.clone()] {
-                    let cleanup = Cleanup {
-                        drops: drops.clone(),
-                        cancelled: cancelled.clone(),
-                        gauge: gauge.clone(),
-                        descendant: descendant.clone(),
-                    };
-                    let (started, ready) = oneshot::channel();
-                    let (future, handle) = Handle::init(
-                        async move {
-                            let _cleanup = cleanup;
-                            started.send(()).unwrap();
-                            pending::<()>().await;
-                        },
-                        MetricHandle::new(gauge.clone()),
-                        context.shared.panicker.clone(),
-                        tree.clone(),
-                    );
-                    let shared = context.shared.clone();
-                    let pool = Arc::downgrade(&shared.pool);
-                    if matches!(placement, Placement::Foreign) {
-                        thread::spawn(move || assert!(shared.tasks.register(future, pool).is_ok()))
+                    for tree in [tree, descendant.clone()] {
+                        let cleanup = Cleanup {
+                            drops: drops.clone(),
+                            cancelled: cancelled.clone(),
+                            gauge: gauge.clone(),
+                            descendant: descendant.clone(),
+                        };
+                        let (started, ready) = oneshot::channel();
+                        let (future, handle) = Handle::init(
+                            async move {
+                                let _cleanup = cleanup;
+                                let _ = started.send(());
+                                pending::<()>().await;
+                            },
+                            MetricHandle::new(gauge.clone()),
+                            context.shared.panicker.clone(),
+                            tree.clone(),
+                        );
+                        let shared = context.shared.clone();
+                        let pool = Arc::downgrade(&shared.pool);
+                        if matches!(placement, Placement::Foreign) {
+                            thread::spawn(move || {
+                                assert!(shared.tasks.register(future, pool).is_ok())
+                            })
                             .join()
                             .unwrap();
-                    } else {
-                        assert!(shared.tasks.register(future, pool).is_ok());
+                        } else {
+                            assert!(shared.tasks.register(future, pool).is_ok());
+                        }
+
+                        handles.push(handle);
+                        receivers.push(ready);
                     }
 
-                    handles.push(handle);
-                    receivers.push(ready);
-                }
-
-                // Only this case lets the futures reach their suspension point.
-                if matches!(placement, Placement::Pending) {
-                    for ready in receivers {
-                        ready.await.unwrap();
+                    // Only this case waits for the futures to reach their
+                    // suspension point.
+                    if matches!(placement, Placement::Pending) {
+                        for ready in receivers {
+                            ready.await.unwrap();
+                        }
                     }
-                }
 
-                handles
+                    handles
+                }
+            });
+
+            let case = format!("workers={workers} placement={placement:?}");
+            assert_eq!(drops.load(Ordering::Relaxed), 2, "{case}");
+            assert_eq!(cancelled.load(Ordering::Relaxed), 2, "{case}");
+            assert_eq!(gauge.get(), 0, "{case}");
+
+            for handle in handles {
+                assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
             }
-        });
-
-        assert_eq!(drops.load(Ordering::Relaxed), 2, "placement={placement:?}");
-        assert_eq!(
-            cancelled.load(Ordering::Relaxed),
-            2,
-            "placement={placement:?}"
-        );
-        assert_eq!(gauge.get(), 0, "placement={placement:?}");
-
-        for handle in handles {
-            assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
         }
     }
 }
@@ -3848,6 +3872,33 @@ fn test_pool_worker_failure_during_shutdown_fails_the_runner() {
     let panic = result.expect_err("a pool worker failure during shutdown must fail the runner");
     assert!(
         extract_panic_message(&*panic).contains("injected pool worker failure during shutdown")
+    );
+}
+
+/// An unwind between the root and the runner's shutdown still stops the other
+/// pool workers, so worker zero's cleanup does not wait for them forever.
+#[test]
+fn test_unwind_before_shutdown_stops_the_pool() {
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(config().with_worker_threads(2)).start(|_| {
+                BEFORE_ABORT.with(|slot| {
+                    *slot.borrow_mut() =
+                        Some(Box::new(|| panic!("injected unwind before the abort")));
+                });
+                async {}
+            })
+        }));
+        let _ = done.send(result.map_err(|panic| extract_panic_message(&*panic)));
+    });
+    let result = finished
+        .recv_timeout(TEST_TIMEOUT)
+        .expect("worker zero waited for a pool worker it never stopped");
+    assert!(
+        result
+            .unwrap_err()
+            .contains("injected unwind before the abort")
     );
 }
 
