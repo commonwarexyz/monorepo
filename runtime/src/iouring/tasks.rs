@@ -265,7 +265,7 @@ impl Tasks {
 
         // The factory runs after the spawn's open check, so the set checks
         // closure again. Insertion precedes delivery, so a runnable the closed
-        // inject queue refuses belongs to a task that teardown clears. A
+        // global queue refuses belongs to a task that teardown clears. A
         // refused task goes back to its caller to clear, so its runnable may be
         // discarded.
         if let Err(task) = self.insert(task) {

@@ -13,7 +13,7 @@
 //! Driver-owned permit waits use [`Waker::wake`] directly. Their readiness stays
 //! in the driver's acquisition queue and remains available after mailbox closure.
 //!
-//! The pool's inject queue also wakes a parked worker with [`Waker::wake`]
+//! The pool's global queue also wakes a parked worker with [`Waker::wake`]
 //! alone, publishing nothing. An idle spin therefore watches
 //! [`Waker::signalled`] as well as the sequence, and clears a wake it saw with
 //! [`Waker::consume_signal`].

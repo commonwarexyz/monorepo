@@ -12,7 +12,7 @@
 //! # Lifecycle
 //!
 //! A [`Runnable`] is the reference that entitles its holder to poll the task
-//! once. It waits in a pool worker's ready queue or in the pool's inject
+//! once. It waits in a pool worker's ready queue or in the pool's global
 //! queue, and a task has at most one. Only a runnable polls or
 //! schedules its task, so a cloned [`Task`] cannot manufacture queued work. A
 //! wake publishes a runnable only when the task has none, so duplicate wakes
@@ -59,7 +59,7 @@
 //!
 //! A task runs wherever it is woken. A wake that publishes a runnable queues it
 //! on the waking worker when that worker belongs to the task's pool and is not
-//! closing, and pushes it into the pool's inject queue otherwise, which any
+//! closing, and pushes it into the pool's global queue otherwise, which any
 //! worker takes from. A wake during a poll leaves the requeue to the poller, on
 //! the poller's worker. A new task's first runnable stays on its spawning
 //! worker when that worker has nothing else queued or is its pool's only
@@ -790,11 +790,11 @@ pub struct Runnable(Task);
 impl Runnable {
     /// Deliver a woken task's runnable: to the current worker's ready queue
     /// when that worker belongs to the task's pool and is not closing,
-    /// otherwise to the pool's inject queue.
+    /// otherwise to the pool's global queue.
     pub fn schedule(self) {
         // Polls and destructors run without the local borrow, so a wake from
         // inside one can take it here. A closing worker polls nothing more,
-        // so its wakes go to the inject queue, which runs them elsewhere or
+        // so its wakes go to the global queue, which runs them elsewhere or
         // has closed.
         if let Some(local) = Local::serving(&self.0.pool) {
             let mut local = local.borrow_mut();
@@ -803,12 +803,12 @@ impl Runnable {
                 return;
             }
         }
-        self.inject();
+        self.push_global();
     }
 
     /// Deliver a new task's first runnable. A worker of the task's pool that
     /// is not closing keeps it when it has nothing else queued or is the pool's
-    /// only worker. Otherwise it goes to the inject queue, which wakes a parked
+    /// only worker. Otherwise it goes to the global queue, which wakes a parked
     /// worker to start it.
     pub fn spawn(self) {
         if let Some(local) = Local::serving(&self.0.pool) {
@@ -818,15 +818,15 @@ impl Runnable {
                 return;
             }
         }
-        self.inject();
+        self.push_global();
     }
 
-    /// Push the runnable into its pool's inject queue.
+    /// Push the runnable into its pool's global queue.
     ///
     /// A closed queue, or a pool that is gone, discards it. The pool closes
     /// its queue only after the task set, so the closed set retains the task
     /// for the drain, which clears it or already has.
-    fn inject(self) {
+    fn push_global(self) {
         let Some(pool) = self.0.pool.upgrade() else {
             self.discard();
             return;
@@ -1210,8 +1210,8 @@ pub mod tests {
         }
     }
 
-    /// A pool of one worker that never runs, so every wake takes the inject
-    /// path.
+    /// A pool of one worker that never runs, so every wake takes the global
+    /// queue path.
     pub fn pool() -> Arc<Pool> {
         Arc::new(Pool::new(vec![Arc::new(Mailbox::new().unwrap())]))
     }
@@ -1251,7 +1251,7 @@ pub mod tests {
         task.state.0.load(Ordering::Acquire) & CANCELLED != 0
     }
 
-    /// Take the runnables pushed into `pool`'s inject queue.
+    /// Take the runnables pushed into `pool`'s global queue.
     fn scheduled(pool: &Pool) -> Vec<Runnable> {
         std::iter::from_fn(|| pool.pop()).collect()
     }
@@ -1405,7 +1405,7 @@ pub mod tests {
         assert_eq!(Arc::weak_count(&pool), 0);
     }
 
-    /// Duplicate wakes from a foreign thread push one runnable into the inject
+    /// Duplicate wakes from a foreign thread push one runnable into the global
     /// queue.
     #[test]
     fn test_foreign_wakes_coalesce_into_one_runnable() {
@@ -1418,7 +1418,7 @@ pub mod tests {
             AfterPoll::Done
         ));
 
-        // Wakes from a thread without a worker go to the inject queue, and
+        // Wakes from a thread without a worker go to the global queue, and
         // duplicates publish one runnable. The coalesced wake by value releases
         // its reference, leaving the set's, the caller's, and the runnable's.
         let waker = Waker::clone(&task.waker());
@@ -1536,17 +1536,18 @@ pub mod tests {
     }
 
     /// A task registered from a thread without a worker joins the set at once
-    /// and pushes its first runnable into the inject queue. A closed queue or
+    /// and pushes its first runnable into the global queue. A closed queue or
     /// a dropped pool discards the runnable and leaves the task to teardown,
     /// and a closed set returns the new task to the caller with its future
     /// intact and its runnable discarded.
     #[test]
-    fn test_foreign_registration_retains_the_task_and_injects_its_runnable() {
+    fn test_foreign_registration_retains_the_task_and_queues_its_runnable_globally() {
         let drops = Arc::new(AtomicUsize::new(0));
         let pool = pool();
         let set = Tasks::new(1);
 
-        // The set retains the task, and its first runnable is injected.
+        // The set retains the task, and its first runnable goes to the global
+        // queue.
         assert!(set.register(pending(), Arc::downgrade(&pool)).is_ok());
         assert_eq!(set.live(), 1);
         let mut runnables = scheduled(&pool);
@@ -1590,7 +1591,7 @@ pub mod tests {
         }
     }
 
-    /// A wake whose pool's inject queue is closed, or whose pool is gone,
+    /// A wake whose pool's global queue is closed, or whose pool is gone,
     /// discards its runnable instead of leaking it.
     #[test]
     fn test_wake_to_a_closed_or_dropped_pool_discards_its_runnable() {
@@ -1944,7 +1945,7 @@ pub mod tests {
 }
 
 /// Loom models of the real task path, through cells, runnables, the waker
-/// vtable, the pool's inject queue and idle set, and the task set, then of the
+/// vtable, the pool's global queue and idle set, and the task set, then of the
 /// state word alone.
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
@@ -1970,7 +1971,7 @@ mod loom_tests {
     }
 
     /// A pool of `workers` workers with no runner. Task headers hold a
-    /// standard `Weak` to it, and every wake takes the inject path.
+    /// standard `Weak` to it, and every wake takes the global queue path.
     fn pool(workers: usize) -> std::sync::Arc<Pool> {
         let mailboxes = (0..workers)
             .map(|_| std::sync::Arc::new(Mailbox::new().unwrap()))
@@ -2031,7 +2032,7 @@ mod loom_tests {
     }
 
     /// Tear down as worker zero does: close the set, then the pool, which
-    /// discards the inject queue's runnables, then drain the set and clear
+    /// discards the global queue's runnables, then drain the set and clear
     /// each task.
     fn teardown(set: &Tasks, pool: &Pool) {
         set.close();
@@ -2042,7 +2043,7 @@ mod loom_tests {
     }
 
     /// Run pool worker `index` until `tasks` tasks have completed: take from
-    /// its local queue, then a share of the inject queue, as `Worker::drive`
+    /// its local queue, then a share of the global queue, as `Worker::drive`
     /// does, and park as a pool worker does when both are empty. A spinning
     /// worker ends its spin on a wake signal and consumes it. The worker that
     /// completes the last task wakes every worker, so none waits forever.
@@ -2073,7 +2074,7 @@ mod loom_tests {
 
             // Publish idleness, look once more, then wait for a wake.
             pool.park_begin(index);
-            if pool.has_inject() || completed.load(Ordering::Acquire) == tasks {
+            if pool.has_global() || completed.load(Ordering::Acquire) == tasks {
                 pool.park_end(index);
                 continue;
             }
@@ -2166,7 +2167,7 @@ mod loom_tests {
     /// lost, even one that finds the task already notified by an earlier wake
     /// from the same thread: the task completes in a poll its runnable runs,
     /// first or requeued, or in the poll of a runnable a wake pushes into the
-    /// inject queue. No reference leaks.
+    /// global queue. No reference leaks.
     #[test]
     fn test_foreign_wake_racing_the_poll_path_is_never_lost() {
         for by_value in [false, true] {
@@ -2197,7 +2198,8 @@ mod loom_tests {
                 let mut completed = run(&set, runnable);
                 waking.join().unwrap();
 
-                // A wake that found the task idle injected a runnable.
+                // A wake that found the task idle pushed a runnable into the global
+                // queue.
                 while let Some(runnable) = pool.pop() {
                     assert!(!completed, "a completed task received a runnable");
                     completed = run(&set, runnable);
@@ -2214,7 +2216,7 @@ mod loom_tests {
     }
 
     /// Teardown racing a foreign wake drops the future once, whether the
-    /// wake's runnable reaches the open inject queue or the closed one, or the
+    /// wake's runnable reaches the open global queue or the closed one, or the
     /// wake finds the task already cleared. Whichever reference goes last
     /// frees the cell, the consuming waker's included.
     #[test]

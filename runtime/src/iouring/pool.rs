@@ -1,7 +1,7 @@
 //! The pool of workers that poll ordinary tasks.
 //!
 //! [`Pool`] is the state the workers share: every worker's mailbox, the
-//! pool-wide inject queue, the idle set, and the shutdown barrier. The runner
+//! pool-wide global queue, the idle set, and the shutdown barrier. The runner
 //! creates it before any worker starts, every worker reaches it through the
 //! runner's shared services, and every task's header holds a weak reference to
 //! it, so a wake from any thread can find the task's pool without keeping the
@@ -12,7 +12,7 @@
 //!
 //! A runnable woken on a worker of its own pool joins that worker's ready
 //! queue, and a new task stays on a pool worker with nothing else queued or no
-//! other worker. Every other push goes to the inject queue: wakes and spawns
+//! other worker. Every other push goes to the global queue: wakes and spawns
 //! from outside the pool or on a closing worker, and spawns that leave a busy
 //! worker. Workers take a share of the queue whenever their own runs dry and
 //! once every [global queue interval] of takes, so a busy worker cannot keep a
@@ -20,14 +20,14 @@
 //!
 //! [global queue interval]: super::Config::with_global_queue_interval
 //!
-//! # Inject queue
+//! # Global queue
 //!
-//! The inject queue is a [`VecDeque`] behind one pool-wide mutex, with its
+//! The global queue is a [`VecDeque`] behind one pool-wide mutex, with its
 //! length mirrored in an atomic. Workers read the mirror to decide whether
 //! there is anything to take, so a worker that finds nothing, the common case,
 //! never locks. A take moves a share of the queue into the taking worker's own
 //! queue under one lock: one runnable more than an even split between the
-//! workers, at most [`INJECT_BATCH`]. The mirror is stored only under the lock,
+//! workers, at most [`GLOBAL_BATCH`]. The mirror is stored only under the lock,
 //! so its stores follow the queue's own order.
 //!
 //! ```text
@@ -42,7 +42,7 @@
 //!
 //! The idle set is one `u64` with a bit per worker, which is why a pool has
 //! at most [`MAX_WORKERS`] workers. A worker sets its bit before its last look at
-//! the inject queue and clears it once it runs again. A push into the inject
+//! the global queue and clears it once it runs again. A push into the global
 //! queue clears the lowest set bit to claim that worker and wakes it, so each
 //! parked worker is woken by at most one push. Each side fences between its
 //! store and its load, so at least one of them sees the other's store: either
@@ -53,7 +53,7 @@
 //! push                              parking worker i
 //!   queue the runnable                set idle bit i
 //!   fence(SeqCst)                     fence(SeqCst)
-//!   load the idle set                 load the inject queue length
+//!   load the idle set                 load the global queue length
 //!   any bit set: clear the lowest     nonzero: clear bit i and run
 //!     and wake its worker             zero: arm the wake source and block
 //! ```
@@ -76,7 +76,7 @@
 //!   enter, start worker i ------------->   enter, report ready
 //!   build and drive the root               drive tasks
 //!   root ends: close the task set,
-//!     then the inject queue
+//!     then the global queue
 //!   abort the supervision tree
 //!   stop the pool --------------------->   root ends
 //!   drain the set from shard 0             drain the set from its shards
@@ -86,7 +86,7 @@
 //!   take a failure reported late
 //! ```
 //!
-//! Shutdown closes the task set before the inject queue, so a runnable the
+//! Shutdown closes the task set before the global queue, so a runnable the
 //! closed queue refuses belongs to a task the set still retains. On the
 //! runner's normal path the pool stops after the supervision tree is aborted,
 //! so the other workers destroy only cancelled tasks, apart from one that
@@ -150,16 +150,16 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Maximum number of runnables one take moves from the inject queue into a
+/// Maximum number of runnables one take moves from the global queue into a
 /// worker's queue, which bounds how long the take holds the pool-wide lock.
-const INJECT_BATCH: usize = 128;
+const GLOBAL_BATCH: usize = 128;
 
 /// Maximum number of workers in one pool, since the idle set gives each worker
 /// one bit of a `u64`.
 pub const MAX_WORKERS: usize = 64;
 
-/// The inject queue's contents, guarded by the pool-wide lock.
-struct Inject {
+/// The global queue's contents, guarded by the pool-wide lock.
+struct GlobalQueue {
     /// Whether pushes are still accepted. Shutdown clears it, after which a
     /// push hands its runnable back to the caller.
     open: bool,
@@ -170,7 +170,7 @@ struct Inject {
 /// Progress of the pool's shutdown, guarded by its own lock and signalled
 /// through the pool's `progress` condition variable.
 struct Closing {
-    /// Whether worker zero has closed the task set and the inject queue. Pool
+    /// Whether worker zero has closed the task set and the global queue. Pool
     /// workers wait for it before they drain the set.
     closed: bool,
     /// Whether worker zero has stopped the pool, which ends the root of every
@@ -190,10 +190,10 @@ pub struct Pool {
     /// like the two fields after it, so parks, pushes, and takes do not contend
     /// for one cache line.
     idle: CachePadded<AtomicU64>,
-    /// The inject queue's length, stored under its lock and read without it.
-    inject_len: CachePadded<AtomicUsize>,
-    /// The inject queue.
-    inject: CachePadded<Mutex<Inject>>,
+    /// The global queue's length, stored under its lock and read without it.
+    global_len: CachePadded<AtomicUsize>,
+    /// The global queue.
+    global: CachePadded<Mutex<GlobalQueue>>,
     /// Shutdown progress, which workers wait on through `progress`.
     closing: Mutex<Closing>,
     /// Signalled when the pool closes and when the last active worker
@@ -212,8 +212,8 @@ impl Pool {
         Self {
             mailboxes: mailboxes.into(),
             idle: CachePadded::new(AtomicU64::new(0)),
-            inject_len: CachePadded::new(AtomicUsize::new(0)),
-            inject: CachePadded::new(Mutex::new(Inject {
+            global_len: CachePadded::new(AtomicUsize::new(0)),
+            global: CachePadded::new(Mutex::new(GlobalQueue {
                 open: true,
                 runnables: VecDeque::new(),
             })),
@@ -236,17 +236,17 @@ impl Pool {
         &self.mailboxes[index as usize]
     }
 
-    /// Lock the inject queue.
-    fn inject(&self) -> MutexGuard<'_, Inject> {
+    /// Lock the global queue.
+    fn global(&self) -> MutexGuard<'_, GlobalQueue> {
         // Loom's mutex reports poisoning, the standard build's does not.
         cfg_if::cfg_if! {
             if #[cfg(feature = "loom")] {
-                let inject = self.inject.lock().unwrap();
+                let queue = self.global.lock().unwrap();
             } else {
-                let inject = self.inject.lock();
+                let queue = self.global.lock();
             }
         }
-        inject
+        queue
     }
 
     /// Lock the shutdown progress.
@@ -280,16 +280,16 @@ impl Pool {
     /// closed task set retains its task.
     pub fn push(&self, runnable: Runnable) -> Result<(), Runnable> {
         {
-            let mut inject = self.inject();
-            if !inject.open {
+            let mut queue = self.global();
+            if !queue.open {
                 return Err(runnable);
             }
-            inject.runnables.push_back(runnable);
+            queue.runnables.push_back(runnable);
 
             // Under the lock, so the mirror's stores follow the queue's own
             // order.
-            self.inject_len
-                .store(inject.runnables.len(), Ordering::Release);
+            self.global_len
+                .store(queue.runnables.len(), Ordering::Release);
         }
 
         // Pairs with the fence in `park_begin`: either the load in `notify`
@@ -300,36 +300,36 @@ impl Pool {
         Ok(())
     }
 
-    /// Whether the inject queue holds runnables, read without the lock. A
+    /// Whether the global queue holds runnables, read without the lock. A
     /// worker that published itself idle and then reads zero here is woken by
     /// any push it missed, by the fence pairing between [`Self::push`] and
     /// [`Self::park_begin`].
-    pub fn has_inject(&self) -> bool {
-        self.inject_len.load(Ordering::Acquire) != 0
+    pub fn has_global(&self) -> bool {
+        self.global_len.load(Ordering::Acquire) != 0
     }
 
-    /// Take a share of the inject queue: one runnable more than an even split
-    /// between the workers, at most [`INJECT_BATCH`].
+    /// Take a share of the global queue: one runnable more than an even split
+    /// between the workers, at most [`GLOBAL_BATCH`].
     /// Returns the oldest and queues the rest in `ready`.
     #[must_use]
     pub fn take(&self, ready: &mut Ready) -> Option<Runnable> {
         // The queue is usually empty, so the mirrored length answers that
         // without the lock.
-        if !self.has_inject() {
+        if !self.has_global() {
             return None;
         }
-        let mut inject = self.inject();
+        let mut queue = self.global();
 
         // One more than an even split, so a lone runnable still moves and a
         // burst spreads over the workers that look. Another take may have
         // emptied the queue since the check above, so the share never exceeds
         // what is left.
-        let len = inject.runnables.len();
-        let count = (len / self.workers() + 1).min(INJECT_BATCH).min(len);
+        let len = queue.runnables.len();
+        let count = (len / self.workers() + 1).min(GLOBAL_BATCH).min(len);
 
         // The caller polls the oldest next, and the rest join the tail of its
         // own queue, behind the work already there.
-        let mut taken = inject.runnables.drain(..count);
+        let mut taken = queue.runnables.drain(..count);
         let first = taken.next();
         for runnable in taken {
             ready.push(runnable);
@@ -338,8 +338,8 @@ impl Pool {
         // Store the new length before unlocking, so the mirror's stores follow
         // the queue's own order and a stale length never overwrites a newer
         // one.
-        self.inject_len
-            .store(inject.runnables.len(), Ordering::Release);
+        self.global_len
+            .store(queue.runnables.len(), Ordering::Release);
         first
     }
 
@@ -377,7 +377,7 @@ impl Pool {
     }
 
     /// Publish that worker `index` is about to park. The caller then looks
-    /// at the inject queue once more before it blocks, and calls
+    /// at the global queue once more before it blocks, and calls
     /// [`Self::park_end`] once it runs again.
     pub fn park_begin(&self, index: u32) {
         self.idle.fetch_or(1 << index, Ordering::SeqCst);
@@ -400,17 +400,17 @@ impl Pool {
         self.closing().active += 1;
     }
 
-    /// Close the inject queue, discarding its runnables, and release the
+    /// Close the global queue, discarding its runnables, and release the
     /// workers waiting for the pool to close. The caller has closed the task
     /// set, which retains every discarded runnable's task.
     pub fn close(&self) {
         // Refuse later pushes and take what is queued under one lock, so every
         // runnable is either discarded here or handed back to its pusher.
         let runnables = {
-            let mut inject = self.inject();
-            inject.open = false;
-            self.inject_len.store(0, Ordering::Release);
-            mem::take(&mut inject.runnables)
+            let mut queue = self.global();
+            queue.open = false;
+            self.global_len.store(0, Ordering::Release);
+            mem::take(&mut queue.runnables)
         };
 
         // Releasing references runs no user code, since the set still holds a
@@ -650,16 +650,16 @@ mod tests {
     const BLOCKED: Duration = Duration::from_millis(20);
 
     impl Pool {
-        /// Take the oldest runnable from the inject queue.
+        /// Take the oldest runnable from the global queue.
         #[must_use]
         pub fn pop(&self) -> Option<Runnable> {
-            if !self.has_inject() {
+            if !self.has_global() {
                 return None;
             }
-            let mut inject = self.inject();
-            let runnable = inject.runnables.pop_front();
-            self.inject_len
-                .store(inject.runnables.len(), Ordering::Release);
+            let mut queue = self.global();
+            let runnable = queue.runnables.pop_front();
+            self.global_len
+                .store(queue.runnables.len(), Ordering::Release);
             runnable
         }
 
@@ -691,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn test_take_moves_a_bounded_share_of_the_inject_queue() {
+    fn test_take_moves_a_bounded_share_of_the_global_queue() {
         for (workers, queued, taken) in [(4, 8, 3), (1, 129, 128)] {
             let pool = pool(workers);
             let set = Tasks::new(1);
@@ -725,7 +725,7 @@ mod tests {
         assert_eq!(refs(&queued), 2);
 
         pool.close();
-        assert!(!pool.has_inject());
+        assert!(!pool.has_global());
         assert_eq!(refs(&queued), 1);
 
         let (late, runnable) = task(&set);
