@@ -210,6 +210,12 @@ pub(super) struct Writable<E: Context> {
     tail_predecessor_sync: Option<SyncCompletion>,
 
     /// The (blob index, logical offset) below which cached pages have been dropped.
+    ///
+    /// # Invariant
+    ///
+    /// Never below `(oldest_blob_index, 0)`, so it always names a retained blob. Recovery starts it
+    /// at the oldest blob, pruning advances it before raising the oldest blob, and clearing resets
+    /// both together.
     evicted: (u64, u64),
 }
 
@@ -382,7 +388,7 @@ impl<E: Context> Writable<E> {
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
 
-        // Pruned blobs can never be read again, so free their cached pages for live data.
+        // Free the cached pages of the blobs being pruned.
         self.evict_cached_before(min_blob, 0);
 
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
@@ -427,13 +433,8 @@ impl<E: Context> Writable<E> {
     /// where the previous call stopped. The bytes remain readable from storage. A position past
     /// the tail's end is clamped to it, and a position at or below an earlier one has no effect.
     pub(super) fn evict_cached_before(&mut self, blob: u64, offset: u64) {
-        let tail_blob = self.tail_blob_index();
-        let target = if blob > tail_blob || (blob == tail_blob && offset > self.tail.size()) {
-            (tail_blob, self.tail.size())
-        } else {
-            (blob, offset)
-        };
-        let (mut blob, mut from) = self.evicted.max((self.oldest_blob_index, 0));
+        let target = (blob, offset).min((self.tail_blob_index(), self.tail.size()));
+        let (mut blob, mut from) = self.evicted;
         if target <= (blob, from) {
             return;
         }
