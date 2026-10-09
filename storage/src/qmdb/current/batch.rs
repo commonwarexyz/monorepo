@@ -19,7 +19,7 @@ use crate::{
             operation::{Operation, update},
         },
         bitmap::{Candidates, Shared, fill_from},
-        chain::{Bounds, OnChain},
+        chain::{Bounds, Compatible},
         current::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
@@ -317,13 +317,14 @@ where
 /// [`Db::prune`](super::db::Db::prune) update the DB.
 ///
 /// Reads through this batch pass only while the DB sits on one of the chain's own states: the
-/// state the chain forked from, an ancestor's tip, or this batch's own tip (once it is applied).
+/// chain's database boundary (usually the state it forked from), an ancestor's tip, or this
+/// batch's own tip (once it is applied).
 ///
 /// Once any other batch is applied (a sibling fork, or one of this batch's own descendants),
-/// this batch is stale, as is every descendant the applied batch is not an ancestor of. Reading
-/// through a stale batch refuses with [`Error::StaleRead`]. Merkleization and application are
-/// rejected with [`Error::StaleBatch`] without mutating committed state (see
-/// [`crate::qmdb::chain`]).
+/// this batch is stale, as is every descendant of it except the applied batch and the applied
+/// batch's descendants. Reading through a stale batch refuses with [`Error::StaleRead`].
+/// Merkleization and application are rejected with [`Error::StaleBatch`] without mutating
+/// committed state (see [`crate::qmdb::chain`]).
 ///
 /// Building a child off a batch that `apply_batch` has consumed (the just-applied
 /// parent) is valid. The committed bitmap then equals the parent's post-apply state,
@@ -557,7 +558,7 @@ where
             .await?;
         let current_db = inner
             .bounds()
-            .on_chain(db, db.any.commitment())
+            .compatible(db, db.any.commitment())
             .map_err(|_| Error::StaleBatch)?;
         let result =
             compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
@@ -625,7 +626,7 @@ where
             .await?;
         let current_db = inner
             .bounds()
-            .on_chain(db, db.any.commitment())
+            .compatible(db, db.any.commitment())
             .map_err(|_| Error::StaleBatch)?;
         let result =
             compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
@@ -679,7 +680,7 @@ where
             .await?;
         let current_db = inner
             .bounds()
-            .on_chain(db, db.any.commitment())
+            .compatible(db, db.any.commitment())
             .map_err(|_| Error::StaleBatch)?;
         let result =
             compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
@@ -733,7 +734,7 @@ where
             .await?;
         let current_db = inner
             .bounds()
-            .on_chain(db, db.any.commitment())
+            .compatible(db, db.any.commitment())
             .map_err(|_| Error::StaleBatch)?;
         let result =
             compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
@@ -854,7 +855,7 @@ where
 #[allow(clippy::type_complexity)]
 async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
     inner: Arc<any::batch::MerkleizedBatch<F, H::Digest, U, S>>,
-    current_db: OnChain<'_, super::db::Db<F, E, C, I, H, U, N, S>>,
+    current_db: Compatible<'_, super::db::Db<F, E, C, I, H, U, N, S>>,
     grafted_parent: &Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
     bitmap_parent: &BitmapBatch<N>,
 ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, N, S>>, Error<F>>
@@ -994,10 +995,10 @@ where
 
 /// A view of the committed bitmap plus zero or more speculative overlay `Layer`s.
 ///
-/// The chain terminates in a `Base` that references the shared committed bitmap. This enum
-/// performs no validity check of its own. Its committed-read consumers run behind the
-/// batch-chain gate (see [`crate::qmdb::chain`]), which refuses stale chains before
-/// they read through it.
+/// The chain terminates in a `Base` that references the shared committed bitmap. Reading through
+/// it performs no validity check. Merkleization first binds the chain to the live database's
+/// bitmap with [`Self::ensure_based_on`] and passes the batch-chain gate (see
+/// [`crate::qmdb::chain`]), which refuses stale chains before they read through it.
 #[derive(Clone, Debug)]
 pub(crate) enum BitmapBatch<const N: usize> {
     /// Chain terminal: shared reference to the committed bitmap.
@@ -1044,6 +1045,11 @@ impl<const N: usize> BitmapBatch<N> {
     /// Return a chain equivalent to `self` with any `Layer` whose overlay is now fully committed
     /// replaced by a direct reference to the committed bitmap. Since `apply_batch` commits
     /// contiguous prefixes, committed `Layer`s are always at the bottom of the chain.
+    ///
+    /// A trimmed layer is never needed again. The batch-chain gate can accept chain states older
+    /// than the one this trim observed, but a database never returns to such a state: its
+    /// committed bitmap never shrinks in length, and a reinitialized database owns a new bitmap
+    /// that [`Self::ensure_based_on`] rejects.
     fn trim_committed(&self) -> Self {
         let shared = self.shared();
         let committed = bitmap::Readable::<N>::len(shared.as_ref());

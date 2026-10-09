@@ -5,8 +5,9 @@
 //! `prune` while live batches read concurrently. Locking (not snapshotting) keeps memory at
 //! O(bitmap size). Snapshots would couple memory to live-batch count and lifetime.
 //!
-//! Reads through a stale `MerkleizedBatch` (see its "Branch validity" docs) are refused by
-//! the batch-chain gate before they reach this bitmap.
+//! Merkleization reads this bitmap only after binding the batch's chain to the database that owns
+//! it and passing the batch-chain gate, which refuses a stale chain (see
+//! [`MerkleizedBatch`](super::current::batch::MerkleizedBatch)'s "Branch validity" docs).
 
 use crate::merkle::{Family, Location};
 #[cfg(test)]

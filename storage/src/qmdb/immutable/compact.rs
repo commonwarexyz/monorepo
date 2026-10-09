@@ -125,10 +125,6 @@ impl<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> MerkleizedBatc
 where
     Operation<F, K, V>: EncodeShared,
 {
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, K, V, S> {
-        chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
-    }
-
     /// The [`Commitment`] this batch commits to.
     pub(super) const fn commitment(&self) -> Commitment<F, D> {
         self.bounds.tip
@@ -173,7 +169,7 @@ where
         C: Clone + Send + Sync + 'static,
         Operation<F, K, V>: Read<Cfg = C>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         let hasher = qmdb::hasher::<H>();
         self.merkle_batch
@@ -208,7 +204,7 @@ where
         C: Clone + Send + Sync + 'static,
         Operation<F, K, V>: Read<Cfg = C>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         let base = db.merkle.mem();
         F::nodes_to_pin(self.bounds.base.size)
             .map(|pos| {
@@ -297,7 +293,6 @@ where
         level = "info",
         skip_all
     )]
-    #[allow(clippy::type_complexity)]
     pub async fn merkleize<E, C>(
         self,
         db: &Db<F, E, K, V, H, C, S>,
@@ -309,25 +304,18 @@ where
         C: Clone + Send + Sync + 'static,
         Operation<F, K, V>: Read<Cfg = C>,
     {
-        let live_ancestors: Vec<_> =
-            chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
-                .collect();
+        let live_ancestors =
+            chain::live_ancestors(self.parent.as_ref(), |batch| batch.parent.as_ref());
         let boundary = chain::effective_boundary(
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
 
-        let ancestors = chain::collect_ancestor_bounds(
-            live_ancestors.iter().cloned(),
-            |batch| batch.bounds.inactivity_floor,
-            |batch| batch.commitment(),
-        );
-        let db = chain::merkleizable(
-            db,
-            db.commitment(),
-            boundary,
-            ancestors.iter().map(|ancestor| ancestor.state),
-        )?;
+        let ancestors: Vec<_> = live_ancestors
+            .iter()
+            .map(|batch| batch.commitment())
+            .collect();
+        let db = chain::merkleizable(db, db.commitment(), boundary, ancestors.iter().copied())?;
 
         let mut ops: Vec<Operation<F, K, V>> = Vec::with_capacity(self.mutations.len() + 1);
         for (key, value) in self.mutations {
@@ -337,7 +325,7 @@ where
 
         let operations = Arc::new(ops);
         let total_size = self.base.size + operations.len() as u64;
-        chain::validate_merkleize_floor::<F, H::Digest>(
+        chain::validate_merkleize_floor(
             self.parent.as_ref().map_or_else(
                 || db.inactivity_floor_loc(),
                 |parent| parent.bounds.inactivity_floor,
@@ -532,9 +520,7 @@ where
         &self,
         batch: &MerkleizedBatch<F, H::Digest, K, V, S>,
     ) -> Result<(), Error<F>> {
-        batch
-            .bounds
-            .validate_apply_to(self.commitment(), self.inactivity_floor_loc)
+        batch.bounds.validate_apply_to(self.commitment())
     }
 
     /// Apply a merkleized batch to the database.
@@ -545,15 +531,8 @@ where
     ///
     /// # Errors
     ///
-    /// - [`Error::StaleBatch`] if the batch is detected as stale (see
-    ///   [`crate::qmdb::chain`] for more details).
-    /// - [`Error::FloorRegressed`] if any commit in the chain declares a floor below the
-    ///   previous commit's floor.
-    /// - [`Error::FloorBeyondSize`] if any commit in the chain declares a floor beyond its own
-    ///   commit location.
-    ///
-    /// Merkleize already enforces both floor rules, so a batch it produced never fails them here.
-    /// Apply re-checks them as a guard.
+    /// Returns [`Error::StaleBatch`] if the batch is detected as stale (see
+    /// [`crate::qmdb::chain`] for more details).
     #[tracing::instrument(
         name = "qmdb.immutable.compact.db.apply_batch",
         level = "info",
@@ -1347,16 +1326,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            let stale = db.new_batch().set(key2, value2);
             let expected_root = batch_a.root();
             let (db, _) = db.apply_batch(batch_a).await.unwrap();
             assert_eq!(db.root(), expected_root);
-            // A fork from the pre-apply state can no longer merkleize, and the
-            // merkleized sibling can no longer apply.
-            assert!(matches!(
-                stale.merkleize(&db, None, Location::new(0)).await,
-                Err(Error::StaleBatch)
-            ));
             assert!(matches!(
                 db.apply_batch(batch_b).await,
                 Err(Error::StaleBatch)

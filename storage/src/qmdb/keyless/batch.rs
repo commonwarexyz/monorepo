@@ -8,7 +8,7 @@ use crate::{
     qmdb::{
         Error,
         any::value::ValueEncoding,
-        chain::{self, Bounds, Commitment, OnChain},
+        chain::{self, Bounds, Commitment, Compatible},
     },
 };
 use commonware_codec::EncodeShared;
@@ -158,19 +158,19 @@ where
     }
 
     /// Prove the live database is on this chain's own states, returning the witness
-    /// committed reads require (see [`Bounds::on_chain`]).
+    /// committed reads require (see [`Bounds::compatible`]).
     #[allow(clippy::type_complexity)]
-    fn on_chain<'a, E, C>(
+    fn compatible<'a, E, C>(
         &self,
         db: &'a Keyless<F, E, V, C, H, S>,
-    ) -> Result<OnChain<'a, Keyless<F, E, V, C, H, S>>, Error<F>>
+    ) -> Result<Compatible<'a, Keyless<F, E, V, C, H, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
         self.parent.as_ref().map_or_else(
-            || self.base.on_chain(db, db.commitment()),
-            |parent| parent.bounds.on_chain(db, db.commitment()),
+            || self.base.compatible(db, db.commitment()),
+            |parent| parent.bounds.compatible(db, db.commitment()),
         )
     }
 
@@ -202,7 +202,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
-        let db = self.on_chain(db)?;
+        let db = self.compatible(db)?;
         let loc_val = *loc;
 
         // Check this batch's pending appends.
@@ -252,7 +252,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
-        let db = self.on_chain(db)?;
+        let db = self.compatible(db)?;
         if locs.is_empty() {
             return Ok(Vec::new());
         }
@@ -316,7 +316,6 @@ where
     /// - Returns [`Error::FloorRegressed`] if `inactivity_floor` is below the floor this batch
     ///   builds on, and [`Error::FloorBeyondSize`] if it is past the commit location.
     #[tracing::instrument(name = "qmdb.keyless.batch.merkleize", level = "info", skip_all)]
-    #[allow(clippy::type_complexity)]
     pub async fn merkleize<E, C>(
         self,
         db: &Keyless<F, E, V, C, H, S>,
@@ -327,25 +326,18 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
-        let live_ancestors: Vec<_> =
-            chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
-                .collect();
+        let live_ancestors =
+            chain::live_ancestors(self.parent.as_ref(), |batch| batch.parent.as_ref());
         let boundary = chain::effective_boundary(
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
 
-        let ancestors = chain::collect_ancestor_bounds(
-            live_ancestors.iter().cloned(),
-            |batch| batch.bounds.inactivity_floor,
-            |batch| batch.commitment(),
-        );
-        let db = chain::merkleizable(
-            db,
-            db.commitment(),
-            boundary,
-            ancestors.iter().map(|ancestor| ancestor.state),
-        )?;
+        let ancestors: Vec<_> = live_ancestors
+            .iter()
+            .map(|batch| batch.commitment())
+            .collect();
+        let db = chain::merkleizable(db, db.commitment(), boundary, ancestors.iter().copied())?;
         let start_floor = self.floor(&*db);
 
         // Build operations: one Append per value, then Commit.
@@ -354,11 +346,7 @@ where
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = self.base.size + ops.len() as u64;
-        chain::validate_merkleize_floor::<F, H::Digest>(
-            start_floor,
-            inactivity_floor,
-            total_size - 1,
-        )?;
+        chain::validate_merkleize_floor(start_floor, inactivity_floor, total_size - 1)?;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
 
         // Leaf and node hashing dominate merkleization, so run them as one job through the
@@ -389,11 +377,6 @@ impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, 
 where
     Operation<F, V>: EncodeShared,
 {
-    /// Iterate over ancestor batches (parent first, then grandparent, etc.).
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, V, S> {
-        chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
-    }
-
     /// The [`Commitment`] this batch commits to.
     pub(super) const fn commitment(&self) -> Commitment<F, D> {
         self.bounds.tip
@@ -439,7 +422,7 @@ where
         C: Mutable<Item = Operation<F, V>>,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         db.journal
             .speculative_proof(&self.journal_batch, inactive_peaks)
@@ -467,7 +450,7 @@ where
         C: Mutable<Item = Operation<F, V>>,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         db.journal
             .speculative_pinned_nodes(&self.journal_batch)
             .map_err(Into::into)
@@ -492,7 +475,7 @@ where
         H: Hasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         if loc >= self.bounds.tip.size {
             return Ok(None);
         }
@@ -536,7 +519,7 @@ where
         H: Hasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         if locs.is_empty() {
             return Ok(Vec::new());
         }

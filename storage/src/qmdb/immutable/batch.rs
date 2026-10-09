@@ -8,7 +8,7 @@ use crate::{
     qmdb::{
         Error,
         any::{ValueEncoding, batch::lookup_sorted},
-        chain::{self, Bounds, Commitment, OnChain},
+        chain::{self, Bounds, Commitment, Compatible},
         immutable::operation::Operation,
         operation::Key,
     },
@@ -20,6 +20,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::iter::zip_eq;
 use std::{
     collections::BTreeMap,
+    iter,
     sync::{Arc, Weak},
 };
 
@@ -98,6 +99,11 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: St
     /// 1:1 with `bounds.ancestors` (same length, same ordering).
     pub(super) ancestor_diffs: Vec<Arc<DiffVec<K, F, V::Value>>>,
 
+    /// Weak references to the batches behind `ancestor_diffs`, 1:1 with them. Reads use them
+    /// to stop consulting retained diffs at the first applied ancestor that was dropped (see
+    /// [`Self::read_diffs`]).
+    pub(super) ancestor_links: Vec<Weak<Self>>,
+
     /// Position and floor bounds for this batch chain.
     pub(super) bounds: chain::Bounds<F, D>,
 }
@@ -154,12 +160,12 @@ where
     }
 
     /// Prove the live database is on this chain's own states, returning the witness
-    /// committed reads require (see [`Bounds::on_chain`]).
+    /// committed reads require (see [`Bounds::compatible`]).
     #[allow(clippy::type_complexity)]
-    fn on_chain<'a, E, C, T>(
+    fn compatible<'a, E, C, T>(
         &self,
         db: &'a Immutable<F, E, K, V, C, H, T, S>,
-    ) -> Result<OnChain<'a, Immutable<F, E, K, V, C, H, T, S>>, Error<F>>
+    ) -> Result<Compatible<'a, Immutable<F, E, K, V, C, H, T, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
@@ -167,8 +173,8 @@ where
         T: Translator,
     {
         self.parent.as_ref().map_or_else(
-            || self.base.on_chain(db, db.commitment()),
-            |parent| parent.bounds.on_chain(db, db.commitment()),
+            || self.base.compatible(db, db.commitment()),
+            |parent| parent.bounds.compatible(db, db.commitment()),
         )
     }
 
@@ -199,7 +205,7 @@ where
         C::Item: EncodeShared,
         T: Translator,
     {
-        let db = self.on_chain(db)?;
+        let db = self.compatible(db)?;
         // Check this batch's pending mutations.
         if let Some(value) = self.mutations.get(key) {
             return Ok(Some(value.clone()));
@@ -209,7 +215,7 @@ where
             if let Some(entry) = lookup_active(parent.diff.as_slice(), key, floor) {
                 return Ok(Some(entry.value.clone()));
             }
-            for diff in &parent.ancestor_diffs {
+            for diff in parent.read_diffs(db.commitment().size) {
                 if let Some(entry) = lookup_active(diff.as_slice(), key, floor) {
                     return Ok(Some(entry.value.clone()));
                 }
@@ -237,7 +243,7 @@ where
         C::Item: EncodeShared,
         T: Translator,
     {
-        let db = self.on_chain(db)?;
+        let db = self.compatible(db)?;
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -246,6 +252,12 @@ where
         let mut results: Vec<Option<V::Value>> = Vec::with_capacity(keys.len());
         let mut db_indices = Vec::new();
         let mut db_keys = Vec::new();
+        // The parent's diff, then the retained ancestor diffs the whole read may consult.
+        let diffs: Vec<_> = self.parent.as_ref().map_or_else(Vec::new, |parent| {
+            iter::once(&parent.diff)
+                .chain(parent.read_diffs(db.commitment().size))
+                .collect()
+        });
 
         for (i, key) in keys.iter().enumerate() {
             // Check local mutations.
@@ -256,19 +268,11 @@ where
 
             // Check the parent's retained diff chain.
             let mut found = false;
-            if let Some(parent) = self.parent.as_ref() {
-                if let Some(entry) = lookup_active(parent.diff.as_slice(), *key, floor) {
+            for diff in &diffs {
+                if let Some(entry) = lookup_active(diff.as_slice(), *key, floor) {
                     results.push(Some(entry.value.clone()));
                     found = true;
-                }
-                if !found {
-                    for diff in &parent.ancestor_diffs {
-                        if let Some(entry) = lookup_active(diff.as_slice(), *key, floor) {
-                            results.push(Some(entry.value.clone()));
-                            found = true;
-                            break;
-                        }
-                    }
+                    break;
                 }
             }
 
@@ -305,7 +309,6 @@ where
     /// - Returns [`Error::FloorRegressed`] if `inactivity_floor` is below the floor this batch
     ///   builds on, and [`Error::FloorBeyondSize`] if it is past the commit location.
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
-    #[allow(clippy::type_complexity)]
     pub async fn merkleize<E, C, T>(
         self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
@@ -320,9 +323,8 @@ where
     {
         let base = self.base.size;
 
-        let live_ancestors: Vec<_> =
-            chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
-                .collect();
+        let live_ancestors =
+            chain::live_ancestors(self.parent.as_ref(), |batch| batch.parent.as_ref());
         let boundary = chain::effective_boundary(
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),
@@ -330,20 +332,14 @@ where
 
         // Compute the batch chain bounds.
         let mut ancestor_diffs = Vec::new();
+        let mut ancestor_links = Vec::new();
         let mut ancestors = Vec::new();
         for batch in &live_ancestors {
             ancestor_diffs.push(Arc::clone(&batch.diff));
-            ancestors.push(chain::AncestorBounds {
-                floor: batch.bounds.inactivity_floor,
-                state: batch.commitment(),
-            });
+            ancestor_links.push(Arc::downgrade(batch));
+            ancestors.push(batch.commitment());
         }
-        let db = chain::merkleizable(
-            db,
-            db.commitment(),
-            boundary,
-            ancestors.iter().map(|ancestor| ancestor.state),
-        )?;
+        let db = chain::merkleizable(db, db.commitment(), boundary, ancestors.iter().copied())?;
         let start_floor = self.floor(&*db);
 
         // Build operations: one Set per key, then Commit. `self.mutations` is a BTreeMap, so
@@ -361,11 +357,7 @@ where
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = base + ops.len() as u64;
-        chain::validate_merkleize_floor::<F, H::Digest>(
-            start_floor,
-            inactivity_floor,
-            total_size - 1,
-        )?;
+        chain::validate_merkleize_floor(start_floor, inactivity_floor, total_size - 1)?;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
 
         // Leaf and node hashing dominate merkleization, so run them as one job through the
@@ -383,6 +375,7 @@ where
             diff: Arc::new(diff),
             parent: self.parent.as_ref().map(Arc::downgrade),
             ancestor_diffs,
+            ancestor_links,
             bounds: chain::Bounds {
                 base: self.base,
                 db: boundary,
@@ -401,6 +394,28 @@ where
     /// Return the speculative root.
     pub const fn root(&self) -> D {
         self.bounds.tip.root
+    }
+
+    /// Retained ancestor diffs a read consults before a database that sits on this chain at
+    /// `db_size` operations: every unapplied ancestor's, then applied ancestors' only while
+    /// their batches are alive. The walk ends at the first applied ancestor that was dropped.
+    /// The database already holds its writes and every older ancestor's, so an older retained
+    /// layer could return a value it has since superseded.
+    ///
+    /// Each layer is classified as the walk reaches it, so a read that hits early does no work
+    /// for the layers behind it.
+    fn read_diffs(
+        &self,
+        db_size: Location<F>,
+    ) -> impl Iterator<Item = &Arc<DiffVec<K, F, V::Value>>> {
+        self.ancestor_diffs
+            .iter()
+            .zip(&self.ancestor_links)
+            .zip(&self.bounds.ancestors)
+            .take_while(move |((_, link), ancestor)| {
+                ancestor.size > db_size || link.strong_count() > 0
+            })
+            .map(|((diff, _), _)| diff)
     }
 
     /// Return the [`Bounds`] of the batch.
@@ -443,7 +458,7 @@ where
         H: Hasher<Digest = D>,
         T: Translator,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         db.journal
             .speculative_proof(&self.journal_batch, inactive_peaks)
@@ -475,15 +490,10 @@ where
         H: Hasher<Digest = D>,
         T: Translator,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         db.journal
             .speculative_pinned_nodes(&self.journal_batch)
             .map_err(Into::into)
-    }
-
-    /// Iterate over ancestor batches (parent first, then grandparent, etc.).
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, K, V, S> {
-        chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
     /// The [`Commitment`] this batch commits to.
@@ -511,12 +521,12 @@ where
         H: Hasher<Digest = D>,
         T: Translator,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         let floor = self.bounds.inactivity_floor;
         if let Some(entry) = lookup_active(self.diff.as_slice(), key, floor) {
             return Ok(Some(entry.value.clone()));
         }
-        for diff in &self.ancestor_diffs {
+        for diff in self.read_diffs(db.commitment().size) {
             if let Some(entry) = lookup_active(diff.as_slice(), key, floor) {
                 return Ok(Some(entry.value.clone()));
             }
@@ -543,7 +553,7 @@ where
         H: Hasher<Digest = D>,
         T: Translator,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -552,6 +562,7 @@ where
         let mut results: Vec<Option<V::Value>> = Vec::with_capacity(keys.len());
         let mut db_indices = Vec::new();
         let mut db_keys = Vec::new();
+        let diffs: Vec<_> = self.read_diffs(db.commitment().size).collect();
 
         for (i, key) in keys.iter().enumerate() {
             // Check local diff.
@@ -562,7 +573,7 @@ where
 
             // Check the retained ancestor diffs.
             let mut found = false;
-            for diff in &self.ancestor_diffs {
+            for diff in &diffs {
                 if let Some(entry) = lookup_active(diff.as_slice(), *key, floor) {
                     results.push(Some(entry.value.clone()));
                     found = true;
@@ -626,6 +637,7 @@ where
             diff: Arc::new(Vec::new()),
             parent: None,
             ancestor_diffs: Vec::new(),
+            ancestor_links: Vec::new(),
             bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
     }

@@ -369,7 +369,7 @@ pub enum Error<F: Family> {
     /// A batch read found the database on none of the batch's chain states: a batch other than
     /// this one or an ancestor was applied (or the database was reinitialized off the chain).
     /// The caller should fork a new batch from the current state.
-    #[error("stale read: a non-ancestor batch was applied")]
+    #[error("stale read: current database state is not on the batch's chain")]
     StaleRead,
 
     /// A batch read asked for a location below the inactivity floor its chain commits to.
