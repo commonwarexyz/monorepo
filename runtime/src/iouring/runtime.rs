@@ -186,7 +186,7 @@ use std::{
     future::{Future, poll_fn},
     mem,
     net::{IpAddr, SocketAddr, ToSocketAddrs},
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     ops::RangeInclusive,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
@@ -1072,6 +1072,9 @@ impl Role {
 pub struct Local {
     /// Which work this worker runs.
     pub role: Role,
+    /// Identity of the task set whose tasks this worker polls, or `None` on a
+    /// dedicated worker, which polls only its root.
+    serving: Option<NonZeroU64>,
     /// Ring owner, taken only after kernel retirement so it can be dropped unborrowed.
     pub driver: Option<Driver>,
     /// FIFO runnables.
@@ -1114,8 +1117,10 @@ impl Local {
             now,
         )?;
 
+        let serving = role.is_pool().then(|| shared.tasks.id());
         Ok(Self {
             role,
+            serving,
             driver: Some(driver),
             ready: Ready::default(),
             timers: Timers::default(),
@@ -1148,19 +1153,12 @@ impl Local {
         matches.then_some(local)
     }
 
-    /// Return the current worker if it is a worker of the pool behind `pool`,
+    /// Return the current worker if it polls tasks retained by `owner`,
     /// including during shutdown.
     #[inline(always)]
-    pub fn serving(pool: &Weak<Pool>) -> Option<Rc<RefCell<Self>>> {
+    pub fn serving(owner: NonZeroU64) -> Option<Rc<RefCell<Self>>> {
         let local = Self::current()?;
-
-        // The weak reference preserves allocation identity without retaining
-        // the pool. A dedicated worker shares the pool but polls no task of it.
-        let serves = {
-            let local = local.borrow();
-            local.role.is_pool() && ptr::eq(Arc::as_ptr(&local.shared.pool), pool.as_ptr())
-        };
-
+        let serves = local.borrow().serving == Some(owner);
         serves.then_some(local)
     }
 
