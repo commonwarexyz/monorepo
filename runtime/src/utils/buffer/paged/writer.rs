@@ -2176,6 +2176,43 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    fn test_evict_cached_drops_pages_ending_in_range() {
+        // Eviction drops the cached pages that end within the range, and their bytes stay
+        // readable from the blob.
+        fn cached<B: Blob>(append: &Writer<B>, page: u64) -> bool {
+            let page_size = PAGE_SIZE.get() as usize;
+            let mut probe = vec![0u8; page_size];
+            let offset = page * page_size as u64;
+            append.cache_ref.read_cached(append.id, &mut probe, offset) == page_size
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"evict").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as u64;
+            let data: Vec<u8> = (0..page_size * 7 / 2).map(|i| (i % 251) as u8).collect();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
+            assert!((0..3).all(|page| cached(&append, page)));
+
+            // Page 0 ends past the range start and page 1 ends at the range end. Page 2 ends
+            // beyond it.
+            append.evict_cached(page_size / 2..2 * page_size);
+            assert!(!cached(&append, 0));
+            assert!(!cached(&append, 1));
+            assert!(cached(&append, 2));
+
+            let read = append.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read, &data[..]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
     fn test_read_many_into_all_from_cache() {
         // Synced bytes remain readable from the retained partial tip.
         let executor = deterministic::Runner::default();
