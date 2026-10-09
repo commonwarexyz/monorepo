@@ -7,10 +7,10 @@ use commonware_consensus::{
         scheme::Scheme,
         types::{Activity, Attributable, Proposal},
     },
-    types::{Epoch, Round, TermLength, View},
+    types::{Epoch, Round, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
-    Configuration, bounds,
+    Configuration, FUZZ_LOG_ENV, bounds,
     simplex::Simplex,
     simplex_audit::{AutomatonEvent, Completion, Event, RecordingReporter, summaries},
     types::{Finalization, Notarization, Nullification, ReplicaState},
@@ -41,7 +41,12 @@ type ExactVotes = BTreeMap<(ExactVoteScope, Round, Vec<u8>), BTreeSet<Proposal<S
 /// dedicated audit targets, additionally run invariants requiring append-only
 /// activity and automaton history.
 pub trait SafetyObservations<P: Simplex> {
-    fn check_safety(self, configuration: Configuration, term_length: TermLength);
+    fn check_safety(
+        self,
+        configuration: Configuration,
+        term_length: TermLength,
+        optimistic_views: ViewDelta,
+    );
 }
 
 /// Checks Simplex safety using the provided observations.
@@ -51,17 +56,26 @@ pub trait SafetyObservations<P: Simplex> {
 /// invariants are observable. `configuration` gates the certificate-derived
 /// invariants: each one encodes a safety argument that requires an honest
 /// participant in the quorum intersection (see [`Configuration::can_finalize`]).
+/// `optimistic_views` is the largest optimistic lookahead any honest engine
+/// was started with; when nonzero under a multi-view term, the invariants
+/// that assume non-optimistic view entry are skipped for intra-term views.
 pub fn check<P: Simplex>(
     configuration: Configuration,
     term_length: TermLength,
+    optimistic_views: ViewDelta,
     observations: impl SafetyObservations<P>,
 ) {
-    observations.check_safety(configuration, term_length);
+    observations.check_safety(configuration, term_length, optimistic_views);
 }
 
 impl<P: Simplex> SafetyObservations<P> for Vec<ReplicaState> {
-    fn check_safety(self, configuration: Configuration, term_length: TermLength) {
-        check_basic_invariants::<P>(configuration, term_length, self);
+    fn check_safety(
+        self,
+        configuration: Configuration,
+        term_length: TermLength,
+        optimistic_views: ViewDelta,
+    ) {
+        check_basic_invariants::<P>(configuration, term_length, optimistic_views, self);
     }
 }
 
@@ -72,10 +86,16 @@ where
     P::Scheme: Scheme<Sha256Digest>,
     L: Elector<P::Scheme>,
 {
-    fn check_safety(self, configuration: Configuration, term_length: TermLength) {
+    fn check_safety(
+        self,
+        configuration: Configuration,
+        term_length: TermLength,
+        optimistic_views: ViewDelta,
+    ) {
         check_basic_invariants::<P>(
             configuration,
             term_length,
+            optimistic_views,
             extract(self, configuration.n as usize),
         );
     }
@@ -88,11 +108,24 @@ where
     P::Scheme: Scheme<Sha256Digest>,
     L: Elector<P::Scheme>,
 {
-    fn check_safety(self, configuration: Configuration, term_length: TermLength) {
+    fn check_safety(
+        self,
+        configuration: Configuration,
+        term_length: TermLength,
+        optimistic_views: ViewDelta,
+    ) {
+        // The recording reporters carry the lookahead their engines ran.
+        let audited = audited_lookahead(self);
+        debug_assert_eq!(
+            effective_lookahead(term_length, optimistic_views),
+            audited,
+            "supplied optimistic lookahead disagrees with the audited electors"
+        );
         check_fuzz_invariants(term_length, self);
         check_basic_invariants::<P>(
             configuration,
             term_length,
+            audited,
             extract(summaries(self), configuration.n as usize),
         );
     }
@@ -211,11 +244,60 @@ fn timeout_trigger_exempted(
             .any(|certified| certified >= &round)
 }
 
+// Lookahead the engines actually run: single-view terms have no optimistic
+// window (`Terms::rotating`), whatever lookahead they were configured with.
+fn effective_lookahead(term_length: TermLength, optimistic_views: ViewDelta) -> ViewDelta {
+    if term_length.get() == 1 {
+        ViewDelta::zero()
+    } else {
+        optimistic_views
+    }
+}
+
+// Whether the entry-evidence rule `invariant` is skipped for intra-term
+// views: engines running a nonzero optimistic lookahead enter those views
+// before their predecessor is certified. Term starts are never entered
+// optimistically, so the rule keeps applying there (`entry_rule_applies`).
+// Logged once per skipped rule under the fuzz log switch.
+fn skips_intra_term_entry(invariant: &str, optimistic_views: ViewDelta) -> bool {
+    if optimistic_views.is_zero() {
+        return false;
+    }
+    if std::env::var_os(FUZZ_LOG_ENV).is_some() {
+        eprintln!(
+            "consensus fuzz invariant {invariant} skipped for intra-term views: optimistic lookahead {optimistic_views}"
+        );
+    }
+    true
+}
+
+// Whether a rule skipped by `skips_intra_term_entry` still applies to `view`.
+fn entry_rule_applies(skipped: bool, view: u64, term_length: TermLength) -> bool {
+    !skipped || is_term_start(view, term_length)
+}
+
+/// Largest optimistic lookahead any audited engine was started with: each
+/// recording reporter carries a built copy of its engine's elector.
+fn audited_lookahead<E, S, L>(reporters: &[RecordingReporter<E, S, L, Sha256Digest>]) -> ViewDelta
+where
+    E: CryptoRng,
+    S: Scheme<Sha256Digest>,
+    L: Elector<S>,
+{
+    reporters
+        .iter()
+        .map(|reporter| reporter.elector().terms().optimistic_views())
+        .max()
+        .unwrap_or(ViewDelta::zero())
+}
+
 fn check_basic_invariants<P: Simplex>(
     configuration: Configuration,
     term_length: TermLength,
+    optimistic_views: ViewDelta,
     replicas: Vec<ReplicaState>,
 ) {
+    let optimistic_views = effective_lookahead(term_length, optimistic_views);
     let threshold = bounds::quorum(configuration.n) as usize;
 
     // Invariant: agreement
@@ -568,22 +650,34 @@ fn check_basic_invariants<P: Simplex>(
     // Only notarized links are walked: finalization_requires_notarization has
     // already forced every finalized view onto an identical notarized link.
     //
+    // The certified-parent check is skipped for intra-term views when any
+    // engine runs a nonzero optimistic lookahead: the rule below assumes
+    // non-optimistic entry (a notarization's correct signers observed a
+    // certificate at its parent); the optimistic-entry rule (same term,
+    // own-vote chain, within lookahead) is not checked. Term starts are never
+    // entered optimistically and stay checked, and the remaining checks hold
+    // under optimism.
+    //
     // Invariant: intra_term_proposals_never_skip
     // Entry into a mid-term view is only sequential (a nullification advances
     // directly to the next term start), so a proposal at a view other than its
     // term start must extend exactly the preceding view, regardless of
     // nullification coverage.
+    let skip_parent =
+        skips_intra_term_entry("chain_consistency (certified parent)", optimistic_views);
     for (&view, &(idx, (parent, _))) in notarized_by_view.iter() {
         assert!(
             parent < view,
             "Invariant violation: replica {idx} has notarization in view {view} with parent {parent}"
         );
-        assert!(
-            parent == 0
-                || notarized_by_view.contains_key(&parent)
-                || finalized_by_view.contains_key(&parent),
-            "Invariant violation: replica {idx} has notarization in view {view} with uncertified parent {parent}"
-        );
+        if entry_rule_applies(skip_parent, view, term_length) {
+            assert!(
+                parent == 0
+                    || notarized_by_view.contains_key(&parent)
+                    || finalized_by_view.contains_key(&parent),
+                "Invariant violation: replica {idx} has notarization in view {view} with uncertified parent {parent}"
+            );
+        }
         assert!(
             term_start(view, term_length) == view || parent + 1 == view,
             "Invariant violation: replica {idx} has mid-term notarization in view {view} with parent {parent} (term start {})",
@@ -603,11 +697,13 @@ fn check_basic_invariants<P: Simplex>(
 /// Checks invariants that require per-signer information (votes and fault
 /// evidence). `faults` is the number of Byzantine nodes by participant index
 /// (`0..faults`); only correct nodes (`faults..n`) are checked for equivocation.
+/// See [`check_vote_invariants_with_byzantine`] for `optimistic_views`.
 pub fn check_vote_invariants<E, S, L>(
     faults: usize,
     elector: L,
     epoch: Epoch,
     term_length: TermLength,
+    optimistic_views: ViewDelta,
     reporters: &[Reporter<E, S, L, Sha256Digest>],
 ) where
     E: CryptoRng,
@@ -615,7 +711,14 @@ pub fn check_vote_invariants<E, S, L>(
     L: Elector<S>,
 {
     let byzantine: HashSet<usize> = (0..faults).collect();
-    check_vote_invariants_with_byzantine(&byzantine, elector, epoch, term_length, reporters);
+    check_vote_invariants_with_byzantine(
+        &byzantine,
+        elector,
+        epoch,
+        term_length,
+        optimistic_views,
+        reporters,
+    );
 }
 
 /// Invariant: per_certificate_leader_derivation_coherence
@@ -777,17 +880,26 @@ pub fn check_no_invalid_reports_if_no_faults<E, S, L>(
 /// same configured instance the harness hands to engines and reporters (the
 /// twins wrapper for Twins runs), so per-certificate leader derivation runs
 /// on adversarial paths too.
+///
+/// `optimistic_views` is the largest optimistic lookahead any honest engine
+/// in the run was started with (the summary reporter keeps its engine's
+/// elector private, so callers supply it). When nonzero under a multi-view
+/// term, the invariants that assume non-optimistic view entry are skipped
+/// for intra-term views.
 pub fn check_vote_invariants_with_byzantine<E, S, L>(
     byzantine: &HashSet<usize>,
     elector: L,
     epoch: Epoch,
     term_length: TermLength,
+    optimistic_views: ViewDelta,
     reporters: &[Reporter<E, S, L, Sha256Digest>],
 ) where
     E: CryptoRng,
     S: Scheme<Sha256Digest>,
     L: Elector<S>,
 {
+    let optimistic_views = effective_lookahead(term_length, optimistic_views);
+
     // Invariant: certificate_derived_leader_agreement
     // Every reporter that derives a leader for the same view must derive the
     // same participant. Missing entries are deliberately ignored: Reporter
@@ -887,6 +999,15 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     // from a view only with a block or dummy-block certificate; the
     // stable-leader extension advances a nullified view directly to the next
     // term ("Specification for View v", "Joining Consensus").
+    //
+    // Skipped for intra-term views when any engine runs a nonzero optimistic
+    // lookahead: the rule below assumes non-optimistic entry; the
+    // optimistic-entry rule (same term, own-vote chain, within lookahead) is
+    // not checked. Term starts are never entered optimistically and stay
+    // checked. The certificate sets are still collected for the vote checks
+    // below.
+    let skip_progression =
+        skips_intra_term_entry("contiguous_certificate_progression", optimistic_views);
     let mut certified_views = BTreeSet::new();
     let mut value_progress_views = BTreeSet::new();
     let mut nullified_views: BTreeSet<u64> = BTreeSet::new();
@@ -906,7 +1027,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
         }
     }
     for &view in &certified_views {
-        if view > 1 {
+        if view > 1 && entry_rule_applies(skip_progression, view, term_length) {
             assert!(
                 value_progress_views.contains(&(view - 1))
                     || entered_via_nullification(view, &nullified_views, term_length),
@@ -1347,9 +1468,20 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     // certificate; the stable-leader extension advances a nullified view
     // directly to the next term ("Specification for View v", "Joining
     // Consensus").
+    //
+    // Skipped for intra-term views when any engine runs a nonzero optimistic
+    // lookahead: the rule below assumes non-optimistic entry; the
+    // optimistic-entry rule (same term, own-vote chain, within lookahead) is
+    // not checked. Term starts are never entered optimistically and stay
+    // checked.
+    let skip_entry = skips_intra_term_entry(
+        "correct_view_entry_requires_predecessor_certificate",
+        optimistic_views,
+    );
     let mut premature_votes = BTreeSet::new();
     for (view, signer) in &correct_vote_views {
-        if *view > 1
+        if entry_rule_applies(skip_entry, *view, term_length)
+            && *view > 1
             && !value_progress_views.contains(&(view - 1))
             && !entered_via_nullification(*view, &nullified_views, term_length)
         {
@@ -1468,6 +1600,11 @@ fn check_fuzz_invariants<E, S, L>(
         .iter()
         .map(|reporter| reporter.audit().observer().as_ref().to_vec())
         .collect();
+    let optimistic_views = audited_lookahead(reporters);
+    let skip_entry = skips_intra_term_entry(
+        "local_view_entry_requires_certified_predecessor (notarize)",
+        optimistic_views,
+    );
     let mut exact_notarizes: ExactVotes = BTreeMap::new();
     let mut exact_finalizes: ExactVotes = BTreeMap::new();
     let mut notarization_history: BTreeMap<Round, BTreeSet<Proposal<Sha256Digest>>> =
@@ -1619,8 +1756,17 @@ fn check_fuzz_invariants<E, S, L>(
                             observed_nullifications.insert(certificate.round());
                             incarnation_trigger_observed_nullifications.insert(certificate.round());
                         }
+                        // An own notarize vote may run up to the optimistic
+                        // lookahead ahead of the current view (the admission
+                        // window), so it only proves the node reached that
+                        // many views below it; nullify and finalize votes
+                        // never run ahead.
                         Activity::Notarize(vote) if vote.signer() == observer_idx => {
-                            incarnation_trigger_own_votes.insert(vote.proposal.round);
+                            let round = vote.proposal.round;
+                            incarnation_trigger_own_votes.insert(Round::new(
+                                round.epoch(),
+                                round.view().saturating_sub(optimistic_views),
+                            ));
                         }
                         Activity::Nullify(vote) if vote.signer() == observer_idx => {
                             incarnation_trigger_own_votes.insert(vote.round);
@@ -1868,8 +2014,20 @@ fn check_fuzz_invariants<E, S, L>(
                             // "Notarizations advance the view if-and-only-if the
                             // application certifies them" and the stable-leader
                             // rule that nullification advances to the next term.
+                            //
+                            // Skipped for intra-term views when any engine
+                            // runs a nonzero optimistic lookahead: the rule
+                            // below assumes non-optimistic entry; the
+                            // optimistic-entry rule (same term, own-vote
+                            // chain, within lookahead) is not checked. Term
+                            // starts are never entered optimistically and
+                            // stay checked. The nullify arm below always
+                            // runs: nullify votes are current-view-only, and
+                            // the current view still advances only on
+                            // certification, finalization, or a
+                            // nullification.
                             let view = vote.proposal.round.view().get();
-                            if view >= 2 {
+                            if view >= 2 && entry_rule_applies(skip_entry, view, term_length) {
                                 assert!(
                                     predecessor_evidence.contains(&(view - 1))
                                         || entered_round_via_nullification(
@@ -2842,7 +3000,12 @@ mod tests {
             views(vec![(1, nullification())]),
             views(vec![(5, finalization(4, 0xE))]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     #[test]
@@ -2852,7 +3015,12 @@ mod tests {
             views(vec![(1, nullification())]),
             views(vec![(6, finalization(0, 0xA))]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     #[test]
@@ -2862,7 +3030,12 @@ mod tests {
             views(vec![(3, nullification())]),
             views(vec![(1, finalization(0, 0xA))]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     #[test]
@@ -2872,7 +3045,12 @@ mod tests {
             views(vec![(2, nullification())]),
             views(vec![]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     #[test]
@@ -2883,7 +3061,12 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     #[test]
@@ -2894,7 +3077,12 @@ mod tests {
             views(vec![(2, nullification()), (3, nullification())]),
             views(vec![]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     #[test]
@@ -2902,6 +3090,7 @@ mod tests {
         check::<SimplexCertificateMockAttributable>(
             N4F1C3,
             TermLength::ONE,
+            ViewDelta::zero(),
             vec![chain_replica(), chain_replica()],
         );
     }
@@ -2913,7 +3102,12 @@ mod tests {
             views(vec![(1, nullification())]),
             views(vec![]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::ONE,
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     #[test]
@@ -2929,7 +3123,12 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r0, r1]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::ONE,
+            ViewDelta::zero(),
+            vec![r0, r1],
+        );
     }
 
     #[test]
@@ -2945,7 +3144,12 @@ mod tests {
             views(vec![]),
             views(vec![(1, finalization(0, 0xB))]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r0, r1]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::ONE,
+            ViewDelta::zero(),
+            vec![r0, r1],
+        );
     }
 
     #[test]
@@ -2961,7 +3165,12 @@ mod tests {
             views(vec![(1, nullification())]),
             views(vec![]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r0, r1]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::ONE,
+            ViewDelta::zero(),
+            vec![r0, r1],
+        );
     }
 
     #[test]
@@ -2972,7 +3181,12 @@ mod tests {
             views(vec![]),
             views(vec![(1, finalization(0, 0xA))]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::ONE,
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     #[test]
@@ -2983,7 +3197,12 @@ mod tests {
             views(vec![]),
             views(vec![(1, finalization(0, 0xB))]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::ONE,
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     #[test]
@@ -2996,7 +3215,12 @@ mod tests {
             views(vec![]),
             views(vec![(2, finalization(1, 0xA))]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::ONE,
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     #[test]
@@ -3007,7 +3231,12 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::ONE,
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     #[test]
@@ -3018,7 +3247,59 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::ONE,
+            ViewDelta::zero(),
+            vec![r],
+        );
+    }
+
+    #[test]
+    fn uncertified_parent_passes_under_optimistic_lookahead() {
+        let r = replica(
+            views(vec![(2, notarization(1, 0xA))]),
+            views(vec![]),
+            views(vec![]),
+        );
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            ViewDelta::new(1),
+            vec![r],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "uncertified parent 5")]
+    fn uncertified_term_start_parent_is_rejected_under_optimistic_lookahead() {
+        let r = replica(
+            views(vec![(6, notarization(5, 0xA))]),
+            views(vec![]),
+            views(vec![]),
+        );
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            ViewDelta::new(1),
+            vec![r],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "view 2 has no covering nullification")]
+    fn optimistic_lookahead_keeps_skipped_view_check() {
+        let r = replica(
+            views(vec![(1, notarization(0, 0xA)), (6, notarization(1, 0xB))]),
+            views(vec![]),
+            views(vec![]),
+        );
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            ViewDelta::new(1),
+            vec![r],
+        );
     }
 
     #[test]
@@ -3029,7 +3310,12 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::ONE,
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     #[test]
@@ -3039,7 +3325,12 @@ mod tests {
             views(vec![(2, nullification()), (3, nullification())]),
             views(vec![]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::ONE,
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     #[test]
@@ -3050,7 +3341,12 @@ mod tests {
             views(vec![]),
             views(vec![(2, finalization(1, 0xA))]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::ONE,
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     // Certificate-mock schemes share one signing record, so any scheme instance
@@ -3092,16 +3388,29 @@ mod tests {
         schemes: &[MockScheme],
         term_length: TermLength,
     ) -> Reporter<TestRng, MockScheme, RoundRobin, Sha256Digest> {
+        optimistic_vote_reporter(participants, schemes, term_length, ViewDelta::zero())
+    }
+
+    /// Stable-term elector configured like an engine started with
+    /// `optimistic_views`; reporters and the reference elector share it.
+    fn term_elector(term_length: TermLength, optimistic_views: ViewDelta) -> RoundRobin {
+        RoundRobin::default().with_term(term_length, Duration::from_secs(10), optimistic_views)
+    }
+
+    /// Summary reporter whose elector carries the checked term length and the
+    /// optimistic lookahead its engine was started with.
+    fn optimistic_vote_reporter(
+        participants: &[Ed25519PublicKey],
+        schemes: &[MockScheme],
+        term_length: TermLength,
+        optimistic_views: ViewDelta,
+    ) -> Reporter<TestRng, MockScheme, RoundRobin, Sha256Digest> {
         Reporter::new(
             test_rng(),
             ReporterConfig {
                 participants: Set::try_from(participants.to_vec()).expect("unique keys"),
                 scheme: schemes[0].clone(),
-                elector: RoundRobin::default().with_term(
-                    term_length,
-                    Duration::from_secs(10),
-                    ViewDelta::zero(),
-                ),
+                elector: term_elector(term_length, optimistic_views),
             },
         )
     }
@@ -3134,6 +3443,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep_a, rep_b],
         );
     }
@@ -3157,6 +3467,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep_a, rep_b],
         );
     }
@@ -3177,6 +3488,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep_a, rep_b],
         );
     }
@@ -3193,6 +3505,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3221,6 +3534,7 @@ mod tests {
             ),
             Epoch::new(0),
             term_length,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3246,6 +3560,7 @@ mod tests {
             ),
             Epoch::new(0),
             term_length,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3274,6 +3589,7 @@ mod tests {
             ),
             Epoch::new(0),
             term_length,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3305,6 +3621,7 @@ mod tests {
             ),
             Epoch::new(0),
             term_length,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3344,6 +3661,7 @@ mod tests {
             ),
             Epoch::new(0),
             term_length,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3369,6 +3687,7 @@ mod tests {
             ),
             Epoch::new(0),
             term_length,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3398,6 +3717,7 @@ mod tests {
             ),
             Epoch::new(0),
             term_length,
+            ViewDelta::zero(),
             &[rep_a, rep_b],
         );
     }
@@ -3421,6 +3741,7 @@ mod tests {
             ),
             Epoch::new(0),
             term_length,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3445,6 +3766,7 @@ mod tests {
             ),
             Epoch::new(0),
             term_length,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3469,6 +3791,7 @@ mod tests {
             ),
             Epoch::new(0),
             term_length,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3497,6 +3820,7 @@ mod tests {
             ),
             Epoch::new(0),
             term_length,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3536,6 +3860,7 @@ mod tests {
             ),
             Epoch::new(0),
             term_length,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3556,6 +3881,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep_a, rep_b],
         );
     }
@@ -3574,6 +3900,107 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
+            &[rep],
+        );
+    }
+
+    #[test]
+    fn correct_vote_without_predecessor_certificate_passes_under_optimistic_lookahead() {
+        let (participants, schemes) = vote_fixture();
+        let term_length = TermLength::new(NZU32!(5));
+        let lookahead = ViewDelta::new(1);
+        let mut rep = optimistic_vote_reporter(&participants, &schemes, term_length, lookahead);
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[1], proposal(2, 1, 0xA)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(
+            &HashSet::new(),
+            term_elector(term_length, lookahead),
+            Epoch::new(0),
+            term_length,
+            lookahead,
+            &[rep],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "voted in view 6 without entry evidence at predecessor view 5")]
+    fn term_start_vote_without_predecessor_certificate_is_rejected_under_optimistic_lookahead() {
+        let (participants, schemes) = vote_fixture();
+        let term_length = TermLength::new(NZU32!(5));
+        let lookahead = ViewDelta::new(1);
+        let mut rep = optimistic_vote_reporter(&participants, &schemes, term_length, lookahead);
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[1], proposal(6, 5, 0xA)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(
+            &HashSet::new(),
+            term_elector(term_length, lookahead),
+            Epoch::new(0),
+            term_length,
+            lookahead,
+            &[rep],
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "certificate progression reaches view 6 without a value certificate at view 5"
+    )]
+    fn term_start_certificate_progression_is_checked_under_optimistic_lookahead() {
+        let (participants, schemes) = vote_fixture();
+        let term_length = TermLength::new(NZU32!(5));
+        let lookahead = ViewDelta::new(1);
+        let rep = optimistic_vote_reporter(&participants, &schemes, term_length, lookahead);
+        rep.certified.lock().insert(View::new(6));
+        check_vote_invariants_with_byzantine(
+            &HashSet::new(),
+            term_elector(term_length, lookahead),
+            Epoch::new(0),
+            term_length,
+            lookahead,
+            &[rep],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "voted in view 2 without entry evidence at predecessor view 1")]
+    fn single_view_terms_have_no_optimistic_lookahead() {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = vote_reporter(&participants, &schemes);
+        rep.certified.lock().clear();
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[1], proposal(2, 1, 0xA)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(
+            &HashSet::new(),
+            RoundRobin::default(),
+            Epoch::new(0),
+            TermLength::ONE,
+            ViewDelta::new(1),
+            &[rep],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "correct signer notarized multiple payloads in view 5")]
+    fn optimistic_lookahead_keeps_vote_equivocation_check() {
+        let (participants, schemes) = vote_fixture();
+        let term_length = TermLength::new(NZU32!(5));
+        let lookahead = ViewDelta::new(1);
+        let mut rep = optimistic_vote_reporter(&participants, &schemes, term_length, lookahead);
+        for payload in [0xA, 0xB] {
+            rep.report(Activity::Notarize(
+                Notarize::sign(&schemes[1], proposal(5, 4, payload)).unwrap(),
+            ));
+        }
+        check_vote_invariants_with_byzantine(
+            &HashSet::new(),
+            term_elector(term_length, lookahead),
+            Epoch::new(0),
+            term_length,
+            lookahead,
             &[rep],
         );
     }
@@ -3594,6 +4021,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3614,6 +4042,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3634,6 +4063,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3660,6 +4090,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3681,6 +4112,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep_a, rep_b],
         );
     }
@@ -3700,6 +4132,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3719,6 +4152,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -3820,6 +4254,24 @@ mod tests {
         schemes: &[MockScheme],
         term_length: TermLength,
     ) -> AuditReporter {
+        optimistic_audit_reporter(
+            observer,
+            participants,
+            schemes,
+            term_length,
+            ViewDelta::zero(),
+        )
+    }
+
+    /// Audit reporter whose elector carries the checked term length and the
+    /// optimistic lookahead its engine was started with.
+    fn optimistic_audit_reporter(
+        observer: usize,
+        participants: &[Ed25519PublicKey],
+        schemes: &[MockScheme],
+        term_length: TermLength,
+        optimistic_views: ViewDelta,
+    ) -> AuditReporter {
         RecordingReporter::new(
             test_rng(),
             participants[observer].clone(),
@@ -3827,11 +4279,7 @@ mod tests {
             ReporterConfig {
                 participants: Set::try_from(participants.to_vec()).expect("unique keys"),
                 scheme: schemes[observer].clone(),
-                elector: RoundRobin::default().with_term(
-                    term_length,
-                    Duration::from_secs(10),
-                    ViewDelta::zero(),
-                ),
+                elector: term_elector(term_length, optimistic_views),
             },
         )
     }
@@ -3922,6 +4370,20 @@ mod tests {
         ));
     }
 
+    // A later own notarize vote with its acceptance evidence, at a view with no
+    // entry requirement and no certificate exit that would exempt a trigger.
+    fn record_later_own_notarize(reporter: &mut AuditReporter, schemes: &[MockScheme]) {
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(1), View::new(1)),
+            View::new(0),
+            digest(0xB),
+        );
+        record_propose_success(reporter, &proposal);
+        reporter.report(Activity::Notarize(
+            Notarize::sign(&schemes[0], proposal).unwrap(),
+        ));
+    }
+
     #[test]
     #[should_panic(expected = "advanced past timeout trigger without nullify")]
     fn dropped_proposal_must_make_progress() {
@@ -3950,6 +4412,56 @@ mod tests {
         record_later_own_vote(&mut reporter, &schemes);
 
         check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "advanced past timeout trigger without nullify")]
+    fn later_own_notarize_is_timeout_progress_without_optimistic_lookahead() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        record_verify_result(
+            &reporter,
+            participants[1].clone(),
+            &proposal(1, 0, 0xA),
+            false,
+        );
+        record_later_own_notarize(&mut reporter, &schemes);
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    // Own notarize at `view` after a rejected verification at view 1, under a
+    // five-view term with lookahead 1: the vote may be optimistic, so it only
+    // witnesses reaching `view - 1`.
+    fn own_notarize_after_rejected_verification(view: u64) {
+        let (participants, schemes) = vote_fixture();
+        let term_length = TermLength::new(NZU32!(5));
+        let mut reporter =
+            optimistic_audit_reporter(0, &participants, &schemes, term_length, ViewDelta::new(1));
+        record_verify_result(
+            &reporter,
+            participants[1].clone(),
+            &proposal(1, 0, 0xA),
+            false,
+        );
+        let proposal = proposal(view, view - 1, 0xB);
+        record_propose_success(&reporter, &proposal);
+        reporter.report(Activity::Notarize(
+            Notarize::sign(&schemes[0], proposal).unwrap(),
+        ));
+
+        check_fuzz_invariants(term_length, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn own_notarize_within_optimistic_lookahead_is_not_timeout_progress() {
+        own_notarize_after_rejected_verification(2);
+    }
+
+    #[test]
+    #[should_panic(expected = "advanced past timeout trigger without nullify")]
+    fn own_notarize_beyond_optimistic_lookahead_is_timeout_progress() {
+        own_notarize_after_rejected_verification(3);
     }
 
     #[test]
@@ -4622,6 +5134,81 @@ mod tests {
             Nullify::sign::<Sha256Digest>(&schemes[0], round(5)).unwrap(),
         ));
         check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn own_notarize_without_predecessor_certificate_passes_under_optimistic_lookahead() {
+        let (participants, schemes) = vote_fixture();
+        let term_length = TermLength::new(NZU32!(5));
+        let mut reporter =
+            optimistic_audit_reporter(0, &participants, &schemes, term_length, ViewDelta::new(1));
+        let proposal = proposal(5, 4, 0xA);
+        record_propose_success(&reporter, &proposal);
+        reporter.report(Activity::Notarize(
+            Notarize::sign(&schemes[0], proposal).unwrap(),
+        ));
+        check_fuzz_invariants(term_length, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "local notarize without entry evidence for view 6")]
+    fn own_term_start_notarize_without_predecessor_certificate_is_rejected_under_optimistic_lookahead()
+     {
+        let (participants, schemes) = vote_fixture();
+        let term_length = TermLength::new(NZU32!(5));
+        let mut reporter =
+            optimistic_audit_reporter(0, &participants, &schemes, term_length, ViewDelta::new(1));
+        let proposal = proposal(6, 5, 0xA);
+        record_propose_success(&reporter, &proposal);
+        reporter.report(Activity::Notarize(
+            Notarize::sign(&schemes[0], proposal).unwrap(),
+        ));
+        check_fuzz_invariants(term_length, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "local nullify without entry evidence for view 5")]
+    fn own_nullify_without_predecessor_certificate_is_rejected_under_optimistic_lookahead() {
+        let (participants, schemes) = vote_fixture();
+        let term_length = TermLength::new(NZU32!(5));
+        let mut reporter =
+            optimistic_audit_reporter(0, &participants, &schemes, term_length, ViewDelta::new(1));
+        reporter.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], round(5)).unwrap(),
+        ));
+        check_fuzz_invariants(term_length, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "notarized multiple exact proposals")]
+    fn optimistic_lookahead_keeps_exact_equivocation_check() {
+        let (participants, schemes) = vote_fixture();
+        let term_length = TermLength::new(NZU32!(5));
+        let mut reporter =
+            optimistic_audit_reporter(0, &participants, &schemes, term_length, ViewDelta::new(1));
+        for payload in [0xA, 0xB] {
+            let proposal = proposal(5, 4, payload);
+            record_propose_success(&reporter, &proposal);
+            reporter.report(Activity::Notarize(
+                Notarize::sign(&schemes[0], proposal).unwrap(),
+            ));
+        }
+        check_fuzz_invariants(term_length, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn mixed_optimistic_lookaheads_gate_on_the_maximum() {
+        let (participants, schemes) = vote_fixture();
+        let term_length = TermLength::new(NZU32!(5));
+        let optimistic =
+            optimistic_audit_reporter(0, &participants, &schemes, term_length, ViewDelta::new(2));
+        let mut plain = term_audit_reporter(1, &participants, &schemes, term_length);
+        let proposal = proposal(5, 4, 0xA);
+        record_propose_success(&plain, &proposal);
+        plain.report(Activity::Notarize(
+            Notarize::sign(&schemes[1], proposal).unwrap(),
+        ));
+        check_fuzz_invariants(term_length, &[plain, optimistic]);
     }
 
     #[test]
@@ -5301,6 +5888,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5324,6 +5912,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5346,6 +5935,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5365,6 +5955,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5384,6 +5975,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5404,6 +5996,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep_a, rep_b],
         );
     }
@@ -5421,6 +6014,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5441,6 +6035,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5458,6 +6053,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5470,7 +6066,12 @@ mod tests {
             views(vec![(0, nullification())]),
             views(vec![]),
         );
-        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::ONE,
+            ViewDelta::zero(),
+            vec![r],
+        );
     }
 
     #[test]
@@ -5486,6 +6087,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5503,6 +6105,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5518,6 +6121,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5541,6 +6145,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5569,6 +6174,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5595,6 +6201,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5620,6 +6227,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5648,6 +6256,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5760,6 +6369,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[rep],
         );
     }
@@ -5965,6 +6575,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[reporter],
         );
     }
@@ -5988,6 +6599,7 @@ mod tests {
             RoundRobin::default(),
             Epoch::new(0),
             TermLength::ONE,
+            ViewDelta::zero(),
             &[reporter],
         );
     }
@@ -6000,7 +6612,12 @@ mod tests {
         replicas: Vec<ReplicaState>,
     ) -> String {
         let result = std::panic::catch_unwind(|| {
-            check::<SimplexCertificateMockAttributable>(configuration, term_length, replicas);
+            check::<SimplexCertificateMockAttributable>(
+                configuration,
+                term_length,
+                ViewDelta::zero(),
+                replicas,
+            );
         });
         let err = result.expect_err("check must panic");
         err.downcast_ref::<String>()
@@ -6044,6 +6661,7 @@ mod tests {
         check::<SimplexCertificateMockAttributable>(
             N4F3C1,
             TermLength::new(NZU32!(5)),
+            ViewDelta::zero(),
             vec![conflicted(1), conflicted(2)],
         );
 
@@ -6070,6 +6688,7 @@ mod tests {
         check::<SimplexCertificateMockAttributable>(
             N4F3C1,
             TermLength::new(NZU32!(5)),
+            ViewDelta::zero(),
             vec![replica(
                 views(vec![]),
                 views(vec![(1, nullification())]),
@@ -6118,7 +6737,12 @@ mod tests {
 
         // Without an honest quorum the parent is not trustworthy, so the rule
         // must not fire (see `parent_mismatch_requires_honest_quorum`).
-        check::<SimplexCertificateMockAttributable>(N4F3C1, TermLength::new(NZU32!(5)), state());
+        check::<SimplexCertificateMockAttributable>(
+            N4F3C1,
+            TermLength::new(NZU32!(5)),
+            ViewDelta::zero(),
+            state(),
+        );
     }
 
     #[test]
@@ -6170,6 +6794,7 @@ mod tests {
         check::<SimplexCertificateMockAttributable>(
             N4F1C3,
             TermLength::new(NZU32!(5)),
+            ViewDelta::zero(),
             state(&[4, 6]),
         );
     }
@@ -6268,6 +6893,7 @@ mod tests {
         check::<SimplexCertificateMockAttributable>(
             N4F3C1,
             TermLength::new(NZU32!(5)),
+            ViewDelta::zero(),
             vec![replica(1), replica(2)],
         );
 

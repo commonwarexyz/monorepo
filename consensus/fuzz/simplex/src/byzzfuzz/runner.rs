@@ -350,7 +350,7 @@ async fn setup_engines<P: Simplex>(
                 validator,
                 P::elector(
                     P::effective_term_length(input.term_length),
-                    commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS,
+                    input.optimistic_views,
                 ),
                 relay.clone(),
                 Duration::from_secs(1),
@@ -598,12 +598,10 @@ pub fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput) {
         let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
         invariants::check_vote_invariants_with_byzantine(
             &byzantine,
-            P::elector(
-                term_length,
-                commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS,
-            ),
+            P::elector(term_length, input.optimistic_views),
             Epoch::new(EPOCH),
             term_length,
+            input.optimistic_views,
             &reporters,
         );
 
@@ -617,7 +615,7 @@ pub fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput) {
             .collect();
 
         let states = invariants::extract(correct_reporters, config.n as usize);
-        invariants::check::<P>(config, term_length, states);
+        invariants::check::<P>(config, term_length, input.optimistic_views, states);
     });
 }
 

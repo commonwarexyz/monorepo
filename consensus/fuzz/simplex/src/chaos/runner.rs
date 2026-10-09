@@ -39,7 +39,7 @@ use crate::{
 use commonware_consensus::{
     Monitor as _,
     simplex::mocks::{relay, reporter::Reporter},
-    types::{Epoch, TermLength, View},
+    types::{Epoch, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     CertifyChoice, ManagedValidator, N4F0C4, PublicKeyOf, bounds, build_validator_with_reporter,
@@ -234,7 +234,7 @@ async fn restart_durable<P: Simplex>(
         validator,
         P::elector(
             P::effective_term_length(input.term_length),
-            commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS,
+            input.optimistic_views,
         ),
         relay.clone(),
         Duration::from_secs(1),
@@ -318,6 +318,7 @@ fn check_safety<P: Simplex>(
     checker: &mut Checker,
     reporters: &[ChaosReporter<P>],
     term_length: TermLength,
+    optimistic_views: ViewDelta,
 ) {
     // Audit-history invariants plus the basic replica-state suite over the
     // lossless per-node event logs. The logs live in the retained reporters,
@@ -327,6 +328,7 @@ fn check_safety<P: Simplex>(
     invariants::check::<P>(
         commonware_consensus_fuzz_core::N4F0C4,
         term_length,
+        optimistic_views,
         reporters,
     );
 
@@ -346,12 +348,10 @@ fn check_safety<P: Simplex>(
     invariants::check_no_invalid_reports(&summaries);
     invariants::check_vote_invariants(
         0,
-        P::elector(
-            term_length,
-            commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS,
-        ),
+        P::elector(term_length, optimistic_views),
         Epoch::new(commonware_consensus_fuzz_core::EPOCH),
         term_length,
+        optimistic_views,
         &summaries,
     );
 }
@@ -406,6 +406,7 @@ async fn paced_enact<P: Simplex>(
         checker,
         reporters,
         P::effective_term_length(input.term_length),
+        input.optimistic_views,
     );
     boundary
 }
@@ -469,10 +470,7 @@ fn run_with<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput, st
                 &participants,
                 schemes[i].clone(),
                 validator,
-                P::elector(
-                    term_length,
-                    commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS,
-                ),
+                P::elector(term_length, input.optimistic_views),
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
@@ -661,7 +659,12 @@ fn run_with<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput, st
         // window so any still-runnable work emits before the final safety check.
         context.sleep(CHAOS_FINISH_SETTLE).await;
         clock.drain();
-        check_safety::<P>(&mut checker, &reporters, term_length);
+        check_safety::<P>(
+            &mut checker,
+            &reporters,
+            term_length,
+            input.optimistic_views,
+        );
     });
 }
 
