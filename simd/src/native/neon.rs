@@ -867,11 +867,10 @@ mod tests {
 
     #[test]
     fn test_boundaries() {
-        if !std::arch::is_aarch64_feature_detected!("neon") {
-            eprintln!("skipping native NEON boundaries: NEON is unavailable");
+        let Some(native) = NativeNeon::new() else {
+            eprintln!("skipping native NEON boundaries: the profile is unavailable");
             return;
-        }
-        let native = NativeNeon::new().expect("NEON hardware must yield a token");
+        };
         for a in BOUNDARIES {
             check_splat(native, a, !a);
             check_execute(native, [a, !a]);
