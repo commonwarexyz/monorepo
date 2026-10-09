@@ -1151,12 +1151,14 @@ impl Local {
     #[inline(always)]
     pub fn serving(pool: &Weak<Pool>) -> Option<Rc<RefCell<Self>>> {
         let local = Self::current()?;
+
         // The weak reference preserves allocation identity without retaining
         // the pool. A dedicated worker shares the pool but polls no task of it.
         let serves = {
             let local = local.borrow();
             local.role.is_pool() && ptr::eq(Arc::as_ptr(&local.shared.pool), pool.as_ptr())
         };
+
         serves.then_some(local)
     }
 
