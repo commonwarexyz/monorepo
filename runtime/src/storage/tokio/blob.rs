@@ -1,5 +1,5 @@
 #[cfg(target_os = "linux")]
-use crate::storage::{preadv2, pwritev2};
+use crate::storage::{DIRECT_ALIGNMENT, direct_aligned, preadv2, pwritev2, read_direct};
 use crate::{
     Buf, BufferPool, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     storage::{
@@ -39,12 +39,6 @@ const IOVEC_BATCH_SIZE: usize = 1024;
 
 #[cfg(target_os = "linux")]
 mod aio;
-
-/// Alignment of the offset, length, and buffer address that uncached reads need to bypass the page
-/// cache with `O_DIRECT`: one blob page, which covers devices with 512-byte and 4 KiB logical
-/// blocks.
-#[cfg(target_os = "linux")]
-const DIRECT_ALIGNMENT: usize = crate::BLOB_PAGE_SIZE as usize;
 
 /// Page-cache policy for one positioned I/O request.
 enum Cache {
@@ -356,58 +350,20 @@ impl Blob {
     /// not [DIRECT_ALIGNMENT]-aligned, or no direct descriptor is available (see [aio::direct]).
     #[cfg(target_os = "linux")]
     fn read_direct_at(file: &Shared, buf: &mut [u8], offset: u64) -> Result<bool, Error> {
-        let align = DIRECT_ALIGNMENT as u64;
-        if !offset.is_multiple_of(align)
-            || !buf.len().is_multiple_of(DIRECT_ALIGNMENT)
-            || !buf.as_ptr().addr().is_multiple_of(DIRECT_ALIGNMENT)
-        {
+        if !direct_aligned(offset, buf) {
             return Ok(false);
         }
         let Some(direct) = aio::direct(file) else {
             return Ok(false);
         };
+        let Some(read) = read_direct(direct, buf, offset)? else {
+            return Ok(false);
+        };
 
-        let mut done = 0;
-        while done < buf.len() {
-            let pos = offset
-                .checked_add(done as u64)
-                .and_then(|pos| libc::off_t::try_from(pos).ok())
-                .ok_or(Error::OffsetOverflow)?;
-            let remaining = &mut buf[done..];
-            // SAFETY: `direct` owns a valid fd for this call, and `remaining` is an exclusive
-            // writable slice borrowed for the duration of the syscall.
-            let ret = unsafe {
-                libc::pread(
-                    direct.as_raw_fd(),
-                    remaining.as_mut_ptr().cast(),
-                    remaining.len(),
-                    pos,
-                )
-            };
-            if ret < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-
-                // A device whose blocks are larger than `DIRECT_ALIGNMENT` rejects the request
-                // before reading anything, so the caller can still read it another way.
-                if done == 0 && err.raw_os_error() == Some(libc::EINVAL) {
-                    return Ok(false);
-                }
-                return Err(err.into());
-            }
-            if ret == 0 {
-                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
-            }
-            done += ret as usize;
-
-            // A short read stops at end of file, where the remainder is no longer aligned. Read
-            // it through the page cache, which reports the same end of file.
-            if done < buf.len() && !done.is_multiple_of(DIRECT_ALIGNMENT) {
-                file.read_exact_at(&mut buf[done..], offset + done as u64)?;
-                break;
-            }
+        // A short read stops at end of file, where the remainder is no longer aligned. Read it
+        // through the page cache, which reports the same end of file.
+        if read < buf.len() {
+            file.read_exact_at(&mut buf[read..], offset + read as u64)?;
         }
         #[cfg(test)]
         file.test
