@@ -260,7 +260,7 @@ impl<B: Blob> View<'_, B> {
             return Ok(offsets.len());
         }
 
-        // Slow path: read remaining ranges from the underlying blob, concurrently.
+        // Read the remaining misses from the blob concurrently.
         let mut reads = cache_ranges
             .iter_mut()
             .map(|(item_buf, offset)| {
@@ -289,7 +289,7 @@ impl<B: Blob> View<'_, B> {
             return Ok(offsets.len());
         }
 
-        // Slow path: read remaining ranges from the underlying blob, concurrently, without
+        // Read the remaining misses from the blob concurrently without
         // admitting their pages. Each distinct page covered by the misses is read once.
         self.cache_ref
             .read_uncached_many(self.blob, &mut cache_ranges)
