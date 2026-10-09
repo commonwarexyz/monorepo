@@ -337,7 +337,9 @@ pub use commonware_macros_impl::test_async;
 pub use commonware_macros_impl::test_collect_traces;
 /// Suffix a test name with a nextest filter group.
 ///
-/// This renames `test_some_behavior` into `test_some_behavior_<group>_`. The nextest profiles in
+/// This renames `test_some_behavior` into `test_some_behavior_<group>_`. On an inline module, it
+/// renames the module the same way, so the suffix is in the path of every test inside it, and keeps
+/// the original name as an alias for code that refers to the module. The nextest profiles in
 /// `nextest.toml` select tests by that suffix, whether it ends the test name or a module in its
 /// path. Place it above every other test attribute.
 pub use commonware_macros_impl::test_group;

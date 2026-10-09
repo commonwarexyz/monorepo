@@ -14,7 +14,7 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
-    Error, Expr, Ident, ItemFn, LitInt, LitStr, Pat, Token, Visibility, braced,
+    Error, Expr, Ident, Item, ItemFn, LitInt, LitStr, Pat, Token, Visibility, braced,
     parse::{Parse, ParseStream, Result},
     parse_macro_input,
 };
@@ -345,7 +345,7 @@ pub fn test_group(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into();
     }
 
-    let mut input = parse_macro_input!(item as ItemFn);
+    let mut input = parse_macro_input!(item as Item);
     let group_literal = parse_macro_input!(attr as LitStr);
 
     let group = match nextest::sanitize_group_literal(&group_literal) {
@@ -364,12 +364,35 @@ pub fn test_group(attr: TokenStream, item: TokenStream) -> TokenStream {
         return err.to_compile_error().into();
     }
 
-    let original_name = input.sig.ident.to_string();
-    let new_ident = Ident::new(&format!("{original_name}_{group}_"), input.sig.ident.span());
+    let alias = match &mut input {
+        Item::Fn(item) => {
+            item.sig.ident = format_ident!("{}_{}_", item.sig.ident, group);
+            None
+        }
+        // Keep the module's original name as an alias, so code that refers to it is unchanged.
+        Item::Mod(item) if item.content.is_some() => {
+            let original = item.ident.clone();
+            item.ident = format_ident!("{}_{}_", original, group);
+            let renamed = &item.ident;
+            let vis = &item.vis;
+            let cfgs = item.attrs.iter().filter(|attr| attr.path().is_ident("cfg"));
+            Some(quote! {
+                #(#cfgs)*
+                #[allow(unused_imports)]
+                #vis use #renamed as #original;
+            })
+        }
+        other => {
+            return Error::new_spanned(
+                other,
+                "test_group applies to test functions and inline test modules",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
 
-    input.sig.ident = new_ident;
-
-    TokenStream::from(quote!(#input))
+    TokenStream::from(quote!(#input #alias))
 }
 
 #[proc_macro_attribute]
