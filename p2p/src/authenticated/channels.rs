@@ -105,7 +105,7 @@ impl<P: PublicKey, C: Clock> Sender<P, C> {
 impl<P, C> crate::LimitedSender for Sender<P, C>
 where
     P: PublicKey,
-    C: Clock + Send + 'static,
+    C: Clock,
 {
     type PublicKey = P;
     type Checked<'a>

@@ -1,30 +1,34 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    merkle::{Graftable, full::Config as MerkleConfig, mmb, mmr},
+    merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::unordered::fixed::Update,
+        any::{traits::DbAny as _, unordered::fixed::Update},
         current::{
-            FixedConfig as Config, batch::UnmerkleizedBatch, unordered::fixed::Db as CurrentDb,
+            FixedConfig as Config,
+            batch::{MerkleizedBatch, UnmerkleizedBatch},
+            unordered::fixed::Db as CurrentDb,
         },
     },
     translator::OneCap,
 };
+use commonware_storage_fuzz::floor::{Plan, Recorder};
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
-use std::num::NonZeroU16;
+use std::{collections::BTreeMap, num::NonZeroU16, sync::Arc};
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
 type Db<F> = CurrentDb<F, deterministic::Context, Key, Value, Sha256, OneCap, 32, Sequential>;
 type Batch<F> = UnmerkleizedBatch<F, Sha256, Update<Key, Value>, 32, Sequential>;
+type Merkleized<F> = MerkleizedBatch<F, Digest, Update<Key, Value>, 32, Sequential>;
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(137);
 const COLLISION_GROUPS: u8 = 4;
@@ -66,11 +70,19 @@ struct FuzzInput {
     parent: Vec<Mutation>,
     child: Vec<Mutation>,
     grandchild: Vec<Mutation>,
+    initial_plan: Plan,
+    parent_plan: Plan,
+    child_plan: Plan,
+    grandchild_plan: Plan,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let schedule = Schedule::arbitrary(u)?;
+        let initial_plan = Plan::arbitrary(u)?;
+        let parent_plan = Plan::arbitrary(u)?;
+        let child_plan = Plan::arbitrary(u)?;
+        let grandchild_plan = Plan::arbitrary(u)?;
         let initial_len = u.int_in_range(0..=MAX_INITIAL_WRITES)?;
         let parent_len = u.int_in_range(1..=MAX_PARENT_MUTATIONS)?;
         let child_len = u.int_in_range(1..=MAX_CHILD_MUTATIONS)?;
@@ -95,6 +107,10 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             parent,
             child,
             grandchild,
+            initial_plan,
+            parent_plan,
+            child_plan,
+            grandchild_plan,
         })
     }
 }
@@ -150,26 +166,121 @@ fn apply_mutations<F: Graftable>(mut batch: Batch<F>, mutations: &[Mutation]) ->
     batch
 }
 
+/// Advance the batch's logical key-value model independently of ancestor application.
+fn apply_to_model(model: &mut BTreeMap<Key, Value>, mutations: &[Mutation]) {
+    for mutation in mutations {
+        match mutation {
+            Mutation::Write { key, value } => {
+                model.insert(key_from_seed(*key), value_from_bytes(*value));
+            }
+            Mutation::Delete { key } => {
+                model.remove(&key_from_seed(*key));
+            }
+        }
+    }
+}
+
+/// Merkleize `batch` under `plan` from the `inherited` floor, check its floor walk against
+/// `model` (already advanced by the batch's writes), and replay the walk's decisions into it.
+async fn merkleize<F: Graftable>(
+    db: &Db<F>,
+    batch: Batch<F>,
+    inherited: Location<F>,
+    plan: &Plan,
+    model: &mut BTreeMap<Key, Value>,
+) -> (Arc<Merkleized<F>>, Recorder<Key, Value>) {
+    let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
+    let merkleized = batch.merkleize(db, None, &mut policy).await.unwrap();
+    let bounds = merkleized.bounds();
+    policy.check(
+        model,
+        inherited,
+        bounds.inactivity_floor,
+        bounds.tip.size - 1,
+    );
+    (merkleized, policy)
+}
+
+/// Merkleize `batch`, which rebuilds the batch `original` walked along another path, and check
+/// that its walk makes the same decisions.
+async fn rebuild<F: Graftable>(
+    db: &Db<F>,
+    batch: Batch<F>,
+    plan: &Plan,
+    original: &Recorder<Key, Value>,
+) -> Arc<Merkleized<F>> {
+    let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
+    let merkleized = batch.merkleize(db, None, &mut policy).await.unwrap();
+    policy.assert_same_walk(original);
+    merkleized
+}
+
+/// Check every key in the mutation key space against the model.
+async fn assert_matches_model<F: Graftable>(db: &Db<F>, model: &BTreeMap<Key, Value>) {
+    assert_eq!(db.is_empty(), model.is_empty(), "empty-db state diverged");
+    let keys = (0..COLLISION_GROUPS).flat_map(|prefix| {
+        (0..KEY_SPACE).map(move |suffix| key_from_seed(KeySeed { prefix, suffix }))
+    });
+    for key in keys {
+        let got = db.get(&key).await.expect("get should not fail");
+        assert_eq!(got.as_ref(), model.get(&key), "db diverged from model");
+    }
+}
+
+/// Commit `db`, then reopen it and check that recovery rebuilds the same roots, floor, and live
+/// state from the log, including the floor walks' rewrites and evictions.
+async fn assert_recovers<F: Graftable>(
+    context: &deterministic::Context,
+    name: &str,
+    db: Db<F>,
+    model: &BTreeMap<Key, Value>,
+) {
+    let db = db.commit().await.unwrap();
+    assert_matches_model(&db, model).await;
+    let roots = (db.root(), db.ops_root());
+    let floor = db.inactivity_floor_loc();
+    drop(db);
+
+    let db: Db<F> = Db::init(context.child("reopened"), test_config(name, context), None)
+        .await
+        .expect("reopen current unordered db");
+    assert_eq!(
+        (db.root(), db.ops_root()),
+        roots,
+        "roots changed across reopen"
+    );
+    assert_eq!(
+        db.inactivity_floor_loc(),
+        floor,
+        "floor changed across reopen"
+    );
+    assert_matches_model(&db, model).await;
+    db.destroy().await.unwrap();
+}
+
 fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
     let runner = deterministic::Runner::default();
 
     let test_name = test_name.to_string();
     runner.start(|context| async move {
         let cfg = test_config(&test_name, &context);
-        let db: Db<F> = Db::init(context.child("storage"), cfg)
+        let db: Db<F> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("init current unordered db");
 
         // Seed the committed base state so the wrapper sees collision-heavy
         // inner batching before parent/child comparisons.
+        let mut model = BTreeMap::new();
         let mut batch = db.new_batch();
         for write in &input.initial {
             batch = batch.write(
                 key_from_seed(write.key),
                 Some(value_from_bytes(write.value)),
             );
+            model.insert(key_from_seed(write.key), value_from_bytes(write.value));
         }
-        let initial = batch.merkleize(&db, None).await.unwrap();
+        let floor = db.inactivity_floor_loc();
+        let (initial, _) = merkleize(&db, batch, floor, &input.initial_plan, &mut model).await;
         let (db, _) = db.apply_batch(initial).await.unwrap();
         let db = db.commit().await.unwrap();
 
@@ -177,9 +288,15 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
             Schedule::PendingParent => {
                 // Build the child while the parent is still pending.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
-                let parent = batch.merkleize(&db, None).await.unwrap();
+                apply_to_model(&mut model, &input.parent);
+                let floor = db.inactivity_floor_loc();
+                let (parent, _) =
+                    merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
-                let pending_child = batch.merkleize(&db, None).await.unwrap();
+                apply_to_model(&mut model, &input.child);
+                let floor = parent.bounds().inactivity_floor;
+                let (pending_child, child_walk) =
+                    merkleize(&db, batch, floor, &input.child_plan, &mut model).await;
 
                 // Commit the parent, then rebuild the same logical child from the
                 // committed wrapper state. Both canonical and ops roots must match.
@@ -187,7 +304,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 let db = db.commit().await.unwrap();
 
                 let batch = apply_mutations(db.new_batch(), &input.child);
-                let committed_child = batch.merkleize(&db, None).await.unwrap();
+                let committed_child = rebuild(&db, batch, &input.child_plan, &child_walk).await;
 
                 assert_eq!(
                     pending_child.root(),
@@ -220,11 +337,19 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 // committed bitmap. This is the only schedule that checks a multi-diff
                 // ancestor walk against a committed-only reference.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
-                let parent = batch.merkleize(&db, None).await.unwrap();
+                apply_to_model(&mut model, &input.parent);
+                let floor = db.inactivity_floor_loc();
+                let (parent, _) =
+                    merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
-                let child = batch.merkleize(&db, None).await.unwrap();
+                apply_to_model(&mut model, &input.child);
+                let floor = parent.bounds().inactivity_floor;
+                let (child, _) = merkleize(&db, batch, floor, &input.child_plan, &mut model).await;
                 let batch = apply_mutations(child.new_batch::<Sha256>(), &input.grandchild);
-                let pending_grandchild = batch.merkleize(&db, None).await.unwrap();
+                apply_to_model(&mut model, &input.grandchild);
+                let floor = child.bounds().inactivity_floor;
+                let (pending_grandchild, grandchild_walk) =
+                    merkleize(&db, batch, floor, &input.grandchild_plan, &mut model).await;
 
                 // Commit the chain prefix, then rebuild the same grandchild from the
                 // committed wrapper state. Both roots must be independent of the chain's
@@ -235,7 +360,8 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 let db = db.commit().await.unwrap();
 
                 let batch = apply_mutations(db.new_batch(), &input.grandchild);
-                let committed_grandchild = batch.merkleize(&db, None).await.unwrap();
+                let committed_grandchild =
+                    rebuild(&db, batch, &input.grandchild_plan, &grandchild_walk).await;
 
                 assert_eq!(
                     pending_grandchild.root(),
@@ -267,26 +393,36 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 // the dropped committed prefix. C reuses the parent mutations so the chain
                 // re-deletes and re-creates the same colliding keys.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
-                let a = batch.merkleize(&db, None).await.unwrap();
+                apply_to_model(&mut model, &input.parent);
+                let floor = db.inactivity_floor_loc();
+                let (a, _) = merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);
-                let b = batch.merkleize(&db, None).await.unwrap();
+                apply_to_model(&mut model, &input.child);
+                let floor = a.bounds().inactivity_floor;
+                let (b, b_walk) = merkleize(&db, batch, floor, &input.child_plan, &mut model).await;
                 let batch = apply_mutations(b.new_batch::<Sha256>(), &input.parent);
-                let c = batch.merkleize(&db, None).await.unwrap();
+                apply_to_model(&mut model, &input.parent);
+                let floor = b.bounds().inactivity_floor;
+                let (c, c_walk) =
+                    merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
 
                 // Applying A consumes its last strong reference. B retains only a Weak parent.
                 let (db, _) = db.apply_batch(a).await.unwrap();
                 let db = db.commit().await.unwrap();
 
                 let batch = apply_mutations(c.new_batch::<Sha256>(), &input.grandchild);
-                let retained_d = batch.merkleize(&db, None).await.unwrap();
+                apply_to_model(&mut model, &input.grandchild);
+                let floor = c.bounds().inactivity_floor;
+                let (retained_d, d_walk) =
+                    merkleize(&db, batch, floor, &input.grandchild_plan, &mut model).await;
 
                 // Rebuild B -> C -> D from the committed A state as a reference.
                 let batch = apply_mutations(db.new_batch(), &input.child);
-                let rebuilt_b = batch.merkleize(&db, None).await.unwrap();
+                let rebuilt_b = rebuild(&db, batch, &input.child_plan, &b_walk).await;
                 let batch = apply_mutations(rebuilt_b.new_batch::<Sha256>(), &input.parent);
-                let rebuilt_c = batch.merkleize(&db, None).await.unwrap();
+                let rebuilt_c = rebuild(&db, batch, &input.parent_plan, &c_walk).await;
                 let batch = apply_mutations(rebuilt_c.new_batch::<Sha256>(), &input.grandchild);
-                let rebuilt_d = batch.merkleize(&db, None).await.unwrap();
+                let rebuilt_d = rebuild(&db, batch, &input.grandchild_plan, &d_walk).await;
 
                 assert_eq!(
                     retained_d.root(),
@@ -314,7 +450,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
             }
         };
 
-        db.destroy().await.unwrap();
+        assert_recovers(&context, &test_name, db, &model).await;
     });
 }
 

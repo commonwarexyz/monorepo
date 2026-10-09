@@ -20,9 +20,9 @@ use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
 use futures::future::{Aborted, Either, pending};
 use mpsc::error::TryRecvError;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fmt::Debug,
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
 };
 
@@ -156,8 +156,9 @@ where
     /// The engine only verifies source data against this commitment and does not select or
     /// authenticate the target.
     pub target: Target<DB::Family, DB::Digest>,
-    /// Maximum number of outstanding requests for operation batches
-    pub max_outstanding_requests: usize,
+    /// Maximum number of outstanding requests. The boundary request for the pinned nodes counts
+    /// toward it.
+    pub max_outstanding_requests: NonZeroUsize,
     /// Maximum operations to fetch per batch
     pub fetch_batch_size: NonZeroU64,
     /// Number of operations to apply in a single batch
@@ -180,9 +181,6 @@ where
     /// drained by the observer. The engine awaits send capacity on this channel before
     /// proceeding, so backpressure can pause progress at target.
     pub reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
-    /// Maximum number of previous targets whose pending operation requests may be reused
-    /// after a target update. Set to 0 to cancel all pending requests on each target update.
-    pub max_retained_roots: usize,
 }
 /// A shared sync engine that manages the core synchronization state and operations.
 pub(crate) struct Engine<DB, S>
@@ -201,21 +199,14 @@ where
     /// The vectors in the map are non-empty.
     fetched_operations: BTreeMap<Location<DB::Family>, Vec<DB::Op>>,
 
-    /// Pinned merkle nodes extracted from proofs, used for database construction
+    /// Pinned merkle nodes at `target.range.start()`, used for database construction.
     pinned_nodes: Option<Vec<DB::Digest>>,
-
-    /// Superseded target sizes whose in-flight requests remain eligible.
-    /// Each fetch owns the root it authenticates against.
-    retained_sizes: BTreeSet<Location<DB::Family>>,
-
-    /// Maximum number of previous targets eligible for operation request reuse.
-    max_retained_roots: usize,
 
     /// The current sync target (root digest and operation bounds)
     target: Target<DB::Family, DB::Digest>,
 
     /// Maximum number of parallel outstanding requests
-    max_outstanding_requests: usize,
+    max_outstanding_requests: NonZeroUsize,
 
     /// Maximum operations to fetch in a single batch
     fetch_batch_size: NonZeroU64,
@@ -287,6 +278,7 @@ where
             }));
         }
 
+        // Recover the operation prefix that can resume this target.
         let journal = <DB::Journal as Journal<DB::Family>>::new(
             config.context.child("journal"),
             config.db_config.journal_config(),
@@ -317,8 +309,6 @@ where
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
             pinned_nodes,
-            retained_sizes: BTreeSet::new(),
-            max_retained_roots: config.max_retained_roots,
             target: config.target.clone(),
             max_outstanding_requests: config.max_outstanding_requests,
             fetch_batch_size: config.fetch_batch_size,
@@ -394,6 +384,7 @@ where
         // Calculate the maximum number of requests to make
         let num_requests = self
             .max_outstanding_requests
+            .get()
             .saturating_sub(self.outstanding_requests.len());
 
         let log_size = self.journal.size();
@@ -427,31 +418,25 @@ where
 
     /// Reset sync state for a target update.
     ///
-    /// Retains only operation requests beyond the new lower bound whose captured verification
-    /// roots are still covered by the configured retention window.
+    /// Keeps fetched operations. Keeps pinned nodes only while the lower bound is unchanged.
+    /// Keeps outstanding requests, whatever target size they were issued for, except those at or
+    /// below a moved lower bound. Each request verifies against the root it was issued with.
     pub async fn reset_for_target_update(
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
     ) -> Result<Self, Error<DB, S>> {
+        let start_moved = self.target.range.start() != new_target.range.start();
         self.journal = self.journal.resize(new_target.range.start()).await?;
-        self.fetched_operations.clear();
-        self.pinned_nodes = None;
+        if start_moved {
+            self.pinned_nodes = None;
 
-        // Retain the prior target size so its fetches stay eligible until eviction.
-        if self.max_retained_roots > 0 {
-            self.retained_sizes.insert(self.target.range.end());
-            if self.retained_sizes.len() > self.max_retained_roots {
-                self.retained_sizes.pop_first();
-            }
+            // A source may prune up to the new lower bound, so a request below a moved bound
+            // may never be answered. Requests are also tracked by start location, so one kept at the
+            // new bound would block the boundary request there.
+            let new_start = new_target.range.start();
+            self.outstanding_requests
+                .retain(|request| request.start() > new_start);
         }
-
-        // Preserve operation fetches for retained targets beyond the new lower bound.
-        // The lower bound never decreases, so this cancels old boundary requests and
-        // leaves the new boundary free for fetching pinned nodes.
-        let new_start = new_target.range.start();
-        self.outstanding_requests.retain(|request| {
-            request.start() > new_start && self.retained_sizes.contains(&request.size())
-        });
 
         self.target = new_target;
         self.reached_current_target_reported = false;
@@ -507,6 +492,9 @@ where
     }
 
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
+    ///
+    /// Each start has at most one outstanding request, and gaps skip stored batches, so a batch
+    /// never replaces another.
     pub(crate) fn store_operations(
         &mut self,
         start_loc: Location<DB::Family>,
@@ -625,9 +613,12 @@ where
             Response::Boundary {
                 op, pinned_nodes, ..
             } => {
-                // A tracked boundary request belongs to the current target.
+                // A tracked boundary request is at the current lower bound. A fetched batch
+                // there already holds its operation.
                 self.pinned_nodes = Some(pinned_nodes);
-                self.store_operations(start_loc, vec![op]);
+                self.fetched_operations
+                    .entry(start_loc)
+                    .or_insert_with(|| vec![op]);
             }
         }
 
@@ -784,15 +775,18 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
-        merkle::mmr::{Family as MmrFamily, Proof},
-        qmdb::sync::source,
+        merkle::{Proof, mmr::Family as MmrFamily},
+        qmdb::sync::{
+            harness::{DbOf, OpOf, SyncTestHarness},
+            source::{self, tests::FailSource},
+        },
     };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::{NZU64, non_empty_range};
+    use commonware_utils::{NZU64, NZUsize, non_empty_range};
     use std::{
         convert::Infallible,
         sync::{
@@ -929,7 +923,7 @@ mod tests {
                 root: sha256::Digest::from([1u8; 32]),
                 range: non_empty_range!(Location::new(5), Location::new(10)),
             },
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             fetch_batch_size: NZU64!(1),
             apply_batch_size: NZU64!(1),
             db_config: TestConfig {
@@ -939,22 +933,52 @@ mod tests {
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 0,
         }
     }
 
-    fn insert_pending_request(
-        engine: &mut Engine<TestDb, TestSource>,
-        request: Request<MmrFamily>,
-    ) -> RequestId {
+    async fn retention_engine<H: SyncTestHarness>(
+        context: deterministic::Context,
+    ) -> Engine<DbOf<H>, FailSource<H::Family, OpOf<H>, sha256::Digest>>
+    where
+        OpOf<H>: Encode + 'static,
+    {
+        // Source requests stay unpolled; completed fetch results are injected directly.
+        let config = Config {
+            db_config: H::config("retention", &context),
+            context,
+            source: FailSource::new(),
+            target: Target {
+                root: sha256::Digest::from([1u8; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(10)),
+            },
+            max_outstanding_requests: NZUsize!(1),
+            fetch_batch_size: NZU64!(1),
+            apply_batch_size: NZU64!(1),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+        };
+        Engine::new(config).await.unwrap()
+    }
+
+    fn insert_pending_request<DB, S>(
+        engine: &mut Engine<DB, S>,
+        request: Request<DB::Family>,
+    ) -> RequestId
+    where
+        DB: Database,
+        S: SourceFor<DB>,
+        DB::Op: Encode + 'static,
+    {
         engine
             .outstanding_requests
             .insert(request, |_| std::future::pending())
     }
 
-    fn stale_fetch_result(
+    fn late_fetch_result<F: Family, Op>(
         id: RequestId,
-    ) -> IndexedFetchResult<MmrFamily, i32, sha256::Digest, Infallible> {
+        operation: Op,
+    ) -> IndexedFetchResult<F, Op, sha256::Digest, qmdb::Error<F>> {
         IndexedFetchResult {
             id,
             result: Ok(Some(Response::Operations {
@@ -963,17 +987,76 @@ mod tests {
                     inactive_peaks: 0,
                     digests: vec![],
                 },
-                operations: vec![99],
+                operations: vec![operation],
             })),
         }
     }
 
-    #[test]
-    fn target_update_with_zero_retention_cancels_old_requests_and_queued_result() {
+    /// A boundary response keeps a fetched batch that starts at the lower bound.
+    pub(crate) fn test_boundary_response_keeps_fetched_batch_at_lower_bound<H: SyncTestHarness>()
+    where
+        OpOf<H>: Encode + Clone + PartialEq + Debug + 'static,
+    {
         deterministic::Runner::default().start(|context| async move {
-            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            config.max_outstanding_requests = 0;
-            let mut engine = Engine::new(config).await.unwrap();
+            let mut engine = retention_engine::<H>(context).await;
+            let operations = H::create_ops(3);
+            engine
+                .fetched_operations
+                .insert(Location::new(6), operations.clone());
+
+            // Move the lower bound to the start of the fetched batch.
+            let next = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(6), Location::new(12)),
+            };
+            let mut engine = engine.reset_for_target_update(next).await.unwrap();
+            assert!(engine.pinned_nodes.is_none());
+
+            // The boundary response sets pinned nodes without replacing the batch.
+            let id = insert_pending_request(
+                &mut engine,
+                Request::Boundary {
+                    size: Location::new(12),
+                    start: Location::new(6),
+                },
+            );
+            let pinned = vec![sha256::Digest::from([7; 32])];
+            engine
+                .handle_fetch_result(IndexedFetchResult {
+                    id,
+                    result: Ok(Some(Response::Boundary {
+                        proof: Proof {
+                            leaves: Location::new(12),
+                            inactive_peaks: 0,
+                            digests: vec![],
+                        },
+                        op: operations[0].clone(),
+                        pinned_nodes: pinned.clone(),
+                    })),
+                })
+                .unwrap();
+            assert_eq!(engine.pinned_nodes, Some(pinned));
+            assert_eq!(
+                engine.fetched_operations.get(&Location::new(6)),
+                Some(&operations)
+            );
+
+            // Applying moves the journal past the whole batch.
+            let engine = engine.apply_operations().await.unwrap();
+            assert_eq!(engine.journal.size(), 9);
+        });
+    }
+
+    /// Moving the lower bound past an operation request cancels it with the old boundary and
+    /// drops its queued result.
+    pub(crate) fn test_target_update_drops_queued_result_of_cancelled_request<H: SyncTestHarness>()
+    where
+        OpOf<H>: Encode + 'static,
+    {
+        deterministic::Runner::default().start(|context| async move {
+            let mut engine = retention_engine::<H>(context).await;
+
+            // Track the boundary request and an operation request below the next lower bound.
             assert!(engine.outstanding_requests.contains(&Location::new(5)));
             let request = Request::Operations {
                 size: Location::new(10),
@@ -981,18 +1064,19 @@ mod tests {
                 max_ops: NZU64!(1),
             };
             let old_id = insert_pending_request(&mut engine, request);
-            let queued_result = stale_fetch_result(old_id);
+            let queued_result = late_fetch_result(old_id, H::create_ops(1).pop().unwrap());
             assert_eq!(engine.outstanding_requests.len(), 2);
 
+            // Moving the lower bound beyond both starts cancels both requests.
             let new_target = Target {
                 root: sha256::Digest::from([2u8; 32]),
-                range: non_empty_range!(Location::new(5), Location::new(12)),
+                range: non_empty_range!(Location::new(7), Location::new(12)),
             };
             let mut engine = engine.reset_for_target_update(new_target).await.unwrap();
-
-            assert!(engine.retained_sizes.is_empty());
             assert_eq!(engine.outstanding_requests.len(), 0);
             assert!(engine.outstanding_requests.remove(old_id).is_none());
+
+            // The queued result of the cancelled request is ignored.
             engine.handle_fetch_result(queued_result).unwrap();
             assert!(engine.fetched_operations.is_empty());
             assert!(engine.pinned_nodes.is_none());
@@ -1008,16 +1092,125 @@ mod tests {
         });
     }
 
-    #[test]
-    fn target_update_retains_useful_operation_then_cancels_it_on_root_eviction() {
+    /// An operation request at an old size survives any number of target updates while its
+    /// start is beyond the lower bound, and its late response is stored. The boundary request
+    /// survives updates that keep the lower bound.
+    pub(crate) fn test_target_updates_keep_old_size_request_beyond_floor<H: SyncTestHarness>()
+    where
+        OpOf<H>: Encode + Clone + PartialEq + Debug + 'static,
+    {
         deterministic::Runner::default().start(|context| async move {
-            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            config.max_outstanding_requests = 0;
-            config.max_retained_roots = 1;
-            let mut engine = Engine::new(config).await.unwrap();
+            let mut engine = retention_engine::<H>(context).await;
 
+            // Track a pending boundary request and an operation request at the first target
+            // size.
             assert!(engine.outstanding_requests.contains(&Location::new(5)));
-            let old_operation_id = insert_pending_request(
+            insert_pending_request(
+                &mut engine,
+                Request::Boundary {
+                    size: Location::new(10),
+                    start: Location::new(5),
+                },
+            );
+            let request = Request::Operations {
+                size: Location::new(10),
+                start: Location::new(8),
+                max_ops: NZU64!(1),
+            };
+            let id = insert_pending_request(&mut engine, request);
+            assert_eq!(engine.outstanding_requests.len(), 2);
+
+            // Updates with an unchanged lower bound keep both requests.
+            let mut root = 2u8;
+            for end in 11..21 {
+                let next = Target {
+                    root: sha256::Digest::from([root; 32]),
+                    range: non_empty_range!(Location::new(5), Location::new(end)),
+                };
+                root += 1;
+                engine = engine.reset_for_target_update(next).await.unwrap();
+                assert!(engine.outstanding_requests.contains(&Location::new(5)));
+                assert!(engine.outstanding_requests.contains(&Location::new(8)));
+                assert_eq!(engine.outstanding_requests.len(), 2);
+            }
+
+            // Updates that move the lower bound below the request start cancel the boundary
+            // and keep the operation request.
+            for (start, end) in [(6, 22), (7, 24)] {
+                let next = Target {
+                    root: sha256::Digest::from([root; 32]),
+                    range: non_empty_range!(Location::new(start), Location::new(end)),
+                };
+                root += 1;
+                engine = engine.reset_for_target_update(next).await.unwrap();
+                assert!(engine.outstanding_requests.contains(&Location::new(8)));
+                assert_eq!(engine.outstanding_requests.len(), 1);
+            }
+
+            // The late response at the first target size is stored at its start.
+            let operation = H::create_ops(1).pop().unwrap();
+            engine
+                .handle_fetch_result(late_fetch_result(id, operation.clone()))
+                .unwrap();
+            assert_eq!(engine.outstanding_requests.len(), 0);
+            assert_eq!(
+                engine.fetched_operations.get(&Location::new(8)),
+                Some(&vec![operation])
+            );
+        });
+    }
+
+    /// Moving the lower bound cancels an operation request whose range ends at the new bound and
+    /// keeps one beyond it.
+    pub(crate) fn test_target_update_floor_move_cancels_operations_below_bound<H: SyncTestHarness>()
+    where
+        OpOf<H>: Encode + 'static,
+    {
+        deterministic::Runner::default().start(|context| async move {
+            let mut engine = retention_engine::<H>(context).await;
+
+            // Track operation requests below and beyond the next lower bound.
+            let below = Request::Operations {
+                size: Location::new(10),
+                start: Location::new(6),
+                max_ops: NZU64!(2),
+            };
+            insert_pending_request(&mut engine, below);
+            let beyond = Request::Operations {
+                size: Location::new(10),
+                start: Location::new(9),
+                max_ops: NZU64!(1),
+            };
+            insert_pending_request(&mut engine, beyond);
+            assert_eq!(engine.outstanding_requests.len(), 3);
+
+            // Moving the lower bound to the end of the first request cancels it and the old
+            // boundary. The request beyond the bound survives.
+            let next = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(8), Location::new(14)),
+            };
+            let engine = engine.reset_for_target_update(next).await.unwrap();
+            assert!(!engine.outstanding_requests.contains(&Location::new(5)));
+            assert!(!engine.outstanding_requests.contains(&Location::new(6)));
+            assert!(engine.outstanding_requests.contains(&Location::new(9)));
+            assert_eq!(engine.outstanding_requests.len(), 1);
+        });
+    }
+
+    /// Moving the lower bound to the start of an operation request cancels it and the old
+    /// boundary request, and scheduling issues the boundary request at the new lower bound.
+    pub(crate) fn test_moved_floor_schedules_boundary_without_waiting_for_old_operation<
+        H: SyncTestHarness,
+    >()
+    where
+        OpOf<H>: Encode + 'static,
+    {
+        deterministic::Runner::default().start(|context| async move {
+            let mut engine = retention_engine::<H>(context).await;
+
+            // Track the boundary request and an operation request at the next lower bound.
+            let operation_id = insert_pending_request(
                 &mut engine,
                 Request::Operations {
                     size: Location::new(10),
@@ -1025,57 +1218,71 @@ mod tests {
                     max_ops: NZU64!(1),
                 },
             );
-            assert_eq!(engine.outstanding_requests.len(), 2);
+            assert!(engine.outstanding_requests.contains(&Location::new(5)));
 
-            let target_2 = Target {
-                root: sha256::Digest::from([2u8; 32]),
-                range: non_empty_range!(Location::new(5), Location::new(12)),
+            // Move the lower bound to the start of the operation request.
+            let next = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(6), Location::new(12)),
             };
-            let mut engine = engine.reset_for_target_update(target_2).await.unwrap();
+            let mut engine = engine.reset_for_target_update(next).await.unwrap();
+            engine.schedule_requests();
 
-            assert_eq!(engine.retained_sizes, BTreeSet::from([Location::new(10)]));
+            // Both requests are cancelled and the boundary request at the new lower bound is
+            // the only one outstanding.
+            assert!(engine.outstanding_requests.remove(operation_id).is_none());
             assert!(!engine.outstanding_requests.contains(&Location::new(5)));
             assert!(engine.outstanding_requests.contains(&Location::new(6)));
             assert_eq!(engine.outstanding_requests.len(), 1);
+        });
+    }
 
-            insert_pending_request(
-                &mut engine,
-                Request::Operations {
-                    size: Location::new(12),
-                    start: Location::new(7),
-                    max_ops: NZU64!(1),
-                },
-            );
-            assert_eq!(engine.outstanding_requests.len(), 2);
-            let queued_old_result = stale_fetch_result(old_operation_id);
-            let target_3 = Target {
-                root: sha256::Digest::from([3u8; 32]),
-                range: non_empty_range!(Location::new(5), Location::new(14)),
+    /// Target updates keep fetched operations and keep pinned nodes only while the lower bound is
+    /// unchanged. Once the lower bound moves, applying drops batches below it and trims a batch
+    /// that straddles it.
+    #[test]
+    fn target_updates_keep_operations_and_reset_pins_only_when_floor_moves() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut engine = Engine::new(test_engine_config(
+                context,
+                5,
+                Arc::new(AtomicUsize::new(0)),
+            ))
+            .await
+            .unwrap();
+
+            // Hold pinned nodes and two batches fetched ahead of the journal tip.
+            let fetched = BTreeMap::from([
+                (Location::new(6), vec![1, 2]),
+                (Location::new(8), vec![3, 4]),
+            ]);
+            engine.fetched_operations = fetched.clone();
+            let pinned = vec![sha256::Digest::from([7; 32])];
+            engine.pinned_nodes = Some(pinned.clone());
+
+            // An update with an unchanged lower bound keeps operations and pinned nodes.
+            let next = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(12)),
             };
-            let mut engine = engine.reset_for_target_update(target_3).await.unwrap();
+            let engine = engine.reset_for_target_update(next).await.unwrap();
+            assert_eq!(engine.fetched_operations, fetched);
+            assert_eq!(engine.pinned_nodes, Some(pinned));
 
-            assert_eq!(engine.retained_sizes, BTreeSet::from([Location::new(12)]));
-            assert!(
-                engine
-                    .outstanding_requests
-                    .remove(old_operation_id)
-                    .is_none()
-            );
-            assert!(engine.outstanding_requests.contains(&Location::new(7)));
-            assert_eq!(engine.outstanding_requests.len(), 1);
-            engine.handle_fetch_result(queued_old_result).unwrap();
-            assert!(engine.fetched_operations.is_empty());
+            // An update that moves the lower bound keeps operations and clears pinned nodes.
+            let next = Target {
+                root: sha256::Digest::from([3; 32]),
+                range: non_empty_range!(Location::new(9), Location::new(14)),
+            };
+            let engine = engine.reset_for_target_update(next).await.unwrap();
+            assert_eq!(engine.fetched_operations, fetched);
             assert!(engine.pinned_nodes.is_none());
-            assert!(matches!(
-                engine.outstanding_requests.next_completed().await,
-                Err(Aborted)
-            ));
-            assert!(matches!(
-                engine.outstanding_requests.next_completed().await,
-                Err(Aborted)
-            ));
-            assert!(engine.outstanding_requests.contains(&Location::new(7)));
-            assert_eq!(engine.outstanding_requests.len(), 1);
+
+            // Applying drops the batch below the new lower bound and appends the operation of
+            // the straddling batch at it.
+            let engine = engine.apply_operations().await.unwrap();
+            assert_eq!(engine.journal.size(), 10);
+            assert!(engine.fetched_operations.is_empty());
         });
     }
 
@@ -1107,7 +1314,7 @@ mod tests {
     fn new_schedules_operations_after_boundary_request() {
         deterministic::Runner::default().start(|context| async move {
             let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            config.max_outstanding_requests = 2;
+            config.max_outstanding_requests = NZUsize!(2);
             config.fetch_batch_size = NZU64!(5);
 
             let engine = Engine::new(config).await.unwrap();

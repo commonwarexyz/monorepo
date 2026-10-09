@@ -21,7 +21,10 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
-    qmdb::current::{VariableConfig, unordered::variable::Db as Current},
+    qmdb::{
+        current::{VariableConfig, unordered::variable::Db as Current},
+        floor::Proportional,
+    },
     translator::TwoCap,
 };
 use commonware_storage_fuzz::{
@@ -205,7 +208,7 @@ async fn commit_pending<F: Graftable>(
     // Merkleize only reads and hashes, and reads are never fault-injected, so an
     // error here is a real bug rather than a legal crash trigger.
     let merkleized = batch
-        .merkleize(&db, None)
+        .merkleize(&db, None, &mut Proportional)
         .await
         .expect("merkleize failed without any mutable operation");
     let post_root = merkleized.root();
@@ -261,7 +264,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         let suffix = suffix.clone();
         let operations = operations.clone();
         async move {
-            let mut db: Db<F> = Db::init(ctx.child("db"), make_config(&ctx, &suffix, params))
+            let mut db: Db<F> = Db::init(ctx.child("db"), make_config(&ctx, &suffix, params), None)
                 .await
                 .expect("initial init failed");
 
@@ -374,6 +377,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             Db::<F>::init(
                 ctx.child("faulted_recovery"),
                 make_config(&ctx, &recovery_suffix, params),
+                None,
             )
             .await
         }
@@ -386,9 +390,13 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         async move {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            let db: Db<F> = Db::init(ctx.child("recovered"), make_config(&ctx, &suffix, params))
-                .await
-                .expect("recovery failed");
+            let db: Db<F> = Db::init(
+                ctx.child("recovered"),
+                make_config(&ctx, &suffix, params),
+                None,
+            )
+            .await
+            .expect("recovery failed");
 
             // Read every observed key in one batch so the result must match one atomic
             // snapshot, and require the recovered root to match the root recorded at
@@ -450,7 +458,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             let batch = db
                 .new_batch()
                 .write(test_key, Some(test_value))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .expect("post-recovery merkleize failed");
             let (db, _) = db

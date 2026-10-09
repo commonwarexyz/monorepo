@@ -19,9 +19,9 @@ enum QueueOperation {
     Enqueue { value: u8 },
     /// Append a new item without committing.
     Append { value: u8 },
-    /// Commit appended items to disk.
+    /// Commit appended items to disk and publish them to the reader.
     Commit,
-    /// Dequeue the next unacked item.
+    /// Dequeue the next unacked published item.
     Dequeue,
     /// Acknowledge a specific position.
     Ack { pos_offset: u8 },
@@ -29,7 +29,7 @@ enum QueueOperation {
     AckUpTo { pos_offset: u8 },
     /// Reset the read position.
     Reset,
-    /// Sync (commit and prune).
+    /// Sync (commit, prune, and publish).
     Sync,
 }
 
@@ -53,8 +53,11 @@ struct FuzzInput {
 
 /// Reference model for verifying queue behavior.
 struct ReferenceQueue {
-    /// Items that have been enqueued (position -> value).
+    /// Items that have been appended (position -> value).
     items: Vec<u8>,
+
+    /// Number of items published to the reader by a successful commit or sync.
+    published: u64,
 
     /// Positions that have been acknowledged.
     acked: BTreeSet<u64>,
@@ -67,15 +70,20 @@ impl ReferenceQueue {
     fn new() -> Self {
         Self {
             items: Vec::new(),
+            published: 0,
             acked: BTreeSet::new(),
             read_pos: 0,
         }
     }
 
-    fn enqueue(&mut self, value: u8) -> u64 {
+    fn append(&mut self, value: u8) -> u64 {
         let pos = self.items.len() as u64;
         self.items.push(value);
         pos
+    }
+
+    fn publish(&mut self) {
+        self.published = self.size();
     }
 
     fn size(&self) -> u64 {
@@ -87,17 +95,17 @@ impl ReferenceQueue {
     }
 
     fn ack_floor(&self) -> u64 {
-        // Find the lowest unacked position
-        for pos in 0..self.size() {
+        // Find the lowest unacked published position
+        for pos in 0..self.published {
             if !self.acked.contains(&pos) {
                 return pos;
             }
         }
-        self.size()
+        self.published
     }
 
     fn dequeue(&mut self) -> Option<(u64, u8)> {
-        while self.read_pos < self.size() {
+        while self.read_pos < self.published {
             let pos = self.read_pos;
             self.read_pos += 1;
             if !self.is_acked(pos) {
@@ -108,7 +116,7 @@ impl ReferenceQueue {
     }
 
     fn ack(&mut self, pos: u64) -> bool {
-        if pos >= self.size() {
+        if pos >= self.published {
             return false;
         }
         self.acked.insert(pos);
@@ -116,7 +124,7 @@ impl ReferenceQueue {
     }
 
     fn ack_up_to(&mut self, up_to: u64) -> bool {
-        if up_to > self.size() {
+        if up_to > self.published {
             return false;
         }
         for pos in 0..up_to {
@@ -130,7 +138,7 @@ impl ReferenceQueue {
     }
 
     fn is_empty(&self) -> bool {
-        self.ack_floor() >= self.size()
+        self.ack_floor() >= self.published
     }
 
     fn read_pos(&self) -> u64 {
@@ -159,7 +167,7 @@ fn fuzz(input: FuzzInput) {
             replay_buffer: NZUsize!(1024),
         };
 
-        let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
+        let (mut queue, mut reader) = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
             .await
             .unwrap();
         let mut reference = ReferenceQueue::new();
@@ -168,22 +176,27 @@ fn fuzz(input: FuzzInput) {
             queue = match op {
                 QueueOperation::Enqueue { value } => {
                     let (queue, pos) = queue.enqueue(vec![*value]).await.unwrap();
-                    let ref_pos = reference.enqueue(*value);
+                    let ref_pos = reference.append(*value);
+                    reference.publish();
                     assert_eq!(pos, ref_pos, "enqueue position mismatch");
                     queue
                 }
 
                 QueueOperation::Append { value } => {
                     let (queue, pos) = queue.append(vec![*value]).await.unwrap();
-                    let ref_pos = reference.enqueue(*value);
+                    let ref_pos = reference.append(*value);
                     assert_eq!(pos, ref_pos, "append position mismatch");
                     queue
                 }
 
-                QueueOperation::Commit => queue.commit().await.unwrap(),
+                QueueOperation::Commit => {
+                    let queue = queue.commit().await.unwrap();
+                    reference.publish();
+                    queue
+                }
 
                 QueueOperation::Dequeue => {
-                    let result = queue.dequeue().await.unwrap();
+                    let result = reader.try_recv().await.unwrap();
                     let ref_result = reference.dequeue();
 
                     match (result, ref_result) {
@@ -200,16 +213,17 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 QueueOperation::Ack { pos_offset } => {
-                    // Map the offset with slack past size so out-of-range positions stay
-                    // reachable while in-range remains the common case.
+                    // Map the offset with slack past size so positions past the published items
+                    // stay reachable.
                     let size = reference.size();
+                    let published = reference.published;
                     let pos = (*pos_offset as u64) % (size + size / 4 + 1);
 
                     // Snapshot ack state to pin that a rejected ack is a no-op
-                    let floor_before = queue.ack_floor();
-                    let read_before = queue.read_position();
+                    let floor_before = reader.ack_floor();
+                    let read_before = reader.read_position();
 
-                    let result = queue.ack(pos);
+                    let result = reader.ack(pos);
                     let ref_result = reference.ack(pos);
 
                     assert_eq!(
@@ -218,35 +232,39 @@ fn fuzz(input: FuzzInput) {
                         "ack result mismatch for pos {pos}"
                     );
                     if let Err(err) = result {
-                        // Out-of-range positions must fail with the documented error
+                        // Unpublished positions must fail with the documented error
                         assert!(
-                            matches!(err, Error::PositionOutOfRange(p, s) if p == pos && s == size),
-                            "unexpected ack error for pos {pos} size {size}: {err:?}"
+                            matches!(
+                                err,
+                                Error::PositionOutOfRange(p, s) if p == pos && s == published
+                            ),
+                            "unexpected ack error for pos {pos} published {published}: {err:?}"
                         );
 
                         // A rejected ack must not mutate ack state
-                        assert_eq!(queue.ack_floor(), floor_before, "rejected ack moved floor");
+                        assert_eq!(reader.ack_floor(), floor_before, "rejected ack moved floor");
                         assert_eq!(
-                            queue.read_position(),
+                            reader.read_position(),
                             read_before,
                             "rejected ack moved read position"
                         );
-                        assert!(!queue.is_acked(pos), "rejected ack marked pos {pos} acked");
+                        assert!(!reader.is_acked(pos), "rejected ack marked pos {pos} acked");
                     }
                     queue
                 }
 
                 QueueOperation::AckUpTo { pos_offset } => {
-                    // Map the offset with slack past size + 1 so out-of-range values stay
-                    // reachable while in-range remains the common case.
+                    // Map the offset with slack past size + 1 so values past the published items
+                    // stay reachable.
                     let size = reference.size();
+                    let published = reference.published;
                     let up_to = (*pos_offset as u64) % (size + size / 4 + 2);
 
                     // Snapshot ack state to pin that a rejected ack_up_to is a no-op
-                    let floor_before = queue.ack_floor();
-                    let read_before = queue.read_position();
+                    let floor_before = reader.ack_floor();
+                    let read_before = reader.read_position();
 
-                    let result = queue.ack_up_to(up_to);
+                    let result = reader.ack_up_to(up_to);
                     let ref_result = reference.ack_up_to(up_to);
 
                     assert_eq!(
@@ -255,20 +273,23 @@ fn fuzz(input: FuzzInput) {
                         "ack_up_to result mismatch for up_to {up_to}"
                     );
                     if let Err(err) = result {
-                        // Out-of-range values must fail with the documented error
+                        // Values past the published items must fail with the documented error
                         assert!(
-                            matches!(err, Error::PositionOutOfRange(p, s) if p == up_to && s == size),
-                            "unexpected ack_up_to error for up_to {up_to} size {size}: {err:?}"
+                            matches!(
+                                err,
+                                Error::PositionOutOfRange(p, s) if p == up_to && s == published
+                            ),
+                            "unexpected ack_up_to({up_to}) error with published {published}: {err:?}"
                         );
 
                         // A rejected ack_up_to must not mutate ack state
                         assert_eq!(
-                            queue.ack_floor(),
+                            reader.ack_floor(),
                             floor_before,
                             "rejected ack_up_to moved floor"
                         );
                         assert_eq!(
-                            queue.read_position(),
+                            reader.read_position(),
                             read_before,
                             "rejected ack_up_to moved read position"
                         );
@@ -277,36 +298,40 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 QueueOperation::Reset => {
-                    queue.reset();
+                    reader.reset();
                     reference.reset();
                     queue
                 }
 
-                QueueOperation::Sync => queue.sync().await.unwrap(),
+                QueueOperation::Sync => {
+                    let queue = queue.sync().await.unwrap();
+                    reference.publish();
+                    queue
+                }
             };
 
             // Verify invariants after each operation
             assert_eq!(queue.size(), reference.size(), "size mismatch after {op:?}");
             assert_eq!(
-                queue.ack_floor(),
+                reader.ack_floor(),
                 reference.ack_floor(),
                 "ack_floor mismatch after {op:?}"
             );
             assert_eq!(
-                queue.read_position(),
+                reader.read_position(),
                 reference.read_pos(),
                 "read_position mismatch after {op:?}"
             );
             assert_eq!(
-                queue.is_empty(),
+                reader.is_empty(),
                 reference.is_empty(),
                 "is_empty mismatch after {op:?}"
             );
 
-            // Verify is_acked consistency for a sample of positions
+            // Verify is_acked consistency for a sample of positions, including unpublished ones
             for pos in 0..queue.size().min(20) {
                 assert_eq!(
-                    queue.is_acked(pos),
+                    reader.is_acked(pos),
                     reference.is_acked(pos),
                     "is_acked mismatch for pos {pos} after {op:?}"
                 );

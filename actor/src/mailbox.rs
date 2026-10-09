@@ -801,7 +801,7 @@ fn try_recv_from<T, M: Mode<T>>(state: &State<T, M>) -> Result<T, TryRecvError> 
 mod mocks {
     use commonware_runtime::{
         Metrics as RuntimeMetrics, Name, Supervisor,
-        telemetry::metrics::{Metric, Registered, Registration},
+        telemetry::metrics::{Metric, Registered},
     };
     use std::fmt;
 
@@ -829,7 +829,7 @@ mod mocks {
             _help: H,
             metric: M,
         ) -> Registered<M> {
-            Registered::with_registration(metric, Registration::from(()))
+            Registered::detached(metric)
         }
 
         fn encode(&self) -> String {

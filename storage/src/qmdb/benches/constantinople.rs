@@ -7,7 +7,7 @@
 //! any optimization must reproduce identical roots).
 //!
 //! Usage:
-//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [reads] [read_chunks] [updates] [threads] [page_cache]
+//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [reads] [read_chunks] [updates] [threads] [page_cache] [policy]
 //!
 //! - db: one of "any::unordered::fixed::mmb", "any::ordered::fixed::mmb",
 //!   "any::unordered::variable::mmb", "current::unordered::fixed::mmb", or
@@ -23,6 +23,13 @@
 //! - threads: strategy pool threads (default 8)
 //! - page_cache: page cache capacity in 4096-byte pages (default 131,072 = 512MiB, enough
 //!   to hold the default working set; shrink it to measure miss-heavy regimes)
+//! - policy: the floor policy of the timed merkleize (default "proportional"). "fixed" keeps
+//!   up to one update per distinct key the timed batch writes, plus one, with unlimited skips.
+//!   That is exactly the entry allowance a proportional walk has for the batch (every written
+//!   key exists and nothing is deleted), so it moves the same updates through the fixed-limit
+//!   decision path and reproduces the proportional roots. "fixed-bounded" keeps the same
+//!   entries but passes at most updates inactive locations. Seeding, churn, and the pending
+//!   ancestors always use the proportional policy.
 
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
@@ -34,12 +41,17 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{full, mmb},
-    qmdb::{any::FixedConfig, current::FixedConfig as CurrentFixedConfig},
+    qmdb::{
+        any::FixedConfig,
+        current::FixedConfig as CurrentFixedConfig,
+        floor::{Bounded, Proportional},
+    },
     translator::EightCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
 use rand::Rng;
 use std::{
+    collections::HashSet,
     hint::black_box,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::Instant,
@@ -152,6 +164,54 @@ struct Args {
     num_updates: u64,
     num_reads: u64,
     read_chunks: usize,
+    policy: PolicyKind,
+}
+
+/// The floor policy of the timed merkleize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PolicyKind {
+    Proportional,
+    Fixed,
+    FixedBounded,
+}
+
+impl PolicyKind {
+    const NAMES: &str = "proportional|fixed|fixed-bounded";
+
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "proportional" => Some(Self::Proportional),
+            "fixed" => Some(Self::Fixed),
+            "fixed-bounded" => Some(Self::FixedBounded),
+            _ => None,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Proportional => "proportional",
+            Self::Fixed => "fixed",
+            Self::FixedBounded => "fixed-bounded",
+        }
+    }
+
+    /// The fixed limits for a batch that writes `distinct_keys` existing keys out of `updates`
+    /// slots, or `None` for the proportional policy. The entries match the proportional walk's
+    /// allowance for that batch: one per superseded update and one for the previous commit.
+    const fn fixed(self, distinct_keys: usize, updates: u64) -> Option<Bounded> {
+        let entries = distinct_keys + 1;
+        match self {
+            Self::Proportional => None,
+            Self::Fixed => Some(Bounded {
+                entries,
+                skips: u64::MAX,
+            }),
+            Self::FixedBounded => Some(Bounded {
+                entries,
+                skips: updates,
+            }),
+        }
+    }
 }
 
 fn key(i: u64) -> Digest {
@@ -172,11 +232,12 @@ fn report(db: &str, args: &Args, mut times_ms: Vec<f64>) {
     let p = |q: f64| times_ms[((times_ms.len() - 1) as f64 * q) as usize];
     let mean: f64 = times_ms.iter().sum::<f64>() / times_ms.len() as f64;
     println!(
-        "RESULT db={db} depth={} reads={} read_chunks={} updates={} p10={:.2} p50={:.2} mean={:.2} max={:.2}",
+        "RESULT db={db} depth={} reads={} read_chunks={} updates={} policy={} p10={:.2} p50={:.2} mean={:.2} max={:.2}",
         args.depth,
         args.num_reads,
         args.read_chunks,
         args.num_updates,
+        args.policy.name(),
         p(0.1),
         p(0.5),
         mean,
@@ -198,7 +259,7 @@ macro_rules! run_pipeline {
         for i in 0..args.num_keys {
             batch = batch.write(key(i), Some(Sha256::hash(&[&rng.next_u32().to_be_bytes()])));
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let mut db = db.commit().await.unwrap();
 
@@ -208,7 +269,7 @@ macro_rules! run_pipeline {
             for (k, v) in gen_muts(&mut rng, args.num_updates, args.num_keys) {
                 batch = batch.write(k, Some(v));
             }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
             (db, _) = db.apply_batch(merkleized).await.unwrap();
         }
         let db = db.commit().await.unwrap();
@@ -229,7 +290,7 @@ macro_rules! run_pipeline {
                 for (k, v) in gen_muts(&mut rng, args.num_updates, args.num_keys) {
                     b = b.write(k, Some(v));
                 }
-                chain.push(b.merkleize(&db, None).await.unwrap());
+                chain.push(b.merkleize(&db, None, &mut Proportional).await.unwrap());
             }
 
             let reads = gen_muts(&mut rng, args.num_reads, args.num_keys);
@@ -243,6 +304,11 @@ macro_rules! run_pipeline {
                 .iter()
                 .map(|&idx| (idx, Some(reads[idx].1)))
                 .collect();
+            let distinct_keys = updates
+                .iter()
+                .map(|&(idx, _)| reads[idx].0)
+                .collect::<HashSet<_>>()
+                .len();
             let new_batch = || {
                 chain
                     .last()
@@ -266,10 +332,16 @@ macro_rules! run_pipeline {
             }
             black_box(&values);
             let t_load = start.elapsed();
-            let merkleized = staged
-                .merkleize(updates, Vec::new(), None, &db)
-                .await
-                .unwrap();
+            let merkleized = match args.policy.fixed(distinct_keys, args.num_updates) {
+                None => staged
+                    .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
+                    .await
+                    .unwrap(),
+                Some(mut bounded) => staged
+                    .merkleize(updates, Vec::new(), None, &db, &mut bounded)
+                    .await
+                    .unwrap(),
+            };
             let root = merkleized.root();
             let elapsed = start.elapsed();
 
@@ -305,6 +377,9 @@ fn main() {
         num_reads: raw.get(5).and_then(|s| s.parse().ok()).unwrap_or(32_768),
         read_chunks: raw.get(6).and_then(|s| s.parse().ok()).unwrap_or(1),
         num_updates: raw.get(7).and_then(|s| s.parse().ok()).unwrap_or(32_768),
+        policy: raw.get(10).map_or(PolicyKind::Proportional, |name| {
+            PolicyKind::parse(name).unwrap_or_else(|| panic!("policy: {}", PolicyKind::NAMES))
+        }),
     };
     let threads: NonZeroUsize = raw
         .get(8)
@@ -335,8 +410,14 @@ fn main() {
     assert!(args.read_chunks > 0, "read_chunks must be non-zero");
 
     eprintln!(
-        "constantinople db={db_kind} depth={} iters={} keys={} reads={} read_chunks={} updates={} threads={threads} page_cache={page_cache}",
-        args.depth, args.iters, args.num_keys, args.num_reads, args.read_chunks, args.num_updates
+        "constantinople db={db_kind} depth={} iters={} keys={} reads={} read_chunks={} updates={} threads={threads} page_cache={page_cache} policy={}",
+        args.depth,
+        args.iters,
+        args.num_keys,
+        args.num_reads,
+        args.read_chunks,
+        args.num_updates,
+        args.policy.name()
     );
 
     Runner::new(RConfig::default()).start(|ctx| async move {
@@ -369,7 +450,7 @@ fn main() {
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = CurrentDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = CurrentDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(
                     db,
                     args,
@@ -387,7 +468,9 @@ fn main() {
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = CurrentOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = CurrentOrderedDb::init(ctx.child("db"), cfg, None)
+                    .await
+                    .unwrap();
                 run_pipeline!(
                     db,
                     args,
@@ -404,7 +487,9 @@ fn main() {
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = AnyOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = AnyOrderedDb::init(ctx.child("db"), cfg, None)
+                    .await
+                    .unwrap();
                 run_pipeline!(db, args, "any::ordered::fixed::mmb", AnyOrderedMerkleized)
             }
             "any::unordered::variable::mmb" => {
@@ -424,7 +509,7 @@ fn main() {
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = AnyVarDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = AnyVarDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::variable::mmb", AnyVarMerkleized)
             }
             _ => {
@@ -436,7 +521,7 @@ fn main() {
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = AnyDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = AnyDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::fixed::mmb", AnyMerkleized)
             }
         }

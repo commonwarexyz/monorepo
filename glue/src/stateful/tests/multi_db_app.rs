@@ -57,18 +57,17 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sync::Mutex, test_rng,
+    NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, test_rng,
 };
 use futures::StreamExt;
 use rand_core::Rng;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 /// The full (journaled) QMDB used as DB-A in the multi-db e2e tests.
 type QmdbA<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-/// The compact (witness-only) QMDB used as DB-B, so the suite drives deep rewind,
-/// pruning, and state sync through the compact path as well.
+/// The compact (witness-only) QMDB used as DB-B for bounded recovery, pruning, and state sync.
 pub(super) type QmdbB<E> =
     immutable::fixed::CompactDb<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, Sequential>;
 
@@ -391,8 +390,6 @@ pub(crate) struct MultiDbEngine {
     enable_state_sync: bool,
     sync_config: SyncEngineConfig,
     retained_marshal_blocks: usize,
-    sync_entries: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
-    sync_heights: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
 }
 
 impl MultiDbEngine {
@@ -411,13 +408,10 @@ impl MultiDbEngine {
             sync_config: SyncEngineConfig {
                 fetch_batch_size: NZU64!(16),
                 apply_batch_size: NZU64!(64),
-                max_outstanding_requests: 8,
+                max_outstanding_requests: NZUsize!(8),
                 update_channel_size: NZUsize!(256),
-                max_retained_roots: 32,
             },
             retained_marshal_blocks: 10,
-            sync_entries: Arc::new(Mutex::new(BTreeMap::new())),
-            sync_heights: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -431,9 +425,8 @@ impl MultiDbEngine {
         self.sync_config = SyncEngineConfig {
             fetch_batch_size: NZU64!(1),
             apply_batch_size: NZU64!(1),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_channel_size: NZUsize!(4),
-            max_retained_roots: 32,
         };
         self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;
         self
@@ -555,15 +548,23 @@ impl EngineDefinition for MultiDbEngine {
         );
 
         let stateful_startup_context = context.child("stateful_startup");
-        let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
-        let should_state_sync = plan.should_state_sync(self.enable_state_sync && delayed);
-        let provider = ConstantProvider::new(scheme.clone());
+        let mut plan = SyncPlan::init(
+            stateful_startup_context.child("plan"),
+            partition_prefix.clone(),
+        )
+        .await;
+        let requested = self.enable_state_sync && delayed;
+        let should_state_sync = plan.should_sync(requested);
 
+        // A floor persisted by an earlier startup means its state sync was interrupted.
+        let state_sync_resumed = plan.floor().is_some();
+
+        let provider = ConstantProvider::new(scheme.clone());
         let (probe, probe_mailbox) = Probe::new(ProbeConfig {
             context: context.child("probe"),
             provider: provider.clone(),
             strategy: Sequential,
-            capacity: NZUsize!(100),
+            mailbox_size: NZUsize!(100),
             blocker: oracle.control(public_key.clone()),
             minimum_epoch: Epoch::zero(),
             retry_timeout: NZDuration!(Duration::from_millis(100)),
@@ -571,10 +572,12 @@ impl EngineDefinition for MultiDbEngine {
         probe.start(probe_network);
         let mut state_sync_height = if should_state_sync {
             let finalization = probe_mailbox.subscribe().await.expect("probe stopped");
-            plan = plan.with_floor(finalization);
+            plan = plan.set_floor(finalization).await;
             None
+        } else if requested {
+            plan.completed().map(|height| height.get())
         } else {
-            self.sync_heights.lock().get(public_key).copied()
+            None
         };
 
         // Marshal actor
@@ -645,7 +648,7 @@ impl EngineDefinition for MultiDbEngine {
 
         // Stateful actor
         let application = App::new(genesis_block.clone());
-        let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+        let (stateful_actor, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application,
@@ -700,16 +703,7 @@ impl EngineDefinition for MultiDbEngine {
                 .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
                 .await
                 .expect("sync floor block must be available");
-            let height = block.height();
-            *self
-                .sync_entries
-                .lock()
-                .entry(public_key.clone())
-                .or_insert(0) += 1;
-            self.sync_heights
-                .lock()
-                .insert(public_key.clone(), height.get());
-            state_sync_height = Some(height.get());
+            state_sync_height = Some(block.height().get());
         }
 
         // Initialize stateful from marshal's processed frontier.
@@ -751,12 +745,7 @@ impl EngineDefinition for MultiDbEngine {
             handle,
             MockValidatorState {
                 marshal: marshal_mailbox,
-                state_sync_entries: self
-                    .sync_entries
-                    .lock()
-                    .get(public_key)
-                    .copied()
-                    .unwrap_or(0),
+                state_sync_resumed,
                 state_sync_height,
                 oldest_retained,
             },

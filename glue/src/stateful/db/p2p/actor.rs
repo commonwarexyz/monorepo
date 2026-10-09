@@ -48,7 +48,8 @@ where
     /// Blocker used when peers send invalid data.
     pub blocker: B,
 
-    /// Local database used to serve incoming requests when available.
+    /// Database to serve peer requests from, if already open ([`Mailbox::attach_database`] can
+    /// attach one later).
     pub database: Option<Shared<DB>>,
 
     /// Capacity of resolver mailboxes.
@@ -63,17 +64,23 @@ where
     /// Retry cadence for pending fetches.
     pub fetch_retry_timeout: Duration,
 
-    /// Maximum number of operations to serve in a single response.
+    /// Largest `max_ops` served in a peer's operations request. Larger requests go unanswered.
+    ///
+    /// Peers fetching from this node must keep their `fetch_batch_size` (see
+    /// [`SyncEngineConfig`](crate::stateful::db::SyncEngineConfig)) at or below this value, or
+    /// their requests never complete. Use the same value across the network.
     pub max_serve_ops: NonZeroU64,
 
-    /// Send fetch requests with network priority.
+    /// Whether fetch requests are sent with network priority.
     pub priority_requests: bool,
 
-    /// Send responses with network priority.
+    /// Whether responses are sent with network priority.
     pub priority_responses: bool,
 }
 
-/// Runs a QMDB sync resolver service over `commonware_resolver::p2p::Engine`.
+/// A QMDB state sync resolver that fetches from peers and serves them from a local database.
+///
+/// See the [module docs](super) for the fetch and serve contract.
 pub struct Actor<E, P, D, B, F, DB>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
@@ -107,7 +114,7 @@ where
     Shared<DB>: Source<Family = F>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
-    /// Create a new resolver actor and mailbox.
+    /// Creates the actor and its mailbox.
     pub fn new(context: E, cfg: Config<P, D, B, DB>) -> (Self, SyncMailbox<F, DB>) {
         let metrics = ResolverMetrics::new(&context);
         let _ = metrics
@@ -128,7 +135,7 @@ where
         (actor, mailbox)
     }
 
-    /// Start the resolver service.
+    /// Starts the actor, fetching and serving over `net`.
     pub fn start(
         mut self,
         net: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -136,7 +143,7 @@ where
         spawn_cell!(self.context, self.run(net))
     }
 
-    /// Main event loop: multiplexes mailbox messages and engine callbacks.
+    /// Multiplexes mailbox messages and resolver engine callbacks.
     async fn run(
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -179,8 +186,6 @@ where
             },
             // Drive verdicts and subscription retirement independently of database reads.
             _ = self.work.next_completed() => {},
-            // Drive reads and release their slots on completion.
-            // Each future sends its response and records the outcome.
             _ = self.serves.next_completed() => {},
             Some(message) = mailbox_message else continue => {
                 self.handle_mailbox_message(&mut resolver_mailbox, message);
@@ -202,7 +207,7 @@ where
         }
     }
 
-    /// Process database attachment and fetch requests.
+    /// Processes database attachments and fetch requests.
     fn handle_mailbox_message<R>(&mut self, resolver: &mut R, message: SyncMessage<F, DB>)
     where
         R: Resolver<Key = Request<F>, Subscriber = Subscriber<F, DB>>,
@@ -246,7 +251,8 @@ where
         }
     }
 
-    /// Decode a candidate and route its validity feedback to waiting callers.
+    /// Decodes a peer response and reports a verdict on it to the resolver (see the
+    /// [module docs](super)).
     fn handle_deliver(
         &mut self,
         delivery: Delivery<Request<F>, Subscriber<F, DB>>,
@@ -281,7 +287,7 @@ where
             }
         };
 
-        // The resolver waits asynchronously for this verdict.
+        // A single recipient judges the candidate directly.
         if let [(subscriber, _)] = subscribers.as_slice() {
             let status = if subscriber.reply.try_send((response, feedback_tx)).is_ok() {
                 status::Status::Success
@@ -308,7 +314,8 @@ where
         }
         self.metrics.deliveries.inc(status::Status::Success);
         self.work.push(async move {
-            // All callers verify the same QMDB history. Closed receipts abstain.
+            // All callers verify against the same history, so the first verdict in subscriber
+            // order applies to all. A caller that drops its verdict sender abstains.
             let mut verdict = None;
             for receiver in verdicts {
                 verdict = verdict.or(receiver.await.ok());
@@ -319,7 +326,7 @@ where
         });
     }
 
-    /// Serve a peer's request by querying the local database.
+    /// Serves a peer's request from the attached database.
     fn handle_produce(&mut self, key: Request<F>, response_tx: oneshot::Sender<bytes::Bytes>) {
         let Some(database) = &self.config.database else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
@@ -369,6 +376,7 @@ mod tests {
         mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
         qmdb::{
             any::{FixedConfig, unordered::fixed},
+            floor::Proportional,
             sync,
         },
         translator::TwoCap,
@@ -590,7 +598,7 @@ mod tests {
     }
 
     async fn init_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
-        let db = TestDb::init(context.child("db"), db_config(suffix, &context))
+        let db = TestDb::init(context.child("db"), db_config(suffix, &context), None)
             .await
             .expect("db init should succeed");
         Shared::new("test", db)
@@ -598,7 +606,7 @@ mod tests {
 
     /// Create a database with one applied update.
     async fn init_seeded_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
-        let db = TestDb::init(context.child("db"), db_config(suffix, &context))
+        let db = TestDb::init(context.child("db"), db_config(suffix, &context), None)
             .await
             .expect("db init should succeed");
         let key = Sha256::hash(&[suffix.as_bytes(), b"-key"]);
@@ -606,7 +614,7 @@ mod tests {
         let batch = db
             .new_batch()
             .write(key, Some(value))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .expect("batch should merkleize");
         let (db, _) = db.apply_batch(batch).await.expect("batch should apply");
@@ -1673,7 +1681,10 @@ mod tests {
                 let value = Sha256::hash(&[b"value", &index.to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
-            let batch = batch.merkleize(&database, None).await.unwrap();
+            let batch = batch
+                .merkleize(&database, None, &mut Proportional)
+                .await
+                .unwrap();
             let (database, _) = database.apply_batch(batch).await.unwrap();
             let bounds = database.bounds();
             let target = sync::Target::new(database.root(), bounds.clone().try_into().unwrap());
@@ -1686,14 +1697,13 @@ mod tests {
                     context: pair_context.child("destination"),
                     source: pair.mailboxes[0].clone(),
                     target: target.clone(),
-                    max_outstanding_requests: 4,
+                    max_outstanding_requests: NZUsize!(4),
                     fetch_batch_size: NZU64!(2),
                     apply_batch_size: NZU64!(1),
                     db_config: db_config("multiple-batches-destination", &pair_context),
                     update_rx: None,
                     finish_rx: None,
                     reached_target_tx: None,
-                    max_retained_roots: 0,
                 }) => result.unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
                     panic!("multi-batch sync stopped making progress");
@@ -1812,14 +1822,13 @@ mod tests {
                     context: test_context.child("destination"),
                     source: mailbox,
                     target: target.clone(),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: NZU64!(16),
                     db_config: db_config("f7-destination", &test_context),
                     update_rx: None,
                     finish_rx: None,
                     reached_target_tx: None,
-                    max_retained_roots: 0,
                 }) => result.unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
                     panic!("sync waited for the rejected peer's full request timeout");

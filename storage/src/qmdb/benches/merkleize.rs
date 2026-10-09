@@ -6,7 +6,7 @@
 //!
 //! - [`bench_merkleize`]: timing on a freshly seeded DB (no prior overwrites).
 //! - [`bench_merkleize_churned`]: timing after overwrite batches have accumulated inactive
-//!   update operations above the inactivity floor — the workload the floor-raise bitmap-skip
+//!   update operations above the inactivity floor, the workload the floor walk's bitmap skip
 //!   optimizes for.
 
 use crate::common::{
@@ -25,7 +25,10 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{self, full},
-    qmdb::any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
+    qmdb::{
+        any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
+        floor::Proportional,
+    },
     translator::EightCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
@@ -36,8 +39,6 @@ use std::{
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::{Duration, Instant},
 };
-
-// -- Type aliases --
 
 pub(crate) type AnyUFix = commonware_storage::qmdb::any::unordered::fixed::Db<
     commonware_storage::merkle::mmr::Family,
@@ -277,8 +278,6 @@ type CurOVar256Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
     Rayon,
 >;
 
-// -- Config --
-
 // Use huge blobs to avoid iteration times being affected by blob boundary crossings.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
@@ -322,8 +321,6 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
         replay_buffer: REPLAY_BUFFER_SIZE,
     }
 }
-
-// -- DB constructors (eliminates repeated config boilerplate in match arms) --
 
 pub(crate) fn any_fix_cfg_with_cache(
     ctx: &(impl BufferPooler + Strategizer),
@@ -383,8 +380,6 @@ fn cur_var_cfg_with_cache(
     }
 }
 
-// -- Benchmark helpers --
-
 /// Apply overwrite batches before timing merkleization.
 ///
 /// This leaves inactive update operations above the inactivity floor, matching
@@ -402,7 +397,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
 
     for _ in 0..churn_batches {
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         (db, _) = db.apply_batch(merkleized).await.unwrap();
     }
     let db = db.commit().await.unwrap();
@@ -412,7 +407,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
     for _ in 0..iters {
         let start = Instant::now();
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         black_box(merkleized.root());
         total += start.elapsed();
     }
@@ -519,7 +514,7 @@ where
             self.options.num_keys,
             &mut self.rng,
         );
-        self.parent = Some(batch.merkleize(db, None).await.unwrap());
+        self.parent = Some(batch.merkleize(db, None, &mut Proportional).await.unwrap());
     }
 
     async fn iter(&mut self) -> Self::Output {
@@ -545,7 +540,7 @@ where
                 &mut self.rng,
             )
         };
-        let merkleized = batch.merkleize(db, None).await.unwrap();
+        let merkleized = batch.merkleize(db, None, &mut Proportional).await.unwrap();
         merkleized.root()
     }
 
@@ -596,8 +591,6 @@ fn metric_value(encoded: &str, name: &str) -> u64 {
     }
     0
 }
-
-// -- Variant dispatch --
 
 macro_rules! variants {
     (
@@ -653,99 +646,195 @@ macro_rules! variants {
 variants! {
     AnyFixed {
         name: "any::unordered::fixed::mmr",
-        init: |ctx, page_cache| AnyUFix::init(ctx.child("storage"), any_fix_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| AnyUFix::init(
+            ctx.child("storage"),
+            any_fix_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     AnyVariable {
         name: "any::unordered::variable::mmr",
-        init: |ctx, page_cache| AnyUVar::init(ctx.child("storage"), any_var_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| AnyUVar::init(
+            ctx.child("storage"),
+            any_var_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     AnyFixedMmb {
         name: "any::unordered::fixed::mmb",
-        init: |ctx, page_cache| AnyUFixMmb::init(ctx.child("storage"), any_fix_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| AnyUFixMmb::init(
+            ctx.child("storage"),
+            any_fix_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     AnyVariableMmb {
         name: "any::unordered::variable::mmb",
-        init: |ctx, page_cache| AnyUVarMmb::init(ctx.child("storage"), any_var_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| AnyUVarMmb::init(
+            ctx.child("storage"),
+            any_var_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     AnyOrderedFixed {
         name: "any::ordered::fixed::mmr",
-        init: |ctx, page_cache| AnyOFix::init(ctx.child("storage"), any_fix_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| AnyOFix::init(
+            ctx.child("storage"),
+            any_fix_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     AnyOrderedVariable {
         name: "any::ordered::variable::mmr",
-        init: |ctx, page_cache| AnyOVar::init(ctx.child("storage"), any_var_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| AnyOVar::init(
+            ctx.child("storage"),
+            any_var_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     AnyOrderedFixedMmb {
         name: "any::ordered::fixed::mmb",
-        init: |ctx, page_cache| AnyOFixMmb::init(ctx.child("storage"), any_fix_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| AnyOFixMmb::init(
+            ctx.child("storage"),
+            any_fix_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     AnyOrderedVariableMmb {
         name: "any::ordered::variable::mmb",
-        init: |ctx, page_cache| AnyOVarMmb::init(ctx.child("storage"), any_var_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| AnyOVarMmb::init(
+            ctx.child("storage"),
+            any_var_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentFixed32 {
         name: "current::unordered::fixed::mmr chunk=32",
-        init: |ctx, page_cache| CurUFix32::init(ctx.child("storage"), cur_fix_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurUFix32::init(
+            ctx.child("storage"),
+            cur_fix_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentVariable32 {
         name: "current::unordered::variable::mmr chunk=32",
-        init: |ctx, page_cache| CurUVar32::init(ctx.child("storage"), cur_var_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurUVar32::init(
+            ctx.child("storage"),
+            cur_var_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentFixed32Mmb {
         name: "current::unordered::fixed::mmb chunk=32",
-        init: |ctx, page_cache| CurUFix32Mmb::init(ctx.child("storage"), cur_fix_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurUFix32Mmb::init(
+            ctx.child("storage"),
+            cur_fix_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentVariable32Mmb {
         name: "current::unordered::variable::mmb chunk=32",
-        init: |ctx, page_cache| CurUVar32Mmb::init(ctx.child("storage"), cur_var_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurUVar32Mmb::init(
+            ctx.child("storage"),
+            cur_var_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentFixed256 {
         name: "current::unordered::fixed::mmr chunk=256",
-        init: |ctx, page_cache| CurUFix256::init(ctx.child("storage"), cur_fix_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurUFix256::init(
+            ctx.child("storage"),
+            cur_fix_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentVariable256 {
         name: "current::unordered::variable::mmr chunk=256",
-        init: |ctx, page_cache| CurUVar256::init(ctx.child("storage"), cur_var_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurUVar256::init(
+            ctx.child("storage"),
+            cur_var_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentFixed256Mmb {
         name: "current::unordered::fixed::mmb chunk=256",
-        init: |ctx, page_cache| CurUFix256Mmb::init(ctx.child("storage"), cur_fix_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurUFix256Mmb::init(
+            ctx.child("storage"),
+            cur_fix_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentVariable256Mmb {
         name: "current::unordered::variable::mmb chunk=256",
-        init: |ctx, page_cache| CurUVar256Mmb::init(ctx.child("storage"), cur_var_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurUVar256Mmb::init(
+            ctx.child("storage"),
+            cur_var_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentOrderedFixed32 {
         name: "current::ordered::fixed::mmr chunk=32",
-        init: |ctx, page_cache| CurOFix32::init(ctx.child("storage"), cur_fix_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurOFix32::init(
+            ctx.child("storage"),
+            cur_fix_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentOrderedVariable32 {
         name: "current::ordered::variable::mmr chunk=32",
-        init: |ctx, page_cache| CurOVar32::init(ctx.child("storage"), cur_var_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurOVar32::init(
+            ctx.child("storage"),
+            cur_var_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentOrderedFixed32Mmb {
         name: "current::ordered::fixed::mmb chunk=32",
-        init: |ctx, page_cache| CurOFix32Mmb::init(ctx.child("storage"), cur_fix_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurOFix32Mmb::init(
+            ctx.child("storage"),
+            cur_fix_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentOrderedVariable32Mmb {
         name: "current::ordered::variable::mmb chunk=32",
-        init: |ctx, page_cache| CurOVar32Mmb::init(ctx.child("storage"), cur_var_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurOVar32Mmb::init(
+            ctx.child("storage"),
+            cur_var_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentOrderedFixed256 {
         name: "current::ordered::fixed::mmr chunk=256",
-        init: |ctx, page_cache| CurOFix256::init(ctx.child("storage"), cur_fix_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurOFix256::init(
+            ctx.child("storage"),
+            cur_fix_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentOrderedVariable256 {
         name: "current::ordered::variable::mmr chunk=256",
-        init: |ctx, page_cache| CurOVar256::init(ctx.child("storage"), cur_var_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurOVar256::init(
+            ctx.child("storage"),
+            cur_var_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentOrderedFixed256Mmb {
         name: "current::ordered::fixed::mmb chunk=256",
-        init: |ctx, page_cache| CurOFix256Mmb::init(ctx.child("storage"), cur_fix_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurOFix256Mmb::init(
+            ctx.child("storage"),
+            cur_fix_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
     CurrentOrderedVariable256Mmb {
         name: "current::ordered::variable::mmb chunk=256",
-        init: |ctx, page_cache| CurOVar256Mmb::init(ctx.child("storage"), cur_var_cfg_with_cache(ctx, page_cache)),
+        init: |ctx, page_cache| CurOVar256Mmb::init(
+            ctx.child("storage"),
+            cur_var_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
     }
 }
 

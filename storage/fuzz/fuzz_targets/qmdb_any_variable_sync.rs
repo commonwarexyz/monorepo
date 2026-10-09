@@ -11,6 +11,7 @@ use commonware_storage::{
     merkle::{Family as MerkleFamily, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
         any::{VariableConfig as Config, unordered::variable::Db},
+        floor::Proportional,
         verify_proof,
     },
     translator::TwoCap,
@@ -176,6 +177,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
         let mut db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
             context.child("storage"),
             cfg,
+            None,
         )
         .await
         .expect("Failed to init source db");
@@ -205,7 +207,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(&db, metadata_bytes.clone()).await.unwrap();
+                    let merkleized = batch
+                        .merkleize(&db, metadata_bytes.clone(), &mut Proportional)
+                        .await
+                        .unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -236,7 +241,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -266,7 +271,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -300,7 +305,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -325,7 +330,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -346,6 +351,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     let db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
+                        None,
                     )
                     .await
                     .expect("Failed to init source db");
@@ -359,7 +365,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
         for (k, v) in pending_writes.drain(..) {
             batch = batch.write(k, v);
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db
             .apply_batch(merkleized)
             .await

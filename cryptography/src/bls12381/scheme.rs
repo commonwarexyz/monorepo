@@ -32,7 +32,7 @@ use super::primitives::{
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{BatchVerifier, Secret, Signer as _};
+use crate::{BatchEntry, BatchVerifier, Secret, Signer as _};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
@@ -151,11 +151,46 @@ impl crate::Verifier for PublicKey {
     }
 }
 
+impl BatchVerifier for PublicKey {
+    fn verify_batch<'a, R, T, F>(
+        rng: &mut R,
+        items: &'a [T],
+        project: F,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: CryptoRng,
+        T: Sync,
+        F: Fn(usize, &'a T) -> BatchEntry<'a, Self> + Sync,
+    {
+        let hms = strategy.map_collect_vec(items.iter().enumerate(), |(index, item)| {
+            let entry = project(index, item);
+            ops::hash_with_namespace::<MinPk>(MinPk::MESSAGE, entry.namespace, entry.message)
+        });
+        let (publics, signatures): (Vec<_>, Vec<_>) = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let entry = project(index, item);
+                (entry.public_key.key, entry.signature.signature)
+            })
+            .unzip();
+
+        MinPk::batch_verify(rng, &publics, &hms, &signatures, strategy).is_ok()
+    }
+}
+
 /// BLS12-381 public key.
-#[derive(Clone, Eq, PartialEq, FixedArray)]
+#[derive(Clone, Eq, FixedArray)]
 pub struct PublicKey {
     raw: [u8; <MinPk as Variant>::Public::SIZE],
     key: <MinPk as Variant>::Public,
+}
+
+impl PartialEq for PublicKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
 }
 
 impl From<PrivateKey> for PublicKey {
@@ -365,51 +400,14 @@ impl arbitrary::Arbitrary<'_> for Signature {
     }
 }
 
-/// BLS12-381 batch verifier.
-pub struct Batch {
-    publics: Vec<<MinPk as Variant>::Public>,
-    hms: Vec<<MinPk as Variant>::Signature>,
-    signatures: Vec<<MinPk as Variant>::Signature>,
-}
-
-impl BatchVerifier for Batch {
-    type PublicKey = PublicKey;
-
-    fn new(capacity: usize) -> Self {
-        Self {
-            publics: Vec::with_capacity(capacity),
-            hms: Vec::with_capacity(capacity),
-            signatures: Vec::with_capacity(capacity),
-        }
-    }
-
-    fn add(
-        &mut self,
-        namespace: &[u8],
-        message: &[u8],
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) -> bool {
-        self.publics.push(public_key.key);
-        let hm = ops::hash_with_namespace::<MinPk>(MinPk::MESSAGE, namespace, message);
-        self.hms.push(hm);
-        self.signatures.push(signature.signature);
-        true
-    }
-
-    fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
-        MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures, strategy).is_ok()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Verifier as _, bls12381};
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
-    use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, union_unique};
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::{NZUsize, test_rng, union_unique};
 
     #[test]
     fn test_codec_private_key() {
@@ -479,38 +477,118 @@ mod tests {
 
     #[test]
     fn batch_verify_empty() {
-        let batch = Batch::new(0);
-        assert!(!batch.verify(&mut test_rng(), &Sequential));
+        let entries: [BatchEntry<'_, PublicKey>; 0] = [];
+        assert!(!PublicKey::verify_batch(
+            &mut test_rng(),
+            &entries,
+            |_, entry| *entry,
+            &Sequential,
+        ));
     }
 
     #[test]
-    fn batch_verify_valid() {
+    fn batch_verify_invalid_message() {
+        // Start with a valid namespaced signature.
         let mut rng = test_rng();
-        let mut batch = Batch::new(3);
-        for i in 0..3u8 {
-            let key = PrivateKey::random(&mut rng);
-            let message = [i; 8];
-            let signature = key.sign(b"namespace", &message);
-            assert!(batch.add(b"namespace", &message, &key.public_key(), &signature));
-        }
-        assert!(batch.verify(&mut rng, &Sequential));
+        let private_key = PrivateKey::random(&mut rng);
+        let public_key = private_key.public_key();
+        let signature = private_key.sign(b"ns", b"message");
+        let mut entries = [BatchEntry {
+            namespace: b"ns",
+            message: b"message",
+            public_key: &public_key,
+            signature: &signature,
+        }];
+        assert!(PublicKey::verify_batch(
+            &mut rng,
+            &entries,
+            |_, entry| *entry,
+            &Sequential,
+        ));
+
+        // Changing the message must invalidate the signature.
+        entries[0].message = b"invalid";
+        assert!(!PublicKey::verify_batch(
+            &mut rng,
+            &entries,
+            |_, entry| *entry,
+            &Sequential,
+        ));
     }
 
     #[test]
-    fn batch_verify_invalid() {
-        // One signature over the wrong message fails the batch, wherever it is added.
+    fn projected_batch_indexes_zero_sized_items() {
+        struct Batch {
+            namespaces: Vec<&'static [u8]>,
+            messages: Vec<Vec<u8>>,
+            signers: Vec<usize>,
+            public_keys: Vec<PublicKey>,
+            signatures: Vec<Signature>,
+        }
+
+        impl Batch {
+            fn verify(&self, strategy: &impl Strategy) -> bool {
+                let items = vec![(); self.messages.len()];
+                PublicKey::verify_batch(
+                    &mut test_rng(),
+                    &items,
+                    |index, ()| BatchEntry {
+                        namespace: self.namespaces[index],
+                        message: &self.messages[index],
+                        public_key: &self.public_keys[self.signers[index]],
+                        signature: &self.signatures[index],
+                    },
+                    strategy,
+                )
+            }
+        }
+
+        // Build an uneven batch whose unit items identify their namespace, message, signer, and
+        // signature only by original index.
         let mut rng = test_rng();
         let keys: Vec<_> = (0..3).map(|_| PrivateKey::random(&mut rng)).collect();
-        for invalid in 0..keys.len() {
-            let mut batch = Batch::new(keys.len());
-            for (i, key) in keys.iter().enumerate() {
-                let message = [i as u8; 8];
-                let signed = if i == invalid { [0xff; 8] } else { message };
-                let signature = key.sign(b"namespace", &signed);
-                batch.add(b"namespace", &message, &key.public_key(), &signature);
-            }
-            assert!(!batch.verify(&mut rng, &Sequential));
+        let namespaces: Vec<&'static [u8]> = (0..9)
+            .map(|i| [b"".as_slice(), b"alpha", b"beta"][(i / 3) % 3])
+            .collect();
+        let messages: Vec<_> = (0..9).map(|i| vec![i as u8; i * 7]).collect();
+        let signers: Vec<_> = (0..9).map(|i| i % keys.len()).collect();
+        let signatures = (0..9)
+            .map(|i| keys[signers[i]].sign(namespaces[i], &messages[i]))
+            .collect();
+        let mut batch = Batch {
+            namespaces,
+            messages,
+            signers,
+            public_keys: keys.iter().map(|key| key.public_key()).collect(),
+            signatures,
+        };
+
+        // Check each expected verdict with both serial and forced parallel preparation.
+        let parallel = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let check = |batch: &Batch, expected: bool| {
+            assert_eq!(batch.verify(&Sequential), expected);
+            assert_eq!(batch.verify(&parallel), expected);
+        };
+        check(&batch, true);
+
+        // Changing the message, namespace, or signer at any index must fail the whole batch.
+        for index in 0..batch.messages.len() {
+            batch.messages[index].push(0);
+            check(&batch, false);
+            batch.messages[index].pop();
+
+            let namespace = core::mem::replace(&mut batch.namespaces[index], b"other");
+            check(&batch, false);
+            batch.namespaces[index] = namespace;
+
+            let signer = batch.signers[index];
+            batch.signers[index] = (signer + 1) % keys.len();
+            check(&batch, false);
+            batch.signers[index] = signer;
         }
+
+        // Restoring every entry must verify again.
+        check(&batch, true);
     }
 
     #[test]
@@ -527,10 +605,14 @@ mod tests {
         ));
         let public_key = PrivateKey::from(private).public_key();
         for supplied_namespace in [namespace.as_slice(), b"other"] {
-            let mut batch = Batch::new(1);
-            batch.add(supplied_namespace, message, &public_key, &signature);
+            let entries = [BatchEntry {
+                namespace: supplied_namespace,
+                message,
+                public_key: &public_key,
+                signature: &signature,
+            }];
             assert_eq!(
-                batch.verify(&mut rng, &Sequential),
+                PublicKey::verify_batch(&mut rng, &entries, |_, entry| *entry, &Sequential),
                 supplied_namespace == namespace,
             );
         }

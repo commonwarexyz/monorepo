@@ -5,8 +5,7 @@
 //! `mmr::mem::Mmr` and `mmb::mem::Mmb` via type aliases.
 
 use crate::merkle::{
-    Error, Family, Location, Position, Proof, Readable, batch, hasher::Hasher,
-    proof as merkle_proof,
+    Error, Family, Location, Position, Proof, RangePlan, Readable, batch, hasher::Hasher,
 };
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -338,14 +337,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
         range: Range<Location<F>>,
         inactive_peaks: usize,
     ) -> Result<Proof<F, D>, Error<F>> {
-        merkle_proof::build_range_proof(
-            hasher,
-            self.leaves(),
-            inactive_peaks,
-            range,
-            |pos| self.get_node(pos),
-            Error::ElementPruned,
-        )
+        RangePlan::new(self.leaves(), range)?
+            .build(hasher, inactive_peaks, |pos| self.get_node(pos))
     }
 
     /// Get the digests of nodes that need to be pinned at the provided pruning boundary.
@@ -357,21 +350,9 @@ impl<F: Family, D: Digest> Mem<F, D> {
     }
 
     /// Pin extra nodes. It's up to the caller to ensure this set is valid.
-    #[cfg(any(feature = "std", test))]
-    pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position<F>, D>) {
-        for (pos, node) in pinned_nodes {
-            self.pinned_nodes.insert(pos, node);
-        }
-    }
-
-    /// Truncate the structure to a smaller valid size, discarding all nodes beyond that size.
     #[cfg(feature = "std")]
-    #[allow(dead_code)]
-    pub(crate) fn truncate(&mut self, new_size: Position<F>) {
-        assert!(new_size.is_valid_size());
-        assert!(new_size >= self.pruning_boundary);
-        let keep = (*new_size - *self.pruning_boundary) as usize;
-        self.nodes.truncate(keep);
+    pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position<F>, D>) {
+        self.pinned_nodes.extend(pinned_nodes);
     }
 
     /// Return the nodes this structure currently has pinned.

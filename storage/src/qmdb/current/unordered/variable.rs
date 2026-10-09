@@ -51,11 +51,15 @@ where
 {
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
+    /// while `None` selects the latest retained state. Initialization fails with
+    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor.
     pub async fn init(
         context: E,
         config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
+        max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>> {
-        crate::qmdb::current::init(context, config).await
+        crate::qmdb::current::init(context, config, max_size).await
     }
 }
 
@@ -100,11 +104,16 @@ pub mod partitioned {
     {
         /// Initializes a [Db] from the given `config`.
         /// The configured [`Strategy`] is used to parallelize merkleization.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
+        /// while `None` selects the latest retained state. Initialization fails with
+        /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
+        /// floor.
         pub async fn init(
             context: E,
             config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
+            max_size: Option<Location<F>>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::current::init(context, config).await
+            crate::qmdb::current::init(context, config, max_size).await
         }
     }
 }
@@ -114,7 +123,10 @@ mod test {
     use super::*;
     use crate::{
         mmr,
-        qmdb::current::{tests::variable_config, unordered::tests as shared},
+        qmdb::{
+            current::{tests::variable_config, unordered::tests as shared},
+            floor::Proportional,
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
@@ -136,7 +148,7 @@ mod test {
     /// Return a [Db] database initialized with a variable config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
         let cfg = variable_config::<TwoCap>(&partition_prefix, &context);
-        CurrentTest::init(context, cfg).await.unwrap()
+        CurrentTest::init(context, cfg, None).await.unwrap()
     }
 
     #[test_traced("DEBUG")]
@@ -196,7 +208,7 @@ mod test {
             };
 
             // Commit a value and verify its lookup and proof under a variable-length key.
-            let db = VecKeyTest::init(context.child("first"), cfg.clone())
+            let db = VecKeyTest::init(context.child("first"), cfg.clone(), None)
                 .await
                 .unwrap();
             let key = b"variable-length-key".to_vec();
@@ -204,7 +216,7 @@ mod test {
             let merkleized = db
                 .new_batch()
                 .write(key.clone(), Some(value))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -221,7 +233,7 @@ mod test {
             drop(db);
 
             // Reopen the database and verify the committed root and value.
-            let db = VecKeyTest::init(context.child("second"), cfg)
+            let db = VecKeyTest::init(context.child("second"), cfg, None)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);

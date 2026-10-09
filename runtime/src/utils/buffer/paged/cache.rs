@@ -1,8 +1,8 @@
 //! A page cache for caching _logical_ pages of [Blob] data in memory. The cache is unaware of the
 //! physical page format used by the blob, which is left to the blob implementation.
 
-use super::{CHECKSUM_SIZE, STORAGE_PAGE_SIZE, get_page_from_blob};
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
+use super::{CHECKSUM_SIZE, get_page_from_blob};
+use crate::{BLOB_PAGE_SIZE, Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
 use ahash::AHashMap;
 use commonware_utils::{Widen, cache, sync::RwLock};
 use futures::{
@@ -164,18 +164,18 @@ impl CacheRef {
     /// Initialization eagerly allocates and zeroes all cache slots from `pool`. Eviction follows
     /// the cache's Clock2Q+ replacement algorithm.
     ///
-    /// Any `page_size` is accepted, but physical pages that do not align with storage pages (see
-    /// the module docs) amplify cold random reads. Use [super::page_size] to pick an aligned value.
+    /// Any `page_size` is accepted, but physical pages that do not align with blob pages (see the
+    /// module docs) amplify cold random reads. Use [super::page_size] to pick an aligned value.
     /// Cache misses request [ReadOptions::DONT_CACHE] because the fetched page is retained here.
     pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64: u64 = page_size.widen();
         let physical_page_size = page_size_u64 + CHECKSUM_SIZE;
-        if !physical_page_size.is_multiple_of(STORAGE_PAGE_SIZE)
-            && !STORAGE_PAGE_SIZE.is_multiple_of(physical_page_size)
+        if !physical_page_size.is_multiple_of(u64::from(BLOB_PAGE_SIZE))
+            && !u64::from(BLOB_PAGE_SIZE).is_multiple_of(physical_page_size)
         {
             debug!(
                 page_size = page_size.get(),
-                physical_page_size, "physical pages do not align with storage pages"
+                physical_page_size, "physical pages do not align with blob pages"
             );
         }
 
@@ -298,7 +298,7 @@ impl CacheRef {
     /// the next miss.
     pub(super) async fn read_after_miss<B: Blob>(
         &self,
-        blob: &B,
+        blob: &Arc<B>,
         blob_id: u64,
         mut buf: &mut [u8],
         mut offset: u64,
@@ -330,7 +330,7 @@ impl CacheRef {
     /// should always be non-zero.
     pub(super) async fn read_after_page_fault<B: Blob>(
         &self,
-        blob: &B,
+        blob: &Arc<B>,
         blob_id: u64,
         buf: &mut [u8],
         offset: u64,
@@ -368,7 +368,7 @@ impl CacheRef {
                     let cache = Arc::clone(&self.cache);
                     let page_size = self.page_size;
                     let future = async move {
-                        let result = fetch_cacheable_page(&blob, page_num, page_size).await;
+                        let result = fetch_cacheable_page(blob.as_ref(), page_num, page_size).await;
                         if let Err(err) = &result {
                             error!(page_num, ?err, "Page fetch failed");
                         }
@@ -418,26 +418,32 @@ impl CacheRef {
     ///
     /// # Panics
     ///
-    /// - Panics if `offset` is not page aligned.
-    /// - If the buffer is not the size of a page.
-    pub fn cache(&self, blob_id: u64, mut buf: &[u8], offset: u64) -> usize {
+    /// Panics if `offset` is not page aligned.
+    pub fn cache(&self, blob_id: u64, buf: &[u8], offset: u64) -> usize {
+        let page_size: usize = self.page_size.widen();
+        buf.len() - self.cache_pages(blob_id, buf.chunks_exact(page_size), offset)
+    }
+
+    /// Insert whole logical pages under one cache lock, returning the number of bytes cached.
+    pub(super) fn cache_pages<'a>(
+        &self,
+        blob_id: u64,
+        pages: impl Iterator<Item = &'a [u8]>,
+        offset: u64,
+    ) -> usize {
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
-        {
-            // Write lock the page cache.
-            let page_size: usize = self.page_size.widen();
-            let mut page_cache = self.cache.write();
-            while buf.len() >= page_size {
-                page_cache.cache(blob_id, &buf[..page_size], page_num);
-                buf = &buf[page_size..];
-                page_num = match page_num.checked_add(1) {
-                    Some(next) => next,
-                    None => break,
-                };
-            }
+        let mut cached = 0;
+        let mut page_cache = self.cache.write();
+        for page in pages {
+            page_cache.cache(blob_id, page, page_num);
+            cached += page.len();
+            page_num = match page_num.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
         }
-
-        buf.len()
+        cached
     }
 
     /// Drop all cached pages while retaining the backing page buffers for reuse.
@@ -446,13 +452,6 @@ impl CacheRef {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn clear(&self) {
         self.cache.write().clear();
-    }
-
-    /// Drop any cached pages for `blob_id` at `page_num >= start_page`. Used after a blob is
-    /// truncated so subsequent reads can't observe pre-truncation bytes in a page that the tip
-    /// buffer (or future writes) now owns.
-    pub(super) fn invalidate_from(&self, blob_id: u64, start_page: u64) {
-        self.cache.write().invalidate_from(blob_id, start_page);
     }
 }
 
@@ -546,12 +545,6 @@ impl Cache {
         self.cache.get(&key)
     }
 
-    /// Drop any cached pages for `blob_id` at `page_num >= start_page`.
-    fn invalidate_from(&mut self, blob_id: u64, start_page: u64) {
-        self.cache
-            .retain(|&(bid, page_num), _| bid != blob_id || page_num < start_page);
-    }
-
     /// Drop all cached pages while retaining backing page buffers for reuse.
     #[cfg(any(test, feature = "test-utils"))]
     fn clear(&mut self) {
@@ -629,9 +622,8 @@ mod tests {
     }
 
     /// A blob that signals once a read starts and then never returns.
-    #[derive(Clone)]
     struct BlockingBlob {
-        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        started: Mutex<Option<oneshot::Sender<()>>>,
     }
 
     impl Blob for BlockingBlob {
@@ -684,17 +676,15 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
     enum ControlledBlobResult {
-        Success(Arc<Vec<u8>>),
+        Success(Vec<u8>),
         Error,
     }
 
     /// A blob that counts physical reads and can pause a read until released.
-    #[derive(Clone)]
     struct ControlledBlob {
-        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+        started: Mutex<Option<oneshot::Sender<()>>>,
+        release: Mutex<Option<oneshot::Receiver<()>>>,
         reads: Arc<AtomicUsize>,
         result: ControlledBlobResult,
     }
@@ -730,7 +720,7 @@ mod tests {
             }
 
             match &self.result {
-                ControlledBlobResult::Success(page) => Ok(IoBufsMut::from(page.as_ref().clone())),
+                ControlledBlobResult::Success(page) => Ok(IoBufsMut::from(page.clone())),
                 ControlledBlobResult::Error => Err(Error::ReadFailed),
             }
         }
@@ -804,20 +794,18 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_invalidate_from_does_not_orphan_re_cached_page() {
-        // Invalidating pages, re-caching one, then forcing an eviction must keep every live page
-        // readable. Freed slots are reused cleanly, so an invalidated-then-re-cached page is never
-        // orphaned by a later eviction.
+    fn test_clear_does_not_orphan_recached_page() {
+        // Clearing the cache and reusing its slots must keep each newly cached page readable.
         let mut registry = Registry::default();
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
         let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(2));
         let blob_id = 0u64;
         let page_size = PAGE_SIZE.get() as usize;
 
-        // Fill both slots, then invalidate them so both slots are freed for reuse.
+        // Fill both slots, then clear the cache so both slots are available for reuse.
         cache.cache(blob_id, &vec![0xAA; page_size], 0);
         cache.cache(blob_id, &vec![0xBB; page_size], 1);
-        cache.invalidate_from(blob_id, 0);
+        cache.clear();
 
         // Re-cache page 1 into a reused slot.
         cache.cache(blob_id, &vec![0xCC; page_size], 1);
@@ -865,6 +853,7 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
             assert_eq!(size, 0);
+            let blob = Arc::new(blob);
             for i in 0..11 {
                 // Write logical data followed by Checksum.
                 let logical_data = vec![i as u8; PAGE_SIZE.get() as usize];
@@ -935,7 +924,7 @@ mod tests {
                 .unwrap();
 
             // Count reads beneath an empty cache so duplicate physical misses remain observable.
-            let blob = MigratingReadBlob::new(blob, require_pending);
+            let blob = Arc::new(MigratingReadBlob::new(blob, require_pending));
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
             let blob_id = cache_ref.next_id();
 
@@ -1013,11 +1002,10 @@ mod tests {
 
     #[test_traced]
     fn test_cache_clear_forces_uncached_blob_read() {
-        #[derive(Clone)]
         struct CountingBlob {
-            reads: Arc<AtomicUsize>,
-            read_options: Arc<Mutex<Vec<ReadOptions>>>,
-            page: Arc<Vec<u8>>,
+            reads: AtomicUsize,
+            read_options: Mutex<Vec<ReadOptions>>,
+            page: Vec<u8>,
         }
 
         impl Blob for CountingBlob {
@@ -1040,7 +1028,7 @@ mod tests {
             ) -> Result<IoBufsMut, Error> {
                 self.reads.fetch_add(1, Ordering::Relaxed);
                 self.read_options.lock().push(options);
-                Ok(IoBufsMut::from(self.page.as_ref().clone()))
+                Ok(IoBufsMut::from(self.page.clone()))
             }
 
             async fn write_at(
@@ -1072,12 +1060,11 @@ mod tests {
             let record = Checksum::new(PAGE_SIZE.get(), crc);
             let mut physical_page = page.clone();
             physical_page.extend_from_slice(&record.to_bytes());
-            let physical_page = Arc::new(physical_page);
-            let blob = CountingBlob {
-                reads: Arc::new(AtomicUsize::new(0)),
-                read_options: Arc::new(Mutex::new(Vec::new())),
+            let blob = Arc::new(CountingBlob {
+                reads: AtomicUsize::new(0),
+                read_options: Mutex::new(Vec::new()),
                 page: physical_page,
-            };
+            });
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
 
             let mut buf = vec![0u8; page.len()];
@@ -1184,9 +1171,9 @@ mod tests {
             let blob_id = 0;
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
             let (started_tx, started_rx) = oneshot::channel();
-            let blob = BlockingBlob {
-                started: Arc::new(Mutex::new(Some(started_tx))),
-            };
+            let blob = Arc::new(BlockingBlob {
+                started: Mutex::new(Some(started_tx)),
+            });
             let mut read_buf = vec![0u8; PAGE_SIZE.get() as usize];
 
             // Spawn the first fetcher. It will insert into `page_fetches` and then block forever.
@@ -1233,12 +1220,12 @@ mod tests {
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
             let reads = Arc::new(AtomicUsize::new(0));
-            let blob = ControlledBlob {
-                started: Arc::new(Mutex::new(Some(started_tx))),
-                release: Arc::new(Mutex::new(Some(release_rx))),
+            let blob = Arc::new(ControlledBlob {
+                started: Mutex::new(Some(started_tx)),
+                release: Mutex::new(Some(release_rx)),
                 reads: reads.clone(),
-                result: ControlledBlobResult::Success(Arc::new(physical_page)),
-            };
+                result: ControlledBlobResult::Success(physical_page),
+            });
 
             // Start the fetch that installs the shared in-flight entry.
             let mut first_buf = vec![0u8; PAGE_SIZE.get() as usize];
@@ -1360,12 +1347,12 @@ mod tests {
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
             let reads = Arc::new(AtomicUsize::new(0));
-            let blob = ControlledBlob {
-                started: Arc::new(Mutex::new(Some(started_tx))),
-                release: Arc::new(Mutex::new(Some(release_rx))),
+            let blob = Arc::new(ControlledBlob {
+                started: Mutex::new(Some(started_tx)),
+                release: Mutex::new(Some(release_rx)),
                 reads: reads.clone(),
                 result: ControlledBlobResult::Error,
-            };
+            });
 
             // Start the fetch that creates the in-flight entry.
             let mut first_buf = vec![0u8; PAGE_SIZE.get() as usize];
@@ -1444,12 +1431,12 @@ mod tests {
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
             let reads = Arc::new(AtomicUsize::new(0));
-            let blob = ControlledBlob {
-                started: Arc::new(Mutex::new(Some(started_tx))),
-                release: Arc::new(Mutex::new(Some(release_rx))),
+            let blob = Arc::new(ControlledBlob {
+                started: Mutex::new(Some(started_tx)),
+                release: Mutex::new(Some(release_rx)),
                 reads: reads.clone(),
                 result: ControlledBlobResult::Error,
-            };
+            });
 
             // Keep the follower suspended while another waiter completes the failed fetch.
             let mut first_buf = vec![0; PAGE_SIZE.get() as usize];
@@ -1541,12 +1528,12 @@ mod tests {
             let crc = Crc32::checksum(&physical_page);
             physical_page.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc).to_bytes());
             let reads = Arc::new(AtomicUsize::new(0));
-            let blob = ControlledBlob {
-                started: Arc::new(Mutex::new(None)),
-                release: Arc::new(Mutex::new(None)),
+            let blob = Arc::new(ControlledBlob {
+                started: Mutex::new(None),
+                release: Mutex::new(None),
                 reads: reads.clone(),
-                result: ControlledBlobResult::Success(Arc::new(physical_page)),
-            };
+                result: ControlledBlobResult::Success(physical_page),
+            });
             for (remaining, offset) in ranges {
                 cache_ref
                     .read_after_miss(&blob, blob_id, remaining, offset)
@@ -1569,12 +1556,12 @@ mod tests {
             let mut buf = [0; 8];
             assert_eq!(cache_ref.read_cached(blob_id, &mut buf, 3), 0);
             let reads = Arc::new(AtomicUsize::new(0));
-            let blob = ControlledBlob {
-                started: Arc::new(Mutex::new(None)),
-                release: Arc::new(Mutex::new(None)),
+            let blob = Arc::new(ControlledBlob {
+                started: Mutex::new(None),
+                release: Mutex::new(None),
                 reads: reads.clone(),
                 result: ControlledBlobResult::Error,
-            };
+            });
 
             // Another reader may populate the page before the completion future is polled.
             let completion = cache_ref.read_after_miss(&blob, blob_id, &mut buf, 3);
@@ -1743,22 +1730,11 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_read_cached_many_invalidated_page_is_a_miss() {
-        // Invalidated pages free their slots but keep their keys. Their hints need no
-        // cleanup: a freed slot is not live, so the dropped page reads as a miss until
-        // re-cached.
+    fn test_read_cached_many_evicted_page_is_a_miss() {
         let pool = test_pool();
-        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(4));
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(1));
         let blob_id = cache_ref.next_id();
         let page_size = PAGE_SIZE.get() as usize;
-        {
-            let mut cache = cache_ref.cache.write();
-            for page in 0u64..4 {
-                cache.cache(blob_id, &vec![page as u8 + 1; page_size], page);
-            }
-        }
-        cache_ref.invalidate_from(blob_id, 2);
-
         let read_page = |page: u64| {
             let mut buf = vec![0u8; page_size];
             let mut ranges: Vec<(&mut [u8], u64)> = vec![(&mut buf, page * PAGE_SIZE_U64)];
@@ -1767,17 +1743,19 @@ mod tests {
             drop(ranges);
             hit.then_some(buf)
         };
-        assert_eq!(read_page(0), Some(vec![1u8; page_size]));
-        assert_eq!(read_page(1), Some(vec![2u8; page_size]));
-        assert_eq!(read_page(2), None);
-        assert_eq!(read_page(3), None);
 
-        // Re-caching a dropped page restores it through the hint path.
-        {
-            let mut cache = cache_ref.cache.write();
-            cache.cache(blob_id, &vec![0xCC; page_size], 2);
-        }
-        assert_eq!(read_page(2), Some(vec![0xCC; page_size]));
+        cache_ref.cache(blob_id, &vec![1; page_size], 0);
+        assert_eq!(read_page(0), Some(vec![1; page_size]));
+
+        // The one-page cache must evict page zero when page one arrives.
+        cache_ref.cache(blob_id, &vec![2; page_size], PAGE_SIZE_U64);
+        assert_eq!(read_page(0), None);
+        assert_eq!(read_page(1), Some(vec![2; page_size]));
+
+        // A reused slot must expose the replacement bytes through the hint path.
+        cache_ref.cache(blob_id, &vec![0xCC; page_size], 0);
+        assert_eq!(read_page(0), Some(vec![0xCC; page_size]));
+        assert_eq!(read_page(1), None);
     }
 
     #[rstest]

@@ -4,47 +4,44 @@ use commonware_macros::stability_scope;
 
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use crate::{BlobVersion, Error};
+    use cfg_if::cfg_if;
+    use commonware_formatting::hex;
+    use commonware_utils::Widen;
     use std::{
         fs::File,
-        io::{Read as _, Seek as _, SeekFrom},
+        io::{self, Read as _, Seek as _, SeekFrom, Write as _},
         ops::RangeInclusive,
         path::Path,
     };
 
-    /// Flush storage inherited from a prior process at startup.
-    ///
-    /// Per-platform guarantee:
-    /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable.
-    ///   Assumes storage lives on one filesystem; reliable error detection needs kernel >= 5.8.
-    /// - **macOS**: best-effort `sync(2)` for contents, followed by a crash-durable storage
-    ///   directory sync. Existing partition directories are synchronized on first access.
-    pub(crate) fn sync(dir: &std::path::Path) -> std::io::Result<()> {
-        cfg_if::cfg_if! {
-            if #[cfg(target_os = "linux")] {
-                use std::os::fd::AsRawFd;
-                let file = std::fs::File::open(dir)?;
+    mod pending;
+    pub(crate) use pending::{Generation, Pending, Sender};
+    mod tracker;
+    pub(crate) use tracker::Tracker;
+
+    cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            use std::os::fd::AsRawFd;
+
+            /// Make what a prior process wrote crash-durable before any storage structure reads by
+            /// flushing the whole filesystem containing `dir` with `syncfs(2)`.
+            ///
+            /// Assumes storage lives on a single filesystem. Reliable error detection needs
+            /// kernel >= 5.8.
+            pub(crate) fn sync(dir: &Path) -> io::Result<()> {
+                let file = File::open(dir)?;
                 // SAFETY: `file` owns a valid fd that lives across the call; `syncfs` takes only
                 // that fd, performs no memory access, and returns -1 on error.
                 if unsafe { libc::syncfs(file.as_raw_fd()) } == -1 {
-                    return Err(std::io::Error::last_os_error());
+                    return Err(io::Error::last_os_error());
                 }
-                tracing::debug!(
-                    storage_directory = %dir.display(),
-                    "made storage filesystem durable at startup (syncfs)"
-                );
                 Ok(())
-            } else {
-                // SAFETY: `sync` takes no arguments and cannot fail.
-                unsafe { libc::sync() };
-
-                // Make inherited storage-directory entries durable.
-                #[cfg(target_os = "macos")]
-                File::open(dir)?.sync_all()?;
-                tracing::debug!(
-                    storage_directory = %dir.display(),
-                    "best-effort storage flush at startup (sync(); not a crash-durability guarantee)"
-                );
-                Ok(())
+            }
+        } else {
+            /// Make inherited partition entries durable before user code starts. Partition
+            /// directories and existing blob contents are synchronized on their first access.
+            pub(crate) fn sync(dir: &Path) -> io::Result<()> {
+                File::open(dir)?.sync_all()
             }
         }
     }
@@ -77,11 +74,48 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         partition: &str,
         name: &[u8],
     ) -> Result<Option<(u64, BlobVersion, u64)>, Error> {
-        let mut raw = vec![0u8; Header::resolve_len(raw_len)];
+        let requested = Header::resolve_len(raw_len);
+        let mut raw = Vec::with_capacity(requested);
         file.seek(SeekFrom::Start(0))
             .map_err(|_| Error::ReadFailed)?;
-        file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
-        header::resolve(&raw, raw_len, layouts, versions, partition, name)
+        file.take(Widen::widen(requested))
+            .read_to_end(&mut raw)
+            .map_err(|_| Error::ReadFailed)?;
+
+        // V0's prefix includes mutable payload that may shrink after metadata was read.
+        // A complete prefix must retain the original length, which yields the logical size.
+        let parse_len = if raw.len() < requested { Widen::widen(raw.len()) } else { raw_len };
+        header::resolve(&raw, parse_len, layouts, versions, partition, name)
+    }
+
+    /// Write and sync a fresh header, returning the new blob's size, version, and data offset.
+    ///
+    /// Callers make the blob's directory entries durable first, so a parseable header implies
+    /// they are.
+    pub(crate) fn create_header(
+        file: &mut File,
+        layouts: &RangeInclusive<Layout>,
+        versions: &RangeInclusive<BlobVersion>,
+        generation: &Generation,
+    ) -> Result<(u64, BlobVersion, u64), Error> {
+        let (partition, name) = &generation.key;
+        let (region, blob_version) = Header::create(layouts, versions);
+        let data_offset = Widen::widen(region.len());
+
+        // Clear any previous bytes so a partial write cannot splice them into a valid header.
+        file.set_len(0)
+            .map_err(|e| Error::BlobResizeFailed(partition.clone(), hex(name), e.into()))?;
+        file.seek(SeekFrom::Start(0)).map_err(|_| Error::WriteFailed)?;
+        #[cfg(test)]
+        if let Some(len) = generation.pending.test.fail_creation_after.lock().take() {
+            file.write_all(&region[..len.min(region.len())])
+                .map_err(|_| Error::WriteFailed)?;
+            return Err(Error::Closed);
+        }
+        file.write_all(&region).map_err(|_| Error::WriteFailed)?;
+        file.sync_all()
+            .map_err(|e| Error::BlobSyncFailed(partition.clone(), hex(name), e.into()))?;
+        Ok((0, blob_version, data_offset))
     }
 
     pub(crate) mod hold;
@@ -122,6 +156,9 @@ stability_scope!(BETA {
 });
 
 #[cfg(test)]
+pub(crate) mod shared;
+
+#[cfg(test)]
 pub(crate) mod tests {
     pub(crate) use super::header::tests::v0_blob_bytes;
     use crate::{
@@ -129,12 +166,12 @@ pub(crate) mod tests {
         WriteOptions,
     };
     use futures::FutureExt;
+    use std::sync::Arc;
 
     /// Runs the full suite of tests on the provided storage implementation.
     pub(crate) async fn run_storage_tests<S>(context: impl Spawner, storage: S)
     where
-        S: Storage + Send + Sync + 'static,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         test_open_and_write(&storage).await;
         test_remove(&storage).await;
@@ -142,7 +179,7 @@ pub(crate) mod tests {
         test_read_after_remove_partition(&storage).await;
         test_recreate_after_remove(&storage).await;
         test_read_after_remove_unsynced(&storage).await;
-        test_read_after_remove_handle_clones(&storage).await;
+        test_read_after_remove_shared_owners(&storage).await;
         test_recreate_generations(&storage).await;
         test_read_after_remove_partition_multi(&storage).await;
         test_scan(&storage).await;
@@ -174,8 +211,7 @@ pub(crate) mod tests {
     /// Test opening a blob, writing to it, and reading back the data.
     async fn test_open_and_write<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, len) = storage.open("partition", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
@@ -195,8 +231,7 @@ pub(crate) mod tests {
     /// Test removing a blob from storage.
     async fn test_remove<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         storage.open("partition", b"test_blob").await.unwrap();
         storage
@@ -211,8 +246,7 @@ pub(crate) mod tests {
     /// An already-open handle remains fully readable after the blob is removed by name.
     async fn test_read_after_remove_blob<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage.open("read_after_remove", b"by_name").await.unwrap();
         let data: Vec<u8> = (0u8..=255).collect();
@@ -243,8 +277,7 @@ pub(crate) mod tests {
     /// An already-open handle remains fully readable after its entire partition is removed.
     async fn test_read_after_remove_partition<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("read_after_remove_partition", b"victim")
@@ -276,8 +309,7 @@ pub(crate) mod tests {
     /// observing the removed blob's contents.
     async fn test_recreate_after_remove<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (old, _) = storage
             .open("recreate_after_remove", b"name")
@@ -317,8 +349,7 @@ pub(crate) mod tests {
     /// Bytes written but never synced remain readable through an open handle after removal.
     async fn test_read_after_remove_unsynced<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("read_after_remove_unsynced", b"name")
@@ -355,17 +386,17 @@ pub(crate) mod tests {
         assert_eq!(read.coalesce().as_ref(), &data[data.len() - 1..]);
     }
 
-    /// Removal liveness is per-blob, not per-handle: clones taken before or after removal keep
-    /// reading regardless of other handles' lifetimes, and out-of-bounds reads still fail.
-    async fn test_read_after_remove_handle_clones<S>(storage: &S)
+    /// Shared owners keep reading after removal regardless of other owners' lifetimes,
+    /// and out-of-bounds reads still fail.
+    async fn test_read_after_remove_shared_owners<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (first, _) = storage
-            .open("read_after_remove_clones", b"name")
+            .open("read_after_remove_shared", b"name")
             .await
             .unwrap();
+        let first = Arc::new(first);
         let data: Vec<u8> = (0u8..=255).collect();
         first
             .write_at(0, data.clone(), WriteOptions::default())
@@ -373,22 +404,17 @@ pub(crate) mod tests {
             .unwrap();
         first.sync().await.unwrap();
         let second = first.clone();
-        // Opened independently: a distinct handle to the same blob, not a clone.
-        let (independent, _) = storage
-            .open("read_after_remove_clones", b"name")
-            .await
-            .unwrap();
 
         storage
-            .remove("read_after_remove_clones", Some(b"name"))
+            .remove("read_after_remove_shared", Some(b"name"))
             .await
             .unwrap();
 
-        // A clone taken after removal reads too, and outlives the handle it was cloned from.
+        // An owner retained after removal can outlive the original owner.
         let third = first.clone();
         drop(first);
 
-        for handle in [&second, &third, &independent] {
+        for handle in [&second, &third] {
             let read = handle
                 .read_at(0, data.len(), ReadOptions::default())
                 .await
@@ -408,8 +434,7 @@ pub(crate) mod tests {
     /// is recreated and removed repeatedly.
     async fn test_recreate_generations<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let partition = "recreate_generations";
 
@@ -455,8 +480,7 @@ pub(crate) mod tests {
     /// offsets, and recreating the partition yields independent blobs.
     async fn test_read_after_remove_partition_multi<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let partition = "read_after_remove_partition_multi";
         let (small_a, _) = storage.open(partition, b"a").await.unwrap();
@@ -520,8 +544,7 @@ pub(crate) mod tests {
     /// Test scanning a partition for blobs.
     async fn test_scan<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         storage.open("partition", b"blob1").await.unwrap();
         storage.open("partition", b"blob2").await.unwrap();
@@ -545,10 +568,10 @@ pub(crate) mod tests {
     /// Test concurrent access to the same blob.
     async fn test_concurrent_access<S>(context: impl Spawner, storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+        let blob = Arc::new(blob);
 
         // Initialize blob with data of sufficient length first
         blob.write_at(0, b"concurrent write", WriteOptions::default())
@@ -582,8 +605,7 @@ pub(crate) mod tests {
     /// Test handling of large data sizes.
     async fn test_large_data<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage.open("partition", b"large_blob").await.unwrap();
 
@@ -604,8 +626,7 @@ pub(crate) mod tests {
     /// Test overwriting data in a blob.
     async fn test_overwrite_data<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_overwrite_data", b"test_blob")
@@ -638,8 +659,7 @@ pub(crate) mod tests {
     /// Test reading from an offset beyond the written data.
     async fn test_read_beyond_bound<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_read_beyond_written_data", b"test_blob")
@@ -670,8 +690,7 @@ pub(crate) mod tests {
     /// Test writing data at a large offset.
     async fn test_write_at_large_offset<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_write_at_large_offset", b"test_blob")
@@ -695,8 +714,7 @@ pub(crate) mod tests {
     /// Test writing and syncing data in one operation.
     async fn test_write_at_sync<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_write_at_sync", b"test_blob")
@@ -746,8 +764,7 @@ pub(crate) mod tests {
     /// Test that `start_sync` durably persists data, matching `sync`.
     async fn test_start_sync<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, len) = storage.open("test_start_sync", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
@@ -772,8 +789,7 @@ pub(crate) mod tests {
     /// Test appending data to a blob.
     async fn test_append_data<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_append_data", b"test_blob")
@@ -802,8 +818,7 @@ pub(crate) mod tests {
     /// Test vectored writes at offset 0.
     async fn test_vectored_write_at<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let test = |partition, bufs: Vec<IoBuf>, options, context| async move {
             // Coalesce the input to test later when reading
@@ -874,8 +889,7 @@ pub(crate) mod tests {
     /// Test vectored writes at large offset with many chunks.
     async fn test_vectored_write_at_large_offset<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_vectored_write_at_large_offset", b"test_blob")
@@ -919,8 +933,7 @@ pub(crate) mod tests {
     /// Test reading and writing with interleaved offsets.
     async fn test_sequential_read_write<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
@@ -951,8 +964,7 @@ pub(crate) mod tests {
     /// Test writing and reading large data in chunks.
     async fn test_sequential_chunk_read_write<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_large_data_in_chunks", b"large_blob")
@@ -988,8 +1000,7 @@ pub(crate) mod tests {
     /// Test reading from an empty blob.
     async fn test_read_empty_blob<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_read_empty_blob", b"empty_blob")
@@ -1014,8 +1025,7 @@ pub(crate) mod tests {
     /// Test writing and reading with overlapping writes.
     async fn test_overlapping_writes<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_overlapping_writes", b"test_blob")
@@ -1041,8 +1051,7 @@ pub(crate) mod tests {
 
     async fn test_resize_then_open<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         {
             let (blob, _) = storage
@@ -1081,8 +1090,7 @@ pub(crate) mod tests {
     /// Test that partition names are validated correctly.
     async fn test_partition_name_validation<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         // Valid partition names should not return PartitionNameInvalid
         for valid in [
@@ -1150,8 +1158,7 @@ pub(crate) mod tests {
     /// Test that opening a blob with an incompatible version range returns an error.
     async fn test_blob_version_mismatch<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         // Create a blob with version 1
         let (blob, _, blob_version) = storage
@@ -1198,8 +1205,7 @@ pub(crate) mod tests {
     /// Test aligned-layout blob creation, reopen, and resize through logical offsets.
     async fn test_aligned_layout<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         // Create an aligned blob and write/read through logical offsets.
         let (blob, size, _) = storage
@@ -1265,8 +1271,7 @@ pub(crate) mod tests {
     /// Test that read_at with zero length returns an empty buffer.
     async fn test_read_zero_length<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_read_at_zero_len", b"blob")
@@ -1293,8 +1298,7 @@ pub(crate) mod tests {
     /// Test that read_at_buf returns the same buffer that was passed in (contract verification).
     async fn test_read_at_buf_returns_same_buffer<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_read_at_contract", b"blob")
@@ -1385,8 +1389,7 @@ pub(crate) mod tests {
     /// Test that read_at_buf panics when buffer capacity < len.
     async fn test_read_at_buf_insufficient_capacity<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_read_at_buf_capacity", b"blob")
@@ -1423,8 +1426,7 @@ pub(crate) mod tests {
     /// Test that read_at_buf works when buffer capacity exceeds len.
     async fn test_read_at_buf_larger_capacity<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_read_at_buf_large_cap", b"blob")
@@ -1458,8 +1460,7 @@ pub(crate) mod tests {
     /// Test that read options do not change functional read behavior.
     async fn test_read_options<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage.open("test_read_options", b"blob").await.unwrap();
         blob.write_at(0, b"hello world", WriteOptions::default())

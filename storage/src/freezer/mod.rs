@@ -255,7 +255,10 @@ pub struct Config<C> {
     /// The [commonware_runtime::Storage] partition for the value journal.
     pub value_partition: String,
 
-    /// The compression level for the value journal.
+    /// Optional zstd compression level for the value journal.
+    ///
+    /// Keep the choice between `None` and `Some(_)` fixed while stored values are retained.
+    /// Only the compression level may change between initializations when compression is enabled.
     pub value_compression: Option<u8>,
 
     /// The size of the write buffer for the value journal.

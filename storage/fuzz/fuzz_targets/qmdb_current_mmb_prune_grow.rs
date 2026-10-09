@@ -18,7 +18,10 @@ use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deter
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full::Config as MerkleConfig, mmb},
-    qmdb::current::{BitmapPrunedBits, FixedConfig as Config, unordered::fixed::Db as CurrentDb},
+    qmdb::{
+        current::{BitmapPrunedBits, FixedConfig as Config, unordered::fixed::Db as CurrentDb},
+        floor::Proportional,
+    },
     translator::TwoCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
@@ -177,7 +180,7 @@ async fn apply_pending(db: Db, writes: &[(Key, Option<Value>)]) -> Db {
     for (key, value) in writes.iter().cloned() {
         batch = batch.write(key, value);
     }
-    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
     let (db, _) = db
         .apply_batch(merkleized)
         .await
@@ -246,7 +249,7 @@ async fn reopen_pruned_db(
     let reopen_context = context
         .child("pruned_reopen")
         .with_attribute("count", reopen_count);
-    let reopened = Db::init(reopen_context, config.clone())
+    let reopened = Db::init(reopen_context, config.clone(), None)
         .await
         .expect("reopen pruned current db");
     assert_eq!(
@@ -376,17 +379,20 @@ fn fuzz(data: FuzzInput) {
         let pruned_cache =
             CacheRef::from_pooler(&pruned_context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let pruned_config = test_config("pruned", pruned_cache);
-        let mut db = Db::init(pruned_context, pruned_config.clone())
+        let mut db = Db::init(pruned_context, pruned_config.clone(), None)
             .await
             .expect("init pruned current db");
 
         let reference_context = context.child("reference");
         let reference_cache =
             CacheRef::from_pooler(&reference_context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
-        let mut reference_db =
-            Db::init(reference_context, test_config("reference", reference_cache))
-                .await
-                .expect("init reference current db");
+        let mut reference_db = Db::init(
+            reference_context,
+            test_config("reference", reference_cache),
+            None,
+        )
+        .await
+        .expect("init reference current db");
 
         let mut committed_state: HashMap<LogicalKey, Option<RawValue>> = HashMap::new();
         let mut pending_expected: HashMap<LogicalKey, Option<RawValue>> = HashMap::new();

@@ -21,8 +21,8 @@ use tracing::debug;
 
 pub struct Actor<
     E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
-    Si: Sender,
-    St: Receiver,
+    S: Sender,
+    R: Receiver,
     C: PublicKey,
 > {
     context: ContextCell<E>,
@@ -31,21 +31,17 @@ pub struct Actor<
     send_batch_size: NonZeroUsize,
     ping_frequency: std::time::Duration,
 
-    receiver: mailbox::UnreliableReceiver<Message<Si, St, C>>,
+    receiver: mailbox::UnreliableReceiver<Message<S, R, C>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<
-    E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
-    Si: Sender,
-    St: Receiver,
-    C: PublicKey,
-> Actor<E, Si, St, C>
+impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, S: Sender, R: Receiver, C: PublicKey>
+    Actor<E, S, R, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<S, R, C>>) {
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
         let rate_limited = context.family("messages_rate_limited", "messages rate limited");

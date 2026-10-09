@@ -21,6 +21,7 @@ use commonware_storage::{
     qmdb::{
         any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
         current::{ordered::fixed::Db as OCFixed, unordered::fixed::Db as UCFixed},
+        floor::Proportional,
     },
     translator::EightCap,
 };
@@ -31,8 +32,6 @@ use std::{
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::{Duration, Instant},
 };
-
-// -- Config (mirrors merkleize bench) --
 
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
@@ -139,7 +138,7 @@ macro_rules! with_current_db {
         macro_rules! init_db {
             ($DbType:ty) => {{
                 #[allow(unused_mut)]
-                let mut $db = <$DbType>::init($ctx.child("storage"), cur_fix_cfg(&$ctx))
+                let mut $db = <$DbType>::init($ctx.child("storage"), cur_fix_cfg(&$ctx), None)
                     .await
                     .unwrap();
                 $body
@@ -173,11 +172,17 @@ async fn run_chained_growth<
 
     // Pre-build a deep chain (untimed).
     let initial = write_random_updates(db.new_batch(), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
-    let mut parent = initial.merkleize(&db, None).await.unwrap();
+    let mut parent = initial
+        .merkleize(&db, None, &mut Proportional)
+        .await
+        .unwrap();
     for _ in 0..PREBUILT_CHAIN {
         let child_batch =
             write_random_updates(fork_child(&parent), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
-        let child = child_batch.merkleize(&db, None).await.unwrap();
+        let child = child_batch
+            .merkleize(&db, None, &mut Proportional)
+            .await
+            .unwrap();
         (db, _) = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
@@ -191,7 +196,10 @@ async fn run_chained_growth<
     for _ in 0..grow {
         let child_batch =
             write_random_updates(fork_child(&parent), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
-        let child = child_batch.merkleize(&db, None).await.unwrap();
+        let child = child_batch
+            .merkleize(&db, None, &mut Proportional)
+            .await
+            .unwrap();
         black_box(child.root());
         (db, _) = db.apply_batch(parent).await.unwrap();
         parent = child;

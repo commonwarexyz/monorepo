@@ -65,10 +65,4 @@ impl Barrier {
         self.observe();
         self.pending = Some((boundary, completion));
     }
-
-    /// Lower the proven boundary after storage moves backward.
-    pub(crate) fn truncate(&mut self, boundary: u64) {
-        self.boundary = self.boundary.min(boundary);
-        self.pending = None;
-    }
 }
