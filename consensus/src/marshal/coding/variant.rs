@@ -4,17 +4,18 @@ use crate::{
         ancestry::BlockProvider,
         coding::{
             shards,
-            types::{CodedBlock, CodedBlockCfg, StoredCodedBlock, coding_config_for_participants},
+            types::{CodedBlock, StoredCodedBlock, coding_config_for_participants},
         },
         core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Variant},
     },
     simplex::{scheme::Scheme as SimplexScheme, types::Context},
     types::{Round, coding::Commitment},
 };
-use commonware_codec::Read;
-use commonware_coding::Scheme as CodingScheme;
+use commonware_codec::{Decode as _, Error as CodecError, Input, Read};
+use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey, certificate::Scheme};
 use commonware_p2p::Recipients;
+use commonware_parallel::Strategy;
 use commonware_utils::channel::oneshot;
 use std::{future::Future, sync::Arc};
 
@@ -91,14 +92,14 @@ where
         payload.config() == coding_config_for_participants(n_participants)
     }
 
-    fn block_cfg(
+    fn decode_block(
+        buf: impl Input,
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         expected: ExpectedCommitment<Self::Commitment>,
-    ) -> <Self::Block as Read>::Cfg {
-        CodedBlockCfg {
-            inner: block_cfg.clone(),
-            expected,
-        }
+        strategy: &impl Strategy,
+    ) -> Result<Self::Block, CodecError> {
+        let (inner, config) = <(B, CodingConfig)>::decode_cfg(buf, &(block_cfg.clone(), ()))?;
+        CodedBlock::from_decoded(inner, config, expected, strategy).map(Arc::new)
     }
 
     fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
@@ -190,7 +191,7 @@ mod tests {
         types::{Epoch, Height, View},
     };
     use bytes::BufMut;
-    use commonware_codec::{Buf, EncodeSize, Error, Read, Write};
+    use commonware_codec::{Buf, Encode, EncodeSize, Error, Read, Write};
     use commonware_coding::{Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
         Digest as _, Digestible, Signer as _,
@@ -198,12 +199,19 @@ mod tests {
         sha256::{Digest as Sha256Digest, Sha256},
     };
     use commonware_math::algebra::Random;
-    use commonware_parallel::Sequential;
-    use commonware_utils::{NZU16, test_rng};
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::{NZU16, NZUsize, test_rng};
 
     type TestCommitment = Commitment<NoCloneBlock, ReedSolomon<Sha256>, Sha256>;
     type TestContext = Context<TestCommitment, PublicKey>;
     type InnerBlock = Block<Sha256Digest, TestContext>;
+    type TestScheme = ReedSolomon<Sha256>;
+    type TestVariant = Coding<NoCloneBlock, TestScheme, Sha256, PublicKey>;
+
+    const CONFIG: CodingConfig = CodingConfig {
+        minimum_shards: NZU16!(1),
+        extra_shards: NZU16!(2),
+    };
 
     struct NoCloneBlock {
         inner: InnerBlock,
@@ -290,14 +298,6 @@ mod tests {
 
     #[test]
     fn storage_conversion_shares_coding_block() {
-        const CONFIG: CodingConfig = CodingConfig {
-            minimum_shards: NZU16!(1),
-            extra_shards: NZU16!(2),
-        };
-
-        type TestScheme = ReedSolomon<Sha256>;
-        type TestVariant = Coding<NoCloneBlock, TestScheme, Sha256, PublicKey>;
-
         let block = no_clone_block(CONFIG);
         let coded = Arc::new(CodedBlock::<NoCloneBlock, TestScheme, Sha256>::new(
             block,
@@ -316,5 +316,67 @@ mod tests {
             &TestVariant::into_shared(recovered),
             &coded.inner_shared()
         ));
+    }
+
+    #[test]
+    fn decode_block_recomputes_untrusted_root() {
+        let coded = CodedBlock::<NoCloneBlock, TestScheme, Sha256>::new(
+            no_clone_block(CONFIG),
+            CONFIG,
+            &Sequential,
+        );
+        let expected = coded.commitment();
+        let encoded = coded.encode();
+        let strategy = Rayon::new(NZUsize!(2)).unwrap().manual();
+
+        // An untrusted commitment is recomputed, so the decoded block already holds its shards.
+        let decoded = TestVariant::decode_block(
+            encoded.clone(),
+            &(),
+            ExpectedCommitment::Untrusted(expected),
+            &strategy,
+        )
+        .unwrap();
+        assert_eq!(TestVariant::commitment(&decoded), expected);
+        assert!(decoded.shard(0).is_some());
+
+        // A root that does not encode the block is rejected unless it is trusted.
+        let other = TestCommitment::from((
+            expected.block(),
+            Sha256::hash(&[b"other root"]),
+            expected.context(),
+            CONFIG,
+        ));
+        assert!(
+            TestVariant::decode_block(
+                encoded.clone(),
+                &(),
+                ExpectedCommitment::Untrusted(other),
+                &strategy,
+            )
+            .is_err()
+        );
+        let trusted = TestVariant::decode_block(
+            encoded.clone(),
+            &(),
+            ExpectedCommitment::Trusted(other),
+            &strategy,
+        )
+        .unwrap();
+        assert_eq!(TestVariant::commitment(&trusted), other);
+        assert!(trusted.shard(0).is_none());
+
+        // Bytes after the block are rejected.
+        let mut extended = encoded.to_vec();
+        extended.push(0);
+        assert!(
+            TestVariant::decode_block(
+                extended,
+                &(),
+                ExpectedCommitment::Untrusted(expected),
+                &strategy,
+            )
+            .is_err()
+        );
     }
 }

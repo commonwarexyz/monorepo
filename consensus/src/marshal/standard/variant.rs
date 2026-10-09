@@ -13,9 +13,10 @@ use crate::{
     types::Round,
 };
 use commonware_broadcast::buffered;
-use commonware_codec::Read;
+use commonware_codec::{Decode as _, Error as CodecError, Input, Read};
 use commonware_cryptography::{Digestible, PublicKey, certificate::Scheme};
 use commonware_p2p::Recipients;
+use commonware_parallel::Strategy;
 use commonware_utils::channel::oneshot;
 use std::{future::Future, sync::Arc};
 
@@ -60,11 +61,13 @@ where
         true
     }
 
-    fn block_cfg(
+    fn decode_block(
+        buf: impl Input,
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         _expected: ExpectedCommitment<Self::Commitment>,
-    ) -> <Self::Block as Read>::Cfg {
-        block_cfg.clone()
+        _strategy: &impl Strategy,
+    ) -> Result<Self::Block, CodecError> {
+        Self::Block::decode_cfg(buf, block_cfg)
     }
 
     fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {

@@ -372,8 +372,8 @@ where
     /// [`commonware_codec::Read`] configuration for decoding blocks.
     pub block_codec_cfg: B::Cfg,
 
-    /// The strategy that decodes received shards, encodes shards for broadcast, and runs
-    /// reconstruction jobs.
+    /// The strategy that checks and decodes received shards, encodes shards for broadcast, and
+    /// runs reconstruction jobs.
     pub strategy: T,
 
     /// The size of the mailbox buffer.
@@ -611,8 +611,8 @@ where
     /// [`commonware_codec::Read`] configuration for decoding [`CodedBlock`]s.
     block_codec_cfg: B::Cfg,
 
-    /// The strategy that decodes received shards, encodes shards for broadcast, and runs
-    /// reconstruction jobs.
+    /// The strategy that checks and decodes received shards, encodes shards for broadcast, and
+    /// runs reconstruction jobs.
     strategy: T,
 
     /// The cache and reconstruction lifecycle for each observed [`Commitment`].
@@ -893,8 +893,13 @@ where
                 .get_mut(&commitment)
                 .and_then(CommitmentRecord::reconstruction_mut)
                 .expect("reconstruction checked as present");
-            let progressed =
-                state.on_network_shard(peer, shard, scheme.as_ref(), &mut self.blocker);
+            let progressed = state.on_network_shard(
+                peer,
+                shard,
+                scheme.as_ref(),
+                &mut self.blocker,
+                &self.strategy,
+            );
             if progressed {
                 self.try_advance(sender, commitment);
             }
@@ -1246,7 +1251,13 @@ where
         // Ingest buffered shards into the active reconstruction state.
         let mut progressed = false;
         for (peer, shard) in buffered {
-            progressed |= state.on_network_shard(peer, shard, scheme.as_ref(), &mut self.blocker);
+            progressed |= state.on_network_shard(
+                peer,
+                shard,
+                scheme.as_ref(),
+                &mut self.blocker,
+                &self.strategy,
+            );
         }
         progressed
     }
@@ -1804,12 +1815,14 @@ where
         shard: IndexedShard<C>,
         is_participant: bool,
         blocker: &mut impl Blocker<PublicKey = P>,
+        strategy: &impl Strategy,
     ) -> bool {
         let Ok(checked) = C::check(
             &commitment.config(),
             &commitment.root(),
             shard.index,
             &shard.data,
+            strategy,
         ) else {
             commonware_p2p::block!(blocker, sender, "invalid assigned shard received");
             return false;
@@ -1885,6 +1898,7 @@ where
         shard: Shard<B, C, H>,
         scheme: &Sch,
         blocker: &mut X,
+        strategy: &impl Strategy,
     ) -> bool
     where
         Sch: CertificateScheme<PublicKey = P>,
@@ -1954,6 +1968,7 @@ where
                 indexed,
                 scheme.me().is_some(),
                 blocker,
+                strategy,
             );
         }
 
@@ -2155,9 +2170,10 @@ mod tests {
             commitment: &Self::Commitment,
             index: u16,
             shard: &Self::Shard,
+            strategy: &impl Strategy,
         ) -> Result<Self::CheckedShard, Self::Error> {
             assert_eq!(index, 3, "only the assigned shard is checked eagerly");
-            C::check(config, commitment, index, shard)
+            C::check(config, commitment, index, shard, strategy)
         }
 
         fn check_many(
@@ -2216,8 +2232,9 @@ mod tests {
             commitment: &Self::Commitment,
             index: u16,
             shard: &Self::Shard,
+            strategy: &impl Strategy,
         ) -> Result<Self::CheckedShard, Self::Error> {
-            C::check(config, commitment, index, shard)
+            C::check(config, commitment, index, shard, strategy)
         }
 
         fn check_many(
@@ -6631,6 +6648,7 @@ mod tests {
                         shard,
                         &scheme,
                         &mut engine.blocker,
+                        &STRATEGY,
                     ));
                 }
                 engine.try_reconstruct(commitment);
