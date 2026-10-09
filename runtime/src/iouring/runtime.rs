@@ -13,7 +13,7 @@
 //!   +-- Shared (Arc) <-------------------------- Local.shared
 //!   |     +-- Config, metrics, stop/panic signals
 //!   |     +-- Network, Storage, buffer pools
-//!   |     +-- Pool (pool mailboxes, inject queue, idle set, shutdown barrier)
+//!   |     +-- Pool (pool mailboxes, global queue, idle set, shutdown barrier)
 //!   |     |       ^-- task headers (Weak)
 //!   |     +-- Tasks (every live ordinary task, for teardown)
 //!   |     `-- Workers <------------------------ ActiveWorker
@@ -53,16 +53,16 @@
 //! task and retains it in [`Tasks`] on the caller's thread, then delivers its
 //! first runnable. A pool worker keeps it when nothing else is queued there or
 //! when it is the pool's only worker. Every other spawn, including one from a
-//! busy pool worker, goes to the pool's inject queue, which wakes a parked
+//! busy pool worker, goes to the pool's global queue, which wakes a parked
 //! worker. A wake queues the task on the pool worker that wakes it, or, from
 //! outside the pool or on a closing worker, on whichever worker takes it from
-//! the inject queue. A wake during a poll leaves the task on its poller.
+//! the global queue. A wake during a poll leaves the task on its poller.
 //!
 //! ```text
 //! ordinary spawn:
 //!   check Tasks --> factory --> Tasks::register
 //!                                  +-- pool worker, quiet or alone --> its Ready
-//!                                  `-- otherwise --> inject queue --> a worker's Ready
+//!                                  `-- otherwise --> global queue --> a worker's Ready
 //!
 //! dedicated / blocking spawn:
 //!   Workers::reserve --> factory --> new thread
@@ -85,10 +85,10 @@
 //! Each turn polls a bounded batch of tasks and checks the root's wake flag,
 //! services I/O and timers, and applies a bounded batch of mailbox messages.
 //! Deferred callbacks run between these phases. A pool worker takes a share of
-//! the inject queue every [`Config::with_global_queue_interval`] takes and
+//! the global queue every [`Config::with_global_queue_interval`] takes and
 //! whenever its own queue is empty. Before parking, the worker checks readiness
 //! again because polls and callbacks can have produced more work, and a pool
-//! worker publishes itself in the idle set before its last look at the inject
+//! worker publishes itself in the idle set before its last look at the global
 //! queue.
 //!
 //! ## Shutdown
@@ -102,7 +102,7 @@
 //! destroy root (TLS and mailbox still available)
 //!   |
 //!   v
-//! close worker registry, task set, and inject queue
+//! close worker registry, task set, and global queue
 //!   |
 //!   v
 //! abort spawned tasks through the supervision tree, stop the other pool workers
@@ -249,7 +249,7 @@ impl Default for RingConfig {
 pub struct Config {
     /// Pool workers, including the calling thread.
     worker_threads: usize,
-    /// Polls between a pool worker's looks at the inject queue, defaulting to
+    /// Polls between a pool worker's looks at the global queue, defaulting to
     /// 31.
     global_queue_interval: u32,
     /// Per-worker ring capacity and operation wheel tick.
@@ -1076,7 +1076,7 @@ pub struct Local {
     pub ready: Ready,
     /// Sleeper registrations and deadlines.
     pub timers: Timers,
-    /// Reject new registration and send wakes to the inject queue, while
+    /// Reject new registration and send wakes to the global queue, while
     /// allowing idempotent cancellation.
     pub closing: bool,
     /// Shared monotonic sample for the current service turn.
@@ -1213,12 +1213,12 @@ impl Local {
     }
 
     /// Whether task polling or callbacks prevent the worker from parking. A
-    /// pool worker also has the pool's inject queue to take from.
+    /// pool worker also has the pool's global queue to take from.
     fn is_ready(&self) -> bool {
         !self.ready.is_empty()
             || self.root_ready
             || !self.deferred.is_empty()
-            || (self.role.is_pool() && self.shared.pool.has_inject())
+            || (self.role.is_pool() && self.shared.pool.has_global())
     }
 
     /// Earliest absolute deadline across driver requests and sleepers.
@@ -1432,10 +1432,10 @@ pub struct Worker {
     /// Mailbox publication sequence acknowledged when whole batches enter the inbox.
     processed_seq: u32,
     /// Calls to [`Self::next_runnable`] left before its next look at the
-    /// pool's inject queue.
-    until_inject: u32,
-    /// Calls between two looks at the inject queue, from the configuration.
-    inject_interval: u32,
+    /// pool's global queue.
+    until_global: u32,
+    /// Calls between two looks at the global queue, from the configuration.
+    global_queue_interval: u32,
     /// False until kernel retirement and callback cleanup have finished.
     finished: bool,
 }
@@ -1447,7 +1447,7 @@ impl Worker {
         if local.role.is_pool() {
             local.shared.pool.enter();
         }
-        let inject_interval = local.shared.cfg.global_queue_interval;
+        let global_queue_interval = local.shared.cfg.global_queue_interval;
         let local = Rc::new(RefCell::new(local));
         let mut worker = Self {
             local: local.clone(),
@@ -1456,8 +1456,8 @@ impl Worker {
             panics: Panics::default(),
             inbox: Vec::new(),
             processed_seq: 0,
-            until_inject: inject_interval,
-            inject_interval,
+            until_global: global_queue_interval,
+            global_queue_interval,
             finished: false,
         };
         worker.scope = Some(Scope::install(local));
@@ -1581,7 +1581,7 @@ impl Worker {
 
             // Worker zero shuts the runner down. It closes the task set, so a
             // spawn from then on is refused and disposed of on its caller,
-            // then the inject queue, which releases workers waiting for the
+            // then the global queue, which releases workers waiting for the
             // pool to close. The set closes first, so it retains the task of
             // every runnable a closed queue discards. Cleanup drains the set.
             // Closing again does nothing.
@@ -1817,13 +1817,13 @@ impl Worker {
         outcome
     }
 
-    /// Take the next runnable to poll: a share of the pool's inject queue
+    /// Take the next runnable to poll: a share of the pool's global queue
     /// every [`Config::with_global_queue_interval`] calls, otherwise the
-    /// oldest local runnable, otherwise a share of the inject queue. A dedicated
+    /// oldest local runnable, otherwise a share of the global queue. A dedicated
     /// worker polls only its root, so its queue stays empty.
     ///
     /// The drive loop is instantiated in the caller's crate, so the common
-    /// case is inlined there and the inject queue sits behind a call.
+    /// case is inlined there and the global queue sits behind a call.
     #[inline]
     #[must_use]
     fn next_runnable(&mut self, pool: Option<&Pool>) -> Option<Runnable> {
@@ -1832,27 +1832,27 @@ impl Worker {
         };
 
         // The interval counts every take, so runnables queued here cannot
-        // keep the inject queue waiting however fast they requeue. A
+        // keep the global queue waiting however fast they requeue. A
         // countdown keeps a division off this path.
-        self.until_inject -= 1;
-        if self.until_inject == 0 {
-            self.until_inject = self.inject_interval;
+        self.until_global -= 1;
+        if self.until_global == 0 {
+            self.until_global = self.global_queue_interval;
         } else {
             if let Some(runnable) = self.local.borrow_mut().ready.pop() {
                 return Some(runnable);
             }
-            if !pool.has_inject() {
+            if !pool.has_global() {
                 return None;
             }
         }
-        Self::take_inject(&self.local, pool)
+        Self::take_global(&self.local, pool)
     }
 
-    /// Take a share of the inject queue into the local queue, returning its
+    /// Take a share of the global queue into the local queue, returning its
     /// oldest runnable, or the oldest local runnable if the share was empty.
     #[inline(never)]
     #[must_use]
-    fn take_inject(local: &RefCell<Local>, pool: &Pool) -> Option<Runnable> {
+    fn take_global(local: &RefCell<Local>, pool: &Pool) -> Option<Runnable> {
         let mut local = local.borrow_mut();
         pool.take(&mut local.ready).or_else(|| local.ready.pop())
     }
@@ -1991,14 +1991,14 @@ impl Worker {
                 continue;
             }
 
-            // Publish idleness before the last look at the inject queue. A push
+            // Publish idleness before the last look at the global queue. A push
             // racing this check either shows up here or wakes this worker.
             if let (Some(pool), Some(index)) = (pool, index) {
                 #[cfg(test)]
                 tests::at_park(pool, index, tests::ParkPoint::BeforeIdle);
 
                 pool.park_begin(index);
-                if pool.has_inject() {
+                if pool.has_global() {
                     pool.park_end(index);
                     if kernel_deferred && needs_kernel {
                         self.service(false);
