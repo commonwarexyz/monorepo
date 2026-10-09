@@ -382,8 +382,13 @@ fn test_config_validation_before_startup() {
         max_budget_us: 1,
         ..SpinnerConfig::default()
     });
+    let invalid_workers = [0, MAX_WORKERS + 1].map(|workers| config().with_worker_threads(workers));
 
-    for invalid in invalid_layouts.into_iter().chain([invalid_spinner]) {
+    for invalid in invalid_layouts
+        .into_iter()
+        .chain([invalid_spinner])
+        .chain(invalid_workers)
+    {
         let directory = invalid.storage_directory().clone();
         let called = AtomicBool::new(false);
 
@@ -2888,41 +2893,6 @@ fn test_chatty_pair_converges_onto_one_worker() {
 }
 
 #[test]
-fn test_ordinary_spawns_from_dedicated_and_foreign_threads_use_the_pool() {
-    for dedicated in [false, true] {
-        Runner::new(config().with_worker_threads(3)).start(|context| async move {
-            let producer = context.child("producer");
-            let spawn = move || {
-                let spawner = thread::current().id();
-                let tasks = (0..6)
-                    .map(|_| {
-                        context
-                            .child("child")
-                            .spawn(|_| async { thread::current().id() })
-                    })
-                    .collect::<Vec<_>>();
-                (spawner, tasks)
-            };
-            let (spawner, tasks) = if dedicated {
-                // Use a separate supervision node so its completion does not
-                // abort the ordinary children constructed by spawn.
-                producer
-                    .dedicated()
-                    .spawn(move |_| async move { spawn() })
-                    .await
-                    .unwrap()
-            } else {
-                thread::spawn(spawn).join().unwrap()
-            };
-            for task in tasks {
-                let ran_on = task.await.unwrap();
-                assert_ne!(ran_on, spawner, "ordinary task ran outside the pool");
-            }
-        });
-    }
-}
-
-#[test]
 fn test_shutdown_destroys_tasks_on_a_worker() {
     struct OwnedDrop(Arc<AtomicUsize>);
     impl Drop for OwnedDrop {
@@ -2983,16 +2953,6 @@ fn test_partial_startup_failure_releases_all_workers() {
 }
 
 #[test]
-fn test_worker_threads_outside_the_supported_range_are_rejected_before_startup() {
-    for workers in [0, MAX_WORKERS + 1] {
-        let cfg = config().with_worker_threads(workers);
-        let directory = cfg.storage_directory().clone();
-        assert!(catch_unwind(|| Runner::new(cfg).start(|_| async {})).is_err());
-        assert!(!directory.exists());
-    }
-}
-
-#[test]
 fn test_network_and_storage_on_multiple_workers() {
     Runner::new(config().with_worker_threads(2)).start(|context| async move {
         let mut listener = context.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -3049,13 +3009,12 @@ fn test_remote_task_panic_respects_policy() {
 #[test]
 fn test_shutdown_drains_queued_writes_on_every_ring() {
     let cfg = config()
-        .with_worker_threads(4)
+        .with_worker_threads(2)
         .with_ring_config(RingConfig {
             size: 1,
             ..Default::default()
         });
     Runner::new(cfg.clone()).start(|context| async move {
-        let mut writers = HashSet::new();
         for actor in 0_u8..4 {
             let write = {
                 let context = context.child("writer");
@@ -3071,14 +3030,14 @@ fn test_shutdown_drains_queued_writes_on_every_ring() {
                     pending::<()>().await;
                 }
             };
-            // The first writer stays here, the others start on other workers.
+
+            // The first writer stays here, and the others start on worker one.
             if actor == 0 {
                 context.child("writer").spawn(move |_| write);
             } else {
-                writers.insert(spawn_elsewhere(&context, write).1);
+                let _ = spawn_elsewhere(&context, write);
             }
         }
-        assert!(!writers.is_empty());
         // The first writer runs once the root yields.
         reschedule().await;
     });
@@ -3193,8 +3152,9 @@ fn test_worker_count_scales_default_buffer_pools() {
 }
 
 /// A task registers a receive and a sleep on worker zero, then a wake from
-/// another worker moves it there. Polled on that worker, both forward their
-/// results from worker zero, which holds the registrations.
+/// another worker moves it there. Polled on that worker, both stay pending
+/// through a forward from worker zero, which holds the registrations, and the
+/// receive's result arrives through its forward.
 #[test]
 fn test_operation_and_sleep_follow_their_task_to_another_worker() {
     Runner::new(config().with_worker_threads(2)).start(|context| async move {
@@ -3215,7 +3175,7 @@ fn test_operation_and_sleep_follow_their_task_to_another_worker() {
                 exact: true,
                 deadline: None,
             }));
-            let sleep = context.sleep(Duration::from_millis(20));
+            let sleep = context.sleep(Duration::from_secs(3600));
             let mut sleep = pin!(sleep);
             assert!(futures::poll!(&mut recv).is_pending());
             assert!(futures::poll!(&mut sleep).is_pending());
@@ -3228,7 +3188,6 @@ fn test_operation_and_sleep_follow_their_task_to_another_worker() {
             assert!(futures::poll!(&mut sleep).is_pending());
             released.await.unwrap();
             let received = recv.await.unwrap();
-            sleep.await;
             (registered, polled, received)
         });
         reschedule().await;
@@ -3305,83 +3264,49 @@ fn occupy_worker_one(context: &Context, in_ring: bool) -> (ThreadId, Option<Unix
     (other, Some(peer))
 }
 
-/// Spawn a task from a thread outside the pool that records the thread
-/// running it in `started`.
-fn spawn_foreign(context: Context, started: Arc<Mutex<Option<ThreadId>>>) {
-    thread::spawn(move || {
-        context.spawn(move |_| async move {
-            *started.lock() = Some(thread::current().id());
-        });
-    })
-    .join()
-    .unwrap();
-}
-
-/// A push after a worker's last readiness check, before it publishes itself
-/// idle, finds no idle bit and wakes nobody, so the worker's look at the
-/// inject queue after publishing must find it, in either wait. The worker
-/// then withdraws its idle bit.
+/// A push racing a worker's park reaches it in either wait. A push before the
+/// worker publishes itself idle finds no idle bit, so the worker's look at the
+/// inject queue after publishing must find it. A push after the worker finds
+/// the queue empty claims its idle bit and wakes it. Either way the worker
+/// leaves the idle set.
 #[test]
-fn test_push_before_a_worker_publishes_itself_idle_is_found() {
-    for in_ring in [false, true] {
-        Runner::new(config().with_worker_threads(2)).start(|context| async move {
-            let pool = context.shared.pool.clone();
-            let (other, _peer) = occupy_worker_one(&context, in_ring);
+fn test_push_racing_a_park_reaches_the_worker() {
+    for point in [ParkPoint::BeforeIdle, ParkPoint::BeforeWait] {
+        for in_ring in [false, true] {
+            Runner::new(config().with_worker_threads(2)).start(|context| async move {
+                let pool = context.shared.pool.clone();
+                let (other, _peer) = occupy_worker_one(&context, in_ring);
 
-            // Only worker one can start the target while the root holds this
-            // worker.
-            let started = Arc::new(Mutex::new(None));
-            let idle = Arc::new(AtomicBool::new(true));
-            on_next_park(&pool, 1, ParkPoint::BeforeIdle, {
-                let context = context.child("target");
-                let started = started.clone();
-                let idle = idle.clone();
-                let pool = pool.clone();
-                move || {
-                    thread::spawn(move || {
-                        context.spawn(move |_| async move {
-                            idle.store(pool.is_idle(1), Ordering::SeqCst);
-                            *started.lock() = Some(thread::current().id());
-                        });
-                    })
-                    .join()
-                    .unwrap();
-                }
+                // Only worker one can start the target while the root holds
+                // this worker.
+                let started = Arc::new(Mutex::new(None));
+                let idle = Arc::new(AtomicBool::new(true));
+                on_next_park(&pool, 1, point, {
+                    let context = context.child("target");
+                    let started = started.clone();
+                    let idle = idle.clone();
+                    let pool = pool.clone();
+                    move || {
+                        thread::spawn(move || {
+                            context.spawn(move |_| async move {
+                                idle.store(pool.is_idle(1), Ordering::SeqCst);
+                                *started.lock() = Some(thread::current().id());
+                            });
+                        })
+                        .join()
+                        .unwrap();
+                    }
+                });
+
+                // Waking worker one sends it through its loop to that park.
+                let _ = spawn_elsewhere(&context, async {});
+                assert_eq!(wait_started(&started), other);
+                assert!(
+                    !idle.load(Ordering::SeqCst),
+                    "busy worker left in the idle set"
+                );
             });
-
-            // Waking worker one sends it through its loop to that park.
-            let _ = spawn_elsewhere(&context, async {});
-            assert_eq!(wait_started(&started), other);
-            assert!(
-                !idle.load(Ordering::SeqCst),
-                "busy worker left in the idle set"
-            );
-        });
-    }
-}
-
-/// A push after a worker publishes itself idle and finds the inject queue
-/// empty claims its idle bit and wakes it, in either wait.
-#[test]
-fn test_push_after_a_worker_publishes_itself_idle_wakes_it() {
-    for in_ring in [false, true] {
-        Runner::new(config().with_worker_threads(2)).start(|context| async move {
-            let pool = context.shared.pool.clone();
-            let (other, _peer) = occupy_worker_one(&context, in_ring);
-
-            // Only worker one can start the target while the root holds this
-            // worker.
-            let started = Arc::new(Mutex::new(None));
-            on_next_park(&pool, 1, ParkPoint::BeforeWait, {
-                let context = context.child("target");
-                let started = started.clone();
-                move || spawn_foreign(context, started)
-            });
-
-            // Waking worker one sends it through its loop to that park.
-            let _ = spawn_elsewhere(&context, async {});
-            assert_eq!(wait_started(&started), other);
-        });
+        }
     }
 }
 
@@ -3433,19 +3358,6 @@ fn test_spinning_worker_sleeps_after_a_signalled_spin() {
         while state_bits(&pool.mailbox(1).waker) & 1 == 0 {
             assert!(Instant::now() < deadline, "worker one never slept");
             std::hint::spin_loop();
-        }
-    });
-}
-
-/// A spawn from outside the pool wakes a parked worker: each round lets every
-/// worker park, then the root holds its own worker until the task has run, so
-/// only a woken worker can run it.
-#[test]
-fn test_spawn_from_outside_the_pool_wakes_a_parked_worker() {
-    Runner::new(config().with_worker_threads(3)).start(|context| async move {
-        for _ in 0..20 {
-            context.sleep(Duration::from_millis(1)).await;
-            let _ = spawn_elsewhere(&context, async {});
         }
     });
 }

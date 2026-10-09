@@ -1590,6 +1590,46 @@ pub mod tests {
         }
     }
 
+    /// A take moves one more runnable than an even split between the workers,
+    /// at most a batch, oldest first.
+    #[test]
+    fn test_take_moves_a_bounded_share_of_the_inject_queue() {
+        for (workers, queued, taken) in [(4, 8, 3), (1, 129, 128)] {
+            let mailboxes = (0..workers)
+                .map(|_| Arc::new(Mailbox::new().unwrap()))
+                .collect();
+            let pool = Table::new(mailboxes);
+            let set = Tasks::new(1);
+            let tasks: Vec<Task> = (0..queued)
+                .map(|_| {
+                    let (task, runnable) = Task::new(pending::<()>(), &set, Weak::new());
+                    assert!(pool.push(runnable).is_ok());
+                    task
+                })
+                .collect();
+
+            let mut ready = Ready::default();
+            let mut moved = vec![pool.take(&mut ready).unwrap()];
+            while let Some(runnable) = ready.pop() {
+                moved.push(runnable);
+            }
+            assert_eq!(moved.len(), taken);
+            for (runnable, task) in moved.iter().zip(&tasks) {
+                assert_eq!(task_of(runnable).as_ptr(), task.as_ptr());
+            }
+
+            // No set retains these tasks, so the test clears each one after
+            // discarding its runnable.
+            for runnable in moved {
+                runnable.discard();
+            }
+            pool.close();
+            for task in tasks {
+                task.clear();
+            }
+        }
+    }
+
     /// A wake whose pool's inject queue is closed, or whose pool is gone,
     /// discards its runnable instead of leaking it.
     #[test]

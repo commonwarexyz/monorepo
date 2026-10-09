@@ -573,6 +573,11 @@ pub mod tests {
         }
         set.close();
 
+        // Each worker starts at its own shards, wrapping around the set.
+        for (worker, start) in [(0, 0), (1, 4), (2, 8), (3, 12), (4, 0)] {
+            assert_eq!(set.drain(worker).start, start);
+        }
+
         let barrier = Arc::new(Barrier::new(4));
         let drains: Vec<_> = (0..4)
             .map(|start| {
