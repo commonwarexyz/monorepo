@@ -12,6 +12,16 @@ on:
       flags:
         required: true
         type: string
+    # Optional so forks, which have no secrets, still run without sccache.
+    secrets:
+      SCCACHE_R2_BUCKET:
+        required: false
+      SCCACHE_R2_ENDPOINT:
+        required: false
+      SCCACHE_R2_ACCESS_KEY_ID:
+        required: false
+      SCCACHE_R2_SECRET_ACCESS_KEY:
+        required: false
 
 permissions:
   contents: read

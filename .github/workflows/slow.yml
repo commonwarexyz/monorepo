@@ -39,7 +39,11 @@ jobs:
       os: ${{ matrix.os }}
       variant: ${{ matrix.variant }}
       flags: ${{ matrix.flags }}
-    secrets: inherit
+    secrets:
+      SCCACHE_R2_BUCKET: ${{ secrets.SCCACHE_R2_BUCKET }}
+      SCCACHE_R2_ENDPOINT: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+      SCCACHE_R2_ACCESS_KEY_ID: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+      SCCACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
 
   # Stable aggregate check for all slow-test configurations.
   Tests-Gate:
