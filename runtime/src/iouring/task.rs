@@ -1070,6 +1070,7 @@ impl Ready {
 }
 
 #[cfg(test)]
+#[commonware_macros::test_group("miri")]
 pub mod tests {
     use super::*;
     use crate::utils::extract_panic_message;

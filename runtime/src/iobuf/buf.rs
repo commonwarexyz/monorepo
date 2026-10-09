@@ -1129,6 +1129,7 @@ fn resolve_range(len: usize, range: impl RangeBounds<usize>) -> (usize, usize) {
 }
 
 #[cfg(all(test, not(feature = "loom")))]
+#[commonware_macros::test_group("miri")]
 mod tests {
     use super::{
         super::{bufs::IoBufs, pool::BufferPoolConfig},

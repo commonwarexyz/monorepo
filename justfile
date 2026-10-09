@@ -189,9 +189,9 @@ hack *args='':
 udeps:
     cargo {{ nightly_version }} udeps --all-targets
 
-# Run miri tests on a given module
-miri module *args='':
-    MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --lib {{ module }} {{ args }}
+# Run the tests in the `miri` test group under Miri (optionally filtered: just miri -p commonware-runtime iobuf::)
+miri *args='':
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --lib {{ args }}
 
 # Run zepter feature checks
 check-features:

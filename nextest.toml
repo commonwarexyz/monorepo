@@ -1,9 +1,14 @@
 [test-groups]
 slow = { max-threads = "num-cpus" }
 conformance = { max-threads = "num-cpus" }
+miri = { max-threads = "num-cpus" }
 
 [profile.default]
 default-filter = 'not test(/(_slow_(::|$)|_conformance_$)/)'
+
+# Nextest selects this profile under Miri.
+[profile.default-miri]
+default-filter = 'test(/_miri_(::|$)/) and not test(/(_slow_(::|$)|_conformance_$)/)'
 
 [profile.slow]
 default-filter = 'test(/_slow_(::|$)/)'
