@@ -1606,6 +1606,23 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
 }
 
 impl<E: Context, V: CodecShared> Inner<E, V> {
+    /// Drop cached data and offsets pages that hold only items below `position`, continuing from
+    /// the previous call. See [Mutable::evict_cached_before].
+    fn evict_cached_before(&mut self, position: u64) {
+        let position = position.clamp(self.bounds.start, self.bounds.end);
+        let blob = super::position_to_blob(position, self.items_per_blob.get());
+
+        // The item's offset bounds the eviction within its blob. Without a cached offset, only
+        // earlier blobs are dropped, since a lookup could cost a read.
+        let offset = if position < self.bounds.end {
+            self.offsets.reader().try_read_sync(position).unwrap_or(0)
+        } else {
+            u64::MAX
+        };
+        self.blobs.evict_cached_before(blob, offset);
+        self.offsets.evict_cached_before(position);
+    }
+
     /// See [Journal::init].
     #[boxed]
     pub(crate) async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
@@ -2587,6 +2604,10 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
 }
 
 impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
+    fn evict_cached_before(&mut self, min_position: u64) {
+        self.0.evict_cached_before(min_position);
+    }
+
     async fn append(self, item: &Self::Item) -> Result<(Self, u64), Error> {
         Self::append(self, item).await
     }
@@ -4931,6 +4952,57 @@ mod tests {
             );
             drop(served);
             drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_evict_cached_before_drops_only_earlier_items() {
+        // Eviction drops the cached pages that hold only items below the position. Evicted items
+        // still read correctly, and items at or after the position stay cached.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "evict-cached".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(256)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let items = (0..13)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
+            journal = journal.sync().await.unwrap();
+
+            // Warm the cache.
+            let positions: Vec<u64> = (0..items.len() as u64).collect();
+            assert_eq!(journal.read_many(&positions).await.unwrap(), items);
+            assert!(
+                positions
+                    .iter()
+                    .all(|&p| journal.try_read_sync(p).is_some())
+            );
+
+            // Position 7 is the third item of the second blob. Every item of the first blob
+            // loses its cached pages, while items 7 and later keep theirs.
+            journal.evict_cached_before(7);
+            for position in 0..5 {
+                assert!(journal.try_read_sync(position).is_none());
+            }
+            for position in 7..13 {
+                assert_eq!(
+                    journal.try_read_sync(position).as_ref(),
+                    Some(&items[position as usize])
+                );
+            }
+            assert_eq!(journal.read_many(&positions).await.unwrap(), items);
 
             journal.destroy().await.unwrap();
         });

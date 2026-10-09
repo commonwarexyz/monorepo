@@ -303,6 +303,10 @@ pub trait Mutable: Contiguous + Sized {
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<(Self, bool), Error>> + Send;
 
+    /// Hint that items at positions strictly less than `min_position` will not be read again
+    /// soon, so the journal may drop cached copies of them. The items remain readable.
+    fn evict_cached_before(&mut self, _min_position: u64) {}
+
     /// Begin durably persisting the current state of the journal.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
