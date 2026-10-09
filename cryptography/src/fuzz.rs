@@ -9,7 +9,10 @@
 //! generated here are biased toward the shapes and lengths those
 //! specializations match on.
 
-use crate::{Hasher, blake3::SUBTREE_LEN};
+use crate::{
+    Hasher,
+    blake3::{MIN_SPLIT_LEN, MIN_SUBTREE_LEN},
+};
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_parallel::Strategy;
 use commonware_utils::TestRng;
@@ -52,18 +55,19 @@ fn arbitrary_batch_len(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
     })
 }
 
-/// Pick a length of one to five BLAKE3 subtrees, biased toward the multiples of
-/// the subtree length where long messages split, and toward one byte or one
-/// chunk to either side of them.
+/// Pick a length from just below the BLAKE3 split threshold to four of the
+/// smallest subtrees past it, biased toward the multiples of the smallest
+/// subtree length where long messages split, and toward one byte or one chunk
+/// to either side of them.
 fn arbitrary_long_len(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    let subtrees = u.int_in_range(1..=4)? * SUBTREE_LEN;
+    let subtrees = MIN_SPLIT_LEN + u.int_in_range(0..=3)? * MIN_SUBTREE_LEN;
     Ok(match u.int_in_range(0..=5)? {
         0 => subtrees - blake3::CHUNK_LEN,
         1 => subtrees - 1,
         2 => subtrees,
         3 => subtrees + 1,
         4 => subtrees + blake3::CHUNK_LEN,
-        _ => subtrees + u.int_in_range(0..=SUBTREE_LEN)?,
+        _ => subtrees + u.int_in_range(0..=MIN_SUBTREE_LEN)?,
     })
 }
 
@@ -414,11 +418,11 @@ mod tests {
             .test(|u| {
                 let plan = u.arbitrary::<ParallelPlan<Blake3>>()?;
                 let inner = |cut: &usize| (1..plan.len).contains(cut);
-                saw_split |= plan.len > SUBTREE_LEN;
+                saw_split |= plan.len >= MIN_SPLIT_LEN;
                 saw_boundary |= plan
                     .cuts
                     .iter()
-                    .any(|cut| inner(cut) && cut % SUBTREE_LEN == 0);
+                    .any(|cut| inner(cut) && cut % MIN_SUBTREE_LEN == 0);
                 saw_empty |= plan
                     .cuts
                     .windows(2)

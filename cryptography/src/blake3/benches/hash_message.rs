@@ -10,7 +10,7 @@ const CONCURRENCY: usize = 8;
 fn bench_hash_message(c: &mut Criterion) {
     let mut sampler = test_rng();
     let strategy = Rayon::new(NZUsize!(CONCURRENCY)).unwrap();
-    let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
+    let cases = [8, 12, 16, 17, 18, 19, 20, 24].map(|i| 2usize.pow(i));
     for message_length in cases.into_iter() {
         let mut msg = vec![0u8; message_length];
         sampler.fill_bytes(msg.as_mut_slice());

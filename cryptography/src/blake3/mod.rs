@@ -1,8 +1,8 @@
 //! BLAKE3 implementation of the [Hasher] trait.
 //!
 //! This implementation uses the [blake3] crate to generate BLAKE3 digests. [Hasher::hash_with]
-//! splits a message longer than one subtree of 64 KiB along the BLAKE3 tree and hashes the
-//! subtrees across the given strategy.
+//! splits a message of at least 128 KiB along the BLAKE3 tree and hashes the subtrees across the
+//! given strategy.
 //!
 //! # Example
 //! ```rust
@@ -54,9 +54,20 @@ pub type CoreBlake3 = blake3::Hasher;
 
 const DIGEST_LENGTH: usize = blake3::OUT_LEN;
 
-/// Length, in bytes, of the largest subtree [`Hasher::hash_with`] hashes as one task: 64 chunks,
-/// enough to keep the widest SIMD kernel busy and to amortize the cost of a fork.
-pub(crate) const SUBTREE_LEN: usize = 64 * CHUNK_LEN;
+/// Divisor of a message's length that bounds each subtree [`Hasher::hash_with`] hashes as one
+/// task, so that a split message spreads across at least this many tasks.
+const SUBTREES: usize = 8;
+
+/// Lower clamp, in bytes, on the subtree bound: 16 chunks, the widest batch the SIMD kernels
+/// compress at once.
+pub(crate) const MIN_SUBTREE_LEN: usize = 16 * CHUNK_LEN;
+
+/// Upper clamp, in bytes, on the subtree bound: 64 chunks, enough to amortize the cost of a fork.
+const MAX_SUBTREE_LEN: usize = 64 * CHUNK_LEN;
+
+/// Length, in bytes, of the shortest message [`Hasher::hash_with`] splits: [`SUBTREES`] subtrees of
+/// [`MIN_SUBTREE_LEN`] bytes.
+pub(crate) const MIN_SPLIT_LEN: usize = SUBTREES * MIN_SUBTREE_LEN;
 
 /// Hash the concatenation of `parts` on the calling thread.
 fn hash_serial(parts: &[&[u8]]) -> Digest {
@@ -67,21 +78,24 @@ fn hash_serial(parts: &[&[u8]]) -> Digest {
     hasher.finalize().into()
 }
 
-/// Hash the `len`-byte concatenation of `parts`, which spans more than one chunk, as subtrees of
-/// at most [`SUBTREE_LEN`] bytes across `strategy`.
+/// Hash the `len`-byte concatenation of `parts`, which spans more than one chunk, across `strategy`
+/// as subtrees of at most `len / SUBTREES` bytes, clamped to [`MIN_SUBTREE_LEN`] and
+/// [`MAX_SUBTREE_LEN`].
 fn hash_subtrees(parts: &[&[u8]], len: usize, strategy: &impl Strategy) -> Digest {
     let root = Node {
         parts,
         skip: 0,
         offset: 0,
         len,
+        task_len: (len / SUBTREES).clamp(MIN_SUBTREE_LEN, MAX_SUBTREE_LEN),
     };
     let (left, right) = root.children(strategy);
     merge_subtrees_root(&left, &right, Mode::Hash).into()
 }
 
 /// A node of a message's BLAKE3 tree: the `len` bytes at byte `offset` of the message, which
-/// start `skip` bytes into the first of `parts`.
+/// start `skip` bytes into the first of `parts`. Subtrees of at most `task_len` bytes hash as one
+/// task.
 ///
 /// `parts` holds every byte of the node, and `skip` is at most the length of its first part.
 #[derive(Clone, Copy)]
@@ -90,6 +104,7 @@ struct Node<'a> {
     skip: usize,
     offset: usize,
     len: usize,
+    task_len: usize,
 }
 
 impl Node<'_> {
@@ -116,6 +131,7 @@ impl Node<'_> {
             skip,
             offset: self.offset + left_len,
             len: self.len - left_len,
+            task_len: self.task_len,
         };
         strategy.join(
             || left.chaining_value(strategy),
@@ -123,10 +139,9 @@ impl Node<'_> {
         )
     }
 
-    /// Hash the node's chaining value, splitting it until every subtree fits in
-    /// [`SUBTREE_LEN`] bytes.
+    /// Hash the node's chaining value, splitting it until every subtree fits in `task_len` bytes.
     fn chaining_value(self, strategy: &impl Strategy) -> ChainingValue {
-        if self.len > SUBTREE_LEN {
+        if self.len > self.task_len {
             let (left, right) = self.children(strategy);
             return merge_subtrees_non_root(&left, &right, Mode::Hash);
         }
@@ -160,14 +175,14 @@ impl Hasher for Blake3 {
     type Digest = Digest;
 
     fn hash_with(parts: &[&[u8]], strategy: &impl Strategy) -> Self::Digest {
-        // A message that fits in one subtree has nothing to split. A total that overflows
-        // `usize` (possible only when parts alias) hashes serially, since the streaming hasher
-        // counts bytes in a `u64`.
+        // A message shorter than `MIN_SPLIT_LEN` hashes on the calling thread. A total that
+        // overflows `usize` (possible only when parts alias) hashes serially, since the streaming
+        // hasher counts bytes in a `u64`.
         match parts
             .iter()
             .try_fold(0usize, |len, part| len.checked_add(part.len()))
         {
-            Some(len) if len > SUBTREE_LEN => strategy.run(
+            Some(len) if len >= MIN_SPLIT_LEN => strategy.run(
                 len,
                 || hash_serial(parts),
                 || hash_subtrees(parts, len, strategy),
@@ -347,8 +362,8 @@ mod tests {
     }
 
     /// Official BLAKE3 test vectors. Hashing 16 KiB or more in one update reaches the 16-way
-    /// AVX-512 chunk kernel, and 32 KiB or more also reaches the 16-way parent kernel. Across
-    /// workers, the longest vector splits into two subtrees.
+    /// AVX-512 chunk kernel, and 32 KiB or more also reaches the 16-way parent kernel. Each vector
+    /// also hashes as subtrees across workers.
     #[test]
     fn test_official_vectors() {
         let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
@@ -381,13 +396,15 @@ mod tests {
             assert_eq!(digest.as_ref(), expected, "len {len}");
             let digest = Blake3::hash_with(&[&input], &strategy);
             assert_eq!(digest.as_ref(), expected, "len {len}");
+            let digest = hash_subtrees(&[&input], len, &strategy);
+            assert_eq!(digest.as_ref(), expected, "len {len}");
         }
     }
 
-    /// Messages around multiples of [`SUBTREE_LEN`], given whole, cut inside chunks and
-    /// subtrees, padded with empty parts, and paged, hash to the reference digest on the calling
-    /// thread and across workers. Splitting into subtrees on the calling thread also matches,
-    /// down to two chunks.
+    /// Messages around multiples of [`MIN_SUBTREE_LEN`] and around [`MIN_SPLIT_LEN`], given whole,
+    /// cut inside chunks and subtrees, padded with empty parts, and paged, hash to the reference
+    /// digest on the calling thread and across workers. Splitting into subtrees on the calling
+    /// thread also matches, down to two chunks.
     #[test]
     fn test_hash_long_messages() {
         let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
@@ -398,21 +415,24 @@ mod tests {
             CHUNK_LEN,
             CHUNK_LEN + 1,
             3 * CHUNK_LEN + 7,
-            SUBTREE_LEN - 1,
-            SUBTREE_LEN,
-            SUBTREE_LEN + 1,
-            SUBTREE_LEN + CHUNK_LEN,
-            2 * SUBTREE_LEN - 1,
-            2 * SUBTREE_LEN,
-            2 * SUBTREE_LEN + 1,
-            2 * SUBTREE_LEN + 3 * CHUNK_LEN + 7,
-            3 * SUBTREE_LEN + 17,
-            8 * SUBTREE_LEN,
+            MIN_SUBTREE_LEN - 1,
+            MIN_SUBTREE_LEN,
+            MIN_SUBTREE_LEN + 1,
+            MIN_SUBTREE_LEN + CHUNK_LEN,
+            2 * MIN_SUBTREE_LEN - 1,
+            2 * MIN_SUBTREE_LEN,
+            2 * MIN_SUBTREE_LEN + 1,
+            2 * MIN_SUBTREE_LEN + 3 * CHUNK_LEN + 7,
+            3 * MIN_SUBTREE_LEN + 17,
+            MIN_SPLIT_LEN - 1,
+            MIN_SPLIT_LEN,
+            MIN_SPLIT_LEN + MIN_SUBTREE_LEN + 1,
+            3 * MIN_SPLIT_LEN + 17,
             (1 << 20) + 5000,
         ] {
             let message = &data[..len];
             let expected: Digest = blake3::hash(message).into();
-            let (a, b) = (len / 3, len / 3 + SUBTREE_LEN.min(len - len / 3));
+            let (a, b) = (len / 3, len / 3 + MIN_SUBTREE_LEN.min(len - len / 3));
             let splits: [Vec<&[u8]>; 4] = [
                 vec![message],
                 vec![&message[..a], &message[a..b], &message[b..]],
@@ -433,8 +453,8 @@ mod tests {
         }
     }
 
-    /// A message longer than one subtree is hashed across the strategy's pool, and a shorter one
-    /// on the calling thread.
+    /// A message of at least [`MIN_SPLIT_LEN`] bytes is hashed across the strategy's pool, and a
+    /// shorter one on the calling thread.
     #[test]
     fn test_hash_splits_long_messages() {
         // One worker, planned as four, counts the jobs it runs while looping. Splitting a message
@@ -448,8 +468,12 @@ mod tests {
         let strategy = Rayon::with_pool(pool.clone())
             .with_parallelism(NZUsize!(4))
             .manual();
-        let data = random(4 * SUBTREE_LEN, 0);
-        for (len, jobs) in [(SUBTREE_LEN, 0), (SUBTREE_LEN + 1, 1), (4 * SUBTREE_LEN, 1)] {
+        let data = random(2 * MIN_SPLIT_LEN, 0);
+        for (len, jobs) in [
+            (MIN_SPLIT_LEN - 1, 0),
+            (MIN_SPLIT_LEN, 1),
+            (2 * MIN_SPLIT_LEN, 1),
+        ] {
             let done = Arc::new(AtomicBool::new(false));
             let (started, ready) = mpsc::channel();
             let (sender, receiver) = mpsc::channel();
