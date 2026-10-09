@@ -358,8 +358,8 @@ mod tests {
     /// to match.
     #[test]
     fn pr_5152_regression() {
-        fn run() -> String {
-            deterministic::Runner::seeded(0).start(|context| async move {
+        fn run(seed: u64) -> String {
+            deterministic::Runner::seeded(seed).start(|context| async move {
                 let (network, oracle) = Network::new(
                     context.child("network"),
                     Config {
@@ -414,7 +414,9 @@ mod tests {
                 context.auditor().state()
             })
         }
-        assert_eq!(run(), run());
+        for seed in 0..8 {
+            assert_eq!(run(seed), run(seed));
+        }
     }
 
     #[test]

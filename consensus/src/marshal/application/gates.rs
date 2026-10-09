@@ -594,6 +594,8 @@ mod tests {
     /// seed must wake those owners in the same order.
     #[test]
     fn pr_5152_regression() {
-        assert_eq!(prune_parked_owners(0), prune_parked_owners(0));
+        for seed in 0..8 {
+            assert_eq!(prune_parked_owners(seed), prune_parked_owners(seed));
+        }
     }
 }

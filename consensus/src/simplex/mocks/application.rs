@@ -515,8 +515,8 @@ mod tests {
     /// close in the same order for two runs with the same seed to match.
     #[test]
     fn pr_5152_regression() {
-        fn run() -> (Vec<u8>, String) {
-            deterministic::Runner::seeded(0).start(|context| async move {
+        fn run(seed: u64) -> (Vec<u8>, String) {
+            deterministic::Runner::seeded(seed).start(|context| async move {
                 let me = PrivateKey::from_seed(0).public_key();
                 let (application, mut mailbox) = Application::<_, Sha256, _>::new(
                     context.child("application"),
@@ -563,6 +563,8 @@ mod tests {
                 (closed, context.auditor().state())
             })
         }
-        assert_eq!(run(), run());
+        for seed in 0..8 {
+            assert_eq!(run(seed), run(seed));
+        }
     }
 }

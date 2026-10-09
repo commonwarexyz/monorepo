@@ -580,8 +580,8 @@ mod tests {
     /// key order, so the senders close in key order and two runs with the same seed match.
     #[test]
     fn pr_5152_regression() {
-        fn run() -> (Vec<u8>, String) {
-            Runner::seeded(0).start(|context| async move {
+        fn run(seed: u64) -> (Vec<u8>, String) {
+            Runner::seeded(seed).start(|context| async move {
                 let (consumer, mut senders) = PendingConsumer::new();
                 let mut tracker = Tracker::<PendingConsumer, u8>::new(consumer);
                 let (closed_sender, mut closed) = mpsc::unbounded_channel();
@@ -619,9 +619,11 @@ mod tests {
                 (observed, context.auditor().state())
             })
         }
-        let first = run();
         let expected: Vec<u8> = (1..16).step_by(2).chain((0..16).step_by(2)).collect();
-        assert_eq!(first.0, expected);
-        assert_eq!(first, run());
+        for seed in 0..8 {
+            let first = run(seed);
+            assert_eq!(first.0, expected);
+            assert_eq!(first, run(seed));
+        }
     }
 }

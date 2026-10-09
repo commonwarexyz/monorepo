@@ -443,8 +443,8 @@ mod tests {
     /// order for two runs with the same seed to match.
     #[test]
     fn pr_5152_regression() {
-        fn run() -> (Vec<u64>, String) {
-            deterministic::Runner::seeded(0).start(|context| async move {
+        fn run(seed: u64) -> (Vec<u64>, String) {
+            deterministic::Runner::seeded(seed).start(|context| async move {
                 let cfg = default_test_config(&context, PrivateKey::from_seed(0), Vec::new());
                 let tracker_pk = cfg.myself.public_key.clone();
                 let (actor, mailbox, mut oracle) = Actor::new(context.child("tracker"), cfg);
@@ -484,7 +484,9 @@ mod tests {
                 (closed, context.auditor().state())
             })
         }
-        assert_eq!(run(), run());
+        for seed in 0..8 {
+            assert_eq!(run(seed), run(seed));
+        }
     }
 
     #[test]

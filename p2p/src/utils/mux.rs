@@ -1012,8 +1012,8 @@ mod tests {
     /// two runs with the same seed to match.
     #[test]
     fn pr_5152_regression() {
-        fn run() -> (Vec<Channel>, String) {
-            deterministic::Runner::seeded(0).start(|context| async move {
+        fn run(seed: u64) -> (Vec<Channel>, String) {
+            deterministic::Runner::seeded(seed).start(|context| async move {
                 let oracle = start_network(context.child("network"));
                 let (sender, receiver) =
                     oracle.control(pk(0)).register(0, TEST_QUOTA).await.unwrap();
@@ -1045,6 +1045,8 @@ mod tests {
                 (closed, context.auditor().state())
             })
         }
-        assert_eq!(run(), run());
+        for seed in 0..8 {
+            assert_eq!(run(seed), run(seed));
+        }
     }
 }

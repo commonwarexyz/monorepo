@@ -171,8 +171,8 @@ mod tests {
     /// the same order for two runs with the same seed to match.
     #[test]
     fn pr_5152_regression() {
-        fn run() -> (Vec<u16>, String) {
-            deterministic::Runner::seeded(0).start(|context| async move {
+        fn run(seed: u64) -> (Vec<u16>, String) {
+            deterministic::Runner::seeded(seed).start(|context| async move {
                 let auditor = context.auditor();
                 let closed = Arc::new(Mutex::new(Vec::new()));
                 let mut acceptors = Vec::new();
@@ -197,6 +197,8 @@ mod tests {
                 (closed, auditor.state())
             })
         }
-        assert_eq!(run(), run());
+        for seed in 0..8 {
+            assert_eq!(run(seed), run(seed));
+        }
     }
 }
