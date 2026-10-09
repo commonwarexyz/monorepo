@@ -128,8 +128,8 @@ jobs:
       run: just partition=${{ matrix.partition || '1/1' }} test-benches ${{ matrix.package }} '${{ matrix.test_flags }}' '${{ matrix.lint_flags }}'
 
   Fuzz:
-    name: "Fuzz (${{ matrix.fuzz_dir }}) (partition: ${{ matrix.partition || '1/1' }})"
-    runs-on: ubuntu-latest
+    name: "Fuzz (${{ matrix.fuzz_dir }}${{ matrix.os && format(', os: {0}', matrix.os) }}) (partition: ${{ matrix.partition || '1/1' }})"
+    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 180
     strategy:
       matrix:
@@ -162,6 +162,12 @@ jobs:
             partition: "3/4"
           - fuzz_dir: storage/fuzz
             partition: "4/4"
+          - fuzz_dir: simd/fuzz
+          # Apple Silicon executes the NEON/SHA2 backend on native hardware.
+          - fuzz_dir: simd/fuzz
+            os: macos-15
+            simd-backend: neon
+            cpu-features: "neon sha2 !sve !sve2"
           - fuzz_dir: stream/fuzz
           - fuzz_dir: utils/fuzz
             partition: "1/2"
@@ -178,7 +184,7 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        additional-cache-key: ${{ matrix.fuzz_dir }}
+        additional-cache-key: ${{ matrix.fuzz_dir }}-${{ matrix.os || 'ubuntu-latest' }}
         rust-cache-save: ${{ startsWith(matrix.partition || '1/1', '1/') }}
         sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
         sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
@@ -192,7 +198,7 @@ jobs:
       uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: ${{ env.CARGO_HOME || '~/.cargo' }}/bin/cargo-fuzz
-        key: ${{ runner.os }}-${{ env.FUZZ_VERSION }}-cargo-fuzz-${{ steps.rust-version.outputs.rust_version }}
+        key: ${{ runner.os }}-${{ runner.arch }}-${{ env.FUZZ_VERSION }}-cargo-fuzz-${{ steps.rust-version.outputs.rust_version }}
     - name: Install cargo-fuzz
       if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
       run: cargo +${{ env.NIGHTLY_VERSION }} install cargo-fuzz --version ${{ env.FUZZ_VERSION }}
@@ -200,6 +206,11 @@ jobs:
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0
+    - name: Check native SIMD CPU features
+      if: ${{ matrix.cpu-features }}
+      run: |
+        rustc --edition 2024 -O -o "$RUNNER_TEMP/check_cpu_features" .github/scripts/check_cpu_features.rs
+        "$RUNNER_TEMP/check_cpu_features" ${{ matrix.cpu-features }}
     - name: Ensure corpus directory exists
       run: mkdir -p ${{ matrix.fuzz_dir }}/corpus
     - name: Compute fuzz corpus cache key prefix
@@ -217,6 +228,8 @@ jobs:
         restore-keys: |
           ${{ steps.fuzz-corpus-cache-key.outputs.prefix }}-
     - name: Test all targets
+      env:
+        COMMONWARE_SIMD_EXPECT_BACKEND: ${{ matrix.simd-backend }}
       run: just partition=${{ matrix.partition || '1/1' }} fuzz ${{ matrix.fuzz_dir }}
     - name: Save fuzz corpus
       if: success() && github.ref == 'refs/heads/main'

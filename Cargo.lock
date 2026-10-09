@@ -2421,6 +2421,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-simd"
+version = "2026.9.0"
+dependencies = [
+ "arbitrary",
+ "commonware-invariants",
+ "commonware-macros",
+]
+
+[[package]]
+name = "commonware-simd-fuzz"
+version = "2026.9.0"
+dependencies = [
+ "arbitrary",
+ "commonware-simd",
+ "libfuzzer-sys",
+]
+
+[[package]]
 name = "commonware-sol-fuzz"
 version = "2026.9.0"
 dependencies = [

@@ -1,0 +1,27 @@
+[package]
+name = "commonware-simd"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Abstract over SIMD operations."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/simd"
+documentation = "https://docs.rs/commonware-simd"
+
+[lints]
+workspace = true
+
+[features]
+default = [ "std" ]
+std = [ "commonware-macros/std" ]
+fuzz = [ "arbitrary/derive", "dep:arbitrary", "std" ]
+
+[dependencies]
+arbitrary = { workspace = true, optional = true }
+commonware-macros.workspace = true
+
+[dev-dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+commonware-invariants.workspace = true

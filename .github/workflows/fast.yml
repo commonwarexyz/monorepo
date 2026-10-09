@@ -152,9 +152,10 @@ jobs:
           # Ice Lake-SP has SHA-NI, AVX-512, IFMA, GFNI, and VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             sde: icx
-            cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma gfni vpclmulqdq"
+            simd-backend: ice_lake
+            cpu-features: "ssse3 sse4.1 avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma gfni vpclmulqdq"
           # Skylake-SP has AVX-512 without SHA-NI, IFMA, GFNI, or VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography
@@ -183,28 +184,62 @@ jobs:
           # Neoverse N2 has SHA-3 and SVE2.
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: neoverse-n2
-            cpu-features: "sha2 sha3 sve sve2"
+            simd-backend: arm_v9
+            cpu-features: "neon sha2 sha3 sve sve2"
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519"
             rustflags: "-C target-feature=+sha2,+sve2"
             static-features: "sha2 sve2 !sha3"
             qemu: neoverse-n2
-            cpu-features: "sha2 sha3 sve sve2"
+            cpu-features: "neon sha2 sha3 sve sve2"
           # Neoverse N1 has SHA-2 without SHA-3 or SVE.
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: neoverse-n1
-            cpu-features: "sha2 !sha3 !sve !sve2"
+            simd-backend: neon
+            cpu-features: "neon sha2 !sha3 !sve !sve2"
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release --no-default-features --lib -p commonware-cryptography-curve25519"
             static-features: "!sha2 !sha3 !sve2"
             qemu: neoverse-n1
-            cpu-features: "sha2 !sha3 !sve !sve2"
+            cpu-features: "neon sha2 !sha3 !sve !sve2"
+          # Isolate SIMD so other packages cannot re-enable std.
+          - os: ubuntu-latest
+            package: commonware-simd
+            flags: "--cargo-profile release --target x86_64-unknown-linux-gnu --no-default-features --lib"
+            rustflags: "-C target-feature=+avx512f,+avx512bw,+gfni,+avx512ifma,+sha,+ssse3,+sse4.1"
+            static-features: "avx512f avx512bw gfni avx512ifma sha ssse3 sse4.1"
+            sde: icx
+            cpu-features: "avx512f avx512bw gfni avx512ifma sha ssse3 sse4.1"
+            simd-backend: ice_lake
+          - os: ubuntu-24.04-arm
+            package: commonware-simd
+            flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib"
+            rustflags: "-C target-feature=+neon,+sha2,+sve,+sve2"
+            static-features: "neon sha2 sve sve2"
+            qemu: neoverse-n2
+            cpu-features: "neon sha2 sve sve2"
+            simd-backend: arm_v9
+          - os: ubuntu-24.04-arm
+            package: commonware-simd
+            flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib"
+            rustflags: "-C target-feature=+neon,+sha2"
+            static-features: "neon sha2 !sve !sve2"
+            qemu: neoverse-n1
+            cpu-features: "neon sha2 !sve !sve2"
+            simd-backend: neon
+          - os: ubuntu-24.04-arm
+            package: commonware-simd
+            flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib"
+            static-features: "neon !sha2 !sve !sve2"
+            qemu: neoverse-n1
+            cpu-features: "neon sha2 !sve !sve2"
+            simd-backend: scalar
           # Test each package with a std feature without std, one package at a time.
           - os: ubuntu-latest
             package: all
@@ -280,6 +315,8 @@ jobs:
       run: just test-no-std --verbose
     - name: Run subset tests
       if: ${{ !matrix.no-std }}
+      env:
+        COMMONWARE_SIMD_EXPECT_BACKEND: ${{ matrix.simd-backend }}
       run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose
     - name: Run subset doc tests
       if: ${{ !matrix.sde && !matrix.qemu && !matrix.no-std }}
