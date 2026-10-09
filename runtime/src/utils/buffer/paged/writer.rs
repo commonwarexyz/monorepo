@@ -996,6 +996,15 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         self.view().read_at(offset, len).await
     }
 
+    /// Fill the page cache with the pages that `ranges` (each `(offset, len)`) touch, using one
+    /// batched blob read. See [`View::fill_pages`].
+    pub async fn fill_pages(
+        &self,
+        ranges: impl Iterator<Item = (u64, usize)> + Send,
+    ) -> Result<(), Error> {
+        self.view().fill_pages(ranges).await
+    }
+
     /// Reads up to `len` bytes starting at `offset`, but only as many as are available.
     ///
     /// Returns the buffer (truncated to actual bytes read) and the number of bytes read. Returns

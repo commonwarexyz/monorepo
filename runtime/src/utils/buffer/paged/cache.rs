@@ -1,12 +1,12 @@
 //! A page cache for caching _logical_ pages of [Blob] data in memory. The cache is unaware of the
 //! physical page format used by the blob, which is left to the blob implementation.
 
-use super::{CHECKSUM_SIZE, get_page_from_blob};
+use super::{CHECKSUM_SIZE, Checksum, get_page_from_blob};
 use crate::{BLOB_PAGE_SIZE, Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
 use ahash::AHashMap;
 use commonware_utils::{Widen, cache, sync::RwLock};
 use futures::{
-    FutureExt,
+    FutureExt, StreamExt as _,
     future::{BoxFuture, Shared},
 };
 use std::{
@@ -322,6 +322,82 @@ impl CacheRef {
             buf = &mut buf[cached..];
         }
 
+        Ok(())
+    }
+
+    /// Populate the cache with every page that `ranges` (each `(logical offset, len)`) touches
+    /// and that is not resident, using one batched blob read.
+    ///
+    /// This is a best-effort fill: the caller still serves its ranges through the regular
+    /// cache-then-fetch path, which handles pages evicted in between and joins fetches other
+    /// readers have in flight. A page failing validation returns an error, like a single fetch;
+    /// pages validated before it stay cached.
+    pub(super) async fn fill_missing_pages<B: Blob>(
+        &self,
+        blob: &Arc<B>,
+        blob_id: u64,
+        ranges: impl Iterator<Item = (u64, usize)>,
+    ) -> Result<(), Error> {
+        let page_size: u64 = self.page_size.widen();
+        let mut pages: Vec<u64> = Vec::new();
+        for (offset, len) in ranges {
+            if len == 0 {
+                continue;
+            }
+            let first = offset / page_size;
+            let last = (offset + len as u64 - 1) / page_size;
+            pages.extend(first..=last);
+        }
+        pages.sort_unstable();
+        pages.dedup();
+        // Pages already resident, or already being fetched by another reader, are left to the
+        // regular path, which joins the in-flight fetch.
+        {
+            let cache = self.cache.read();
+            pages.retain(|&page| {
+                cache.get_page(blob_id, page).is_none()
+                    && !cache.page_fetches.contains_key(&(blob_id, page))
+            });
+        }
+        if pages.is_empty() {
+            return Ok(());
+        }
+
+        // One batched read fetches every missing physical page. CacheRef retains the pages, so
+        // the source pages need not remain in the OS page cache.
+        let physical_page_size = page_size + CHECKSUM_SIZE;
+        let mut reads = Vec::with_capacity(pages.len());
+        for &page in &pages {
+            let start = page
+                .checked_mul(physical_page_size)
+                .ok_or(Error::OffsetOverflow)?;
+            reads.push((start, physical_page_size as usize));
+        }
+        // Validate and cache each page as its read completes so this work overlaps the reads
+        // still in flight; only the last page's validation follows the last read.
+        let expected: usize = self.page_size.widen();
+        let mut fetched = std::pin::pin!(blob.read_many(&reads, ReadOptions::DONT_CACHE));
+        while let Some(item) = fetched.next().await {
+            let (index, bufs) = item?;
+            let page_num = pages[index];
+            let page = bufs.coalesce();
+            let Some(checksum) = Checksum::validate_page(page.as_ref()) else {
+                return Err(Error::InvalidChecksum);
+            };
+            // Only full pages may enter the cache (see fetch_cacheable_page).
+            if checksum.len as usize != expected {
+                error!(
+                    page_num,
+                    expected,
+                    actual = checksum.len,
+                    "attempted to fetch partial page from blob"
+                );
+                return Err(Error::InvalidChecksum);
+            }
+            self.cache
+                .write()
+                .cache(blob_id, &page.as_ref()[..expected], page_num);
+        }
         Ok(())
     }
 
@@ -1121,6 +1197,116 @@ mod tests {
             let bytes_read = page_cache.read_at(0, &mut buf, aligned_max_offset);
             assert_eq!(bytes_read, PAGE_SIZE.get() as usize);
             assert!(buf.iter().all(|b| *b == 42));
+        });
+    }
+
+    /// Write `pages` CRC-protected physical pages (page `i` filled with byte `i`) and return the
+    /// blob.
+    async fn checksummed_blob<S: crate::Storage>(storage: &S, pages: u64) -> Arc<S::Blob> {
+        let physical_page_size = PAGE_SIZE_U64 + CHECKSUM_SIZE;
+        let (blob, size) = storage.open("fill", b"blob").await.unwrap();
+        assert_eq!(size, 0);
+        for i in 0..pages {
+            let logical = vec![i as u8; PAGE_SIZE.get() as usize];
+            let crc = Crc32::checksum(&logical);
+            let mut page = logical;
+            page.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc).to_bytes());
+            blob.write_at(i * physical_page_size, page, WriteOptions::default())
+                .await
+                .unwrap();
+        }
+        Arc::new(blob)
+    }
+
+    #[test_traced]
+    fn test_fill_missing_pages_serves_later_reads() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (recording, recordings) = crate::mocks::RecordingContext::new(context);
+            let blob = checksummed_blob(&recording, 8).await;
+            let context = recording.inner;
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let page = PAGE_SIZE.get() as usize;
+
+            // Page 2 is already resident, so the fill reads only the other pages the ranges
+            // touch: a range inside page 0, one straddling pages 3-4, and one ending in page 6.
+            let mut buf = vec![0u8; page];
+            cache_ref
+                .read_after_miss(&blob, 0, &mut buf, 2 * PAGE_SIZE_U64)
+                .await
+                .unwrap();
+            recordings.clear();
+            let ranges = [
+                (5u64, 3usize),
+                (2 * PAGE_SIZE_U64 + 1, 2),
+                (3 * PAGE_SIZE_U64 + page as u64 - 1, 2),
+                (5 * PAGE_SIZE_U64, page + 1),
+            ];
+            cache_ref
+                .fill_missing_pages(&blob, 0, ranges.iter().copied())
+                .await
+                .unwrap();
+            assert_eq!(recordings.snapshot().reads.len(), 5);
+
+            // Every touched page is now resident: the reads complete without a blob read.
+            recordings.clear();
+            for (offset, len) in ranges {
+                let mut buf = vec![0u8; len];
+                cache_ref
+                    .read_after_miss(&blob, 0, &mut buf, offset)
+                    .await
+                    .unwrap();
+                let expected: Vec<u8> = (offset..offset + len as u64)
+                    .map(|o| (o / PAGE_SIZE_U64) as u8)
+                    .collect();
+                assert_eq!(buf, expected);
+            }
+            assert!(recordings.snapshot().reads.is_empty());
+
+            // Empty and already-resident ranges need no blob read at all.
+            cache_ref
+                .fill_missing_pages(&blob, 0, [(0u64, 0usize), (7, 1)].into_iter())
+                .await
+                .unwrap();
+            assert!(recordings.snapshot().reads.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_fill_missing_pages_rejects_corruption() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = checksummed_blob(&context, 3).await;
+            let physical_page_size = PAGE_SIZE_U64 + CHECKSUM_SIZE;
+            blob.write_at(physical_page_size + 1, vec![0xFF], WriteOptions::default())
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+
+            // A corrupt page fails the fill and never enters the cache; pages that passed their
+            // own validation before the failure may already be resident.
+            let ranges = [(0u64, 1usize), (PAGE_SIZE_U64, 1), (2 * PAGE_SIZE_U64, 1)];
+            assert!(matches!(
+                cache_ref
+                    .fill_missing_pages(&blob, 0, ranges.iter().copied())
+                    .await,
+                Err(Error::InvalidChecksum)
+            ));
+            let mut buf = [0u8; 1];
+            assert_eq!(cache_ref.read_cached(0, &mut buf, PAGE_SIZE_U64), 0);
+
+            // The intact pages fill on their own.
+            cache_ref
+                .fill_missing_pages(
+                    &blob,
+                    0,
+                    [(0u64, 1usize), (2 * PAGE_SIZE_U64, 1)].into_iter(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(cache_ref.read_cached(0, &mut buf, 0), 1);
+            assert_eq!(cache_ref.read_cached(0, &mut buf, 2 * PAGE_SIZE_U64), 1);
+            assert_eq!(buf, [2]);
         });
     }
 

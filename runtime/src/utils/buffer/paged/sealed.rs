@@ -114,6 +114,15 @@ impl<B: Blob> Sealed<B> {
         self.view().read_at(offset, len).await
     }
 
+    /// Fill the page cache with the pages that `ranges` (each `(offset, len)`) touch, using one
+    /// batched blob read. See [`View::fill_pages`].
+    pub async fn fill_pages(
+        &self,
+        ranges: impl Iterator<Item = (u64, usize)> + Send,
+    ) -> Result<(), Error> {
+        self.view().fill_pages(ranges).await
+    }
+
     /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
     /// `buf.len()` bytes were satisfied from the page cache and/or the in-memory tail. When `false`
     /// is returned, the contents of `buf` are unspecified.

@@ -151,6 +151,18 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.read_at_buf(offset, len, bufs, options).await
     }
 
+    fn read_many(
+        &self,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+        self.metrics.storage_reads.inc_by(ranges.len() as u64);
+        self.metrics
+            .storage_read_bytes
+            .inc_by(ranges.iter().map(|&(_, len)| len as u64).sum());
+        self.inner.read_many(ranges, options)
+    }
+
     #[tracing::instrument(
         name = "runtime.storage.blob.write_at",
         level = "info",
