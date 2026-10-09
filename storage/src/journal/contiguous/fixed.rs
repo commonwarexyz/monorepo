@@ -1556,7 +1556,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
 /// Whether a batched read admits faulted pages into the page cache.
 #[derive(Clone, Copy)]
-enum Admission {
+pub(crate) enum Admission {
     /// Cache faulted pages for future reads.
     Admit,
     /// Do not cache faulted pages.

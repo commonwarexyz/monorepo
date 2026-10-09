@@ -48,7 +48,9 @@ use std::{
 use tracing::{error, warn};
 
 /// Immutable ops roots retained in memory for graftable bitmap chunks.
-/// Chunk indices provide dense addressing without storing node positions.
+/// Chunk indices provide dense addressing without storing node positions. A graftable chunk's
+/// root is immutable while the ops log does not rewind below it; any future rewind must discard
+/// affected retained roots.
 pub(super) struct GraftRoots<D> {
     start: usize,
     roots: VecDeque<D>,
@@ -1057,7 +1059,8 @@ pub(super) async fn compute_grafted_root<
 ///
 /// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born in
 /// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
-/// [`merkle::Graftable::subtree_root_position`].
+/// [`merkle::Graftable::subtree_root_position`]. Chunks present in `graft_roots` are served from
+/// memory without reading storage.
 pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: usize>(
     ops_tree: &impl MerkleStorage<F, Digest = D>,
     graft_roots: Option<&GraftRoots<D>>,
