@@ -79,8 +79,6 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Configure swap
       uses: ./.github/actions/swap
-    - name: Clear disk space
-      uses: ./.github/actions/disk
     - name: Install nextest
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -109,8 +107,6 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Configure swap
       uses: ./.github/actions/swap
-    - name: Clear disk space
-      uses: ./.github/actions/disk
     - name: Install nextest
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
