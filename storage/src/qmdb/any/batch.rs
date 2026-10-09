@@ -407,9 +407,10 @@ impl<F: Family, U: update::Update> Walked<F, U> {
 ///
 /// A `MerkleizedBatch` is a branch-scoped view rooted at a specific committed prefix of the DB,
 /// not an immutable snapshot. Reads through it pass only while the DB sits on one of the chain's
-/// own states: the state the chain forked from, an ancestor's tip, or this batch's own tip (once
-/// it is applied). After any other batch is applied (a sibling fork, or one of this batch's own
-/// descendants), reads refuse with [`crate::qmdb::Error::StaleRead`], and applying the batch or
+/// own states: the chain's database boundary (usually the state it forked from), an ancestor's
+/// tip, or this batch's own tip (once it is applied). After any other batch is applied (a sibling
+/// fork, or one of this batch's own descendants), reads refuse with
+/// [`crate::qmdb::Error::StaleRead`], and applying the batch or
 /// merkleizing a child of it is rejected with [`crate::qmdb::Error::StaleBatch`] (see
 /// [`crate::qmdb::chain`] for more details).
 #[allow(clippy::type_complexity)]
@@ -1983,19 +1984,10 @@ where
         self
     }
 
-    /// Collect the currently-live ancestor chain, immediate parent first.
-    fn retain_ancestors(&self) -> Vec<AncestorBatch<F, H::Digest, U, S>> {
-        self.base.parent().map_or_else(Vec::new, |parent| {
-            let mut ancestors = vec![Arc::clone(parent)];
-            ancestors.extend(parent.ancestors());
-            ancestors
-        })
-    }
-
     /// Split into pending mutations and the merkleization machinery.
     #[allow(clippy::type_complexity)]
     fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U, S>) {
-        let ancestors = self.retain_ancestors();
+        let ancestors = chain::live_ancestors(self.base.parent(), |batch| batch.parent.as_ref());
         let db_state = chain::effective_boundary(
             self.base.db(),
             ancestors.last().map(|oldest| oldest.bounds.base),
@@ -3158,12 +3150,6 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
         update
     }
 
-    /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
-    /// Weak ref fails to upgrade (ancestor was freed).
-    pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, U, S> {
-        chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
-    }
-
     /// The [`Commitment`] this batch commits to.
     pub(crate) const fn commitment(&self) -> Commitment<F, D> {
         self.bounds.tip
@@ -3480,16 +3466,11 @@ where
             } else {
                 // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
                 // and pending (still to be applied; merged with the child).
-                let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
-                let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
-                for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-                    if batch.bounds.ancestors[i].size <= db_size {
-                        applied.push(ancestor_diff.as_slice());
-                    } else {
-                        pending.push(ancestor_diff.as_slice());
-                    }
-                }
-                let mut resolver = DiffCursors::new(applied);
+                let (pending, applied) = batch
+                    .ancestor_diffs
+                    .split_at(batch.bounds.unapplied(start_loc));
+                let pending: Vec<_> = pending.iter().map(|diff| diff.as_slice()).collect();
+                let mut resolver = DiffCursors::new(applied.iter().map(|diff| diff.as_slice()));
                 if batch.ancestor_base_locs.is_empty() {
                     let merge = DiffMerge::new(
                         iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),

@@ -317,7 +317,8 @@ where
 /// [`Db::prune`](super::db::Db::prune) update the DB.
 ///
 /// Reads through this batch pass only while the DB sits on one of the chain's own states: the
-/// state the chain forked from, an ancestor's tip, or this batch's own tip (once it is applied).
+/// chain's database boundary (usually the state it forked from), an ancestor's tip, or this
+/// batch's own tip (once it is applied).
 ///
 /// Once any other batch is applied (a sibling fork, or one of this batch's own descendants),
 /// this batch is stale, as is every descendant of it except the applied batch and the applied
@@ -994,10 +995,10 @@ where
 
 /// A view of the committed bitmap plus zero or more speculative overlay `Layer`s.
 ///
-/// The chain terminates in a `Base` that references the shared committed bitmap. This enum
-/// performs no validity check of its own. Its committed-read consumers run behind the
-/// batch-chain gate (see [`crate::qmdb::chain`]), which refuses stale chains before
-/// they read through it.
+/// The chain terminates in a `Base` that references the shared committed bitmap. Reading through
+/// it performs no validity check. Merkleization first binds the chain to the live database's
+/// bitmap with [`Self::ensure_based_on`] and passes the batch-chain gate (see
+/// [`crate::qmdb::chain`]), which refuses stale chains before they read through it.
 #[derive(Clone, Debug)]
 pub(crate) enum BitmapBatch<const N: usize> {
     /// Chain terminal: shared reference to the committed bitmap.

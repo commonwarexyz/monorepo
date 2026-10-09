@@ -912,6 +912,7 @@ pub(crate) mod tests {
         assert_ne!(winner.root(), loser.root());
 
         let child = loser.new_batch::<Sha256>().append(V::Value::make(3));
+        let direct = db.new_batch();
         let committed = Location::new(0);
         let (db, _) = db.apply_batch(winner).await.unwrap();
 
@@ -924,7 +925,24 @@ pub(crate) mod tests {
             Err(Error::StaleRead)
         ));
         assert!(matches!(
+            direct.get(committed, &db).await,
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            direct.get_many(&[committed], &db).await,
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
             loser.get(committed, &db).await,
+            Err(Error::StaleRead)
+        ));
+        // The gate runs before the empty-input shortcut.
+        assert!(matches!(
+            direct.get_many(&[], &db).await,
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            loser.get_many(&[], &db).await,
             Err(Error::StaleRead)
         ));
         assert!(matches!(

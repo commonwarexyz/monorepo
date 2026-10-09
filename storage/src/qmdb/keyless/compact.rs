@@ -116,10 +116,6 @@ impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, 
 where
     Operation<F, V>: EncodeShared,
 {
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, V, S> {
-        chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
-    }
-
     /// The [`Commitment`] this batch commits to.
     pub(super) const fn commitment(&self) -> Commitment<F, D> {
         self.bounds.tip
@@ -297,9 +293,8 @@ where
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
     {
-        let live_ancestors: Vec<_> =
-            chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
-                .collect();
+        let live_ancestors =
+            chain::live_ancestors(self.parent.as_ref(), |batch| batch.parent.as_ref());
         let boundary = chain::effective_boundary(
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),

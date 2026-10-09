@@ -697,10 +697,7 @@ where
             self.snapshot
                 .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
         }
-        for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.bounds.ancestors[i].size <= db_size {
-                continue;
-            }
+        for ancestor_diff in &batch.ancestor_diffs[..batch.bounds.unapplied(db_size)] {
             for (key, entry) in ancestor_diff.iter() {
                 self.snapshot
                     .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
@@ -1111,6 +1108,7 @@ pub(super) mod tests {
         assert_ne!(winner.root(), loser.root());
 
         let child = loser.new_batch::<Sha256>().set(k2, Sha256::fill(5u8));
+        let direct = db.new_batch();
         let (db, _) = db.apply_batch(winner).await.unwrap();
 
         assert!(matches!(child.get(&k1, &db).await, Err(Error::StaleRead)));
@@ -1118,7 +1116,21 @@ pub(super) mod tests {
             child.get_many(&[&k1], &db).await,
             Err(Error::StaleRead)
         ));
+        assert!(matches!(direct.get(&k1, &db).await, Err(Error::StaleRead)));
+        assert!(matches!(
+            direct.get_many(&[&k1], &db).await,
+            Err(Error::StaleRead)
+        ));
         assert!(matches!(loser.get(&k1, &db).await, Err(Error::StaleRead)));
+        // The gate runs before the empty-input shortcut.
+        assert!(matches!(
+            direct.get_many(&[], &db).await,
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            loser.get_many(&[], &db).await,
+            Err(Error::StaleRead)
+        ));
         assert!(matches!(
             child.merkleize(&db, None, floor).await,
             Err(Error::StaleBatch)

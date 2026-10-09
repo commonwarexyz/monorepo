@@ -8,10 +8,10 @@
 //!
 //! Reads through a batch are gated: a committed read first proves the live database is one of the
 //! chain's own states and otherwise refuses with [`Error::StaleRead`]. The chain's own states are
-//! the state it forked from (its database boundary), each ancestor's tip, and the batch's own tip.
-//! Membership compares full commitments (size and root). Any other state refuses, including one
-//! reached by applying a descendant of the batch. Merkleize runs the same staleness check against
-//! the chain's live ancestors and refuses with [`Error::StaleBatch`].
+//! its database boundary (usually the state it forked from), each ancestor's tip, and the batch's
+//! own tip. Membership compares full commitments (size and root). Any other state refuses,
+//! including one reached by applying a descendant of the batch. Merkleize runs the same staleness
+//! check against the chain's live ancestors and refuses with [`Error::StaleBatch`].
 //!
 //! Applying a batch requires the current DB state to match either the batch's recorded DB state
 //! or one of its ancestor states. Batch construction ensures commit floors are monotonically
@@ -26,7 +26,6 @@ use crate::{
     qmdb::Error,
 };
 use commonware_cryptography::Digest;
-use core::iter;
 use std::{
     ops::Deref,
     sync::{Arc, Weak},
@@ -115,7 +114,8 @@ pub struct Bounds<F: Family, D: Digest> {
     pub db: Commitment<F, D>,
     /// This batch's tip [`Commitment`]: the state after all its operations.
     pub tip: Commitment<F, D>,
-    /// Ancestor commitments in newest-first order.
+    /// Tip [`Commitment`] of each ancestor reachable through live parent links when this batch
+    /// was merkleized, newest first.
     pub ancestors: Vec<Commitment<F, D>>,
     /// Inactivity floor declared by this batch's commit.
     pub inactivity_floor: Location<F>,
@@ -161,39 +161,35 @@ impl<F: Family, D: Digest> Bounds<F, D> {
     pub(crate) fn validate_apply_to(&self, current: Commitment<F, D>) -> Result<(), Error<F>> {
         validate_batch_applicable(current, self.db, self.ancestors.iter().copied())
     }
+
+    /// Count the leading entries of [`Self::ancestors`] that a database of `db_size`
+    /// operations has not applied.
+    ///
+    /// Ancestors are newest first with strictly decreasing tip sizes, so the applied ones form a
+    /// suffix. A database on this chain already holds their operations, so apply needs only the
+    /// unapplied prefix of an overlay kept 1:1 with `ancestors`.
+    pub(crate) fn unapplied(&self, db_size: Location<F>) -> usize {
+        self.ancestors
+            .partition_point(|ancestor| ancestor.size > db_size)
+    }
 }
 
-/// Iterate over a batch's live ancestors, starting at `parent`.
+/// Collect `parent` followed by its live ancestors, newest first.
 ///
-/// Iteration stops when a weak parent reference cannot be upgraded.
-pub(crate) fn ancestors<T, P>(
-    parent: Option<Weak<T>>,
-    mut parent_of: P,
-) -> impl Iterator<Item = Arc<T>>
-where
-    P: for<'a> FnMut(&'a T) -> Option<&'a Weak<T>>,
-{
-    let mut next = parent.as_ref().and_then(Weak::upgrade);
-    iter::from_fn(move || {
-        let batch = next.take()?;
-        next = parent_of(&batch).and_then(Weak::upgrade);
-        Some(batch)
-    })
-}
-
-/// Iterate over a strong parent followed by its live ancestors.
-pub(crate) fn parent_and_ancestors<T, P, I>(
+/// The walk stops when a weak parent reference cannot be upgraded. A dropped batch never becomes
+/// reachable again, so the result is `parent` followed by a prefix of the chain it was
+/// merkleized with. The returned references keep the collected batches alive.
+pub(crate) fn live_ancestors<T>(
     parent: Option<&Arc<T>>,
-    mut ancestors_of: P,
-) -> impl Iterator<Item = Arc<T>> + use<T, P, I>
-where
-    P: FnMut(&Arc<T>) -> I,
-    I: IntoIterator<Item = Arc<T>>,
-{
-    parent.cloned().into_iter().flat_map(move |parent| {
-        let ancestors = ancestors_of(&parent);
-        iter::once(parent).chain(ancestors)
-    })
+    parent_of: impl Fn(&T) -> Option<&Weak<T>>,
+) -> Vec<Arc<T>> {
+    let mut live = Vec::new();
+    let mut next = parent.cloned();
+    while let Some(batch) = next {
+        next = parent_of(&batch).and_then(Weak::upgrade);
+        live.push(batch);
+    }
+    live
 }
 
 /// Advance the inherited DB boundary past ancestors no longer reachable through the weak parent
@@ -201,8 +197,7 @@ where
 ///
 /// A dropped ancestor may be applied or not. Either way merkleize can no longer reach its
 /// operations through the chain, so the boundary moves up to the oldest live ancestor's base, and a
-/// database still below that base fails [`validate_batch_applicable`]. Reads are unaffected, since
-/// merkleized batches retain their ancestors' diffs.
+/// database still below that base fails [`validate_batch_applicable`].
 pub(crate) fn effective_boundary<F: Family, D: Digest>(
     inherited: Commitment<F, D>,
     oldest_live_base: Option<Commitment<F, D>>,
@@ -323,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn on_chain_accepts_own_states_only() {
+    fn compatible_accepts_own_states_only() {
         // Ancestors are newest-first, and the batch builds on the newest one's tip.
         let bounds = Bounds::<F, D> {
             base: state(16, 16),
@@ -352,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn on_chain_from_base_commitment_requires_unchanged_state() {
+    fn compatible_from_base_commitment_requires_unchanged_state() {
         let base = state(10, 1);
         assert!(base.compatible(&(), state(10, 1)).is_ok());
         assert!(matches!(
@@ -366,21 +361,32 @@ mod tests {
     }
 
     #[test]
-    fn ancestors_iterates_parent_first() {
+    fn live_ancestors_walk_parent_first_and_stop_at_a_dropped_link() {
+        let root = Arc::new(TestBatch {
+            id: 0,
+            parent: None,
+        });
         let grandparent = Arc::new(TestBatch {
             id: 1,
-            parent: None,
+            parent: Some(Arc::downgrade(&root)),
         });
         let parent = Arc::new(TestBatch {
             id: 2,
             parent: Some(Arc::downgrade(&grandparent)),
         });
 
-        let ids: Vec<_> = ancestors(Some(Arc::downgrade(&parent)), |batch| batch.parent.as_ref())
-            .map(|batch| batch.id)
-            .collect();
+        let ids = |parent: Option<&Arc<TestBatch>>| -> Vec<u8> {
+            live_ancestors(parent, |batch| batch.parent.as_ref())
+                .iter()
+                .map(|batch| batch.id)
+                .collect()
+        };
+        assert_eq!(ids(Some(&parent)), vec![2, 1, 0]);
+        assert!(ids(None).is_empty());
 
-        assert_eq!(ids, vec![2, 1]);
+        // The root stays alive but is unreachable once the link to it is gone.
+        drop(grandparent);
+        assert_eq!(ids(Some(&parent)), vec![2]);
     }
 
     #[test]
@@ -396,5 +402,21 @@ mod tests {
 
         let result = bounds.validate_apply_to(state(11, 11));
         assert!(matches!(result, Err(Error::StaleBatch)));
+    }
+
+    #[test]
+    fn unapplied_counts_ancestors_above_the_database() {
+        let bounds = Bounds::<F, D> {
+            base: state(16, 16),
+            db: state(10, 1),
+            tip: state(18, 18),
+            ancestors: vec![state(16, 16), state(12, 12)],
+            inactivity_floor: loc(14),
+        };
+        // At the boundary both ancestors are unapplied, then one, then none.
+        assert_eq!(bounds.unapplied(loc(10)), 2);
+        assert_eq!(bounds.unapplied(loc(12)), 1);
+        assert_eq!(bounds.unapplied(loc(16)), 0);
+        assert_eq!(bounds.unapplied(loc(18)), 0);
     }
 }

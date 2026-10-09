@@ -3,7 +3,8 @@
 //!
 //! Immutable databases accept new keyed values but no updates or deletions. Batch reads fall back
 //! to the database's applied state at the time of the read, not to a snapshot taken when the
-//! batch was created.
+//! batch was created. Once applied state moves off or past the batch's chain, reads refuse with
+//! a `StaleRead` error.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,

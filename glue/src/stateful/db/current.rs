@@ -2,7 +2,8 @@
 //! [`current`](commonware_storage::qmdb::current) databases.
 //!
 //! Batch reads fall back to the database's applied state at the time of the read, not to a
-//! snapshot taken when the batch was created.
+//! snapshot taken when the batch was created. Once applied state moves off or past the batch's
+//! chain, reads refuse with a `StaleRead` error.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,

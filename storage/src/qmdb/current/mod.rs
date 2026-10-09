@@ -10,10 +10,11 @@
 //!
 //! Current batches are branch-scoped views, not immutable snapshots.
 //!
-//! A batch remains usable only while the DB sits on one of its chain's own states: the state the
-//! chain forked from, an ancestor's tip, or the batch's own tip. Once any other batch is applied
-//! (a sibling fork, or one of the batch's own descendants), that batch is stale, as is every
-//! descendant of it except the applied batch and the applied batch's descendants.
+//! A batch remains usable only while the DB sits on one of its chain's own states: the chain's
+//! database boundary (usually the state it forked from), an ancestor's tip, or the batch's own
+//! tip. Once any other batch is applied (a sibling fork, or one of the batch's own descendants),
+//! that batch is stale, as is every descendant of it except the applied batch and the applied
+//! batch's descendants.
 //! Reads refuse with `StaleRead`, and merkleization and application are rejected with
 //! `StaleBatch` (see [`crate::qmdb::chain`]).
 //!
