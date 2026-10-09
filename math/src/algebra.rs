@@ -12,26 +12,6 @@ use core::{
 };
 use rand_core::CryptoRng;
 
-/// Yield all the bits in a u64, from lowest to highest.
-fn yield_bits_le(x: u64) -> impl Iterator<Item = bool> {
-    (0..64).map(move |i| (x >> i) & 1 != 0)
-}
-
-/// Yield the bits in a u64, until they all become 0.
-fn yield_bits_le_until_zeroes(x: u64) -> impl Iterator<Item = bool> {
-    (0..64 - x.leading_zeros()).map(move |i| (x >> i) & 1 != 0)
-}
-
-/// Yield all of the bits in an array of u64s, in little endian order.
-fn yield_bits_le_arr(xs: &[u64]) -> impl Iterator<Item = bool> + use<'_> {
-    let (&last, start) = xs.split_last().unwrap_or((&0, &[]));
-    start
-        .iter()
-        .copied()
-        .flat_map(yield_bits_le)
-        .chain(yield_bits_le_until_zeroes(last))
-}
-
 /// Inner utility for [`Additive::scale`] and [`Ring::exp`].
 ///
 /// The "double-and-add" / "square-and-multiply" algorithms work over an arbitrary
@@ -49,13 +29,18 @@ fn monoid_exp<T: Clone>(
     x: &T,
     bits_le: &[u64],
 ) -> T {
-    let mut acc = zero;
-    let mut w = x.clone();
-    for b in yield_bits_le_arr(bits_le) {
-        if b {
-            op(&mut acc, &w);
+    let Some(limb) = bits_le.iter().rposition(|&l| l != 0) else {
+        return zero;
+    };
+    let bit = |i: usize| (bits_le[i / 64] >> (i % 64)) & 1 != 0;
+    // Walk down from the highest set bit, so `acc` starts at `x` instead of `zero`.
+    let top = 64 * limb + 63 - bits_le[limb].leading_zeros() as usize;
+    let mut acc = x.clone();
+    for i in (0..top).rev() {
+        self_op(&mut acc);
+        if bit(i) {
+            op(&mut acc, x);
         }
-        self_op(&mut w)
     }
     acc
 }
@@ -436,6 +421,7 @@ pub mod test_suites {
     //! - Addition is associative
     //! - Zero is the neutral element
     //! - Negation is the additive inverse
+    //! - Doubling matches adding an element to itself
     //!
     //! These functions take `&mut Unstructured` so users can run the harness themselves.
     //!
@@ -482,6 +468,12 @@ pub mod test_suites {
         assert_eq!(acc, a - &b, "-= different from -");
     }
 
+    fn check_double<T: Additive>(a: T) {
+        let mut doubled = a.clone();
+        doubled.double();
+        assert_eq!(doubled, a.clone() + &a, "double different from a + a");
+    }
+
     /// Fuzz the [`Additive`] trait properties.
     ///
     /// Takes arbitrary data and checks that algebraic laws hold.
@@ -497,7 +489,9 @@ pub mod test_suites {
         check_add_zero(a.clone());
         check_add_neg_self(a.clone());
         check_sub_vs_add_neg(a.clone(), b.clone());
-        check_sub_assign(a, b);
+        check_sub_assign(a.clone(), b);
+        check_double(a);
+        check_double(T::zero());
         Ok(())
     }
 
@@ -601,9 +595,11 @@ pub mod test_suites {
     /// Fuzz the [`Space`] trait properties, assuming nothing about the scalar `R`.
     ///
     /// Takes arbitrary data and checks that algebraic laws hold.
+    /// This also checks [`Additive`] properties of `K`.
     pub fn fuzz_space<R: Debug + for<'a> Arbitrary<'a>, K: Space<R> + for<'a> Arbitrary<'a>>(
         u: &mut Unstructured<'_>,
     ) -> arbitrary::Result<()> {
+        fuzz_additive::<K>(u)?;
         let a: K = u.arbitrary()?;
         let b: K = u.arbitrary()?;
         let x: R = u.arbitrary()?;
@@ -770,10 +766,12 @@ commonware_macros::stability_scope!(ALPHA {
             ExpOne(F),
             ExpZero(F),
             Exp(F, u32, u32),
+            ExpLimbs(F, u64, u64),
             PowersMatchesExp(F, F, u16),
             ScaleOne(F),
             ScaleZero(F),
             Scale(F, u32, u32),
+            ScaleLimbs(F, u64, u64),
             Msm2([F; 2], [F; 2]),
         }
 
@@ -790,6 +788,11 @@ commonware_macros::stability_scope!(ALPHA {
                         let a = u64::from(a);
                         let b = u64::from(b);
                         assert_eq!(x.exp(&[a + b]), x.exp(&[a]) * x.exp(&[b]));
+                    }
+                    Self::ExpLimbs(x, a, b) => {
+                        let high = x.exp(&[b]).exp(&[0, 1]);
+                        assert_eq!(x.exp(&[a, b]), x.exp(&[a]) * high);
+                        assert_eq!(x.exp(&[a, 0]), x.exp(&[a]));
                     }
                     Self::PowersMatchesExp(shift, base, index) => {
                         let pow_i = powers(shift, &base)
@@ -808,6 +811,11 @@ commonware_macros::stability_scope!(ALPHA {
                         let a = u64::from(a);
                         let b = u64::from(b);
                         assert_eq!(x.scale(&[a + b]), x.scale(&[a]) + x.scale(&[b]));
+                    }
+                    Self::ScaleLimbs(x, a, b) => {
+                        let high = x.scale(&[b]).scale(&[0, 1]);
+                        assert_eq!(x.scale(&[a, b]), x.scale(&[a]) + high);
+                        assert_eq!(x.scale(&[a, 0]), x.scale(&[a]));
                     }
                     Self::Msm2(a, b) => {
                         assert_eq!(F::msm(&a, &b, &Sequential), a[0] * b[0] + a[1] * b[1]);

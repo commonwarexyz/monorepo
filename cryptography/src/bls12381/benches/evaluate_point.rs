@@ -35,8 +35,20 @@ fn bench_evaluate_point(c: &mut Criterion) {
     }
 }
 
+fn bench_evaluate_counter_point(c: &mut Criterion) {
+    for &n in &[5u32, 10, 20, 50, 100, 250, 500] {
+        let t = N3f1::quorum(n);
+        let polynomial: Poly<G1> = Poly::commit(Poly::new(test_rng(), t - 1));
+        c.bench_function(
+            &format!("{}/n={} t={} point=counter", module_path!(), n, t),
+            // The last participant has the largest point.
+            |b| b.iter(|| black_box(polynomial.eval_u64(u64::from(n)))),
+        );
+    }
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_evaluate_point
+    targets = bench_evaluate_point, bench_evaluate_counter_point
 }
