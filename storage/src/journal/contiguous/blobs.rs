@@ -19,7 +19,7 @@ use futures::{
     FutureExt as _,
     future::{self, try_join_all},
 };
-use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
+use std::{collections::BTreeMap, num::NonZeroUsize, ops::Range, sync::Arc};
 use tracing::debug;
 
 /// Metrics for a journal's blobs.
@@ -208,6 +208,9 @@ pub(super) struct Writable<E: Context> {
 
     /// Sync of the tail's predecessor.
     tail_predecessor_sync: Option<SyncCompletion>,
+
+    /// The (blob index, logical offset) below which cached pages have been dropped.
+    evicted: (u64, u64),
 }
 
 impl<E: Context> Writable<E> {
@@ -277,6 +280,7 @@ impl<E: Context> Writable<E> {
             sealed,
             sealed_snapshot: None,
             tail_predecessor_sync: None,
+            evicted: (oldest_blob_index, 0),
         })
     }
 
@@ -378,6 +382,9 @@ impl<E: Context> Writable<E> {
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
 
+        // Pruned blobs can never be read again, so free their cached pages for live data.
+        self.evict_cached_before(min_blob, 0);
+
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
         let prev_oldest_blob_index = self.oldest_blob_index;
         self.sealed.drain(..drop_count);
@@ -402,6 +409,7 @@ impl<E: Context> Writable<E> {
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
 
+        self.evict_cached_before(self.tail_blob_index(), u64::MAX);
         for blob in self.oldest_blob_index..=self.tail_blob_index() {
             self.partition.remove(blob).await?;
         }
@@ -411,7 +419,40 @@ impl<E: Context> Writable<E> {
         self.oldest_blob_index = tail_blob;
         self.sealed.clear();
         self.sealed_snapshot = None;
+        self.evicted = (tail_blob, 0);
         Ok(self)
+    }
+
+    /// Drop cached pages lying entirely below logical `offset` of blob `blob`, continuing from
+    /// where the previous call stopped. The bytes remain readable from storage. A position past
+    /// the tail's end is clamped to it, and a position at or below an earlier one has no effect.
+    pub(super) fn evict_cached_before(&mut self, blob: u64, offset: u64) {
+        let tail_blob = self.tail_blob_index();
+        let target = if blob > tail_blob || (blob == tail_blob && offset > self.tail.size()) {
+            (tail_blob, self.tail.size())
+        } else {
+            (blob, offset)
+        };
+        let (mut blob, mut from) = self.evicted.max((self.oldest_blob_index, 0));
+        if target <= (blob, from) {
+            return;
+        }
+        while blob < target.0 {
+            self.blob_evict_cached(blob, from..u64::MAX);
+            blob += 1;
+            from = 0;
+        }
+        self.blob_evict_cached(blob, from..target.1);
+        self.evicted = target;
+    }
+
+    /// Drop the cached pages of retained blob `blob` that end within `range`.
+    fn blob_evict_cached(&self, blob: u64, range: Range<u64>) {
+        if blob == self.tail_blob_index() {
+            self.tail.evict_cached(range);
+        } else {
+            self.sealed[(blob - self.oldest_blob_index) as usize].evict_cached(range);
+        }
     }
 
     /// Wait for the predecessor's durability completion.

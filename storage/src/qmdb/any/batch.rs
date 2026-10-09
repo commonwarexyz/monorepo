@@ -3520,6 +3520,9 @@ where
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root();
 
+        // Operations below the floor are inactive, so free their cached pages for live data.
+        Mutable::evict_cached_before(&mut self.log, *self.inactivity_floor_loc);
+
         self.update_metrics();
         self.metrics
             .operations_applied
