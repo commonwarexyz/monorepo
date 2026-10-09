@@ -66,17 +66,27 @@ mod aio {
     /// One completed read, sent to the stream as soon as the kernel reports it.
     pub(super) type Completion = Result<(usize, IoBufsMut), Error>;
 
-    /// Lazily open an `O_DIRECT` descriptor on the blob's inode. `None` when the filesystem
-    /// rejects direct I/O, in which case callers read through the page cache instead.
-    pub(super) fn direct(file: &Shared) -> Option<&File> {
-        file.direct
-            .get_or_init(|| {
-                let path = format!("/proc/self/fd/{}", file.as_raw_fd());
-                let mut options = std::fs::OpenOptions::new();
-                options.read(true).custom_flags(libc::O_DIRECT);
-                options.open(path).ok()
-            })
-            .as_ref()
+    /// Open an `O_DIRECT` descriptor on the blob's inode for one submission. A blob holds no
+    /// direct descriptor between submissions, so descriptors scale with submissions in flight
+    /// rather than with open blobs. `None` when the filesystem rejects direct I/O, which the
+    /// blob remembers so later batches take the per-read path without trying again, or when
+    /// the open fails for a transient reason such as a descriptor limit.
+    pub(super) fn open_direct(file: &Shared) -> Option<File> {
+        if file.direct_unsupported.load(Ordering::Relaxed) {
+            return None;
+        }
+        let path = format!("/proc/self/fd/{}", file.as_raw_fd());
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).custom_flags(libc::O_DIRECT);
+        match options.open(path) {
+            Ok(direct) => Some(direct),
+            Err(err) => {
+                if err.raw_os_error() == Some(libc::EINVAL) {
+                    file.direct_unsupported.store(true, Ordering::Relaxed);
+                }
+                None
+            }
+        }
     }
 
     /// Alignment direct I/O requires of buffer addresses, file offsets, and lengths: the largest
@@ -194,14 +204,13 @@ mod aio {
     /// reads still in flight.
     fn submit(
         file: &Shared,
+        direct: &File,
         pool: &BufferPool,
         ctx: Context,
         batch: Vec<Read>,
         tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
     ) -> Result<Context, Error> {
-        let fd = direct(file)
-            .expect("direct descriptor checked before dispatch")
-            .as_raw_fd() as u32;
+        let fd = direct.as_raw_fd() as u32;
         let n = batch.len();
 
         // Every read covers the block-aligned superset of its range, laid out back to back in
@@ -374,11 +383,17 @@ mod aio {
         if batch.is_empty() {
             return;
         }
-        let Some(ctx) = take_context() else {
-            // The kernel's request limit is exhausted.
+
+        // Without a direct descriptor (the filesystem rejects direct I/O, or a transient open
+        // failure) or a context (the kernel's request limit is exhausted), the submission is
+        // served one blocking task per read, as read_at would.
+        let Some(direct) = open_direct(file) else {
             return read_positioned_each(file, pool, batch, tx);
         };
-        match submit(file, pool, ctx, batch, tx) {
+        let Some(ctx) = take_context() else {
+            return read_positioned_each(file, pool, batch, tx);
+        };
+        match submit(file, &direct, pool, ctx, batch, tx) {
             Ok(ctx) => contexts().lock().push(ctx),
             Err(err) => {
                 let _ = tx.send(Err(err));
@@ -415,7 +430,7 @@ mod aio {
             let (blob, _) = storage.open("partition", b"blob").await.unwrap();
             blob.write_at(0, data, WriteOptions::SYNC).await.unwrap();
             assert!(
-                direct(&blob.shared).is_some(),
+                open_direct(&blob.shared).is_some(),
                 "temporary directory must support O_DIRECT"
             );
             (storage, blob, directory)
@@ -454,7 +469,8 @@ mod aio {
                     },
                 ];
                 let ctx = take_context().unwrap();
-                assert!(submit(&blob.shared, &pool, ctx, batch, &tx).is_err());
+                let direct = open_direct(&blob.shared).unwrap();
+                assert!(submit(&blob.shared, &direct, &pool, ctx, batch, &tx).is_err());
 
                 let canary = Aligned::new(LEN + ALIGN).unwrap();
                 // SAFETY: `canary` owns `canary.len` writable bytes.
@@ -500,7 +516,8 @@ mod aio {
                     thread_tx.send(unsafe { libc::pthread_self() }).unwrap();
                     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                     let ctx = take_context().unwrap();
-                    let result = submit(&shared, &pool(), ctx, batch, &tx);
+                    let direct = open_direct(&shared).unwrap();
+                    let result = submit(&shared, &direct, &pool(), ctx, batch, &tx);
                     done.store(true, Ordering::Release);
                     (result.is_ok(), rx.try_recv().ok(), rx.try_recv().is_err())
                 })
@@ -621,10 +638,9 @@ struct Shared {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: AtomicBool,
-    /// Descriptor for direct I/O on the same inode, opened on first use. `None` once the
-    /// filesystem has rejected direct I/O.
+    /// Whether the filesystem has rejected direct I/O on this file, so batched reads skip it.
     #[cfg(target_os = "linux")]
-    direct: OnceLock<Option<File>>,
+    direct_unsupported: AtomicBool,
     #[cfg(test)]
     test: Hooks,
 }
@@ -813,7 +829,7 @@ impl Blob {
             promise: OnceLock::new(),
             dont_cache_supported: AtomicBool::new(true),
             #[cfg(target_os = "linux")]
-            direct: OnceLock::new(),
+            direct_unsupported: AtomicBool::new(false),
             #[cfg(test)]
             test: Hooks::default(),
         });
@@ -1049,7 +1065,9 @@ impl crate::Blob for Blob {
         // page cache holds. Its concurrency assumes filesystem-native direct I/O (such as ext4
         // or XFS): a filesystem that serves direct I/O through a buffered fallback stays correct
         // but completes each submission's reads one at a time.
-        if options.contains(ReadOptions::DONT_CACHE) && aio::direct(&self.shared).is_some() {
+        if options.contains(ReadOptions::DONT_CACHE)
+            && !self.shared.direct_unsupported.load(Ordering::Relaxed)
+        {
             let mut reads = Vec::with_capacity(ranges.len());
             for (index, &(offset, len)) in ranges.iter().enumerate() {
                 let Some(offset) = offset.checked_add(self.data_offset) else {
@@ -1831,7 +1849,7 @@ mod tests {
             blob.write_at(0, b"data", WriteOptions::SYNC).await.unwrap();
             blob
         });
-        if aio::direct(&blob.shared).is_none() {
+        if aio::open_direct(&blob.shared).is_none() {
             drop(blob);
             runtime.block_on(storage.remove("partition", None)).unwrap();
             drop(storage);
@@ -1862,7 +1880,7 @@ mod tests {
 
         // Only some filesystems (such as tmpfs) hold a file this large and serve direct I/O.
         let len = i64::MAX as u64 - blob.data_offset;
-        if blob.resize(len).await.is_err() || aio::direct(&blob.shared).is_none() {
+        if blob.resize(len).await.is_err() || aio::open_direct(&blob.shared).is_none() {
             drop(blob);
             storage.remove("partition", None).await.unwrap();
             drop(storage);
@@ -1906,7 +1924,7 @@ mod tests {
         let (storage, directory) = storage_for_reopen_test("read_many_large", Layout::ALL);
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         assert!(
-            aio::direct(&blob.shared).is_some(),
+            aio::open_direct(&blob.shared).is_some(),
             "temporary directory must support O_DIRECT"
         );
 
@@ -1943,7 +1961,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            aio::direct(&blob.shared).is_some(),
+            aio::open_direct(&blob.shared).is_some(),
             "temporary directory must support O_DIRECT"
         );
 
