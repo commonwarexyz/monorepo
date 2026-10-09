@@ -232,12 +232,57 @@ jobs:
           fi
           echo "All tests passed successfully!"
 
-  conformance:
-    # Run conformance tests on multiple architectures to catch platform-specific
-    # encoding differences.
-    name: "Breaking Changes (${{ matrix.name }}) (partition: ${{ matrix.partition }}/8)"
+  # Each architecture builds the conformance tests once, checks that every fixture still has a
+  # test, and archives the tests for the partitions below.
+  Conformance-Build:
+    name: "Breaking Changes (${{ matrix.name }}) (build)"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    strategy:
+      matrix:
+        include:
+          - name: x86_64
+            os: ubuntu-latest
+          - name: arm64
+            os: ubuntu-24.04-arm
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
+    - name: Run setup
+      uses: ./.github/actions/setup
+      with:
+        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+    - name: Install just & nextest
+      uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+      with:
+        tool: just@1.43.0,cargo-nextest@0.9.133
+    - name: Check conformance fixtures
+      run: just check-conformance-fixtures
+    - name: Build and archive conformance tests
+      run: cargo nextest archive --features arbitrary --archive-file "$RUNNER_TEMP/conformance.tar.zst"
+    - name: Upload conformance tests
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      with:
+        name: conformance-${{ matrix.name }}
+        path: ${{ runner.temp }}/conformance.tar.zst
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 1
+        overwrite: true
+
+  conformance:
+    # Run conformance tests on multiple architectures to catch platform-specific
+    # encoding differences. The tests read and update each crate's conformance.toml at the build
+    # job's checkout path, which is the same for every job on a runner image.
+    name: "Breaking Changes (${{ matrix.name }}) (partition: ${{ matrix.partition }}/8)"
+    needs: Conformance-Build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       matrix:
         name: [x86_64, arm64]
@@ -252,20 +297,22 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Configure swap
       uses: ./.github/actions/swap
-    - name: Run setup
-      uses: ./.github/actions/setup
-      with:
-        rust-cache-save: ${{ matrix.partition == 1 }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
-    - name: Install just
+    - name: Install nextest
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
-        tool: just@1.43.0,cargo-nextest@0.9.133
+        tool: cargo-nextest@0.9.133
+    - name: Download conformance tests
+      uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+      with:
+        name: conformance-${{ matrix.name }}
+        path: ${{ runner.temp }}
     - name: Run conformance tests
-      run: just test-conformance --partition hash:${{ matrix.partition }}/8 && git diff --exit-code
+      run: >-
+        cargo-nextest nextest run --archive-file "$RUNNER_TEMP/conformance.tar.zst"
+        --workspace-remap "$GITHUB_WORKSPACE" --profile conformance
+        --partition hash:${{ matrix.partition }}/8
+    - name: Check fixtures are unchanged
+      run: git diff --exit-code
 
   Conformance-Gate:
     name: "Breaking Changes"

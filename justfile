@@ -203,14 +203,20 @@ fix-features:
 
 # Test conformance (optionally for specific crates: just test-conformance -p commonware-codec)
 test-conformance *args='':
-    just _conformance check {{ args }}
+    just check-conformance-fixtures {{ args }}
+    just test --features arbitrary --profile conformance {{ args }}
+
+# Check that every conformance fixture still has a test (optionally for specific crates: just check-conformance-fixtures -p commonware-codec)
+check-conformance-fixtures *args='':
+    just _conformance-fixtures check {{ args }}
 
 # Regenerate conformance fixtures (optionally for specific crates: just regenerate-conformance -p commonware-codec)
 regenerate-conformance *args='':
-    RUSTFLAGS="--cfg generate_conformance_tests" just _conformance prune {{ args }}
+    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}
+    RUSTFLAGS="--cfg generate_conformance_tests" just _conformance-fixtures prune {{ args }}
 
 [private]
-_conformance mode *args='':
+_conformance-fixtures mode *args='':
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -218,16 +224,7 @@ _conformance mode *args='':
     trap 'rm -f "$inventory"' EXIT
 
     cargo nextest list --features arbitrary --profile conformance --message-format json {{ args }} > "$inventory"
-
-    if [[ "{{ mode }}" == "check" ]]; then
-        cargo run --quiet -p commonware-conformance-macros --features fixtures --bin fixtures -- check < "$inventory"
-    fi
-
-    just test --features arbitrary --profile conformance {{ args }}
-
-    if [[ "{{ mode }}" == "prune" ]]; then
-        cargo run --quiet -p commonware-conformance-macros --features fixtures --bin fixtures -- prune < "$inventory"
-    fi
+    cargo run --quiet -p commonware-conformance-macros --features fixtures --bin fixtures -- {{ mode }} < "$inventory"
 
 # Find public items missing stability annotations.
 unstable-public *args='':
