@@ -247,6 +247,16 @@ pub struct ValidatorSetup<H: TestHarness> {
     pub actor_handle: commonware_runtime::Handle<()>,
 }
 
+impl<H: TestHarness> ValidatorSetup<H> {
+    /// Aborts the marshal actor and releases the validator's storage, as a crash would, so a
+    /// later setup can reopen the same partition.
+    pub async fn crash(self) {
+        self.actor_handle.abort();
+        let Self { actor_handle, .. } = self;
+        let _ = actor_handle.await;
+    }
+}
+
 /// Per-validator handle for test operations.
 pub struct ValidatorHandle<H: TestHarness> {
     pub mailbox: Mailbox<S, H::Variant>,

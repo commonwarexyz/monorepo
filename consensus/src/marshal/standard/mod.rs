@@ -3743,6 +3743,10 @@ mod tests {
     /// cannot be notarized, and the restarted leader builds a fresh one on the recovered
     /// context whatever the stored block's own context says. The relay persist stores the
     /// fresh block beside the stale one, and certification resolves through it.
+    ///
+    /// Both blocks must then survive another restart. Reading them back afterwards checks
+    /// storage itself, since the in-memory cache that serves a block right after it is sent
+    /// does not survive the restart.
     #[test_traced("WARN")]
     fn test_propose_rebuilds_after_restart() {
         for kind in wrapper_kinds() {
@@ -3769,17 +3773,13 @@ mod tests {
 
                 // Before the crash, the relay broadcast of a block built on a parent that
                 // replay has since replaced persisted it at the round.
-                let pre_setup = StandardHarness::setup_validator(
+                let setup = StandardHarness::setup_validator(
                     context.child("validator").with_attribute("index", 0),
                     &mut oracle,
                     me.clone(),
                     ConstantProvider::new(schemes[0].clone()),
                 )
                 .await;
-                let pre_marshal = pre_setup.mailbox;
-                let pre_actor = pre_setup.actor_handle;
-                let pre_extra = pre_setup.extra;
-                let pre_application = pre_setup.application;
                 let stale = B::new::<Sha256>(
                     Ctx {
                         round,
@@ -3791,25 +3791,20 @@ mod tests {
                     100,
                 );
                 let stale_digest = stale.digest();
-                assert!(pre_marshal.verified(round, stale).await);
+                let (ack, persisted) = oneshot::channel();
+                let _ = setup.mailbox.proposed(round, stale, Recipients::All, ack);
+                let sync = persisted.await.expect("stale block sync handle missing");
+                assert!(sync.durable(round, "stale block").await);
+                setup.crash().await;
 
-                // Crash: abort the actor and release the storage partition before reopening.
-                pre_actor.abort();
-                let _ = pre_actor.await;
-                drop(pre_marshal);
-                drop(pre_extra);
-                drop(pre_application);
-
-                let post_setup = StandardHarness::setup_validator(
-                    context
-                        .child("validator_restart")
-                        .with_attribute("index", 0),
+                let setup = StandardHarness::setup_validator(
+                    context.child("restarted").with_attribute("index", 0),
                     &mut oracle,
                     me.clone(),
                     ConstantProvider::new(schemes[0].clone()),
                 )
                 .await;
-                let marshal = post_setup.mailbox;
+                let marshal = setup.mailbox.clone();
                 assert_eq!(
                     marshal
                         .get_verified(round)
@@ -3828,12 +3823,8 @@ mod tests {
                 let fresh_digest = fresh.digest();
                 let app: MockVerifyingApp<B, S> =
                     MockVerifyingApp::new().with_propose_result(fresh);
-                let mut wrapper = Wrapper::new(
-                    kind,
-                    context.child("wrapper_under_test"),
-                    app,
-                    marshal.clone(),
-                );
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("wrapper"), app, marshal.clone());
                 let digest = wrapper
                     .propose(ctx)
                     .await
@@ -3861,9 +3852,31 @@ mod tests {
                     Some(stale_digest),
                     "{kind:?}: the stale block stays stored first at the round"
                 );
+                setup.crash().await;
+
+                let setup = StandardHarness::setup_validator(
+                    context.child("recovered").with_attribute("index", 0),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                for (label, digest) in [("stale", stale_digest), ("fresh", fresh_digest)] {
+                    assert!(
+                        setup.mailbox.get_block(&digest).await.is_some(),
+                        "{kind:?}: the {label} block must be recoverable from storage"
+                    );
+                }
+                let app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+                let mut certifier =
+                    Wrapper::new(kind, context.child("certifier"), app, setup.mailbox.clone());
                 assert!(
-                    marshal.get_block(&fresh_digest).await.is_some(),
-                    "{kind:?}: the fresh block must be stored beside the stale one"
+                    certifier
+                        .certify(round, fresh_digest)
+                        .await
+                        .await
+                        .expect("certify result missing"),
+                    "{kind:?}: the fresh block must certify from storage after a restart"
                 );
             });
         }

@@ -76,7 +76,7 @@ mod tests {
                 },
             },
             config::{Config, Start},
-            core::{self, Processed},
+            core::{self, Processed, durability::Durable as _},
             mocks::{
                 application::Application,
                 harness::{
@@ -4928,6 +4928,10 @@ mod tests {
     /// the same checks as an ordinary proposal and answers under the
     /// application's decision. The relay persist stores the fresh block beside
     /// the stale one.
+    ///
+    /// Both blocks must then survive another restart. Reading them back
+    /// afterwards checks storage itself, since the in-memory cache that serves
+    /// a block right after it is sent does not survive the restart.
     #[test_traced("WARN")]
     fn test_propose_rebuilds_despite_verified_block_on_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -4954,8 +4958,6 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
-            let marshal = setup.mailbox;
-            let shards = setup.extra;
 
             let genesis_ctx = CodingCtx {
                 round: Round::zero(),
@@ -4982,10 +4984,34 @@ mod tests {
                 ),
             };
             let stale = make_coding_block(stale_ctx, genesis.digest(), Height::new(1), 100);
+            let stale_digest = stale.digest();
             let coded_stale: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
                 CodedBlock::new(stale, coding_config, &Sequential);
             let stale_commitment = coded_stale.commitment();
-            assert!(marshal.verified(round, coded_stale).await);
+            let (ack, persisted) = oneshot::channel();
+            let _ = setup
+                .mailbox
+                .proposed(round, coded_stale, Recipients::All, ack);
+            let sync = persisted.await.expect("stale block sync handle missing");
+            assert!(sync.durable(round, "stale block").await);
+            setup.crash().await;
+
+            let setup = CodingHarness::setup_validator(
+                context.child("restarted").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox.clone();
+            assert_eq!(
+                marshal
+                    .get_verified(round)
+                    .await
+                    .map(|block| block.commitment()),
+                Some(stale_commitment),
+                "the restarted marshal must restore the stale block"
+            );
 
             let ctx = CodingCtx {
                 round,
@@ -5006,7 +5032,7 @@ mod tests {
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
-                shards: shards.clone(),
+                shards: setup.extra.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
@@ -5041,9 +5067,37 @@ mod tests {
                 Some(stale_commitment),
                 "the stale block stays stored first at the round"
             );
+            setup.crash().await;
+
+            let setup = CodingHarness::setup_validator(
+                context.child("recovered").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            for (label, digest) in [("stale", stale_digest), ("fresh", fresh_digest)] {
+                assert!(
+                    setup.mailbox.get_block(&digest).await.is_some(),
+                    "the {label} block must be recoverable from storage"
+                );
+            }
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new(),
+                marshal: setup.mailbox.clone(),
+                shards: setup.extra.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut certifier = Marshaled::new(context.child("certifier"), cfg);
             assert!(
-                marshal.get_block(&fresh_digest).await.is_some(),
-                "the fresh block must be stored beside the stale one"
+                certifier
+                    .certify(round, fresh_commitment)
+                    .await
+                    .await
+                    .expect("certify result missing"),
+                "the fresh block must certify from storage after a restart"
             );
         });
     }
