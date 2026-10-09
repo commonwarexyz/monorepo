@@ -485,3 +485,149 @@ pub fn arm_v9<N: ArmV9, E: ArmV9>(n: N, e: E, u: &mut Unstructured<'_>) -> arbit
     );
     Ok(())
 }
+
+#[cfg(all(test, not(miri)))]
+mod tests {
+    use super::{bytes, words};
+    use crate::Simd;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    fn memory_contracts<S: Simd>(simd: S) {
+        for len in 0..S::U8_LANES {
+            let mut output = [0xa5; 66];
+            assert!(catch_unwind(AssertUnwindSafe(|| simd.u8_load(&output[1..1 + len]))).is_err());
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    simd.u8_store(simd.u8_splat(0), &mut output[1..1 + len]);
+                }))
+                .is_err()
+            );
+            assert_eq!(output, [0xa5; 66]);
+        }
+        for len in 0..S::U32_LANES {
+            let mut output = [0xa5a5_a5a5; 18];
+            assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_load(&output[1..1 + len]))).is_err());
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    simd.u32_store(simd.u32_splat(0), &mut output[1..1 + len]);
+                }))
+                .is_err()
+            );
+            assert_eq!(output, [0xa5a5_a5a5; 18]);
+        }
+        for len in 0..S::U64_LANES {
+            let mut output = [0xa5a5_a5a5_a5a5_a5a5; 10];
+            assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_load(&output[1..1 + len]))).is_err());
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    simd.u64_store(simd.u64_splat(0), &mut output[1..1 + len]);
+                }))
+                .is_err()
+            );
+            assert_eq!(output, [0xa5a5_a5a5_a5a5_a5a5; 10]);
+        }
+
+        let input: [u8; 66] = core::array::from_fn(|i| (i as u8).wrapping_mul(73));
+        let value = simd.u8_load(&input[1..]);
+        for len in 0..=S::U8_LANES {
+            let mut expected = [0xa5; 66];
+            expected[1..1 + S::U8_LANES].fill(0);
+            expected[1..1 + len].copy_from_slice(&input[1..1 + len]);
+            assert_eq!(
+                bytes(simd, simd.u8_load_partial(&input[1..1 + len])),
+                expected
+            );
+            let mut output = [0xa5; 66];
+            simd.u8_store_partial(value, &mut output[1..1 + len]);
+            expected[1 + len..1 + S::U8_LANES].fill(0xa5);
+            assert_eq!(output, expected);
+        }
+        for len in [S::U8_LANES + 1, 65] {
+            let mut output = [0xa5; 66];
+            assert!(
+                catch_unwind(AssertUnwindSafe(
+                    || simd.u8_load_partial(&output[1..1 + len])
+                ))
+                .is_err()
+            );
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    simd.u8_store_partial(value, &mut output[1..1 + len]);
+                }))
+                .is_err()
+            );
+            assert_eq!(output, [0xa5; 66]);
+        }
+    }
+
+    fn permutation_contracts<S: Simd>(simd: S) {
+        let a: [u32; 16] = core::array::from_fn(|i| 0xa000_0000 + i as u32);
+        let b: [u32; 16] = core::array::from_fn(|i| 0xb000_0000 + i as u32);
+        let av = simd.u32_load(&a);
+        let bv = simd.u32_load(&b);
+        for source in 0..2 * S::U32_LANES {
+            let mut indices = [usize::MAX; 17];
+            let mut expected = [0xa5a5_a5a5; 18];
+            for i in 0..S::U32_LANES {
+                indices[i] = (source + i) % S::U32_LANES;
+                expected[i + 1] = a[indices[i]];
+            }
+            assert_eq!(words(simd, simd.u32_permute(av, &indices)), expected);
+            for i in 0..S::U32_LANES {
+                indices[i] = (source + i) % (2 * S::U32_LANES);
+                expected[i + 1] = if indices[i] < S::U32_LANES {
+                    a[indices[i]]
+                } else {
+                    b[indices[i] - S::U32_LANES]
+                };
+            }
+            assert_eq!(words(simd, simd.u32_permute2(av, bv, &indices)), expected);
+        }
+        for len in 0..S::U32_LANES {
+            let indices = [0; 16];
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| simd.u32_permute(av, &indices[..len]))).is_err()
+            );
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| simd.u32_permute2(
+                    av,
+                    bv,
+                    &indices[..len]
+                )))
+                .is_err()
+            );
+        }
+        for lane in 0..S::U32_LANES {
+            for invalid in [S::U32_LANES, usize::MAX] {
+                let mut indices = [0; 16];
+                indices[lane] = invalid;
+                assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_permute(av, &indices))).is_err());
+                indices[lane] = invalid.saturating_mul(2);
+                assert!(
+                    catch_unwind(AssertUnwindSafe(|| simd.u32_permute2(av, bv, &indices))).is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_input_contracts() {
+        fn check<S: Simd>(simd: S) {
+            memory_contracts(simd);
+            permutation_contracts(simd);
+        }
+        #[cfg(target_arch = "x86_64")]
+        if let Some(simd) = crate::native::NativeIceLake::new() {
+            check(simd);
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if let Some(simd) = crate::native::NativeNeon::new() {
+                check(simd);
+            }
+            if let Some(simd) = crate::native::NativeArmV9::new() {
+                check(simd);
+            }
+        }
+    }
+}
