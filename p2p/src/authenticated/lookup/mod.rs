@@ -161,6 +161,7 @@
 //! let p2p_cfg = lookup::Config::local(
 //!     Cups::<_, ChaCha20Poly1305>::new(
 //!         Sake {
+//!             kem: commonware_cryptography::handshake::sake::X25519,
 //!             signer: signer.clone(),
 //!             synchrony_bound: Duration::from_secs(5),
 //!             max_handshake_age: Duration::from_secs(10),
@@ -2395,6 +2396,7 @@ mod tests {
             self.authenticate().await?;
             let (sender, receiver) = Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
+                    kem: commonware_cryptography::handshake::sake::X25519,
                     signer: self.transport_signer,
                     synchrony_bound: Duration::from_secs(5),
                     max_handshake_age: Duration::from_secs(10),
@@ -2442,6 +2444,7 @@ mod tests {
             let handshake = self.clone();
             let (transport_peer, sender, receiver) = Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
+                    kem: commonware_cryptography::handshake::sake::X25519,
                     signer: self.transport_signer.clone(),
                     synchrony_bound: Duration::from_secs(5),
                     max_handshake_age: Duration::from_secs(10),

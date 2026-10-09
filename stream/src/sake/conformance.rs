@@ -6,7 +6,9 @@ use crate::{
     sake::{self, Sake},
 };
 use commonware_conformance::{Conformance, conformance_tests};
-use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
+use commonware_cryptography::{
+    ChaCha20Poly1305, Kem, Signer as _, ed25519::PrivateKey, handshake::sake::X25519,
+};
 use commonware_runtime::{
     Clock as _, Error, IoBufs, Runner as _, Sink, Spawner as _, Supervisor as _, deterministic,
     mocks,
@@ -49,7 +51,7 @@ impl Sink for Tap {
 /// in both directions, so it pins the handshake and the record format of each version.
 /// Ephemeral keys and timestamps come from the deterministic runtime, so a change to its scheduling
 /// can also move the log.
-fn exchange(seed: u64, sake: sake::Version, cups: cups::Version) -> Vec<u8> {
+fn exchange<K: Kem + Default>(seed: u64, sake: sake::Version, cups: cups::Version) -> Vec<u8> {
     let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(seed));
     runner.start(|mut context| async move {
         // Start at a seeded time so handshake timestamps have nonzero upper bytes.
@@ -75,6 +77,7 @@ fn exchange(seed: u64, sake: sake::Version, cups: cups::Version) -> Vec<u8> {
         // Complete the handshake.
         let listener_handshake = Cups::<_, ChaCha20Poly1305>::new(
             Sake {
+                kem: K::default(),
                 signer: listener.clone(),
                 synchrony_bound: Duration::from_secs(5),
                 max_handshake_age: Duration::from_secs(10),
@@ -96,6 +99,7 @@ fn exchange(seed: u64, sake: sake::Version, cups: cups::Version) -> Vec<u8> {
         });
         let (mut dialer_tx, mut dialer_rx) = Cups::<_, ChaCha20Poly1305>::new(
             Sake {
+                kem: K::default(),
                 signer: dialer,
                 synchrony_bound: Duration::from_secs(5),
                 max_handshake_age: Duration::from_secs(10),
@@ -146,7 +150,7 @@ struct CupsV0;
 
 impl Conformance for CupsV0 {
     async fn commit(seed: u64) -> Vec<u8> {
-        exchange(seed, sake::Version::V0, cups::Version::V0)
+        exchange::<X25519>(seed, sake::Version::V0, cups::Version::V0)
     }
 }
 
@@ -155,7 +159,7 @@ struct CupsV1;
 
 impl Conformance for CupsV1 {
     async fn commit(seed: u64) -> Vec<u8> {
-        exchange(seed, sake::Version::V1, cups::Version::V1)
+        exchange::<X25519>(seed, sake::Version::V1, cups::Version::V1)
     }
 }
 
@@ -164,7 +168,7 @@ struct SakeV0CupsV1;
 
 impl Conformance for SakeV0CupsV1 {
     async fn commit(seed: u64) -> Vec<u8> {
-        exchange(seed, sake::Version::V0, cups::Version::V1)
+        exchange::<X25519>(seed, sake::Version::V0, cups::Version::V1)
     }
 }
 
@@ -173,7 +177,7 @@ struct SakeV1CupsV0;
 
 impl Conformance for SakeV1CupsV0 {
     async fn commit(seed: u64) -> Vec<u8> {
-        exchange(seed, sake::Version::V1, cups::Version::V0)
+        exchange::<X25519>(seed, sake::Version::V1, cups::Version::V0)
     }
 }
 
@@ -182,4 +186,39 @@ conformance_tests! {
     CupsV1 => 256,
     SakeV0CupsV1 => 256,
     SakeV1CupsV0 => 256,
+}
+
+#[cfg(not(any(
+    commonware_stability_BETA,
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
+mod ml_kem {
+    use super::*;
+    use commonware_cryptography::ml_kem::MlKem768;
+
+    /// Pins an ML-KEM SAKE V0 connection carrying CUPS V0 records.
+    struct MlKemCupsV0;
+
+    impl Conformance for MlKemCupsV0 {
+        async fn commit(seed: u64) -> Vec<u8> {
+            exchange::<MlKem768>(seed, sake::Version::V0, cups::Version::V0)
+        }
+    }
+
+    /// Pins an ML-KEM SAKE V1 connection carrying CUPS V1 records.
+    struct MlKemCupsV1;
+
+    impl Conformance for MlKemCupsV1 {
+        async fn commit(seed: u64) -> Vec<u8> {
+            exchange::<MlKem768>(seed, sake::Version::V1, cups::Version::V1)
+        }
+    }
+
+    conformance_tests! {
+        MlKemCupsV0 => 64,
+        MlKemCupsV1 => 64,
+    }
 }

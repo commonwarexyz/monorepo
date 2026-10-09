@@ -62,6 +62,9 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod lthash;
     pub use crate::lthash::LtHash;
 
+    pub mod ml_dsa;
+    pub mod ml_kem;
+
     pub mod reed_solomon;
 
     pub mod sha512;
@@ -357,6 +360,48 @@ commonware_macros::stability_scope!(BETA {
         /// Consume the hasher, returning a freshly-reset hasher alongside the
         /// digest of everything written so far.
         fn finalize(self) -> (Self, Self::Digest);
+    }
+
+    /// A key encapsulation mechanism for authenticated key exchange.
+    ///
+    /// Callers must authenticate encapsulation keys and ciphertexts. IND-CCA2 mechanisms
+    /// additionally protect against chosen-ciphertext attacks without that authentication.
+    /// All randomness comes from the supplied RNG, making operations reproducible with a
+    /// deterministic RNG. Decapsulation keys and returned shared secrets zeroize on drop.
+    /// Rejected keys or ciphertexts return `None`. Mechanisms with implicit rejection instead
+    /// return an unrelated secret for an invalid ciphertext; callers must confirm the secret
+    /// before accepting it.
+    pub trait Kem: Clone + core::fmt::Debug + Send + Sync + 'static {
+        /// Secret key used to decapsulate a single exchange.
+        type DecapsulationKey: zeroize::ZeroizeOnDrop + Send + 'static;
+
+        /// Public key, with a validated fixed-size encoding.
+        type EncapsulationKey: Clone + core::fmt::Debug + Eq + Send + Sync
+            + commonware_codec::CodecFixed<Cfg = ()>;
+
+        /// Encapsulated shared secret, with a fixed-size encoding.
+        type Ciphertext: Clone + core::fmt::Debug + Eq + Send + Sync
+            + commonware_codec::CodecFixed<Cfg = ()>;
+
+        /// Flat secret bytes without pointers, protected by [Secret].
+        type SharedSecret: AsRef<[u8]> + Send + 'static;
+
+        /// Generates a fresh decapsulation key and its public encapsulation key.
+        fn generate(&self, rng: impl CryptoRng) -> (Self::DecapsulationKey, Self::EncapsulationKey);
+
+        /// Encapsulates a fresh shared secret for `ek`, or returns `None` if the key is rejected.
+        fn encapsulate(
+            &self,
+            rng: impl CryptoRng,
+            ek: &Self::EncapsulationKey,
+        ) -> Option<(Self::Ciphertext, Secret<Self::SharedSecret>)>;
+
+        /// Consumes `dk` to decapsulate `ct`, or returns `None` if the ciphertext is rejected.
+        fn decapsulate(
+            &self,
+            dk: Self::DecapsulationKey,
+            ct: &Self::Ciphertext,
+        ) -> Option<Secret<Self::SharedSecret>>;
     }
 
     /// Authenticated encryption of an ordered sequence of messages.
@@ -691,6 +736,58 @@ mod tests {
     fn test_secp256r1_recoverable_len() {
         assert_eq!(secp256r1::recoverable::PublicKey::SIZE, 33);
         assert_eq!(secp256r1::recoverable::Signature::SIZE, 65);
+    }
+
+    #[test]
+    fn test_ml_dsa_validate() {
+        test_validate::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_public_key_order() {
+        test_public_key_order::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_validate_invalid_public_key() {
+        test_validate_invalid_public_key::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_sign_and_verify() {
+        test_sign_and_verify::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_sign_and_verify_wrong_message() {
+        test_sign_and_verify_wrong_message::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_sign_and_verify_wrong_namespace() {
+        test_sign_and_verify_wrong_namespace::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_empty_namespace() {
+        test_empty_namespace::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_signature_determinism() {
+        test_signature_determinism::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_invalid_signature_publickey_pair() {
+        test_invalid_signature_publickey_pair::<crate::ml_dsa::PrivateKey>();
+    }
+
+    #[test]
+    fn test_ml_dsa_len() {
+        assert_eq!(crate::ml_dsa::PrivateKey::SIZE, 32);
+        assert_eq!(crate::ml_dsa::PublicKey::SIZE, 1952);
+        assert_eq!(crate::ml_dsa::Signature::SIZE, 3309);
     }
 
     fn test_hasher_multiple_runs<H: Hasher>() {

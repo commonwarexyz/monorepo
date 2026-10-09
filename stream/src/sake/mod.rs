@@ -20,8 +20,8 @@
 //!
 //! # Configuration
 //!
-//! Peers must agree on an application-specific namespace and a SAKE [Version]. Neither is
-//! negotiated.
+//! Peers must agree on an application-specific namespace, KEM, and SAKE [Version]. These are
+//! not negotiated.
 //!
 //! Each peer samples its local clock when constructing its SAKE context. The dialer does so
 //! before sending `Syn`, and the listener after receiving `Syn`. Peer timestamps must lie in

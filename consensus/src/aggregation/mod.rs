@@ -19,6 +19,9 @@
 //! - [`secp256r1`][scheme::secp256r1]: Attributable signatures with individual verification.
 //!   HSM-friendly, no trusted setup required. Certificates contain individual signatures.
 //!
+//! - [`ml_dsa`][scheme::ml_dsa]: Attributable signatures with individual verification.
+//!   Post-quantum secure (FIPS 204). Certificates contain individual signatures.
+//!
 //! - [`bls12381_multisig`][scheme::bls12381_multisig]: Attributable signatures with aggregated
 //!   verification. Produces compact certificates while preserving signer attribution.
 //!
@@ -99,7 +102,9 @@ cfg_if::cfg_if! {
 mod tests {
     use super::{Config, Engine, mocks};
     use crate::{
-        aggregation::scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
+        aggregation::scheme::{
+            Scheme, bls12381_multisig, bls12381_threshold, ed25519, ml_dsa, secp256r1,
+        },
         types::{Epoch, EpochDelta, Height, HeightDelta},
     };
     use commonware_cryptography::{
@@ -138,6 +143,7 @@ mod tests {
             $cb!($($args)*, bls12381_multisig_min_pk, bls12381_multisig::fixture::<MinPk, _>);
             $cb!($($args)*, bls12381_multisig_min_sig, bls12381_multisig::fixture::<MinSig, _>);
             $cb!($($args)*, ed25519, ed25519::fixture);
+            $cb!($($args)*, ml_dsa, ml_dsa::fixture);
             $cb!($($args)*, secp256r1, secp256r1::fixture);
         };
     }

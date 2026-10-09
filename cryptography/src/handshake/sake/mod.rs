@@ -1,16 +1,18 @@
 //! Simple Authenticated Key Exchange (SAKE).
 //!
 //! SAKE establishes a shared secret [Transcript](crate::transcript::Transcript) from signed
-//! ephemeral X25519 keys. It uses BLAKE3 and identity signatures from any [Signer](crate::Signer).
+//! ephemeral [KEM](crate::Kem) keys. It uses BLAKE3 and identity signatures from any
+//! [Signer](crate::Signer). [X25519] is the default KEM; ML-KEM-768 is the post-quantum option
+//! in the `ml_kem` module.
 //!
 //! _This construction is unrelated to [EAP-SAKE] or the [symmetric-key SAKE] protocol._
 //!
 //! # Protocol
 //!
 //! Each peer supplies a [Context] with an application namespace, its signer, the expected peer
-//! identity, a local timestamp, an accepted peer timestamp range, and a [Version]. Timestamps
+//! identity, a local timestamp, an accepted peer timestamp range, a KEM, and a [Version]. Timestamps
 //! are in milliseconds. Let `D` and `L` be the public identities, `t_D` and `t_L` their
-//! timestamps, and `X` and `Y` their fresh ephemeral public keys.
+//! timestamps, `X` the dialer's fresh encapsulation key, and `Y` the listener's ciphertext.
 //!
 //! ```text
 //! Dialer                                       Listener
@@ -21,9 +23,10 @@
 //!
 //! 1. [dial_start] generates `X` and signs the initial transcript to produce [Syn].
 //! 2. [listen_start] checks `t_D` against the accepted range and verifies `sig_D` before
-//!    generating `Y` and signing the extended transcript. It rejects a non-contributory X25519
-//!    exchange, commits the shared secret, and returns [SynAck] with its key confirmation.
-//! 3. [dial_end] checks `t_L`, verifies `sig_L`, and performs the same exchange. It rejects a
+//!    encapsulating a fresh secret as `Y` and signing the extended transcript. It rejects a
+//!    non-contributory exchange, commits the shared secret, and returns [SynAck] with its key
+//!    confirmation.
+//! 3. [dial_end] checks `t_L`, verifies `sig_L`, and decapsulates `Y`. It rejects a
 //!    non-contributory result or incorrect listener confirmation, then returns [Ack] and the
 //!    secret transcript. The dialer must send [Ack] before application data.
 //! 4. [listen_end] verifies the dialer's confirmation before returning the same secret
@@ -40,7 +43,7 @@
 //! |-------|-----------|-----------|
 //! | Before `sig_D` | `t_D, L, X` | `t_D, L, D, X` |
 //! | Before `sig_L` | `t_D, L, X, D, t_L, Y` | `t_D, L, D, X, t_L, Y` |
-//! | Before confirmation | Append the X25519 shared secret | Append the X25519 shared secret |
+//! | Before confirmation | Append the KEM shared secret | Append the KEM shared secret |
 //!
 //! From the final transcript `T`, the confirmations are
 //! `T.fork(b"confirmation_l2d").summarize()` and `T.fork(b"confirmation_d2l").summarize()`.
@@ -49,8 +52,8 @@
 //!
 //! # Versions
 //!
-//! Both peers must use the same [Version]. Versions have identical message encodings but
-//! different signatures and secret transcripts. A mismatch fails signature verification.
+//! Both peers must use the same KEM and [Version]. Versions have identical message encodings but
+//! different signatures and secret transcripts. A version mismatch fails signature verification.
 //!
 //! - [Version::V0] uses `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` and
 //!   [transcript::Version::V0](crate::transcript::Version::V0). Its fixed packet schema makes
@@ -70,8 +73,10 @@
 //!
 //! Fresh ephemeral secrets provide forward secrecy against later compromise of the identity
 //! signing keys, provided the ephemeral secrets and secret transcript state have been erased.
-//! Protecting application messages requires a record protocol using keys derived from the
-//! transcript.
+//! ML-KEM-768 protects key agreement against quantum adversaries; authentication also requires
+//! a post-quantum signature scheme. Its implicit rejection yields an unrelated secret for an
+//! invalid ciphertext, which the confirmation rejects. Protecting application messages requires
+//! a record protocol using keys derived from the transcript.
 //!
 //! The construction does not hide identities or provide 0-RTT data or resumption. The transcript
 //! does not bind a cipher or record format. Peers must agree on them out of band.
@@ -84,6 +89,7 @@ mod error;
 pub use error::Error;
 
 mod exchange;
+pub use exchange::{EphemeralPublicKey, SecretKey, X25519};
 
 mod protocol;
 pub use protocol::{

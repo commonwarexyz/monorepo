@@ -1,9 +1,6 @@
-use super::{
-    Error,
-    exchange::{EphemeralPublicKey, SecretKey},
-};
+use super::{Error, X25519};
 use crate::{
-    PublicKey, Signature, Signer, Verifier,
+    Kem, PublicKey, Signature, Signer, Verifier,
     transcript::{self, Summary, Transcript},
 };
 use commonware_codec::{Buf, Encode, FixedSize, Mode, Read, ReadExt, Write, mode, modes};
@@ -71,82 +68,83 @@ impl Version {
 }
 
 /// First handshake message sent by the dialer.
-/// Contains the dialer's timestamp, ephemeral key, and transcript signature.
+/// Contains the dialer's timestamp, encapsulation key, and transcript signature.
 #[cfg_attr(test, derive(Debug, PartialEq))]
-pub struct Syn<S: Signature> {
+pub struct Syn<S: Signature, K: Kem = X25519> {
     time_ms: u64,
-    epk: EphemeralPublicKey,
+    ek: K::EncapsulationKey,
     sig: S,
 }
 
-impl<S: Signature> FixedSize for Syn<S> {
-    const SIZE: usize = u64::SIZE + EphemeralPublicKey::SIZE + S::SIZE;
+impl<S: Signature, K: Kem> FixedSize for Syn<S, K> {
+    const SIZE: usize = u64::SIZE + K::EncapsulationKey::SIZE + S::SIZE;
 }
 
-impl<S: Signature> Write for Syn<S> {
+impl<S: Signature, K: Kem> Write for Syn<S, K> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.time_ms.write(buf);
-        self.epk.write(buf);
+        self.ek.write(buf);
         self.sig.write(buf);
     }
 }
 
-impl<S: Signature> Read for Syn<S> {
+impl<S: Signature, K: Kem> Read for Syn<S, K> {
     type Cfg = S::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             time_ms: ReadExt::read(buf)?,
-            epk: ReadExt::read(buf)?,
+            ek: ReadExt::read(buf)?,
             sig: Read::read_cfg(buf, cfg)?,
         })
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S: Signature> arbitrary::Arbitrary<'_> for Syn<S>
+impl<S: Signature, K: Kem> arbitrary::Arbitrary<'_> for Syn<S, K>
 where
     S: for<'a> arbitrary::Arbitrary<'a>,
+    K::EncapsulationKey: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             time_ms: u.arbitrary()?,
-            epk: u.arbitrary()?,
+            ek: u.arbitrary()?,
             sig: u.arbitrary()?,
         })
     }
 }
 
 /// Second handshake message sent by the listener.
-/// Contains the listener's timestamp, ephemeral key, transcript signature, and confirmation tag.
+/// Contains the listener's timestamp, KEM ciphertext, transcript signature, and confirmation tag.
 #[cfg_attr(test, derive(Debug, PartialEq))]
-pub struct SynAck<S: Signature> {
+pub struct SynAck<S: Signature, K: Kem = X25519> {
     time_ms: u64,
-    epk: EphemeralPublicKey,
+    ct: K::Ciphertext,
     sig: S,
     confirmation: Summary,
 }
 
-impl<S: Signature> FixedSize for SynAck<S> {
-    const SIZE: usize = u64::SIZE + EphemeralPublicKey::SIZE + S::SIZE + Summary::SIZE;
+impl<S: Signature, K: Kem> FixedSize for SynAck<S, K> {
+    const SIZE: usize = u64::SIZE + K::Ciphertext::SIZE + S::SIZE + Summary::SIZE;
 }
 
-impl<S: Signature> Write for SynAck<S> {
+impl<S: Signature, K: Kem> Write for SynAck<S, K> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.time_ms.write(buf);
-        self.epk.write(buf);
+        self.ct.write(buf);
         self.sig.write(buf);
         self.confirmation.write(buf);
     }
 }
 
-impl<S: Signature> Read for SynAck<S> {
+impl<S: Signature, K: Kem> Read for SynAck<S, K> {
     type Cfg = S::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             time_ms: ReadExt::read(buf)?,
-            epk: ReadExt::read(buf)?,
+            ct: ReadExt::read(buf)?,
             sig: Read::read_cfg(buf, cfg)?,
             confirmation: ReadExt::read(buf)?,
         })
@@ -154,14 +152,15 @@ impl<S: Signature> Read for SynAck<S> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S: Signature> arbitrary::Arbitrary<'_> for SynAck<S>
+impl<S: Signature, K: Kem> arbitrary::Arbitrary<'_> for SynAck<S, K>
 where
     S: for<'a> arbitrary::Arbitrary<'a>,
+    K::Ciphertext: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             time_ms: u.arbitrary()?,
-            epk: u.arbitrary()?,
+            ct: u.arbitrary()?,
             sig: u.arbitrary()?,
             confirmation: u.arbitrary()?,
         })
@@ -197,9 +196,10 @@ impl Read for Ack {
 }
 
 /// State maintained by the dialer during handshake.
-/// Tracks ephemeral secret, peer identity, and protocol transcript.
-pub struct DialState<P> {
-    esk: SecretKey,
+/// Retains the decapsulation key, peer identity, and protocol transcript.
+pub struct DialState<P, K: Kem = X25519> {
+    kem: K,
+    dk: K::DecapsulationKey,
     peer_identity: P,
     transcript: Transcript,
     ok_timestamps: Range<u64>,
@@ -211,9 +211,10 @@ pub struct ListenState {
     transcript: Transcript,
 }
 
-/// Inputs that start a dialer or listener: the namespace, timing bounds, identities, and
+/// Inputs that start a dialer or listener: the namespace, timing bounds, identities, KEM, and
 /// [Version].
-pub struct Context<S, P> {
+pub struct Context<S, P, K: Kem = X25519> {
+    kem: K,
     version: Version,
     transcript: Transcript,
     current_time: u64,
@@ -222,16 +223,17 @@ pub struct Context<S, P> {
     peer_identity: P,
 }
 
-impl<S, P> Context<S, P> {
+impl<S, P, K: Kem> Context<S, P, K> {
     /// Creates a context from the application namespace, the local time, the accepted range of
-    /// peer timestamps (both in milliseconds), the local signer, the expected peer identity, and
-    /// the [Version].
+    /// peer timestamps (both in milliseconds), the local signer, the expected peer identity, the
+    /// KEM, and the [Version].
     pub fn new(
         namespace: &[u8],
         current_time_ms: u64,
         ok_timestamps: Range<u64>,
         my_identity: S,
         peer_identity: P,
+        kem: K,
         version: Version,
     ) -> Self {
         let mut transcript =
@@ -240,6 +242,7 @@ impl<S, P> Context<S, P> {
             transcript.commit(modes.encode());
         }
         Self {
+            kem,
             version,
             transcript,
             current_time: current_time_ms,
@@ -252,11 +255,12 @@ impl<S, P> Context<S, P> {
 
 /// Initiates a handshake as the dialer.
 /// Returns the dialer state and the first message to send.
-pub fn dial_start<S: Signer, P: PublicKey>(
+pub fn dial_start<S: Signer, P: PublicKey, K: Kem>(
     rng: impl CryptoRng,
-    ctx: Context<S, P>,
-) -> (DialState<P>, Syn<<S as Signer>::Signature>) {
+    ctx: Context<S, P, K>,
+) -> (DialState<P, K>, Syn<<S as Signer>::Signature, K>) {
     let Context {
+        kem,
         version,
         current_time,
         ok_timestamps,
@@ -265,9 +269,8 @@ pub fn dial_start<S: Signer, P: PublicKey>(
         mut transcript,
     } = ctx;
 
-    // Generate an ephemeral key and commit the timestamp and listener identity.
-    let esk = SecretKey::new(rng);
-    let epk = esk.public();
+    // Generate a fresh encapsulation key and commit the timestamp and listener identity.
+    let (dk, ek) = kem.generate(rng);
     let dialer_identity = my_identity.public_key().encode();
     transcript
         .commit(current_time.encode())
@@ -278,20 +281,21 @@ pub fn dial_start<S: Signer, P: PublicKey>(
     if version.binds_identity_before_syn() {
         transcript.commit(&dialer_identity[..]);
     }
-    let sig = transcript.commit(epk.encode()).sign(&my_identity);
+    let sig = transcript.commit(ek.encode()).sign(&my_identity);
     if !version.binds_identity_before_syn() {
         transcript.commit(dialer_identity);
     }
     (
         DialState {
-            esk,
+            kem,
+            dk,
             peer_identity,
             transcript,
             ok_timestamps,
         },
         Syn {
             time_ms: current_time,
-            epk,
+            ek,
             sig,
         },
     )
@@ -300,12 +304,13 @@ pub fn dial_start<S: Signer, P: PublicKey>(
 /// Completes a handshake as the dialer.
 /// Verifies the listener's [SynAck] and returns the [Ack] to send and the confirmed secret
 /// transcript. The caller must send [Ack] before using the transcript for application data.
-pub fn dial_end<P: PublicKey>(
-    state: DialState<P>,
-    msg: SynAck<<P as Verifier>::Signature>,
+pub fn dial_end<P: PublicKey, K: Kem>(
+    state: DialState<P, K>,
+    msg: SynAck<<P as Verifier>::Signature, K>,
 ) -> Result<(Ack, Transcript), Error> {
     let DialState {
-        esk,
+        kem,
+        dk,
         peer_identity,
         mut transcript,
         ok_timestamps,
@@ -317,19 +322,17 @@ pub fn dial_end<P: PublicKey>(
     }
     if !transcript
         .commit(msg.time_ms.encode())
-        .commit(msg.epk.encode())
+        .commit(msg.ct.encode())
         .verify(&peer_identity, &msg.sig)
     {
         return Err(Error::InvalidSignature);
     }
 
     // Commit the shared secret, then derive the confirmations from the transcript.
-    let Some(shared) = esk.exchange(&msg.epk) else {
+    let Some(shared) = kem.decapsulate(dk, &msg.ct) else {
         return Err(Error::InvalidEphemeralKey);
     };
-    shared
-        .secret
-        .expose(|secret| transcript.commit(secret.as_ref()));
+    shared.expose(|secret| transcript.commit(secret.as_ref()));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
     let confirmation_d2l = transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
 
@@ -348,12 +351,13 @@ pub fn dial_end<P: PublicKey>(
 
 /// Processes the first handshake message as the listener.
 /// Verifies the dialer's [Syn] and returns the listener state and the [SynAck] to send.
-pub fn listen_start<S: Signer, P: PublicKey>(
+pub fn listen_start<S: Signer, P: PublicKey, K: Kem>(
     rng: impl CryptoRng,
-    ctx: Context<S, P>,
-    msg: Syn<<P as Verifier>::Signature>,
-) -> Result<(ListenState, SynAck<<S as Signer>::Signature>), Error> {
+    ctx: Context<S, P, K>,
+    msg: Syn<<P as Verifier>::Signature, K>,
+) -> Result<(ListenState, SynAck<<S as Signer>::Signature, K>), Error> {
     let Context {
+        kem,
         version,
         current_time,
         my_identity,
@@ -377,7 +381,7 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         transcript.commit(&dialer_identity[..]);
     }
     if !transcript
-        .commit(msg.epk.encode())
+        .commit(msg.ek.encode())
         .verify(&peer_identity, &msg.sig)
     {
         return Err(Error::InvalidSignature);
@@ -386,28 +390,24 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         transcript.commit(dialer_identity);
     }
 
-    // Sign the listener's timestamp and ephemeral key.
-    let esk = SecretKey::new(rng);
-    let epk = esk.public();
+    // Encapsulate a fresh secret and sign the listener's timestamp and ciphertext.
+    let Some((ct, shared)) = kem.encapsulate(rng, &msg.ek) else {
+        return Err(Error::InvalidEphemeralKey);
+    };
     let sig = transcript
         .commit(current_time.encode())
-        .commit(epk.encode())
+        .commit(ct.encode())
         .sign(&my_identity);
 
     // Commit the shared secret and derive the confirmation the dialer must match.
-    let Some(shared) = esk.exchange(&msg.epk) else {
-        return Err(Error::InvalidEphemeralKey);
-    };
-    shared
-        .secret
-        .expose(|secret| transcript.commit(secret.as_ref()));
+    shared.expose(|secret| transcript.commit(secret.as_ref()));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
 
     Ok((
         ListenState { transcript },
         SynAck {
             time_ms: current_time,
-            epk,
+            ct,
             sig,
             confirmation: confirmation_l2d,
         },
@@ -446,8 +446,10 @@ mod test {
 
     /// Completes a handshake under each [Version] and checks that both peers return the same
     /// transcript.
-    #[test]
-    fn test_can_setup() -> Result<(), Error> {
+    #[rstest::rstest]
+    #[case(X25519)]
+    #[case(crate::ml_kem::MlKem768)]
+    fn test_can_setup<K: Kem + PartialEq>(#[case] kem: K) -> Result<(), Error> {
         for version in VERSIONS {
             let mut rng = test_rng();
             let dialer_crypto = PrivateKey::random(&mut rng);
@@ -462,6 +464,7 @@ mod test {
                     0..1,
                     dialer_crypto.clone(),
                     listener_crypto.public_key(),
+                    kem.clone(),
                     version,
                 ),
             );
@@ -474,6 +477,7 @@ mod test {
                     0..1,
                     listener_crypto,
                     dialer_crypto.public_key(),
+                    kem.clone(),
                     version,
                 ),
                 msg1,
@@ -489,8 +493,10 @@ mod test {
     }
 
     /// Rejects a [SynAck] or [Ack] whose confirmation does not match the transcript.
-    #[test]
-    fn test_mismatched_confirmation_fails() {
+    #[rstest::rstest]
+    #[case(X25519)]
+    #[case(crate::ml_kem::MlKem768)]
+    fn test_mismatched_confirmation_fails<K: Kem>(#[case] kem: K) {
         for version in VERSIONS {
             let mut rng = test_rng();
             let dialer_crypto = PrivateKey::random(&mut rng);
@@ -505,6 +511,7 @@ mod test {
                         0..1,
                         dialer_crypto.clone(),
                         listener_crypto.public_key(),
+                        kem.clone(),
                         version,
                     ),
                 );
@@ -516,6 +523,7 @@ mod test {
                         0..1,
                         listener_crypto.clone(),
                         dialer_crypto.public_key(),
+                        kem.clone(),
                         version,
                     ),
                     msg1,
@@ -544,8 +552,10 @@ mod test {
     }
 
     /// Rejects a [Syn] signed under a different application namespace.
-    #[test]
-    fn test_mismatched_namespace_fails() {
+    #[rstest::rstest]
+    #[case(X25519)]
+    #[case(crate::ml_kem::MlKem768)]
+    fn test_mismatched_namespace_fails<K: Kem>(#[case] kem: K) {
         for version in VERSIONS {
             let mut rng = test_rng();
             let dialer_crypto = PrivateKey::random(&mut rng);
@@ -559,6 +569,7 @@ mod test {
                     0..1,
                     dialer_crypto.clone(),
                     listener_crypto.public_key(),
+                    kem.clone(),
                     version,
                 ),
             );
@@ -571,6 +582,7 @@ mod test {
                     0..1,
                     listener_crypto,
                     dialer_crypto.public_key(),
+                    kem.clone(),
                     version,
                 ),
                 msg1,
@@ -581,8 +593,10 @@ mod test {
     }
 
     /// Rejects a [Syn] from a dialer running a different [Version].
-    #[test]
-    fn test_mismatched_version_fails() {
+    #[rstest::rstest]
+    #[case(X25519)]
+    #[case(crate::ml_kem::MlKem768)]
+    fn test_mismatched_version_fails<K: Kem>(#[case] kem: K) {
         for (dialer_version, listener_version) in
             [(Version::V0, Version::V1), (Version::V1, Version::V0)]
         {
@@ -598,6 +612,7 @@ mod test {
                     0..1,
                     dialer_crypto.clone(),
                     listener_crypto.public_key(),
+                    kem.clone(),
                     dialer_version,
                 ),
             );
@@ -610,6 +625,7 @@ mod test {
                     0..1,
                     listener_crypto,
                     dialer_crypto.public_key(),
+                    kem.clone(),
                     listener_version,
                 ),
                 msg1,
@@ -620,8 +636,10 @@ mod test {
     }
 
     /// Rejects a [Syn] when the listener expects a different dialer identity.
-    #[test]
-    fn test_mismatched_dialer_identity_fails() {
+    #[rstest::rstest]
+    #[case(X25519)]
+    #[case(crate::ml_kem::MlKem768)]
+    fn test_mismatched_dialer_identity_fails<K: Kem>(#[case] kem: K) {
         for version in VERSIONS {
             let mut rng = test_rng();
             let dialer_crypto = PrivateKey::random(&mut rng);
@@ -636,6 +654,7 @@ mod test {
                     0..1,
                     dialer_crypto,
                     listener_crypto.public_key(),
+                    kem.clone(),
                     version,
                 ),
             );
@@ -648,6 +667,7 @@ mod test {
                     0..1,
                     listener_crypto,
                     impostor_crypto.public_key(),
+                    kem.clone(),
                     version,
                 ),
                 msg1,
@@ -659,9 +679,9 @@ mod test {
 
     /// Reconstructs the transcript a listener verifies a [Syn] against, with the dialer identity
     /// included or omitted before the ephemeral key.
-    fn syn_transcript<P: PublicKey>(
+    fn syn_transcript<P: PublicKey, K: Kem>(
         version: Version,
-        syn: &Syn<P::Signature>,
+        syn: &Syn<P::Signature, K>,
         listener: &P,
         dialer: Option<&P>,
     ) -> Transcript {
@@ -676,7 +696,7 @@ mod test {
         if let Some(dialer) = dialer {
             transcript.commit(dialer.encode());
         }
-        transcript.commit(syn.epk.encode());
+        transcript.commit(syn.ek.encode());
         transcript
     }
 
@@ -699,6 +719,7 @@ mod test {
                     0..1,
                     dialer_crypto,
                     listener.clone(),
+                    X25519,
                     version,
                 ),
             );
@@ -708,6 +729,66 @@ mod test {
             let without = syn_transcript(version, &syn, &listener, None);
             assert_eq!(with.verify(&dialer, &syn.sig), covers, "{version:?}");
             assert_eq!(without.verify(&dialer, &syn.sig), !covers, "{version:?}");
+        }
+    }
+
+    /// A signed ciphertext still requires confirmation of the decapsulated secret.
+    #[rstest::rstest]
+    #[case(X25519)]
+    #[case(crate::ml_kem::MlKem768)]
+    fn test_changed_ciphertext_confirmation<K: Kem>(#[case] kem: K) {
+        for version in VERSIONS {
+            let mut rng = test_rng();
+            let dialer = PrivateKey::random(&mut rng);
+            let listener = PrivateKey::random(&mut rng);
+            let (state, syn) = dial_start(
+                &mut rng,
+                Context::new(
+                    b"test_namespace",
+                    0,
+                    0..1,
+                    dialer.clone(),
+                    listener.public_key(),
+                    kem.clone(),
+                    version,
+                ),
+            );
+            let mut signed = syn_transcript(
+                version,
+                &syn,
+                &listener.public_key(),
+                version
+                    .binds_identity_before_syn()
+                    .then_some(&dialer.public_key()),
+            );
+            if !version.binds_identity_before_syn() {
+                signed.commit(dialer.public_key().encode());
+            }
+            let (_, mut syn_ack) = listen_start(
+                &mut rng,
+                Context::new(
+                    b"test_namespace",
+                    0,
+                    0..1,
+                    listener.clone(),
+                    dialer.public_key(),
+                    kem.clone(),
+                    version,
+                ),
+                syn,
+            )
+            .unwrap();
+            let mut bytes = syn_ack.ct.encode().to_vec();
+            bytes[0] ^= 1;
+            syn_ack.ct = K::Ciphertext::decode(bytes).unwrap();
+            syn_ack.sig = signed
+                .commit(syn_ack.time_ms.encode())
+                .commit(syn_ack.ct.encode())
+                .sign(&listener);
+            assert!(matches!(
+                dial_end(state, syn_ack),
+                Err(Error::InvalidConfirmation)
+            ));
         }
     }
 
@@ -756,6 +837,7 @@ mod test {
                     0..1,
                     dialer.clone(),
                     listener.public_key(),
+                    X25519,
                     version,
                 ),
             );
@@ -778,7 +860,15 @@ mod test {
             claimed.commit(derived.encode());
             let result = listen_start(
                 &mut rng,
-                Context::new(b"test_namespace", 0, 0..1, listener, derived, version),
+                Context::new(
+                    b"test_namespace",
+                    0,
+                    0..1,
+                    listener,
+                    derived,
+                    X25519,
+                    version,
+                ),
                 syn,
             );
 

@@ -104,6 +104,7 @@ mod tests {
     fn upgrader(seed: u64) -> SakeCups<PrivateKey, ChaCha20Poly1305> {
         Cups::<_, ChaCha20Poly1305>::new(
             Sake {
+                kem: commonware_cryptography::handshake::sake::X25519,
                 signer: PrivateKey::from_seed(seed),
                 synchrony_bound: Duration::from_secs(5),
                 max_handshake_age: Duration::from_secs(10),

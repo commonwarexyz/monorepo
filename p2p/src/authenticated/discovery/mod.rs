@@ -210,6 +210,7 @@
 //! let p2p_cfg = discovery::Config::local(
 //!     Cups::<_, ChaCha20Poly1305>::new(
 //!         Sake {
+//!             kem: commonware_cryptography::handshake::sake::X25519,
 //!             signer: signer.clone(),
 //!             synchrony_bound: Duration::from_secs(5),
 //!             max_handshake_age: Duration::from_secs(10),
@@ -277,7 +278,7 @@ pub trait Handshake: commonware_stream::Handshake<PublicKey: PublicKey> {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> <Self::PublicKey as Verifier>::Signature;
 }
 
-impl<S: Signer> Handshake for Sake<S> {
+impl<S: Signer, K: commonware_cryptography::Kem> Handshake for Sake<S, K> {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
         self.signer.sign(namespace, message)
     }

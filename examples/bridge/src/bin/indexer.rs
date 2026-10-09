@@ -245,6 +245,7 @@ fn main() {
         let upgrader = Timeout::new(
             Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
+                    kem: commonware_cryptography::handshake::sake::X25519,
                     signer,
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(60),

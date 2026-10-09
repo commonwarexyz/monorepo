@@ -7,7 +7,7 @@ pub enum Error {
     /// A peer's signature does not verify over the transcript.
     #[error("invalid signature")]
     InvalidSignature,
-    /// A peer's ephemeral key yields a non-contributory shared secret.
+    /// A peer's encapsulation key or ciphertext is rejected by the KEM.
     #[error("invalid ephemeral key")]
     InvalidEphemeralKey,
     /// A peer's confirmation does not match the transcript.

@@ -16,6 +16,11 @@
 //! - [`secp256r1`]: Attributable signatures with individual verification. HSM-friendly, no trusted
 //!   setup required, and widely supported by hardware security modules. Unlike ed25519, does not
 //!   benefit from batch verification. Certificates contain individual signatures from each signer.
+//!
+//! - [`ml_dsa`]: Attributable ML-DSA-65 (FIPS 204) signatures with individual verification.
+//!   Post-quantum secure and no trusted setup required. Like secp256r1, does not benefit from batch
+//!   verification. Certificates contain individual signatures from each signer, which are much
+//!   larger than classical signatures (3309 bytes each).
 #![cfg_attr(
     feature = "bls12381",
     doc = "
@@ -65,6 +70,8 @@ pub use crate::bls12381::certificate::{
     multisig as bls12381_multisig, threshold as bls12381_threshold,
 };
 pub use crate::ed25519::certificate as ed25519;
+#[commonware_macros::stability(ALPHA)]
+pub use crate::ml_dsa::certificate as ml_dsa;
 #[commonware_macros::stability(ALPHA)]
 pub use crate::secp256r1::certificate as secp256r1;
 use crate::{Digest, PublicKey};
@@ -828,6 +835,8 @@ impl<S: Scheme, Sc: Clone + Send + Sync + 'static> crate::certificate::Provider
         Some(Scoped::scheme(self.scheme.clone()))
     }
 }
+
+commonware_macros::stability_mod!(ALPHA, pub mod individual);
 
 #[cfg(feature = "mocks")]
 pub mod mocks;

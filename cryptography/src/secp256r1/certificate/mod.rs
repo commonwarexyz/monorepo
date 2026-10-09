@@ -1,333 +1,18 @@
 //! Secp256r1 signing scheme implementation.
 //!
-//! This module provides both the generic Secp256r1 implementation and a macro to generate
-//! protocol-specific wrappers.
+//! This module instantiates the [individually verified certificate scheme](individual) with
+//! Secp256r1 signing keys and provides a macro to generate protocol-specific wrappers.
 
-#[cfg(feature = "mocks")]
-pub mod mocks;
+use crate::{certificate::individual, secp256r1::standard};
 
-use crate::{
-    Digest, Signer as _, Verifier as _,
-    certificate::{AssemblyError, Attestation, Namespace, Scheme, Signers, Subject, Verification},
-    secp256r1::standard::{PrivateKey, PublicKey, Signature as Secp256r1Signature},
-};
-#[cfg(not(feature = "std"))]
-use alloc::{collections::BTreeSet, vec::Vec};
-use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
-use commonware_utils::{
-    Participant, Widen,
-    iter::NonEmpty,
-    ordered::{BiMap, Quorum, Set},
-};
-use rand_core::CryptoRng;
-#[cfg(feature = "std")]
-use std::collections::BTreeSet;
-
-/// Generic Secp256r1 signing scheme implementation parameterized by identity type.
+/// Secp256r1 signing scheme parameterized by identity type and namespace type.
 ///
-/// This struct contains the core cryptographic operations without protocol-specific
-/// context types. It can be reused across different protocols (simplex, aggregation, etc.)
-/// by wrapping it with protocol-specific trait implementations via the macro.
-#[derive(Clone, Debug)]
-pub struct Generic<P: crate::PublicKey, N: Namespace> {
-    /// Participants in the committee.
-    pub participants: BiMap<P, PublicKey>,
-    /// Key used for generating signatures.
-    pub signer: Option<(Participant, PrivateKey)>,
-    /// Pre-computed namespace(s) for this subject type.
-    pub namespace: N,
-}
+/// It can be reused across different protocols (simplex, aggregation, etc.) by wrapping it with
+/// protocol-specific trait implementations via [crate::impl_certificate_secp256r1].
+pub type Generic<P, N> = individual::Generic<P, standard::PrivateKey, N>;
 
-impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
-    /// Creates a new scheme instance with the provided key material.
-    ///
-    /// Participants have both an identity key and a signing key. The identity key
-    /// is used for participant set ordering and indexing, while the signing key is used for
-    /// signing and verification.
-    ///
-    /// Returns `None` if the provided private key does not match any signing key
-    /// in the participant set.
-    pub fn signer(
-        namespace: &[u8],
-        participants: BiMap<P, PublicKey>,
-        private_key: PrivateKey,
-    ) -> Option<Self> {
-        let public_key = private_key.public_key();
-        let signer = participants
-            .values()
-            .iter()
-            .position(|p| p == &public_key)
-            .map(|index| (Participant::from_usize(index), private_key))?;
-
-        Some(Self {
-            participants,
-            signer: Some(signer),
-            namespace: N::derive(namespace),
-        })
-    }
-
-    /// Builds a verifier that can authenticate signatures and certificates.
-    ///
-    /// Participants have both an identity key and a signing key. The identity key
-    /// is used for participant set ordering and indexing, while the signing key is used for
-    /// verification.
-    pub fn verifier(namespace: &[u8], participants: BiMap<P, PublicKey>) -> Self {
-        Self {
-            participants,
-            signer: None,
-            namespace: N::derive(namespace),
-        }
-    }
-
-    /// Returns the ordered set of identity keys.
-    pub const fn participants(&self) -> &Set<P> {
-        self.participants.keys()
-    }
-
-    /// Returns the index of "self" in the participant set, if available.
-    pub fn me(&self) -> Option<Participant> {
-        self.signer.as_ref().map(|(index, _)| *index)
-    }
-
-    /// Signs a subject and returns the attestation.
-    pub fn sign<'a, S, D>(&self, subject: S::Subject<'a, D>) -> Option<Attestation<S>>
-    where
-        S: Scheme<Signature = Secp256r1Signature>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        D: Digest,
-    {
-        let (index, private_key) = self.signer.as_ref()?;
-
-        let signature = private_key.sign(subject.namespace(&self.namespace), &subject.message());
-
-        Some(Attestation {
-            signer: *index,
-            signature: signature.into(),
-        })
-    }
-
-    /// Verifies a single attestation from a signer.
-    pub fn verify_attestation<'a, S, D>(
-        &self,
-        subject: S::Subject<'a, D>,
-        attestation: &Attestation<S>,
-    ) -> bool
-    where
-        S: Scheme<Signature = Secp256r1Signature>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        D: Digest,
-    {
-        let Some(public_key) = self.participants.value(attestation.signer.into()) else {
-            return false;
-        };
-        let Some(signature) = attestation.signature.get() else {
-            return false;
-        };
-
-        public_key.verify(
-            subject.namespace(&self.namespace),
-            &subject.message(),
-            signature,
-        )
-    }
-
-    /// Verifies attestations one-by-one and returns verified attestations and invalid signers.
-    pub fn verify_attestations<'a, S, R, D, I>(
-        &self,
-        _rng: &mut R,
-        subject: S::Subject<'a, D>,
-        attestations: I,
-    ) -> Verification<S>
-    where
-        S: Scheme<Signature = Secp256r1Signature>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRng,
-        D: Digest,
-        I: IntoIterator<Item = Attestation<S>>,
-    {
-        let namespace = subject.namespace(&self.namespace);
-        let message = subject.message();
-
-        let mut invalid = BTreeSet::new();
-        let mut verified = Vec::new();
-
-        for attestation in attestations.into_iter() {
-            let Some(public_key) = self.participants.value(attestation.signer.into()) else {
-                invalid.insert(attestation.signer);
-                continue;
-            };
-            let Some(signature) = attestation.signature.get() else {
-                invalid.insert(attestation.signer);
-                continue;
-            };
-
-            if public_key.verify(namespace, &message, signature) {
-                verified.push(attestation);
-            } else {
-                invalid.insert(attestation.signer);
-            }
-        }
-
-        Verification::new(verified, invalid.into_iter().collect())
-    }
-
-    /// Assembles a certificate from a non-empty collection of attestations.
-    pub fn assemble<S, I>(&self, attestations: NonEmpty<I>) -> Result<Certificate, AssemblyError>
-    where
-        S: Scheme<Signature = Secp256r1Signature>,
-        I: Iterator<Item = Attestation<S>>,
-    {
-        // Collect the signers and signatures.
-        let mut entries = Vec::new();
-        for Attestation { signer, signature } in attestations {
-            self.participants
-                .value(signer.into())
-                .ok_or(AssemblyError::UnknownSigner(signer))?;
-            let signature = signature
-                .get()
-                .cloned()
-                .ok_or(AssemblyError::MalformedSignature(signer))?;
-            entries.push((signer, signature));
-        }
-
-        // Sort the signatures by signer index.
-        entries.sort_by_key(|(signer, _)| *signer);
-        let (signer, signatures): (Vec<Participant>, Vec<_>) = entries.into_iter().unzip();
-        let signers = Signers::try_from((self.participants.keys(), signer))?
-            .require(self.participants.quorum::<S::Faults>())?;
-        let signatures = signatures.into_iter().map(Lazy::from).collect();
-
-        Ok(Certificate {
-            signers,
-            signatures,
-        })
-    }
-
-    /// Verifies a certificate by checking each signature individually.
-    pub fn verify_certificate<'a, S, R, D>(
-        &self,
-        _rng: &mut R,
-        subject: S::Subject<'a, D>,
-        certificate: &Certificate,
-    ) -> bool
-    where
-        S: Scheme,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRng,
-        D: Digest,
-    {
-        // If the certificate signers length does not match the participant set, return false.
-        if certificate.signers.len() != self.participants.len() {
-            return false;
-        }
-
-        // If the certificate signers and signatures counts differ, return false.
-        if certificate.signers.count() != certificate.signatures.len() {
-            return false;
-        }
-
-        // If the certificate does not meet the quorum, return false.
-        if certificate.signers.count() < Widen::widen(self.participants.quorum::<S::Faults>()) {
-            return false;
-        }
-
-        let namespace = subject.namespace(&self.namespace);
-        let message = subject.message();
-        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-            let Some(public_key) = self.participants.value(signer.into()) else {
-                return false;
-            };
-            let Some(signature) = signature.get() else {
-                return false;
-            };
-            if !public_key.verify(namespace, &message, signature) {
-                return false;
-            }
-        }
-
-        true
-    }
-
-    pub const fn is_attributable() -> bool {
-        true
-    }
-
-    pub const fn is_batchable() -> bool {
-        false
-    }
-
-    pub const fn certificate_codec_config(&self) -> <Certificate as commonware_codec::Read>::Cfg {
-        self.participants.len()
-    }
-
-    pub const fn certificate_codec_config_unbounded() -> <Certificate as commonware_codec::Read>::Cfg
-    {
-        u32::MAX as usize
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Certificate {
-    /// Bitmap of participant indices that contributed signatures.
-    pub signers: Signers,
-    /// Secp256r1 signatures emitted by the respective participants ordered by signer index.
-    pub signatures: Vec<Lazy<Secp256r1Signature>>,
-}
-
-#[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for Certificate {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let signers = Signers::arbitrary(u)?;
-        let signatures = (0..signers.count())
-            .map(|_| u.arbitrary::<Secp256r1Signature>().map(Lazy::from))
-            .collect::<arbitrary::Result<Vec<_>>>()?;
-        Ok(Self {
-            signers,
-            signatures,
-        })
-    }
-}
-
-impl Write for Certificate {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.signers.write(writer);
-        self.signatures.write(writer);
-    }
-}
-
-impl EncodeSize for Certificate {
-    fn encode_size(&self) -> usize {
-        self.signers.encode_size() + self.signatures.encode_size()
-    }
-}
-
-impl Read for Certificate {
-    type Cfg = usize;
-
-    fn read_cfg(reader: &mut impl Buf, participants: &usize) -> Result<Self, Error> {
-        let signers = Signers::read_cfg(reader, participants)?;
-        if signers.count() == 0 {
-            return Err(Error::Invalid(
-                "cryptography::secp256r1::certificate::Certificate",
-                "Certificate contains no signers",
-            ));
-        }
-
-        let signatures = Vec::<Lazy<Secp256r1Signature>>::read_range(reader, ..=*participants)?;
-        if signers.count() != signatures.len() {
-            return Err(Error::Invalid(
-                "cryptography::secp256r1::certificate::Certificate",
-                "Signers and signatures counts differ",
-            ));
-        }
-
-        Ok(Self {
-            signers,
-            signatures,
-        })
-    }
-}
+/// Certificate containing the Secp256r1 signatures of a quorum.
+pub type Certificate = individual::Certificate<standard::Signature>;
 
 /// Generates a Secp256r1 signing scheme wrapper for a specific protocol.
 ///
@@ -339,7 +24,8 @@ impl Read for Certificate {
 /// - `$subject`: The subject type used as `Scheme::Subject<'a, D>`. Use `'a` and `D`
 ///   in the subject type to bind to the GAT lifetime and digest type parameters.
 ///
-/// - `$namespace`: The namespace type that implements [`Namespace`].
+/// - `$namespace`: The namespace type that implements
+///   [`Namespace`](crate::certificate::Namespace).
 ///   This type pre-computes and stores any protocol-specific namespace bytes derived from
 ///   a base namespace. The scheme calls `$namespace::derive(base)` at construction time
 ///   to create the namespace, then passes it to `Subject::namespace()` during signing
@@ -378,7 +64,7 @@ macro_rules! impl_certificate_secp256r1 {
         where
             R: rand_core::CryptoRng,
         {
-            $crate::secp256r1::certificate::mocks::fixture(
+            $crate::certificate::individual::mocks::fixture(
                 rng,
                 namespace,
                 n,
@@ -576,14 +262,18 @@ macro_rules! impl_certificate_secp256r1 {
 mod tests {
     use super::*;
     use crate::{
-        certificate::{Scheme as _, Verifier as _},
+        Signer as _,
+        certificate::{AssemblyError, Scheme as _, Signers, Subject, Verifier as _},
+        secp256r1::standard::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;
-    use commonware_codec::{Decode, Encode};
+    use commonware_codec::{Decode, Encode, types::lazy::Lazy};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{Faults, N3f1, TryCollect, non_empty, ordered::BiMap, test_rng};
+    use commonware_utils::{
+        Faults, N3f1, Participant, TryCollect, non_empty, ordered::BiMap, test_rng,
+    };
     use rand_core::CryptoRng;
     use std::sync::{
         Arc,

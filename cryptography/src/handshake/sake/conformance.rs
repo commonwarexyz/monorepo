@@ -1,10 +1,10 @@
 //! SAKE conformance tests
 
 use crate::{
-    Signer,
+    Kem, Signer,
     ed25519::PrivateKey,
     handshake::sake::{
-        Ack, Context, Syn, SynAck, Version, dial_end, dial_start, listen_end, listen_start,
+        Ack, Context, Version, X25519, dial_end, dial_start, listen_end, listen_start,
     },
 };
 use commonware_codec::{Encode, conformance::CodecConformance};
@@ -13,9 +13,12 @@ use commonware_math::algebra::Random;
 use commonware_utils::TestRng;
 use rand::RngExt as _;
 
+type Syn<S, K = X25519> = super::Syn<S, K>;
+type SynAck<S, K = X25519> = super::SynAck<S, K>;
+
 /// Runs a full handshake for `version`, logging every message and the summary of the resulting
 /// transcript.
-fn exchange(seed: u64, version: Version) -> Vec<u8> {
+fn exchange<K: Kem>(seed: u64, kem: K, version: Version) -> Vec<u8> {
     let mut rng = TestRng::new(seed);
     let mut log = Vec::new();
 
@@ -38,6 +41,7 @@ fn exchange(seed: u64, version: Version) -> Vec<u8> {
             listener_time..listener_time + 1,
             dialer_key.clone(),
             listener_key.public_key(),
+            kem.clone(),
             version,
         ),
     );
@@ -51,6 +55,7 @@ fn exchange(seed: u64, version: Version) -> Vec<u8> {
             dialer_time..dialer_time + 1,
             listener_key,
             dialer_key.public_key(),
+            kem,
             version,
         ),
         dialer_greeting,
@@ -73,7 +78,7 @@ struct SakeV0;
 
 impl Conformance for SakeV0 {
     async fn commit(seed: u64) -> Vec<u8> {
-        exchange(seed, Version::V0)
+        exchange(seed, X25519, Version::V0)
     }
 }
 
@@ -81,7 +86,7 @@ struct SakeV1;
 
 impl Conformance for SakeV1 {
     async fn commit(seed: u64) -> Vec<u8> {
-        exchange(seed, Version::V1)
+        exchange(seed, X25519, Version::V1)
     }
 }
 
@@ -91,4 +96,39 @@ conformance_tests! {
     CodecConformance<Syn<crate::ed25519::Signature>>,
     CodecConformance<SynAck<crate::ed25519::Signature>>,
     CodecConformance<Ack>,
+}
+
+#[cfg(not(any(
+    commonware_stability_BETA,
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
+mod ml_kem {
+    use super::*;
+    use crate::ml_kem::MlKem768;
+
+    struct SakeMlKem768V0;
+
+    impl Conformance for SakeMlKem768V0 {
+        async fn commit(seed: u64) -> Vec<u8> {
+            exchange(seed, MlKem768, Version::V0)
+        }
+    }
+
+    struct SakeMlKem768V1;
+
+    impl Conformance for SakeMlKem768V1 {
+        async fn commit(seed: u64) -> Vec<u8> {
+            exchange(seed, MlKem768, Version::V1)
+        }
+    }
+
+    conformance_tests! {
+        SakeMlKem768V0 => 1024,
+        SakeMlKem768V1 => 1024,
+        CodecConformance<Syn<crate::ed25519::Signature, MlKem768>>,
+        CodecConformance<SynAck<crate::ed25519::Signature, MlKem768>>,
+    }
 }
