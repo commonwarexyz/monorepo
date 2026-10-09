@@ -82,7 +82,7 @@ enum WorkerFault {
     AfterRelease(Box<dyn FnOnce() + Send>),
 }
 
-/// Fault state shared between a test and its one-off worker threads.
+/// Fault state shared between a test and its dedicated worker threads.
 struct WorkerFaultEntry {
     /// Worker registry identity without retaining the runtime's shared services.
     workers: Weak<Workers>,
@@ -808,9 +808,9 @@ fn test_execution_modes_share_ordinary_descendants() {
                         );
                     }
 
-                    // Nested one-off tasks each receive a separate worker.
+                    // Nested dedicated tasks each receive a separate worker.
                     for blocking in [false, true] {
-                        let nested = context.child("one_off");
+                        let nested = context.child("dedicated");
                         let nested = if blocking {
                             nested.shared(true)
                         } else {
@@ -1013,7 +1013,7 @@ fn test_closed_task_set_skips_local_and_foreign_factories() {
 }
 
 #[test]
-fn test_closed_registry_skips_one_off_factories() {
+fn test_closed_registry_skips_dedicated_factories() {
     Runner::new(config()).start(|context| async move {
         // Leave supervision open so rejection must come from worker registration.
         context.shared.workers.close();
@@ -1033,7 +1033,7 @@ fn test_closed_registry_skips_one_off_factories() {
 }
 
 #[test]
-fn test_closed_runner_rejects_one_off_payload_without_invoking_closure() {
+fn test_closed_runner_rejects_dedicated_payload_without_invoking_closure() {
     let escaped = Runner::new(config()).start(|context| async { context });
     let drops = Arc::new(AtomicUsize::new(0));
     let payload = DropCount(drops.clone());
@@ -1142,7 +1142,7 @@ fn test_shutdown_does_not_wait_for_an_unpublished_ordinary_factory() {
 }
 
 #[test]
-fn test_one_off_reservation_covers_factory_construction_through_shutdown() {
+fn test_dedicated_reservation_covers_factory_construction_through_shutdown() {
     /// Signal worker registration closure while ordinary tasks are destroyed.
     struct Closing(mpsc::Sender<()>);
 
@@ -1233,7 +1233,7 @@ fn test_factory_panic_finishes_metrics_and_releases_reservation() {
 
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     child.spawn(move |_| -> Ready<()> {
-                        // One-off factories retain their reservation without holding its lock.
+                        // Dedicated factories retain their reservation without holding its lock.
                         let reserved = usize::from(matches!(
                             execution,
                             Execution::Dedicated | Execution::Shared(true)
@@ -1298,7 +1298,7 @@ fn test_retained_descendant_context_is_closed_before_parent_result() {
 }
 
 #[test]
-fn test_one_off_completion_cancels_local_and_remote_descendants() {
+fn test_dedicated_completion_cancels_local_and_remote_descendants() {
     for blocking in [false, true] {
         Runner::new(config()).start(|context| async move {
             let parent = context.child("parent");
@@ -1361,7 +1361,7 @@ fn test_root_shutdown_cancels_descendants_across_workers() {
 }
 
 #[test]
-fn test_completed_one_off_worker_does_not_close_sibling_registry() {
+fn test_completed_dedicated_worker_does_not_close_sibling_registry() {
     Runner::new(config()).start(|context| async move {
         context
             .child("first")
@@ -1370,7 +1370,7 @@ fn test_completed_one_off_worker_does_not_close_sibling_registry() {
             .await
             .unwrap();
 
-        // Spawning remains available to a later sibling and its own one-off children.
+        // Spawning remains available to a later sibling and its own dedicated children.
         let result = context
             .child("second")
             .dedicated()
@@ -2176,7 +2176,7 @@ fn test_teardown_drops_every_future_before_clearing_timers() {
 }
 
 #[test]
-fn test_shutdown_waits_for_one_off_task_destruction() {
+fn test_shutdown_waits_for_dedicated_task_destruction() {
     /// Hold task disposal open until the test inspects the shutdown wait.
     struct HeldDestructor {
         /// Tell the test that destruction has begun.
