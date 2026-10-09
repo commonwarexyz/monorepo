@@ -10340,7 +10340,7 @@ mod tests {
     }
 
     /// A propose relay that finds no staged proposal must fall back to
-    /// forwarding the persisted block. Staging then flushing at certify
+    /// forwarding the persisted block. Staging then claiming the gate at certify
     /// persists the block and resolves the certification gate through the
     /// staged ack, so the subsequent relay broadcast re-sends the block from
     /// storage instead of dropping it.
@@ -10391,12 +10391,15 @@ mod tests {
                 }
             });
             assert_eq!(rx.await.expect("id published"), digest);
-            let gate = gates.take(round, digest).expect("gate registered");
-            gates.flush_unrelayed(&mailbox, round, digest);
+            let gate = gates
+                .claim(round, digest, |block, ack| {
+                    mailbox.verified_deferred(round, block, ack)
+                })
+                .expect("gate registered");
             assert_eq!(
                 gate.await.expect("gate resolved"),
                 GateOutcome::Ready(true),
-                "certify flush must resolve the gate durably",
+                "certify must persist the staged block and resolve the gate durably",
             );
 
             // The relay finds nothing staged and must forward the persisted
@@ -10497,8 +10500,9 @@ mod tests {
     }
 
     /// A prepare relay sends the staged candidate without storing it, so an abandoned
-    /// candidate costs no storage write. The propose relay that locks the candidate in
-    /// stores it without sending it again and completes the durability handshake.
+    /// candidate costs no storage write. A repeated prepare relay does not send it again.
+    /// The propose relay that locks the candidate in stores it without sending it again
+    /// and completes the durability handshake.
     #[test_traced("WARN")]
     fn test_standard_prepare_relay_sends_once_and_propose_stores() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -10565,6 +10569,11 @@ mod tests {
                 "an early relay must not resolve the certification gate"
             );
 
+            // A repeated prepare relay must not send the candidate again. The lock-in below
+            // goes through the same marshal mailbox, so its handshake orders this relay first.
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+
             // The lock-in stores the candidate without sending it again.
             let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Propose { round });
             assert!(matches!(feedback, Feedback::Ok));
@@ -10585,7 +10594,7 @@ mod tests {
             assert_eq!(
                 sends.len(),
                 1,
-                "lock-in must not send a relayed candidate again"
+                "neither a repeated prepare relay nor the lock-in may send a relayed candidate again"
             );
             assert_eq!(sends[0].0, round);
             assert_eq!(sends[0].1.digest(), digest);
@@ -10669,7 +10678,11 @@ mod tests {
                     parent: (boundary_round.view(), digest),
                 };
                 assert!(
-                    wrapper.verify(outgoing_context, digest).await.await.unwrap(),
+                    wrapper
+                        .verify(outgoing_context, digest)
+                        .await
+                        .await
+                        .unwrap(),
                     "{kind:?}: the outgoing boundary re-proposal must verify"
                 );
 
@@ -10688,9 +10701,12 @@ mod tests {
                     wrapper.broadcast(digest, Plan::Prepare { round }),
                     Feedback::Ok
                 ));
-                wait_until(&context, Duration::from_secs(5), "early boundary send", || {
-                    !buffer.sends().is_empty()
-                })
+                wait_until(
+                    &context,
+                    Duration::from_secs(5),
+                    "early boundary send",
+                    || !buffer.sends().is_empty(),
+                )
                 .await;
                 assert_eq!(buffer.sends().len(), 1);
                 assert!(

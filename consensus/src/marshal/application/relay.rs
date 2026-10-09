@@ -15,8 +15,8 @@ use tracing::debug;
 
 /// Relays a consensus broadcast [`Plan`] through marshal for a proposal staged in `gates`.
 ///
-/// A prepare plan sends the staged candidate to all peers and keeps it staged
-/// without storing it. A propose plan locks the staged proposal in: it sends
+/// A prepare plan sends the staged candidate to all peers, at most once, and keeps
+/// it staged without storing it. A propose plan locks the staged proposal in: it sends
 /// the proposal to all peers unless a prepare plan already did, and persists
 /// it either way, delivering the durable-sync handle through the staged ack. A
 /// forward plan re-sends a stored block to the requested recipients. A propose
@@ -35,7 +35,7 @@ where
     match plan {
         Plan::Prepare { round } => {
             let Some(block) = gates.send_staged(round, commitment) else {
-                debug!(%round, %commitment, "no staged candidate to relay early");
+                debug!(%round, %commitment, "no unsent staged candidate to relay early");
                 return Feedback::Ok;
             };
             marshal.prepared(round, block, Recipients::All)

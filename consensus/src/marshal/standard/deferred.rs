@@ -801,10 +801,10 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        self.gates.flush_unrelayed(&self.marshal, round, digest);
-
         // Attempt to retrieve the existing certification gate task for this round/digest.
-        let task = self.gates.take(round, digest);
+        let task = self.gates.claim(round, digest, |block, ack| {
+            self.marshal.verified_deferred(round, block, ack)
+        });
         if let Some(task) = task {
             return self.certify_from_existing_task(round, digest, task);
         }

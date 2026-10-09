@@ -559,13 +559,13 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        self.gates.flush_unrelayed(&self.marshal, round, digest);
-
         // `propose`/`verify` register an in-flight certification gate whose result resolves
         // once the block's sync handle completes. Awaiting it here is the durability barrier
         // for the finalize vote, and it lets the sync overlap consensus voting
         // instead of freezing certify with a fresh fsync.
-        let task = self.gates.take(round, digest);
+        let task = self.gates.claim(round, digest, |block, ack| {
+            self.marshal.verified_deferred(round, block, ack)
+        });
 
         // `verify()` waits only on local broadcast delivery, so nudge a
         // round-bound notarized fetch that can unblock the existing waiter

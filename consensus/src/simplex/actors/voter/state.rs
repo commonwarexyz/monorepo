@@ -1083,7 +1083,19 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         }
 
         // Record the proposal as locally verified after accepting its captured parent.
-        self.record_proposed(Proposal::new(context.round, context.parent.0, payload))
+        let proposal = Proposal::new(context.round, context.parent.0, payload);
+        if !self.record_proposed(proposal.clone()) {
+            return false;
+        }
+
+        // Bind the captured parent payload, as replay does, so a conflicting parent
+        // certificate invalidates the proposal as ancestry.
+        if let Some(round) = self.views.get_mut(&proposal.view())
+            && round.proposal() == Some(&proposal)
+        {
+            round.set_verifying(proposal, context.parent.1);
+        }
+        true
     }
 
     /// Releases a request's build latch when its captured parent is no longer
@@ -1682,8 +1694,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if proposal != verifying {
             return false;
         }
+
+        // Our own pipelined handoff binds the uncertified parent that `find_parent` selects,
+        // which `parent_payload` rejects until that parent certifies.
         self.parent_payload(proposal)
             .is_ok_and(|payload| payload == *parent_payload)
+            || (self
+                .leader_index(view)
+                .is_some_and(|leader| self.is_me(leader))
+                && self.find_parent(view) == Ok((proposal.parent, *parent_payload)))
     }
 
     fn previous_in_term(&self, view: View) -> Option<View> {
@@ -7441,6 +7460,142 @@ mod tests {
             assert_eq!(
                 state.views.get(&View::new(6)).and_then(Round::proposal),
                 Some(&child)
+            );
+        });
+    }
+
+    /// The incoming leader's pipelined handoff rests on its own vote for the
+    /// outgoing tip. A conflicting tip notarization kills that handoff, so a
+    /// same-term successor must not build on it.
+    #[test]
+    fn pipelined_handoff_conflicting_parent_blocks_same_term_successor() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            let ctx = state
+                .try_propose()
+                .expect("handoff proposal should use the uncertified tip")
+                .into_context();
+            assert_eq!(ctx.parent, (View::new(5), tip.payload));
+            let ours = fetch_proposal(6, 5, 66);
+            assert!(state.proposed(&ctx, ours.payload));
+            assert!(state.construct_notarize(View::new(6)).is_some());
+
+            // The outgoing leader equivocated, and a conflicting tip notarizes and certifies.
+            let conflict = fetch_proposal(5, 4, 75);
+            let notarization = build_notarization(&verifier, &schemes[..3], &conflict);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(View::new(5), true).is_some());
+            assert_eq!(state.current_view(), View::new(6));
+
+            // Our view-6 proposal binds the displaced tip, so it is dead ancestry.
+            let request = state
+                .try_propose()
+                .map(|r| (r.view(), r.is_handoff(), r.context().parent));
+            assert_eq!(request, None, "proposed on a dead chain");
+            assert_eq!(state.optimistic_ancestry_payload(View::new(6)), None);
+        });
+    }
+
+    /// An elector whose fixed schedule gives participant 3 views 6 and 7.
+    #[derive(Clone)]
+    struct RepeatLeaderElector;
+
+    impl<S: certificate::Scheme> Elector<S> for RepeatLeaderElector {
+        type Mode = crate::simplex::elector::Scheduled;
+
+        fn terms(&self) -> Terms {
+            Terms::rotating()
+        }
+
+        fn elect(&self, round: Rnd, _: ()) -> Participant {
+            match round.view().get() {
+                6 | 7 => Participant::new(3),
+                v => Participant::new((v % 3) as u32),
+            }
+        }
+    }
+
+    /// With the same incoming leader for two consecutive terms, a conflicting
+    /// outgoing tip must stop the second handoff from building on the dead first one.
+    #[test]
+    fn pipelined_handoff_conflicting_parent_blocks_consecutive_handoff() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, b"ns", 4);
+            let mut state: State<_, _, RepeatLeaderElector, Sha256Digest> = State::new(
+                context.child("state"),
+                Config {
+                    scheme: schemes[3].clone(),
+                    elector: RepeatLeaderElector,
+                    epoch: Epoch::new(9),
+                    view_retention: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    skip_budget: 4,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            // Certify view 4 and vote for the outgoing leader's view-5 tip.
+            let anchor = fetch_proposal(4, 3, 64);
+            let notarization = build_notarization(&verifier, &schemes, &anchor);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(View::new(4), true).is_some());
+            let _ = state.certify_candidates();
+            assert_eq!(state.current_view(), View::new(5));
+            let tip = fetch_proposal(5, 4, 65);
+            assert!(state.set_proposal(View::new(5), tip.clone()));
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
+            assert!(state.verified(View::new(5)));
+            assert!(state.construct_notarize(View::new(5)).is_some());
+
+            // Pipelined handoff at view 6 on the uncertified tip.
+            let ctx = state
+                .try_propose()
+                .expect("handoff proposal should use the uncertified tip")
+                .into_context();
+            assert_eq!(ctx.parent, (View::new(5), tip.payload));
+            let ours = fetch_proposal(6, 5, 66);
+            assert!(state.proposed(&ctx, ours.payload));
+            assert!(state.construct_notarize(View::new(6)).is_some());
+
+            // The outgoing leader equivocated, and a conflicting tip notarizes and certifies.
+            let conflict = fetch_proposal(5, 4, 75);
+            let notarization = build_notarization(&verifier, &schemes[..3], &conflict);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(View::new(5), true).is_some());
+            assert_eq!(state.current_view(), View::new(6));
+
+            // View 6 is dead. A view-7 request on it would forfeit view 7, whereas
+            // waiting lets view 7 build on the certified conflicting tip once view 6
+            // nullifies.
+            let request = state
+                .try_propose()
+                .map(|r| (r.view(), r.is_handoff(), r.context().parent));
+            assert_eq!(request, None, "proposed on a dead chain");
+            assert_eq!(state.optimistic_ancestry_payload(View::new(6)), None);
+
+            let nullification = build_nullification(
+                &verifier,
+                &schemes[..3],
+                Rnd::new(Epoch::new(9), View::new(6)),
+            );
+            assert!(state.add_nullification(nullification));
+            let request = state.try_propose().map(|r| (r.view(), r.context().parent));
+            assert_eq!(
+                request,
+                Some((View::new(7), (View::new(5), conflict.payload)))
             );
         });
     }

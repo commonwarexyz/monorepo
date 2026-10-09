@@ -5846,8 +5846,9 @@ mod tests {
                 assert!(handle.await.is_err());
                 assert!(response.is_closed());
                 requests.lock().clear();
+                let restarted_context = context.child("restarted");
                 (mailbox, batcher, _resolver, relay, reporter) = setup_voter(
-                    &context.child("restarted"),
+                    &restarted_context,
                     &oracle,
                     &participants,
                     &schemes,

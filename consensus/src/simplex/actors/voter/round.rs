@@ -113,8 +113,9 @@ pub struct Round<S: Scheme, D: Digest> {
     certify: CertifyState,
     last_ancestry_request: Option<View>,
 
-    // Proposal and exact parent payload captured by peer verification or
-    // recovered from a replayed local vote. A certificate may replace either.
+    // Proposal and exact parent payload captured by peer verification, by
+    // recording a local proposal, or recovered from a replayed local vote. A
+    // certificate may replace either.
     verifying: Option<(Proposal<D>, D)>,
 }
 
