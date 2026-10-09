@@ -236,9 +236,12 @@ impl Drop for RejectedPayload {
     }
 }
 
-/// Disable idle spinning so tests exercise the worker's parking paths.
+/// One worker with idle spinning disabled, so tests that set no worker count
+/// place tasks deterministically and exercise the parking paths.
 fn config() -> Config {
-    Config::new().with_idle_spinner(SpinnerConfig::disabled())
+    Config::new()
+        .with_worker_threads(1)
+        .with_idle_spinner(SpinnerConfig::disabled())
 }
 
 /// Select a placement while preserving the unmodified default as a separate case.
