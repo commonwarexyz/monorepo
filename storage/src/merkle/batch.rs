@@ -279,9 +279,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         self
     }
 
-    /// Hash `element` across the batch's strategy and add it as a leaf.
+    /// Hash `element` and add it as a leaf.
     pub fn add(self, hasher: &impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
-        let digest = hasher.leaf_digest_with(self.size(), element, self.strategy());
+        let digest = hasher.leaf_digest(self.size(), element);
         self.add_leaf_digest(digest)
     }
 
@@ -293,14 +293,16 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         items: &[Item],
     ) -> Self {
         let first = self.leaves();
-        let strategy = self.strategy();
-        let digests =
-            strategy.map_init_collect_vec(items.iter().enumerate(), Vec::new, |buf, (i, item)| {
+        let digests = self.strategy().map_init_collect_vec(
+            items.iter().enumerate(),
+            Vec::new,
+            |buf, (i, item)| {
                 let pos = Position::try_from(first + i as u64).expect("valid leaf location");
                 buf.clear();
                 item.write(buf);
-                hasher.leaf_digest_with(pos, buf.as_slice(), strategy)
-            });
+                hasher.leaf_digest(pos, buf.as_slice())
+            },
+        );
         self.add_leaf_digests(digests)
     }
 
@@ -320,7 +322,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         Position::try_from(loc)
     }
 
-    /// Update the leaf at `loc` to `element`, hashing it across the batch's strategy.
+    /// Update the leaf at `loc` to `element`.
     ///
     /// # Errors
     ///
@@ -333,7 +335,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         element: &[u8],
     ) -> Result<Self, Error<F>> {
         let pos = self.validate_loc(loc)?;
-        let digest = hasher.leaf_digest_with(pos, element, self.strategy());
+        let digest = hasher.leaf_digest(pos, element);
         self.store_node(pos, digest);
         self.mark_dirty(loc);
         Ok(self)

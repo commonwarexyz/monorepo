@@ -43,7 +43,7 @@ where
                     let pos = F::location_to_position(first_leaf + offset);
                     buf.clear();
                     op.write(buf);
-                    hasher.leaf_digest_with(pos, buf.as_slice(), &strategy)
+                    hasher.leaf_digest(pos, buf.as_slice())
                 });
 
             let batch = batch.add_leaf_digests(leaf_digests);
