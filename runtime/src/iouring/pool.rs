@@ -46,8 +46,10 @@
 //! queue clears the lowest set bit to claim that worker and wakes it, so each
 //! parked worker is woken by at most one push. Each side fences between its
 //! store and its load, so at least one of them sees the other's store: either
-//! the pusher finds the worker's bit and wakes it, or the worker finds the push
-//! and runs it.
+//! the worker finds the push and runs it, or the pusher finds the worker's bit,
+//! so the idle set is not empty and the pusher wakes one idle worker, not
+//! necessarily that one. A push is therefore never left queued with every
+//! worker asleep.
 //!
 //! ```text
 //! push                              parking worker i
@@ -87,15 +89,15 @@
 //! ```
 //!
 //! Shutdown closes the task set before the global queue, so a runnable the
-//! closed queue refuses belongs to a task the set still retains. On the
-//! runner's normal path the pool stops after the supervision tree is aborted,
-//! so the other workers destroy only cancelled tasks, apart from one that
-//! failed earlier, which drains the set as soon as the pool closes. Worker
-//! zero stops the pool from its own cleanup, so an unwind that skips the
-//! runner's shutdown still releases the barrier. No worker closes its
-//! mailbox, drops the messages it took from it, or closes its ring until every
-//! pool worker has drained the set and finished its last poll, since a task
-//! polled on one worker can hold registrations on another, whose mailbox
+//! closed queue refuses belongs to a task that teardown clears or already has
+//! cleared. On the runner's normal path the pool stops after the supervision
+//! tree is aborted, so the other workers destroy only cancelled tasks, apart
+//! from one that failed earlier, which drains the set as soon as the pool
+//! closes. Worker zero stops the pool from its own cleanup, so an unwind that
+//! skips the runner's shutdown still releases the barrier. No worker closes
+//! its mailbox, drops the messages it took from it, or closes its ring until
+//! every pool worker has drained the set and finished its last poll, since a
+//! task polled on one worker can hold registrations on another, whose mailbox
 //! forwards their results.
 //!
 //! The barrier's state is [`Closing`], under a lock of its own: `closed`
@@ -186,9 +188,11 @@ pub struct Pool {
     /// Every pool worker's mailbox, indexed by worker. All exist before any
     /// worker starts, so a push can wake any worker from the first spawn on.
     mailboxes: Box<[Arc<Mailbox>]>,
-    /// Bit `i` is set while worker `i` is parked or about to park. Padded,
-    /// like the two fields after it, so parks, pushes, and takes do not contend
-    /// for one cache line.
+    /// Bit `i` is set while worker `i` is published as parked or about to
+    /// park and no push has claimed it. A push clears the bit to claim the
+    /// worker before waking it, and the worker clears it when it runs again.
+    /// Padded, like the two fields after it, so parks, pushes, and takes do not
+    /// contend for one cache line.
     idle: CachePadded<AtomicU64>,
     /// The global queue's length, stored under its lock and read without it.
     global_len: CachePadded<AtomicUsize>,
@@ -276,8 +280,8 @@ impl Pool {
     }
 
     /// Queue `runnable` for any worker and wake a parked one. Once the queue
-    /// has closed, returns the runnable for the caller to discard, since the
-    /// closed task set retains its task.
+    /// has closed, returns the runnable for the caller to discard: the task
+    /// set closed first, so teardown clears its task or already has.
     pub fn push(&self, runnable: Runnable) -> Result<(), Runnable> {
         {
             let mut queue = self.global();
@@ -300,10 +304,10 @@ impl Pool {
         Ok(())
     }
 
-    /// Whether the global queue holds runnables, read without the lock. A
-    /// worker that published itself idle and then reads zero here is woken by
-    /// any push it missed, by the fence pairing between [`Self::push`] and
-    /// [`Self::park_begin`].
+    /// Whether the global queue holds runnables, read without the lock. After
+    /// a worker publishes itself idle, the fence pairing between [`Self::push`]
+    /// and [`Self::park_begin`] ensures that a push it misses here wakes some
+    /// idle worker, not necessarily this one.
     pub fn has_global(&self) -> bool {
         self.global_len.load(Ordering::Acquire) != 0
     }

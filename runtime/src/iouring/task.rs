@@ -824,8 +824,8 @@ impl Runnable {
     /// Push the runnable into its pool's global queue.
     ///
     /// A closed queue, or a pool that is gone, discards it. The pool closes
-    /// its queue only after the task set, so the closed set retains the task
-    /// for the drain, which clears it or already has.
+    /// its queue only after the task set, so teardown clears the task or
+    /// already has.
     fn push_global(self) {
         let Some(pool) = self.0.pool.upgrade() else {
             self.discard();

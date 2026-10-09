@@ -1992,7 +1992,8 @@ impl Worker {
             }
 
             // Publish idleness before the last look at the global queue. A push
-            // racing this check either shows up here or wakes this worker.
+            // racing this check either shows up here or wakes an idle worker,
+            // not necessarily this one.
             if let (Some(pool), Some(index)) = (pool, index) {
                 #[cfg(test)]
                 tests::at_park(pool, index, tests::ParkPoint::BeforeIdle);
