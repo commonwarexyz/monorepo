@@ -2874,7 +2874,7 @@ fn test_tasks_spread_across_workers_and_complete() {
             if count > 1 {
                 let deadline = Instant::now() + TEST_TIMEOUT;
                 while started.load(Ordering::SeqCst) < count * 3 - 1 {
-                    assert!(Instant::now() < deadline, "injected tasks never started");
+                    assert!(Instant::now() < deadline, "globally queued tasks never started");
                     std::hint::spin_loop();
                 }
             }
