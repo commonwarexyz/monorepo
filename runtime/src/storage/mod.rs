@@ -87,15 +87,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 Ok(())
             }
 
-            /// Read up to `len` bytes from the start of `file`, stopping early at end of file.
+            /// Fill `buf` from the start of `file`, stopping early at end of file, and return the
+            /// number of bytes read.
             ///
             /// The resolved header is held in memory, so the read asks the kernel not to keep it
             /// in the page cache, retrying without the hint where that is unsupported.
-            fn read_header_bytes(file: &mut File, len: usize) -> io::Result<Vec<u8>> {
-                let mut buf = vec![0; len];
+            fn read_header_bytes(file: &mut File, buf: &mut [u8]) -> io::Result<usize> {
                 let mut flags = libc::RWF_DONTCACHE;
                 let mut done = 0;
-                while done < len {
+                while done < buf.len() {
                     let offset = libc::off_t::try_from(done)
                         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
                     match preadv2(file.as_fd(), &mut buf[done..], offset, flags) {
@@ -108,8 +108,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                         Err(err) => return Err(err),
                     }
                 }
-                buf.truncate(done);
-                Ok(buf)
+                Ok(done)
             }
 
             /// Write `buf` at the start of `file`.
@@ -144,12 +143,20 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 File::open(dir)?.sync_all()
             }
 
-            /// Read up to `len` bytes from the start of `file`, stopping early at end of file.
-            fn read_header_bytes(file: &mut File, len: usize) -> io::Result<Vec<u8>> {
-                let mut buf = Vec::with_capacity(len);
+            /// Fill `buf` from the start of `file`, stopping early at end of file, and return the
+            /// number of bytes read.
+            fn read_header_bytes(file: &mut File, buf: &mut [u8]) -> io::Result<usize> {
                 file.seek(SeekFrom::Start(0))?;
-                file.take(Widen::widen(len)).read_to_end(&mut buf)?;
-                Ok(buf)
+                let mut done = 0;
+                while done < buf.len() {
+                    match file.read(&mut buf[done..]) {
+                        Ok(0) => break,
+                        Ok(read) => done += read,
+                        Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+                Ok(done)
             }
 
             /// Write `buf` at the start of `file`.
@@ -189,12 +196,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         name: &[u8],
     ) -> Result<Option<(u64, BlobVersion, u64)>, Error> {
         let requested = Header::resolve_len(raw_len);
-        let raw = read_header_bytes(file, requested).map_err(|_| Error::ReadFailed)?;
+        let mut buf = [0u8; Layout::V1.data_offset() as usize];
+        let read =
+            read_header_bytes(file, &mut buf[..requested]).map_err(|_| Error::ReadFailed)?;
+        let raw = &buf[..read];
 
         // V0's prefix includes mutable payload that may shrink after metadata was read.
         // A complete prefix must retain the original length, which yields the logical size.
         let parse_len = if raw.len() < requested { Widen::widen(raw.len()) } else { raw_len };
-        header::resolve(&raw, parse_len, layouts, versions, partition, name)
+        header::resolve(raw, parse_len, layouts, versions, partition, name)
     }
 
     /// Write and sync a fresh header, returning the new blob's size, version, and data offset.
