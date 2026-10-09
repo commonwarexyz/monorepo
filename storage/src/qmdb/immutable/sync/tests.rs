@@ -172,7 +172,6 @@ pub(crate) mod harnesses {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                node_cache_size: Some(NZUsize!(64)),
                 page_cache: page_cache.clone(),
             },
             log: crate::journal::contiguous::variable::Config {
@@ -442,7 +441,6 @@ pub(crate) mod harnesses {
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
-                node_cache_size: Some(NZUsize!(64)),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -472,7 +470,6 @@ pub(crate) mod harnesses {
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
-                node_cache_size: Some(NZUsize!(64)),
             },
             log: crate::journal::contiguous::fixed::Config {
                 partition: format!("log-{suffix}"),

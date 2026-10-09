@@ -1251,7 +1251,6 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                node_cache_size: None,
                 page_cache: page_cache.clone(),
             },
             journal_config: FixedJournalConfig {
@@ -1282,7 +1281,6 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                node_cache_size: None,
                 page_cache: page_cache.clone(),
             },
             journal_config: VariableJournalConfig {

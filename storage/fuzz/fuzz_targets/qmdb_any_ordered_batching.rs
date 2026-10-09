@@ -106,7 +106,6 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                     strategy: Sequential,
-                    node_cache_size: None,
                     page_cache: page_cache.clone(),
                 },
                 journal_config: FConfig {
