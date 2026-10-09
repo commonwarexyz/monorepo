@@ -32,29 +32,29 @@ use std::{
     sync::{Arc, Weak},
 };
 
-/// A database reference proven to be on a batch chain's own states.
+/// A database reference proven compatible with a batch chain: its state is one of the chain's own.
 ///
 /// Committed-read helpers in the any and current families take this instead of a bare database
 /// reference, so calling one without the check fails to compile; the immutable and keyless
 /// families run the same check at each read entry point instead. Public database methods reached
 /// through [`Deref`] are not covered.
-/// It is only created by [`Bounds::onchain`], [`Commitment::onchain`], and [`merkleizable`],
+/// It is only created by [`Bounds::compatible`], [`Commitment::compatible`], and [`merkleizable`],
 /// which check whatever commitment the caller supplies, so callers must pair the database with its
 /// own commitment (every current caller does).
 /// Holding the wrapped reference also freezes the database for the duration of the call.
 /// Every public state mutation takes the database by value, so no apply, prune, or
 /// reinitialization can interleave with a checked read.
-pub(crate) struct Onchain<'a, T>(&'a T);
+pub(crate) struct Compatible<'a, T>(&'a T);
 
-impl<T> Clone for Onchain<'_, T> {
+impl<T> Clone for Compatible<'_, T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T> Copy for Onchain<'_, T> {}
+impl<T> Copy for Compatible<'_, T> {}
 
-impl<T> Deref for Onchain<'_, T> {
+impl<T> Deref for Compatible<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -80,13 +80,13 @@ impl<F: Family, D: Digest> Commitment<F, D> {
     /// Check a committed read for a batch built directly on the database at this
     /// commitment. With no ancestors to account for applies, only the unchanged state is
     /// readable. Returns [`Error::StaleRead`] otherwise.
-    pub(crate) fn onchain<'a, T>(
+    pub(crate) fn compatible<'a, T>(
         &self,
         db: &'a T,
         current: Self,
-    ) -> Result<Onchain<'a, T>, Error<F>> {
+    ) -> Result<Compatible<'a, T>, Error<F>> {
         if *self == current {
-            Ok(Onchain(db))
+            Ok(Compatible(db))
         } else {
             Err(Error::StaleRead)
         }
@@ -145,13 +145,13 @@ impl<F: Family, D: Digest> Bounds<F, D> {
     /// chain's retained diffs shadow every key its unapplied batches touched. Membership
     /// compares size and root together, since a sibling fork can commit the same operation
     /// count with different contents.
-    pub(crate) fn onchain<'a, T>(
+    pub(crate) fn compatible<'a, T>(
         &self,
         db: &'a T,
         current: Commitment<F, D>,
-    ) -> Result<Onchain<'a, T>, Error<F>> {
+    ) -> Result<Compatible<'a, T>, Error<F>> {
         if current == self.tip || current == self.db || self.ancestors.contains(&current) {
-            Ok(Onchain(db))
+            Ok(Compatible(db))
         } else {
             Err(Error::StaleRead)
         }
@@ -247,9 +247,9 @@ pub(crate) fn merkleizable<'a, T, F: Family, D: Digest>(
     current: Commitment<F, D>,
     boundary: Commitment<F, D>,
     ancestors: impl IntoIterator<Item = Commitment<F, D>>,
-) -> Result<Onchain<'a, T>, Error<F>> {
+) -> Result<Compatible<'a, T>, Error<F>> {
     validate_batch_applicable(current, boundary, ancestors)?;
-    Ok(Onchain(db))
+    Ok(Compatible(db))
 }
 
 /// Validate the inactivity floor of a batch at merkleize time.
@@ -333,20 +333,20 @@ mod tests {
             inactivity_floor: loc(14),
         };
         // Own tip, database boundary, and ancestor tips are readable.
-        assert!(bounds.onchain(&(), state(18, 18)).is_ok());
-        assert!(bounds.onchain(&(), state(10, 1)).is_ok());
-        assert!(bounds.onchain(&(), state(16, 16)).is_ok());
+        assert!(bounds.compatible(&(), state(18, 18)).is_ok());
+        assert!(bounds.compatible(&(), state(10, 1)).is_ok());
+        assert!(bounds.compatible(&(), state(16, 16)).is_ok());
         // Foreign states are not, including at sizes the chain also reaches.
         assert!(matches!(
-            bounds.onchain(&(), state(19, 19)),
+            bounds.compatible(&(), state(19, 19)),
             Err(Error::StaleRead)
         ));
         assert!(matches!(
-            bounds.onchain(&(), state(16, 99)),
+            bounds.compatible(&(), state(16, 99)),
             Err(Error::StaleRead)
         ));
         assert!(matches!(
-            bounds.onchain(&(), state(18, 99)),
+            bounds.compatible(&(), state(18, 99)),
             Err(Error::StaleRead)
         ));
     }
@@ -354,13 +354,13 @@ mod tests {
     #[test]
     fn on_chain_from_base_commitment_requires_unchanged_state() {
         let base = state(10, 1);
-        assert!(base.onchain(&(), state(10, 1)).is_ok());
+        assert!(base.compatible(&(), state(10, 1)).is_ok());
         assert!(matches!(
-            base.onchain(&(), state(10, 2)),
+            base.compatible(&(), state(10, 2)),
             Err(Error::StaleRead)
         ));
         assert!(matches!(
-            base.onchain(&(), state(11, 1)),
+            base.compatible(&(), state(11, 1)),
             Err(Error::StaleRead)
         ));
     }

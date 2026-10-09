@@ -19,7 +19,7 @@ use crate::{
             operation::{Operation, update},
         },
         bitmap::{Candidates, Shared, fill_from},
-        chain::{Bounds, Onchain},
+        chain::{Bounds, Compatible},
         current::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
@@ -557,7 +557,7 @@ where
             .await?;
         let current_db = inner
             .bounds()
-            .onchain(db, db.any.commitment())
+            .compatible(db, db.any.commitment())
             .map_err(|_| Error::StaleBatch)?;
         let result =
             compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
@@ -625,7 +625,7 @@ where
             .await?;
         let current_db = inner
             .bounds()
-            .onchain(db, db.any.commitment())
+            .compatible(db, db.any.commitment())
             .map_err(|_| Error::StaleBatch)?;
         let result =
             compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
@@ -679,7 +679,7 @@ where
             .await?;
         let current_db = inner
             .bounds()
-            .onchain(db, db.any.commitment())
+            .compatible(db, db.any.commitment())
             .map_err(|_| Error::StaleBatch)?;
         let result =
             compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
@@ -733,7 +733,7 @@ where
             .await?;
         let current_db = inner
             .bounds()
-            .onchain(db, db.any.commitment())
+            .compatible(db, db.any.commitment())
             .map_err(|_| Error::StaleBatch)?;
         let result =
             compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
@@ -854,7 +854,7 @@ where
 #[allow(clippy::type_complexity)]
 async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
     inner: Arc<any::batch::MerkleizedBatch<F, H::Digest, U, S>>,
-    current_db: Onchain<'_, super::db::Db<F, E, C, I, H, U, N, S>>,
+    current_db: Compatible<'_, super::db::Db<F, E, C, I, H, U, N, S>>,
     grafted_parent: &Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
     bitmap_parent: &BitmapBatch<N>,
 ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, N, S>>, Error<F>>
