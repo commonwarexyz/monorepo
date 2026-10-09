@@ -284,7 +284,7 @@ where
         receiver.await.ok().flatten()
     }
 
-    /// Decides through [`Application::handoff`] before any work, so a [`Handoff::Wait`]
+    /// Decides through [`Application::prepare`] before any work, so a [`Handoff::Wait`]
     /// decision never touches the parent or the actor queue. Otherwise the ancestry is fetched
     /// and the build runs as an ordinary proposal through the processing actor, which alone can
     /// prepare its database batches, and the decision is attached to the result.
@@ -294,7 +294,7 @@ where
         parent: impl Parent<Self::Block>,
         upstream: Self::Input,
     ) -> Handoff<Self::Block> {
-        let decision = self.application.handoff(&context.1);
+        let decision = self.application.prepare(&context.1);
         if decision.is_wait() {
             return Handoff::Wait;
         }

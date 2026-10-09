@@ -591,7 +591,7 @@ mod tests {
             panic!("gated application genesis is not used")
         }
 
-        fn handoff(&self, _context: &Self::Context) -> Handoff<()> {
+        fn prepare(&self, _context: &Self::Context) -> Handoff<()> {
             Handoff::Stage(())
         }
 

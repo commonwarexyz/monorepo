@@ -134,7 +134,7 @@
 //!   `optimistic_views` views ahead of certified ancestry within a term (configured alongside the
 //!   term length, see [`elector::Terms::stable`]); certification and `finalize` votes always wait
 //!   for explicit parent certification (see [Optimistic Validation](#optimistic-validation)).
-//! * Let a term's incoming leader build, and optionally publish and vote on, its first proposal
+//! * Let a term's incoming leader build and relay its first proposal, and optionally vote on it,
 //!   before the outgoing term's final view certifies (see [Pipelined Handoff](#pipelined-handoff)).
 //!   Other validators verify that proposal only on explicitly certified ancestry.
 //! * If an entered view remains unfinalized for the stall timeout (configured alongside the term
@@ -249,7 +249,7 @@
 //!
 //! A pipelined handoff lets the incoming leader build or reuse its term-start proposal before
 //! the parent certifies. The application decides, per request, whether to prepare a candidate
-//! and whether consensus may publish it before the parent certifies.
+//! and whether consensus may vote for it before the parent certifies.
 //!
 //! Handoff requests require a [`elector::Scheduled`] elector, which knows the incoming leader
 //! before the certificate that unlocks the term exists. A [`elector::Dynamic`] elector never
@@ -264,13 +264,13 @@
 //! * [`crate::Handoff::Wait`]: request an ordinary proposal once the parent certifies.
 //! * [`crate::Handoff::Stage`]: relay the candidate now and hold the proposer's notarize vote
 //!   until the parent certifies or finalizes (see [`Plan::Prepare`]).
-//! * [`crate::Handoff::Publish`]: relay the candidate and cast the proposer's notarize vote
+//! * [`crate::Handoff::Vote`]: relay the candidate and cast the proposer's notarize vote
 //!   before the parent certifies.
 //! * Closed response: time out the view as a missing proposal once the parent certifies or
 //!   finalizes.
 //!
-//! Consensus checks ordinary proposal eligibility before publication. Parent certification
-//! does not cancel a pending request or discard a held candidate.
+//! Consensus checks ordinary proposal eligibility before it records a candidate and votes for it.
+//! Parent certification does not cancel a pending request or discard a held candidate.
 //!
 //! Consensus cancels a pending build once its captured ancestry is no longer valid, as after a
 //! nullification in the parent's term, even if no replacement parent is selectable yet. It also
@@ -291,9 +291,9 @@
 //!
 //! Marshal applications opt in through [`crate::Application::prepare`], which receives the
 //! uncertified parent as a handle, asks it for the ancestry to build, and returns the block with
-//! [`crate::Handoff::Publish`] or [`crate::Handoff::Stage`], or declines with the default
+//! [`crate::Handoff::Vote`] or [`crate::Handoff::Stage`], or declines with the default
 //! [`crate::Handoff::Wait`] at no cost. Stateful Glue decides synchronously through its own
-//! `handoff` hook and builds through its ordinary proposal path. The decision is final for the
+//! `prepare` hook and builds through its ordinary proposal path. The decision is final for the
 //! request.
 //!
 //! Asking for the ancestry runs the ordinary construction checks, which may re-propose the epoch
@@ -302,24 +302,24 @@
 //! consensus holds the vote. An application can choose it for any handoff whose outgoing leader
 //! it does not trust.
 //!
-//! With [`crate::Handoff::Publish`], rotating leaders can pipeline every view. The leader
+//! With [`crate::Handoff::Vote`], rotating leaders can pipeline every view. The leader
 //! distributes each proposal in parallel with its parent's votes, allowing network-bound view time
 //! to drop from two network trips to one. With stable leaders, optimistic validation pipelines
 //! every view except the term start, so the handoff only moves each term's first view one network
 //! trip earlier.
 //!
-//! Publication before certification trusts the outgoing leader not to equivocate and to complete
+//! Voting before certification trusts the outgoing leader not to equivocate and to complete
 //! its term. Other validators require explicitly certified ancestry before verifying a term-start
 //! proposal, and so before voting to notarize it. The early proposal becomes usable only if every
 //! uncertified view it builds on certifies, and with stable leaders that can include several views
 //! of the outgoing term. If one of them never certifies, validators cannot use the proposal, and
 //! the usual timeout path nullifies the incoming term.
 //!
-//! If the outgoing term fails, `Publish` costs more than `Stage` or `Wait`. Having voted for the
+//! If the outgoing term fails, `Vote` costs more than `Stage` or `Wait`. Having voted for the
 //! proposal, the leader cannot rebuild on another parent. Validators that hold the proposal also
 //! wait for the certification timeout, because the leader timeout ends once a proposal arrives.
 //!
-//! Early publication also relies on validators keeping pace. A validator admits a term-start vote
+//! An early vote also relies on validators keeping pace. A validator admits a term-start vote
 //! only once it has entered the outgoing term, and the leader does not resend its vote, so a
 //! validator still in an earlier term drops the vote that carries the proposal. If the quorum
 //! needs such a validator, the incoming term times out.
@@ -461,8 +461,8 @@
 //! * `Held`: consensus retained a candidate for parent certification. Releasing a held candidate
 //!   does not count it again.
 //! * `RelayedBeforeCertification`: consensus requested the candidate's relay before the exact
-//!   parent had certified or finalized, either when it held the candidate or when it accepted
-//!   an early publication.
+//!   parent had certified or finalized, either when it held the candidate or when it voted for
+//!   it early.
 //! * `RelayedAfterCertification`: consensus requested the candidate's relay once the exact
 //!   parent had certified or finalized.
 //! * `VotedBeforeCertification`: consensus recorded the candidate and cast its notarize vote
@@ -473,7 +473,7 @@
 //! One request can count several events. Relay events do not imply network delivery.
 //!
 //! `handoff_abandoned` counts handoff requests or candidates that consensus discards before
-//! publication, and pending builds that it cancels, by reason:
+//! voting for them, and pending builds that it cancels, by reason:
 //!
 //! * `ViewExit`: the request's view ended.
 //! * `AncestrySuperseded`: the captured ancestry became invalid while a replacement parent was
@@ -501,8 +501,8 @@
 //! `notarization_latency` and `finalization_latency` measure leader-local time from accepted
 //! local proposal recording to local certificate readiness, falling back to first local view
 //! entry when no local proposal was recorded. Holding a prepared candidate happens before
-//! proposal recording, so that wait is excluded. Early publication can record the proposal
-//! before parent certification and include the remaining wait in these metrics.
+//! proposal recording, so that wait is excluded. An early vote can record the proposal before
+//! parent certification and include the remaining wait in these metrics.
 //!
 //! `notarization_latency_from_view_entry` and `finalization_latency_from_view_entry` measure from
 //! first local view entry, regardless of proposal timing, and omit samples when no entry was
@@ -597,8 +597,8 @@
 //! consensus message and is not gated on this sync: to lower view latency, it is requested as soon
 //! as the automaton returns a payload, which is safe because extra payload bytes (unlike votes)
 //! cannot form a conflicting certificate (see [`Plan::Propose`]). A staged handoff candidate is
-//! relayed when it is held (see [`Plan::Prepare`]), and its lock-in and notarize vote wait
-//! until its parent certifies or finalizes.
+//! relayed when it is held (see [`Plan::Prepare`]), and its notarize vote waits until its
+//! parent certifies or finalizes.
 //!
 //! ## Automaton Failure Semantics
 //!
@@ -774,18 +774,15 @@ cfg_if::cfg_if! {
             /// Early broadcast of a held term-start candidate to all participants.
             ///
             /// Requested when a [`crate::Handoff::Stage`] candidate is held for its
-            /// parent's certification. The relay sends the payload without storing
-            /// it: the proposer has not voted for it, and the candidate may still be
-            /// abandoned for one built on a replacement parent. A later
-            /// [`Plan::Propose`] for the same payload stores it without sending it
-            /// again.
-            ///
-            /// A relay may defer the send to the matching [`Plan::Propose`].
+            /// parent's certification. The proposer has not voted for the candidate
+            /// and may still abandon it for one built on a replacement parent, so
+            /// this plan commits to nothing. A relay may defer the send to the
+            /// matching [`Plan::Propose`].
             Prepare {
                 /// The round in which the candidate was built.
                 round: Round,
             },
-            /// Lock-in broadcast of a proposed block to all participants.
+            /// Broadcast of a proposed block to all participants.
             ///
             /// Requested before the proposer's notarize vote is durable: a
             /// proposer that crashes and restarts may emit this plan again
@@ -793,9 +790,8 @@ cfg_if::cfg_if! {
             /// tolerate multiple candidates per round (at most one is ever
             /// referenced by the proposer's signed votes).
             ///
-            /// This is the lock-in for a payload: the relay requests that it be
-            /// stored, and the proposer's vote follows. A payload already sent by
-            /// [`Plan::Prepare`] is stored without being sent again.
+            /// The proposer's notarize vote follows this plan. A payload already
+            /// sent by [`Plan::Prepare`] is not sent again.
             Propose {
                 /// The round in which the block was proposed.
                 round: Round,
@@ -2098,7 +2094,7 @@ mod tests {
                     ViewDelta::new(4),
                 ),
                 /* propose_latency */ (10.0, 0.0),
-                Handoff::Publish(()),
+                Handoff::Vote(()),
             )
             .await;
 
@@ -2155,7 +2151,7 @@ mod tests {
                 },
                 RoundRobin::<Sha256>::default(),
                 /* propose_latency */ (10.0, 0.0),
-                Handoff::Publish(()),
+                Handoff::Vote(()),
             )
             .await;
 
@@ -8453,7 +8449,7 @@ mod tests {
     ///   the protocol actually commits blocks under synchrony, not just
     ///   reaches a high view via nullifications.
     ///
-    /// - `handoffs`: Whether applications return handoff candidates with early publication
+    /// - `handoffs`: Whether applications return handoff candidates for an early vote
     ///   during the attack prefix instead of waiting for every parent to certify.
     ///
     /// The term structure (length and optimistic lookahead) comes from the
@@ -8470,16 +8466,16 @@ mod tests {
         handoffs: bool,
     }
 
-    /// Makes an application return handoff candidates with early publication during the adversarial
-    /// prefix and wait for parent certification afterward, so early publication evidence comes only
-    /// from prefix views. `returned` counts the candidates the application returns during the
+    /// Makes an application return handoff candidates for an early vote during the adversarial
+    /// prefix and wait for parent certification afterward, so early-vote evidence comes only from
+    /// prefix views. `returned` counts the candidates the application returns during the
     /// prefix.
     fn configure_twins_handoff(
         actor: &mut mocks::application::Application<deterministic::Context, Sha256, PublicKey>,
         prefix_end: View,
         returned: Arc<AtomicUsize>,
     ) {
-        actor.set_handoff(Handoff::Publish(()));
+        actor.set_handoff(Handoff::Vote(()));
         actor.set_handoff_controller(Box::new(move |round, proposal, response| {
             if round.view() <= prefix_end {
                 returned.fetch_add(1, Ordering::Relaxed);
@@ -8503,7 +8499,7 @@ mod tests {
     {
         let honest_handoffs = Arc::new(AtomicUsize::new(0));
         let twin_handoffs = Arc::new(AtomicUsize::new(0));
-        let early_publications = Arc::new(Mutex::new(0u64));
+        let early_votes = Arc::new(Mutex::new(0u64));
         let n = campaign.n;
         let faults = N3f1::max_faults(n) as usize;
         let cases = twins::cases(
@@ -8537,7 +8533,7 @@ mod tests {
             let elector = elector.clone();
             let honest_handoffs = honest_handoffs.clone();
             let twin_handoffs = twin_handoffs.clone();
-            let early_publications = early_publications.clone();
+            let early_votes = early_votes.clone();
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
             let rng: deterministic::BoxDynRng = Box::new(StdRng::from_rng(&mut *rng));
@@ -8849,7 +8845,7 @@ mod tests {
                 }
                 join_all(finalizers).await;
                 if campaign.handoffs {
-                    *early_publications.lock() += u64::from(count_nonzero_metric_lines(
+                    *early_votes.lock() += u64::from(count_nonzero_metric_lines(
                         &context.encode(),
                         &[
                             "_handoff_events_total{",
@@ -8949,8 +8945,8 @@ mod tests {
         }
         if campaign.handoffs {
             assert!(
-                *early_publications.lock() > 0,
-                "campaign must publish prefix handoffs before certification"
+                *early_votes.lock() > 0,
+                "campaign must vote for prefix handoffs before certification"
             );
             assert!(
                 honest_handoffs.load(Ordering::Relaxed) > 0,

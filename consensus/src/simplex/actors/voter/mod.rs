@@ -4009,7 +4009,7 @@ mod tests {
                     timeout_retry: Duration::from_secs(30),
                     local_index,
                     propose_latency_ms: 10.0,
-                    handoff: Handoff::Publish(()),
+                    handoff: Handoff::Vote(()),
                     ..Default::default()
                 },
             )
@@ -4115,7 +4115,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     certifier,
-                    handoff: Handoff::Publish(()),
+                    handoff: Handoff::Vote(()),
                     ..Default::default()
                 },
             )
@@ -4367,12 +4367,12 @@ mod tests {
             )
             .await;
             let (proposal, response) = take_proposal_response(context, &handoff_responses).await;
-            let (Handoff::Publish(digest) | Handoff::Stage(digest)) = proposal else {
+            let (Handoff::Vote(digest) | Handoff::Stage(digest)) = proposal else {
                 panic!("mock must return a candidate");
             };
             assert_eq!(
-                matches!(proposal, Handoff::Publish(_)),
-                decision == Handoff::Publish(())
+                matches!(proposal, Handoff::Vote(_)),
+                decision == Handoff::Vote(())
             );
 
             Self {
@@ -4683,7 +4683,7 @@ mod tests {
         }
     }
 
-    async fn observe_handoff_publication(
+    async fn observe_handoff_relay_and_vote(
         context: &deterministic::Context,
         relayed: &mut mpsc::UnboundedReceiver<(Sha256Digest, Bytes)>,
         batcher: &mut mailbox::Receiver<batcher::Message<ed25519::Scheme, Sha256Digest>>,
@@ -4759,7 +4759,7 @@ mod tests {
 
     /// Certification completes before the application answers. Entering the child
     /// view on the certified parent keeps the pending build, and the single build is
-    /// published once, after certification, for either decision.
+    /// relayed and voted for once, after certification, for either decision.
     async fn certification_first_reuses_build(
         context: &mut deterministic::Context,
         decision: Handoff<()>,
@@ -4779,7 +4779,7 @@ mod tests {
             "parent certification must not cancel the pending build"
         );
         fixture.respond();
-        observe_handoff_publication(
+        observe_handoff_relay_and_vote(
             context,
             &mut relayed,
             &mut fixture.batcher,
@@ -4809,12 +4809,12 @@ mod tests {
         });
     }
 
-    /// [`certification_first_reuses_build`] under [`Handoff::Publish`].
+    /// [`certification_first_reuses_build`] under [`Handoff::Vote`].
     #[test_traced]
-    fn test_pipelined_handoff_certification_first_reuses_build_publish() {
+    fn test_pipelined_handoff_certification_first_reuses_build_vote() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            certification_first_reuses_build(&mut context, Handoff::Publish(())).await;
+            certification_first_reuses_build(&mut context, Handoff::Vote(())).await;
         });
     }
 
@@ -4865,7 +4865,7 @@ mod tests {
     }
 
     /// An already waiting request starts its ordinary build before the parent
-    /// sync completes, but its response cannot publish the child yet.
+    /// sync completes, but its response cannot relay or vote for the child yet.
     #[test_traced]
     fn test_pipelined_handoff_waiting_build_overlaps_certification_sync() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
@@ -5117,7 +5117,7 @@ mod tests {
             // answers. `respond` fails if the voter cancelled the build.
             context.sleep(SETTLE).await;
             fixture.respond();
-            observe_handoff_publication(
+            observe_handoff_relay_and_vote(
                 &context,
                 &mut relayed,
                 &mut fixture.batcher,
@@ -5531,7 +5531,7 @@ mod tests {
                 &mut context,
                 VoterOptions {
                     drop_proposals: true,
-                    handoff: Handoff::Publish(()),
+                    handoff: Handoff::Vote(()),
                     ..Default::default()
                 },
             )
@@ -5627,7 +5627,7 @@ mod tests {
             let mut fixture = HandoffFixture::start(
                 &mut context,
                 VoterOptions {
-                    handoff: Handoff::Publish(()),
+                    handoff: Handoff::Vote(()),
                     stall_proposals: !closed,
                     ..Default::default()
                 },
@@ -5998,7 +5998,7 @@ mod tests {
                     local_index,
                     propose_requests: Some(propose_requests.clone()),
                     handoff_responses: Some(handoff_responses.clone()),
-                    handoff: Handoff::Publish(()),
+                    handoff: Handoff::Vote(()),
                     certifier: hold(View::new(2), certification_requests.clone()),
                     ..Default::default()
                 },

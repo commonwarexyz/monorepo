@@ -90,7 +90,7 @@ async fn next_vote(
 }
 
 /// A handoff build that outlives or precedes its parent's certification is
-/// published after that certification and is never rebuilt.
+/// voted for after that certification and is never rebuilt.
 fn retained_pipeline_handoff(first: First) {
     deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
         // Only the victim runs marshal and consensus. The peer supplies votes and certificates.
@@ -272,7 +272,7 @@ fn retained_pipeline_handoff(first: First) {
                 build_release_tx.send_lossy(());
                 completed_rx.await.unwrap();
                 // Keep the parent uncertified for three link delays so the
-                // observer receives any vote published when the build completes.
+                // observer receives any vote cast when the build completes.
                 let quiet_until = context.current() + 3 * LINK.latency;
                 loop {
                     select! {

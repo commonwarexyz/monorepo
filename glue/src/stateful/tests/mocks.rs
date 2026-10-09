@@ -341,7 +341,7 @@ impl<
         TestBlock::new(0, 0)
     }
 
-    fn handoff(&self, _context: &Self::Context) -> Handoff<()> {
+    fn prepare(&self, _context: &Self::Context) -> Handoff<()> {
         self.handoff
     }
 

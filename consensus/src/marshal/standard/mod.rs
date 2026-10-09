@@ -3632,7 +3632,7 @@ mod tests {
 
                 // Dropping a prepare response must cancel the application's build.
                 let (gated_app, started, dropped) = MockVerifyingApp::new()
-                    .with_handoff(Handoff::Publish(()))
+                    .with_handoff(Handoff::Vote(()))
                     .with_proposal_gate();
                 let mut gated =
                     Wrapper::new(kind, context.child("cancelled"), gated_app, marshal.clone());
@@ -3716,7 +3716,7 @@ mod tests {
                     2000,
                 );
                 let pipeline_app = MockVerifyingApp::new()
-                    .with_handoff(Handoff::Publish(()))
+                    .with_handoff(Handoff::Vote(()))
                     .with_propose_result(unwanted)
                     .ignoring_absence();
                 let mut pipeline = Wrapper::new(
@@ -3988,7 +3988,7 @@ mod tests {
 
                 // The same block is discarded when the unasked build completes from a task.
                 let suspended_app = MockVerifyingApp::new()
-                    .with_handoff(Handoff::Publish(()))
+                    .with_handoff(Handoff::Vote(()))
                     .with_propose_result(child.clone())
                     .without_parent()
                     .suspending();
@@ -4041,7 +4041,7 @@ mod tests {
                     102,
                 );
                 let rebuilding_app = MockVerifyingApp::new()
-                    .with_handoff(Handoff::Publish(()))
+                    .with_handoff(Handoff::Vote(()))
                     .with_propose_result(rebuilt.clone());
                 let mut rebuilding = Wrapper::new(
                     kind,
@@ -4052,7 +4052,7 @@ mod tests {
                 let response = rebuilding.prepare(rebuilt_context).await;
                 assert_eq!(
                     response.await.expect("prepare decision missing"),
-                    Handoff::Publish(rebuilt.digest()),
+                    Handoff::Vote(rebuilt.digest()),
                     "{kind:?}: a stored block must not replace the application's build"
                 );
 
@@ -4060,7 +4060,7 @@ mod tests {
                 // its decision.
                 for (label, decision) in [
                     ("staging", Handoff::Stage(())),
-                    ("publishing", Handoff::Publish(())),
+                    ("voting", Handoff::Vote(())),
                 ] {
                     let asking_app = MockVerifyingApp::new()
                         .with_handoff(decision)

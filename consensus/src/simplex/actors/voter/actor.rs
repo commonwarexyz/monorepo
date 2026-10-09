@@ -195,7 +195,7 @@ impl<
         );
         let handoff_abandoned = context.family(
             "handoff_abandoned",
-            "number of handoff requests, candidates, and builds abandoned before publication",
+            "number of handoff requests, candidates, and builds abandoned before the proposer votes",
         );
         let notarization_latency =
             context.histogram("notarization_latency", "notarization latency", LATENCY);
@@ -418,7 +418,7 @@ impl<
             .inc();
     }
 
-    /// Counts a handoff request, candidate, or build abandoned before publication.
+    /// Counts a handoff request, candidate, or build abandoned before the proposer votes.
     fn record_handoff_abandoned(&self, reason: HandoffAbandonedReason) {
         self.handoff_abandoned
             .get_or_create(&HandoffAbandoned { reason })
@@ -1339,7 +1339,7 @@ impl<
                         pending_propose = Some(Request(request, span, ProposalState::Held(payload)));
                         continue;
                     }
-                    Ok(ProposalResponse::Handoff(Handoff::Publish(payload) | Handoff::Stage(payload))) => {
+                    Ok(ProposalResponse::Handoff(Handoff::Vote(payload) | Handoff::Stage(payload))) => {
                         self.record_handoff_event(HandoffEventKind::CandidateReturned);
                         (Ok(payload), false)
                     }

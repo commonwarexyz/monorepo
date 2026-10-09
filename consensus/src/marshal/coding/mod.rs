@@ -5330,7 +5330,7 @@ mod tests {
             )
             .commitment();
             let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new()
-                .with_handoff(Handoff::Publish(()))
+                .with_handoff(Handoff::Vote(()))
                 .with_propose_result(fresh);
             let cfg = MarshaledConfig {
                 application: mock_app,
@@ -5349,7 +5349,7 @@ mod tests {
                 .expect("prepare must return a decision");
             assert_eq!(
                 decision,
-                Handoff::Publish(fresh_commitment),
+                Handoff::Vote(fresh_commitment),
                 "a restarted leader must build a fresh block under the application's decision"
             );
 

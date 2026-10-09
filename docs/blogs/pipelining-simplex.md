@@ -10,7 +10,7 @@ url: "https://commonware.xyz/blogs/pipelining-simplex"
 image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 ---
 
-*Update (10/7/26): [Pipelined handoffs](https://github.com/commonwarexyz/monorepo/pull/4739) let an incoming leader build its first proposal before the outgoing leader's final view certifies. When the application also permits early publication, rotating leaders can cut network-bound view time from two network trips to one. Applications opt in, and the default still waits for certification. Publishing a proposal early trusts the outgoing leader not to equivocate and to complete its term.*
+*Update (10/7/26): [Pipelined handoffs](https://github.com/commonwarexyz/monorepo/pull/4739) let an incoming leader build its first proposal before the outgoing leader's final view certifies. When the application also permits an early vote, rotating leaders can cut network-bound view time from two network trips to one. Applications opt in, and the default still waits for certification. Voting for a proposal early trusts the outgoing leader not to equivocate and to complete its term.*
 
 Simplex can now produce blocks as fast as its leader can build them.
 
@@ -108,7 +108,7 @@ A participant only votes optimistically when every earlier proposal in the term 
 
 The term boundary is also a leader handoff, so by default optimistic work stops there. Validators verify the first view of a new term only on certified ancestry. Together, these rules let Simplex views pipeline without changing the evidence required for finalization.
 
-A *pipelined handoff* lets the incoming leader prepare its proposal before the parent certifies. The application may also permit early publication, which trusts the outgoing leader not to equivocate and to complete its term. Rotating leaders benefit most, since every view is a handoff.
+A *pipelined handoff* lets the incoming leader prepare its proposal before the parent certifies. The application may also permit an early vote, which trusts the outgoing leader not to equivocate and to complete its term. Rotating leaders benefit most, since every view is a handoff.
 
 The consensus configuration also sets a bound on how many views validators can work ahead at once. A value of zero disables Optimistic Validation. A larger bound can keep the pipeline full when notarizations fall behind, at the cost of more CPU and memory for work that could be discarded if an earlier view fails.
 

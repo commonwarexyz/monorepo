@@ -179,7 +179,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// `Handoff<()>` is the same decision without a payload, and [`map`](Self::map) attaches one.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Handoff<D> {
-        /// Relay the candidate and cast the proposer's notarize vote before parent certification.
+        /// Relay the candidate and cast the proposer's notarize vote at once, before the parent
+        /// certifies.
         ///
         /// This trusts the outgoing leader not to equivocate and to complete its term: the
         /// proposal is usable only if every uncertified view it builds on certifies.
@@ -187,15 +188,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Validators admit the early vote only once they have entered the parent's term, and
         /// consensus does not resend it. If the quorum needs a validator still in an earlier term,
         /// the incoming term times out.
-        Publish(D),
+        Vote(D),
         /// Relay the candidate and withhold the proposer's notarize vote until its parent
         /// certifies or finalizes.
         ///
-        /// The relay commits to nothing: only the vote names a proposal, and the candidate is
-        /// stored only when consensus locks it in for that vote. If the parent is replaced
-        /// before it certifies, the proposer can relay another candidate for the same view.
+        /// The relay commits to nothing: only the vote names a proposal. If the parent is
+        /// replaced before it certifies, the proposer can relay another candidate for the same
+        /// view.
         ///
-        /// A relay may instead hold the candidate until the lock-in.
+        /// A relay may instead hold the candidate until the proposer votes for it.
         Stage(D),
         /// Request an ordinary proposal after the parent certifies.
         Wait,
@@ -210,7 +211,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Applies `f` to the payload, keeping the decision.
         pub fn map<T>(self, f: impl FnOnce(D) -> T) -> Handoff<T> {
             match self {
-                Self::Publish(payload) => Handoff::Publish(f(payload)),
+                Self::Vote(payload) => Handoff::Vote(f(payload)),
                 Self::Stage(payload) => Handoff::Stage(f(payload)),
                 Self::Wait => Handoff::Wait,
             }
@@ -225,7 +226,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub trait CertifiableAutomaton: Automaton {
         /// Prepare a payload for a term-start proposal whose parent is not yet certified.
         ///
-        /// Returning [`Handoff::Publish`] or [`Handoff::Stage`] commits the application to
+        /// Returning [`Handoff::Vote`] or [`Handoff::Stage`] commits the application to
         /// the same verification and certification obligations as returning a payload from
         /// [`Automaton::propose`].
         ///
@@ -429,7 +430,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// returned without asking for the ancestry is discarded too, so the checks always precede
         /// a staged block.
         ///
-        /// With [`Handoff::Publish`] or [`Handoff::Stage`], the marshal stages the returned block
+        /// With [`Handoff::Vote`] or [`Handoff::Stage`], the marshal stages the returned block
         /// as it would a proposal. With [`Handoff::Wait`], consensus waits for parent
         /// certification before requesting [`Self::propose`] for the same context. The decision
         /// is final for the request.
@@ -445,8 +446,8 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// proposal for the same context if the parent certifies, or can request a proposal on a
         /// replacement parent once one is selectable.
         ///
-        /// [`Handoff::Publish`] trusts the outgoing consensus leader not to equivocate and to
-        /// complete its term (see [`Handoff::Publish`]). The context names the parent by view and
+        /// [`Handoff::Vote`] trusts the outgoing consensus leader not to equivocate and to
+        /// complete its term (see [`Handoff::Vote`]). The context names the parent by view and
         /// digest, and its leader field names the incoming leader, not the outgoing one. Identify
         /// the outgoing leader from the elector's schedule or authenticated metadata for the
         /// parent's consensus round. A verified parent block can name an earlier proposer in its

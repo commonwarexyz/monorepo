@@ -639,7 +639,7 @@ mod tests {
             let midpoint = midpoint_parent();
             let genesis = mocks::genesis_block(leader().public_key());
             let payload = epoch_payload(10);
-            for decision in [Handoff::Publish(()), Handoff::Stage(()), Handoff::Wait] {
+            for decision in [Handoff::Vote(()), Handoff::Stage(()), Handoff::Wait] {
                 let inner = RecordingApp {
                     handoff: decision,
                     ..RecordingApp::accepting()
@@ -671,7 +671,7 @@ mod tests {
                     )
                     .await;
                 match (decision, prepared) {
-                    (Handoff::Publish(()), Handoff::Publish(block))
+                    (Handoff::Vote(()), Handoff::Vote(block))
                     | (Handoff::Stage(()), Handoff::Stage(block)) => {
                         assert!(inner.proposed() == vec![None]);
                         assert!(block.payload().is_none());

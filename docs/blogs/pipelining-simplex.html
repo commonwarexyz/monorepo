@@ -99,10 +99,10 @@ Chou</a></div>
         href="https://github.com/commonwarexyz/monorepo/pull/4739">Pipelined
         handoffs</a> let an incoming leader build its first proposal
         before the outgoing leader’s final view certifies. When the
-        application also permits early publication, rotating leaders can
-        cut network-bound view time from two network trips to one.
+        application also permits an early vote, rotating leaders can cut
+        network-bound view time from two network trips to one.
         Applications opt in, and the default still waits for
-        certification. Publishing a proposal early trusts the outgoing
+        certification. Voting for a proposal early trusts the outgoing
         leader not to equivocate and to complete its term.</em></p>
         <p>Simplex can now produce blocks as fast as its leader can
         build them.</p>
@@ -254,9 +254,9 @@ Chou</a></div>
         for finalization.</p>
         <p>A <em>pipelined handoff</em> lets the incoming leader prepare
         its proposal before the parent certifies. The application may
-        also permit early publication, which trusts the outgoing leader
-        not to equivocate and to complete its term. Rotating leaders
-        benefit most, since every view is a handoff.</p>
+        also permit an early vote, which trusts the outgoing leader not
+        to equivocate and to complete its term. Rotating leaders benefit
+        most, since every view is a handoff.</p>
         <p>The consensus configuration also sets a bound on how many
         views validators can work ahead at once. A value of zero
         disables Optimistic Validation. A larger bound can keep the

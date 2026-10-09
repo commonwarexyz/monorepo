@@ -221,7 +221,7 @@ async fn answer<E, B, D, S, M>(
         }
         Resolved::Build((), timer, metadata) => {
             let (block, respond): (B, fn(D) -> Handoff<D>) = match prepared {
-                Handoff::Publish(block) => (block, Handoff::Publish),
+                Handoff::Vote(block) => (block, Handoff::Vote),
                 Handoff::Stage(block) => (block, Handoff::Stage),
                 Handoff::Wait => {
                     debug!(?round, reason = "block building failed", "skipping prepare");

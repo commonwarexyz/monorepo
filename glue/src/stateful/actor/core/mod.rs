@@ -475,12 +475,12 @@ mod tests {
     fn mailbox_prepare_declines_without_block() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut mailbox, handle, _guards) =
-                stateful_with(&context, TestApp::with_handoff(Handoff::Publish(()))).await;
+                stateful_with(&context, TestApp::with_handoff(Handoff::Vote(()))).await;
             let asked = Arc::new(AtomicBool::new(false));
             let block = TestBlock::new(1, 1);
             let prepared = mailbox
                 .prepare(
-                    (context.child("publish"), block.context()),
+                    (context.child("vote"), block.context()),
                     Watched(asked.clone()),
                     (),
                 )
@@ -488,14 +488,14 @@ mod tests {
             assert!(prepared.is_wait(), "an absent ancestry declines");
             assert!(
                 asked.load(Ordering::SeqCst),
-                "a Publish decision fetches the parent"
+                "a Vote decision fetches the parent"
             );
 
             let genesis = TestBlock::new(0, 0);
             assert_eq!(
                 mailbox
                     .prepare(
-                        (context.child("publish"), block.context()),
+                        (context.child("vote"), block.context()),
                         ancestry::from_iter([Arc::new(genesis)]),
                         (),
                     )
@@ -512,7 +512,7 @@ mod tests {
     /// A built block comes back under the application's decision.
     #[test]
     fn mailbox_prepare_attaches_decision() {
-        for decision in [Handoff::Publish(()), Handoff::Stage(())] {
+        for decision in [Handoff::Vote(()), Handoff::Stage(())] {
             deterministic::Runner::timed(Duration::from_secs(5)).start(move |context| async move {
                 let genesis = TestBlock::new(0, 0);
                 let child = TestBlock::child(&genesis, 1);

@@ -192,20 +192,21 @@ where
     /// Returns the block used to initialize the consensus engine in the first epoch.
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
 
-    /// Decide whether to build on a parent that has not yet been certified.
+    /// Decide whether to prepare a proposal on a parent that has not yet been certified.
     ///
-    /// With [`Handoff::Publish`] or [`Handoff::Stage`], [`Stateful`] fetches the parent, builds
+    /// With [`Handoff::Vote`] or [`Handoff::Stage`], [`Stateful`] fetches the parent, builds
     /// the block through [`propose`](Self::propose), and attaches the decision to the result.
-    /// See [`commonware_consensus::Application::prepare`] for the contract, including
-    /// early-publication trust. If readiness is uncertain, return [`Handoff::Wait`], which
-    /// costs no work: consensus requests an ordinary proposal once the parent certifies.
+    /// See [`commonware_consensus::Application::prepare`] for the contract, including the trust
+    /// an early vote places in the outgoing leader. If readiness is uncertain, return
+    /// [`Handoff::Wait`], which costs no work: consensus requests an ordinary proposal once the
+    /// parent certifies.
     ///
     /// [`Stateful`] calls this method on a clone of the application, outside the processing
     /// actor and without database batches. Metadata used only for this decision may live outside
     /// the batches, but the application must share it across clones. This decision does not
     /// change the deterministic execution contract above. The call can run on the consensus
     /// task, so decide without blocking.
-    fn handoff(&self, _context: &Self::Context) -> Handoff<()> {
+    fn prepare(&self, _context: &Self::Context) -> Handoff<()> {
         Handoff::Wait
     }
 
