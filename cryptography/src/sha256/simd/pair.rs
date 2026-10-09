@@ -379,7 +379,7 @@ fn finish<S: Simd>(simd: S, state: State<S>) -> (Digest, Digest) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_simd::emulated::{EmulatedArmV9, EmulatedIceLake, EmulatedNeon, EmulatedScalar};
+    use commonware_simd::{check_consistent, dispatch, test_dispatch};
     use sha2::{Digest as _, Sha256};
 
     fn reference(parts: &[&[u8]]) -> Digest {
@@ -390,29 +390,21 @@ mod tests {
         Digest(hash.finalize().into())
     }
 
-    fn check<S: Simd>(simd: S, positions: [&[u8; 8]; 2], parts: [&[u8; 32]; 4]) {
-        let [a, b, c, d] = parts;
-        let [p, q] = positions;
-        assert_eq!(
-            simd.execute(hash::<S, 0>(&[], a, b, &[], c, d)),
-            (reference(&[a, b]), reference(&[c, d]))
-        );
-        assert_eq!(
-            simd.execute(hash::<S, 8>(p, a, b, q, c, d)),
-            (reference(&[p, a, b]), reference(&[q, c, d]))
-        );
-    }
-
     #[test]
     fn test_pair_parts() {
-        struct Check<'a>([&'a [u8; 8]; 2], [&'a [u8; 32]; 4]);
+        struct Hash<'a>([&'a [u8; 8]; 2], [&'a [u8; 32]; 4]);
 
-        impl<S: Simd> Operation<S> for Check<'_> {
-            type Output = ();
+        impl<S: Simd> Operation<S> for Hash<'_> {
+            type Output = ((Digest, Digest), (Digest, Digest));
 
             #[inline(always)]
-            fn portable(self, simd: S) {
-                check(simd, self.0, self.1);
+            fn portable(self, simd: S) -> Self::Output {
+                let [p, q] = self.0;
+                let [a, b, c, d] = self.1;
+                (
+                    simd.execute(hash::<S, 0>(&[], a, b, &[], c, d)),
+                    simd.execute(hash::<S, 8>(p, a, b, q, c, d)),
+                )
             }
         }
 
@@ -430,17 +422,21 @@ mod tests {
                 let positions: [[u8; 24]; 2] = core::array::from_fn(|part| {
                     core::array::from_fn(|i| (part * 117 + i * 29 + pattern) as u8)
                 });
-                let parts = core::array::from_fn(|part| {
+                let parts: [&[u8; 32]; 4] = core::array::from_fn(|part| {
                     bytes[part][offset..offset + 32].try_into().unwrap()
                 });
-                let positions = core::array::from_fn(|part| {
+                let positions: [&[u8; 8]; 2] = core::array::from_fn(|part| {
                     positions[part][offset..offset + 8].try_into().unwrap()
                 });
-                check(EmulatedScalar, positions, parts);
-                check(EmulatedIceLake, positions, parts);
-                check(EmulatedNeon, positions, parts);
-                check(EmulatedArmV9, positions, parts);
-                commonware_simd::dispatch(Check(positions, parts));
+                let [p, q] = positions;
+                let [a, b, c, d] = parts;
+                let expected = (
+                    (reference(&[a, b]), reference(&[c, d])),
+                    (reference(&[p, a, b]), reference(&[q, c, d])),
+                );
+                assert_eq!(test_dispatch(Hash(positions, parts)), expected);
+                check_consistent(|| Hash(positions, parts));
+                assert_eq!(dispatch(Hash(positions, parts)), expected);
             }
         }
     }

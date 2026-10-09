@@ -332,7 +332,11 @@ fn majority<S: Simd>(a: S::U32, b: S::U32, c: S::U32) -> impl Operation<S, Outpu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_simd::emulated::{EmulatedArmV9, EmulatedIceLake, EmulatedNeon, EmulatedScalar};
+    use commonware_simd::{
+        check_consistent, dispatch,
+        emulated::{EmulatedArmV9, EmulatedIceLake, EmulatedNeon, EmulatedScalar},
+        test_dispatch,
+    };
     use sha2::{Digest as _, Sha256, block_api::compress256};
 
     const BOUNDARY_LENGTHS: [usize; 14] =
@@ -346,12 +350,21 @@ mod tests {
         })
     }
 
+    struct Hash<'a>([&'a [u8]; MESSAGES]);
+
+    impl<S: Simd> Operation<S> for Hash<'_> {
+        type Output = [Digest; MESSAGES];
+
+        #[inline(always)]
+        fn portable(self, simd: S) -> Self::Output {
+            simd.execute(hash::<S>(self.0))
+        }
+    }
+
     fn check_hash(inputs: [&[u8]; MESSAGES]) {
         let expected = inputs.map(|message| Digest(Sha256::digest(message).into()));
-        assert_eq!(EmulatedScalar.execute(hash::<_>(inputs)), expected);
-        assert_eq!(EmulatedIceLake.execute(hash::<_>(inputs)), expected);
-        assert_eq!(EmulatedArmV9.execute(hash::<_>(inputs)), expected);
-        assert_eq!(EmulatedNeon.execute(hash::<_>(inputs)), expected);
+        assert_eq!(test_dispatch(Hash(inputs)), expected);
+        check_consistent(|| Hash(inputs));
     }
 
     #[test]
@@ -387,56 +400,44 @@ mod tests {
                     expected[word][lane] = state[word];
                 }
             }
-            fn check<S: Simd>(
-                simd: S,
-                inputs: [&[u8]; MESSAGES],
+            struct Compress<'a> {
+                inputs: [&'a [u8]; MESSAGES],
                 full_len: usize,
-                tails: [&[u8]; MESSAGES],
+                tails: [&'a [u8]; MESSAGES],
                 padding_len: usize,
                 initial: [[u32; MESSAGES]; STATE_WORDS],
-                expected: [[u32; MESSAGES]; STATE_WORDS],
-            ) {
-                assert_eq!(
-                    compress_blocks(simd, inputs, full_len, tails, padding_len, initial,),
-                    expected,
-                );
             }
-            check(
-                EmulatedScalar,
+
+            impl<S: Simd> Operation<S> for Compress<'_> {
+                type Output = [[u32; MESSAGES]; STATE_WORDS];
+
+                #[inline(always)]
+                fn portable(self, simd: S) -> Self::Output {
+                    simd.execute(
+                        #[inline(always)]
+                        move |simd: S| {
+                            compress_blocks(
+                                simd,
+                                self.inputs,
+                                self.full_len,
+                                self.tails,
+                                self.padding_len,
+                                self.initial,
+                            )
+                        },
+                    )
+                }
+            }
+
+            let operation = || Compress {
                 inputs,
                 full_len,
                 tails,
                 padding_len,
                 initial,
-                expected,
-            );
-            check(
-                EmulatedIceLake,
-                inputs,
-                full_len,
-                tails,
-                padding_len,
-                initial,
-                expected,
-            );
-            check(
-                EmulatedArmV9,
-                inputs,
-                full_len,
-                tails,
-                padding_len,
-                initial,
-                expected,
-            );
-            check(
-                EmulatedNeon,
-                inputs,
-                full_len,
-                tails,
-                padding_len,
-                initial,
-                expected,
-            );
+            };
+            assert_eq!(test_dispatch(operation()), expected);
+            check_consistent(operation);
         }
     }
 
@@ -447,26 +448,13 @@ mod tests {
         })
     }
 
-    fn dispatched_hash(inputs: [&[u8]; MESSAGES]) -> [Digest; MESSAGES] {
-        struct Hash<'a>([&'a [u8]; MESSAGES]);
-        impl<S: Simd> Operation<S> for Hash<'_> {
-            type Output = [Digest; MESSAGES];
-
-            #[inline(always)]
-            fn portable(self, simd: S) -> Self::Output {
-                simd.execute(hash::<S>(self.0))
-            }
-        }
-        commonware_simd::dispatch(Hash(inputs))
-    }
-
     #[test]
     fn test_batch_dispatched() {
         for len in BOUNDARY_LENGTHS {
             let messages = messages(len);
             let inputs = core::array::from_fn(|lane| messages[lane].as_slice());
             let expected = inputs.map(|message| Digest(Sha256::digest(message).into()));
-            assert_eq!(dispatched_hash(inputs), expected, "dispatched length {len}");
+            assert_eq!(dispatch(Hash(inputs)), expected, "dispatched length {len}");
         }
     }
 
@@ -558,7 +546,7 @@ mod tests {
             let inputs = core::array::from_fn(|lane| &messages[lane][3..]);
             check_hash(inputs);
             let expected = inputs.map(|message| Digest(Sha256::digest(message).into()));
-            assert_eq!(dispatched_hash(inputs), expected);
+            assert_eq!(dispatch(Hash(inputs)), expected);
         }
     }
 
@@ -579,6 +567,6 @@ mod tests {
     fn test_batch_rejects_unequal_lengths() {
         let mut inputs: [&[u8]; MESSAGES] = [&[]; MESSAGES];
         inputs[15] = &[1];
-        let _ = EmulatedScalar.execute(hash::<_>(inputs));
+        let _ = test_dispatch(Hash(inputs));
     }
 }
