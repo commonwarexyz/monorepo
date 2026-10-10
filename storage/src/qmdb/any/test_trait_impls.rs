@@ -171,6 +171,13 @@ where
         Self::get_many(self, keys).await
     }
 
+    fn prefetch(
+        &self,
+        keys: &[&U::Key],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S> {
+        Self::prefetch(self, keys)
+    }
+
     fn root(&self) -> H::Digest {
         Self::root(self)
     }
