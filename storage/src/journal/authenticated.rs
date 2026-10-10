@@ -1276,6 +1276,13 @@ where
         items
     }
 
+    fn prefetch(
+        &self,
+        positions: &[u64],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, H, S> {
+        self.journal.prefetch(positions)
+    }
+
     async fn replay(
         &self,
         range: Range<u64>,
