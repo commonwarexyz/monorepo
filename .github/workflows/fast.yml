@@ -99,7 +99,7 @@ jobs:
           echo "All lints passed!"
 
   Tests:
-    name: "${{ matrix.os }} / ${{ matrix.variant }}"
+    name: "Tests (os: ${{ matrix.os }}${{ matrix.flags && format(', flags: \"{0}\"', matrix.flags) || '' }})"
     strategy:
       matrix:
         include:

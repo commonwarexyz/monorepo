@@ -68,7 +68,7 @@ jobs:
 
   # Fast and slow partitions share one matrix, so the first failing partition cancels the others.
   Run:
-    name: "${{ matrix.suite }} (${{ matrix.partition }}/${{ matrix.partitions }})"
+    name: "${{ matrix.suite }} (partition: ${{ matrix.partition }}/${{ matrix.partitions }})"
     needs: Build
     runs-on: ${{ inputs.os }}
     timeout-minutes: 45
