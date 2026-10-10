@@ -494,7 +494,7 @@ mod tests {
                 vec![fill + 1; 32],
             ]
         }
-        crate::fuzz::Plan::<Sha256>::new(node(42, 0x11), node(43, 0x33)).run(&Sequential);
+        crate::fuzz::Plan::<Sha256>::new(node(42, 0x11), node(43, 0x33)).run();
     }
 
     /// Deterministically exercise the pair (assembly) kernel with the BMT

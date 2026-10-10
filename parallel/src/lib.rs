@@ -136,18 +136,15 @@ commonware_macros::stability_scope!(BETA {
     #[derive(Debug)]
     pub struct Batches<'scope, S: Strategy> {
         strategy: &'scope S,
-        len: usize,
-        // Empty for a whole-input run, which needs no ranges until it prepares its one batch.
         ranges: Vec<Range<usize>>,
     }
 
     impl<'scope, S: Strategy> Batches<'scope, S> {
         /// Returns the single batch `0..len`, executed on the calling thread.
-        const fn whole(strategy: &'scope S, len: usize) -> Self {
+        fn whole(strategy: &'scope S, len: usize) -> Self {
             Self {
                 strategy,
-                len,
-                ranges: Vec::new(),
+                ranges: iter::once(0..len).collect(),
             }
         }
 
@@ -156,7 +153,7 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// Such a run can process the input directly rather than preparing its single batch.
         pub const fn is_whole(&self) -> bool {
-            self.ranges.is_empty()
+            self.ranges.len() == 1
         }
 
         /// Prepare and map batches, collecting results in batch order.
@@ -171,10 +168,7 @@ commonware_macros::stability_scope!(BETA {
             R: Send,
         {
             if self.is_whole() {
-                prepare(iter::once(0..self.len).collect())
-                    .into_iter()
-                    .map(map_op)
-                    .collect()
+                prepare(self.ranges).into_iter().map(map_op).collect()
             } else {
                 self.strategy.map_collect_vec(prepare(self.ranges), map_op)
             }
@@ -197,10 +191,7 @@ commonware_macros::stability_scope!(BETA {
             E: Send,
         {
             if self.is_whole() {
-                prepare(iter::once(0..self.len).collect())
-                    .into_iter()
-                    .map(map_op)
-                    .collect()
+                prepare(self.ranges).into_iter().map(map_op).collect()
             } else {
                 self.strategy.try_map_collect_vec(prepare(self.ranges), map_op)
             }
@@ -1228,7 +1219,6 @@ commonware_macros::stability_scope!(BETA {
             self.strategy.try_run_batches(len, minimum_batch_len, multiplier, |batches| {
                 run(Batches {
                     strategy: self,
-                    len: batches.len,
                     ranges: batches.ranges,
                 })
             })
@@ -1814,7 +1804,6 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     let manual = self.manual();
                     run(Batches {
                         strategy: &manual.strategy,
-                        len,
                         ranges,
                     })
                 }

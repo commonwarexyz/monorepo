@@ -7,7 +7,6 @@ use commonware_cryptography::{
     crc32::{Crc32 as OurCrc32, Digest},
     fuzz::Plan,
 };
-use commonware_parallel::Sequential;
 use crc::{CRC_32_ISCSI, Crc};
 use libfuzzer_sys::fuzz_target;
 
@@ -149,6 +148,6 @@ fuzz_target!(|op: Operation| {
         Operation::EncodeDecode(data) => fuzz_encode_decode(&data),
         Operation::DigestU32Roundtrip(data) => fuzz_digest_u32_roundtrip(&data),
         Operation::Determinism(chunks) => fuzz_determinism(&chunks),
-        Operation::HasherPlan(plan) => plan.run(&Sequential),
+        Operation::HasherPlan(plan) => plan.run(),
     }
 });

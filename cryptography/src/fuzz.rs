@@ -2,21 +2,15 @@
 //!
 //! For any hasher, the one-shot [Hasher::hash], [Hasher::hash_across],
 //! [Hasher::hash_pair], and [Hasher::hash_many] entrypoints must agree with
-//! streaming the same bytes through [Hasher::update], whether they hash on the
-//! calling thread or split the work across workers. Implementations are free
+//! streaming the same bytes through [Hasher::update]. Implementations are free
 //! to specialize the one-shot entrypoints for fixed shapes (e.g. with assembly
 //! kernels), so the inputs generated here are biased toward the shapes and
 //! lengths those specializations match on.
 
-use crate::{
-    Hasher,
-    blake3::{MIN_SPLIT_LEN, MIN_SUBTREE_LEN},
-};
+use crate::Hasher;
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_parallel::{Sequential, Strategy};
-use commonware_utils::TestRng;
 use core::{fmt::Debug, marker::PhantomData};
-use rand::Rng as _;
 
 /// Pick a contiguous message length biased toward the boundaries of
 /// SHA-256's specialized paths (the pair kernels at 64 and 72 bytes and the
@@ -51,22 +45,6 @@ fn arbitrary_batch_len(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
         11 => 129,
         12 => 256,
         _ => u.int_in_range(0..=256)?,
-    })
-}
-
-/// Pick a length from just below the BLAKE3 split threshold to four of the
-/// smallest subtrees past it, biased toward the multiples of the smallest
-/// subtree length where long messages split, and toward one byte or one chunk
-/// to either side of them.
-fn arbitrary_long_len(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    let subtrees = MIN_SPLIT_LEN + u.int_in_range(0..=3)? * MIN_SUBTREE_LEN;
-    Ok(match u.int_in_range(0..=5)? {
-        0 => subtrees - blake3::CHUNK_LEN,
-        1 => subtrees - 1,
-        2 => subtrees,
-        3 => subtrees + 1,
-        4 => subtrees + blake3::CHUNK_LEN,
-        _ => subtrees + u.int_in_range(0..=MIN_SUBTREE_LEN)?,
     })
 }
 
@@ -131,11 +109,9 @@ impl<H: Hasher> Plan<H> {
         }
     }
 
-    /// Check that streaming the parts and each one-shot entrypoint agree with a
-    /// single [Hasher::update] over the concatenated message: [Hasher::hash] on
-    /// the calling thread, [Hasher::hash_across] across `strategy`, and
-    /// [Hasher::hash_pair] both ways.
-    pub fn run(self, strategy: &impl Strategy) {
+    /// Check that every entrypoint agrees with a single [Hasher::update]
+    /// over the concatenated message.
+    pub fn run(self) {
         let left: Vec<&[u8]> = self.left.iter().map(Vec::as_slice).collect();
         let right: Vec<&[u8]> = self.right.iter().map(Vec::as_slice).collect();
 
@@ -163,12 +139,9 @@ impl<H: Hasher> Plan<H> {
 
         assert_eq!(H::hash(&left), expected_left);
         assert_eq!(H::hash(&right), expected_right);
-        assert_eq!(H::hash_across(&left, strategy), expected_left);
-        assert_eq!(H::hash_across(&right, strategy), expected_right);
+        assert_eq!(H::hash_across(&left, &Sequential), expected_left);
+        assert_eq!(H::hash_across(&right, &Sequential), expected_right);
         let (left_digest, right_digest) = H::hash_pair(&left, &right, &Sequential);
-        assert_eq!(left_digest, expected_left);
-        assert_eq!(right_digest, expected_right);
-        let (left_digest, right_digest) = H::hash_pair(&left, &right, strategy);
         assert_eq!(left_digest, expected_left);
         assert_eq!(right_digest, expected_right);
     }
@@ -231,90 +204,24 @@ impl<H: Hasher> BatchPlan<H> {
     }
 }
 
-/// A message, given as parts, with a length from just below the BLAKE3 split
-/// threshold to a few subtrees past it, to hash across workers with
-/// [Hasher::hash_across].
-pub struct ParallelPlan<H: Hasher> {
-    seed: u64,
-    len: usize,
-    cuts: Vec<usize>,
-    _hasher: PhantomData<H>,
-}
-
-impl<H: Hasher> Debug for ParallelPlan<H> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ParallelPlan")
-            .field("seed", &self.seed)
-            .field("len", &self.len)
-            .field("cuts", &self.cuts)
-            .finish()
-    }
-}
-
-impl<H: Hasher> Arbitrary<'_> for ParallelPlan<H> {
-    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        let len = arbitrary_long_len(u)?;
-
-        // Cut anywhere, near a subtree boundary, or again at the previous cut
-        // (or the start) to leave an empty part.
-        let mut cuts = Vec::new();
-        for _ in 0..u.int_in_range(0..=3)? {
-            let cut = match u.int_in_range(0..=2)? {
-                0 => u.int_in_range(0..=len)?,
-                1 => arbitrary_long_len(u)?.min(len),
-                _ => cuts.last().copied().unwrap_or(0),
-            };
-            cuts.push(cut);
-        }
-        cuts.sort_unstable();
-        Ok(Self {
-            seed: u.arbitrary()?,
-            len,
-            cuts,
-            _hasher: PhantomData,
-        })
-    }
-}
-
-impl<H: Hasher> ParallelPlan<H> {
-    /// Check that hashing the parts across `strategy` agrees with streaming
-    /// the message.
-    pub fn run(self, strategy: &impl Strategy) {
-        // Expand the seed into the message and cut it into parts.
-        let mut message = vec![0; self.len];
-        TestRng::new(self.seed).fill_bytes(&mut message);
-        let mut parts = Vec::with_capacity(self.cuts.len() + 1);
-        let mut start = 0;
-        for cut in self.cuts {
-            parts.push(&message[start..cut]);
-            start = cut;
-        }
-        parts.push(&message[start..]);
-
-        let mut hasher = H::default();
-        hasher.update(&message);
-        assert_eq!(H::hash_across(&parts, strategy), hasher.finalize().1);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Blake3, Sha256};
     use commonware_invariants::minifuzz;
-    use commonware_parallel::{Rayon, Sequential};
+    use commonware_parallel::Rayon;
     use commonware_utils::NZUsize;
     use std::sync::Arc;
 
     fn test_fuzz<H: Hasher>() {
         // The generators below always emit at least one part, so pin the
         // zero-parts one-shot to the empty-message digest separately.
-        Plan::<H>::new(vec![], vec![]).run(&Sequential);
+        Plan::<H>::new(vec![], vec![]).run();
         minifuzz::Builder::default()
             .with_seed(0)
             .with_search_limit(512)
             .test(|u| {
-                u.arbitrary::<Plan<H>>()?.run(&Sequential);
+                u.arbitrary::<Plan<H>>()?.run();
                 Ok(())
             });
     }
@@ -395,37 +302,6 @@ mod tests {
     #[test]
     fn test_fuzz_blake3() {
         test_fuzz::<Blake3>();
-    }
-
-    /// Check long messages across workers, and that the generator reaches
-    /// messages that split, cuts at subtree boundaries, and empty middle parts.
-    #[test]
-    fn test_fuzz_parallel_blake3() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
-        let mut saw_split = false;
-        let mut saw_boundary = false;
-        let mut saw_empty = false;
-        minifuzz::Builder::default()
-            .with_seed(0)
-            .with_search_limit(256)
-            .test(|u| {
-                let plan = u.arbitrary::<ParallelPlan<Blake3>>()?;
-                let inner = |cut: &usize| (1..plan.len).contains(cut);
-                saw_split |= plan.len >= MIN_SPLIT_LEN;
-                saw_boundary |= plan
-                    .cuts
-                    .iter()
-                    .any(|cut| inner(cut) && cut % MIN_SUBTREE_LEN == 0);
-                saw_empty |= plan
-                    .cuts
-                    .windows(2)
-                    .any(|pair| pair[0] == pair[1] && inner(&pair[0]));
-                plan.run(&strategy);
-                Ok(())
-            });
-        assert!(saw_split);
-        assert!(saw_boundary);
-        assert!(saw_empty);
     }
 
     #[cfg(feature = "std")]

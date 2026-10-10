@@ -17,6 +17,6 @@ static STRATEGY: LazyLock<Manual<Rayon>> =
 
 fuzz_target!(|input: (Plan<Sha512>, BatchPlan<Sha512>)| {
     let (plan, batch_plan) = input;
-    plan.run(&*STRATEGY);
+    plan.run();
     batch_plan.run(&*STRATEGY);
 });

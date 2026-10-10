@@ -222,7 +222,7 @@ mod tests {
                     parts.iter().map(|p| p.to_vec()).collect(),
                     vec![b"abc".to_vec()],
                 )
-                .run(&Sequential);
+                .run();
             }
         }
     }
