@@ -1,31 +1,31 @@
-//! Linux native AIO: submit one ring's worth of `O_DIRECT` reads from one thread and reap
-//! completions as they arrive. Unlike a thread per read, the device sees them all at once and
-//! the submitting thread pays only a few microseconds per read.
+//! Linux native AIO: one thread submits up to [NR_EVENTS] `O_DIRECT` reads through one AIO
+//! context and reaps completions as they arrive. Unlike a thread per read, the device sees
+//! them all at once and the submitting thread pays only a few microseconds per read.
 
 use super::*;
 use crate::{BLOB_PAGE_SIZE, BufMut as _, IoBufMut};
 use commonware_utils::NZUsize;
 use std::os::unix::fs::OpenOptionsExt as _;
 
-/// Reads an AIO context holds at once (`io_setup`'s `nr_events`, the analog of an io_uring
-/// ring's entries), and so the reads one blocking task submits through one context in
+/// The `nr_events` each AIO context is created with (`io_setup`): the requests it processes
+/// concurrently, and so the reads one blocking task submits through one context in
 /// [`crate::Blob::read_many`].
 ///
-/// One ring is one device queue's worth of reads: NVMe queues hold 256 to 1024 commands, and
-/// a queue depth of 256 saturates the devices this runtime targets. A larger `read_many`
-/// splits into that many reads per task, so issue cost spreads across tasks while each task
-/// keeps a full queue in flight.
-pub(super) const RING_SIZE: usize = 256;
+/// One context's worth is one device queue's worth of reads: NVMe queues hold 256 to 1024
+/// commands, and a queue depth of 256 saturates the devices this runtime targets. A larger
+/// `read_many` splits into that many reads per task, so issue cost spreads across tasks while
+/// each task keeps a full queue in flight.
+pub(super) const NR_EVENTS: usize = 256;
 
-/// Reads issued per `io_submit` call (the analog of SQEs per `io_uring_enter`) before the
-/// completions that have landed are reaped.
+/// Requests (iocbs) issued per `io_submit` call before the completions that have landed are
+/// reaped.
 ///
-/// The kernel spends about 2 us issuing each direct read, so filling a whole ring takes
-/// longer than one read takes to complete. Reaping between calls lets the earliest
-/// completions reach the stream while the rest of the ring is still being issued, at the
-/// cost of one non-blocking `io_getevents` per call. Much smaller batches pay more in
-/// per-call overhead than they return.
-const SUBMIT_BATCH: usize = 32;
+/// The kernel spends about 2 us issuing each direct read, so issuing a whole context's worth
+/// in one call takes longer than one read takes to complete. Reaping between calls lets the
+/// earliest completions reach the stream while the rest are still being issued, at the cost
+/// of one non-blocking `io_getevents` per call. Much smaller calls pay more in per-call
+/// overhead than they return.
+const IOCBS_PER_SUBMIT: usize = 32;
 
 /// A pending read: its index among the `read_many` call's ranges and the physical file range.
 pub(super) struct Read {
@@ -94,7 +94,7 @@ const IOCB_CMD_PREAD: u16 = 0;
 ///
 /// Destroying a context waits for RCU grace periods (~30 ms), so one is destroyed only when
 /// a submission fails with reads in flight, because the slab must outlive them. Every
-/// pooled context charges [RING_SIZE] against the host-wide `fs.aio-max-nr` budget (65,536
+/// pooled context charges [NR_EVENTS] against the host-wide `fs.aio-max-nr` budget (65,536
 /// by default, so 256 contexts) until the process exits and the kernel reclaims them. A
 /// submission that cannot obtain a context is served one blocking task per read, and other
 /// users of Linux AIO on the same host see that budget as taken.
@@ -118,7 +118,7 @@ impl Drop for Context {
 /// across a syscall.
 static CONTEXTS: Mutex<Vec<Context>> = Mutex::new(Vec::new());
 
-/// Take a pooled context or create one with [RING_SIZE] slots. `None` when the kernel
+/// Take a pooled context or create one for [NR_EVENTS] concurrent requests. `None` when the kernel
 /// cannot create one, for example when its outstanding-request limit (`fs.aio-max-nr`) is
 /// exhausted.
 fn take_context() -> Option<Context> {
@@ -127,7 +127,7 @@ fn take_context() -> Option<Context> {
     }
     let mut ctx: libc::c_ulong = 0;
     // SAFETY: `io_setup` writes the new context handle to the valid out pointer.
-    let r = unsafe { libc::syscall(libc::SYS_io_setup, RING_SIZE as libc::c_ulong, &mut ctx) };
+    let r = unsafe { libc::syscall(libc::SYS_io_setup, NR_EVENTS as libc::c_ulong, &mut ctx) };
     (r == 0).then(|| Context(ctx))
 }
 
@@ -242,10 +242,10 @@ fn submit(
     let mut accepted = 0;
     let mut completed = 0;
     while next < n {
-        let count = (n - next).min(SUBMIT_BATCH);
+        let count = (n - next).min(IOCBS_PER_SUBMIT);
         // SAFETY: `ptrs[next..next + count]` are valid iocbs whose buffers lie in the slab,
-        // which outlives every accepted request. The context holds at least `n` slots
-        // because `n <= RING_SIZE`.
+        // which outlives every accepted request. The context accepts at least `n` requests
+        // because `n <= NR_EVENTS`.
         let r = unsafe {
             libc::syscall(
                 libc::SYS_io_submit,
