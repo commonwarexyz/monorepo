@@ -529,7 +529,7 @@ impl crate::Blob for Blob {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut reads = reads.into_iter().peekable();
         while reads.peek().is_some() {
-            let batch: Vec<_> = reads.by_ref().take(aio::AIO_SUBMISSION).collect();
+            let batch: Vec<_> = reads.by_ref().take(aio::SUBMISSION).collect();
             let file = self.shared.clone();
             let pool = self.pool.clone();
             let tx = tx.clone();
@@ -1253,7 +1253,7 @@ mod tests {
             }
         }
         #[cfg(target_os = "linux")]
-        assert!(ranges.len() > aio::AIO_SUBMISSION);
+        assert!(ranges.len() > aio::SUBMISSION);
         let mut bufs: Vec<(usize, IoBufsMut)> = blob
             .read_many(&ranges, ReadOptions::DONT_CACHE)
             .try_collect()

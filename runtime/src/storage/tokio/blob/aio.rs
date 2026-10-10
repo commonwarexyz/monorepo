@@ -13,7 +13,7 @@ use std::os::unix::fs::OpenOptionsExt as _;
 /// and a queue depth of 256 saturates the devices this runtime targets. Larger batches split
 /// into that many reads per submitting task, so submission cost spreads across tasks while
 /// each task keeps a full queue in flight.
-pub(super) const AIO_SUBMISSION: usize = 256;
+pub(super) const SUBMISSION: usize = 256;
 
 /// Reads issued per `io_submit` call before the completions that have landed are reaped.
 ///
@@ -22,7 +22,7 @@ pub(super) const AIO_SUBMISSION: usize = 256;
 /// earliest completions reach the stream while the rest of the submission is still being
 /// issued, at the cost of one non-blocking `io_getevents` per slice; slices much smaller
 /// than this pay more in per-call overhead than they return.
-const AIO_SLICE: usize = 32;
+const SLICE: usize = 32;
 
 /// A pending read: its index in the batch and the physical file range.
 pub(super) struct Read {
@@ -90,7 +90,7 @@ const IOCB_CMD_PREAD: u16 = 0;
 /// Destroying one waits for RCU grace periods (~30 ms), so a context is destroyed only when
 /// a submission fails with reads in flight, because the slab must outlive them. The pool
 /// therefore holds as many contexts as submissions ever ran concurrently in this process,
-/// each charging [AIO_SUBMISSION] against the host-wide `fs.aio-max-nr` budget (65,536 by
+/// each charging [SUBMISSION] against the host-wide `fs.aio-max-nr` budget (65,536 by
 /// default, so 256 contexts) until the process exits and the kernel reclaims them. A
 /// submission that cannot obtain a context is served one blocking task per read, and other
 /// users of Linux AIO on the same host see that budget as taken.
@@ -121,13 +121,7 @@ fn take_context() -> Option<Context> {
     }
     let mut ctx: libc::c_ulong = 0;
     // SAFETY: `io_setup` writes the new context handle to the valid out pointer.
-    let r = unsafe {
-        libc::syscall(
-            libc::SYS_io_setup,
-            AIO_SUBMISSION as libc::c_ulong,
-            &mut ctx,
-        )
-    };
+    let r = unsafe { libc::syscall(libc::SYS_io_setup, SUBMISSION as libc::c_ulong, &mut ctx) };
     (r == 0).then(|| Context(ctx))
 }
 
@@ -242,10 +236,10 @@ fn submit(
     let mut accepted = 0;
     let mut completed = 0;
     while next < n {
-        let count = (n - next).min(AIO_SLICE);
+        let count = (n - next).min(SLICE);
         // SAFETY: `ptrs[next..next + count]` are valid iocbs whose buffers lie in the slab,
         // which outlives every accepted request; the context holds at least `n` slots
-        // because `n <= AIO_SUBMISSION`.
+        // because `n <= SUBMISSION`.
         let r = unsafe {
             libc::syscall(
                 libc::SYS_io_submit,
