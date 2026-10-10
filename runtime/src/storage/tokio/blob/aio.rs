@@ -85,7 +85,8 @@ struct IoEvent {
 /// The `aio_lio_opcode` of a positioned read.
 const IOCB_CMD_PREAD: u16 = 0;
 
-/// A long-lived AIO context, pooled and reused by submitting threads.
+/// A long-lived AIO context, owned by one submission at a time: `io_submit` and
+/// `io_getevents` block the submitting thread, and concurrent submissions each hold their own.
 ///
 /// Destroying one waits for RCU grace periods (~30 ms), so a context is destroyed only when
 /// a submission fails with reads in flight, because the slab must outlive them. The pool
@@ -108,8 +109,9 @@ impl Drop for Context {
     }
 }
 
-/// Contexts not in use by a submission. None of them holds an outstanding request. The lock
-/// guards one pop or push per submission and is never held across a syscall.
+/// The process-wide free list of contexts no submission is using; none holds an outstanding
+/// request. The lock guards one pop or push per submission and is never held across a
+/// syscall.
 static CONTEXTS: Mutex<Vec<Context>> = Mutex::new(Vec::new());
 
 /// Take a pooled context or create one sized for a full submission. `None` when the kernel
