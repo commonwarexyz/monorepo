@@ -356,6 +356,7 @@ fn percentile(v: &mut [f64], q: f64) -> f64 {
 async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E> {
     let mut rng = TestRng::new(args.rseed);
     let mut times = Vec::new();
+
     // Pre-generate every batch's keys so a pipeline iteration can prefetch the next batch.
     let batches: Vec<Vec<Digest>> = (0..args.iters + 1)
         .map(|_| {
@@ -519,6 +520,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                     start.elapsed().as_secs_f64() * 1000.0 / done as f64
                 );
                 drop(inflight);
+
                 // One sustained run is the whole measurement.
                 let elapsed = start.elapsed().as_secs_f64() * 1000.0;
                 let after = diskstats(&args.disk);
@@ -565,6 +567,7 @@ fn main() {
         .skip(1)
         .filter(|a| a != "--bench")
         .collect();
+
     // Run only when explicitly given a subcommand. Blanket harness invocations (no args, or
     // libtest or Criterion flags like `--list` or `--output-format bencher` from the benchmark
     // CI) must no-op so `cargo bench --benches` does not seed millions of keys.

@@ -508,46 +508,46 @@ impl crate::Blob for Blob {
         ranges: &[(u64, usize)],
         options: ReadOptions,
     ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
-        // Direct I/O serves a batch the page cache need not retain: the device sees every read
-        // at once and no thread blocks per read. Everything else goes through the page cache
-        // one read per blocking task.
-        //
-        // Such a batch uses direct I/O on every Linux kernel, so it does not read data the OS
-        // page cache holds. Its concurrency assumes filesystem-native direct I/O (such as ext4
-        // or XFS): a filesystem that serves direct I/O through a buffered fallback stays correct
-        // but completes each submission's reads one at a time.
-        if options.contains(ReadOptions::DONT_CACHE) {
-            let mut reads = Vec::with_capacity(ranges.len());
-            for (index, &(offset, len)) in ranges.iter().enumerate() {
-                let Some(offset) = offset.checked_add(self.data_offset) else {
-                    return stream::iter(vec![Err(Error::OffsetOverflow)]).boxed();
-                };
-                reads.push(aio::Read { index, offset, len });
-            }
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut reads = reads.into_iter().peekable();
-            while reads.peek().is_some() {
-                let batch: Vec<_> = reads.by_ref().take(aio::AIO_SUBMISSION).collect();
-                let file = self.shared.clone();
-                let pool = self.pool.clone();
-                let tx = tx.clone();
-                task::spawn_blocking(move || aio::run(&file, &pool, batch, &tx));
-            }
-
-            // The stream ends once every range is yielded or at the first error. A submitting
-            // task that ends without reporting its reads (it panicked, or the runtime shut down)
-            // closes the channel early, which is an error.
-            return stream::unfold((rx, ranges.len()), |(mut rx, remaining)| async move {
-                if remaining == 0 {
-                    return None;
-                }
-                let item = rx.recv().await.unwrap_or(Err(Error::ReadFailed));
-                let remaining = if item.is_ok() { remaining - 1 } else { 0 };
-                Some((item, (rx, remaining)))
-            })
-            .boxed();
+        // Reads the page cache should retain go through it, one read per blocking task.
+        if !options.contains(ReadOptions::DONT_CACHE) {
+            return crate::read_each(self, ranges, options).boxed();
         }
-        crate::read_each(self, ranges, options).boxed()
+
+        // Direct I/O serves a batch the page cache need not retain: the device sees every read
+        // at once and no thread blocks per read. Such a batch uses direct I/O on every Linux
+        // kernel, so it does not read data the OS page cache holds. Its concurrency assumes
+        // filesystem-native direct I/O (such as ext4 or XFS): a filesystem that serves direct
+        // I/O through a buffered fallback stays correct but completes each submission's reads
+        // one at a time.
+        let mut reads = Vec::with_capacity(ranges.len());
+        for (index, &(offset, len)) in ranges.iter().enumerate() {
+            let Some(offset) = offset.checked_add(self.data_offset) else {
+                return stream::iter(vec![Err(Error::OffsetOverflow)]).boxed();
+            };
+            reads.push(aio::Read { index, offset, len });
+        }
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut reads = reads.into_iter().peekable();
+        while reads.peek().is_some() {
+            let batch: Vec<_> = reads.by_ref().take(aio::AIO_SUBMISSION).collect();
+            let file = self.shared.clone();
+            let pool = self.pool.clone();
+            let tx = tx.clone();
+            task::spawn_blocking(move || aio::run(&file, &pool, batch, &tx));
+        }
+
+        // The stream ends once every range is yielded or at the first error. A submitting
+        // task that ends without reporting its reads (it panicked, or the runtime shut down)
+        // closes the channel early, which is an error.
+        stream::unfold((rx, ranges.len()), |(mut rx, remaining)| async move {
+            if remaining == 0 {
+                return None;
+            }
+            let item = rx.recv().await.unwrap_or(Err(Error::ReadFailed));
+            let remaining = if item.is_ok() { remaining - 1 } else { 0 };
+            Some((item, (rx, remaining)))
+        })
+        .boxed()
     }
 
     async fn write_at(

@@ -54,11 +54,6 @@ pub(super) fn direct(file: &Shared) -> Option<&File> {
         .as_ref()
 }
 
-/// Alignment direct I/O requires of buffer addresses, file offsets, and lengths. A blob page
-/// is the largest logical block size of supported devices, so blob-page alignment satisfies
-/// every one of them.
-const ALIGN: usize = BLOB_PAGE_SIZE as usize;
-
 /// Kernel ABI (`struct iocb`, little-endian layout).
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
@@ -160,18 +155,20 @@ fn submit(
     let fd = u32::try_from(direct.as_raw_fd()).expect("an open descriptor is non-negative");
     let n = batch.len();
 
-    // Every read covers the block-aligned superset of its range, laid out back to back in
-    // one aligned slab; the requested bytes are copied into pool buffers on completion.
+    // Every read covers the superset of its range aligned to a blob page, which is the largest
+    // logical block size of supported devices and so satisfies direct I/O's alignment of
+    // offsets, lengths, and buffers. The supersets lie back to back in one aligned slab; the
+    // requested bytes are copied into pool buffers on completion.
+    let block: usize = Widen::widen(BLOB_PAGE_SIZE);
     let mut spans = Vec::with_capacity(n);
     let mut slab_len = 0usize;
-    let align: u64 = Widen::widen(ALIGN);
     for read in &batch {
-        let aligned_offset = read.offset / align * align;
+        let aligned_offset = read.offset - read.offset % u64::from(BLOB_PAGE_SIZE);
         let skip = usize::try_from(read.offset - aligned_offset)
             .expect("an offset within a block fits in usize");
         let aligned_len = skip
             .checked_add(read.len)
-            .and_then(|len| len.checked_next_multiple_of(ALIGN))
+            .and_then(|len| len.checked_next_multiple_of(block))
             .ok_or(Error::OffsetOverflow)?;
         spans.push((aligned_offset, skip, slab_len, aligned_len));
         slab_len = slab_len
@@ -182,10 +179,10 @@ fn submit(
     // Like an overflowing span, a slab no allocation layout can hold fails the submission.
     // The allocation adds a header and alignment padding, each shorter than a block, so a
     // slab within two blocks of the largest layout cannot be allocated either.
-    if slab_len > isize::MAX.cast_unsigned() - 2 * ALIGN {
+    if slab_len > isize::MAX.cast_unsigned() - 2 * block {
         return Err(Error::OffsetOverflow);
     }
-    let mut slab = IoBufMut::with_alignment(slab_len, NZUsize!(ALIGN));
+    let mut slab = IoBufMut::with_alignment(slab_len, NZUsize!(block));
     let slab_ptr = slab.chunk_mut().as_mut_ptr();
 
     // This local drops before the slab. Context destruction waits for pending kernel
@@ -400,6 +397,7 @@ mod tests {
     #[tokio::test]
     async fn test_failed_submission_keeps_slab_until_reads_complete() {
         const LEN: usize = 64 << 10;
+        let block: usize = Widen::widen(BLOB_PAGE_SIZE);
         let (storage, blob, directory) = direct_blob("failed_submission", vec![0xAB; LEN]).await;
         let pool = pool();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -418,14 +416,14 @@ mod tests {
                 Read {
                     index: 1,
                     offset: 1 << 63,
-                    len: ALIGN,
+                    len: block,
                 },
             ];
             let ctx = take_context().unwrap();
             let direct = direct(&blob.shared).unwrap();
             assert!(submit(&blob.shared, direct, &pool, ctx, batch, &tx).is_err());
 
-            let canary = IoBufMut::zeroed_with_alignment(LEN + ALIGN, NZUsize!(ALIGN));
+            let canary = IoBufMut::zeroed_with_alignment(LEN + block, NZUsize!(block));
             std::thread::sleep(Duration::from_millis(10));
             assert!(!canary.as_ref().contains(&0xAB));
         }
@@ -478,6 +476,7 @@ mod tests {
             std::thread::sleep(Duration::from_micros(10));
         }
         let (submitted, first, drained) = submitter.join().unwrap();
+
         // SAFETY: restores the action saved above.
         unsafe { libc::sigaction(libc::SIGUSR1, &previous, std::ptr::null_mut()) };
         assert!(submitted);
@@ -499,7 +498,7 @@ mod tests {
         ));
         let storage = Storage::new(Config::new(directory.clone(), Layout::ALL), pool());
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
-        blob.write_at(0, vec![0; ALIGN], WriteOptions::SYNC)
+        blob.write_at(0, vec![0; Widen::widen(BLOB_PAGE_SIZE)], WriteOptions::SYNC)
             .await
             .unwrap();
 
@@ -530,13 +529,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_reads_without_context_are_served_individually() {
-        let data: Vec<u8> = (0..3 * ALIGN).map(|i| (i % 251) as u8).collect();
+        let block: usize = Widen::widen(BLOB_PAGE_SIZE);
+        let data: Vec<u8> = (0..3 * block).map(|i| (i % 251) as u8).collect();
         let (storage, blob, directory) = direct_blob("without_context", data.clone()).await;
 
         // Each read is served on its own blocking task, and one past the end fails alone.
         let ranges = [
             (10u64, 5000usize),
-            (ALIGN as u64 - 1, 2),
+            (u64::from(BLOB_PAGE_SIZE) - 1, 2),
             (data.len() as u64, 1),
         ];
         let batch = ranges
