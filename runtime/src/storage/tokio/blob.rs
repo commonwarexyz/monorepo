@@ -69,18 +69,44 @@ mod aio {
     /// One completed read, sent to the stream as soon as the kernel reports it.
     pub(super) type Completion = Result<(usize, IoBufsMut), Error>;
 
-    /// The blob's `O_DIRECT` descriptor on its inode, opened once by the first submission on
-    /// the submitting thread and kept for the blob's lifetime. `None` when that open failed,
-    /// which the blob remembers so later batches take the per-read path without trying again.
-    pub(super) fn direct(file: &Shared) -> Option<&File> {
-        file.direct
-            .get_or_init(|| {
-                let path = format!("/proc/self/fd/{}", file.as_raw_fd());
-                let mut options = std::fs::OpenOptions::new();
-                options.read(true).custom_flags(libc::O_DIRECT);
-                options.open(path).ok()
-            })
-            .as_ref()
+    /// A blob's direct-I/O descriptor state.
+    pub(super) enum Direct {
+        /// No submission has opened one yet, or the last open failed for a reason that may not
+        /// recur, such as a descriptor limit; the next submission tries again.
+        Unopened,
+        /// The descriptor every submission reads through.
+        Open(Arc<File>),
+        /// The filesystem rejects direct I/O on this file; batches take the per-read path.
+        Unsupported,
+    }
+
+    /// The blob's `O_DIRECT` descriptor on its inode, opened under the blob's lock by the first
+    /// submission that needs it and shared by every later one. `None` when the filesystem
+    /// rejects direct I/O, which the blob remembers, or when the open fails for a reason that
+    /// may not recur, which the next submission retries.
+    pub(super) fn direct(file: &Shared) -> Option<Arc<File>> {
+        let mut state = file.direct.lock();
+        match &*state {
+            Direct::Open(direct) => return Some(direct.clone()),
+            Direct::Unsupported => return None,
+            Direct::Unopened => {}
+        }
+        let path = format!("/proc/self/fd/{}", file.as_raw_fd());
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).custom_flags(libc::O_DIRECT);
+        match options.open(path) {
+            Ok(direct) => {
+                let direct = Arc::new(direct);
+                *state = Direct::Open(direct.clone());
+                Some(direct)
+            }
+            Err(err) => {
+                if err.raw_os_error() == Some(libc::EINVAL) {
+                    *state = Direct::Unsupported;
+                }
+                None
+            }
+        }
     }
 
     /// Alignment direct I/O requires of buffer addresses, file offsets, and lengths. A blob page
@@ -377,7 +403,7 @@ mod aio {
         let Some(ctx) = take_context() else {
             return read_positioned_each(file, pool, batch, tx);
         };
-        match submit(file, direct, pool, ctx, batch, tx) {
+        match submit(file, &direct, pool, ctx, batch, tx) {
             Ok(ctx) => CONTEXTS.lock().push(ctx),
             Err(err) => {
                 let _ = tx.send(Err(err));
@@ -454,7 +480,7 @@ mod aio {
                 ];
                 let ctx = take_context().unwrap();
                 let direct = direct(&blob.shared).unwrap();
-                assert!(submit(&blob.shared, direct, &pool, ctx, batch, &tx).is_err());
+                assert!(submit(&blob.shared, &direct, &pool, ctx, batch, &tx).is_err());
 
                 let canary = IoBufMut::zeroed_with_alignment(LEN + ALIGN, NZUsize!(ALIGN));
                 std::thread::sleep(Duration::from_millis(10));
@@ -497,7 +523,7 @@ mod aio {
                     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                     let ctx = take_context().unwrap();
                     let direct = direct(&shared).unwrap();
-                    let result = submit(&shared, direct, &pool(), ctx, batch, &tx);
+                    let result = submit(&shared, &direct, &pool(), ctx, batch, &tx);
                     done.store(true, Ordering::Release);
                     (result.is_ok(), rx.try_recv().ok(), rx.try_recv().is_err())
                 })
@@ -517,6 +543,37 @@ mod aio {
                 panic!("expected the read");
             };
             assert_eq!(bufs.coalesce().as_ref(), vec![0xAB; LEN].as_slice());
+            remove(storage, blob, directory).await;
+        }
+
+        /// An open that fails for a reason that may not recur leaves the blob free to try again,
+        /// while a filesystem's rejection is final for the blob.
+        #[tokio::test]
+        async fn test_direct_open_retries_after_descriptor_limit() {
+            let (storage, blob, directory) = direct_blob("retry_open", vec![0; ALIGN]).await;
+            drop(direct(&blob.shared));
+            *blob.shared.direct.lock() = Direct::Unopened;
+
+            // Forbid further descriptors for the duration of one open attempt.
+            // SAFETY: getrlimit and setrlimit take valid pointers to an rlimit.
+            let denied = unsafe {
+                let mut previous: libc::rlimit = std::mem::zeroed();
+                assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut previous), 0);
+                let none = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: previous.rlim_max,
+                };
+                assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &none), 0);
+                let denied = direct(&blob.shared);
+                assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &previous), 0);
+                denied
+            };
+            assert!(denied.is_none());
+            assert!(matches!(*blob.shared.direct.lock(), Direct::Unopened));
+
+            // The next submission opens it.
+            assert!(direct(&blob.shared).is_some());
+            assert!(matches!(*blob.shared.direct.lock(), Direct::Open(_)));
             remove(storage, blob, directory).await;
         }
 
@@ -618,10 +675,9 @@ struct Shared {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: AtomicBool,
-    /// Descriptor for direct I/O on the same inode, opened by the first batched read; `None`
-    /// once that open has failed.
+    /// Descriptor for direct I/O on the same inode, opened by the first batched read.
     #[cfg(target_os = "linux")]
-    direct: OnceLock<Option<File>>,
+    direct: Mutex<aio::Direct>,
     #[cfg(test)]
     test: Hooks,
 }
@@ -813,7 +869,7 @@ impl Blob {
             promise: OnceLock::new(),
             dont_cache_supported: AtomicBool::new(true),
             #[cfg(target_os = "linux")]
-            direct: OnceLock::new(),
+            direct: Mutex::new(aio::Direct::Unopened),
             #[cfg(test)]
             test: Hooks::default(),
         });
