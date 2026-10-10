@@ -70,7 +70,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
 
     /// Verifies `signature` against pairings of corresponding public keys and message hashes.
     ///
-    /// Implementations must reject empty inputs and inputs with different lengths.
+    /// Empty inputs, inputs with different lengths, and identity signatures are invalid.
     #[stability(ALPHA)]
     fn verify_pairing_product(
         publics: &[Self::Public],
@@ -183,6 +183,7 @@ impl Variant for MinPk {
     ) -> Result<(), Error> {
         if publics.is_empty()
             || publics.len() != hms.len()
+            || signature == &Self::Signature::zero()
             || !G2::multi_pairing_check(hms, publics, signature, &-G1::generator(), strategy)
         {
             return Err(Error::InvalidSignature);
@@ -313,6 +314,7 @@ impl Variant for MinSig {
     ) -> Result<(), Error> {
         if publics.is_empty()
             || publics.len() != hms.len()
+            || signature == &Self::Signature::zero()
             || !G1::multi_pairing_check(hms, publics, signature, &-G2::generator(), strategy)
         {
             return Err(Error::InvalidSignature);
@@ -479,6 +481,28 @@ mod tests {
     fn test_batch_verify_rejects_identity_entry() {
         batch_verify_rejects_identity_entry::<MinPk>();
         batch_verify_rejects_identity_entry::<MinSig>();
+    }
+
+    fn verify_pairing_product_rejects_identity_signature<V: Variant>() {
+        // Opposite keys on one message cancel, so only the identity signature completes the
+        // product.
+        let (_, public) = ops::keypair::<_, V>(&mut test_rng());
+        let hm = ops::hash_with_namespace::<V>(V::MESSAGE, b"test", b"message");
+        assert!(matches!(
+            V::verify_pairing_product(
+                &[public, -public],
+                &[hm, hm],
+                &V::Signature::zero(),
+                &Sequential,
+            ),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_verify_pairing_product_rejects_identity_signature() {
+        verify_pairing_product_rejects_identity_signature::<MinPk>();
+        verify_pairing_product_rejects_identity_signature::<MinSig>();
     }
 
     fn batch_verify_rejects_malleability<V: Variant>() {
