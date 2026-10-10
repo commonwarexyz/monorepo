@@ -512,6 +512,9 @@ impl crate::Blob for Blob {
         if !options.contains(ReadOptions::DONT_CACHE) {
             return crate::read_each(self, ranges, options).boxed();
         }
+
+        // Reads it need not retain bypass it with direct I/O, submitted together so the device
+        // sees them all at once.
         aio::read_many(&self.shared, &self.pool, self.data_offset, ranges)
     }
 
