@@ -1,0 +1,348 @@
+# StateLens recipes. See README.md.
+
+set positional-arguments := true
+
+# Turn sources into invariants: just extract-invariants [--registry R] [--number N] <kind> <source>...
+extract-invariants *args:
+    python3 scripts/statelens.py extract "$@"
+
+# Turn sources into target-state cards: just extract-states [--registry R] [--number N] [--local] <kind> <source>...
+extract-states *args:
+    python3 scripts/statelens.py extract --states "$@"
+
+# Instrument this checkout and build the StateLens targets: just campaign [--agent A] [--profile P] [--invariants LIST]...
+campaign *args:
+    python3 scripts/statelens.py campaign "$@"
+
+# Write, build and check a scaffold per target-state card and base, after a campaign: just synthesize [--agent A] [--profile P] [--match GLOB]... [--redo]
+synthesize *args:
+    python3 scripts/statelens.py synthesize "$@"
+
+# Run only the campaign's test gate on this checkout: just test [--profile P]
+test *args:
+    python3 scripts/statelens.py test-gate "$@"
+
+# Fuzz a target a campaign built: just run <target> [-- -fork=8 -max_total_time=600]
+run target *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # A consensus target runs through consensus/fuzz, whose `run` finds its package.
+    # Storage has one fuzz package and no recipes, so a qmdb target runs there
+    # directly, on the toolchain consensus/fuzz would pick: NIGHTLY_VERSION, else
+    # the pin CI uses, else `nightly`. A crash file is best given as an absolute
+    # path, because each runs cargo-fuzz from its own directory.
+    case "$1" in
+      qmdb_*)
+        pin=$(sed -n 's/^ *NIGHTLY_VERSION: *//p' ../.github/workflows/slow.yml | head -1)
+        nightly="${NIGHTLY_VERSION-${pin:-nightly}}"
+        cd .. && cargo ${nightly:+"+$nightly"} fuzz run --fuzz-dir storage/fuzz "$@" ;;
+      *)
+        cd ../consensus/fuzz && just run "$@" ;;
+    esac
+
+# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--fuzz-targets GLOB]... [--state-targets GLOB]... [--invariants LIST]... [--skip-campaign] [--skip-synthesis] [--rebaseline] [--parallel] [--tmux] [--state-reaching] [-- -fork=8]
+fuzz target *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # A profile name runs every target the profile builds, or with --fuzz-targets
+    # the ones a shell pattern names; a target name runs that one. Every StateLens
+    # variant is derived from a target of its own package, so it keeps that
+    # package's prefix, and a name that is neither is refused rather than sent to
+    # another profile by default. With --state-reaching, simplex and marshal run
+    # their scaffolds instead of their variants: a synthesis follows the campaign,
+    # --state-targets names the cards (TS-0003) and --fuzz-targets the bases the
+    # scaffolds are written on, one scaffold per card and base (every base of the
+    # profile without --fuzz-targets).
+    target="$1"
+    shift
+    # Leading flags are ours; everything after them, or after `--`, is libFuzzer's.
+    # libFuzzer's own flags take one dash, so an unknown double-dash flag before
+    # `--` is refused rather than passed on.
+    # --skip-campaign fuzzes the targets a campaign already built in this checkout,
+    # whatever its result, because a campaign refuses an instrumented checkout.
+    # --skip-synthesis fuzzes the scaffolds a synthesis already built, whatever
+    # their verdicts, because a synthesis refuses a checkout that drifted from its
+    # baseline, as one does once an upstream fix is merged into it; it needs
+    # --state-reaching. --rebaseline instead lets that synthesis accept the merge
+    # and revalidate every scaffold (synthesize --rebaseline).
+    # --invariants LIST goes to the campaign, which binds only the invariants it
+    # names, so it needs a campaign and a profile.
+    # Both pattern flags reach the listing and the synthesis as --match, whose one
+    # rule they split: a TS-NNNN pattern names a card, any other a fuzz target.
+    fuzz_targets() {
+        case "$1" in
+          TS-*) echo "just fuzz: --fuzz-targets names fuzz targets; a card is --state-targets $1" >&2
+                exit 1 ;;
+        esac
+        narrowed=yes; patterns+=(--match "$1")
+    }
+    state_targets() {
+        case "$1" in
+          TS-*) ;;
+          *) echo "just fuzz: --state-targets names cards (TS-NNNN); a fuzz target is --fuzz-targets $1" >&2
+             exit 1 ;;
+        esac
+        cards=yes; patterns+=(--match "$1")
+    }
+    parallel=no
+    windows=no
+    campaign=yes
+    synthesis=yes
+    rebaseline=()
+    narrowed=no
+    cards=no
+    reaching=no
+    selected=no
+    patterns=()
+    invariants=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --skip-campaign)        campaign=no; shift ;;
+        --skip-synthesis)       synthesis=no; shift ;;
+        --rebaseline)           rebaseline=(--rebaseline); shift ;;
+        --parallel|--parallels) parallel=yes; shift ;;
+        --tmux)                 parallel=yes; windows=yes; shift ;;
+        --state-reaching)       reaching=yes; shift ;;
+        --fuzz-targets=*)       fuzz_targets "${1#--fuzz-targets=}"; shift ;;
+        --fuzz-targets)         [ $# -ge 2 ] || { echo "just fuzz: --fuzz-targets needs a pattern" >&2; exit 1; }
+                                fuzz_targets "$2"; shift 2 ;;
+        --state-targets=*)      state_targets "${1#--state-targets=}"; shift ;;
+        --state-targets)        [ $# -ge 2 ] || { echo "just fuzz: --state-targets needs a pattern" >&2; exit 1; }
+                                state_targets "$2"; shift 2 ;;
+        --invariants=*)         selected=yes; invariants+=(--invariants "${1#--invariants=}"); shift ;;
+        --invariants)           [ $# -ge 2 ] || { echo "just fuzz: --invariants needs a list of ids" >&2; exit 1; }
+                                selected=yes; invariants+=(--invariants "$2"); shift 2 ;;
+        --)                     shift; break ;;
+        --*)                    echo "just fuzz: unknown flag $1" >&2; exit 1 ;;
+        *)                      break ;;
+      esac
+    done
+    # `cargo fuzz run` takes libFuzzer flags only after `--`, which the loop consumed.
+    if [ $# -gt 0 ]; then set -- -- "$@"; fi
+    case "$target" in
+      simplex|marshal|qmdb) profile="$target"; every=yes ;;
+      simplex_*)            profile=simplex;   every=no ;;
+      marshal_*)            profile=marshal;   every=no ;;
+      qmdb_*)               profile=qmdb;      every=no ;;
+      *) echo "just fuzz: $target is not a profile or a simplex_/marshal_/qmdb_ target" >&2
+         exit 1 ;;
+    esac
+    if [ "$reaching" = yes ] && [ "$every" = no ]; then
+        echo "just fuzz: --state-reaching narrows a profile; name simplex or marshal" >&2
+        echo "           (one scaffold runs with just run <scaffold>)" >&2
+        exit 1
+    fi
+    if [ "$reaching" = yes ] && [ "$profile" = qmdb ]; then
+        echo "just fuzz: --state-reaching takes simplex or marshal; qmdb has no target states" >&2
+        exit 1
+    fi
+    if [ "$cards" = yes ] && [ "$reaching" = no ]; then
+        echo "just fuzz: --state-targets needs --state-reaching" >&2
+        exit 1
+    fi
+    if [ "$synthesis" = no ] && [ "$reaching" = no ]; then
+        echo "just fuzz: --skip-synthesis needs --state-reaching" >&2
+        exit 1
+    fi
+    if [ "${#rebaseline[@]}" -gt 0 ] && { [ "$reaching" = no ] || [ "$synthesis" = no ]; }; then
+        echo "just fuzz: --rebaseline goes to synthesis; it needs --state-reaching, without --skip-synthesis" >&2
+        exit 1
+    fi
+    if [ "$every" = no ] && [ "$narrowed" = yes ]; then
+        echo "just fuzz: --fuzz-targets narrows a profile; name simplex, marshal or qmdb" >&2
+        exit 1
+    fi
+    if [ "$selected" = yes ] && [ "$campaign" = no ]; then
+        echo "just fuzz: --invariants selects what a campaign binds; drop --skip-campaign" >&2
+        exit 1
+    fi
+    if [ "$selected" = yes ] && [ "$every" = no ]; then
+        echo "just fuzz: --invariants selects what a campaign binds; name simplex, marshal or qmdb" >&2
+        exit 1
+    fi
+    # The targets are listed before the campaign runs, so that a pattern naming
+    # none fails at once rather than after it; with --state-reaching, so do a
+    # selection of no card and a selected card with a lint problem. A read loop,
+    # not `mapfile`: that is bash 4, and macOS ships bash 3.2, which also calls an
+    # empty array unbound.
+    listed=()
+    if [ "$reaching" = yes ]; then
+        listed=(--state-reaching)
+    fi
+    list() {
+        local listing
+        names=()
+        if ! listing=$(python3 scripts/statelens.py targets --profile "$profile" ${listed[@]+"${listed[@]}"} ${patterns[@]+"${patterns[@]}"}); then
+            echo "$listing" >&2
+            exit 1
+        fi
+        while IFS= read -r name; do
+            if [ -n "$name" ]; then names+=("$name"); fi
+        done <<< "$listing"
+    }
+    if [ "$every" = yes ]; then
+        list
+    fi
+    if [ "$campaign" = yes ]; then
+        just campaign --profile "$profile" ${invariants[@]+"${invariants[@]}"}
+    fi
+    if [ "$every" = no ]; then
+        just run "$target" "$@"
+        exit 0
+    fi
+    # Synthesis writes a scaffold per selected card and base; a failure stops the
+    # recipe with its exit code, and with --skip-synthesis the scaffolds listed
+    # above stand as they are. Then only the scaffolds run, never the variants,
+    # one window or run per scaffold, and the messages below count scaffolds.
+    kind=target
+    if [ "$reaching" = yes ]; then
+        if [ "$synthesis" = yes ]; then
+            python3 scripts/statelens.py synthesize --profile "$profile" ${rebaseline[@]+"${rebaseline[@]}"} ${patterns[@]+"${patterns[@]}"}
+            list
+        fi
+        if [ "${#names[@]}" -eq 0 ]; then
+            echo "just fuzz: no scaffold for this selection; see the reports in campaign/reach/" >&2
+            exit 1
+        fi
+        kind=scaffold
+    fi
+    here="$(pwd)"
+    cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+
+    if [ "$windows" = yes ]; then
+        command -v tmux >/dev/null 2>&1 || {
+            echo "just fuzz: --tmux needs tmux on PATH" >&2; exit 1; }
+        session="statelens-$profile"
+        if [ "$reaching" = yes ]; then session="$session-reach"; fi
+        tmux has-session -t "$session" 2>/dev/null && {
+            echo "just fuzz: tmux session $session already exists; kill it first with" >&2
+            echo "           tmux kill-session -t $session" >&2; exit 1; }
+        echo "just fuzz: ${#names[@]} ${kind}(s), one tmux window each, ${cores} core(s)" >&2
+        for at in $(seq 0 $(( ${#names[@]} - 1 ))); do
+            name="${names[$at]}"
+            # The window stays open after the run so its result can be read.
+            body="cd '$here' && just run '$name' $*; echo; echo '[$name finished; enter closes this window]'; read _"
+            # Named after the target it was derived from, or for a scaffold its
+            # base and card (simplex_cert_mock_ts0004), which is what
+            # distinguishes the windows from each other.
+            window="${name%_statelens}"
+            if [ "$at" -eq 0 ]; then
+                tmux new-session -d -s "$session" -n "$window" "bash -lc \"$body\""
+            else
+                tmux new-window -t "$session" -n "$window" "bash -lc \"$body\""
+            fi
+        done
+        if [ -n "${TMUX:-}" ]; then
+            tmux switch-client -t "$session"
+        else
+            echo "just fuzz: attaching; detach with ctrl-b d, and return with" >&2
+            echo "           tmux attach -t $session" >&2
+            tmux attach -t "$session"
+        fi
+        exit 0
+    fi
+
+    if [ "$parallel" = no ]; then
+        # Sequential and unbounded means the first target never ends and the
+        # rest never start, so say so rather than quietly imposing a limit.
+        if [[ "$*" != *-max_total_time=* && "$*" != *-runs=[0-9]* ]]; then
+            echo "just fuzz: no -max_total_time, so $kind 1 of ${#names[@]} runs until it" >&2
+            echo "           stops and the rest wait. Use --parallel, --tmux, or pass" >&2
+            echo "           -- -max_total_time=<seconds>." >&2
+        fi
+        echo "just fuzz: ${#names[@]} $profile ${kind}(s), in turn" >&2
+        for name in "${names[@]}"; do
+            echo "just fuzz: === $name ===" >&2
+            just run "$name" "$@"
+        done
+        exit 0
+    fi
+
+    # Batches, because a pool that waits for one process at a time needs
+    # `wait -n`, which is bash 4.3. libFuzzer's own `-fork=N` also takes cores,
+    # so a whole profile at once would oversubscribe badly.
+    jobs=${STATELENS_JOBS:-$(( cores / 4 > 0 ? cores / 4 : 1 ))}
+    [ "$jobs" -gt "${#names[@]}" ] && jobs=${#names[@]}
+    logs="campaign/logs"
+    mkdir -p "$logs"
+    echo "just fuzz: ${#names[@]} $profile ${kind}(s), $jobs at a time, ${cores} core(s)" >&2
+    echo "just fuzz: output goes to $logs/<$kind>.run.log" >&2
+    failed=()
+    index=0
+    while [ "$index" -lt "${#names[@]}" ]; do
+        pids=()
+        batch=()
+        while [ "${#batch[@]}" -lt "$jobs" ] && [ "$index" -lt "${#names[@]}" ]; do
+            name="${names[$index]}"
+            batch+=("$name")
+            index=$(( index + 1 ))
+            echo "just fuzz: starting $name" >&2
+            ( just run "$name" "$@" ) > "$logs/$name.run.log" 2>&1 &
+            pids+=("$!")
+        done
+        for at in $(seq 0 $(( ${#pids[@]} - 1 ))); do
+            if ! wait "${pids[$at]}"; then
+                failed+=("${batch[$at]}")
+            fi
+        done
+    done
+    for name in "${names[@]}"; do
+        printf 'just fuzz: %-58s %s\n' "$name" \
+            "$(printf '%s\n' "${failed[@]:-}" | grep -qxF "$name" && echo FAILED || echo ok)" >&2
+    done
+    if [ "${#failed[@]}" -gt 0 ]; then
+        echo "just fuzz: ${#failed[@]} ${kind}(s) failed; see $logs/<$kind>.run.log" >&2
+        exit 1
+    fi
+
+# Coverage of the corpora the targets built: just coverage <simplex|marshal|qmdb|target...>
+coverage *args:
+    python3 scripts/statelens.py coverage "$@"
+
+# Build the code index a campaign and the agents query: just code-index [--subsystem S]
+code-index *args:
+    python3 scripts/statelens.py code build "$@"
+
+# Build or update the search index of `kb search`: just search-index [--rebuild]
+search-index *args:
+    python3 scripts/statelens.py search-index "$@"
+
+# Ask the search index a question: just search [--registry R] [--path P] QUESTION...
+search *args:
+    python3 scripts/statelens.py kb search "$@"
+
+# Identify an entity in the code: just code <defs|refs|callers|callees> <NAME>
+code query name *args:
+    python3 scripts/statelens.py code "$@"
+
+# Read the syntax tree: just ast <sites|notes> [NAME] [path...]
+ast query *args:
+    python3 scripts/statelens.py ast "$@"
+
+# Undo what a campaign or a synthesis wrote to this checkout: just clean [--yes]
+clean *args:
+    python3 scripts/statelens.py clean "$@"
+
+# Check the worked analyses: just check-examples [path...]
+check-examples *args:
+    python3 scripts/statelens.py lint-examples "$@"
+
+# Check the scripts: just check-scripts [TestClass]
+check-scripts *args:
+    python3 scripts/test_statelens.py "$@"
+
+# Check invariant files: just check-invariants [path...]
+check-invariants *args:
+    python3 scripts/statelens.py lint "$@"
+
+# Write the cited source lines into invariant files: just excerpts [--check] [path...]
+excerpts *args:
+    python3 scripts/statelens.py excerpts "$@"
+
+# Check an instrumentation plan: just check-plan [--profile P] [path...]
+check-plan *args:
+    python3 scripts/statelens.py lint-plan "$@"
+
+# Check the prompt copies in the specification: just check-prompts [--write]
+check-prompts *args:
+    python3 scripts/statelens.py lint-prompts "$@"
