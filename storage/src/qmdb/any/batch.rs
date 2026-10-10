@@ -22,6 +22,7 @@ use crate::{
         delete_known_loc,
         floor::{Action, Entry, Limits, Policy, Walk},
         operation::{Key, Operation as OperationTrait},
+        sync::{self, Target},
         update_known_loc,
     },
 };
@@ -29,7 +30,7 @@ use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{Widen, bitmap, iter::zip_eq, range::contains_cyclic};
+use commonware_utils::{Widen, bitmap, iter::zip_eq, non_empty_range, range::contains_cyclic};
 use core::{
     cmp::Ordering,
     ops::{
@@ -3116,6 +3117,31 @@ where
         // Membership changes emit affected predecessors and created keys, so the newest
         // matching layer owns the query's span in the final batch view.
         find(self).or_else(|| self.ancestors().find_map(|batch| find(&batch)))
+    }
+}
+
+impl<F: Family, D: Digest, U: update::Update, S: Strategy> sync::MerkleizedBatch
+    for MerkleizedBatch<F, D, U, S>
+where
+    Operation<F, U>: Codec,
+{
+    type Family = F;
+    type Digest = D;
+    type Unmerkleized<H: Hasher<Digest = D>> = UnmerkleizedBatch<F, H, U, S>;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    fn target(&self) -> Result<Target<F, D>, crate::qmdb::Error<F>> {
+        Ok(Target {
+            root: self.root(),
+            range: non_empty_range!(self.bounds.inactivity_floor, self.bounds.tip.size),
+        })
+    }
+
+    fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, S> {
+        self.new_batch::<H>()
     }
 }
 

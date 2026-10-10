@@ -1013,26 +1013,22 @@ where
     });
 }
 
-/// Engine configuration for a compact sync over the one-operation range ending at the target.
+/// Engine configuration for a compact sync to `target`.
 pub(crate) fn compact_engine_config<DB, S>(
     context: DB::Context,
     source: S,
-    target: sync::CompactTarget<DB::Family, DB::Digest>,
+    target: Target<DB::Family, DB::Digest>,
     db_config: DB::Config,
 ) -> sync::engine::Config<DB, S>
 where
     DB: sync::Database,
     S: sync::SourceFor<DB>,
-    DB::Op: Encode,
 {
     sync::engine::Config {
         context,
         db_config,
         fetch_batch_size: NZU64!(1),
-        target: sync::Target {
-            root: target.root,
-            range: non_empty_range!(target.size - 1, target.size),
-        },
+        target,
         source,
         apply_batch_size: NZU64!(1024),
         max_outstanding_requests: NZUsize!(1),
