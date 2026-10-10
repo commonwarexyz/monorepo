@@ -93,6 +93,13 @@ pub trait DbAny<F: Family>:
         keys: &'a [&'a Self::Key],
     ) -> impl Future<Output = Result<Vec<Option<Self::Value>>, Error<F>>> + Send + use<'a, F, Self>;
 
+    /// Return a future that warms the page cache for the committed state of `keys` without
+    /// borrowing the database. Best effort: absent keys are skipped and failures are logged.
+    fn prefetch(
+        &self,
+        keys: &[&Self::Key],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, Self>;
+
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
 
@@ -192,8 +199,33 @@ pub trait Provable<F: Family>: DbAny<F> {
 /// }
 /// ```
 macro_rules! impl_db_any {
+    // Collect the generic parameter names, which the prefetch future captures.
+    (@names [$($gen:tt)*] [$($names:ident)*] [] $($tail:tt)*) => {
+        $crate::qmdb::any::traits::impl_db_any!(@emit [$($gen)*] [$($names)*] $($tail)*);
+    };
+    (@names [$($gen:tt)*] [$($names:ident)*] [const $n:ident : $t:ty $(, $($rest:tt)*)?] $($tail:tt)*) => {
+        $crate::qmdb::any::traits::impl_db_any!(
+            @names [$($gen)*] [$($names)* $n] [$($($rest)*)?] $($tail)*
+        );
+    };
+    (@names [$($gen:tt)*] [$($names:ident)*] [$n:ident $(, $($rest:tt)*)?] $($tail:tt)*) => {
+        $crate::qmdb::any::traits::impl_db_any!(
+            @names [$($gen)*] [$($names)* $n] [$($($rest)*)?] $($tail)*
+        );
+    };
     (
         [$($gen:tt)*] $ty:ty
+        where { $($where_clause:tt)* }
+        Family = $fam:ty, Key = $key:ty, Value = $val:ty, Digest = $dig:ty
+    ) => {
+        $crate::qmdb::any::traits::impl_db_any!(
+            @names [$($gen)*] [] [$($gen)*] $ty
+            where { $($where_clause)* }
+            Family = $fam, Key = $key, Value = $val, Digest = $dig
+        );
+    };
+    (
+        @emit [$($gen:tt)*] [$($names:ident)*] $ty:ty
         where { $($where_clause:tt)* }
         Family = $fam:ty, Key = $key:ty, Value = $val:ty, Digest = $dig:ty
     ) => {
@@ -210,6 +242,13 @@ macro_rules! impl_db_any {
 
             async fn get_many(&self, keys: &[&$key]) -> ::core::result::Result<Vec<Option<$val>>, $crate::qmdb::Error<$fam>> {
                 <$ty>::get_many(self, keys).await
+            }
+
+            fn prefetch(
+                &self,
+                keys: &[&$key],
+            ) -> impl ::core::future::Future<Output = ()> + Send + 'static + use<$($names),*> {
+                <$ty>::prefetch(self, keys)
             }
 
             fn root(&self) -> $dig {
