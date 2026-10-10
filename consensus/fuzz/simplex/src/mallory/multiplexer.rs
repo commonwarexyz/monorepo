@@ -32,7 +32,10 @@
 //! transition is out of scope (it would need an amnesia-style oracle flip).
 
 use super::adversary::{AdversaryRole, spawn_adversary};
-use commonware_consensus::{simplex::mocks::relay, types::TermLength};
+use commonware_consensus::{
+    simplex::mocks::relay,
+    types::{TermLength, ViewDelta},
+};
 use commonware_consensus_fuzz_core::{NetworkChannels, PublicKeyOf, simplex::Simplex};
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_p2p::simulated::Oracle;
@@ -60,6 +63,8 @@ pub(crate) struct RoleMultiplexer<P: Simplex> {
     required_containers: u64,
     /// Elector term length, the same config the honest validators build with.
     term_length: TermLength,
+    /// Optimistic lookahead, the same config the honest validators build with.
+    optimistic_views: ViewDelta,
     /// The currently active Byzantine profile.
     role: AdversaryRole,
     /// The live actor's task handle; aborted and awaited before each switch.
@@ -83,6 +88,7 @@ impl<P: Simplex> RoleMultiplexer<P> {
         relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
         required_containers: u64,
         term_length: TermLength,
+        optimistic_views: ViewDelta,
         role: AdversaryRole,
         channels: NetworkChannels<PublicKeyOf<P>>,
     ) -> Self {
@@ -99,10 +105,7 @@ impl<P: Simplex> RoleMultiplexer<P> {
             scheme.clone(),
             required_containers,
             relay.clone(),
-            P::elector(
-                term_length,
-                commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS,
-            ),
+            P::elector(term_length, optimistic_views),
             channels,
         );
         Self {
@@ -112,6 +115,7 @@ impl<P: Simplex> RoleMultiplexer<P> {
             relay,
             required_containers,
             term_length,
+            optimistic_views,
             role,
             handle: Some(handle),
             switches: 0,
@@ -163,10 +167,7 @@ impl<P: Simplex> RoleMultiplexer<P> {
             self.scheme.clone(),
             self.required_containers,
             self.relay.clone(),
-            P::elector(
-                self.term_length,
-                commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS,
-            ),
+            P::elector(self.term_length, self.optimistic_views),
             channels,
         ));
         self.role = new_role;

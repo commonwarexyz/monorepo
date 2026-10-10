@@ -340,6 +340,7 @@ impl fmt::Debug for FuzzInputDebug<'_> {
             .field("raw_bytes_len", &input.raw_bytes.len())
             .field("required_containers", &input.required_containers)
             .field("term_length", &input.term_length)
+            .field("optimistic_views", &input.optimistic_views)
             .field("degraded_network", &input.degraded_network)
             .field("configuration", &input.configuration)
             .field("partition", &input.partition)
@@ -368,9 +369,13 @@ pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
     pub required_containers: u64,
     pub term_length: TermLength,
-    /// Sampled but not yet handed to engines (see `PINNED_OPTIMISTIC_VIEWS`).
+    /// Optimistic lookahead every honest engine's elector is built with (a
+    /// no-op for single-view terms); zero for half the inputs. A nonzero value
+    /// under a multi-view term skips the entry-evidence invariants for
+    /// intra-term views, which assume non-optimistic view entry.
     pub optimistic_views: ViewDelta,
-    /// Sampled but not yet handed to engines (see `PINNED_OPTIMISTIC_VIEWS`).
+    /// Sampled but not yet handed to engines: per-node lookaheads are not
+    /// wired, so every engine runs `optimistic_views`.
     pub heterogeneous_optimism: bool,
     pub degraded_network: bool,
     pub configuration: Configuration,
@@ -423,8 +428,7 @@ impl Arbitrary<'_> for FuzzInput {
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
         let term_length = TermLength::new(NZU32!(u.int_in_range(1..=MAX_TERM_LENGTH)?));
-        let optimistic_views =
-            ViewDelta::new(u.int_in_range(0..=max_optimistic_views(term_length))?);
+        let optimistic_views = ViewDelta::new(sample_optimistic_views(u, term_length)?);
         let heterogeneous_optimism = u.arbitrary()?;
 
         // SmallScope mutations with round-based injections - 80%,
@@ -512,22 +516,41 @@ pub type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Verifier>::PublicK
 pub type CertCfgOf<P> =
     <<<P as simplex::Simplex>::Scheme as Verifier>::Certificate as commonware_codec::Read>::Cfg;
 
-/// Largest fuzzed optimistic-view value: the domain `[0, term_length + 2]`
-/// covers 0 (optimistic validation disabled), the term-length boundary, and
-/// values beyond the term length, which production accepts but caps.
+/// Largest fuzzed optimistic-view value: `term_length + 2` covers the
+/// term-length boundary and values beyond it, which production accepts but
+/// caps.
 fn max_optimistic_views(term_length: TermLength) -> u64 {
     term_length.get() + 2
 }
 
-/// Optimistic lookahead wired into engines and reference electors.
+/// Samples the optimistic lookahead: zero (optimistic validation disabled) for
+/// half the inputs, so the entry-evidence invariants skipped under optimism
+/// keep their coverage, otherwise uniform over `[1, max_optimistic_views]`.
+/// One draw over a doubled range keeps the byte consumption of the plain
+/// `[0, max]` domain.
+fn sample_optimistic_views(
+    u: &mut arbitrary::Unstructured<'_>,
+    term_length: TermLength,
+) -> arbitrary::Result<u64> {
+    let max = max_optimistic_views(term_length);
+    Ok(fold_optimistic_views(u.int_in_range(0..=2 * max - 1)?, max))
+}
+
+/// Maps a draw over `[0, 2 * max)` to zero for its lower half and to
+/// `[1, max]` for its upper half.
+fn fold_optimistic_views(raw: u64, max: u64) -> u64 {
+    if raw < max { 0 } else { raw - max + 1 }
+}
+
+/// Optimistic lookahead for harnesses without a fuzzed optimistic dimension:
+/// the marshal end-to-end stacks and the [`TwinsBackend::optimistic_views`]
+/// default.
 ///
-/// Pinned to zero: the entry-evidence invariants (contiguous certificate
+/// Zero keeps the entry-evidence invariants (contiguous certificate
 /// progression, certified notarization parents, per-vote entry evidence)
-/// assume non-optimistic view entry, and a run truncated inside an optimistic
-/// issuance window would trip them without a real violation. The fuzzed
-/// [`FuzzInput::optimistic_views`] and [`FuzzInput::heterogeneous_optimism`]
-/// dimensions stay in the input format but are not handed to engines until
-/// those invariants understand optimism.
+/// active: they assume non-optimistic view entry and skip themselves when any
+/// engine runs a nonzero lookahead. The simplex drivers build their engines
+/// with [`FuzzInput::optimistic_views`] instead.
 pub const PINNED_OPTIMISTIC_VIEWS: ViewDelta = ViewDelta::zero();
 
 pub type NetworkChannels<P> = (
@@ -1711,6 +1734,7 @@ pub struct TwinsTopology<P: simplex::Simplex, C> {
     pub compromised: HashSet<usize>,
     pub elector: TwinsElector<P>,
     pub term_length: TermLength,
+    pub optimistic_views: ViewDelta,
     #[cfg_attr(not(feature = "mocks"), allow(dead_code))]
     pub data: C,
 }
@@ -1740,6 +1764,12 @@ pub trait TwinsBackend<P: simplex::Simplex> {
     ) -> impl std::future::Future<Output = TwinsSetup<P, Self::State>> + Send;
 
     fn term_length(&self) -> TermLength;
+
+    /// Optimistic lookahead the backend's engines are built with. The default
+    /// keeps the pinned zero for stacks without a fuzzed optimistic dimension.
+    fn optimistic_views(&self) -> ViewDelta {
+        PINNED_OPTIMISTIC_VIEWS
+    }
 
     /// Select the framework whose cases the shared driver will generate.
     fn framework(&mut self, rng: &mut FuzzRng, participants: usize) -> twins::Framework;
@@ -1876,6 +1906,7 @@ pub async fn run_twins_with_backend<P, B>(
     let mut setup = backend.setup(context).await;
     let participants: Arc<[PublicKeyOf<P>]> = setup.participants.into();
     let term_length = backend.term_length();
+    let optimistic_views = backend.optimistic_views();
     let mut scenario_rng = FuzzRng::new(entropy);
     let framework = backend.framework(&mut scenario_rng, participants.len());
     let cases = twins::cases(&mut scenario_rng, framework);
@@ -1893,13 +1924,14 @@ pub async fn run_twins_with_backend<P, B>(
     let compromised = case.compromised.iter().copied().collect::<HashSet<_>>();
     let topology = TwinsTopology {
         elector: twins::Elector::new(
-            P::elector(term_length, PINNED_OPTIMISTIC_VIEWS),
+            P::elector(term_length, optimistic_views),
             &case.scenario,
             participants.len(),
         ),
         scenario: case.scenario,
         compromised,
         term_length,
+        optimistic_views,
         data: case.data,
     };
     backend.configure_topology(&mut setup.state, &topology, &participants);
@@ -2049,4 +2081,19 @@ pub enum Mode {
     MalloryContainer,
     Chaos,
     ChaosTwins,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optimistic_views_fold_splits_zero_and_nonzero_evenly() {
+        let max = max_optimistic_views(TermLength::new(NZU32!(5)));
+        let folded: Vec<u64> = (0..2 * max)
+            .map(|raw| fold_optimistic_views(raw, max))
+            .collect();
+        assert_eq!(folded[..max as usize], vec![0; max as usize][..]);
+        assert_eq!(folded[max as usize..], (1..=max).collect::<Vec<_>>()[..]);
+    }
 }

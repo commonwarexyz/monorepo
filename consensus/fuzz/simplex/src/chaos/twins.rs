@@ -64,7 +64,7 @@ use commonware_consensus::{
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
     },
-    types::{Delta, Epoch, TermLength, View},
+    types::{Delta, Epoch, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     ManagedValidator, N4F1C3, PublicKeyOf, build_validator_with_reporter,
@@ -529,6 +529,7 @@ fn check_safety<P: Simplex>(
     byz: usize,
     elector: TwinsElector<P>,
     term_length: TermLength,
+    optimistic_views: ViewDelta,
 ) {
     // Full audit-history suite over the RECORDING reporters: the append-only,
     // full-proposal (parent-aware) conflict checks (`finalization_history` /
@@ -540,7 +541,12 @@ fn check_safety<P: Simplex>(
     // order-independent safety and healing evidence survives journal pruning.
     // The chaos-twins runner pins `input.configuration = N4F1C3` before
     // spawning, so the safety suite always judges that configuration.
-    invariants::check::<P>(commonware_consensus_fuzz_core::N4F1C3, term_length, honest);
+    invariants::check::<P>(
+        commonware_consensus_fuzz_core::N4F1C3,
+        term_length,
+        optimistic_views,
+        honest,
+    );
 
     let honest_summaries = summaries(honest);
     let mut observers = honest_summaries.clone();
@@ -551,6 +557,7 @@ fn check_safety<P: Simplex>(
         elector,
         Epoch::new(commonware_consensus_fuzz_core::EPOCH),
         term_length,
+        optimistic_views,
         &observers,
     );
 }
@@ -584,6 +591,7 @@ async fn paced_step<P: Simplex>(
     byz: usize,
     elector: &TwinsElector<P>,
     term_length: TermLength,
+    optimistic_views: ViewDelta,
 ) {
     let jitter = Duration::from_millis(context.random_range(0..=CHAOS_TWINS_JITTER_MS));
     context.sleep(jitter).await;
@@ -593,7 +601,14 @@ async fn paced_step<P: Simplex>(
     let baseline = clock.baseline(&live);
     let deadline = context.current() + CHAOS_TWINS_STEP_TIMEOUT;
     wait_for_step_boundary(context, clock, &live, baseline, deadline).await;
-    check_safety::<P>(honest, twin_summaries, byz, elector.clone(), term_length);
+    check_safety::<P>(
+        honest,
+        twin_summaries,
+        byz,
+        elector.clone(),
+        term_length,
+        optimistic_views,
+    );
 }
 
 /// Run one chaos-twins episode. Seeded solely from `FuzzRng::new(raw_bytes)`;
@@ -635,7 +650,11 @@ pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInp
         // shows `byz` leading `target_view` (entry into the Byzantine term).
         let crash = (0..n).find(|&idx| idx != byz).expect("an honest index exists");
         let target_view = View::new(CHAOS_TWINS_BYZ_ROUND * term_length.get() + 1);
-        let elector = twins::Elector::new(P::elector(term_length, commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS), &scenario, n);
+        let elector = twins::Elector::new(
+            P::elector(term_length, input.optimistic_views),
+            &scenario,
+            n,
+        );
 
         // Byzantine twin on `byz` (never crashed).
         let twin_channels = registrations
@@ -735,7 +754,14 @@ pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInp
             let step_deadline = context.current() + CHAOS_TWINS_STEP_TIMEOUT;
             wait_for_step_boundary(&mut context, &mut clock, &only_crash, baseline, step_deadline)
                 .await;
-            check_safety::<P>(&honest, &twin_summaries, byz, elector.clone(), term_length);
+            check_safety::<P>(
+                &honest,
+                &twin_summaries,
+                byz,
+                elector.clone(),
+                term_length,
+                input.optimistic_views,
+            );
         };
         // Confirm from the crash node's own leader map that the next term is
         // Byzantine-led before crashing; skip if not yet derived (never crash in
@@ -767,6 +793,7 @@ pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInp
                 byz,
                 &elector,
                 term_length,
+                input.optimistic_views,
             )
             .await;
         }
@@ -832,10 +859,18 @@ pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInp
                 byz,
                 &elector,
                 term_length,
+                input.optimistic_views,
             )
             .await;
         }
 
-        check_safety::<P>(&honest, &twin_summaries, byz, elector.clone(), term_length);
+        check_safety::<P>(
+            &honest,
+            &twin_summaries,
+            byz,
+            elector.clone(),
+            term_length,
+            input.optimistic_views,
+        );
     });
 }

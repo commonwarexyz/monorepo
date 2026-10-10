@@ -588,7 +588,7 @@ async fn restart<P: Simplex>(
             validator,
             P::elector(
                 P::effective_term_length(input.term_length),
-                commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS,
+                input.optimistic_views,
             ),
             relay.clone(),
             Duration::from_secs(1),
@@ -867,6 +867,7 @@ fn run_inner<P: Simplex>(
                     relay.clone(),
                     required_containers,
                     term_length,
+                    input.optimistic_views,
                     role,
                     channels,
                 ));
@@ -926,7 +927,7 @@ fn run_inner<P: Simplex>(
                     &participants,
                     scheme,
                     validator,
-                    P::elector(term_length, commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS),
+                    P::elector(term_length, input.optimistic_views),
                     relay.clone(),
                     Duration::from_secs(1),
                     Duration::from_secs(2),
@@ -1563,13 +1564,14 @@ fn run_inner<P: Simplex>(
         observers.extend(managed.iter().map(|m| m.reporter()));
         invariants::check_vote_invariants_with_byzantine(
             &byzantine,
-            P::elector(term_length, commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS),
+            P::elector(term_length, input.optimistic_views),
             Epoch::new(commonware_consensus_fuzz_core::EPOCH),
             term_length,
+            input.optimistic_views,
             &observers,
         );
         let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<P>(config, term_length, states);
+        invariants::check::<P>(config, term_length, input.optimistic_views, states);
     });
 }
 
