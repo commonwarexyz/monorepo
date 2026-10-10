@@ -22,6 +22,11 @@ use std::{
 };
 use tracing::{debug, error, trace};
 
+/// Most consecutive missing pages [CacheRef::read_after_misses] fetches with one read. At the common
+/// 4 KiB page size a full run is a ~256 KiB read, already on the flat part of NVMe sequential-read
+/// efficiency, so longer runs would only grow the read's buffer.
+const MAX_RUN_PAGES: u64 = 64;
+
 /// Shared future for one logical page fetch. The cache keeps one clone in `page_fetches` and
 /// each waiter holds another while it is still interested in the result. The `IoBuf` contains
 /// only the logical, validated page bytes.
@@ -332,11 +337,12 @@ impl CacheRef {
     /// `(destination, logical offset)`, non-empty, in ascending offset order).
     ///
     /// Each page the ranges touch is copied from the cache when resident, joined when another
-    /// reader is fetching it, and otherwise read with one batched blob read that validates,
-    /// caches, and serves each page as it arrives. Serving never depends on the cache still
-    /// holding a page, so no page this call reads is read again to serve it. Other readers do
-    /// not join the batched read. A page failing validation returns an error, like a single
-    /// fetch. Pages cached before it remain, subject to normal eviction.
+    /// reader is fetching it, and otherwise read with one batched blob read. The batched read
+    /// fetches each run of up to [MAX_RUN_PAGES] consecutive missing pages as one range, and
+    /// validates, caches, and serves the run's pages as it arrives. Serving never depends on the
+    /// cache still holding a page, so no page this call reads is read again to serve it. Other
+    /// readers do not join the batched read. A page failing validation returns an error, like a
+    /// single fetch. Pages cached before it remain, subject to normal eviction.
     pub(super) async fn read_after_misses<B: Blob>(
         &self,
         blob: &Arc<B>,
@@ -369,41 +375,67 @@ impl CacheRef {
             }
         }
 
-        // Group the waiting pieces by page, which the ranges' offset order keeps adjacent, and
-        // collect each page's physical range for one batched read. A page's group is taken when
-        // its read completes.
+        // Group the waiting pieces into runs of consecutive pages, which the ranges' offset order
+        // keeps adjacent, and collect each run's physical range for one batched read. A run is
+        // taken when its read completes.
         let page_size: u64 = self.page_size.widen();
-        let mut groups = Vec::new();
+        let (_, physical_page_size) = physical_page(0, page_size)?;
+        let mut runs = Vec::new();
         let mut physical = Vec::new();
-        for group in waiting.chunk_by_mut(|(a, _, _), (b, _, _)| a == b) {
-            physical.push(physical_page(group[0].0, page_size)?);
-            groups.push(Some(group));
+        let mut rest = waiting.as_mut_slice();
+        while let Some(&(first, ..)) = rest.first() {
+            let mut last = first;
+            let mut pieces = 1;
+            while let Some(&(page_num, ..)) = rest.get(pieces)
+                && (page_num == last || (page_num == last + 1 && page_num - first < MAX_RUN_PAGES))
+            {
+                last = page_num;
+                pieces += 1;
+            }
+            let (run, tail) = std::mem::take(&mut rest).split_at_mut(pieces);
+            rest = tail;
+            let (start, _) = physical_page(first, page_size)?;
+            let pages = usize::try_from(last - first + 1).map_err(|_| Error::OffsetOverflow)?;
+            let len = physical_page_size
+                .checked_mul(pages)
+                .ok_or(Error::OffsetOverflow)?;
+            physical.push((start, len));
+            runs.push(Some(run));
         }
 
-        // Validate, cache, and serve each page as its read completes so this work overlaps the
-        // reads still in flight, while the joined fetches proceed. CacheRef retains the pages, so
-        // the source pages need not remain in the OS page cache.
+        // Validate, cache, and serve each run's pages as its read completes so this work overlaps
+        // the reads still in flight, while the joined fetches proceed. CacheRef retains the pages,
+        // so the source pages need not remain in the OS page cache.
         let read = async {
             let mut stream = std::pin::pin!(blob.read_many(&physical, ReadOptions::DONT_CACHE));
             while let Some(item) = stream.next().await {
                 let (index, bufs) = item.inspect_err(|err| error!(?err, "Page fetch failed"))?;
 
-                // Each page is yielded exactly once (see Blob::read_many).
-                let Some(group) = groups.get_mut(index).and_then(Option::take) else {
+                // Each run is yielded exactly once (see Blob::read_many).
+                let Some(run) = runs.get_mut(index).and_then(Option::take) else {
                     return Err(Error::ReadFailed);
                 };
-                let page_num = group[0].0;
-                let page = validate_physical_page(bufs.coalesce())
-                    .and_then(|(page, _)| cacheable_page(page, page_num, self.page_size))
-                    .inspect_err(|err| error!(page_num, ?err, "Page fetch failed"))?;
-                self.cache.write().cache(blob_id, page.as_ref(), page_num);
-                for (_, offset_in_page, piece) in group.iter_mut() {
-                    piece.copy_from_slice(
-                        &page.as_ref()[*offset_in_page..*offset_in_page + piece.len()],
-                    );
+                let bytes = bufs.coalesce().freeze();
+                if bytes.len() != physical[index].1 {
+                    return Err(Error::ReadFailed);
+                }
+                let first = run[0].0;
+                for group in run.chunk_by_mut(|(a, _, _), (b, _, _)| a == b) {
+                    let page_num = group[0].0;
+                    let start = (page_num - first) as usize * physical_page_size;
+                    let page =
+                        validate_physical_page(bytes.slice(start..start + physical_page_size))
+                            .and_then(|(page, _)| cacheable_page(page, page_num, self.page_size))
+                            .inspect_err(|err| error!(page_num, ?err, "Page fetch failed"))?;
+                    self.cache.write().cache(blob_id, page.as_ref(), page_num);
+                    for (_, offset_in_page, piece) in group.iter_mut() {
+                        piece.copy_from_slice(
+                            &page.as_ref()[*offset_in_page..*offset_in_page + piece.len()],
+                        );
+                    }
                 }
             }
-            if groups.iter().any(Option::is_some) {
+            if runs.iter().any(Option::is_some) {
                 return Err(Error::ReadFailed);
             }
             Ok(())
@@ -1283,7 +1315,9 @@ mod tests {
                 .read_after_misses(&blob, 0, pending)
                 .await
                 .unwrap();
-            assert_eq!(recordings.snapshot().reads.len(), 5);
+
+            // Page 0 is read alone and the consecutive pages 3-6 as one run.
+            assert_eq!(recordings.snapshot().reads.len(), 2);
             for ((offset, len), buf) in ranges.into_iter().zip(&bufs) {
                 let expected: Vec<u8> = (offset..offset + len as u64)
                     .map(|o| (o / PAGE_SIZE_U64) as u8)
@@ -1321,6 +1355,35 @@ mod tests {
                 .unwrap();
             assert_eq!((inside, straddling), ([0], [3, 4]));
             assert!(recordings.snapshot().reads.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_read_after_misses_coalesces_runs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (recording, recordings) = crate::mocks::RecordingContext::new(context);
+            let blob = checksummed_blob(&recording, 140).await;
+            let context = recording.inner;
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+
+            // One byte from each of pages 0-129 and from page 135. The consecutive pages split
+            // into runs of at most MAX_RUN_PAGES (64, 64, and 2), and page 135 is read alone.
+            let pages: Vec<u64> = (0..130).chain([135]).collect();
+            let mut bufs = vec![[0u8; 1]; pages.len()];
+            let pending: Vec<(&mut [u8], u64)> = bufs
+                .iter_mut()
+                .zip(&pages)
+                .map(|(buf, &page)| (buf.as_mut_slice(), page * PAGE_SIZE_U64 + 1))
+                .collect();
+            cache_ref
+                .read_after_misses(&blob, 0, pending)
+                .await
+                .unwrap();
+            assert_eq!(recordings.snapshot().reads.len(), 4);
+            for (buf, page) in bufs.iter().zip(pages) {
+                assert_eq!(buf, &[page as u8]);
+            }
         });
     }
 
@@ -1384,8 +1447,8 @@ mod tests {
             }
             recordings.clear();
 
-            // Caching the 10 missing pages evicts most of them before they are served, but each
-            // is still read from the blob once.
+            // Caching the 10 missing pages evicts most of them before they are served, but the
+            // one read of their run serves them all.
             let size = 40 * PAGE_SIZE_U64;
             let view = View {
                 blob: &blob,
@@ -1403,7 +1466,7 @@ mod tests {
                 .unwrap();
             assert_eq!(served, 0);
             assert_eq!(buf, (0u8..10).collect::<Vec<_>>());
-            assert_eq!(recordings.snapshot().reads.len(), offsets.len());
+            assert_eq!(recordings.snapshot().reads.len(), 1);
         });
     }
 
@@ -1416,7 +1479,8 @@ mod tests {
             let context = recording.inner;
 
             // Page 1 is resident in a 2-page cache. Caching the five other pages one item spans
-            // evicts it, yet it is never read from the blob.
+            // evicts it, yet it is never read from the blob: page 0 and pages 2-5 are read as two
+            // runs.
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
             let mut buf = [0u8; 1];
             cache_ref
@@ -1442,13 +1506,14 @@ mod tests {
             assert_eq!(served, 0);
             let expected: Vec<u8> = (0..size).map(|o| (o / PAGE_SIZE_U64) as u8).collect();
             assert_eq!(buf, expected);
-            assert_eq!(recordings.snapshot().reads.len(), 5);
+            assert_eq!(recordings.snapshot().reads.len(), 2);
         });
     }
 
     #[test_traced]
     fn test_read_many_into_joins_fetch_in_flight() {
-        /// Serves checksummed pages from memory, holding each read until its page's gate opens.
+        /// Serves checksummed pages from memory, holding each read until the gates of all its
+        /// pages open.
         struct GatedBlob {
             pages: Vec<Vec<u8>>,
             gates: Mutex<Vec<Option<oneshot::Receiver<()>>>>,
@@ -1469,17 +1534,22 @@ mod tests {
             async fn read_at_buf(
                 &self,
                 offset: u64,
-                _len: usize,
+                len: usize,
                 _bufs: impl Into<IoBufsMut> + Send,
                 _options: ReadOptions,
             ) -> Result<IoBufsMut, Error> {
-                let page = (offset / (PAGE_SIZE_U64 + CHECKSUM_SIZE)) as usize;
-                self.reads.lock().push(page);
-                let gate = self.gates.lock()[page].take();
-                if let Some(gate) = gate {
+                let physical_page_size = (PAGE_SIZE_U64 + CHECKSUM_SIZE) as usize;
+                let first = offset as usize / physical_page_size;
+                let pages = first..first + len / physical_page_size;
+                self.reads.lock().extend(pages.clone());
+                let gates: Vec<_> = pages
+                    .clone()
+                    .filter_map(|page| self.gates.lock()[page].take())
+                    .collect();
+                for gate in gates {
                     let _ = gate.await;
                 }
-                Ok(IoBufsMut::from(self.pages[page].clone()))
+                Ok(IoBufsMut::from(self.pages[pages].concat()))
             }
 
             async fn write_at(
