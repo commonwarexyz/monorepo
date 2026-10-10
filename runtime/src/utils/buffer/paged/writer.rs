@@ -1025,6 +1025,17 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         self.view().read_many_into(buf, offsets, item_size).await
     }
 
+    /// Like [`Self::read_many_into`], but for variable-length `(offset, len)` ranges: `buf` holds
+    /// one slot per range, back to back. Returns the number of ranges fully served without a blob
+    /// read.
+    pub async fn read_ranges_into(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<usize, Error> {
+        self.view().read_ranges_into(buf, ranges).await
+    }
+
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
     /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
     pub fn try_read_many_sync_into(
