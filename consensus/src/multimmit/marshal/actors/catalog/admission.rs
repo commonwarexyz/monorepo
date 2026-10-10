@@ -597,6 +597,17 @@ where
             .collect::<Vec<_>>();
         self.admission.volatile.extend(references.iter().copied());
         self.reads.cache_admitted(&self.metrics, blocks);
+        // The blocks are readable now, so delivery may report final blocks it was missing. The
+        // notice is advisory: delivery also retries on later commits and finality facts.
+        let mut chains = references
+            .iter()
+            .map(|reference| reference.chain().get())
+            .collect::<Vec<_>>();
+        if !chains.is_empty() {
+            chains.sort_unstable();
+            chains.dedup();
+            let _ = self.delivery.admitted(chains);
+        }
         self.metrics.admitted(admitted);
         for reply in buffered {
             reply.send_lossy(Ok(()));
