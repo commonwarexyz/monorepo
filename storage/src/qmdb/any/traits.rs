@@ -111,6 +111,13 @@ pub trait DbAny: BatchableDb<Key: Key, Value: CodecShared + Clone> + Send + Sync
     + Send
     + use<'a, Self, Q>;
 
+    /// Return a future that warms the page cache for the applied state of `keys` without
+    /// borrowing the database. Best effort: absent keys are skipped and failures are logged.
+    fn prefetch(
+        &self,
+        keys: &[&Self::Key],
+    ) -> impl Future<Output = ()> + Send + 'static + use<Self>;
+
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
 
