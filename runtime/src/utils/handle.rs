@@ -8,7 +8,6 @@ use commonware_utils::{
     sync::{Mutex, Once},
 };
 use futures::{
-    FutureExt as _,
     future::{Either, poll_fn, select},
     pin_mut,
     stream::{AbortHandle, Abortable, Aborted},
@@ -17,7 +16,7 @@ use std::{
     any::Any,
     cell::UnsafeCell,
     future::Future,
-    panic::{AssertUnwindSafe, resume_unwind},
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -153,8 +152,10 @@ where
     }
 }
 
-/// Holds a task future in an [`UnsafeCell`], so a shared reference to a wrapper around the future
-/// does not conflict with borrows the future holds into its own state.
+/// Polls a task future held in an [`UnsafeCell`], catching any panic it raises.
+///
+/// The cell keeps a shared reference to a wrapper around the future from conflicting with borrows
+/// the future holds into its own state.
 ///
 /// A suspended `async` block can hold a reference into its own state across an `.await`, and
 /// [`Abortable`] checks for cancellation through `&self`, which covers the future it wraps. Safe
@@ -163,15 +164,20 @@ where
 /// read of the whole future that invalidates its borrows of itself, and reports undefined behavior
 /// when the resumed task uses them. Creating a shared reference does not read memory inside an
 /// `UnsafeCell`, and `UnsafeCell<F>` has the same layout as `F`.
+///
+/// Catching panics here means building a task needs no further wrappers. Unoptimized builds give
+/// each wrapper value its own stack slot the size of the future, in a frame that every poll of the
+/// task allocates.
 struct FutureCell<F>(UnsafeCell<F>);
 
 impl<F: Future> Future for FutureCell<F> {
-    type Output = F::Output;
+    type Output = std::thread::Result<F::Output>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // SAFETY: The future is structurally pinned: `FutureCell` has no `Drop` impl, is `Unpin`
         // only when `F` is, and reaches the future only through this pinned projection.
-        unsafe { self.map_unchecked_mut(|cell| cell.0.get_mut()) }.poll(cx)
+        let future = unsafe { self.map_unchecked_mut(|cell| cell.0.get_mut()) };
+        catch_unwind(AssertUnwindSafe(|| future.poll(cx)))?.map(Ok)
     }
 }
 
@@ -218,11 +224,7 @@ where
             let _guard = guard;
 
             // Run future with panic catching and abort support
-            let result = Abortable::new(
-                AssertUnwindSafe(FutureCell(UnsafeCell::new(f))).catch_unwind(),
-                abort_registration,
-            )
-            .await;
+            let result = Abortable::new(FutureCell(UnsafeCell::new(f)), abort_registration).await;
 
             // Handle result
             match result {
