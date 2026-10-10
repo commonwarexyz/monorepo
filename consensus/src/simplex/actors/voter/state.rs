@@ -2164,6 +2164,26 @@ mod tests {
         (fixture, state)
     }
 
+    /// Like [setup_state_with], with the five-view terms, two optimistic views,
+    /// view retention, and skip budget shared by the pipelined-handoff tests.
+    fn setup_state_with_handoff(
+        context: &mut deterministic::Context,
+        validators: usize,
+        signer: usize,
+        epoch: u64,
+    ) -> (Fixture<ed25519::Scheme>, TestState) {
+        setup_state_with(
+            context,
+            validators,
+            signer,
+            epoch,
+            10,
+            TermLength::new(NZU32!(5)),
+            ViewDelta::new(2),
+            4,
+        )
+    }
+
     /// Proposes `payload` at view 1 (on top of genesis) and broadcasts our
     /// notarize vote for it, returning the proposal.
     fn propose_and_notarize_view1(state: &mut TestState, payload: u8) -> Proposal<Sha256Digest> {
@@ -7059,6 +7079,917 @@ mod tests {
                 .into_context();
             assert_eq!(proposal.round.view(), View::new(6));
             assert_eq!(proposal.parent, (parent_view, parent_payload));
+        });
+    }
+
+    /// Certifies view 4 and verifies and votes for the term-1 leader's view-5
+    /// proposal, leaving the state at the outgoing term's final view.
+    ///
+    /// Expects a 4-validator state with term length 5 in epoch 9. Returns the
+    /// view-4 and view-5 proposals.
+    fn prepare_term_boundary(
+        state: &mut TestState,
+        verifier: &ed25519::Scheme,
+        schemes: &[ed25519::Scheme],
+    ) -> (Proposal<Sha256Digest>, Proposal<Sha256Digest>) {
+        let certified = certify_view_4(state, verifier, schemes);
+        assert_eq!(state.current_view(), View::new(5));
+
+        let tip = fetch_proposal(5, 4, 65);
+        assert!(state.set_proposal(View::new(5), tip.clone()));
+        assert!(matches!(state.try_verify(), Verify::Ready(..)));
+        assert!(state.verified(View::new(5)));
+        assert_eq!(state.leader_index(View::new(6)), None);
+        assert!(state.construct_notarize(View::new(5)).is_some());
+        (certified, tip)
+    }
+
+    /// Certifies view 4, the anchor before the outgoing term's final view, and
+    /// returns its proposal.
+    ///
+    /// Drains the view-4 candidate: views 1-3 are untracked, so processing it
+    /// later would request a parent fetch.
+    fn certify_view_4(
+        state: &mut TestState,
+        verifier: &ed25519::Scheme,
+        schemes: &[ed25519::Scheme],
+    ) -> Proposal<Sha256Digest> {
+        let certified = fetch_proposal(4, 3, 64);
+        let notarization = build_notarization(verifier, schemes, &certified);
+        assert!(state.add_notarization(notarization).0);
+        assert!(state.certified(View::new(4), true).is_some());
+        let _ = state.certify_candidates();
+        certified
+    }
+
+    /// Notarizes a single participant's pipelined handoff: the outgoing tip
+    /// at view 5 and the child built on it at view 6 before the tip certifies.
+    fn notarize_single_participant_handoff(
+        state: &mut TestState,
+        verifier: &ed25519::Scheme,
+        schemes: &[ed25519::Scheme],
+    ) -> (Proposal<Sha256Digest>, Proposal<Sha256Digest>) {
+        certify_view_4(state, verifier, schemes);
+
+        let context = state
+            .try_propose()
+            .expect("outgoing leader should propose the term tip")
+            .into_context();
+        let tip = fetch_proposal(5, 4, 65);
+        assert!(state.proposed(&context, tip.payload));
+        assert!(state.construct_notarize(View::new(5)).is_some());
+
+        let context = state
+            .try_propose()
+            .expect("handoff proposal should use the uncertified tip")
+            .into_context();
+        let child = fetch_proposal(6, 5, 66);
+        assert!(state.proposed(&context, child.payload));
+        assert!(state.construct_notarize(View::new(6)).is_some());
+
+        let tip_notarization = build_notarization(verifier, schemes, &tip);
+        assert!(state.add_notarization(tip_notarization).0);
+        let child_notarization = build_notarization(verifier, schemes, &child);
+        assert!(state.add_notarization(child_notarization).0);
+        (tip, child)
+    }
+
+    #[test]
+    fn pipelined_handoff_proposes_on_uncertified_term_end() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            // Voting for the outgoing tip stamps the incoming term's leader.
+            assert_eq!(state.leader_index(View::new(6)), Some(Participant::new(3)));
+
+            // The incoming leader proposes on the uncertified tip while still
+            // in the outgoing view.
+            let ctx = state
+                .try_propose()
+                .expect("handoff proposal should use the uncertified tip")
+                .into_context();
+            assert_eq!(ctx.round.view(), View::new(6));
+            assert_eq!(ctx.parent, (View::new(5), tip.payload));
+            assert_eq!(state.current_view(), View::new(5));
+
+            // The built proposal broadcasts its notarize vote immediately.
+            let ours = fetch_proposal(6, 5, 66);
+            assert!(state.proposed(&ctx, ours.payload));
+            let notarize = state
+                .construct_notarize(View::new(6))
+                .expect("handoff proposal should notarize before the tip certifies");
+            assert_eq!(notarize.proposal, ours);
+            assert_eq!(state.current_view(), View::new(5));
+
+            // The handoff completes once the tip certifies and the pipelined
+            // proposal notarizes.
+            let tip_notarization = build_notarization(&verifier, &schemes, &tip);
+            assert!(state.add_notarization(tip_notarization).0);
+            assert!(state.certified(View::new(5), true).is_some());
+            assert_eq!(state.current_view(), View::new(6));
+
+            let ours_notarization = build_notarization(&verifier, &schemes, &ours);
+            assert!(state.add_notarization(ours_notarization).0);
+            let (ready, fetches) = state.certify_candidates();
+            assert!(fetches.is_empty());
+            assert!(ready.iter().any(|p| p.round.view() == View::new(6)));
+            assert!(state.certified(View::new(6), true).is_some());
+            assert_eq!(state.current_view(), View::new(7));
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_certification_waits_for_parent() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 1, 0, 9);
+            let (tip, child) = notarize_single_participant_handoff(&mut state, &verifier, &schemes);
+
+            // Only the parent may cross the application certification barrier first.
+            let (ready, fetches) = state.certify_candidates();
+            assert!(fetches.is_empty());
+            assert_eq!(ready, vec![tip]);
+
+            assert!(state.certified(View::new(5), true).is_some());
+
+            // Completing the cross-term parent wakes the blocked child.
+            let (ready, fetches) = state.certify_candidates();
+            assert!(fetches.is_empty());
+            assert_eq!(ready, vec![child]);
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_certification_barrier_survives_restart() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 1, 0, 9);
+            certify_view_4(&mut state, &verifier, &schemes);
+
+            // The journal holds an early vote issued before the restart.
+            let tip = fetch_proposal(5, 4, 65);
+            let tip_vote = Notarize::sign(&schemes[0], tip.clone()).expect("tip vote");
+            state.replay(&Artifact::Notarize(tip_vote));
+            let child = fetch_proposal(6, 5, 66);
+            let child_vote = Notarize::sign(&schemes[0], child.clone()).expect("child vote");
+            state.replay(&Artifact::Notarize(child_vote));
+
+            let tip_notarization = build_notarization(&verifier, &schemes, &tip);
+            assert!(state.add_notarization(tip_notarization).0);
+            let child_notarization = build_notarization(&verifier, &schemes, &child);
+            assert!(state.add_notarization(child_notarization).0);
+
+            // The replayed early vote retains the certification barrier: only
+            // the parent may cross it first.
+            let (ready, fetches) = state.certify_candidates();
+            assert!(fetches.is_empty());
+            assert_eq!(ready, vec![tip]);
+            assert!(state.certified(View::new(5), true).is_some());
+
+            // Completing the cross-term parent wakes the blocked child.
+            let (ready, fetches) = state.certify_candidates();
+            assert!(fetches.is_empty());
+            assert_eq!(ready, vec![child]);
+        });
+    }
+
+    /// Replays the journaled notarize vote of `schemes[signer]` for a term-start proposal at
+    /// view 6 that names view 4, as a validator holding a nullification of view 5 may cast.
+    /// Then adds the notarization of a conflicting view-6 proposal that names view 5, signed
+    /// by the other validators, since an honest signer cannot vote for both proposals.
+    ///
+    /// That certificate includes a vote from an honest validator that certified view 5, so
+    /// a validator that is not the incoming leader must certify it without first fetching
+    /// and certifying view 5.
+    fn certify_conflicting_term_start<L: Elector<ed25519::Scheme>>(
+        state: &mut State<deterministic::Context, ed25519::Scheme, L, Sha256Digest>,
+        signer: usize,
+        verifier: &ed25519::Scheme,
+        schemes: &[ed25519::Scheme],
+    ) {
+        let nullification =
+            build_nullification(verifier, schemes, Rnd::new(Epoch::new(9), View::new(5)));
+        assert!(state.add_nullification(nullification));
+        let ours = fetch_proposal(6, 4, 61);
+        let vote = Notarize::sign(&schemes[signer], ours).expect("local notarize vote");
+        state.replay(&Artifact::Notarize(vote));
+
+        let conflicting = fetch_proposal(6, 5, 62);
+        let others: Vec<_> = schemes
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != signer)
+            .map(|(_, scheme)| scheme.clone())
+            .collect();
+        let notarization = build_notarization(verifier, &others, &conflicting);
+        assert!(state.add_notarization(notarization).0);
+        let (ready, fetches) = state.certify_candidates();
+        assert_eq!(ready, vec![conflicting]);
+        assert!(fetches.is_empty());
+    }
+
+    /// Every validator other than the incoming leader of view 6 (participant 3) certifies
+    /// the conflicting term start without its parent.
+    #[test]
+    fn term_start_gate_skips_non_leader_vote() {
+        for signer in 0..3 {
+            let runtime = deterministic::Runner::default();
+            runtime.start(move |mut context| async move {
+                let (
+                    Fixture {
+                        schemes, verifier, ..
+                    },
+                    mut state,
+                ) = setup_state_with_handoff(&mut context, 4, signer, 9);
+                assert_eq!(
+                    state.handoff_leader(View::new(6)),
+                    Some(Participant::new(3))
+                );
+                certify_conflicting_term_start(&mut state, signer, &verifier, &schemes);
+            });
+        }
+    }
+
+    /// A [`Dynamic`] elector elects no leader before the certificate that starts a term,
+    /// so no local vote gates a term-start certificate.
+    #[test]
+    fn term_start_gate_skips_dynamic_elector() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, b"ns", 4);
+            let mut state = State::new(
+                context.child("state"),
+                Config {
+                    scheme: schemes[1].clone(),
+                    elector: RequireCertificateElector {
+                        term_length: TermLength::new(NZU32!(5)),
+                        _phantom: PhantomData,
+                    },
+                    epoch: Epoch::new(9),
+                    view_retention: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    skip_budget: 4,
+                },
+            );
+            state.set_genesis(test_genesis());
+            certify_conflicting_term_start(&mut state, 1, &verifier, &schemes);
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_finalize_waits_for_parent_certification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 1, 0, 9);
+            notarize_single_participant_handoff(&mut state, &verifier, &schemes);
+
+            // A finalize vote requires the certified parent even when the
+            // child is already certified.
+            assert!(state.certified(View::new(6), true).is_some());
+            assert!(state.construct_finalize(View::new(6)).is_none());
+
+            assert!(state.certified(View::new(5), true).is_some());
+            assert!(state.construct_finalize(View::new(6)).is_some());
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_replay_restores_early_leader() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+
+            // Restore the certified anchor that precedes the outgoing vote in
+            // the journal.
+            certify_view_4(&mut state, &verifier, &schemes);
+            assert_eq!(state.current_view(), View::new(5));
+
+            // The outgoing vote is durable, but its derived incoming leader is
+            // absent before replay.
+            let tip = fetch_proposal(5, 4, 65);
+            let local_vote = Notarize::sign(&schemes[3], tip.clone()).expect("local notarize vote");
+            assert_eq!(state.leader_index(View::new(6)), None);
+
+            // Replaying the vote must restore both the early leader and
+            // the outgoing tip as usable handoff ancestry.
+            state.replay(&Artifact::Notarize(local_vote));
+            assert_eq!(state.leader_index(View::new(6)), Some(Participant::new(3)));
+            let ctx = state
+                .try_propose()
+                .expect("replayed outgoing vote should restore the handoff")
+                .into_context();
+            assert_eq!(ctx.round.view(), View::new(6));
+            assert_eq!(ctx.parent, (View::new(5), tip.payload));
+
+            // Completing the recovered request must still produce the
+            // incoming term's notarize vote.
+            let ours = fetch_proposal(6, 5, 66);
+            assert!(state.proposed(&ctx, ours.payload));
+            let notarize = state
+                .construct_notarize(View::new(6))
+                .expect("recovered handoff proposal should be votable");
+            assert_eq!(notarize.proposal, ours);
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_child_replay_prevents_rebuild() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes,
+                    participants,
+                    verifier,
+                    ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+
+            let certified = certify_view_4(&mut state, &verifier, &schemes);
+            let tip = fetch_proposal(5, 4, 65);
+            let tip_vote = Notarize::sign(&schemes[3], tip).expect("tip vote");
+            state.replay(&Artifact::Notarize(tip_vote));
+
+            let child = fetch_proposal(6, 5, 66);
+            let child_vote = Notarize::sign(&schemes[3], child.clone()).expect("child vote");
+            state.replay(&Artifact::Notarize(child_vote));
+
+            assert!(state.try_propose().is_none());
+            assert!(state.construct_notarize(View::new(6)).is_none());
+
+            // The other participants nullify the old tip, making the certified
+            // view-4 ancestry independently admissible for the term start.
+            let nullification = build_nullification(
+                &verifier,
+                &schemes[..3],
+                Rnd::new(Epoch::new(9), View::new(5)),
+            );
+            assert!(state.add_nullification(nullification));
+            assert_eq!(
+                state.parent_payload_for(View::new(6), View::new(4)),
+                Ok(certified.payload)
+            );
+            assert!(state.try_propose().is_none());
+
+            let alternate = Context {
+                round: Rnd::new(Epoch::new(9), View::new(6)),
+                leader: participants[3].clone(),
+                parent: (View::new(4), certified.payload),
+            };
+            // The occupied slot ignores the conflicting proposal.
+            state.proposed(&alternate, Sha256Digest::from([67u8; 32]));
+            assert_eq!(
+                state.views.get(&View::new(6)).and_then(Round::proposal),
+                Some(&child)
+            );
+        });
+    }
+
+    /// The incoming leader's pipelined handoff rests on its own vote for the
+    /// outgoing tip. A conflicting tip notarization kills that handoff, so a
+    /// same-term successor must not build on it.
+    #[test]
+    fn pipelined_handoff_conflicting_parent_blocks_same_term_successor() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            let ctx = state
+                .try_propose()
+                .expect("handoff proposal should use the uncertified tip")
+                .into_context();
+            assert_eq!(ctx.parent, (View::new(5), tip.payload));
+            let ours = fetch_proposal(6, 5, 66);
+            assert!(state.proposed(&ctx, ours.payload));
+            assert!(state.construct_notarize(View::new(6)).is_some());
+
+            // The outgoing leader equivocated, and a conflicting tip notarizes and certifies.
+            let conflict = fetch_proposal(5, 4, 75);
+            let notarization = build_notarization(&verifier, &schemes[..3], &conflict);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(View::new(5), true).is_some());
+            assert_eq!(state.current_view(), View::new(6));
+
+            // Our view-6 proposal binds the displaced tip, so it is dead ancestry.
+            let request = state
+                .try_propose()
+                .map(|r| (r.view(), r.is_handoff(), r.context().parent));
+            assert_eq!(request, None, "proposed on a dead chain");
+            assert_eq!(state.optimistic_ancestry_payload(View::new(6)), None);
+        });
+    }
+
+    /// An elector whose fixed schedule gives participant 3 views 6 and 7.
+    #[derive(Clone)]
+    struct RepeatLeaderElector;
+
+    impl<S: certificate::Scheme> Elector<S> for RepeatLeaderElector {
+        type Mode = crate::simplex::elector::Scheduled;
+
+        fn terms(&self) -> Terms {
+            Terms::rotating()
+        }
+
+        fn elect(&self, round: Rnd, _: ()) -> Participant {
+            match round.view().get() {
+                6 | 7 => Participant::new(3),
+                v => Participant::new((v % 3) as u32),
+            }
+        }
+    }
+
+    /// With the same incoming leader for two consecutive terms, a conflicting
+    /// outgoing tip must stop the second handoff from building on the dead first one.
+    #[test]
+    fn pipelined_handoff_conflicting_parent_blocks_consecutive_handoff() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, b"ns", 4);
+            let mut state: State<_, _, RepeatLeaderElector, Sha256Digest> = State::new(
+                context.child("state"),
+                Config {
+                    scheme: schemes[3].clone(),
+                    elector: RepeatLeaderElector,
+                    epoch: Epoch::new(9),
+                    view_retention: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    skip_budget: 4,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            // Certify view 4 and vote for the outgoing leader's view-5 tip.
+            let anchor = fetch_proposal(4, 3, 64);
+            let notarization = build_notarization(&verifier, &schemes, &anchor);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(View::new(4), true).is_some());
+            let _ = state.certify_candidates();
+            assert_eq!(state.current_view(), View::new(5));
+            let tip = fetch_proposal(5, 4, 65);
+            assert!(state.set_proposal(View::new(5), tip.clone()));
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
+            assert!(state.verified(View::new(5)));
+            assert!(state.construct_notarize(View::new(5)).is_some());
+
+            // Pipelined handoff at view 6 on the uncertified tip.
+            let ctx = state
+                .try_propose()
+                .expect("handoff proposal should use the uncertified tip")
+                .into_context();
+            assert_eq!(ctx.parent, (View::new(5), tip.payload));
+            let ours = fetch_proposal(6, 5, 66);
+            assert!(state.proposed(&ctx, ours.payload));
+            assert!(state.construct_notarize(View::new(6)).is_some());
+
+            // The outgoing leader equivocated, and a conflicting tip notarizes and certifies.
+            let conflict = fetch_proposal(5, 4, 75);
+            let notarization = build_notarization(&verifier, &schemes[..3], &conflict);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(View::new(5), true).is_some());
+            assert_eq!(state.current_view(), View::new(6));
+
+            // View 6 is dead. A view-7 request on it would forfeit view 7, whereas
+            // waiting lets view 7 build on the certified conflicting tip once view 6
+            // nullifies.
+            let request = state
+                .try_propose()
+                .map(|r| (r.view(), r.is_handoff(), r.context().parent));
+            assert_eq!(request, None, "proposed on a dead chain");
+            assert_eq!(state.optimistic_ancestry_payload(View::new(6)), None);
+
+            let nullification = build_nullification(
+                &verifier,
+                &schemes[..3],
+                Rnd::new(Epoch::new(9), View::new(6)),
+            );
+            assert!(state.add_nullification(nullification));
+            let request = state.try_propose().map(|r| (r.view(), r.context().parent));
+            assert_eq!(
+                request,
+                Some((View::new(7), (View::new(5), conflict.payload)))
+            );
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_does_not_require_recovered_parent_leader() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 0, 9);
+
+            // Enter the outgoing term without reconstructing any of its rounds.
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(state.epoch(), View::new(5)));
+            assert!(state.add_nullification(nullification));
+            assert_eq!(state.current_view(), View::new(6));
+
+            // A bare notarization for the outgoing tip elects the incoming
+            // leader, but does not reveal the outgoing leader.
+            let tip = fetch_proposal(10, 9, 110);
+            let notarization = build_notarization(&verifier, &schemes, &tip);
+            assert!(state.add_notarization(notarization).0);
+            assert_eq!(state.leader_index(View::new(10)), None);
+            assert_eq!(state.leader_index(View::new(11)), Some(Participant::new(0)));
+
+            let request = state
+                .try_propose()
+                .expect("recovered tip should allow a handoff");
+            assert!(request.is_handoff());
+            let handoff = request.into_context();
+            assert_eq!(handoff.round.view(), View::new(11));
+            assert_eq!(handoff.parent, (View::new(10), tip.payload));
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_keeps_valid_fallback_after_late_certification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            let (certified, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            let tip_notarization = build_notarization(&verifier, &schemes, &tip);
+            assert!(state.add_notarization(tip_notarization).0);
+
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(5)));
+            assert!(state.add_nullification(nullification));
+            assert_eq!(state.current_view(), View::new(6));
+
+            let request = state
+                .try_propose()
+                .expect("term-start proposal should use the certified fallback");
+            assert!(matches!(request, ProposalRequest::Regular(_)));
+            let ctx = request.into_context();
+            assert_eq!(ctx.parent, (View::new(4), certified.payload));
+
+            // Late certification makes the outgoing tip preferred, but the
+            // captured fallback remains valid under the formed nullification.
+            assert!(state.certified(View::new(5), true).is_some());
+            let ours = fetch_proposal(6, 4, 66);
+            assert!(!state.supersede_proposal_request(&ctx));
+            assert!(state.proposed(&ctx, ours.payload));
+            let notarize = state
+                .construct_notarize(View::new(6))
+                .expect("still-valid fallback should remain votable");
+            assert_eq!(notarize.proposal, ours);
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_retries_after_parent_invalidation() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            // Prepare the outgoing tip and claim the incoming view's build on
+            // that speculative parent.
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            let (certified, _) = prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            let initial = state
+                .try_propose()
+                .expect("handoff proposal should use the outgoing tip")
+                .into_context();
+            assert_eq!(initial.parent.0, View::new(5));
+            assert!(state.try_propose().is_none());
+
+            // Abandoning the captured parent leaves the certified fallback
+            // selectable, so supersession drops the pending build and releases
+            // the incoming view to rebuild on certified ancestry.
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(5)));
+            assert!(state.add_nullification(nullification));
+            assert!(state.supersede_proposal_request(&initial));
+            assert!(state.construct_notarize(View::new(6)).is_none());
+
+            // Re-resolving ancestry for the same incoming view selects the
+            // certified fallback and still permits only one pending build.
+            let retry = state
+                .try_propose()
+                .expect("superseded handoff should retry on certified ancestry");
+            assert!(matches!(retry, ProposalRequest::Regular(_)));
+            let retry = retry.into_context();
+            assert_eq!(retry.round.view(), View::new(6));
+            assert_eq!(retry.parent, (View::new(4), certified.payload));
+            assert!(state.try_propose().is_none());
+
+            // Completing the replacement build produces a vote on the
+            // fallback branch.
+            let rebuilt = fetch_proposal(6, 4, 67);
+            assert!(state.proposed(&retry, rebuilt.payload));
+            let notarize = state
+                .construct_notarize(View::new(6))
+                .expect("rebuilt proposal should be votable");
+            assert_eq!(notarize.proposal, rebuilt);
+        });
+    }
+
+    /// A build rejected because its parent failed local certification keeps the view's request
+    /// claimed, even after a finalization makes that parent usable again, so the automaton is
+    /// not asked to propose for that view again.
+    #[test]
+    fn rejected_build_keeps_single_propose_per_view() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+
+            // Enter the local signer's term at view 6 on certified view-4 ancestry, then
+            // propose and vote for the term start, which the peers notarize.
+            let certified = certify_view_4(&mut state, &verifier, &schemes);
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(5)));
+            assert!(state.add_nullification(nullification));
+            assert_eq!(state.current_view(), View::new(6));
+            let start = state
+                .try_propose()
+                .expect("term start should be proposed on certified ancestry")
+                .into_context();
+            assert_eq!(start.parent, (View::new(4), certified.payload));
+            let term_start = fetch_proposal(6, 4, 66);
+            assert!(state.proposed(&start, term_start.payload));
+            assert!(state.construct_notarize(View::new(6)).is_some());
+            let notarization = build_notarization(&verifier, &schemes[..3], &term_start);
+            assert!(state.add_notarization(notarization).0);
+
+            // The next view in the term is requested on the notarized term start.
+            let request = state
+                .try_propose()
+                .expect("next view should be proposed on the notarized term start");
+            assert!(matches!(request, ProposalRequest::Regular(_)));
+            let ctx = request.into_context();
+            assert_eq!(ctx.round.view(), View::new(7));
+            assert_eq!(ctx.parent, (View::new(6), term_start.payload));
+
+            // Local certification rejects the parent while the automaton is building, so the
+            // build is neither superseded nor recorded.
+            assert!(state.certified(View::new(6), false).is_some());
+            let child = fetch_proposal(7, 6, 67);
+            assert!(!state.supersede_proposal_request(&ctx));
+            assert!(!state.proposed(&ctx, child.payload));
+
+            // Finalizing the parent restores it as ancestry, but the view's request stays
+            // claimed.
+            let finalization = build_finalization(&verifier, &schemes, &term_start);
+            assert!(state.add_finalization(finalization).0);
+            assert!(state.try_propose().is_none());
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_withholds_notarize_after_failed_certification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            let ctx = state
+                .try_propose()
+                .expect("handoff proposal should use the outgoing tip")
+                .into_context();
+            let ours = fetch_proposal(6, 5, 66);
+
+            // Local certification rejects the tip while the application is building.
+            let tip_notarization = build_notarization(&verifier, &schemes, &tip);
+            assert!(state.add_notarization(tip_notarization).0);
+            assert!(state.certified(View::new(5), false).is_some());
+            assert!(!state.proposed(&ctx, ours.payload));
+            assert!(state.construct_notarize(View::new(6)).is_none());
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_withholds_notarize_after_equivocation() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            let ctx = state
+                .try_propose()
+                .expect("handoff proposal should use the outgoing tip")
+                .into_context();
+            let ours = fetch_proposal(6, 5, 66);
+
+            // The outgoing leader equivocates while the application is building.
+            assert!(!state.set_proposal(View::new(5), fetch_proposal(5, 4, 99)));
+            assert!(!state.proposed(&ctx, ours.payload));
+            assert!(state.construct_notarize(View::new(6)).is_none());
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_withholds_notarize_after_conflicting_parent_certificate() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            let proposal_context = state
+                .try_propose()
+                .expect("handoff proposal should use the outgoing tip")
+                .into_context();
+            assert_eq!(proposal_context.parent, (View::new(5), tip.payload));
+
+            // A certificate from the other three validators replaces the tip
+            // while our application is still building on the original payload.
+            let conflicting = fetch_proposal(5, 4, 99);
+            let notarization = build_notarization(&verifier, &schemes[..3], &conflicting);
+            let (added, equivocator) = state.add_notarization(notarization);
+            assert!(added);
+            assert!(equivocator.is_some());
+            assert_eq!(state.current_view(), View::new(5));
+
+            let ours = fetch_proposal(6, 5, 66);
+            assert!(!state.proposed(&proposal_context, ours.payload));
+            assert!(state.construct_notarize(View::new(6)).is_none());
+        });
+    }
+
+    /// Which message reaches the follower first.
+    enum Arrival {
+        Proposal,
+        Notarization,
+    }
+
+    /// A validator other than the incoming leader verifies the pipelined proposal only
+    /// once the tip certifies, whether the proposal arrives before or after the tip's
+    /// notarization.
+    fn peer_verification_stays_explicit(arrival: Arrival) {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    participants,
+                    schemes,
+                    verifier,
+                    ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 1, 9);
+            let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            // Only the incoming leader elects itself before the tip's certificate
+            // exists, so only it receives a handoff request.
+            assert_eq!(state.leader_index(View::new(6)), None);
+            assert!(state.try_propose().is_none());
+
+            // The validator learns the incoming leader from the tip's notarization, so a
+            // proposal that arrives first waits for it. Either way, the validator then
+            // requests the tip's certificate from the incoming leader before verifying.
+            let tip_notarization = build_notarization(&verifier, &schemes, &tip);
+            let child = fetch_proposal(6, 5, 66);
+            match arrival {
+                Arrival::Proposal => {
+                    assert!(state.set_proposal(View::new(6), child.clone()));
+                    assert!(matches!(state.try_verify(), Verify::Wait));
+                    assert!(state.add_notarization(tip_notarization).0);
+                }
+                Arrival::Notarization => {
+                    assert!(state.add_notarization(tip_notarization).0);
+                    assert!(state.set_proposal(View::new(6), child.clone()));
+                }
+            }
+            let leader =
+                participants[usize::from(state.leader_index(View::new(6)).unwrap())].clone();
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    proposal,
+                    view,
+                    kind: Kind::Notarization,
+                    target,
+                }
+                    if proposal == View::new(6)
+                        && view == View::new(5)
+                        && target == leader
+            ));
+
+            assert!(state.certified(View::new(5), true).is_some());
+            let Verify::Ready(ctx, proposal) = state.try_verify() else {
+                panic!("proposal should verify once the tip certifies");
+            };
+            assert_eq!(ctx.parent, (View::new(5), tip.payload));
+            assert_eq!(proposal, child);
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_keeps_peer_verification_explicit() {
+        peer_verification_stays_explicit(Arrival::Notarization);
+    }
+
+    #[test]
+    fn pipelined_handoff_keeps_early_peer_proposal_explicit() {
+        peer_verification_stays_explicit(Arrival::Proposal);
+    }
+
+    #[test]
+    fn pipelined_handoff_pipelines_rotating_terms() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (_, mut state) = setup_state_with(
+                &mut context,
+                4,
+                3,
+                9,
+                10,
+                TermLength::ONE,
+                ViewDelta::new(0),
+                4,
+            );
+
+            // With single-view terms, every view is a handoff: verifying and
+            // voting for the view-1 proposal lets the view-2 leader propose
+            // before view 1 notarizes.
+            let first = fetch_proposal(1, 0, 67);
+            assert!(state.set_proposal(View::new(1), first.clone()));
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
+            assert!(state.verified(View::new(1)));
+            assert!(state.construct_notarize(View::new(1)).is_some());
+
+            let ctx = state
+                .try_propose()
+                .expect("handoff proposal should pipeline single-view terms")
+                .into_context();
+            assert_eq!(ctx.round.view(), View::new(2));
+            assert_eq!(ctx.parent, (View::new(1), first.payload));
+            assert_eq!(state.current_view(), View::new(1));
         });
     }
 
