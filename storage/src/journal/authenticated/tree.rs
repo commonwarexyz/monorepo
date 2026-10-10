@@ -1209,6 +1209,9 @@ mod tests {
         fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<u64>> {
             vec![None; positions.len()]
         }
+        fn prefetch(&self, _: &[u64]) -> impl Future<Output = ()> + Send + 'static + use<> {
+            std::future::ready(())
+        }
         async fn replay(
             &self,
             range: Range<u64>,
