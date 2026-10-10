@@ -718,56 +718,9 @@ where
         );
         context.spawn(move |runtime_context| {
             async move {
-                // On leader recovery, marshal may already hold a verified block
-                // for this round (persisted by a pre-crash propose that reached
-                // its relay broadcast).
-                //
-                // The pre-crash commitment may already have been broadcast,
-                // so building a fresh block would equivocate. The stored
-                // block is the only proposal we can broadcast for this round.
-                //
-                // The recovered block is safe to reuse only if its embedded
-                // context matches the context simplex just recovered, or if it
-                // is the parent re-proposed at the epoch boundary: that stores the
-                // parent under its original context, whose round is the parent's own.
-                // Otherwise the cached block was built against a different
-                // parent and cannot be broadcast under the current header, so
-                // drop the receiver and let the voter nullify the view via
-                // timeout.
                 let last_in_epoch = epocher
                     .last(consensus_context.epoch())
                     .expect("current epoch should exist");
-                if let Some(block) = marshal.get_verified(consensus_context.round).await {
-                    let block_context = block.context();
-                    let commitment = block.commitment();
-                    let reproposal =
-                        commitment == consensus_context.parent.1 && block.height() == last_in_epoch;
-                    if !reproposal && block_context != consensus_context {
-                        debug!(
-                            round = ?consensus_context.round,
-                            ?consensus_context,
-                            ?block_context,
-                            "skipping proposal: cached verified block context no longer matches"
-                        );
-                        return;
-                    }
-                    // Stage the recovered block so the relay broadcast re-sends
-                    // its shards through the same handshake as a fresh
-                    // proposal. The relay-time persist deduplicates against the
-                    // pre-crash write, with the handle covering the original.
-                    let round = consensus_context.round;
-                    debug!(
-                        ?round,
-                        ?commitment,
-                        reproposal,
-                        "reusing verified block from marshal on leader recovery"
-                    );
-                    gates
-                        .stage(round, commitment, block, tx, "recovered block")
-                        .await;
-                    return;
-                }
-
                 // The parent for any consensus context is in the same epoch: the
                 // boundary block of the previous epoch is the genesis block of the
                 // current epoch.

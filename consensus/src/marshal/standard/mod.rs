@@ -3658,6 +3658,149 @@ mod tests {
         }
     }
 
+    /// A leader that crashes between its relay broadcast and the journaling of its notarize
+    /// vote holds a verified block for the round on restart. No vote names that block, so it
+    /// cannot be notarized, and the restarted leader builds a fresh one on the recovered
+    /// context whatever the stored block's own context says. The relay persist stores the
+    /// fresh block beside the stale one, and certification resolves through it.
+    ///
+    /// Both blocks must then survive another restart. Reading them back afterwards checks
+    /// storage itself, since the in-memory cache that serves a block right after it is sent
+    /// does not survive the restart.
+    #[test_traced("WARN")]
+    fn test_propose_rebuilds_after_restart() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let mut oracle = setup_network_with_participants(
+                    context.child("network"),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let me = participants[0].clone();
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+                let round = Round::new(Epoch::zero(), View::new(2));
+
+                // Before the crash, the relay broadcast persisted a block at the round. Replay
+                // has since replaced the block's parent.
+                let setup = StandardHarness::setup_validator(
+                    context.child("validator").with_attribute("index", 0),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let stale = B::new::<Sha256>(
+                    Ctx {
+                        round,
+                        leader: me.clone(),
+                        parent: (View::new(1), Sha256::hash(&[b"replaced parent"])),
+                    },
+                    genesis.digest(),
+                    Height::new(1),
+                    100,
+                );
+                let stale_digest = stale.digest();
+                let (ack, persisted) = oneshot::channel();
+                let _ = setup.mailbox.proposed(round, stale, Recipients::All, ack);
+                let sync = persisted.await.expect("stale block sync handle missing");
+                assert!(sync.durable(round, "stale block").await);
+                setup.crash().await;
+
+                let setup = StandardHarness::setup_validator(
+                    context.child("restarted").with_attribute("index", 0),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let marshal = setup.mailbox.clone();
+                assert_eq!(
+                    marshal
+                        .get_verified(round)
+                        .await
+                        .map(|block| block.digest()),
+                    Some(stale_digest),
+                    "{kind:?}: the restarted marshal must restore the stale block"
+                );
+
+                let ctx = Ctx {
+                    round,
+                    leader: me.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let fresh = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
+                let fresh_digest = fresh.digest();
+                let app: MockVerifyingApp<B, S> =
+                    MockVerifyingApp::new().with_propose_result(fresh);
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("wrapper"), app, marshal.clone());
+                let digest = wrapper
+                    .propose(ctx)
+                    .await
+                    .await
+                    .expect("propose must return a digest");
+                assert_eq!(
+                    digest, fresh_digest,
+                    "{kind:?}: a restarted leader must build a fresh block"
+                );
+
+                let _ = wrapper.broadcast(digest, Plan::Propose { round });
+                assert!(
+                    wrapper
+                        .certify(round, digest)
+                        .await
+                        .await
+                        .expect("certify result missing"),
+                    "{kind:?}: the fresh block must certify through the relay handshake"
+                );
+                assert_eq!(
+                    marshal
+                        .get_verified(round)
+                        .await
+                        .map(|block| block.digest()),
+                    Some(stale_digest),
+                    "{kind:?}: the stale block stays stored first at the round"
+                );
+                setup.crash().await;
+
+                let setup = StandardHarness::setup_validator(
+                    context.child("recovered").with_attribute("index", 0),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                for (label, digest) in [("stale", stale_digest), ("fresh", fresh_digest)] {
+                    assert!(
+                        setup.mailbox.get_block(&digest).await.is_some(),
+                        "{kind:?}: the {label} block must be recoverable from storage"
+                    );
+                }
+                let app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+                let mut certifier =
+                    Wrapper::new(kind, context.child("certifier"), app, setup.mailbox.clone());
+                assert!(
+                    certifier
+                        .certify(round, fresh_digest)
+                        .await
+                        .await
+                        .expect("certify result missing"),
+                    "{kind:?}: the fresh block must certify from storage after a restart"
+                );
+            });
+        }
+    }
     #[test_traced("WARN")]
     fn test_verify_reproposal_validation() {
         for kind in wrapper_kinds() {

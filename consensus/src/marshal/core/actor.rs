@@ -658,12 +658,12 @@ where
                 // To lower view latency as much as possible while preserving
                 // safety, we broadcast the block before persisting it
                 // (durability is not required until certify). A leader that
-                // crashes here may broadcast a conflicting block for the same
-                // round after restart. This is tolerated: extra block bytes
-                // cannot form a conflicting certificate (unlike votes), block
-                // storage tolerates multiple candidates per round (see
-                // [Mailbox::get_verified]), and the propose paths skip or
-                // reuse a recovered block on restart.
+                // crashes here rebuilds after restart and may broadcast a
+                // different block for the same round. This is tolerated: a
+                // block that no journaled vote names cannot be notarized, extra
+                // block bytes cannot form a conflicting certificate (unlike
+                // votes), and block storage holds multiple candidates per
+                // round (see [Mailbox::get_verified]).
                 buffer.send(round, block.clone(), recipients);
                 self = self
                     .persist_verified(round, block, ack, buffer, application, resolver)

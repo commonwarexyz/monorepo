@@ -892,10 +892,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Returns the verified block previously persisted for `round`, if any.
     ///
-    /// Multiple candidates can exist for one round (an equivocating leader can
-    /// land one before a crash and another after), and this returns the first
-    /// stored. Callers must not assume it is the most recently verified
-    /// candidate: check context/digest before reuse, or look up by digest.
+    /// Multiple candidates can exist for one round (a leader that restarts in
+    /// its propose window rebuilds, and an equivocating leader proposes
+    /// several), and this returns the first stored. Callers must not assume it
+    /// is the most recently verified candidate: look up by digest for a
+    /// particular one.
     pub async fn get_verified(&self, round: Round) -> Option<V::Block> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetVerified {
