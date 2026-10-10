@@ -20,7 +20,7 @@ use crate::{
         authenticated::{Backing as _, BackingRecovery as _, Stored},
         contiguous::{
             Contiguous, Many,
-            fixed::{Config as JConfig, Journal, Recovery as JournalRecovery},
+            fixed::{Admission, Config as JConfig, Journal, Recovery as JournalRecovery},
         },
     },
     merkle::{
@@ -635,6 +635,23 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Returns [`Error::ElementPruned`] for the first of `positions` that falls below the
     /// journal's pruning boundary.
     pub async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
+        self.get_nodes_with_admission(positions, Admission::Admit)
+            .await
+    }
+
+    /// A read-only view that uses resident pages but does not admit pages on cache misses.
+    /// Suitable for rebuilding derived state that retains the returned digests in memory.
+    pub(crate) const fn uncached(
+        &self,
+    ) -> impl crate::merkle::storage::Storage<F, Digest = D> + '_ {
+        Uncached(self)
+    }
+
+    async fn get_nodes_with_admission(
+        &self,
+        positions: &[Position<F>],
+        admission: Admission,
+    ) -> Result<Vec<D>, Error<F>> {
         assert!(
             positions.is_sorted_by(|a, b| a < b),
             "positions must be strictly increasing"
@@ -658,10 +675,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let items = if journal_positions.is_empty() {
             Vec::new()
         } else {
-            self.journal
-                .read_many(&journal_positions)
-                .await
-                .map_err(Error::Journal)?
+            match admission {
+                Admission::Admit => self.journal.read_many(&journal_positions).await,
+                Admission::Bypass => self.journal.read_many_uncached(&journal_positions).await,
+            }
+            .map_err(Error::Journal)?
         };
 
         // The unfilled slots are exactly the journal subsequence, in the order it was built.
@@ -1066,6 +1084,37 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Stor
     }
 }
 
+/// Merkle storage view for reads whose pages should not enter the page cache.
+struct Uncached<'a, F: Family, E: Context, D: Digest, S: Strategy>(&'a Merkle<F, E, D, S>);
+
+impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Storage<F>
+    for Uncached<'_, F, E, D, S>
+{
+    type Digest = D;
+
+    fn size(&self) -> Position<F> {
+        self.0.size()
+    }
+
+    async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
+        match self
+            .0
+            .get_nodes_with_admission(&[position], Admission::Bypass)
+            .await
+        {
+            Ok(nodes) => Ok(Some(nodes[0])),
+            Err(Error::ElementPruned(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
+        self.0
+            .get_nodes_with_admission(positions, Admission::Bypass)
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1073,7 +1122,7 @@ mod tests {
         journal::contiguous::fixed::{Config as JConfig, Journal},
         merkle::{
             Bagging::ForwardFold, Location, LocationRangeExt as _, Position, Proof,
-            hasher::Standard, mmb, mmr,
+            hasher::Standard, mmb, mmr, storage::Storage as _,
         },
         metadata::{Config as MConfig, Metadata},
     };
@@ -1653,6 +1702,14 @@ mod tests {
         // Every available position, then a sparse subset (slot correspondence), then empty.
         let positions: Vec<Position<F>> = available.iter().map(|&(pos, _)| pos).collect();
         let batched = mmr.get_nodes(&positions).await.unwrap();
+        assert_eq!(mmr.uncached().get_nodes(&positions).await.unwrap(), batched);
+        for &position in &absent {
+            assert!(mmr.uncached().get_node(position).await.unwrap().is_none());
+        }
+        assert!(matches!(
+            mmr.uncached().get_nodes(&all).await,
+            Err(Error::ElementPruned(_))
+        ));
         assert_eq!(batched.len(), available.len());
         for (slot, &(position, node)) in available.iter().enumerate() {
             assert_eq!(batched[slot], node, "position {position}");
@@ -1667,6 +1724,63 @@ mod tests {
 
         assert!(mmr.get_nodes(&[]).await.unwrap().is_empty());
         mmr.destroy().await.unwrap();
+    }
+
+    async fn page_cache_admission_inner<F: Family>(context: deterministic::Context) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let mut cfg = test_config(&context);
+        cfg.page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(128));
+        let cache = cfg.page_cache.clone();
+        let (recorded, recordings) = RecordingContext::new(context);
+        let mut merkle = Merkle::<F, _, Digest, Sequential>::init(recorded, &hasher, cfg)
+            .await
+            .unwrap();
+        let mut batch = merkle.new_batch();
+        for i in 0..200 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = batch.merkleize(merkle.mem(), &hasher);
+        merkle = merkle.apply_batch(&batch).unwrap().sync().await.unwrap();
+        cache.clear();
+        let positions = [Position::new(0)];
+        let before = recordings.snapshot().reads.len();
+        let first = merkle.uncached().get_nodes(&positions).await.unwrap();
+        let after = recordings.snapshot().reads.len();
+        assert!(after > before);
+        assert_eq!(
+            merkle.uncached().get_nodes(&positions).await.unwrap(),
+            first
+        );
+        assert!(
+            recordings.snapshot().reads.len() > after,
+            "uncached reads admitted pages"
+        );
+
+        cache.clear();
+        let before = recordings.snapshot().reads.len();
+        let proof = merkle.proof(&hasher, Location::new(0), 0).await.unwrap();
+        let after = recordings.snapshot().reads.len();
+        assert!(after > before);
+        assert_eq!(
+            merkle.proof(&hasher, Location::new(0), 0).await.unwrap(),
+            proof
+        );
+        assert_eq!(
+            recordings.snapshot().reads.len(),
+            after,
+            "proof reads did not retain pages"
+        );
+        merkle.destroy().await.unwrap();
+    }
+
+    #[test]
+    fn test_page_cache_admission_mmr() {
+        deterministic::Runner::default().start(page_cache_admission_inner::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_page_cache_admission_mmb() {
+        deterministic::Runner::default().start(page_cache_admission_inner::<mmb::Family>);
     }
 
     #[test_traced]

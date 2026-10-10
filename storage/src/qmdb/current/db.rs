@@ -7,7 +7,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
     merkle::{
-        self, Graftable, Location, Position, hasher::Hasher as _, mem::Mem,
+        self, Graftable, Location, Position, Readable as _, hasher::Hasher as _, mem::Mem,
         storage::Storage as MerkleStorage,
     },
     metadata::{Config as MConfig, Metadata},
@@ -41,8 +41,49 @@ use commonware_utils::{
     sequence::prefixed_u64::U64,
 };
 use core::{num::NonZeroU64, ops::Range};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 use tracing::{error, warn};
+
+/// Immutable ops roots retained in memory for graftable bitmap chunks.
+/// Chunk indices provide dense addressing without storing node positions. A graftable chunk's
+/// root is immutable while the ops log does not rewind below it; any future rewind must discard
+/// affected retained roots.
+pub(super) struct GraftRoots<D> {
+    start: usize,
+    roots: VecDeque<D>,
+}
+
+impl<D: Copy> GraftRoots<D> {
+    fn get(&self, chunk: usize) -> Option<D> {
+        self.roots.get(chunk.checked_sub(self.start)?).copied()
+    }
+
+    fn end(&self) -> usize {
+        self.start + self.roots.len()
+    }
+
+    fn push(&mut self, root: D) {
+        self.roots.push_back(root);
+    }
+
+    fn prune(&mut self, start: usize) {
+        assert!((self.start..=self.end()).contains(&start));
+        self.roots.drain(..start - self.start);
+        self.start = start;
+        if self.roots.len() < self.roots.capacity() / 4 {
+            self.roots.shrink_to(self.roots.len() * 2);
+        }
+    }
+}
+
+/// Position of the immutable ops root covering a bitmap chunk.
+fn graft_root_position<F: Graftable, const N: usize>(chunk: usize) -> Position<F> {
+    let height = grafting::height::<N>();
+    F::subtree_root_position(Location::new((chunk as u64) << height), height)
+}
 
 /// Prefix used for the metadata key for grafted tree pinned nodes.
 const NODE_PREFIX: u8 = 0;
@@ -142,6 +183,9 @@ pub struct Db<
     /// [`Arc::make_mut`]: they are in-place while no snapshot is alive and copy-on-write
     /// otherwise, so a snapshot never observes later mutations.
     pub(super) grafted_tree: Arc<Mem<F, H::Digest>>,
+
+    /// Ops-tree digests retained at the grafting height, independent of journal flushing.
+    pub(super) graft_roots: GraftRoots<H::Digest>,
 
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
@@ -563,6 +607,7 @@ where
         // initialization rejects a commit whose floor the bitmap has pruned.
         self.any.prune_bitmap(prune_loc);
         self.prune_grafted_tree_to_bitmap()?;
+        self.graft_roots.prune(self.any.bitmap.pruned_chunks());
 
         // Persist grafted tree pruning state before pruning the ops log. If the subsequent
         // `any.prune_log` fails, the metadata is ahead of the log, which is safe: on recovery,
@@ -691,6 +736,17 @@ where
         self.metrics.apply_batch_calls.inc();
         let range;
         (self.any, range) = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
+        // Newly graftable roots belong to this batch chain, including unapplied ancestors.
+        // Publish them only after the any layer has validated and applied the batch.
+        for chunk in self.graft_roots.end()..*batch.grafted.leaves() as usize {
+            let pos = graft_root_position::<F, N>(chunk);
+            let digest = batch
+                .inner
+                .journal_batch
+                .get_node(pos)
+                .expect("newly graftable root exists in applied batch chain");
+            self.graft_roots.push(digest);
+        }
         Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;
         self.update_metrics();
@@ -909,7 +965,7 @@ pub(super) async fn compute_db_root<
 }
 
 /// Rebuild the grafted overlay tree and compute the canonical db root from the ops tree and
-/// bitmap. Returns the rebuilt grafted tree and the db root.
+/// bitmap. Returns the grafted tree, retained ops roots, and db root.
 pub(super) async fn rebuild_grafted_tree<F, H, S, const N: usize>(
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
@@ -917,14 +973,14 @@ pub(super) async fn rebuild_grafted_tree<F, H, S, const N: usize>(
     inactivity_floor: Location<F>,
     ops_root: H::Digest,
     strategy: &S,
-) -> Result<(Mem<F, H::Digest>, H::Digest), Error<F>>
+) -> Result<(Mem<F, H::Digest>, GraftRoots<H::Digest>, H::Digest), Error<F>>
 where
     F: merkle::Graftable,
     H: Hasher,
     S: Strategy,
 {
     let ops_leaves = Location::<F>::try_from(ops_tree.size())?;
-    let grafted_tree =
+    let (grafted_tree, graft_roots) =
         build_grafted_tree::<F, H, S, N>(bitmap, pinned_nodes, ops_tree, ops_leaves, strategy)
             .await?;
     let storage =
@@ -939,7 +995,7 @@ where
         &ops_root,
     )
     .await?;
-    Ok((grafted_tree, root))
+    Ok((grafted_tree, graft_roots, root))
 }
 
 /// Compute the root of the grafted structure represented by `storage`.
@@ -1003,53 +1059,34 @@ pub(super) async fn compute_grafted_root<
 ///
 /// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born in
 /// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
-/// [`merkle::Graftable::subtree_root_position`].
+/// [`merkle::Graftable::subtree_root_position`]. Chunks present in `graft_roots` are served from
+/// memory without reading storage.
 pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: usize>(
     ops_tree: &impl MerkleStorage<F, Digest = D>,
+    graft_roots: Option<&GraftRoots<D>>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
 ) -> Result<Vec<(usize, D, [u8; N])>, Error<F>> {
-    let grafting_height = grafting::height::<N>();
-
     // Each graftable chunk has a single h=G ancestor at the deterministic
     // `subtree_root_position(chunk_idx << G, G)`.
     let chunks: Vec<(usize, [u8; N])> = chunks.into_iter().collect();
     let positions: Vec<Position<F>> = chunks
         .iter()
-        .map(|&(chunk_idx, _)| {
-            let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
-            F::subtree_root_position(leaf_start, grafting_height)
-        })
+        .filter(|&&(chunk_idx, _)| graft_roots.and_then(|roots| roots.get(chunk_idx)).is_none())
+        .map(|&(chunk_idx, _)| graft_root_position::<F, N>(chunk_idx))
         .collect();
 
     // Chunk indices ascend and subtree roots ascend with their leaf ranges, satisfying
     // `get_nodes`'s ordering requirement.
-    let nodes = ops_tree.get_nodes(&positions).await?;
+    let mut nodes = ops_tree.get_nodes(&positions).await?.into_iter();
     Ok(chunks
         .into_iter()
-        .zip(nodes)
-        .map(|((chunk_idx, chunk), chunk_ops_digest)| (chunk_idx, chunk_ops_digest, chunk))
+        .map(|(chunk_idx, chunk)| {
+            let digest = graft_roots
+                .and_then(|roots| roots.get(chunk_idx))
+                .unwrap_or_else(|| nodes.next().expect("one digest per unretained chunk"));
+            (chunk_idx, digest, chunk)
+        })
         .collect())
-}
-
-/// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
-///
-/// See [`read_graft_inputs`] for the chunk requirements. The grafted leaf digest is `hash(chunk ||
-/// ops_h_G_node)`; for all-zero chunks the grafted leaf equals the ops digest directly (zero-chunk
-/// identity).
-///
-/// The provided strategy determines if or how to parallelize merkleization.
-pub(super) async fn compute_grafted_leaves<
-    F: merkle::Graftable,
-    H: Hasher,
-    S: Strategy,
-    const N: usize,
->(
-    ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
-    chunks: impl IntoIterator<Item = (usize, [u8; N])>,
-    strategy: &S,
-) -> Result<Vec<(usize, H::Digest)>, Error<F>> {
-    let inputs = read_graft_inputs::<F, _, N>(ops_tree, chunks).await?;
-    Ok(grafting::graft_chunk_digests::<H, _, N>(strategy, inputs))
 }
 
 /// Build a grafted [Mem] from scratch using bitmap chunks and the ops tree.
@@ -1077,7 +1114,7 @@ pub(super) async fn build_grafted_tree<
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
     ops_leaves: Location<F>,
     strategy: &S,
-) -> Result<Mem<F, H::Digest>, Error<F>> {
+) -> Result<(Mem<F, H::Digest>, GraftRoots<H::Digest>), Error<F>> {
     let grafting_height = grafting::height::<N>();
     let pruned_chunks = bitmap.pruned_chunks();
     let complete_chunks = bitmap.complete_chunks();
@@ -1091,12 +1128,17 @@ pub(super) async fn build_grafted_tree<
     // Compute grafted leaves for each unpruned graftable chunk. The pending chunk (if any)
     // sits at index `graftable_chunks` and is excluded; its digest is hashed directly into
     // the canonical root.
-    let leaves = compute_grafted_leaves::<F, H, S, N>(
+    let inputs = read_graft_inputs::<F, _, N>(
         ops_tree,
+        None,
         (pruned_chunks..graftable_chunks).map(|chunk_idx| (chunk_idx, bitmap.get_chunk(chunk_idx))),
-        strategy,
     )
     .await?;
+    let graft_roots = GraftRoots {
+        start: pruned_chunks,
+        roots: inputs.iter().map(|(_, digest, _)| *digest).collect(),
+    };
+    let leaves = grafting::graft_chunk_digests::<H, _, N>(strategy, inputs);
 
     // Build the base grafted tree: either from pruned components or empty.
     let mut grafted_tree = if pruned_chunks > 0 {
@@ -1118,7 +1160,7 @@ pub(super) async fn build_grafted_tree<
         grafted_tree.apply_batch(&batch)?;
     }
 
-    Ok(grafted_tree)
+    Ok((grafted_tree, graft_roots))
 }
 
 /// Load the metadata and recover the pruning state persisted by previous runs.
@@ -1400,6 +1442,114 @@ mod tests {
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
+    }
+
+    /// Reading retained graft roots must not consult the journal, even after prefix pruning.
+    #[test]
+    fn test_retained_graft_reads() {
+        struct NoReads;
+        impl MerkleStorage<mmr::Family> for NoReads {
+            type Digest = sha256::Digest;
+            fn size(&self) -> Position<mmr::Family> {
+                unreachable!()
+            }
+            async fn get_node(
+                &self,
+                _: Position<mmr::Family>,
+            ) -> Result<Option<Self::Digest>, merkle::Error<mmr::Family>> {
+                panic!("retained graft read reached storage")
+            }
+        }
+        deterministic::Runner::default().start(|_| async move {
+            let digest = Sha256::hash(&[b"ops"]);
+            let mut graft_roots = GraftRoots {
+                start: 4,
+                roots: VecDeque::from([digest; 3]),
+            };
+            graft_roots.prune(5);
+            assert!(graft_roots.get(4).is_none());
+            let inputs = read_graft_inputs::<mmr::Family, _, 32>(
+                &NoReads,
+                Some(&graft_roots),
+                [(5, [1; 32]), (6, [2; 32])],
+            )
+            .await
+            .unwrap();
+            assert_eq!(inputs, vec![(5, digest, [1; 32]), (6, digest, [2; 32])]);
+        });
+    }
+
+    async fn graft_roots_lifecycle<F: Graftable>(ctx: deterministic::Context) {
+        type TestDb<F> = fixed::Db<
+            F,
+            deterministic::Context,
+            sha256::Digest,
+            sha256::Digest,
+            Sha256,
+            OneCap,
+            32,
+            commonware_parallel::Sequential,
+        >;
+        let config = fixed_config::<OneCap>("graft-roots", &ctx);
+        let mut db = TestDb::<F>::init(ctx.child("initial"), config.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(db.graft_roots.end(), 0);
+        for round in 0u64..4 {
+            let mut batch = db.new_batch();
+            for idx in 0u64..1024 {
+                batch = batch.write(
+                    Sha256::hash(&[&idx.to_be_bytes()]),
+                    Some(Sha256::hash(&[&round.to_be_bytes()])),
+                );
+            }
+            let parent = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            // Applying a descendant also publishes roots created by its unapplied ancestors.
+            let child = parent
+                .new_batch::<Sha256>()
+                .write(
+                    Sha256::hash(&[b"child"]),
+                    Some(Sha256::hash(&[&round.to_be_bytes()])),
+                )
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(child).await.unwrap();
+            db = db.commit().await.unwrap();
+            assert_eq!(db.graft_roots.end(), *db.grafted_tree.leaves() as usize);
+            for chunk in db.graft_roots.start..db.graft_roots.end() {
+                let pos = F::subtree_root_position(Location::new((chunk as u64) << 8), 8);
+                assert_eq!(
+                    db.graft_roots.get(chunk),
+                    db.any.log.merkle.get_node(pos).await.unwrap()
+                );
+            }
+        }
+        let boundary = db.sync_boundary();
+        assert!(*boundary >= 256);
+        db = db.prune(boundary).await.unwrap();
+        assert_eq!(db.graft_roots.start, db.any.bitmap.pruned_chunks());
+        let roots = db.graft_roots.roots.clone();
+        let start = db.graft_roots.start;
+        let root = db.root();
+        drop(db);
+        let db = TestDb::<F>::init(ctx.child("reopened"), config, None)
+            .await
+            .unwrap();
+        assert_eq!(db.root(), root);
+        assert_eq!(db.graft_roots.start, start);
+        assert_eq!(db.graft_roots.roots, roots);
+        db.destroy().await.unwrap();
+    }
+
+    #[test]
+    fn test_graft_roots_lifecycle_mmr() {
+        deterministic::Runner::default().start(graft_roots_lifecycle::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_graft_roots_lifecycle_mmb() {
+        deterministic::Runner::default().start(graft_roots_lifecycle::<mmb::Family>);
     }
 
     /// `operations()` on a current batch must cover exactly the batch's own applied range

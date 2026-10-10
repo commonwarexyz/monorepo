@@ -911,7 +911,12 @@ where
     // MMR build/merkleize as one job through the strategy (against a snapshot of the
     // committed grafted tree). An empty graft set hashes nothing, so it merkleizes without
     // submitting a job.
-    let graft_inputs = read_graft_inputs::<F, _, N>(&ops_tree_adapter, chunks_to_update).await?;
+    let graft_inputs = read_graft_inputs::<F, _, N>(
+        &ops_tree_adapter,
+        Some(&current_db.graft_roots),
+        chunks_to_update,
+    )
+    .await?;
     let grafted_batch = if graft_inputs.is_empty() {
         let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
         grafted_parent
