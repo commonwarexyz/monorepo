@@ -4,32 +4,45 @@
 //! until the cache fills a later batch of the same run finds about
 //! `batch * iteration / log pages` of its keys resident; size `keys` so this stays small.
 //!
-//! Usage:
-//!   cargo bench -p commonware-storage --bench cold_read -- key=value ...
+//! Seed a directory once with `seed`, drop the OS page cache (`sudo purge` on macOS), then run
+//! `read` or `blob` variants against the same directory:
 //!
-//! Without a `phase` argument the harness no-ops, so blanket `cargo bench` invocations (with no
-//! arguments, libtest or Criterion flags, or a benchmark name filter) skip it; with one, every
-//! argument must be one of the `key=value` options below. Seed once with `phase=seed`, drop the
-//! OS page cache, then run `phase=read` variants against the same directory. Always pass the
-//! `page` and `logical` the DB was seeded with: reopening it with another page size truncates
-//! it. The stage and pipeline modes commit to the DB.
+//! ```text
+//! cargo bench -p commonware-storage --bench cold_read -- seed <dir> <keys> [seed_batch] [page] [logical] [blob] [cache] [threads] [workers] [blocking]
+//! cargo bench -p commonware-storage --bench cold_read -- read <dir> <keys> <mode> [batch] [iters] [depth] [rseed] [disk] [page] [logical] [blob] [cache] [threads] [workers] [blocking]
+//! cargo bench -p commonware-storage --bench cold_read -- blob <dir> <mode> [batch] [iters] [rseed] [disk] [workers] [blocking]
+//! ```
 //!
-//! - dir: storage directory (default /tmp/qmdb-cold)
-//! - keys: seeded keys (default 10,000,000); seed: keys per seeding batch (default 1,000,000)
-//! - phase (required): seed, read, both, or blob (raw blob reads of the first log blob through
-//!   the runtime, no QMDB or page cache; modes blob_read_at and blob_read_many)
-//! - batch: random keys per timed batch (default 1500); iters: timed batches (default 20)
-//! - mode: get_many (default), chunked (up to 8 concurrent get_many), get_concurrent (one `get`
-//!   per key, joined), get_serial (one `get` at a time), stage (stage, merkleize, apply, commit),
-//!   pipeline (prefetch the next batch with get_many while staging this one, then commit),
-//!   or sustained (keep `depth` independent get_many batches in flight for 2 x iters batches
-//!   and report the whole run: the steady-state device throughput a pipelined caller sees)
-//! - page: physical page size, a power of two (default 4096); logical: logical page size
-//!   override for unaligned layouts; cache: page cache capacity in pages (default 65,536)
-//! - blob: items per blob (default 10,000,000); threads: strategy pool threads (default 8)
-//! - workers, blocking: tokio worker and blocking threads (defaults 8 and 512)
-//! - disk: /proc/diskstats device name (default nvme1n1); rseed: key sampling seed
-//! - depth: batches in flight for the sustained mode (default 2)
+//! Without a subcommand the harness no-ops, so blanket `cargo bench` invocations (with no
+//! arguments or with libtest or Criterion flags) skip it. Always pass `read` the `keys`, `page`,
+//! `logical`, and `blob` the DB was seeded with: reopening it with another page size truncates
+//! it. The stage and pipeline modes commit updates to the sampled keys, moving their later read
+//! locations, so compare those modes on a fresh copy of the seeded DB or with a different `rseed`
+//! per run.
+//!
+//! - dir: storage directory (required)
+//! - keys: seeded keys (required); `read` samples keys from this range and first checks that the
+//!   last one is present
+//! - mode (required): for `read`, one of get_many, chunked (up to 8 concurrent get_many),
+//!   get_concurrent (one `get` per key, joined), get_serial (one `get` at a time), stage (stage,
+//!   merkleize, apply, commit), pipeline (prefetch the next batch with get_many while staging
+//!   this one, then commit), or sustained (keep `depth` independent get_many batches in flight
+//!   for 2 x iters batches and report the whole run: the steady-state device throughput a
+//!   pipelined caller sees); for `blob` (raw reads of random 4 KiB pages of the first log blob
+//!   through the runtime, no QMDB or page cache), one of blob_read_at or blob_read_many
+//! - seed_batch: keys per seeding batch (default 1,000,000)
+//! - batch: random keys (or blob pages) per timed batch (default 1500)
+//! - iters: timed batches (default 20)
+//! - depth: batches in flight for the sustained mode (default 2, must be positive)
+//! - rseed: key (or blob page) sampling seed (default 1234)
+//! - disk: /proc/diskstats device name (default nvme1n1)
+//! - page: physical page size, a power of two (default 4096)
+//! - logical: logical page size override for unaligned layouts (default 0, no override)
+//! - blob: items per blob (default 10,000,000)
+//! - cache: page cache capacity in pages (default 65,536)
+//! - threads: strategy pool threads (default 8)
+//! - workers: tokio worker threads (default 8)
+//! - blocking: tokio blocking threads (default 512)
 
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
@@ -48,7 +61,13 @@ use commonware_storage::{
 use commonware_utils::{NZU64, NZUsize, TestRng};
 use futures::{StreamExt as _, future::try_join_all, join, stream::FuturesUnordered};
 use rand::{Rng as _, RngExt as _};
-use std::{collections::HashMap, hint::black_box, num::NonZeroUsize, time::Instant};
+use std::{
+    hint::black_box,
+    num::{NonZeroU16, NonZeroUsize},
+    slice::Iter,
+    str::FromStr,
+    time::Instant,
+};
 
 type Digest = DigestOf<Sha256>;
 type AnyDb<E> = commonware_storage::qmdb::any::unordered::fixed::Db<
@@ -64,14 +83,38 @@ type AnyDb<E> = commonware_storage::qmdb::any::unordered::fixed::Db<
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 const REPLAY_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 
-/// Options `main` accepts as `key=value` arguments (see the module docs).
-const OPTIONS: [&str; 17] = [
-    "dir", "keys", "batch", "iters", "page", "cache", "blob", "workers", "blocking", "mode",
-    "disk", "seed", "phase", "threads", "rseed", "logical", "depth",
+const READ_MODES: [&str; 7] = [
+    "get_many",
+    "chunked",
+    "get_concurrent",
+    "get_serial",
+    "stage",
+    "pipeline",
+    "sustained",
 ];
+const BLOB_MODES: [&str; 2] = ["blob_read_at", "blob_read_many"];
 
-#[derive(Clone)]
+/// The subcommand: what the harness does with the directory.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Seed,
+    Read,
+    Blob,
+}
+
+impl Phase {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "seed" => Some(Self::Seed),
+            "read" => Some(Self::Read),
+            "blob" => Some(Self::Blob),
+            _ => None,
+        }
+    }
+}
+
 struct Args {
+    phase: Phase,
     dir: String,
     keys: u64,
     batch: usize,
@@ -84,11 +127,101 @@ struct Args {
     mode: String,
     disk: String,
     seed: u64,
-    phase: String,
     threads: usize,
     rseed: u64,
-    logical: Option<u16>,
+    logical: Option<NonZeroU16>,
     depth: usize,
+}
+
+/// Positional arguments after the subcommand and directory, consumed in usage order.
+struct Positional<'a>(Iter<'a, String>);
+
+impl Positional<'_> {
+    fn required<T: FromStr>(&mut self) -> Option<T> {
+        self.0.next()?.parse().ok()
+    }
+
+    /// The next argument, or `default` once the arguments run out. `None` is a parse failure.
+    fn optional<T: FromStr>(&mut self, default: T) -> Option<T> {
+        self.0.next().map_or(Some(default), |a| a.parse().ok())
+    }
+}
+
+impl Args {
+    /// Parse `<subcommand> <dir> ...` as listed in the module docs. `None` is a parse failure.
+    fn parse(argv: &[String]) -> Option<Self> {
+        let mut args = Self {
+            phase: Phase::parse(argv.first()?)?,
+            dir: argv.get(1)?.clone(),
+            keys: 0,
+            batch: 1500,
+            iters: 20,
+            page: 4096,
+            cache: 65_536,
+            blob: 10_000_000,
+            workers: 8,
+            blocking: 512,
+            mode: String::new(),
+            disk: "nvme1n1".into(),
+            seed: 1_000_000,
+            threads: 8,
+            rseed: 1234,
+            logical: None,
+            depth: 2,
+        };
+        let mut p = Positional(argv[2..].iter());
+        match args.phase {
+            Phase::Seed => {
+                args.keys = p.required()?;
+                args.seed = p.optional(args.seed)?;
+                args.parse_layout(&mut p)?;
+            }
+            Phase::Read => {
+                args.keys = p.required()?;
+                args.mode = p.required()?;
+                if !READ_MODES.contains(&args.mode.as_str()) {
+                    return None;
+                }
+                args.batch = p.optional(args.batch)?;
+                args.iters = p.optional(args.iters)?;
+                args.depth = p.optional(args.depth).filter(|depth| *depth > 0)?;
+                args.rseed = p.optional(args.rseed)?;
+                args.disk = p.optional(args.disk)?;
+                args.parse_layout(&mut p)?;
+            }
+            Phase::Blob => {
+                args.mode = p.required()?;
+                if !BLOB_MODES.contains(&args.mode.as_str()) {
+                    return None;
+                }
+                args.batch = p.optional(args.batch)?;
+                args.iters = p.optional(args.iters)?;
+                args.rseed = p.optional(args.rseed)?;
+                args.disk = p.optional(args.disk)?;
+            }
+        }
+        args.workers = p.optional(args.workers)?;
+        args.blocking = p.optional(args.blocking)?;
+        p.0.next().is_none().then_some(args)
+    }
+
+    /// Parse the DB layout and page cache options shared by `seed` and `read`.
+    fn parse_layout(&mut self, p: &mut Positional<'_>) -> Option<()> {
+        self.page = p.optional(self.page)?;
+        self.logical = NonZeroU16::new(p.optional(0)?);
+        self.blob = p.optional(self.blob)?;
+        self.cache = p.optional(self.cache)?;
+        self.threads = p.optional(self.threads)?;
+        Some(())
+    }
+}
+
+fn usage() {
+    eprintln!(
+        "usage:\n  seed <dir> <keys> [seed_batch] [page] [logical] [blob] [cache] [threads] [workers] [blocking]   seed a fresh directory\n  read <dir> <keys> <mode> [batch] [iters] [depth] [rseed] [disk] [page] [logical] [blob] [cache] [threads] [workers] [blocking]   time random key reads (mode: {})\n  blob <dir> <mode> [batch] [iters] [rseed] [disk] [workers] [blocking]   time raw first-log-blob page reads (mode: {})",
+        READ_MODES.join("|"),
+        BLOB_MODES.join("|")
+    );
 }
 
 fn key(i: u64) -> Digest {
@@ -159,9 +292,7 @@ fn config<E: Strategizer + commonware_runtime::BufferPooler>(
     ctx: &E,
     args: &Args,
 ) -> FixedConfig<EightCap, Rayon> {
-    let page_size = args.logical.map_or(paged::page_size(args.page), |l| {
-        std::num::NonZeroU16::new(l).unwrap()
-    });
+    let page_size = args.logical.unwrap_or(paged::page_size(args.page));
     let page_cache = CacheRef::from_pooler(ctx, page_size, NZUsize!(args.cache));
     FixedConfig {
         merkle_config: full::Config {
@@ -374,7 +505,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                 // Time the run from its first read; generating the key pool above is setup.
                 let before = diskstats(&args.disk);
                 let start = Instant::now();
-                let mut done = 0;
+                let mut done = 0usize;
                 while let Some(n) = inflight.next().await {
                     black_box(n);
                     done += 1;
@@ -428,63 +559,68 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
 }
 
 fn main() {
+    // `cargo bench` appends a trailing `--bench` arg even for harness=false binaries; drop it so
+    // trailing optional args parse.
     let raw: Vec<String> = std::env::args()
         .skip(1)
         .filter(|a| a != "--bench")
         .collect();
-    if !raw.iter().any(|a| a.starts_with("phase=")) {
+    // Run only when explicitly given a subcommand. Blanket harness invocations (no args, or
+    // libtest or Criterion flags like `--list` or `--output-format bencher` from the benchmark
+    // CI) must no-op so `cargo bench --benches` does not seed millions of keys.
+    let Some(first) = raw.first() else {
+        return;
+    };
+    if first.starts_with("--") {
         return;
     }
-    let kv: HashMap<String, String> = raw
-        .iter()
-        .map(|a| {
-            let (k, v) = a
-                .split_once('=')
-                .unwrap_or_else(|| panic!("expected key=value, got {a}"));
-            assert!(OPTIONS.contains(&k), "unknown option {k}");
-            (k.to_string(), v.to_string())
-        })
-        .collect();
-    let get = |k: &str, d: &str| kv.get(k).cloned().unwrap_or_else(|| d.to_string());
-    let args = Args {
-        dir: get("dir", "/tmp/qmdb-cold"),
-        keys: get("keys", "10000000").parse().unwrap(),
-        batch: get("batch", "1500").parse().unwrap(),
-        iters: get("iters", "20").parse().unwrap(),
-        page: get("page", "4096").parse().unwrap(),
-        cache: get("cache", "65536").parse().unwrap(),
-        blob: get("blob", "10000000").parse().unwrap(),
-        workers: get("workers", "8").parse().unwrap(),
-        blocking: get("blocking", "512").parse().unwrap(),
-        mode: get("mode", "get_many"),
-        disk: get("disk", "nvme1n1"),
-        seed: get("seed", "1000000").parse().unwrap(),
-        phase: kv["phase"].clone(),
-        threads: get("threads", "8").parse().unwrap(),
-        rseed: get("rseed", "1234").parse().unwrap(),
-        logical: kv.get("logical").map(|v| v.parse().unwrap()),
-        depth: get("depth", "2").parse().unwrap(),
+    let Some(args) = Args::parse(&raw) else {
+        usage();
+        return;
     };
-    assert!(
-        ["seed", "read", "both", "blob"].contains(&args.phase.as_str()),
-        "unknown phase {}",
-        args.phase
-    );
-    eprintln!(
-        "cold_read args: dir={} keys={} batch={} iters={} page={} cache={} blob={} workers={} blocking={} mode={} disk={} phase={}",
-        args.dir,
-        args.keys,
-        args.batch,
-        args.iters,
-        args.page,
-        args.cache,
-        args.blob,
-        args.workers,
-        args.blocking,
-        args.mode,
-        args.disk,
-        args.phase
-    );
+    let logical = args.logical.map_or(0, NonZeroU16::get);
+    match args.phase {
+        Phase::Seed => eprintln!(
+            "cold_read seed dir={} keys={} seed_batch={} page={} logical={logical} blob={} cache={} threads={} workers={} blocking={}",
+            args.dir,
+            args.keys,
+            args.seed,
+            args.page,
+            args.blob,
+            args.cache,
+            args.threads,
+            args.workers,
+            args.blocking
+        ),
+        Phase::Read => eprintln!(
+            "cold_read read dir={} keys={} mode={} batch={} iters={} depth={} rseed={} disk={} page={} logical={logical} blob={} cache={} threads={} workers={} blocking={}",
+            args.dir,
+            args.keys,
+            args.mode,
+            args.batch,
+            args.iters,
+            args.depth,
+            args.rseed,
+            args.disk,
+            args.page,
+            args.blob,
+            args.cache,
+            args.threads,
+            args.workers,
+            args.blocking
+        ),
+        Phase::Blob => eprintln!(
+            "cold_read blob dir={} mode={} batch={} iters={} rseed={} disk={} workers={} blocking={}",
+            args.dir,
+            args.mode,
+            args.batch,
+            args.iters,
+            args.rseed,
+            args.disk,
+            args.workers,
+            args.blocking
+        ),
+    }
     let cfg = RConfig::default()
         .with_worker_threads(args.workers)
         .with_max_blocking_threads(args.blocking)
@@ -557,34 +693,26 @@ async fn blob_phase<E: Ctx>(ctx: &E, args: &Args) {
 }
 
 async fn run<E: Ctx + Strategizer>(ctx: E, args: Args) {
-    if args.phase == "blob" {
+    if args.phase == Phase::Blob {
         blob_phase(&ctx, &args).await;
         return;
     }
-    {
-        let start = Instant::now();
-        let db = AnyDb::<E>::init(ctx.child("db"), config(&ctx, &args), None)
-            .await
-            .unwrap();
-        eprintln!("init: {:?} bounds={:?}", start.elapsed(), db.bounds());
-        if *db.bounds().end > 1 || args.phase == "read" {
-            // Sequential seeding commits a prefix of the keyspace before any timed updates.
-            let last = args.keys.checked_sub(1).expect("keys must be positive");
-            assert!(
-                db.get(&key(last)).await.unwrap().is_some(),
-                "database seed is incomplete; seed a fresh directory"
-            );
-        }
-        let db = if args.phase != "read" {
-            seed(db, &args).await
-        } else {
-            db
-        };
-        let db = if args.phase != "seed" {
-            read_phase(db, &args).await
-        } else {
-            db
-        };
-        drop(db);
+    let start = Instant::now();
+    let db = AnyDb::<E>::init(ctx.child("db"), config(&ctx, &args), None)
+        .await
+        .unwrap();
+    eprintln!("init: {:?} bounds={:?}", start.elapsed(), db.bounds());
+    if *db.bounds().end > 1 || args.phase == Phase::Read {
+        // Sequential seeding commits a prefix of the keyspace before any timed updates.
+        let last = args.keys.checked_sub(1).expect("keys must be positive");
+        assert!(
+            db.get(&key(last)).await.unwrap().is_some(),
+            "database seed is incomplete; seed a fresh directory"
+        );
+    }
+    if args.phase == Phase::Seed {
+        drop(seed(db, &args).await);
+    } else {
+        drop(read_phase(db, &args).await);
     }
 }
