@@ -288,6 +288,51 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         (slot, &mut self.slots[slot].value)
     }
 
+    /// Like [`Self::get_or_insert_mut`], except that a miss displaces `stale` when it is
+    /// resident: `key` takes over `stale`'s slot and value, entering `stale`'s partition as a
+    /// fresh admission. Use this when the caller knows `stale` is worthless: it costs one lookup
+    /// of `stale` instead of the replacement policy's victim search and Ghost bookkeeping. A miss
+    /// with `stale` absent is served by the policy as usual.
+    pub fn get_or_insert_mut_displacing<F: FnOnce() -> V>(
+        &mut self,
+        key: K,
+        stale: &K,
+        make: F,
+    ) -> (usize, &mut V) {
+        let hash = self.hasher.hash_one(&key);
+        if let Some(slot) = self.find_slot_hashed(&key, hash) {
+            self.slots[slot].state.record_hit_mut();
+            return (slot, &mut self.slots[slot].value);
+        }
+        let stale_hash = self.hasher.hash_one(stale);
+        let Ok(entry) = self
+            .index
+            .find_entry(stale_hash, |&slot| self.slots[slot].key == *stale)
+        else {
+            let slot = self.insert(key, hash, None, make);
+            return (slot, &mut self.slots[slot].value);
+        };
+        let slot = entry.remove().0;
+
+        // Residents never have Ghost history, and the displaced key earns none.
+        self.ghost.discard(&key, hash);
+        let admission = match self.unlink_resident(slot) {
+            Location::Small => Admission::Small,
+            Location::Main => Admission::Main,
+            Location::Free => unreachable!("resident slot cannot be free"),
+        };
+        let resident = &mut self.slots[slot];
+        let displaced = core::mem::replace(&mut resident.key, key);
+        resident.state = SlotState::new(admission);
+        match admission {
+            Admission::Small => self.small.push(&self.slots, &mut self.topology, slot),
+            Admission::Main => self.main.push(&mut self.topology, slot),
+        }
+        self.index_slot(slot, hash);
+        drop(displaced);
+        (slot, &mut self.slots[slot].value)
+    }
+
     /// Removes `key`, returning whether it was present.
     ///
     /// The slot and its allocation are retained for reuse, so the value is not
@@ -1236,6 +1281,106 @@ mod tests {
         assert_eq!(cache.slots.len(), 2);
         assert_eq!(cache.get(&3).copied(), Some(30));
         assert!(!cache.remove(&999));
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn test_displacing_insert_reuses_stale_slot() {
+        // A miss with a resident stale key takes over its slot and value allocation, and is
+        // admitted to Main afresh, behind the hand. The stale key leaves without Ghost history,
+        // and the other residents are untouched.
+        let mut cache = Cache::new(NZUsize!(40));
+        for key in 0..40u64 {
+            cache.put(key, key * 10);
+        }
+        let main_before = cache.main_keys();
+        let stale_slot = cache.find_slot(&5).unwrap();
+        assert!(main_before.contains(&5));
+        assert_eq!(cache.ghost_keys(), Vec::<u64>::new());
+
+        let (slot, value) = cache.get_or_insert_mut_displacing(100, &5, || 0);
+        assert_eq!(slot, stale_slot);
+        assert_eq!(*value, 50, "the stale value is handed back for overwriting");
+        *value = 1000;
+
+        assert!(!cache.contains(&5));
+        assert_eq!(cache.get(&100).copied(), Some(1000));
+        assert_eq!(cache.get_at(stale_slot, &100).copied(), Some(1000));
+        assert_eq!(cache.get_at(stale_slot, &5), None);
+        assert_eq!(cache.len(), 40);
+        let mut expected: Vec<u64> = main_before.into_iter().filter(|&key| key != 5).collect();
+        expected.push(100);
+        assert_eq!(
+            cache.main_keys(),
+            expected,
+            "the new key is the last the hand will consider",
+        );
+        assert_eq!(cache.ghost_keys(), Vec::<u64>::new());
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn test_displacing_insert_falls_back_when_stale_is_absent_or_key_is_resident() {
+        let mut cache = Cache::new(NZUsize!(40));
+        for key in 0..40u64 {
+            cache.put(key, key);
+        }
+
+        // A resident key is a hit regardless of the stale key offered.
+        let (slot, value) = cache.get_or_insert_mut_displacing(7, &3, || 0);
+        assert_eq!(*value, 7);
+        assert_eq!(slot, cache.find_slot(&7).unwrap());
+        assert!(cache.contains(&3));
+        assert_eq!(cache.len(), 40);
+
+        // An absent stale key leaves the miss to the replacement policy, which evicts the
+        // Small tail (key 36, the oldest probationary resident).
+        let small_tail = *cache.small_keys().last().unwrap();
+        assert!(!cache.contains(&999));
+        cache.get_or_insert_mut_displacing(100, &999, || 100);
+        assert!(cache.contains(&100));
+        assert!(!cache.contains(&small_tail));
+        assert_eq!(cache.ghost_keys(), vec![small_tail]);
+        assert_eq!(cache.len(), 40);
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn test_displacing_insert_clears_reference_and_ghost_history() {
+        // The reused slot does not inherit the stale key's reference bit, so the next CLOCK
+        // sweep treats the new key as unreferenced; and a key with Ghost history loses it on
+        // displacing admission, keeping residents and Ghost disjoint. Displacing the resident
+        // at the hand moves the hand on, as evicting it would.
+        let mut cache = Cache::new(NZUsize!(40));
+        for key in 0..40u64 {
+            cache.put(key, key);
+        }
+        for key in 40..60u64 {
+            cache.put(key, key);
+        }
+        let ghosted = *cache.ghost_keys().last().unwrap();
+        assert!(!cache.contains(&ghosted));
+
+        let main_before = cache.main_keys();
+        let hand = main_before[0];
+        assert!(
+            cache.get(&hand).is_some(),
+            "reference the resident at the hand"
+        );
+        assert!(
+            cache.slots[cache.find_slot(&hand).unwrap()]
+                .state
+                .take_reference()
+        );
+        assert!(cache.get(&hand).is_some());
+
+        cache.get_or_insert_mut_displacing(ghosted, &hand, || ghosted);
+        let slot = cache.find_slot(&ghosted).unwrap();
+        assert!(!cache.slots[slot].state.take_reference());
+        assert!(!cache.ghost_keys().contains(&ghosted));
+        let mut expected = main_before[1..].to_vec();
+        expected.push(ghosted);
+        assert_eq!(cache.main_keys(), expected);
         cache.check_invariants();
     }
 
