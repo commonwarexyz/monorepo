@@ -800,9 +800,12 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
         // Split queried frames into known extents (served below by one batched cache read per
         // data blob) and unknown extents (the last frame of a blob or of the journal, served by
-        // the per-frame path). Frames whose offset lookup missed stay `None`.
+        // the per-frame path). Frames whose offset lookup missed stay `None`. An extent that
+        // overlaps the previous one in its blob, which only corrupt offsets produce, also takes
+        // the per-frame path because the batched read requires non-overlapping ranges.
         let mut extents: Vec<(usize, u64, usize)> = Vec::with_capacity(positions.len());
         let mut singles: Vec<(usize, u64)> = Vec::new();
+        let mut previous: Option<(u64, u64)> = None;
         let mut lookup_idx = 0;
         for (idx, &position) in positions.iter().enumerate() {
             while lookups[lookup_idx] != position {
@@ -827,9 +830,14 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             } else {
                 None
             };
+            let blob = position_to_blob(position, items_per_blob);
             match next_offset {
-                Some(next) if next > offset => {
-                    extents.push((idx, offset, (next - offset) as usize))
+                Some(next)
+                    if next > offset
+                        && previous.is_none_or(|(b, end)| b != blob || offset >= end) =>
+                {
+                    extents.push((idx, offset, (next - offset) as usize));
+                    previous = Some((blob, next));
                 }
                 _ => singles.push((idx, offset)),
             }
@@ -5241,6 +5249,68 @@ mod tests {
                 counter(&after, "second_cache_misses"),
                 counter(&before, "second_cache_misses")
             );
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_overlapping_frame_extents() {
+        // A corrupt offsets journal can give queried frames overlapping extents. The batched
+        // cache read requires non-overlapping ranges, so such frames must take the per-frame
+        // path, which reads each frame by its own length prefix.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "read-many-overlapping-extents".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(16)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+
+            // Each frame is 302 bytes, so position `i` of blob 0 starts at byte `i * 302`.
+            let items = (0..12)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal =
+                Journal::<_, FixedBytes<300>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
+
+            // Rewrite the offsets from position 4 on, moving position 4's frame start past
+            // position 5's. Position 3's extent then ends inside position 5's.
+            let mut journal = journal.test_truncate_offsets(4).await.unwrap();
+            for position in 4..12u64 {
+                let offset = match position {
+                    4 => 5 * 302 + 10,
+                    10.. => (position - 10) * 302,
+                    _ => position * 302,
+                };
+                (journal.0.offsets, _) = journal.0.offsets.append(&offset).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopen with a fresh page cache so both frames miss.
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(16)),
+                ..cfg
+            };
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            let reader;
+            (journal, reader) = journal.snapshot().await.unwrap();
+            let expected = vec![items[3].clone(), items[5].clone()];
+            assert_eq!(reader.read_many(&[3, 5]).await.unwrap(), expected);
+
+            // The probe reaches the same split with both frames cached.
+            assert_eq!(reader.read_many(&[3, 5]).await.unwrap(), expected);
             drop(reader);
 
             journal.destroy().await.unwrap();
