@@ -1761,6 +1761,56 @@ pub struct Reader<'a, E: Context, A> {
 }
 
 impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
+    /// Split `positions` (strictly increasing) into runs of items stored in one immutable blob
+    /// view (see [Blobs::immutable]), returning each run's index range in `positions`, the
+    /// view, and the position stored at the blob's first byte. Positions outside `bounds` are
+    /// omitted. A writable tail's view may end before its last positions, which are buffered.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn immutable_runs(
+        &self,
+        positions: &[u64],
+    ) -> Vec<(
+        Range<usize>,
+        commonware_runtime::buffer::paged::Sealed<E::Blob>,
+        u64,
+    )> {
+        let items_per_blob = self.items_per_blob.get();
+        let start = positions.partition_point(|&pos| pos < self.bounds.start);
+        let end = positions.partition_point(|&pos| pos < self.bounds.end);
+        let mut runs = Vec::new();
+        let mut run_start = start;
+        while run_start < end {
+            let blob = super::position_to_blob(positions[run_start], items_per_blob);
+            let run_end = run_start
+                + positions[run_start..end]
+                    .partition_point(|&pos| super::position_to_blob(pos, items_per_blob) == blob);
+            if let Some(view) = self.blobs.immutable(blob)
+                && let Ok(first) = first_in_blob(self.bounds.start, blob, items_per_blob)
+            {
+                runs.push((run_start..run_end, view, first));
+            }
+            run_start = run_end;
+        }
+        runs
+    }
+
+    /// See [super::Contiguous::prefetch].
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn prefetch(
+        &self,
+        positions: &[u64],
+    ) -> impl Future<Output = ()> + Send + 'static + use<E, A> {
+        let item_size = Inner::<E, A>::CHUNK_SIZE_U64;
+        let mut warm = super::blobs::Warm::new();
+        for (run, blob, first) in self.immutable_runs(positions) {
+            let ranges = positions[run]
+                .iter()
+                .map(|&pos| ((pos - first).saturating_mul(item_size), item_size));
+            warm.push(blob, ranges);
+        }
+        warm.run()
+    }
+
     /// Validate a position to be read: must lie within `bounds`.
     const fn validate_readable(&self, pos: u64) -> Result<(), Error> {
         if pos >= self.bounds.end {
@@ -1866,6 +1916,14 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     /// position: `Some(item)` for sync hits and `None` for positions that require I/O, fail to
     /// decode, or fall outside `bounds()`.
     pub(super) fn probe_items(&self, positions: &[u64]) -> Vec<Option<A>> {
+        let (out, hits) = self.probe_uncounted(positions);
+        self.metrics.cache_hits.inc_by(hits);
+        self.metrics.items_read.inc_by(hits);
+        out
+    }
+
+    /// [Self::probe_items] without recording metrics, also returning the number of hits.
+    pub(super) fn probe_uncounted(&self, positions: &[u64]) -> (Vec<Option<A>>, u64) {
         assert!(
             positions.is_sorted_by(|a, b| a < b),
             "positions must be strictly increasing"
@@ -1879,7 +1937,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         let end = positions.partition_point(|&pos| pos < self.bounds.end);
         let valid = &positions[start..end];
         if valid.is_empty() {
-            return out;
+            return (out, 0);
         }
 
         // Serve the probe from the per-thread scratch buffer. Stale bytes from a previous probe
@@ -1924,14 +1982,20 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                 }
             }
         }
-        self.metrics.cache_hits.inc_by(hits);
-        self.metrics.items_read.inc_by(hits);
-        out
+        (out, hits)
     }
 }
 
-impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
+impl<'a, E: Context, A: CodecFixedShared> super::Contiguous for Reader<'a, E, A> {
     type Item = A;
+
+    #[commonware_macros::stability(ALPHA)]
+    fn prefetch(
+        &self,
+        positions: &[u64],
+    ) -> impl Future<Output = ()> + Send + 'static + use<'a, E, A> {
+        Reader::prefetch(self, positions)
+    }
 
     fn bounds(&self) -> Range<u64> {
         self.bounds.clone()
@@ -2025,6 +2089,11 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
 
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
         self.0.reader().probe_items(positions)
+    }
+
+    #[commonware_macros::stability(ALPHA)]
+    fn prefetch(&self, positions: &[u64]) -> impl Future<Output = ()> + Send + 'static + use<E, A> {
+        self.0.reader().prefetch(positions)
     }
 
     async fn replay_range(
@@ -2288,6 +2357,87 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
+    }
+
+    #[test_traced]
+    fn test_fixed_prefetch_warms_sealed_items() {
+        deterministic::Runner::default().start(|context| async move {
+            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(256));
+            let cfg = Config {
+                page_cache: cache.clone(),
+                ..test_cfg(&context, NZU64!(10))
+            };
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for i in 0..25u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Prefetching serves later reads from the cache, in sealed blobs and in the tail's
+            // written pages. Bytes still buffered are served from memory, and positions past the
+            // end are skipped.
+            let positions = [0, 3, 9, 10, 19, 21, 24];
+            cache.clear();
+            let cold = journal.try_read_many_sync(&positions);
+            assert!(cold[..6].iter().all(Option::is_none));
+            journal.prefetch(&[0, 3, 9, 10, 19, 21, 24, 30]).await;
+            let served = journal.try_read_many_sync(&positions);
+            for (&pos, item) in positions.iter().zip(&served) {
+                assert_eq!(*item, Some(test_digest(pos)), "pos={pos}");
+            }
+
+            // A prefetch outlives a prune that removes the blob it reads.
+            cache.clear();
+            let pending = journal.prefetch(&[1, 2]);
+            let (journal, pruned) = journal.prune(10).await.unwrap();
+            assert!(pruned);
+            pending.await;
+            assert_eq!(journal.read(12).await.unwrap(), test_digest(12));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_prefetch_survives_full_cache() {
+        deterministic::Runner::default().start(|context| async move {
+            // A 50-page cache admits demand-read pages through a 5-page probation queue.
+            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(50));
+            let cfg = Config {
+                page_cache: cache.clone(),
+                ..test_cfg(&context, NZU64!(100))
+            };
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for i in 0..400u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Fill the cache with other pages.
+            let filler: Vec<u64> = (0..200).collect();
+            journal.read_many(&filler).await.unwrap();
+
+            // Prefetched items spanning 22 pages, more than the probation queue holds but within
+            // the cache, are all served from the cache.
+            let positions: Vec<u64> = (250..280).collect();
+            assert!(
+                journal
+                    .try_read_many_sync(&positions)
+                    .iter()
+                    .all(Option::is_none)
+            );
+            journal.prefetch(&positions).await;
+            let served = journal.try_read_many_sync(&positions);
+            for (&pos, item) in positions.iter().zip(&served) {
+                assert_eq!(*item, Some(test_digest(pos)), "pos={pos}");
+            }
+
+            journal.destroy().await.unwrap();
+        });
     }
 
     #[test]

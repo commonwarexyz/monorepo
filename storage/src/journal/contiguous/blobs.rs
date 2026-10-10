@@ -461,6 +461,51 @@ impl<E: Context> Writable<E> {
     }
 }
 
+/// Byte ranges of immutable blob views to read into the page cache.
+///
+/// Holds its own immutable blob views (see [Blobs::immutable]), so warming borrows nothing from
+/// the journal. A view stays readable after the journal prunes or clears its blob (see
+/// [Writable::prune]), and every page is validated before it is cached, so a warm can run
+/// concurrently with any journal operation and be dropped at any point.
+#[commonware_macros::stability(ALPHA)]
+pub(super) struct Warm<B: RBlob> {
+    /// Each blob with its byte ranges.
+    groups: Vec<(Sealed<B>, ByteRanges)>,
+}
+
+/// `(offset, len)` byte ranges of one blob, ascending by offset.
+#[commonware_macros::stability(ALPHA)]
+type ByteRanges = Vec<(u64, u64)>;
+
+#[commonware_macros::stability(ALPHA)]
+impl<B: RBlob> Warm<B> {
+    pub(super) const fn new() -> Self {
+        Self { groups: Vec::new() }
+    }
+
+    /// Add `blob`'s `(offset, len)` byte ranges, given in ascending offset order.
+    pub(super) fn push(&mut self, blob: Sealed<B>, ranges: impl IntoIterator<Item = (u64, u64)>) {
+        let ranges: ByteRanges = ranges.into_iter().collect();
+        if !ranges.is_empty() {
+            self.groups.push((blob, ranges));
+        }
+    }
+
+    /// Read every page the ranges cover that is not already cached or being read, one batched
+    /// read per blob (see [Sealed::warm]). Failures are logged.
+    pub(super) async fn run(self) {
+        let reads = self
+            .groups
+            .into_iter()
+            .map(|(blob, ranges)| async move { blob.warm(&ranges).await });
+        for result in futures::future::join_all(reads).await {
+            if let Err(err) = result {
+                tracing::warn!(?err, "prefetch read failed");
+            }
+        }
+    }
+}
+
 /// Blob handles for a contiguous journal view.
 ///
 /// Stores sealed history separately from the tail because the tail can use a different read path.
@@ -832,6 +877,16 @@ impl<'a, B: RBlob> Blobs<'a, B> {
     /// Index of the newest blob (the tail).
     pub(super) fn tail_blob_index(&self) -> u64 {
         self.oldest_blob_index + self.sealed.as_slice().len() as u64
+    }
+
+    /// Return an immutable view of blob `blob`, if retained: a sealed blob, or the bytes of a
+    /// writable tail already written to storage.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn immutable(&self, blob: u64) -> Option<Sealed<B>> {
+        Some(match self.get(blob)? {
+            Blob::Writer(writer) => writer.written(),
+            Blob::Sealed(sealed) => sealed,
+        })
     }
 
     /// Resolve a blob, if retained.
