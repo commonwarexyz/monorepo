@@ -1130,7 +1130,7 @@ fn resolve_range(len: usize, range: impl RangeBounds<usize>) -> (usize, usize) {
 
 #[cfg(all(test, not(feature = "loom")))]
 #[commonware_macros::test_group("miri")]
-mod tests {
+mod unit_tests {
     use super::{
         super::{bufs::IoBufs, pool::BufferPoolConfig},
         *,
@@ -2052,10 +2052,14 @@ mod tests {
         // SAFETY: this will panic before any read.
         unsafe { buf.set_len(9) };
     }
+}
 
-    #[cfg(feature = "arbitrary")]
+// Conformance fixture keys include the test's module path, so this test lives outside the module
+// that the `miri` test group renames.
+#[cfg(all(test, not(feature = "loom"), feature = "arbitrary"))]
+mod tests {
     mod conformance {
-        use super::IoBuf;
+        use super::super::IoBuf;
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {

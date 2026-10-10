@@ -339,9 +339,10 @@ pub use commonware_macros_impl::test_collect_traces;
 ///
 /// This renames `test_some_behavior` into `test_some_behavior_<group>_`. On an inline module, it
 /// renames the module the same way, so the suffix is in the path of every test inside it, and keeps
-/// the original name as an alias for code that refers to the module. The nextest profiles in
-/// `nextest.toml` select tests by that suffix, whether it ends the test name or a module in its
-/// path. Place it above every other test attribute.
+/// the original name as an alias for code that refers to the module. `module_path!()` inside the
+/// module reports the new name, so conformance fixture keys for tests there include the suffix.
+/// The nextest profiles in `nextest.toml` select tests by that suffix, whether it ends the test
+/// name or a module in its path. Place it above every other test attribute.
 pub use commonware_macros_impl::test_group;
 /// Capture logs from a test run using
 /// [libtest's output capture functionality](https://doc.rust-lang.org/book/ch11-02-running-tests.html#showing-function-output).
