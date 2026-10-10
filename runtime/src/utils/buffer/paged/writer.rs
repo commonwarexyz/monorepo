@@ -518,6 +518,20 @@ impl<B: Blob> Writer<B> {
         Ok((None, 0, invalid_data_found))
     }
 
+    /// Return an immutable view of the bytes already written to the blob, excluding the write
+    /// buffer. Written pages never change within one writer, so the view stays valid while the
+    /// writer appends, and it reads through the page cache under the writer's identity.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn written(&self) -> Sealed<B> {
+        Sealed::new(
+            self.blob.clone(),
+            self.buffer.offset,
+            None,
+            self.cache_ref.clone(),
+            self.id,
+        )
+    }
+
     /// Capture an immutable [`Sealed`] view of the logical bytes.
     ///
     /// Buffered full pages are written to the blob, and the partial page is copied into the view.
@@ -3502,6 +3516,41 @@ mod tests {
             assert_eq!(writes, 1);
             assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 0);
+        });
+    }
+
+    /// The written view covers only bytes written to the blob, and later appends and syncs
+    /// leave it unchanged.
+    #[test_traced("DEBUG")]
+    fn test_written_excludes_buffer() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = Arc::new(SyncTrackingBlob::new());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Nothing is written while bytes fit in the buffer.
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..page * 5 / 2).map(|i| i as u8).collect();
+            let (writer, _) = writer.append(&data[..page / 2]).await.unwrap();
+            assert_eq!(writer.written().size(), 0);
+            let (writer, _) = writer.append(&data[page / 2..]).await.unwrap();
+
+            // A sync writes the full pages and keeps the partial page buffered.
+            let writer = writer.sync().await.unwrap();
+            let written = writer.written();
+            assert_eq!(written.size(), 2 * page as u64);
+            let read = written.read_at(0, 2 * page).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), &data[..2 * page]);
+
+            // Later appends and syncs leave the view unchanged.
+            let (writer, _) = writer.append(&data).await.unwrap();
+            let _writer = writer.sync().await.unwrap();
+            assert_eq!(written.size(), 2 * page as u64);
+            let read = written.read_at(page as u64, page).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), &data[page..2 * page]);
         });
     }
 
