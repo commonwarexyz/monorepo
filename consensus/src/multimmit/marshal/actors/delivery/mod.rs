@@ -1,4 +1,5 @@
-//! Delivery: reports committed outputs to the application in output order.
+//! Delivery: reports committed outputs to the application in output order, and final blocks
+//! before they are ordered.
 //!
 //! Delivery owns the durable acknowledgement cursor. After a crash it redelivers every output
 //! after that cursor, so an application acknowledges an output only once it has durably applied
@@ -16,6 +17,15 @@
 //!
 //! A floor installation resets the cursor to the new generation and drops the window.
 //!
+//! # Final blocks
+//!
+//! The router forwards each leader finality fact, and the catalog tells delivery when custody
+//! admits blocks. Delivery reports every final block (at or below a fact's final tips, or
+//! committed) that it has not yet reported or delivered in this run on that chain, once local
+//! custody holds it, without waiting for the ordered sweep (see the `finals` module). These
+//! reports carry no acknowledgement and never wait for, or hold back, ordered delivery. A failed
+//! read for them is retried later rather than stopping delivery.
+//!
 //! The catalog needs delivery's mailbox before delivery exists, and delivery reads committed
 //! outputs through the catalog, so [`channel`] creates the mailbox first.
 
@@ -24,6 +34,7 @@ mod actor;
 mod batch;
 mod cache;
 mod cursor;
+mod finals;
 mod mailbox;
 mod metrics;
 

@@ -15,9 +15,11 @@
 //!    engine's automaton through [`Inline`]. An engine whose application also reads activity
 //!    reports to both through [`Reporters::from((marshal, application))`](crate::Reporters), and
 //!    [`Service::relay`] gives it a [`Relay`] that broadcasts staged blocks.
-//! 5. The application receives one [`Update`] per block in [`OutputIndex`] order and
+//! 5. The application receives one [`Update::Block`] per block in [`OutputIndex`] order and
 //!    acknowledges each once it has durably applied it. Indices are canonical: an output's index
 //!    is the sum of the producer-chain heights once it commits, so it is the same on every node.
+//!    Before that, it receives an [`Update::Final`] for each block a leader finality fact made
+//!    final, as soon as the block is in local custody (see [Final blocks](#final-blocks)).
 //! 6. [`ServiceHandle::abort`] stops marshal; [`ServiceHandle::join`] returns its first
 //!    failure.
 //!
@@ -25,6 +27,7 @@
 //!
 //! ```text
 //!   consensus --hints--> router --> synchronizer --commits--> catalog --> delivery --> app
+//!                          \------------finality facts-------------------> delivery
 //!   producers --stage--> router -----------------------------> catalog --> promoter
 //!                                         resolver <--> backfill --> catalog
 //! ```
@@ -35,7 +38,8 @@
 //!   owns the scratch journals of its ancestry walks.
 //! - Backfill: fetches missing L-QCs, histories and blocks from peers, and serves peers.
 //! - Catalog: owns pending custody, finalized rows and the checkpoint.
-//! - Delivery: owns the acknowledgement cursor and reports committed outputs to the application.
+//! - Delivery: owns the acknowledgement cursor and reports committed outputs to the application,
+//!   and reports final blocks before they are ordered.
 //! - Promoter: with immutable block retention, owns the immutable body archive and copies
 //!   committed bodies into it.
 //!
@@ -63,6 +67,29 @@
 //!   another node can install to resume at the same indices.
 //! - [`Mailbox::prune`] drops what the newest floor at or below an output index makes obsolete,
 //!   keeping that floor servable.
+//!
+//! # Final blocks
+//!
+//! Finality precedes ordering: a leader finality fact names every producer chain's final tip, and
+//! every block at or below it is final, but the sweep can stop at a shortfall or an unsettled
+//! chain and order those blocks in a later view. So the application can start work early, such
+//! as warming storage, delivery reports each final block as an [`Update::Final`]:
+//!
+//! - Only final blocks are reported: blocks at or below a fact's final tip on their chain, and
+//!   committed outputs. Proposals and DA-certified blocks above the final tips never are.
+//! - Each chain reports oldest first, from above what delivery already reported or delivered on
+//!   it, once local custody holds the block. Marshal does not fetch these blocks from peers for
+//!   the report; a chain whose next block is missing waits until custody admits a block on that
+//!   chain, a commit, or a fact.
+//! - After a restart, each chain resumes from its height at the acknowledgement cursor, so every
+//!   final block not yet delivered in the new run may be reported again, including outputs
+//!   redelivered from that cursor. Blocks at or below an installed floor are never reported.
+//! - Each chain reads at most [`Capacities::final_lookahead`] blocks ahead at a time, its oldest
+//!   unreported final blocks, and slides that window forward as they are reported or delivered.
+//!   So when a fact moves a chain's final tip far ahead, every final block up to the tip is still
+//!   reported in order, unless ordered delivery reaches it first.
+//! - The reports read local custody in small jobs that never wait for, or hold back, ordered
+//!   delivery. While marshal runs, a block is never reported after its [`Update::Block`].
 //!
 //! [`OutputIndex`]: crate::types::OutputIndex
 

@@ -177,11 +177,14 @@ impl Reporter for TestReporter {
     type Activity = Update<TransactionBlock<Sha256, TestBody>>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        let Update {
+        let Update::Block {
             index,
             acknowledgement,
             ..
-        } = activity;
+        } = activity
+        else {
+            return Feedback::Ok;
+        };
         self.pending.lock().push_back((index, acknowledgement));
         Feedback::Ok
     }
@@ -321,6 +324,8 @@ where
         pending_acks: config.capacities.max_pending_acks,
         delivery_bytes: config.limits.max_delivery_bytes,
         hot_block_bytes: config.limits.max_hot_block_bytes,
+        final_lookahead: config.capacities.final_lookahead,
+        header_requests: config.actor_bounds().unwrap().header_requests,
     };
     let Opened {
         catalog: client,
@@ -344,6 +349,7 @@ where
         bodies: Bodies::new(client.clone(), None),
         application: reporter.clone(),
         mailbox: delivery_commands,
+        codec: config.codec_config,
         bounds: delivery_bounds,
     })
     .start();
