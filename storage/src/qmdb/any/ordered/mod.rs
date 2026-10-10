@@ -1934,6 +1934,13 @@ mod test {
             self.inner.try_read_many_sync(positions)
         }
 
+        fn prefetch(
+            &self,
+            positions: &[u64],
+        ) -> impl Future<Output = ()> + Send + 'static + use<C> {
+            self.inner.prefetch(positions)
+        }
+
         async fn replay(
             &self,
             range: Range<u64>,
