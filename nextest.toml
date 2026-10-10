@@ -13,7 +13,7 @@ default-filter = 'test(/_slow_(::|$)/)'
 default-filter = 'test(/.*_conformance_$/)'
 
 [profile.miri]
-default-filter = 'test(/_miri_(::|$)/) and not test(/(_slow_(::|$)|_conformance_$)/)'
+default-filter = 'test(/_miri_(::|$)/)'
 
 [profile.all]
 default-filter = 'test(/.*/)'
