@@ -195,22 +195,8 @@ jobs:
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
-    - name: Run miri tests for runtime::iobuf
-      run: |
-        cd runtime
-        just miri iobuf:: --partition hash:${{matrix.partition}}/12
-    - name: Run miri tests for runtime::buffer::paged::append
-      run: |
-        cd runtime
-        just miri utils::buffer::paged::append::tests:: --partition hash:${{matrix.partition}}/12 --no-tests=pass
-    - name: Run miri tests for runtime::iouring::task
-      run: |
-        cd runtime
-        just miri iouring::task::tests:: --features iouring --partition hash:${{matrix.partition}}/12 --no-tests=pass
-    - name: Run miri tests for runtime::iouring::tasks
-      run: |
-        cd runtime
-        just miri iouring::tasks::tests:: --features iouring --partition hash:${{matrix.partition}}/12 --no-tests=pass
+    - name: Run miri tests
+      run: just miri -p commonware-runtime --features iouring --partition hash:${{matrix.partition}}/12
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"

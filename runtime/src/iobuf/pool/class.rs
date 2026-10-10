@@ -1010,6 +1010,7 @@ impl BufferPoolThreadCache {
 }
 
 #[cfg(all(test, not(feature = "loom")))]
+#[commonware_macros::test_group("miri")]
 pub(super) mod tests {
     use super::{
         super::{BufferPool, BufferPoolConfig, NEXT_SIZE_CLASS_ID},
