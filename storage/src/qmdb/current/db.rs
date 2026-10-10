@@ -318,6 +318,18 @@ where
         self.any.get_many(keys).await
     }
 
+    /// Return a future that reads the storage holding the applied operations of `keys` into
+    /// the page cache, so later reads of those keys avoid storage I/O while the pages stay cached.
+    ///
+    /// Behaves like [any::db::Db::prefetch]. Graft roots used by merkleization are retained in
+    /// memory.
+    pub fn prefetch(
+        &self,
+        keys: &[&U::Key],
+    ) -> impl core::future::Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S> {
+        self.any.prefetch(keys)
+    }
+
     /// Return the retained operation range `[start, end)`.
     ///
     /// Proof generation also requires the necessary Merkle nodes to be retained. Proofs against
