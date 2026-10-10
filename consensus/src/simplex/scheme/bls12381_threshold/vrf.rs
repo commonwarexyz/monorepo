@@ -1003,7 +1003,7 @@ mod tests {
         Proposal::new(
             Round::new(epoch, view),
             view.previous().unwrap(),
-            Sha256::hash(&[&[tag]], &Sequential),
+            Sha256::hash(&[&[tag]]),
         )
     }
 

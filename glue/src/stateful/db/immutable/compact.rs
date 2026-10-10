@@ -558,9 +558,9 @@ mod tests {
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
-            let key = Sha256::hash(&[&[1]], &Sequential);
-            let value = Sha256::hash(&[&[2]], &Sequential);
-            let metadata = Sha256::hash(&[&[3]], &Sequential);
+            let key = Sha256::hash(&[&[1]]);
+            let value = Sha256::hash(&[&[2]]);
+            let metadata = Sha256::hash(&[&[3]]);
 
             let batch = db
                 .new_batch_for_test::<_>()
@@ -605,11 +605,8 @@ mod tests {
             let first = db
                 .new_batch_for_test::<_>()
                 .await
-                .set(
-                    Sha256::hash(&[&[1]], &Sequential),
-                    Sha256::hash(&[&[2]], &Sequential),
-                )
-                .with_metadata(Sha256::hash(&[&[11]], &Sequential));
+                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
+                .with_metadata(Sha256::hash(&[&[11]]));
             let first = crate::stateful::db::Unmerkleized::merkleize(first)
                 .await
                 .unwrap();
@@ -626,11 +623,8 @@ mod tests {
             let second = db
                 .new_batch_for_test::<_>()
                 .await
-                .set(
-                    Sha256::hash(&[&[3]], &Sequential),
-                    Sha256::hash(&[&[4]], &Sequential),
-                )
-                .with_metadata(Sha256::hash(&[&[22]], &Sequential));
+                .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]))
+                .with_metadata(Sha256::hash(&[&[22]]));
             let second = crate::stateful::db::Unmerkleized::merkleize(second)
                 .await
                 .unwrap();
@@ -669,11 +663,8 @@ mod tests {
             let batch = db
                 .new_batch_for_test::<_>()
                 .await
-                .set(
-                    Sha256::hash(&[&[1]], &Sequential),
-                    Sha256::hash(&[&[2]], &Sequential),
-                )
-                .with_metadata(Sha256::hash(&[&[3]], &Sequential));
+                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
+                .with_metadata(Sha256::hash(&[&[3]]));
             let batch = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
@@ -713,14 +704,11 @@ mod tests {
             )
             .await
             .unwrap();
-            let metadata = Sha256::hash(&[&[3]], &Sequential);
+            let metadata = Sha256::hash(&[&[3]]);
             let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
-                .set(
-                    Sha256::hash(&[&[1]], &Sequential),
-                    Sha256::hash(&[&[2]], &Sequential),
-                )
+                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .merkleize(&source, Some(metadata), floor)
                 .await
                 .unwrap();
@@ -758,11 +746,8 @@ mod tests {
             let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
-                .set(
-                    Sha256::hash(&[&[1]], &Sequential),
-                    Sha256::hash(&[&[2]], &Sequential),
-                )
-                .merkleize(&source, Some(Sha256::hash(&[&[3]], &Sequential)), floor)
+                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
+                .merkleize(&source, Some(Sha256::hash(&[&[3]])), floor)
                 .await
                 .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
@@ -775,7 +760,7 @@ mod tests {
             // A larger target the source never serves. Its sync attempt
             // hangs so the test can observe the gauges while they diverge.
             let unservable_target = sync::CompactTarget {
-                root: Sha256::hash(&[&[0xFF]], &Sequential),
+                root: Sha256::hash(&[&[0xFF]]),
                 size: target.size + 1,
             };
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
@@ -854,11 +839,8 @@ mod tests {
             let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
-                .set(
-                    Sha256::hash(&[&[1]], &Sequential),
-                    Sha256::hash(&[&[2]], &Sequential),
-                )
-                .merkleize(&source, Some(Sha256::hash(&[&[9]], &Sequential)), floor)
+                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
+                .merkleize(&source, Some(Sha256::hash(&[&[9]])), floor)
                 .await
                 .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
@@ -871,11 +853,8 @@ mod tests {
             let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
-                .set(
-                    Sha256::hash(&[&[3]], &Sequential),
-                    Sha256::hash(&[&[4]], &Sequential),
-                )
-                .merkleize(&source, Some(Sha256::hash(&[&[10]], &Sequential)), floor)
+                .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]))
+                .merkleize(&source, Some(Sha256::hash(&[&[10]])), floor)
                 .await
                 .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
@@ -923,10 +902,7 @@ mod tests {
                 .unwrap();
 
             assert_eq!(synced.target(), latest_target);
-            assert_eq!(
-                synced.get_metadata(),
-                Some(Sha256::hash(&[&[10]], &Sequential))
-            );
+            assert_eq!(synced.get_metadata(), Some(Sha256::hash(&[&[10]])));
         });
     }
 
@@ -941,11 +917,8 @@ mod tests {
             let floor = db.inactivity_floor_loc();
             let batch = db
                 .new_batch()
-                .set(
-                    Sha256::hash(&[&[1]], &Sequential),
-                    Sha256::hash(&[&[2]], &Sequential),
-                )
-                .merkleize(&db, Some(Sha256::hash(&[&[11]], &Sequential)), floor)
+                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
+                .merkleize(&db, Some(Sha256::hash(&[&[11]])), floor)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
@@ -957,11 +930,8 @@ mod tests {
                 let floor = db.inactivity_floor_loc();
                 let batch = db
                     .new_batch()
-                    .set(
-                        Sha256::hash(&[&[i]], &Sequential),
-                        Sha256::hash(&[&[i + 1]], &Sequential),
-                    )
-                    .merkleize(&db, Some(Sha256::hash(&[&[i * 11]], &Sequential)), floor)
+                    .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
+                    .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
                     .await
                     .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
@@ -981,7 +951,7 @@ mod tests {
 
             let recovered_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
             assert_eq!(recovered_target, first_target);
-            assert_eq!(db.get_metadata(), Some(Sha256::hash(&[&[11]], &Sequential)));
+            assert_eq!(db.get_metadata(), Some(Sha256::hash(&[&[11]])));
         });
     }
 
@@ -1001,11 +971,8 @@ mod tests {
                 let floor = db.inactivity_floor_loc();
                 let batch = db
                     .new_batch()
-                    .set(
-                        Sha256::hash(&[&[i]], &Sequential),
-                        Sha256::hash(&[&[i + 1]], &Sequential),
-                    )
-                    .merkleize(&db, Some(Sha256::hash(&[&[i * 11]], &Sequential)), floor)
+                    .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
+                    .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
                     .await
                     .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();

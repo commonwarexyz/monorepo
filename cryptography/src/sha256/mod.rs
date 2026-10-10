@@ -8,7 +8,7 @@
 //! use commonware_parallel::Sequential;
 //!
 //! // Hash data in a single shot (fastest path)
-//! let digest = Sha256::hash(&[b"hello,", b"world!"], &Sequential);
+//! let digest = Sha256::hash(&[b"hello,", b"world!"]);
 //! println!("digest: {:?}", digest);
 //!
 //! // Or stream data incrementally
@@ -22,7 +22,7 @@
 //! // Batching is most effective for messages of the same length.
 //! let messages: [[u8; 32]; 16] = core::array::from_fn(|lane| [lane as u8; 32]);
 //! let digests = Sha256::hash_many(&messages, &Sequential);
-//! assert_eq!(digests[3], Sha256::hash(&[messages[3].as_slice()], &Sequential));
+//! assert_eq!(digests[3], Sha256::hash(&[messages[3].as_slice()]));
 //! ```
 
 use crate::Hasher;
@@ -189,7 +189,7 @@ impl Hasher for Sha256 {
     type Digest = Digest;
 
     #[inline]
-    fn hash(parts: &[&[u8]], _strategy: &impl Strategy) -> Self::Digest {
+    fn hash(parts: &[&[u8]]) -> Self::Digest {
         hash_specialized(parts)
     }
 
@@ -197,13 +197,13 @@ impl Hasher for Sha256 {
     fn hash_pair(
         left: &[&[u8]],
         right: &[&[u8]],
-        strategy: &impl Strategy,
+        _strategy: &impl Strategy,
     ) -> (Self::Digest, Self::Digest) {
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         if let Some(pair) = simd::hash_pair(left, right) {
             return pair;
         }
-        (Self::hash(left, strategy), Self::hash(right, strategy))
+        (Self::hash(left), Self::hash(right))
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -211,16 +211,17 @@ impl Hasher for Sha256 {
         messages: &[M],
         strategy: &impl Strategy,
     ) -> Vec<Self::Digest> {
-        // Without SHA-NI, every share runs the x16 kernel, which costs the same however few lanes
-        // are active, so shares of whole sixteen-message batches keep it full. With SHA-NI, a
-        // share too small for the kernel hashes on SHA-NI instead, so the strategy may split the
-        // messages one at a time across more workers.
+        // Where the x16 kernel exists but SHA-NI does not, the kernel costs the same however few
+        // lanes are active, so shares hold whole sixteen-message batches: when the messages share
+        // a length, only the last kernel call can run with idle lanes. Without the kernel, every
+        // message hashes alone, and with SHA-NI, a share too small for the kernel hashes on SHA-NI
+        // instead, so the strategy may split the messages one at a time across more workers.
         let lanes = if simd::minimum_x16_batch_len().is_some() && !simd::supports_sha_ni() {
             simd::X16_LANES
         } else {
             1
         };
-        crate::hash_batches(messages, lanes, BLOCK_LENGTH, strategy, hash_batch)
+        crate::hash_batches(messages, lanes, strategy, hash_batch)
     }
 
     #[inline]
@@ -237,8 +238,9 @@ impl Hasher for Sha256 {
     }
 }
 
-/// Hash independent messages in order on the calling thread, sixteen equal-length messages at a
-/// time when the AVX-512 kernel is available.
+/// Hash independent messages in order on the calling thread. Where the AVX-512 kernel is
+/// available, it takes adjacent equal-length messages up to sixteen at a time, and batches below
+/// its minimum size hash one message at a time.
 #[cfg(target_arch = "x86_64")]
 fn hash_batch<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Digest> {
     let Some(minimum) = simd::minimum_x16_batch_len() else {
@@ -300,7 +302,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Digest {
         // Generate random bytes and compute their Sha256 hash
         let len = u.int_in_range(0..=256)?;
         let data = u.bytes(len)?;
-        Ok(Sha256::hash(&[data], &commonware_parallel::Sequential))
+        Ok(Sha256::hash(&[data]))
     }
 }
 
@@ -420,11 +422,11 @@ mod tests {
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Test one-shot hasher
-        let hash = Sha256::hash(&[msg], &Sequential);
+        let hash = Sha256::hash(&[msg]);
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
 
         // Test multi-part one-shot hasher
-        let hash = Sha256::hash(&[b"hello", b" world"], &Sequential);
+        let hash = Sha256::hash(&[b"hello", b" world"]);
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
 
@@ -440,7 +442,7 @@ mod tests {
             let mid = total / 3;
             let parts: [&[u8]; 3] = [&data[..mid], &data[mid..2 * mid], &data[2 * mid..]];
 
-            let oneshot = Sha256::hash(&parts, &Sequential);
+            let oneshot = Sha256::hash(&parts);
 
             let mut hasher = Sha256::default();
             for part in &parts {
@@ -463,7 +465,7 @@ mod tests {
             &[&data[..4], &data[4..36]],
         ];
         for parts in shapes {
-            let oneshot = Sha256::hash(parts, &Sequential);
+            let oneshot = Sha256::hash(parts);
 
             let mut hasher = Sha256::default();
             for part in parts {
@@ -511,8 +513,8 @@ mod tests {
             let (left_digest, right_digest) = Sha256::hash_pair(&left, &right, &Sequential);
             let expected_left = expected(&left);
             let expected_right = expected(&right);
-            assert_eq!(Sha256::hash(&left, &Sequential), expected_left);
-            assert_eq!(Sha256::hash(&right, &Sequential), expected_right);
+            assert_eq!(Sha256::hash(&left), expected_left);
+            assert_eq!(Sha256::hash(&right), expected_right);
             assert_eq!(left_digest, expected_left);
             assert_eq!(right_digest, expected_right);
         }
@@ -537,7 +539,7 @@ mod tests {
     fn check_hash_many(messages: &[&[u8]], strategy: &impl Strategy) {
         let expected = messages
             .iter()
-            .map(|&message| Sha256::hash(&[message], &Sequential))
+            .map(|&message| Sha256::hash(&[message]))
             .collect::<Vec<_>>();
         assert_eq!(Sha256::hash_many(messages, &Sequential), expected);
         assert_eq!(Sha256::hash_many(messages, strategy), expected);

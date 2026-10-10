@@ -5,7 +5,7 @@ use commonware_cryptography::{
     Digest, Hasher,
     reed_solomon::{Decoder, Encoder, Error as RsError, Plan, SHARD_CHUNK_BYTES},
 };
-use commonware_parallel::{Batches, Sequential, Strategy};
+use commonware_parallel::{Batches, Strategy};
 use commonware_storage::bmt::{self, Builder};
 use commonware_utils::{Cached, NZUsize, Widen};
 use std::{marker::PhantomData, ops::Range};
@@ -1191,9 +1191,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         shard: &Self::Shard,
     ) -> Result<Self::CheckedShard, Self::Error> {
         let total = total_shards(config)?;
-        check_chunk::<H>(total, commitment, index, shard, || {
-            H::hash(&[&shard.shard], &Sequential)
-        })
+        check_chunk::<H>(total, commitment, index, shard, || H::hash(&[&shard.shard]))
     }
 
     fn check_many(
@@ -1217,7 +1215,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         }) {
             return strategy.map_collect_vec(shards, |&(index, shard)| {
                 check_chunk::<H>(total, commitment, index, shard, || {
-                    H::hash(&[&shard.shard], strategy)
+                    H::hash_across(&[&shard.shard], strategy)
                 })
             });
         }
@@ -1280,11 +1278,11 @@ mod tests {
     impl Hasher for InstrumentedSha256 {
         type Digest = <Sha256 as Hasher>::Digest;
 
-        fn hash(parts: &[&[u8]], strategy: &impl Strategy) -> Self::Digest {
+        fn hash(parts: &[&[u8]]) -> Self::Digest {
             if let [message] = parts {
                 HASH_INPUTS.with(|inputs| inputs.borrow_mut().push(message.to_vec()));
             }
-            Sha256::hash(parts, strategy)
+            Sha256::hash(parts)
         }
 
         fn hash_pair(
@@ -1297,7 +1295,7 @@ mod tests {
 
         fn hash_many<M: AsRef<[u8]> + Sync>(
             messages: &[M],
-            strategy: &impl Strategy,
+            _strategy: &impl Strategy,
         ) -> Vec<Self::Digest> {
             HASH_INPUTS.with(|inputs| {
                 inputs
@@ -1312,7 +1310,10 @@ mod tests {
                         .collect(),
                 );
             });
-            Sha256::hash_many(messages, strategy)
+            messages
+                .iter()
+                .map(|message| Sha256::hash(&[message.as_ref()]))
+                .collect()
         }
 
         fn update(&mut self, bytes: &[u8]) -> &mut Self {
@@ -1340,7 +1341,7 @@ mod tests {
         chunk: Chunk<<Sha256 as Hasher>::Digest>,
     ) -> CheckedChunk<<Sha256 as Hasher>::Digest> {
         let Chunk { shard, index, .. } = chunk;
-        let digest = Sha256::hash(&[&shard], &Sequential);
+        let digest = Sha256::hash(&[&shard]);
         CheckedChunk::new(root, shard, index, digest)
     }
 
@@ -1352,7 +1353,7 @@ mod tests {
     ) {
         let mut builder = Builder::<Sha256>::new(shards.len());
         for shard in shards {
-            builder.add(&Sha256::hash(&[shard], &Sequential));
+            builder.add(&Sha256::hash(&[shard]));
         }
         let tree = builder.build();
         let root = tree.root();
@@ -2269,7 +2270,7 @@ mod tests {
         let encoding = encoder.encode().unwrap();
 
         let recovery: Vec<&[u8]> = encoding.recovery_iter().collect();
-        let digest = Sha256::hash(&recovery, &Sequential);
+        let digest = Sha256::hash(&recovery);
         assert_eq!(
             format!("{digest}"),
             "e38bb9dbba4a102c4bd8447e212957742dab0af0c4148d4660c671f2f33d3df2",
@@ -2452,7 +2453,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &shards {
-            builder.add(&Sha256::hash(&[shard], &Sequential));
+            builder.add(&Sha256::hash(&[shard]));
         }
         let tree = builder.build();
         let root = tree.root();
@@ -2487,10 +2488,7 @@ mod tests {
             encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
 
         // Create a malicious/fake root (simulating a malicious encoder)
-        let malicious_root = Sha256::hash(
-            &[b"malicious_data_that_wasnt_actually_encoded"],
-            &Sequential,
-        );
+        let malicious_root = Sha256::hash(&[b"malicious_data_that_wasnt_actually_encoded"]);
 
         // Verify all proofs at incorrect root
         for i in 0..total {
@@ -2587,7 +2585,7 @@ mod tests {
         // Build malicious tree
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &malicious_shards {
-            builder.add(&Sha256::hash(&[shard], &Sequential));
+            builder.add(&Sha256::hash(&[shard]));
         }
         let malicious_tree = builder.build();
         let malicious_root = malicious_tree.root();
@@ -2642,7 +2640,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &shards {
-            builder.add(&Sha256::hash(&[shard], &Sequential));
+            builder.add(&Sha256::hash(&[shard]));
         }
         let tree = builder.build();
         let non_canonical_root = tree.root();
@@ -2698,7 +2696,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &oversized_shards {
-            builder.add(&Sha256::hash(&[shard], &Sequential));
+            builder.add(&Sha256::hash(&[shard]));
         }
         let oversized_tree = builder.build();
         let oversized_root = oversized_tree.root();
@@ -2737,7 +2735,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &shards {
-            builder.add(&Sha256::hash(&[shard], &Sequential));
+            builder.add(&Sha256::hash(&[shard]));
         }
         let tree = builder.build();
         let root = tree.root();
@@ -2771,7 +2769,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &shards {
-            builder.add(&Sha256::hash(&[shard], &Sequential));
+            builder.add(&Sha256::hash(&[shard]));
         }
         let tree = builder.build();
         let root = tree.root();
@@ -3000,7 +2998,7 @@ mod tests {
                 .iter()
                 .map(|chunk| {
                     check_chunk::<Sha256>((k + m) as u16, &root, chunk.index, chunk, || {
-                        Sha256::hash(&[chunk.shard.as_ref()], &Sequential)
+                        Sha256::hash(&[chunk.shard.as_ref()])
                     })
                     .unwrap()
                 })
@@ -3071,7 +3069,7 @@ mod tests {
                     .map(|index| {
                         let chunk = &chunks[index];
                         check_chunk::<Sha256>(total, &root, chunk.index, chunk, || {
-                            Sha256::hash(&[chunk.shard.as_ref()], &Sequential)
+                            Sha256::hash(&[chunk.shard.as_ref()])
                         })
                         .unwrap()
                     })

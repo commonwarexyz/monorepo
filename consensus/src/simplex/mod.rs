@@ -4469,11 +4469,8 @@ mod tests {
 
             let quorum = quorum(n) as usize;
             let notarization = |view: View, parent: View, payload: &[u8]| {
-                let proposal = Proposal::new(
-                    Round::new(epoch, view),
-                    parent,
-                    Sha256::hash(&[payload], &Sequential),
-                );
+                let proposal =
+                    Proposal::new(Round::new(epoch, view), parent, Sha256::hash(&[payload]));
                 let votes: Vec<_> = schemes
                     .iter()
                     .take(quorum)
@@ -4483,11 +4480,8 @@ mod tests {
                     .expect("notarization requires quorum")
             };
             let finalization = |view: View, parent: View, payload: &[u8]| {
-                let proposal = Proposal::new(
-                    Round::new(epoch, view),
-                    parent,
-                    Sha256::hash(&[payload], &Sequential),
-                );
+                let proposal =
+                    Proposal::new(Round::new(epoch, view), parent, Sha256::hash(&[payload]));
                 let votes: Vec<_> = schemes
                     .iter()
                     .take(quorum)
@@ -6022,15 +6016,15 @@ mod tests {
             // Choose F=1 and construct B_1, B_2A, B_2B
             let f_view = 1;
             let round_f = Round::new(Epoch::new(333), View::new(f_view));
-            let payload_b0 = Sha256::hash(&[b"B_F"], &Sequential);
+            let payload_b0 = Sha256::hash(&[b"B_F"]);
             let proposal_b0 = Proposal::new(round_f, View::new(f_view - 1), payload_b0);
-            let payload_b1a = Sha256::hash(&[b"B_G1"], &Sequential);
+            let payload_b1a = Sha256::hash(&[b"B_G1"]);
             let proposal_b1a = Proposal::new(
                 Round::new(Epoch::new(333), View::new(f_view + 1)),
                 View::new(f_view),
                 payload_b1a,
             );
-            let payload_b1b = Sha256::hash(&[b"B_G2"], &Sequential);
+            let payload_b1b = Sha256::hash(&[b"B_G2"]);
             let proposal_b1b = Proposal::new(
                 Round::new(Epoch::new(333), View::new(f_view + 2)),
                 View::new(f_view),
@@ -6491,10 +6485,10 @@ mod tests {
                 TNullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("nullification quorum")
             };
-            let payload_b2 = Sha256::hash(&[b"B_2"], &Sequential);
+            let payload_b2 = Sha256::hash(&[b"B_2"]);
             let proposal_b2 =
                 Proposal::new(Round::new(epoch, View::new(2)), View::new(1), payload_b2);
-            let payload_b3 = Sha256::hash(&[b"B_3"], &Sequential);
+            let payload_b3 = Sha256::hash(&[b"B_3"]);
             let proposal_b3 =
                 Proposal::new(Round::new(epoch, View::new(3)), View::new(2), payload_b3);
             let b2_notarization = build_notarization(&proposal_b2);
@@ -6701,10 +6695,10 @@ mod tests {
                 TNullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("nullification quorum")
             };
-            let payload_b2 = Sha256::hash(&[b"B_2"], &Sequential);
+            let payload_b2 = Sha256::hash(&[b"B_2"]);
             let proposal_b2 =
                 Proposal::new(Round::new(epoch, View::new(2)), View::new(1), payload_b2);
-            let payload_b3 = Sha256::hash(&[b"B_3"], &Sequential);
+            let payload_b3 = Sha256::hash(&[b"B_3"]);
             let proposal_b3 =
                 Proposal::new(Round::new(epoch, View::new(3)), View::new(2), payload_b3);
             let b2_notarization = build_notarization(&proposal_b2);
@@ -6916,10 +6910,10 @@ mod tests {
                 TNullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("nullification quorum")
             };
-            let payload_b2 = Sha256::hash(&[b"B_2"], &Sequential);
+            let payload_b2 = Sha256::hash(&[b"B_2"]);
             let proposal_b2 =
                 Proposal::new(Round::new(epoch, View::new(2)), View::new(1), payload_b2);
-            let payload_b5 = Sha256::hash(&[b"B_5"], &Sequential);
+            let payload_b5 = Sha256::hash(&[b"B_5"]);
             let proposal_b5 =
                 Proposal::new(Round::new(epoch, View::new(5)), View::new(2), payload_b5);
             let b2_notarization = build_notarization(&proposal_b2);
@@ -7161,19 +7155,19 @@ mod tests {
             };
 
             // Term 1 chain (views 1 and 2), certified by `b` and `c`.
-            let payload_1 = Sha256::hash(&[b"V1"], &Sequential);
+            let payload_1 = Sha256::hash(&[b"V1"]);
             let proposal_1 =
                 Proposal::new(Round::new(epoch, View::new(1)), View::new(0), payload_1);
-            let payload_2 = Sha256::hash(&[b"V2"], &Sequential);
+            let payload_2 = Sha256::hash(&[b"V2"]);
             let proposal_2 =
                 Proposal::new(Round::new(epoch, View::new(2)), View::new(1), payload_2);
             // Term 5 chain (views 21 and 22), certified by `a` and `b`. The
             // view-21 proposal names genesis, so `a` can vote without
             // certifying term 1.
-            let payload_21 = Sha256::hash(&[b"V21"], &Sequential);
+            let payload_21 = Sha256::hash(&[b"V21"]);
             let proposal_21 =
                 Proposal::new(Round::new(epoch, View::new(21)), View::new(0), payload_21);
-            let payload_22 = Sha256::hash(&[b"V22"], &Sequential);
+            let payload_22 = Sha256::hash(&[b"V22"]);
             let proposal_22 =
                 Proposal::new(Round::new(epoch, View::new(22)), View::new(21), payload_22);
 

@@ -2254,7 +2254,6 @@ mod tests {
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage,
         Supervisor as _, WriteOptions,
@@ -2274,7 +2273,7 @@ mod tests {
 
     /// Generate a SHA-256 digest for the given value.
     fn test_digest(value: u64) -> Digest {
-        Sha256::hash(&[&value.to_be_bytes()], &Sequential)
+        Sha256::hash(&[&value.to_be_bytes()])
     }
 
     fn test_cfg(pooler: &impl BufferPooler, items_per_blob: NonZeroU64) -> Config {

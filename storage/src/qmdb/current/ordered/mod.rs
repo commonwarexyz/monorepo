@@ -55,7 +55,6 @@ pub mod tests {
     use bytes::Bytes;
     use commonware_codec::{Codec, Decode as _, Encode as _, EncodeSize as _, Read};
     use commonware_cryptography::{Digest as _, Hasher as _, Sha256, sha256::Digest};
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
@@ -453,13 +452,13 @@ pub mod tests {
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses
                 // fill patterns).
-                let wrong_val = Sha256::hash(&[&[0xFF]], &Sequential);
+                let wrong_val = Sha256::hash(&[&[0xFF]]);
                 assert!(!proof.verify::<Sha256, V>(key, wrong_val, &root));
                 // Proof should fail against the wrong key.
-                let wrong_key = Sha256::hash(&[&[0xEE]], &Sequential);
+                let wrong_key = Sha256::hash(&[&[0xEE]]);
                 assert!(!proof.verify::<Sha256, V>(wrong_key, value, &root));
                 // Proof should fail against the wrong root.
-                let wrong_root = Sha256::hash(&[&[0xDD]], &Sequential);
+                let wrong_root = Sha256::hash(&[&[0xDD]]);
                 assert!(!proof.verify::<Sha256, V>(key, value, &wrong_root));
                 // Proof should fail with the wrong next-key.
                 let mut bad_proof = proof.clone();
@@ -683,11 +682,11 @@ pub mod tests {
             proof: Proof::<F, Digest> {
                 leaves: Location::<F>::new(7),
                 inactive_peaks: 0,
-                digests: vec![Sha256::hash(&[b"sib"], &Sequential)],
+                digests: vec![Sha256::hash(&[b"sib"])],
             },
             pending_chunk_digest: None.try_into().unwrap(),
             partial_chunk_digest: None,
-            ops_root: Sha256::hash(&[b"ops"], &Sequential),
+            ops_root: Sha256::hash(&[b"ops"]),
         };
         let chunk: [u8; 32] = core::array::from_fn(|i| i as u8);
         OperationProof {
@@ -710,7 +709,7 @@ pub mod tests {
     fn test_key_value_proof_codec_roundtrip() {
         let proof = CodecKeyValueProof {
             proof: sample_op_proof(),
-            next_key: Sha256::hash(&[b"next-key"], &Sequential),
+            next_key: Sha256::hash(&[b"next-key"]),
         };
 
         let encoded = proof.encode();
@@ -723,7 +722,7 @@ pub mod tests {
     fn test_key_value_proof_codec_enforces_merkle_digest_budget() {
         let proof = CodecKeyValueProof {
             proof: sample_op_proof(),
-            next_key: Sha256::hash(&[b"next-key"], &Sequential),
+            next_key: Sha256::hash(&[b"next-key"]),
         };
         let total_digests = op_proof_digest_count(&proof.proof);
 
@@ -740,15 +739,12 @@ pub mod tests {
             CodecExclusionProof::KeyValue(
                 sample_op_proof(),
                 Update {
-                    key: Sha256::hash(&[b"key"], &Sequential),
-                    value: Sha256::hash(&[b"value"], &Sequential),
-                    next_key: Sha256::hash(&[b"next-key"], &Sequential),
+                    key: Sha256::hash(&[b"key"]),
+                    value: Sha256::hash(&[b"value"]),
+                    next_key: Sha256::hash(&[b"next-key"]),
                 },
             ),
-            CodecExclusionProof::Commit(
-                sample_op_proof(),
-                Some(Sha256::hash(&[b"metadata"], &Sequential)),
-            ),
+            CodecExclusionProof::Commit(sample_op_proof(), Some(Sha256::hash(&[b"metadata"]))),
             CodecExclusionProof::Commit(sample_op_proof(), None),
         ];
 
@@ -766,15 +762,12 @@ pub mod tests {
             CodecExclusionProof::KeyValue(
                 sample_op_proof(),
                 Update {
-                    key: Sha256::hash(&[b"key"], &Sequential),
-                    value: Sha256::hash(&[b"value"], &Sequential),
-                    next_key: Sha256::hash(&[b"next-key"], &Sequential),
+                    key: Sha256::hash(&[b"key"]),
+                    value: Sha256::hash(&[b"value"]),
+                    next_key: Sha256::hash(&[b"next-key"]),
                 },
             ),
-            CodecExclusionProof::Commit(
-                sample_op_proof(),
-                Some(Sha256::hash(&[b"metadata"], &Sequential)),
-            ),
+            CodecExclusionProof::Commit(sample_op_proof(), Some(Sha256::hash(&[b"metadata"]))),
             CodecExclusionProof::Commit(sample_op_proof(), None),
         ];
 
@@ -818,7 +811,7 @@ pub mod tests {
     fn check_dynamic_ordered_codecs<F: Graftable>() {
         let proof = constant::KeyValueProof::<F, Digest, Digest, 32> {
             proof: sample_op_proof(),
-            next_key: Sha256::hash(&[b"next-key"], &Sequential),
+            next_key: Sha256::hash(&[b"next-key"]),
         };
         check_dynamic_codec::<dynamic::KeyValueProof<F, Digest, Digest>>(
             proof.encode(),
@@ -834,15 +827,12 @@ pub mod tests {
             constant::ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest, 32>::KeyValue(
                 sample_op_proof(),
                 Update {
-                    key: Sha256::hash(&[b"key"], &Sequential),
-                    value: Sha256::hash(&[b"value"], &Sequential),
-                    next_key: Sha256::hash(&[b"next-key"], &Sequential),
+                    key: Sha256::hash(&[b"key"]),
+                    value: Sha256::hash(&[b"value"]),
+                    next_key: Sha256::hash(&[b"next-key"]),
                 },
             ),
-            constant::ExclusionProof::Commit(
-                sample_op_proof(),
-                Some(Sha256::hash(&[b"metadata"], &Sequential)),
-            ),
+            constant::ExclusionProof::Commit(sample_op_proof(), Some(Sha256::hash(&[b"metadata"]))),
             constant::ExclusionProof::Commit(sample_op_proof(), None),
         ];
         for proof in cases {
@@ -875,9 +865,9 @@ pub mod tests {
             constant::ExclusionProof::<F, Digest, VariableEncoding<Vec<u8>>, Digest, 32>::KeyValue(
                 sample_op_proof(),
                 Update {
-                    key: Sha256::hash(&[b"key"], &Sequential),
+                    key: Sha256::hash(&[b"key"]),
                     value: vec![1, 2, 3],
-                    next_key: Sha256::hash(&[b"next-key"], &Sequential),
+                    next_key: Sha256::hash(&[b"next-key"]),
                 },
             ),
             constant::ExclusionProof::Commit(sample_op_proof(), Some(vec![1, 2, 3])),

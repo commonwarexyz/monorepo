@@ -7,15 +7,16 @@ use commonware_cryptography::{
     fuzz::{BatchPlan, Plan},
     sha256::Digest,
 };
-use commonware_parallel::{Manual, Rayon, Sequential, Strategy as _};
+use commonware_parallel::{Manual, Rayon, Strategy as _};
 use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use sha2::{Digest as RefSha2Digest, Sha256 as RefSha256};
 use std::sync::LazyLock;
 use zeroize::Zeroize;
 
-/// A strategy that splits every operation across four workers, built once and reused across
-/// invocations because starting a thread pool is expensive.
+/// A four-worker strategy with adaptive decisions disabled, so it takes every split a hasher
+/// offers it. It is built once and reused across invocations because starting a thread pool is
+/// expensive.
 static STRATEGY: LazyLock<Manual<Rayon>> =
     LazyLock::new(|| Rayon::new(NZUsize!(4)).unwrap().manual());
 
@@ -44,7 +45,7 @@ fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
 
     // The one-shot API should agree with streaming.
     let parts: Vec<&[u8]> = chunks.iter().map(|c| c.as_slice()).collect();
-    assert_eq!(OurSha256::hash(&parts, &Sequential), our_result);
+    assert_eq!(OurSha256::hash(&parts), our_result);
 }
 
 // Reset functionality: the hasher returned by `finalize` is freshly reset.
@@ -96,7 +97,7 @@ fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
 
 // Differential fuzzing
 fn fuzz_diff_hash(data: &[u8]) {
-    let our_hash_result = OurSha256::hash(&[data], &Sequential);
+    let our_hash_result = OurSha256::hash(&[data]);
     let ref_hash_result = RefSha256::digest(data);
     assert_eq!(our_hash_result.as_ref(), ref_hash_result.as_slice());
 }

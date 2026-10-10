@@ -3,7 +3,6 @@
 //! participants are active at a given view.
 
 use commonware_cryptography::Hasher;
-use commonware_parallel::Sequential;
 use std::num::NonZeroUsize;
 
 mod actor;
@@ -22,7 +21,7 @@ pub fn genesis<H: Hasher>() -> H::Digest {
     //
     // Since this example does not verify that proposed messages link to a
     // parent, this only seeds the consensus floor.
-    H::hash(&[GENESIS], &Sequential)
+    H::hash(&[GENESIS])
 }
 
 /// Configuration for the application.

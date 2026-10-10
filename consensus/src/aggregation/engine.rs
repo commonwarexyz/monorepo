@@ -1056,7 +1056,7 @@ mod tests {
             );
 
             let height = Height::new(0);
-            let digest = Sha256::hash(&[b"payload"], &Sequential);
+            let digest = Sha256::hash(&[b"payload"]);
             engine
                 .pending
                 .insert(height, Pending::Verified(digest, BTreeMap::new()));

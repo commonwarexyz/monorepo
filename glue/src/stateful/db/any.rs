@@ -830,8 +830,8 @@ mod tests {
                 .unwrap();
             let db = Shared::new("test", db);
 
-            let key = Sha256::hash(&[b"key"], &Sequential);
-            let value = Sha256::hash(&[b"winner"], &Sequential);
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"winner"]);
             let pre_finalization = db.new_batch_for_test::<_>().await;
             let winner = db.new_batch_for_test::<_>().await.write(key, Some(value));
             let winner = crate::stateful::db::Unmerkleized::merkleize(winner)
@@ -867,9 +867,9 @@ mod tests {
                 .unwrap();
             let db = Shared::new("test", db);
 
-            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()], &Sequential);
-            let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()], &Sequential);
-            let metadata = Sha256::hash(&[b"metadata"], &Sequential);
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+            let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()]);
+            let metadata = Sha256::hash(&[b"metadata"]);
 
             // Seed keys 0..50 and persist them.
             let mut seed = db.new_batch_for_test::<_>().await;
@@ -969,8 +969,8 @@ mod tests {
             .unwrap();
             let db = Shared::new("test", db);
 
-            let key = Sha256::hash(&[b"key"], &Sequential);
-            let value = Sha256::hash(&[b"value"], &Sequential);
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
             let batch = db.new_batch_for_test::<_>().await.write(key, Some(value));
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await

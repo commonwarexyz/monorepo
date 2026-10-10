@@ -131,7 +131,6 @@ mod test {
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
     /// A type alias for the concrete [Db] type used in these unit tests.
@@ -213,7 +212,7 @@ mod test {
                 .await
                 .unwrap();
             let key = b"variable-length-key".to_vec();
-            let value = Sha256::hash(&[b"value"], &Sequential);
+            let value = Sha256::hash(&[b"value"]);
             let merkleized = db
                 .new_batch()
                 .write(key.clone(), Some(value))

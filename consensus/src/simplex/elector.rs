@@ -32,7 +32,6 @@ use commonware_codec::Encode;
 use commonware_cryptography::{
     Hasher, PublicKey, Sha256, bls12381::primitives::variant::Variant, certificate::Scheme,
 };
-use commonware_parallel::Sequential;
 use commonware_utils::{modulo, ordered::Set};
 use std::{fmt, marker::PhantomData, time::Duration};
 
@@ -302,8 +301,7 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
             .collect();
 
         if let Some(seed) = &self.seed {
-            permutation
-                .sort_by_cached_key(|&index| H::hash(&[seed, &index.get().encode()], &Sequential));
+            permutation.sort_by_cached_key(|&index| H::hash(&[seed, &index.get().encode()]));
         }
 
         RoundRobinElector {
@@ -406,10 +404,7 @@ impl<H: Hasher> Random<H> {
         let encoded = seed_signature.encode();
         let index = match self.version {
             RandomVersion::V0 => modulo(encoded.as_ref(), u64::from(n)),
-            RandomVersion::V1 => modulo(
-                H::hash(&[encoded.as_ref()], &Sequential).as_ref(),
-                u64::from(n),
-            ),
+            RandomVersion::V1 => modulo(H::hash(&[encoded.as_ref()]).as_ref(), u64::from(n)),
         };
         Participant::new(u32::try_from(index).expect("leader index must fit in u32"))
     }

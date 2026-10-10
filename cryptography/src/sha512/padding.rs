@@ -1,6 +1,7 @@
 //! SHA-512 parameters and message padding shared by the multi-message kernels.
 
-use super::BLOCK_LENGTH;
+/// The SHA-512 block size in bytes.
+pub(super) const BLOCK_LENGTH: usize = 128;
 
 /// SHA-512 round constants (FIPS 180-4, section 4.2.3).
 #[rustfmt::skip]

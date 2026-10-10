@@ -609,8 +609,8 @@ mod tests {
         let db = TestDb::init(context.child("db"), db_config(suffix, &context), None)
             .await
             .expect("db init should succeed");
-        let key = Sha256::hash(&[suffix.as_bytes(), b"-key"], &Sequential);
-        let value = Sha256::hash(&[suffix.as_bytes(), b"-value"], &Sequential);
+        let key = Sha256::hash(&[suffix.as_bytes(), b"-key"]);
+        let value = Sha256::hash(&[suffix.as_bytes(), b"-value"]);
         let batch = db
             .new_batch()
             .write(key, Some(value))
@@ -1677,8 +1677,8 @@ mod tests {
             let (slot, database) = pair.databases[1].write().await;
             let mut batch = database.new_batch();
             for index in 0u64..16 {
-                let key = Sha256::hash(&[b"key", &index.to_be_bytes()], &Sequential);
-                let value = Sha256::hash(&[b"value", &index.to_be_bytes()], &Sequential);
+                let key = Sha256::hash(&[b"key", &index.to_be_bytes()]);
+                let value = Sha256::hash(&[b"value", &index.to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
             let batch = batch

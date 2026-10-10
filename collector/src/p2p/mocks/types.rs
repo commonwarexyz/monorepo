@@ -1,6 +1,5 @@
 use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{Committable, Digestible, Hasher, Sha256, sha256::Digest};
-use commonware_parallel::Sequential;
 use commonware_runtime::BufMut;
 
 /// A mock request for testing
@@ -34,17 +33,14 @@ impl Committable for Request {
     type Commitment = Digest;
 
     fn commitment(&self) -> Self::Commitment {
-        Sha256::hash(&[&self.id.to_be_bytes()], &Sequential)
+        Sha256::hash(&[&self.id.to_be_bytes()])
     }
 }
 
 impl Digestible for Request {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
-        Sha256::hash(
-            &[&self.id.to_be_bytes(), &self.data.to_be_bytes()],
-            &Sequential,
-        )
+        Sha256::hash(&[&self.id.to_be_bytes(), &self.data.to_be_bytes()])
     }
 }
 
@@ -80,7 +76,7 @@ impl FixedSize for Response {
 impl Committable for Response {
     type Commitment = Digest;
     fn commitment(&self) -> Self::Commitment {
-        Sha256::hash(&[&self.id.to_be_bytes()], &Sequential)
+        Sha256::hash(&[&self.id.to_be_bytes()])
     }
 }
 
@@ -88,9 +84,6 @@ impl Digestible for Response {
     type Digest = <Sha256 as Hasher>::Digest;
 
     fn digest(&self) -> Self::Digest {
-        Sha256::hash(
-            &[&self.id.to_be_bytes(), &self.result.to_be_bytes()],
-            &Sequential,
-        )
+        Sha256::hash(&[&self.id.to_be_bytes(), &self.result.to_be_bytes()])
     }
 }

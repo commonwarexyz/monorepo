@@ -1198,7 +1198,6 @@ mod tests {
     use commonware_codec::{Decode, Encode, EncodeSize};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
-    use commonware_parallel::Sequential;
 
     type D = sha256::Digest;
     type H = Standard<Sha256>;
@@ -1329,7 +1328,7 @@ mod tests {
     }
 
     fn test_digest(v: u8) -> D {
-        <Sha256 as commonware_cryptography::Hasher>::hash(&[&[v]], &Sequential)
+        <Sha256 as commonware_cryptography::Hasher>::hash(&[&[v]])
     }
 
     /// Build an in-memory Merkle structure with `n` elements (element i = i.to_be_bytes()).
@@ -2236,9 +2235,7 @@ mod tests {
 
         // 252 leaves. Leaf 240 sits in a peak preceded by prefix peaks.
         let elements: Vec<D> = (0..252u16)
-            .map(|i| {
-                <Sha256 as commonware_cryptography::Hasher>::hash(&[&i.to_be_bytes()], &Sequential)
-            })
+            .map(|i| <Sha256 as commonware_cryptography::Hasher>::hash(&[&i.to_be_bytes()]))
             .collect();
         let batch = {
             let mut batch = mem.new_batch();

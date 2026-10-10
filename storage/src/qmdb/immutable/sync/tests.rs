@@ -505,7 +505,7 @@ pub(crate) mod harnesses {
 
     /// Returns the key set at `loc`. Each key is set at most once, so each location gets its own.
     fn key_at(loc: u64) -> sha256::Digest {
-        Sha256::hash(&[&loc.to_be_bytes()], &Sequential)
+        Sha256::hash(&[&loc.to_be_bytes()])
     }
 
     async fn compact_apply<F, V, C>(

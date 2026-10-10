@@ -2,7 +2,6 @@ use crate::types::Height;
 use bytes::BufMut;
 use commonware_codec::{Buf, Codec, EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
 use commonware_cryptography::{Digest, Digestible, Hasher};
-use commonware_parallel::Sequential;
 use std::fmt::Debug;
 
 /// A mock block with no explicit consensus context.
@@ -92,14 +91,11 @@ impl<H: Hasher> Digestible for EmptyBlock<H> {
     type Digest = H::Digest;
 
     fn digest(&self) -> H::Digest {
-        H::hash(
-            &[
-                self.parent.as_ref(),
-                &self.height.get().to_be_bytes(),
-                &self.timestamp.to_be_bytes(),
-            ],
-            &Sequential,
-        )
+        H::hash(&[
+            self.parent.as_ref(),
+            &self.height.get().to_be_bytes(),
+            &self.timestamp.to_be_bytes(),
+        ])
     }
 }
 
@@ -151,15 +147,12 @@ impl<D: Digest, C: Codec> Block<D, C> {
         height: Height,
         timestamp: u64,
     ) -> D {
-        H::hash(
-            &[
-                parent.as_ref(),
-                &height.get().to_be_bytes(),
-                &context.encode(),
-                &timestamp.to_be_bytes(),
-            ],
-            &Sequential,
-        )
+        H::hash(&[
+            parent.as_ref(),
+            &height.get().to_be_bytes(),
+            &context.encode(),
+            &timestamp.to_be_bytes(),
+        ])
     }
 
     pub fn new<H: Hasher<Digest = D>>(

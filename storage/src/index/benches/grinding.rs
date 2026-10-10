@@ -12,7 +12,6 @@
 
 use super::DummyMetrics;
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_parallel::Sequential;
 use commonware_storage::{
     index::{Unordered, partitioned},
     translator::Cap,
@@ -37,7 +36,7 @@ fn keys(items: usize, grinding: bool) -> Vec<[u8; 8]> {
             if grinding {
                 i.to_be_bytes()
             } else {
-                Sha256::hash(&[&i.to_be_bytes()], &Sequential).as_ref()[..8]
+                Sha256::hash(&[&i.to_be_bytes()]).as_ref()[..8]
                     .try_into()
                     .unwrap()
             }

@@ -14,7 +14,6 @@ mod tests {
         mmr::{Error, Location, Position, StandardHasher as Standard},
     };
     use commonware_cryptography::{Hasher, Sha256, sha256};
-    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, Strategizer, deterministic, tokio};
     use commonware_utils::NZUsize;
 
@@ -203,10 +202,7 @@ mod tests {
 
             assert!(matches!(
                 Mmr::init(Config {
-                    nodes: vec![
-                        Sha256::hash(&[b"node1"], &Sequential),
-                        Sha256::hash(&[b"node2"], &Sequential)
-                    ],
+                    nodes: vec![Sha256::hash(&[b"node1"]), Sha256::hash(&[b"node2"])],
                     pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 }),
@@ -216,9 +212,9 @@ mod tests {
             assert!(
                 Mmr::init(Config {
                     nodes: vec![
-                        Sha256::hash(&[b"leaf1"], &Sequential),
-                        Sha256::hash(&[b"leaf2"], &Sequential),
-                        Sha256::hash(&[b"parent"], &Sequential),
+                        Sha256::hash(&[b"leaf1"]),
+                        Sha256::hash(&[b"leaf2"]),
+                        Sha256::hash(&[b"parent"]),
                     ],
                     pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],

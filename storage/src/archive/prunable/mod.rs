@@ -131,7 +131,6 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_cryptography::{Hasher as _, Sha256};
-//! use commonware_parallel::Sequential;
 //! use commonware_storage::{
 //!     translator::FourCap,
 //!     archive::{
@@ -160,7 +159,7 @@
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
 //!     // Put a key
-//!     archive = archive.put(1, Sha256::hash(&[b"data"], &Sequential), &10).await.unwrap();
+//!     archive = archive.put(1, Sha256::hash(&[b"data"]), &10).await.unwrap();
 //!
 //!     // Sync the archive
 //!     archive.sync().await.unwrap();

@@ -12,7 +12,6 @@ use alloy_sol_types::{SolType, SolValue};
 use clap::{Args, Subcommand};
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher, Keccak256, Sha256};
-use commonware_parallel::Sequential;
 use commonware_storage::{
     merkle::{Family, Graftable, Location, PendingChunk as _, mem::Mem, mmb, mmr},
     qmdb::{
@@ -708,15 +707,12 @@ fn materialize_current<F: Graftable, H: Hasher, const N: usize>(
     let grafted_root = grafted
         .root(&hasher, inactive_current)
         .map_err(|e| e.to_string())?;
-    let pending = (leaves / chunk_bits > graftable)
-        .then(|| H::hash(&[status.get_chunk(graftable as usize)], &Sequential));
+    let pending =
+        (leaves / chunk_bits > graftable).then(|| H::hash(&[status.get_chunk(graftable as usize)]));
     let partial = (!leaves.is_multiple_of(chunk_bits)).then(|| {
         (
             leaves % chunk_bits,
-            H::hash(
-                &[status.get_chunk((leaves / chunk_bits) as usize)],
-                &Sequential,
-            ),
+            H::hash(&[status.get_chunk((leaves / chunk_bits) as usize)]),
         )
     });
     let witness = OpsRootWitness::<F, H::Digest> {

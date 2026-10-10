@@ -449,11 +449,7 @@ mod tests {
         );
 
         // Route a quorum of notarizes through the round as network votes.
-        let proposal = Proposal::new(
-            round_id,
-            View::new(0),
-            Sha256::hash(&[b"payload"], &strategy),
-        );
+        let proposal = Proposal::new(round_id, View::new(0), Sha256::hash(&[b"payload"]));
         round.set_leader(Participant::from_usize(0));
         for (i, scheme) in schemes.iter().enumerate() {
             let notarize = Notarize::sign(scheme, proposal.clone()).unwrap();
@@ -513,11 +509,7 @@ mod tests {
             assert!(!S::is_attributable());
             let quorum = quorum(schemes.len().try_into().unwrap()) as usize;
             let round_id = Round::new(Epoch::new(9), View::new(7));
-            let proposal = Proposal::new(
-                round_id,
-                View::new(6),
-                Sha256::hash(&[b"optimistic"], &Sequential),
-            );
+            let proposal = Proposal::new(round_id, View::new(6), Sha256::hash(&[b"optimistic"]));
             let votes: Vec<_> = schemes
                 .iter()
                 .take(quorum)
@@ -561,11 +553,8 @@ mod tests {
             // Proposal authority is established before returning the certificate.
             // A conflicting certificate must not replace the winning proposal.
             if kind != Kind::Nullification {
-                let conflicting = Proposal::new(
-                    round_id,
-                    View::new(6),
-                    Sha256::hash(&[b"conflicting"], &Sequential),
-                );
+                let conflicting =
+                    Proposal::new(round_id, View::new(6), Sha256::hash(&[b"conflicting"]));
                 let certificate = match kind {
                     Kind::Notarization => Certificate::Finalization(build_finalization(
                         &schemes,
@@ -617,11 +606,7 @@ mod tests {
             } = fixture(&mut rng, b"batcher_optimistic_fallback", 7);
             let quorum = quorum(schemes.len().try_into().unwrap()) as usize;
             let round_id = Round::new(Epoch::new(10), View::new(8));
-            let proposal = Proposal::new(
-                round_id,
-                View::new(7),
-                Sha256::hash(&[b"fallback"], &Sequential),
-            );
+            let proposal = Proposal::new(round_id, View::new(7), Sha256::hash(&[b"fallback"]));
             let mut votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| sign_vote(scheme, kind, round_id, &proposal))
@@ -744,11 +729,7 @@ mod tests {
         );
         let quorum = quorum(schemes.len().try_into().unwrap()) as usize;
         let round_id = Round::new(Epoch::new(10), View::new(9));
-        let proposal = Proposal::new(
-            round_id,
-            View::new(8),
-            Sha256::hash(&[b"per_kind"], &Sequential),
-        );
+        let proposal = Proposal::new(round_id, View::new(8), Sha256::hash(&[b"per_kind"]));
         let mut notarizes: Vec<_> = schemes
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
@@ -830,11 +811,7 @@ mod tests {
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut rng, b"batcher_vrf_seed_corruption", 5);
         let quorum = quorum(schemes.len().try_into().unwrap()) as usize;
         let round_id = Round::new(Epoch::new(11), View::new(9));
-        let proposal = Proposal::new(
-            round_id,
-            View::new(8),
-            Sha256::hash(&[b"seed"], &Sequential),
-        );
+        let proposal = Proposal::new(round_id, View::new(8), Sha256::hash(&[b"seed"]));
         let mut votes: Vec<_> = schemes
             .iter()
             .take(quorum)
@@ -846,7 +823,7 @@ mod tests {
         let other_proposal = Proposal::new(
             Round::new(Epoch::new(11), View::new(10)),
             View::new(9),
-            Sha256::hash(&[b"other"], &Sequential),
+            Sha256::hash(&[b"other"]),
         );
         let other = Notarize::sign(&schemes[0], other_proposal).unwrap();
         corrupt_seed(&mut votes[0], &other);
@@ -891,11 +868,7 @@ mod tests {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, b"batcher_test", 1);
         let round_id = Round::new(Epoch::new(0), View::new(2));
-        let proposal = Proposal::new(
-            round_id,
-            View::new(1),
-            Sha256::hash(&[b"constructed"], &Sequential),
-        );
+        let proposal = Proposal::new(round_id, View::new(1), Sha256::hash(&[b"constructed"]));
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
@@ -961,11 +934,7 @@ mod tests {
         );
         round.set_leader(Participant::from_usize(0));
 
-        let proposal = Proposal::new(
-            round_id,
-            View::zero(),
-            Sha256::hash(&[b"payload"], &Sequential),
-        );
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"payload"]));
         let leader_vote = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
         assert!(matches!(
             round.accept_vote(Vote::Notarize(leader_vote.clone()), true),
@@ -1039,11 +1008,7 @@ mod tests {
         );
 
         // The leader's notarize arrives before the leader is known
-        let proposal = Proposal::new(
-            round_id,
-            View::new(0),
-            Sha256::hash(&[b"payload"], &Sequential),
-        );
+        let proposal = Proposal::new(round_id, View::new(0), Sha256::hash(&[b"payload"]));
         let notarize = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
         assert!(round.add_network(participants[0].clone(), Vote::Notarize(notarize)));
 
@@ -1072,16 +1037,8 @@ mod tests {
             ..
         } = ed25519::fixture(&mut rng, b"batcher_test", 5);
         let round_id = Round::new(Epoch::new(0), View::new(1));
-        let proposal = Proposal::new(
-            round_id,
-            View::zero(),
-            Sha256::hash(&[b"payload"], &Sequential),
-        );
-        let conflicting = Proposal::new(
-            round_id,
-            View::zero(),
-            Sha256::hash(&[b"conflicting"], &Sequential),
-        );
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"payload"]));
+        let conflicting = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"conflicting"]));
         let (first, second) = if first_matches {
             (&proposal, &conflicting)
         } else {
@@ -1156,11 +1113,7 @@ mod tests {
             ..
         } = ed25519::fixture(&mut rng, b"batcher_test", 5);
         let round_id = Round::new(Epoch::new(0), View::new(1));
-        let proposal = Proposal::new(
-            round_id,
-            View::zero(),
-            Sha256::hash(&[b"payload"], &Sequential),
-        );
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"payload"]));
         let activities = Arc::new(Mutex::new(Vec::new()));
         let mut round = super::Round::new(
             round_id,
@@ -1195,11 +1148,7 @@ mod tests {
             RecordingReporter(activities.clone()),
             false,
         );
-        let proposal = Proposal::new(
-            round_id,
-            View::zero(),
-            Sha256::hash(&[b"payload"], &Sequential),
-        );
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"payload"]));
         assert!(round.add_network(
             participants[1].clone(),
             Vote::Finalize(Finalize::sign(&schemes[1], proposal.clone()).unwrap()),
@@ -1254,11 +1203,7 @@ mod tests {
             ..
         } = ed25519::fixture(&mut rng, b"batcher_test", 5);
         let round_id = Round::new(Epoch::new(0), View::new(1));
-        let proposal = Proposal::new(
-            round_id,
-            View::zero(),
-            Sha256::hash(&[b"payload"], &Sequential),
-        );
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"payload"]));
 
         let mut round = super::Round::new(
             round_id,
@@ -1308,11 +1253,7 @@ mod tests {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"batcher_test", 5);
         let round_id = Round::new(Epoch::new(0), View::new(1));
-        let proposal = Proposal::new(
-            round_id,
-            View::zero(),
-            Sha256::hash(&[b"payload"], &Sequential),
-        );
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"payload"]));
         let activities = Arc::new(Mutex::new(Vec::new()));
         let mut round = super::Round::new(
             round_id,
@@ -1424,11 +1365,7 @@ mod tests {
         );
 
         // The leader's notarize arrives before the leader is known.
-        let leader_proposal = Proposal::new(
-            round_id,
-            View::zero(),
-            Sha256::hash(&[b"leader"], &Sequential),
-        );
+        let leader_proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"leader"]));
         let notarize = Notarize::sign(&schemes[0], leader_proposal).unwrap();
         assert!(round.add_network(participants[0].clone(), Vote::Notarize(notarize)));
 
@@ -1436,11 +1373,7 @@ mod tests {
         round.set_leader(Participant::from_usize(0));
 
         // The finalization replaces the leader-selected proposal.
-        let proposal = Proposal::new(
-            round_id,
-            View::zero(),
-            Sha256::hash(&[b"finalized"], &Sequential),
-        );
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"finalized"]));
         let finalization = build_finalization(&schemes, &proposal, quorum(5) as usize);
         assert!(!round.record_certificate(&Certificate::Finalization(finalization)));
         assert!(round.has_certificate(Kind::Finalization));
@@ -1462,7 +1395,7 @@ mod tests {
         let proposal = Proposal::new(
             round_id,
             View::zero(),
-            Sha256::hash(&[b"notarized_payload"], &Sequential),
+            Sha256::hash(&[b"notarized_payload"]),
         );
         let mut round = super::Round::new(
             round_id,
@@ -1496,11 +1429,7 @@ mod tests {
             } = ed25519::fixture(&mut rng, b"batcher_test", 5);
             let quorum_size = quorum(5) as usize;
             let round_id = Round::new(Epoch::new(0), View::new(1));
-            let proposal = Proposal::new(
-                round_id,
-                View::zero(),
-                Sha256::hash(&[b"certified"], &Sequential),
-            );
+            let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"certified"]));
             let mut round = super::Round::new(
                 round_id,
                 Arc::new(verifier),
@@ -1548,11 +1477,8 @@ mod tests {
             let certificate = certificate.expect("verified quorum must construct a certificate");
             assert_eq!(certificate.kind(), kind);
 
-            let conflicting = Proposal::new(
-                round_id,
-                View::zero(),
-                Sha256::hash(&[b"conflicting"], &Sequential),
-            );
+            let conflicting =
+                Proposal::new(round_id, View::zero(), Sha256::hash(&[b"conflicting"]));
             let conflicting = match kind {
                 Kind::Notarization => Certificate::Finalization(build_finalization(
                     &schemes,
@@ -1594,19 +1520,11 @@ mod tests {
             NoopReporter(PhantomData),
             false,
         );
-        let proposal = Proposal::new(
-            round_id,
-            View::zero(),
-            Sha256::hash(&[b"notarized"], &Sequential),
-        );
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"notarized"]));
 
         // Select a conflicting proposal from the leader's buffered vote.
         let leader = Participant::from_usize(quorum_size);
-        let conflicting = Proposal::new(
-            round_id,
-            View::zero(),
-            Sha256::hash(&[b"conflicting"], &Sequential),
-        );
+        let conflicting = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"conflicting"]));
         let notarize = Notarize::sign(&schemes[quorum_size], conflicting).unwrap();
         assert!(round.add_network(participants[quorum_size].clone(), Vote::Notarize(notarize)));
         round.set_leader(leader);
@@ -1662,11 +1580,7 @@ mod tests {
             NoopReporter(PhantomData),
             false,
         );
-        let proposal = Proposal::new(
-            round_id,
-            View::zero(),
-            Sha256::hash(&[b"notarized"], &Sequential),
-        );
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"notarized"]));
 
         // Buffer some matching finalizes before selecting a proposal.
         for i in 0..quorum_size / 2 {
@@ -1676,11 +1590,7 @@ mod tests {
 
         // Selecting a conflicting leader proposal filters the buffered votes.
         let leader = Participant::from_usize(quorum_size);
-        let conflicting = Proposal::new(
-            round_id,
-            View::zero(),
-            Sha256::hash(&[b"conflicting"], &Sequential),
-        );
+        let conflicting = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"conflicting"]));
         let notarize = Notarize::sign(&schemes[quorum_size], conflicting).unwrap();
         assert!(round.add_network(participants[quorum_size].clone(), Vote::Notarize(notarize)));
         round.set_leader(leader);
@@ -1734,11 +1644,7 @@ mod tests {
         );
 
         // A quorum of notarizes and a nullify from every participant
-        let proposal = Proposal::new(
-            round_id,
-            View::zero(),
-            Sha256::hash(&[b"payload"], &Sequential),
-        );
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"payload"]));
         for (i, scheme) in schemes.iter().enumerate() {
             if i < quorum {
                 let vote = Notarize::sign(scheme, proposal.clone()).unwrap();
@@ -1826,7 +1732,7 @@ mod tests {
             let leader = Participant::from_usize(4);
             batcher_mailbox.update(Span::none(), view, leader, View::zero(), None);
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"payload"], &Sequential));
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"payload"]));
 
             // Buffer finalizes and non-leader notarizes while the leader's
             // proposal is unknown. Both kinds become verifiable together when
@@ -1922,16 +1828,8 @@ mod tests {
                 false,
             );
 
-            let proposal_a = Proposal::new(
-                round_id,
-                View::new(6),
-                Sha256::hash(&[b"proposal_a"], &Sequential),
-            );
-            let proposal_b = Proposal::new(
-                round_id,
-                View::new(6),
-                Sha256::hash(&[b"proposal_b"], &Sequential),
-            );
+            let proposal_a = Proposal::new(round_id, View::new(6), Sha256::hash(&[b"proposal_a"]));
+            let proposal_b = Proposal::new(round_id, View::new(6), Sha256::hash(&[b"proposal_b"]));
             round.set_leader(Participant::new(0));
             round.accept_vote(
                 Vote::Notarize(Notarize::sign(&schemes[0], proposal_a.clone()).unwrap()),
@@ -2081,11 +1979,7 @@ mod tests {
         context.sleep(Duration::from_millis(5)).await;
 
         let round = Round::new(epoch, view);
-        let proposal = Proposal::new(
-            round,
-            View::zero(),
-            Sha256::hash(&[b"test_payload"], &Sequential),
-        );
+        let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
 
         for i in 1..=quorum {
             let vote = Finalize::sign(&schemes[i], proposal.clone()).unwrap();
@@ -2243,8 +2137,8 @@ mod tests {
                 false,
             );
 
-            let proposal_a = Proposal::new(round_id, View::new(6), Sha256::hash(&[b"proposal_a"], &Sequential));
-            let proposal_b = Proposal::new(round_id, View::new(6), Sha256::hash(&[b"proposal_b"], &Sequential));
+            let proposal_a = Proposal::new(round_id, View::new(6), Sha256::hash(&[b"proposal_a"]));
+            let proposal_b = Proposal::new(round_id, View::new(6), Sha256::hash(&[b"proposal_b"]));
             round.record_certificate(&Certificate::Notarization(build_notarization(
                 &schemes,
                 &proposal_b,
@@ -2370,7 +2264,7 @@ mod tests {
 
             // Build certificates
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"], &Sequential));
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
 
             let notarization = build_notarization(&schemes, &proposal, quorum);
             let nullification = build_nullification(&schemes, round, quorum);
@@ -2544,7 +2438,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, future),
                 current,
-                Sha256::hash(&[b"future_payload"], &Sequential),
+                Sha256::hash(&[b"future_payload"]),
             );
 
             // Buffer the network finalize votes before the notarization. The
@@ -2707,7 +2601,7 @@ mod tests {
 
             // Build certificates for the same target view.
             let round = Round::new(epoch, target_view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"], &Sequential));
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
             let nullification = build_nullification(&schemes, round, quorum_size);
             let notarization = build_notarization(&schemes, &proposal, quorum_size);
 
@@ -2850,11 +2744,7 @@ mod tests {
             );
 
             let round = Round::new(epoch, target_view);
-            let proposal = Proposal::new(
-                round,
-                View::zero(),
-                Sha256::hash(&[b"test_payload"], &Sequential),
-            );
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
 
             // A valid certificate must not block the sender.
             let nullification = build_nullification(&schemes, round, quorum_size);
@@ -2874,11 +2764,8 @@ mod tests {
             // covers the substituted proposal, so verification must fail and
             // the sender must be blocked.
             let mut notarization = build_notarization(&schemes, &proposal, quorum_size);
-            notarization.proposal = Proposal::new(
-                round,
-                View::zero(),
-                Sha256::hash(&[b"other_payload"], &Sequential),
-            );
+            notarization.proposal =
+                Proposal::new(round, View::zero(), Sha256::hash(&[b"other_payload"]));
             injector_sender.send(
                 Recipients::One(me.clone()),
                 Certificate::Notarization(notarization).encode(),
@@ -2997,7 +2884,7 @@ mod tests {
             let future_view = View::new(3);
             let future_round = Round::new(epoch, future_view);
             let future_proposal =
-                Proposal::new(future_round, View::zero(), Sha256::hash(&[b"future_payload"], &Sequential));
+                Proposal::new(future_round, View::zero(), Sha256::hash(&[b"future_payload"]));
             let notarization = build_notarization(&schemes, &future_proposal, quorum_size);
             injector_sender
                 .send(
@@ -3140,7 +3027,7 @@ mod tests {
 
             // Build proposal and votes
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"], &Sequential));
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
 
             // Send notarize votes from participants 1..quorum_size (excluding participant 0)
             // Participant 0's vote will be sent via mailbox.constructed()
@@ -3168,7 +3055,7 @@ mod tests {
             // Should receive the leader's proposal first (participant 1 is leader)
             let output = voter_receiver.recv().await.unwrap();
             assert!(
-                matches!(&output, voter::Message::Proposal { proposal: p, .. } if p.view() == view && p.payload == Sha256::hash(&[b"test_payload"], &Sequential))
+                matches!(&output, voter::Message::Proposal { proposal: p, .. } if p.view() == view && p.payload == Sha256::hash(&[b"test_payload"]))
             );
 
             // Should receive notarization certificate from quorum of votes
@@ -3324,11 +3211,7 @@ mod tests {
 
             let view = View::new(1);
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(
-                round,
-                View::zero(),
-                Sha256::hash(&[b"actor_fallback"], &Sequential),
-            );
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"actor_fallback"]));
             let leader = Participant::from_usize(1);
             batcher_mailbox.update(Span::none(), view, leader, View::zero(), None);
 
@@ -3340,7 +3223,7 @@ mod tests {
                 Proposal::new(
                     Round::new(epoch, view.next()),
                     view,
-                    Sha256::hash(&[b"other_round"], &Sequential),
+                    Sha256::hash(&[b"other_round"]),
                 ),
             )
             .unwrap();
@@ -3567,7 +3450,7 @@ mod tests {
             batcher_mailbox.update(Span::none(), view, Participant::new(1), View::zero(), None);
 
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"], &Sequential));
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
 
             // Send notarize votes from participants 1..quorum_size via network
             for i in 1..quorum_size {
@@ -3736,7 +3619,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, view),
                 View::zero(),
-                Sha256::hash(&[b"silent_leader_payload"], &Sequential),
+                Sha256::hash(&[b"silent_leader_payload"]),
             );
 
             // Toggle whether the next leader appears in the observed vote set.
@@ -3984,7 +3867,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, view),
                 View::zero(),
-                Sha256::hash(&[b"payload"], &Sequential),
+                Sha256::hash(&[b"payload"]),
             );
             for i in 1..(quorum_size - 1) {
                 let vote = Notarize::sign(&schemes[i], proposal.clone()).unwrap();
@@ -4181,7 +4064,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, view),
                 View::zero(),
-                Sha256::hash(&[b"certificate_only_payload"], &Sequential),
+                Sha256::hash(&[b"certificate_only_payload"]),
             );
             let notarization = build_notarization(&schemes, &proposal, quorum_size);
             injector_sender
@@ -4341,8 +4224,8 @@ mod tests {
             batcher_mailbox.update(Span::none(), view2, leader2, View::zero(), None);
 
             let round2 = Round::new(epoch, view2);
-            let proposal_a = Proposal::new(round2, View::new(1), Sha256::hash(&[b"proposal_a"], &Sequential));
-            let proposal_b = Proposal::new(round2, View::new(1), Sha256::hash(&[b"proposal_b"], &Sequential));
+            let proposal_a = Proposal::new(round2, View::new(1), Sha256::hash(&[b"proposal_a"]));
+            let proposal_b = Proposal::new(round2, View::new(1), Sha256::hash(&[b"proposal_b"]));
 
             let leader_vote = Notarize::sign(&schemes[1], proposal_a.clone()).unwrap();
             if let Some(ref mut sender) = participant_senders[1] {
@@ -4551,7 +4434,7 @@ mod tests {
             batcher_mailbox.update(Span::none(), view2, leader2, View::zero(), None);
 
             let round2 = Round::new(epoch, view2);
-            let proposal = Proposal::new(round2, View::new(1), Sha256::hash(&[b"payload"], &Sequential));
+            let proposal = Proposal::new(round2, View::new(1), Sha256::hash(&[b"payload"]));
 
             // Send finalize BEFORE notarize votes so it is processed before
             // quorum is reached and missing_voters is called.
@@ -4761,7 +4644,7 @@ mod tests {
 
             // Build proposal, votes, and certificate
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"], &Sequential));
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
             let notarization = build_notarization(&schemes, &proposal, quorum_size);
 
             // Send some votes (but not enough for quorum), starting with leader (participant 1)
@@ -4929,8 +4812,8 @@ mod tests {
 
             // Build TWO different proposals for the same view
             let round = Round::new(epoch, view);
-            let proposal_a = Proposal::new(round, View::zero(), Sha256::hash(&[b"payload_a"], &Sequential));
-            let proposal_b = Proposal::new(round, View::zero(), Sha256::hash(&[b"payload_b"], &Sequential));
+            let proposal_a = Proposal::new(round, View::zero(), Sha256::hash(&[b"payload_a"]));
+            let proposal_b = Proposal::new(round, View::zero(), Sha256::hash(&[b"payload_b"]));
 
             // Send vote for proposal_a from participant 1 (the leader)
             // This establishes proposal_a as the leader's proposal
@@ -4952,7 +4835,7 @@ mod tests {
             let output = voter_receiver.recv().await.unwrap();
             assert!(matches!(
                 &output,
-                voter::Message::Proposal { proposal: p, .. } if p.view() == view && p.payload == Sha256::hash(&[b"payload_a"], &Sequential)
+                voter::Message::Proposal { proposal: p, .. } if p.view() == view && p.payload == Sha256::hash(&[b"payload_a"])
             ));
 
             // Now send votes for proposal_b from participants 2, 3, 4, 5 (4 votes)
@@ -5126,7 +5009,7 @@ mod tests {
 
             // Build proposal and leader's vote
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"], &Sequential));
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
             let leader_vote = Notarize::sign(&schemes[1], proposal.clone()).unwrap();
 
             // Now send the leader's vote - this should trigger proposal forwarding
@@ -5143,7 +5026,7 @@ mod tests {
             // Should receive the leader's proposal forwarded to voter
             let output = voter_receiver.recv().await.unwrap();
             assert!(
-                matches!(&output, voter::Message::Proposal { proposal: p, .. } if p.view() == view && p.payload == Sha256::hash(&[b"test_payload"], &Sequential)),
+                matches!(&output, voter::Message::Proposal { proposal: p, .. } if p.view() == view && p.payload == Sha256::hash(&[b"test_payload"])),
                 "Expected proposal to be forwarded after leader set"
             );
         });
@@ -5240,7 +5123,7 @@ mod tests {
             // Build proposal and leader's vote for view 1 with participant 1 as leader
             let view = View::new(1);
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"], &Sequential));
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
             let leader_vote = Notarize::sign(&schemes[1], proposal.clone()).unwrap();
 
             // Send the leader's vote BEFORE setting the leader
@@ -5264,7 +5147,7 @@ mod tests {
             // Should receive the leader's proposal forwarded to voter
             let output = voter_receiver.recv().await.unwrap();
             assert!(
-                matches!(&output, voter::Message::Proposal { proposal: p, .. } if p.view() == view && p.payload == Sha256::hash(&[b"test_payload"], &Sequential)),
+                matches!(&output, voter::Message::Proposal { proposal: p, .. } if p.view() == view && p.payload == Sha256::hash(&[b"test_payload"])),
                 "Expected proposal to be forwarded after leader set (vote arrived before leader was known)"
             );
         });
@@ -5360,7 +5243,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, future_view),
                 View::new(2),
-                Sha256::hash(&[b"optimistic_future_proposal"], &Sequential),
+                Sha256::hash(&[b"optimistic_future_proposal"]),
             );
             let vote = Notarize::sign(&schemes[usize::from(leader)], proposal.clone()).unwrap();
             let _ = leader_sender.send(
@@ -6059,7 +5942,7 @@ mod tests {
             // Deliver a certificate from the leader on the certificate channel. Even
             // without any vote traffic, that relay should count as fresh activity.
             let round = Round::new(epoch, active_view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"], &Sequential));
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
             let finalization = build_finalization(&schemes, &proposal, quorum_size);
             leader_sender
                 .send(
@@ -6409,7 +6292,7 @@ mod tests {
             // With optimistic_views=2 and term_length=5, view 3 is accepted while
             // view 4 is still too far in the future.
             let accepted_view = View::new(3);
-            let accepted_payload = Sha256::hash(&[b"accepted_optimistic_view"], &Sequential);
+            let accepted_payload = Sha256::hash(&[b"accepted_optimistic_view"]);
             let accepted_vote = Notarize::sign(
                 &schemes[usize::from(peer)],
                 Proposal::new(
@@ -6446,7 +6329,7 @@ mod tests {
                 Proposal::new(
                     Round::new(epoch, rejected_view),
                     View::new(3),
-                    Sha256::hash(&[b"rejected_optimistic_view"], &Sequential),
+                    Sha256::hash(&[b"rejected_optimistic_view"]),
                 ),
             )
             .expect("notarize");
@@ -6544,7 +6427,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, future_view),
                 View::new(2),
-                Sha256::hash(&[b"same_term_future_notarization"], &Sequential),
+                Sha256::hash(&[b"same_term_future_notarization"]),
             );
 
             // Send quorum votes for an optimistic future view while current remains at view 1.
@@ -6695,7 +6578,7 @@ mod tests {
 
             // Part 1: Send NOTARIZE votes for view 1 (above finalized=0, should succeed)
             let round1 = Round::new(epoch, view1);
-            let proposal1 = Proposal::new(round1, View::zero(), Sha256::hash(&[b"payload1"], &Sequential));
+            let proposal1 = Proposal::new(round1, View::zero(), Sha256::hash(&[b"payload1"]));
             for i in 1..quorum_size {
                 let vote = Notarize::sign(&schemes[i], proposal1.clone()).unwrap();
                 if let Some(ref mut sender) = participant_senders[i] {
@@ -6736,7 +6619,7 @@ mod tests {
 
             // Send NOTARIZE votes for view 2 (now at finalized=2, should NOT succeed)
             let round2 = Round::new(epoch, view2);
-            let proposal2 = Proposal::new(round2, view1, Sha256::hash(&[b"payload2"], &Sequential));
+            let proposal2 = Proposal::new(round2, view1, Sha256::hash(&[b"payload2"]));
             for i in 1..quorum_size {
                 let vote = Notarize::sign(&schemes[i], proposal2.clone()).unwrap();
                 if let Some(ref mut sender) = participant_senders[i] {
@@ -6864,7 +6747,7 @@ mod tests {
             let stale_proposal = Proposal::new(
                 Round::new(epoch, stale_view),
                 View::zero(),
-                Sha256::hash(&[b"stale"], &Sequential),
+                Sha256::hash(&[b"stale"]),
             );
             let stale = Notarize::sign(&schemes[1], stale_proposal.clone()).unwrap();
             peer_sender.send(
@@ -6878,11 +6761,8 @@ mod tests {
             // pipeline reports activity above the floor
             let current = floor.next();
             batcher_mailbox.update(Span::none(), current, Participant::new(1), floor, None);
-            let live_proposal = Proposal::new(
-                Round::new(epoch, current),
-                floor,
-                Sha256::hash(&[b"live"], &Sequential),
-            );
+            let live_proposal =
+                Proposal::new(Round::new(epoch, current), floor, Sha256::hash(&[b"live"]));
             let live = Notarize::sign(&schemes[1], live_proposal.clone()).unwrap();
             peer_sender.send(Recipients::One(me), Vote::Notarize(live).encode(), true);
             while reporter
@@ -7014,7 +6894,7 @@ mod tests {
             let stale_proposal = Proposal::new(
                 Round::new(epoch, stale_view),
                 View::new(6),
-                Sha256::hash(&[b"stale"], &Sequential),
+                Sha256::hash(&[b"stale"]),
             );
             let stale = Notarize::sign(&schemes[1], stale_proposal).unwrap();
             peer_sender.send(
@@ -7030,7 +6910,7 @@ mod tests {
             let window_proposal = Proposal::new(
                 Round::new(epoch, window_view),
                 View::new(8),
-                Sha256::hash(&[b"window"], &Sequential),
+                Sha256::hash(&[b"window"]),
             );
             let window = Notarize::sign(&schemes[1], window_proposal.clone()).unwrap();
             peer_sender.send(Recipients::One(me), Vote::Notarize(window).encode(), true);
@@ -7164,7 +7044,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, future_view),
                 View::new(1),
-                Sha256::hash(&[b"ahead"], &Sequential),
+                Sha256::hash(&[b"ahead"]),
             );
             let notarize = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
             batcher_mailbox.constructed(Vote::Notarize(notarize));
@@ -7341,7 +7221,7 @@ mod tests {
 
             // Build proposal and send enough votes to reach quorum
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"], &Sequential));
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
 
             // Send votes from participants 1 through quorum_size-1 (excluding 0, our own)
             for i in 1..quorum_size {
@@ -7419,7 +7299,7 @@ mod tests {
             // to verify the metric doesn't decrease
             let view3 = View::new(3);
             let round3 = Round::new(epoch, view3);
-            let proposal3 = Proposal::new(round3, View::zero(), Sha256::hash(&[b"payload3"], &Sequential));
+            let proposal3 = Proposal::new(round3, View::zero(), Sha256::hash(&[b"payload3"]));
             let vote_v3 = Notarize::sign(&schemes[1], proposal3).unwrap();
             if let Some(ref mut sender) = participant_senders[1] {
                 sender
@@ -7529,11 +7409,7 @@ mod tests {
             batcher_mailbox.update(Span::none(), view, Participant::new(1), View::zero(), None);
 
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(
-                round,
-                View::zero(),
-                Sha256::hash(&[b"test_payload"], &Sequential),
-            );
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
 
             // Send first valid vote from participant 1
             let vote1 = sign_vote(&schemes[1], proposal.clone());
@@ -7726,16 +7602,8 @@ mod tests {
             batcher_mailbox.update(Span::none(), view, Participant::new(1), View::zero(), None);
 
             let round = Round::new(epoch, view);
-            let proposal1 = Proposal::new(
-                round,
-                View::zero(),
-                Sha256::hash(&[b"payload1"], &Sequential),
-            );
-            let proposal2 = Proposal::new(
-                round,
-                View::zero(),
-                Sha256::hash(&[b"payload2"], &Sequential),
-            );
+            let proposal1 = Proposal::new(round, View::zero(), Sha256::hash(&[b"payload1"]));
+            let proposal2 = Proposal::new(round, View::zero(), Sha256::hash(&[b"payload2"]));
 
             // Send first valid vote for proposal1
             let vote1 = sign_vote(&schemes[1], proposal1);

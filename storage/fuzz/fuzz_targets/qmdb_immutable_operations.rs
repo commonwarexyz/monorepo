@@ -82,7 +82,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 // Derives a key purely from its seed so a Get with the same seed addresses the key a
 // prior Set stored.
 fn generate_key(seed: u64) -> Digest {
-    Sha256::hash(&[&seed.to_be_bytes()], &Sequential)
+    Sha256::hash(&[&seed.to_be_bytes()])
 }
 
 // Derives value bytes purely from a seed, cycled to the clamped size.

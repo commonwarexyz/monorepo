@@ -6,10 +6,9 @@
 //! # Example
 //! ```rust
 //! use commonware_cryptography::{Hasher, Keccak256};
-//! use commonware_parallel::Sequential;
 //!
 //! // Hash data in a single shot
-//! let digest = Keccak256::hash(&[b"hello,", b"world!"], &Sequential);
+//! let digest = Keccak256::hash(&[b"hello,", b"world!"]);
 //! println!("digest: {:?}", digest);
 //!
 //! // Or stream data incrementally
@@ -50,7 +49,7 @@ pub struct Keccak256 {
 impl Hasher for Keccak256 {
     type Digest = Digest;
 
-    fn hash(parts: &[&[u8]], _strategy: &impl Strategy) -> Self::Digest {
+    fn hash(parts: &[&[u8]]) -> Self::Digest {
         let mut hasher = Self::default();
         for part in parts {
             hasher.update(part);
@@ -61,9 +60,9 @@ impl Hasher for Keccak256 {
     fn hash_pair(
         left: &[&[u8]],
         right: &[&[u8]],
-        strategy: &impl Strategy,
+        _strategy: &impl Strategy,
     ) -> (Self::Digest, Self::Digest) {
-        (Self::hash(left, strategy), Self::hash(right, strategy))
+        (Self::hash(left), Self::hash(right))
     }
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
@@ -103,7 +102,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Digest {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let len = u.int_in_range(0..=256)?;
         let data = u.bytes(len)?;
-        Ok(Keccak256::hash(&[data], &commonware_parallel::Sequential))
+        Ok(Keccak256::hash(&[data]))
     }
 }
 
@@ -187,12 +186,9 @@ mod tests {
 
     #[test]
     fn test_known_answers_and_reset() {
-        assert_eq!(Keccak256::hash(&[], &Sequential).as_ref(), EMPTY_DIGEST);
-        assert_eq!(Keccak256::hash(&[b"abc"], &Sequential).as_ref(), ABC_DIGEST);
-        assert_eq!(
-            Keccak256::hash(&[b"a", b"", b"bc"], &Sequential).as_ref(),
-            ABC_DIGEST
-        );
+        assert_eq!(Keccak256::hash(&[]).as_ref(), EMPTY_DIGEST);
+        assert_eq!(Keccak256::hash(&[b"abc"]).as_ref(), ABC_DIGEST);
+        assert_eq!(Keccak256::hash(&[b"a", b"", b"bc"]).as_ref(), ABC_DIGEST);
         assert_eq!(
             Keccak256::hash_pair(&[], &[b"a", b"bc"], &Sequential),
             (Digest(EMPTY_DIGEST), Digest(ABC_DIGEST))
@@ -221,7 +217,7 @@ mod tests {
             let expected: [u8; DIGEST_LENGTH] = CoreKeccak256::digest(&data).into();
             for split in 0..=len {
                 let parts = [&data[..split], &[][..], &data[split..]];
-                assert_eq!(Keccak256::hash(&parts, &Sequential).as_ref(), expected);
+                assert_eq!(Keccak256::hash(&parts).as_ref(), expected);
                 crate::fuzz::Plan::<Keccak256>::new(
                     parts.iter().map(|p| p.to_vec()).collect(),
                     vec![b"abc".to_vec()],
@@ -233,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_codec_and_zeroize() {
-        let mut digest = Keccak256::hash(&[b"abc"], &Sequential);
+        let mut digest = Keccak256::hash(&[b"abc"]);
         let encoded = digest.encode();
         assert_eq!(Digest::SIZE, DIGEST_LENGTH);
         assert_eq!(encoded.as_ref(), ABC_DIGEST);

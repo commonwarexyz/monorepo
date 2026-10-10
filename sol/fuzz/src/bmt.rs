@@ -10,7 +10,6 @@ use alloy_sol_types::{SolValue as _, abi::AbiDecoderConfig, sol_data};
 use clap::{Subcommand, ValueEnum};
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Hasher, Keccak256, Sha256};
-use commonware_parallel::Sequential;
 use commonware_storage::bmt::{Builder, Proof};
 
 type U256 = <sol_data::Uint<256> as alloy_sol_types::SolType>::RustType;
@@ -149,7 +148,7 @@ fn synthetic<H: Hasher>(leaves: u32, index: u32, seed: u64) -> Result<Output, St
         return Err("invalid position".into());
     }
     let element = H::Digest::decode(Copying(leaf(seed, u64::from(index)).as_slice())).unwrap();
-    let mut node = H::hash(&[&index.to_be_bytes(), element.as_ref()], &Sequential);
+    let mut node = H::hash(&[&index.to_be_bytes(), element.as_ref()]);
     let mut position = index;
     let mut width = leaves;
     let mut proof = Vec::new();
@@ -164,16 +163,16 @@ fn synthetic<H: Hasher>(leaves: u32, index: u32, seed: u64) -> Result<Output, St
             sibling
         };
         node = if position.is_multiple_of(2) {
-            H::hash(&[node.as_ref(), sibling.as_ref()], &Sequential)
+            H::hash(&[node.as_ref(), sibling.as_ref()])
         } else {
-            H::hash(&[sibling.as_ref(), node.as_ref()], &Sequential)
+            H::hash(&[sibling.as_ref(), node.as_ref()])
         };
         position /= 2;
         width = width.div_ceil(2);
         level += 1;
     }
     let output = Output {
-        root: H::hash(&[&leaves.to_be_bytes(), node.as_ref()], &Sequential)
+        root: H::hash(&[&leaves.to_be_bytes(), node.as_ref()])
             .as_ref()
             .try_into()
             .unwrap(),

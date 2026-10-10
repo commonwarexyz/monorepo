@@ -11,7 +11,7 @@
 //! use commonware_parallel::Sequential;
 //!
 //! // Hash data in a single shot
-//! let digest = Sha512::hash(&[b"hello,", b"world!"], &Sequential);
+//! let digest = Sha512::hash(&[b"hello,", b"world!"]);
 //! println!("digest: {:?}", digest);
 //!
 //! // Or stream data incrementally
@@ -24,7 +24,7 @@
 //! // Hash independent messages, which may differ in length, in one call
 //! let messages: [&[u8]; 3] = [b"a", b"bc", b"def"];
 //! let digests = Sha512::hash_many(&messages, &Sequential);
-//! assert_eq!(digests[1], Sha512::hash(&[b"bc"], &Sequential));
+//! assert_eq!(digests[1], Sha512::hash(&[b"bc"]));
 //! ```
 
 use crate::Hasher;
@@ -58,9 +58,6 @@ pub type CoreSha512 = sha2::Sha512;
 /// Length of a SHA-512 digest in bytes.
 const DIGEST_LENGTH: usize = 64;
 
-/// The SHA-512 block size in bytes.
-const BLOCK_LENGTH: usize = 128;
-
 #[cfg(target_arch = "x86_64")]
 cpufeatures::new!(has_avx512f, "avx512f");
 
@@ -90,24 +87,28 @@ pub struct Sha512 {
 impl Hasher for Sha512 {
     type Digest = Digest;
 
-    fn hash(parts: &[&[u8]], _strategy: &impl Strategy) -> Self::Digest {
-        hash_serial(parts)
+    fn hash(parts: &[&[u8]]) -> Self::Digest {
+        let mut hasher = CoreSha512::new();
+        for part in parts {
+            hasher.update(part);
+        }
+        Digest(hasher.finalize().into())
     }
 
     fn hash_pair(
         left: &[&[u8]],
         right: &[&[u8]],
-        strategy: &impl Strategy,
+        _strategy: &impl Strategy,
     ) -> (Self::Digest, Self::Digest) {
-        (Self::hash(left, strategy), Self::hash(right, strategy))
+        (Self::hash(left), Self::hash(right))
     }
 
     fn hash_many<M: AsRef<[u8]> + Sync>(
         messages: &[M],
         strategy: &impl Strategy,
     ) -> Vec<Self::Digest> {
-        // Shares of whole kernel batches keep every lane of the kernel busy.
-        crate::hash_batches(messages, lanes(), BLOCK_LENGTH, strategy, hash_batch)
+        // Shares hold whole kernel batches, so only the last call can start with unfilled lanes.
+        crate::hash_batches(messages, lanes(), strategy, hash_batch)
     }
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
@@ -119,15 +120,6 @@ impl Hasher for Sha512 {
         let finalized = self.hasher.finalize_reset();
         (self, Digest(finalized.into()))
     }
-}
-
-/// Hash the concatenation of `parts` on the calling thread.
-fn hash_serial(parts: &[&[u8]]) -> Digest {
-    let mut hasher = CoreSha512::new();
-    for part in parts {
-        hasher.update(part);
-    }
-    Digest(hasher.finalize().into())
 }
 
 /// Hash independent messages in order on the calling thread, a kernel batch at a time where the
@@ -166,7 +158,7 @@ fn hash_batch<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Digest> {
 
         // An odd last message has no partner to interleave with, so it is hashed alone.
         for message in remainder {
-            digests.push(hash_serial(&[message.as_ref()]));
+            digests.push(Sha512::hash(&[message.as_ref()]));
         }
         return digests;
     }
@@ -174,7 +166,7 @@ fn hash_batch<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Digest> {
     // Without a multi-message kernel, hash each message alone.
     messages
         .iter()
-        .map(|message| hash_serial(&[message.as_ref()]))
+        .map(|message| Sha512::hash(&[message.as_ref()]))
         .collect()
 }
 
@@ -203,7 +195,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Digest {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let len = u.int_in_range(0..=256)?;
         let data = u.bytes(len)?;
-        Ok(Sha512::hash(&[data], &commonware_parallel::Sequential))
+        Ok(Sha512::hash(&[data]))
     }
 }
 
@@ -317,12 +309,9 @@ mod tests {
     fn test_known_answers_and_reset() {
         // Every one-shot entry point gives the known digests of the empty message and `abc`,
         // including when a message is split into parts around an empty one.
-        assert_eq!(Sha512::hash(&[], &Sequential).as_ref(), EMPTY_DIGEST);
-        assert_eq!(Sha512::hash(&[b"abc"], &Sequential).as_ref(), ABC_DIGEST);
-        assert_eq!(
-            Sha512::hash(&[b"a", b"", b"bc"], &Sequential).as_ref(),
-            ABC_DIGEST
-        );
+        assert_eq!(Sha512::hash(&[]).as_ref(), EMPTY_DIGEST);
+        assert_eq!(Sha512::hash(&[b"abc"]).as_ref(), ABC_DIGEST);
+        assert_eq!(Sha512::hash(&[b"a", b"", b"bc"]).as_ref(), ABC_DIGEST);
         assert_eq!(
             Sha512::hash_pair(&[], &[b"a", b"bc"], &Sequential),
             (Digest(EMPTY_DIGEST), Digest(ABC_DIGEST))
@@ -427,7 +416,7 @@ mod tests {
     #[test]
     fn test_codec_and_zeroize() {
         // A digest round-trips as its raw bytes, and a truncated encoding fails to decode.
-        let mut digest = Sha512::hash(&[b"abc"], &Sequential);
+        let mut digest = Sha512::hash(&[b"abc"]);
         let encoded = digest.encode();
         assert_eq!(Digest::SIZE, DIGEST_LENGTH);
         assert_eq!(encoded.as_ref(), ABC_DIGEST);

@@ -483,7 +483,7 @@ pub(crate) mod test {
         {
             let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = make_value(i * 1000);
                 batch = batch.write(k, Some(v));
             }
@@ -507,7 +507,7 @@ pub(crate) mod test {
         {
             let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
@@ -523,7 +523,7 @@ pub(crate) mod test {
         {
             let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
@@ -538,7 +538,7 @@ pub(crate) mod test {
         for _ in 0..3 {
             let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
@@ -553,7 +553,7 @@ pub(crate) mod test {
         {
             let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
@@ -589,7 +589,7 @@ pub(crate) mod test {
         {
             let mut batch = db.new_batch();
             for i in 0u64..1000 {
-                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
@@ -604,7 +604,7 @@ pub(crate) mod test {
         {
             let mut batch = db.new_batch();
             for i in 0u64..1000 {
-                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
@@ -619,7 +619,7 @@ pub(crate) mod test {
         for _ in 0..3 {
             let mut batch = db.new_batch();
             for i in 0u64..1000 {
-                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
@@ -634,7 +634,7 @@ pub(crate) mod test {
         {
             let mut batch = db.new_batch();
             for i in 0u64..1000 {
-                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
@@ -659,8 +659,8 @@ pub(crate) mod test {
         D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
         V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
-        let key0 = Sha256::hash(&[&0u64.to_be_bytes()], &Sequential);
-        let key1 = Sha256::hash(&[&1u64.to_be_bytes()], &Sequential);
+        let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
+        let key1 = Sha256::hash(&[&1u64.to_be_bytes()]);
         let value0 = make_value(100);
         let value1 = make_value(200);
 
@@ -707,7 +707,7 @@ pub(crate) mod test {
         D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
         V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
-        let key0 = Sha256::hash(&[&0u64.to_be_bytes()], &Sequential);
+        let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
         let value0 = make_value(100);
 
         // Apply a batch and begin committing it, awaiting the handle for durability.
@@ -752,7 +752,7 @@ pub(crate) mod test {
         // Establish a durable state whose last commit declares an early inactivity floor.
         let mut batch = db.new_batch();
         for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
             batch = batch.write(k, Some(make_value(i)));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
@@ -764,7 +764,7 @@ pub(crate) mod test {
         // durable commit's floor.
         let mut batch = db.new_batch();
         for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
             batch = batch.write(k, Some(make_value(i + 1)));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
@@ -800,9 +800,9 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest>,
         V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
-        let key0 = Sha256::hash(&[&0u64.to_be_bytes()], &Sequential);
-        let key1 = Sha256::hash(&[&1u64.to_be_bytes()], &Sequential);
-        let key2 = Sha256::hash(&[&2u64.to_be_bytes()], &Sequential);
+        let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
+        let key1 = Sha256::hash(&[&1u64.to_be_bytes()]);
+        let key2 = Sha256::hash(&[&2u64.to_be_bytes()]);
         let initial_root = db.root();
         let initial_size = db.size();
         let initial_floor = db.inactivity_floor_loc();
@@ -970,7 +970,7 @@ pub(crate) mod test {
         {
             let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = make_value(i * 1000);
                 batch = batch.write(k, Some(v.clone()));
                 map.insert(k, v);
@@ -981,7 +981,7 @@ pub(crate) mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v.clone()));
                 map.insert(k, v);
@@ -992,7 +992,7 @@ pub(crate) mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 batch = batch.write(k, None);
                 map.remove(&k);
             }
@@ -1013,7 +1013,7 @@ pub(crate) mod test {
 
         // State matches reference map.
         for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
             if let Some(map_value) = map.get(&k) {
                 let Some(db_value) = db.get(&k).await.unwrap() else {
                     panic!("key not found in db: {k}");
@@ -1049,7 +1049,7 @@ pub(crate) mod test {
     {
         // Update the same key many times within a single batch.
         const UPDATES: u64 = 100;
-        let k = Sha256::hash(&[&UPDATES.to_be_bytes()], &Sequential);
+        let k = Sha256::hash(&[&UPDATES.to_be_bytes()]);
         let mut last_value = None;
         {
             let mut batch = db.new_batch();
@@ -1090,7 +1090,7 @@ pub(crate) mod test {
         {
             let mut batch = db.new_batch();
             for i in 0u64..OPS {
-                let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = make_value(i * 1000);
                 batch = batch.write(k, Some(v));
             }
@@ -1123,7 +1123,7 @@ pub(crate) mod test {
         {
             let mut batch = db.new_batch();
             for i in OPS..(OPS + 5) {
-                let k = Sha256::hash(&[&(i + 1000).to_be_bytes()], &Sequential); // different keys
+                let k = Sha256::hash(&[&(i + 1000).to_be_bytes()]); // different keys
                 let v = make_value(i * 1000);
                 batch = batch.write(k, Some(v));
             }
@@ -1166,7 +1166,7 @@ pub(crate) mod test {
         // boundary when the db commits to an inactive peak boundary.
         let mut historical_op_count = Location::new(0);
         for i in 0u64..2 {
-            let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
             let v = make_value(i * 1000);
             let merkleized = db
                 .new_batch()
@@ -1191,7 +1191,7 @@ pub(crate) mod test {
         // Changing the proof digests should cause verification to fail
         {
             let mut tampered_proof = proof.clone();
-            tampered_proof.digests[0] = Sha256::hash(&[b"invalid"], &Sequential);
+            tampered_proof.digests[0] = Sha256::hash(&[b"invalid"]);
             let root_hash = db.root();
             assert!(!verify_proof::<Sha256, _, _>(
                 &tampered_proof,
@@ -1204,9 +1204,7 @@ pub(crate) mod test {
         // Appending an extra digest should cause verification to fail
         {
             let mut tampered_proof = proof.clone();
-            tampered_proof
-                .digests
-                .push(Sha256::hash(&[b"invalid"], &Sequential));
+            tampered_proof.digests.push(Sha256::hash(&[b"invalid"]));
             let root_hash = db.root();
             assert!(!verify_proof::<Sha256, _, _>(
                 &tampered_proof,
@@ -1258,7 +1256,7 @@ pub(crate) mod test {
 
         // Changing the root digest should cause verification to fail
         {
-            let invalid_root = Sha256::hash(&[b"invalid"], &Sequential);
+            let invalid_root = Sha256::hash(&[b"invalid"]);
             assert!(!verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(1),
@@ -1302,7 +1300,7 @@ pub(crate) mod test {
         let initial_size = db.bounds().end;
         let mut boundaries = vec![initial_size];
         for i in 0u64..5 {
-            let k = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
             let v = make_value(i * 1000);
             let merkleized = db
                 .new_batch()
@@ -1364,7 +1362,7 @@ pub(crate) mod test {
         let mut map = HashMap::<Digest, V>::default();
         const ELEMENTS: u64 = 10;
         let metadata_value = make_value(42);
-        let key_at = |j: u64, i: u64| Sha256::hash(&[&(j * 1000 + i).to_be_bytes()], &Sequential);
+        let key_at = |j: u64, i: u64| Sha256::hash(&[&(j * 1000 + i).to_be_bytes()]);
         for j in 0u64..ELEMENTS {
             let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
@@ -2198,7 +2196,7 @@ pub(crate) mod test {
 
     #[inline]
     fn to_digest(i: u64) -> Digest {
-        Sha256::hash(&[&i.to_be_bytes()], &Sequential)
+        Sha256::hash(&[&i.to_be_bytes()])
     }
 
     // Defines MMR-only variants (for tests that require mmr::Family, e.g. proof verification).
@@ -6028,11 +6026,11 @@ pub(crate) mod test {
     }
 
     fn key(i: u64) -> Digest {
-        Sha256::hash(&[&i.to_be_bytes()], &Sequential)
+        Sha256::hash(&[&i.to_be_bytes()])
     }
 
     fn val(i: u64) -> Digest {
-        Sha256::hash(&[&(i + 10000).to_be_bytes()], &Sequential)
+        Sha256::hash(&[&(i + 10000).to_be_bytes()])
     }
 
     /// Helper: commit a batch of key-value writes and return the db and applied range.
@@ -7467,7 +7465,6 @@ mod bitmap_tests {
     };
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
@@ -7495,7 +7492,7 @@ mod bitmap_tests {
 
             // Apply three single-write batches; each produces one CommitFloor op.
             let keys: Vec<_> = (0..3u64)
-                .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
+                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
                 .collect();
             let mut commit_locs = Vec::new();
             for (i, key) in keys.iter().enumerate() {
@@ -7539,8 +7536,8 @@ mod bitmap_tests {
     fn bounded_initialization_restores_bitmap_to_target_commit() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db(context.child("db")).await;
-            let k1 = Sha256::hash(&[&[1]], &Sequential);
-            let k2 = Sha256::hash(&[&[2]], &Sequential);
+            let k1 = Sha256::hash(&[&[1]]);
+            let k2 = Sha256::hash(&[&[2]]);
 
             // Two committed batches; remember the size after the first.
             let b1 = db
@@ -7600,7 +7597,7 @@ mod bitmap_tests {
     fn floor_scan_falls_through_to_uncommitted_tail() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db(context.child("db")).await;
-            let anchor = Sha256::hash(&[&[0xAA]], &Sequential);
+            let anchor = Sha256::hash(&[&[0xAA]]);
 
             // Commit one key.
             let b = db
@@ -7629,7 +7626,7 @@ mod bitmap_tests {
 
             // The pending child supersedes the anchor and creates 16 other keys.
             let others: Vec<_> = (0..16u64)
-                .map(|i| Sha256::hash(&[&(1000 + i).to_be_bytes()], &Sequential))
+                .map(|i| Sha256::hash(&[&(1000 + i).to_be_bytes()]))
                 .collect();
             let mut child_batch = parent.new_batch::<Sha256>();
             child_batch = child_batch.write(anchor, Some(vec![3]));
@@ -7666,7 +7663,7 @@ mod bitmap_tests {
 
             // Write the same 700 keys in three commits so the inactivity floor passes two chunks.
             let keys: Vec<_> = (0..700u64)
-                .map(|i| Sha256::hash(&[&i.to_be_bytes()], &Sequential))
+                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
                 .collect();
             for round in 0..3u8 {
                 let mut batch = db.new_batch();

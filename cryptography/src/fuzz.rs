@@ -1,12 +1,12 @@
 //! Fuzzing utilities for [Hasher] implementations.
 //!
-//! For any hasher, the one-shot [Hasher::hash], [Hasher::hash_pair], and
-//! [Hasher::hash_many] entrypoints must agree with streaming the same bytes through
-//! [Hasher::update], whether they hash on the calling thread or split the work
-//! across workers. Implementations are free to specialize the one-shot
-//! entrypoints for fixed shapes (e.g. with assembly kernels), so the inputs
-//! generated here are biased toward the shapes and lengths those
-//! specializations match on.
+//! For any hasher, the one-shot [Hasher::hash], [Hasher::hash_across],
+//! [Hasher::hash_pair], and [Hasher::hash_many] entrypoints must agree with
+//! streaming the same bytes through [Hasher::update], whether they hash on the
+//! calling thread or split the work across workers. Implementations are free
+//! to specialize the one-shot entrypoints for fixed shapes (e.g. with assembly
+//! kernels), so the inputs generated here are biased toward the shapes and
+//! lengths those specializations match on.
 
 use crate::{
     Hasher,
@@ -131,9 +131,10 @@ impl<H: Hasher> Plan<H> {
         }
     }
 
-    /// Check that every entrypoint agrees with a single [Hasher::update]
-    /// over the concatenated message, both on the calling thread and across
-    /// `strategy`.
+    /// Check that streaming the parts and each one-shot entrypoint agree with a
+    /// single [Hasher::update] over the concatenated message: [Hasher::hash] on
+    /// the calling thread, [Hasher::hash_across] across `strategy`, and
+    /// [Hasher::hash_pair] both ways.
     pub fn run(self, strategy: &impl Strategy) {
         let left: Vec<&[u8]> = self.left.iter().map(Vec::as_slice).collect();
         let right: Vec<&[u8]> = self.right.iter().map(Vec::as_slice).collect();
@@ -160,10 +161,10 @@ impl<H: Hasher> Plan<H> {
         assert_eq!(streamed_left, expected_left);
         assert_eq!(streamed_right, expected_right);
 
-        assert_eq!(H::hash(&left, &Sequential), expected_left);
-        assert_eq!(H::hash(&right, &Sequential), expected_right);
-        assert_eq!(H::hash(&left, strategy), expected_left);
-        assert_eq!(H::hash(&right, strategy), expected_right);
+        assert_eq!(H::hash(&left), expected_left);
+        assert_eq!(H::hash(&right), expected_right);
+        assert_eq!(H::hash_across(&left, strategy), expected_left);
+        assert_eq!(H::hash_across(&right, strategy), expected_right);
         let (left_digest, right_digest) = H::hash_pair(&left, &right, &Sequential);
         assert_eq!(left_digest, expected_left);
         assert_eq!(right_digest, expected_right);
@@ -230,8 +231,9 @@ impl<H: Hasher> BatchPlan<H> {
     }
 }
 
-/// A message long enough to split into BLAKE3 subtrees, given as parts, to
-/// hash through [Hasher::hash] across workers.
+/// A message, given as parts, with a length from just below the BLAKE3 split
+/// threshold to a few subtrees past it, to hash across workers with
+/// [Hasher::hash_across].
 pub struct ParallelPlan<H: Hasher> {
     seed: u64,
     len: usize,
@@ -291,7 +293,7 @@ impl<H: Hasher> ParallelPlan<H> {
 
         let mut hasher = H::default();
         hasher.update(&message);
-        assert_eq!(H::hash(&parts, strategy), hasher.finalize().1);
+        assert_eq!(H::hash_across(&parts, strategy), hasher.finalize().1);
     }
 }
 
@@ -305,16 +307,14 @@ mod tests {
     use std::sync::Arc;
 
     fn test_fuzz<H: Hasher>() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
-
         // The generators below always emit at least one part, so pin the
         // zero-parts one-shot to the empty-message digest separately.
-        Plan::<H>::new(vec![], vec![]).run(&strategy);
+        Plan::<H>::new(vec![], vec![]).run(&Sequential);
         minifuzz::Builder::default()
             .with_seed(0)
             .with_search_limit(512)
             .test(|u| {
-                u.arbitrary::<Plan<H>>()?.run(&strategy);
+                u.arbitrary::<Plan<H>>()?.run(&Sequential);
                 Ok(())
             });
     }
@@ -369,11 +369,6 @@ mod tests {
     #[test]
     fn test_fuzz_hash_many_sha256() {
         test_fuzz_hash_many::<Sha256>();
-    }
-
-    #[test]
-    fn test_fuzz_hash_many_blake3() {
-        test_fuzz_hash_many::<Blake3>();
     }
 
     #[test]

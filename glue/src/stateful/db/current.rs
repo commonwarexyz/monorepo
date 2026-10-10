@@ -1335,10 +1335,10 @@ mod tests {
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
-            let key = Sha256::hash(&[b"key"], &Sequential);
-            let value = Sha256::hash(&[b"value"], &Sequential);
-            let metadata = Sha256::hash(&[b"metadata"], &Sequential);
-            let missing = Sha256::hash(&[b"missing"], &Sequential);
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let metadata = Sha256::hash(&[b"metadata"]);
+            let missing = Sha256::hash(&[b"missing"]);
 
             let batch = db
                 .new_batch_for_test::<_>()
@@ -1378,9 +1378,9 @@ mod tests {
                 .unwrap();
             let db = Shared::new("test", db);
 
-            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()], &Sequential);
-            let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()], &Sequential);
-            let metadata = Sha256::hash(&[b"metadata"], &Sequential);
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+            let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()]);
+            let metadata = Sha256::hash(&[b"metadata"]);
 
             // Seed keys 0..50 and persist them.
             let mut seed = db.new_batch_for_test::<_>().await;
@@ -1454,10 +1454,10 @@ mod tests {
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
-            let key = Sha256::hash(&[b"key"], &Sequential);
-            let value = Sha256::hash(&[b"value"], &Sequential);
-            let metadata = Sha256::hash(&[b"metadata"], &Sequential);
-            let missing = Sha256::hash(&[b"missing"], &Sequential);
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let metadata = Sha256::hash(&[b"metadata"]);
+            let missing = Sha256::hash(&[b"missing"]);
 
             let batch = db
                 .new_batch_for_test::<_>()
@@ -1493,9 +1493,9 @@ mod tests {
                     .unwrap();
             let db = Shared::new("test", db);
 
-            let key = Sha256::hash(&[b"key"], &Sequential);
-            let value = Sha256::hash(&[b"value"], &Sequential);
-            let metadata = Sha256::hash(&[b"metadata"], &Sequential);
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let metadata = Sha256::hash(&[b"metadata"]);
 
             let batch = db
                 .new_batch_for_test::<_>()
@@ -1526,7 +1526,7 @@ mod tests {
             ));
 
             let mut wrong_root = valid_target.clone();
-            wrong_root.root = Sha256::hash(&[b"wrong ops root"], &Sequential);
+            wrong_root.root = Sha256::hash(&[b"wrong ops root"]);
             assert!(!<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_root,
@@ -1553,9 +1553,9 @@ mod tests {
                     .unwrap();
             let db = Shared::new("test", db);
 
-            let key1 = Sha256::hash(&[b"key1"], &Sequential);
-            let value1 = Sha256::hash(&[b"value1"], &Sequential);
-            let metadata1 = Sha256::hash(&[b"metadata1"], &Sequential);
+            let key1 = Sha256::hash(&[b"key1"]);
+            let value1 = Sha256::hash(&[b"value1"]);
+            let metadata1 = Sha256::hash(&[b"metadata1"]);
             let batch1 = db
                 .new_batch_for_test::<_>()
                 .await
@@ -1573,9 +1573,9 @@ mod tests {
                 <OrderedFixedDb as ManagedDb<_>>::sync_target(&guard)
             };
 
-            let key2 = Sha256::hash(&[b"key2"], &Sequential);
-            let value2 = Sha256::hash(&[b"value2"], &Sequential);
-            let metadata2 = Sha256::hash(&[b"metadata2"], &Sequential);
+            let key2 = Sha256::hash(&[b"key2"]);
+            let value2 = Sha256::hash(&[b"value2"]);
+            let metadata2 = Sha256::hash(&[b"metadata2"]);
             let batch2 = db
                 .new_batch_for_test::<_>()
                 .await
@@ -1604,7 +1604,7 @@ mod tests {
 
             // Root, end, and floor mismatches must each report both sides of the comparison.
             let mut wrong_root = target_after_first.clone();
-            wrong_root.root = Sha256::hash(&[b"wrong initialization root"], &Sequential);
+            wrong_root.root = Sha256::hash(&[b"wrong initialization root"]);
             let mut behind = target_after_first.clone();
             behind.range = non_empty_range!(behind.range.start(), behind.range.end() + 1);
             let mut wrong_floor = target_after_first.clone();
@@ -1646,9 +1646,9 @@ mod tests {
                 .unwrap();
             let db = Shared::new("test", db);
 
-            let key = Sha256::hash(&[b"key"], &Sequential);
-            let value = Sha256::hash(&[b"value"], &Sequential);
-            let metadata = Sha256::hash(&[b"metadata"], &Sequential);
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let metadata = Sha256::hash(&[b"metadata"]);
 
             let batch = db
                 .new_batch_for_test::<_>()
@@ -1679,7 +1679,7 @@ mod tests {
             ));
 
             let mut wrong_root = valid_target.clone();
-            wrong_root.root = Sha256::hash(&[b"wrong ops root"], &Sequential);
+            wrong_root.root = Sha256::hash(&[b"wrong ops root"]);
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_root,
@@ -1739,11 +1739,11 @@ mod tests {
             let mut batch = db.new_batch_for_test::<_>().await;
             for i in 0..writes {
                 batch = batch.write(
-                    Sha256::hash(&[b"key", &[id, i]], &Sequential),
-                    Some(Sha256::hash(&[b"value", &[id, i]], &Sequential)),
+                    Sha256::hash(&[b"key", &[id, i]]),
+                    Some(Sha256::hash(&[b"value", &[id, i]])),
                 );
             }
-            let batch = batch.with_metadata(Sha256::hash(&[b"metadata", &[id]], &Sequential));
+            let batch = batch.with_metadata(Sha256::hash(&[b"metadata", &[id]]));
             Unmerkleized::merkleize(batch).await.unwrap()
         }
 
@@ -1876,11 +1876,8 @@ mod tests {
                 let mut batch = databases.new_batch_for_test::<_>().await;
                 for i in 0..384u64 {
                     batch = batch.write(
-                        Sha256::hash(&[&i.to_be_bytes()], &Sequential),
-                        Some(Sha256::hash(
-                            &[&(generation * 1_000 + i).to_le_bytes()],
-                            &Sequential,
-                        )),
+                        Sha256::hash(&[&i.to_be_bytes()]),
+                        Some(Sha256::hash(&[&(generation * 1_000 + i).to_le_bytes()])),
                     );
                 }
                 let batch = Unmerkleized::merkleize(batch).await.unwrap();

@@ -35,7 +35,6 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_cryptography::{Hasher as _, Sha256};
-//! use commonware_parallel::Sequential;
 //! use commonware_storage::{
 //!     archive::{
 //!         Archive as _,
@@ -69,7 +68,7 @@
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
 //!     // Put a key
-//!     archive = archive.put(1, Sha256::hash(&[b"data"], &Sequential), &10).await.unwrap();
+//!     archive = archive.put(1, Sha256::hash(&[b"data"]), &10).await.unwrap();
 //!
 //!     // Sync the archive
 //!     archive.sync().await.unwrap();
@@ -144,7 +143,6 @@ mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
-    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
     use commonware_utils::{NZU16, NZU64, NZUsize};
     use std::num::NonZeroU16;
@@ -189,8 +187,8 @@ mod tests {
                 .unwrap();
 
             // Add some data
-            let key1 = Sha256::hash(&[b"key1"], &Sequential);
-            let key2 = Sha256::hash(&[b"key2"], &Sequential);
+            let key1 = Sha256::hash(&[b"key1"]);
+            let key2 = Sha256::hash(&[b"key2"]);
             archive = archive.put(1, key1, &2000).await.unwrap();
             archive = archive.put(2, key2, &2001).await.unwrap();
 
@@ -258,7 +256,7 @@ mod tests {
                     .unwrap();
 
             // Write data after restart to confirm archive is functional
-            let key = Sha256::hash(&[b"after-restart"], &Sequential);
+            let key = Sha256::hash(&[b"after-restart"]);
             let archive = archive.put_sync(0, key, &42).await.unwrap();
             drop(archive);
 

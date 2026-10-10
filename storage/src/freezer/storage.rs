@@ -9,7 +9,6 @@ use commonware_codec::{
     Buf, CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite,
 };
 use commonware_cryptography::{Crc32, Hasher, crc32};
-use commonware_parallel::Sequential;
 use commonware_runtime::{
     Blob, BufMut, BufferPooler, IoBuf, ReadOptions, WriteOptions, buffer,
     iobuf::EncodeExt,
@@ -206,15 +205,12 @@ impl Entry {
 
     /// Compute a checksum for [Entry].
     fn compute_crc(epoch: u64, section: u64, position: u64, added: u8) -> u32 {
-        Crc32::hash(
-            &[
-                &epoch.to_be_bytes(),
-                &section.to_be_bytes(),
-                &position.to_be_bytes(),
-                &added.to_be_bytes(),
-            ],
-            &Sequential,
-        )
+        Crc32::hash(&[
+            &epoch.to_be_bytes(),
+            &section.to_be_bytes(),
+            &position.to_be_bytes(),
+            &added.to_be_bytes(),
+        ])
         .as_u32()
     }
 

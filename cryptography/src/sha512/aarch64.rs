@@ -3,8 +3,8 @@
 //! latency.
 
 use super::{
-    BLOCK_LENGTH, DIGEST_LENGTH, Digest,
-    padding::{IV, K, block, block_count},
+    DIGEST_LENGTH, Digest,
+    padding::{BLOCK_LENGTH, IV, K, block, block_count},
 };
 use core::arch::aarch64::*;
 use sha2::block_api::compress512;

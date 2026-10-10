@@ -6,16 +6,17 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     Hasher,
     blake3::{Blake3 as OurBlake3, Digest},
-    fuzz::{BatchPlan, ParallelPlan, Plan},
+    fuzz::{ParallelPlan, Plan},
 };
-use commonware_parallel::{Manual, Rayon, Sequential, Strategy as _};
+use commonware_parallel::{Manual, Rayon, Strategy as _};
 use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use std::sync::LazyLock;
 use zeroize::Zeroize;
 
-/// A strategy that splits every operation across four workers, built once and reused across
-/// invocations because starting a thread pool is expensive.
+/// A four-worker strategy with adaptive decisions disabled, so it takes every split a hasher
+/// offers it. It is built once and reused across invocations because starting a thread pool is
+/// expensive.
 static STRATEGY: LazyLock<Manual<Rayon>> =
     LazyLock::new(|| Rayon::new(NZUsize!(4)).unwrap().manual());
 
@@ -24,7 +25,6 @@ pub struct FuzzInput {
     pub chunks: Vec<Vec<u8>>,
     pub data: Vec<u8>,
     pub plan: Plan<OurBlake3>,
-    pub batch_plan: BatchPlan<OurBlake3>,
     pub parallel_plan: ParallelPlan<OurBlake3>,
     pub case_selector: u8,
 }
@@ -44,7 +44,7 @@ fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
 
     // The one-shot API should agree with streaming.
     let parts: Vec<&[u8]> = chunks.iter().map(|c| c.as_slice()).collect();
-    assert_eq!(OurBlake3::hash(&parts, &Sequential), our_result);
+    assert_eq!(OurBlake3::hash(&parts), our_result);
 }
 
 fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
@@ -95,7 +95,7 @@ fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
 }
 
 fn fuzz_diff_hash(data: &[u8]) {
-    let our_hash_result = OurBlake3::hash(&[data], &Sequential);
+    let our_hash_result = OurBlake3::hash(&[data]);
     let mut ref_hasher = RefBlake3::new();
     assert_eq!(
         our_hash_result.as_ref(),
@@ -104,7 +104,7 @@ fn fuzz_diff_hash(data: &[u8]) {
 }
 
 fn fuzz_digest_operations(data: &[u8]) {
-    let hash_result = OurBlake3::hash(&[data], &Sequential);
+    let hash_result = OurBlake3::hash(&[data]);
     let digest_from_hash = hash_result;
 
     let slice_ref: &[u8] = &digest_from_hash;
@@ -163,12 +163,12 @@ fn fuzz_from_hash_and_deref(data: &[u8]) {
     assert_eq!(slice, our_digest.as_ref());
 
     // Verify the conversion worked correctly
-    let our_hash = OurBlake3::hash(&[data], &Sequential);
+    let our_hash = OurBlake3::hash(&[data]);
     assert_eq!(our_digest.as_ref(), our_hash.as_ref());
 }
 
 fn fuzz(input: FuzzInput) {
-    match input.case_selector % 11 {
+    match input.case_selector % 10 {
         0 => fuzz_basic_hashing(&input.chunks),
         1 => fuzz_reset_functionality(&input.chunks),
         2 => fuzz_chunked_vs_whole(&input.chunks),
@@ -178,8 +178,7 @@ fn fuzz(input: FuzzInput) {
         6 => fuzz_digest_operations(&input.data),
         7 => fuzz_from_hash_and_deref(&input.data),
         8 => input.plan.run(&*STRATEGY),
-        9 => input.batch_plan.run(&*STRATEGY),
-        10 => input.parallel_plan.run(&*STRATEGY),
+        9 => input.parallel_plan.run(&*STRATEGY),
         _ => unreachable!(),
     }
 }

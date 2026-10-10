@@ -2,7 +2,6 @@
 
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadRangeExt, Write};
 use commonware_cryptography::{Digestible, Hasher, Sha256, sha256::Digest};
-use commonware_parallel::Sequential;
 use commonware_runtime::BufMut;
 
 /// A simple test message.
@@ -32,7 +31,7 @@ impl TestMessage {
 impl Digestible for TestMessage {
     type Digest = Digest;
     fn digest(&self) -> Digest {
-        Sha256::hash(&[&self.content], &Sequential)
+        Sha256::hash(&[&self.content])
     }
 }
 

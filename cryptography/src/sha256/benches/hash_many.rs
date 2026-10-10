@@ -24,7 +24,7 @@ fn bench_hash_many(c: &mut Criterion) {
                     b.iter(|| {
                         messages
                             .iter()
-                            .map(|&message| Sha256::hash(&[message], &Sequential))
+                            .map(|&message| Sha256::hash(&[message]))
                             .collect::<Vec<_>>()
                     })
                 },

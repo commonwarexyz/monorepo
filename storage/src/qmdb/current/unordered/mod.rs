@@ -39,7 +39,6 @@ pub mod tests {
     };
     use commonware_codec::Codec;
     use commonware_cryptography::{Digest as _, Hasher as _, Sha256, sha256::Digest};
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
@@ -440,17 +439,17 @@ pub mod tests {
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses
                 // fill patterns).
-                let wrong_val = Sha256::hash(&[&[0xFF]], &Sequential);
+                let wrong_val = Sha256::hash(&[&[0xFF]]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
                     key, wrong_val, &proof, &root
                 ));
                 // Proof should fail against the wrong key.
-                let wrong_key = Sha256::hash(&[&[0xEE]], &Sequential);
+                let wrong_key = Sha256::hash(&[&[0xEE]]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
                     wrong_key, value, &proof, &root
                 ));
                 // Proof should fail against the wrong root.
-                let wrong_root = Sha256::hash(&[&[0xDD]], &Sequential);
+                let wrong_root = Sha256::hash(&[&[0xDD]]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
                     key,
                     value,

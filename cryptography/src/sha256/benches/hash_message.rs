@@ -1,5 +1,4 @@
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_parallel::Sequential;
 use commonware_utils::test_rng;
 use criterion::{Criterion, criterion_group};
 use rand::Rng;
@@ -12,7 +11,7 @@ fn bench_hash_message(c: &mut Criterion) {
         sampler.fill_bytes(msg.as_mut_slice());
         let msg = msg.as_slice();
         c.bench_function(&format!("{}/msg_len={}", module_path!(), msg.len()), |b| {
-            b.iter(|| Sha256::hash(&[msg], &Sequential));
+            b.iter(|| Sha256::hash(&[msg]));
         });
     }
 }

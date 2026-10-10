@@ -176,14 +176,13 @@ where
 mod hash {
     use super::*;
     use crate::{Hasher, Sha256};
-    use commonware_parallel::Sequential;
 
     /// H2: GT -> Block
     ///
     /// Used to mask the random sigma value.
     pub fn h2(gt: &GT) -> Block {
         let gt = Zeroizing::new(gt.as_slice());
-        Sha256::hash(&[b"h2", gt.as_ref()], &Sequential).into()
+        Sha256::hash(&[b"h2", gt.as_ref()]).into()
     }
 
     /// H3: (sigma, M) -> Scalar
@@ -203,7 +202,7 @@ mod hash {
     ///
     /// Used to mask the message.
     pub fn h4(sigma: &Block) -> Block {
-        Sha256::hash(&[b"h4", sigma.as_ref()], &Sequential).into()
+        Sha256::hash(&[b"h4", sigma.as_ref()]).into()
     }
 }
 

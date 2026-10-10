@@ -105,7 +105,7 @@ impl<E: CryptoRng + Spawner + Metrics, H: Hasher, S: Sender, R: Receiver> Applic
                     };
 
                     // Hash the message
-                    let digest = H::hash(&[&block.encode()], &Sequential);
+                    let digest = H::hash(&[&block.encode()]);
                     info!(?block, payload = ?digest, "proposed");
 
                     // Publish to indexer

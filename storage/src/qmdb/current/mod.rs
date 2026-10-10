@@ -588,10 +588,10 @@ pub mod tests {
             #[test_traced("WARN")]
             pub fn $name() {
                 fn key(i: u64) -> Digest {
-                    Sha256::hash(&[&i.to_be_bytes()], &Sequential)
+                    Sha256::hash(&[&i.to_be_bytes()])
                 }
                 fn val(i: u64) -> Digest {
-                    Sha256::hash(&[&(i + 10000).to_be_bytes()], &Sequential)
+                    Sha256::hash(&[&(i + 10000).to_be_bytes()])
                 }
 
                 deterministic::Runner::default().start(|ctx| async move {
@@ -1933,8 +1933,8 @@ pub mod tests {
             // partial chunk.
             let mut batch = db.new_batch();
             for i in 0u64..512 {
-                let key = Sha256::hash(&[&i.to_be_bytes()], &Sequential);
-                let value = Sha256::hash(&[&(i + 1_000).to_be_bytes()], &Sequential);
+                let key = Sha256::hash(&[&i.to_be_bytes()]);
+                let value = Sha256::hash(&[&(i + 1_000).to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
             let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
@@ -1966,14 +1966,11 @@ pub mod tests {
             let witness = db.ops_root_witness().await.unwrap();
             assert_eq!(
                 witness.pending_chunk_digest,
-                Some(Sha256::hash(&[pending.as_slice()], &Sequential))
+                Some(Sha256::hash(&[pending.as_slice()]))
             );
             assert_eq!(
                 witness.partial_chunk,
-                Some((
-                    partial_bits,
-                    Sha256::hash(&[partial.as_slice()], &Sequential)
-                ))
+                Some((partial_bits, Sha256::hash(&[partial.as_slice()])))
             );
 
             // The virtual storage remains in ops-tree coordinates even where it substitutes
@@ -2528,11 +2525,11 @@ pub mod tests {
     const CHUNK_BITS: u64 = commonware_utils::bitmap::BitMap::<32>::CHUNK_SIZE_BITS;
 
     fn key(i: u64) -> Digest {
-        Sha256::hash(&[&i.to_be_bytes()], &Sequential)
+        Sha256::hash(&[&i.to_be_bytes()])
     }
 
     fn val(i: u64) -> Digest {
-        Sha256::hash(&[&(i + 10000).to_be_bytes()], &Sequential)
+        Sha256::hash(&[&(i + 10000).to_be_bytes()])
     }
 
     #[boxed]

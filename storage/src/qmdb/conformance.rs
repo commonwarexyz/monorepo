@@ -287,14 +287,11 @@ fn immutable_variable_compact_config(
 // Workloads
 
 fn to_digest(i: u64) -> Digest {
-    Sha256::hash(&[&i.to_be_bytes()], &Sequential)
+    Sha256::hash(&[&i.to_be_bytes()])
 }
 
 fn to_val(i: u64, salt: u64) -> Digest {
-    Sha256::hash(
-        &[&i.to_be_bytes(), &salt.wrapping_add(1).to_be_bytes()],
-        &Sequential,
-    )
+    Sha256::hash(&[&i.to_be_bytes(), &salt.wrapping_add(1).to_be_bytes()])
 }
 
 /// Digest whose first byte is `prefix`, guaranteeing translator collisions under OneCap.
@@ -599,7 +596,7 @@ mod tests {
                     Choice::Keep => entry.keep(),
                     Choice::Evict => entry.evict().0,
                     Choice::Replace => {
-                        let value = Sha256::hash(&[entry.value().as_ref()], &Sequential);
+                        let value = Sha256::hash(&[entry.value().as_ref()]);
                         entry.replace(value)
                     }
                     Choice::Stop => entry.stop(),
@@ -661,14 +658,11 @@ mod tests {
                 return None;
             }
             let round = self.batches.len() as u64;
-            let digest = Sha256::hash(
-                &[
-                    &self.seed.to_be_bytes(),
-                    &round.to_be_bytes(),
-                    &j.to_be_bytes(),
-                ],
-                &Sequential,
-            );
+            let digest = Sha256::hash(&[
+                &self.seed.to_be_bytes(),
+                &round.to_be_bytes(),
+                &j.to_be_bytes(),
+            ]);
             let mix = u64::from_be_bytes(digest[..8].try_into().unwrap());
             Some(ids[(mix % ids.len() as u64) as usize])
         }

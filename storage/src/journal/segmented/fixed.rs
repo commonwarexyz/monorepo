@@ -1165,7 +1165,6 @@ mod tests {
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
         BufferPoolConfig, BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
         buffer::paged::{CacheRef, corrupt_page},
@@ -1235,7 +1234,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
 
     fn test_digest(value: u64) -> Digest {
-        Sha256::hash(&[&value.to_be_bytes()], &Sequential)
+        Sha256::hash(&[&value.to_be_bytes()])
     }
 
     fn test_cfg(pooler: &impl BufferPooler) -> Config {

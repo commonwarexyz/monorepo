@@ -13,7 +13,6 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
-use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
 use commonware_utils::channel::{
     fallible::{FallibleExt, OneshotExt},
@@ -115,10 +114,7 @@ impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
 const GENESIS_BYTES: &[u8] = b"genesis";
 
 pub fn genesis<H: Hasher>(epoch: Epoch) -> H::Digest {
-    H::hash(
-        &[&(Bytes::from(GENESIS_BYTES), epoch).encode()],
-        &Sequential,
-    )
+    H::hash(&[&(Bytes::from(GENESIS_BYTES), epoch).encode()])
 }
 
 type Latency = (f64, f64);
@@ -297,7 +293,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         // Generate the payload
         let rand = self.context.random::<u64>();
         let payload = (context.round, context.parent.1, rand).encode();
-        let digest = H::hash(&[&payload], &Sequential);
+        let digest = H::hash(&[&payload]);
 
         // Mark verified
         self.verified.insert(digest);

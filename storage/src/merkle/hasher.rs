@@ -178,7 +178,7 @@ impl<H: CHasher> Standard<H> {
 
     /// Hash a sequence of byte slices into a single digest.
     pub fn hash(&self, parts: &[&[u8]]) -> H::Digest {
-        H::hash(parts, &Sequential)
+        H::hash(parts)
     }
 
     /// Compute the digest of a byte slice.
@@ -369,7 +369,7 @@ mod tests {
     }
 
     fn test_digest<H: CHasher>(value: u8) -> H::Digest {
-        H::hash(&[&[value]], &Sequential)
+        H::hash(&[&[value]])
     }
 
     fn test_leaf_digest<H: CHasher>() {

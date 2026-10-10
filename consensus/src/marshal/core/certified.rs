@@ -67,14 +67,13 @@ impl<C: Digest> Certified<C> {
 mod tests {
     use super::*;
     use commonware_cryptography::{Hasher as _, Sha256};
-    use commonware_parallel::Sequential;
 
     #[test]
     fn contains_is_height_scoped_and_retain_keeps_from_min() {
         let mut certified = Certified::new();
-        let a = Sha256::hash(&[b"a"], &Sequential);
-        let b = Sha256::hash(&[b"b"], &Sequential);
-        let c = Sha256::hash(&[b"c"], &Sequential);
+        let a = Sha256::hash(&[b"a"]);
+        let b = Sha256::hash(&[b"b"]);
+        let c = Sha256::hash(&[b"c"]);
         certified.insert(Height::new(5), a);
         certified.insert(Height::new(6), c);
         certified.insert(Height::new(7), b);

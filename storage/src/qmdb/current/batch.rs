@@ -1432,7 +1432,7 @@ mod tests {
     use crate::{mmb, mmr, utils::detached::block_strategy};
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_parallel::{Manual, Rayon, Sequential};
+    use commonware_parallel::{Manual, Rayon};
     use commonware_utils::{NZUsize, bitmap::Prunable as BitMap};
     use std::{
         future::Future as _,
@@ -1462,12 +1462,12 @@ mod tests {
         let hasher = grafting::hasher::<mmb::Family, Sha256>(grafting::height::<1>());
         let a = mem
             .new_batch_with_strategy(strategy.clone())
-            .add_leaf_digest(Sha256::hash(&[b"a-0"], strategy))
-            .add_leaf_digest(Sha256::hash(&[b"a-1"], strategy))
+            .add_leaf_digest(Sha256::hash(&[b"a-0"]))
+            .add_leaf_digest(Sha256::hash(&[b"a-1"]))
             .merkleize(mem, &hasher);
         let b = a
             .new_batch()
-            .add_leaf_digest(Sha256::hash(&[b"b-0"], strategy))
+            .add_leaf_digest(Sha256::hash(&[b"b-0"]))
             .merkleize(mem, &hasher);
         (a, b)
     }
@@ -1479,7 +1479,7 @@ mod tests {
         let manual = strategy.manual();
         let mem = Arc::new(Mem::<mmb::Family, <Sha256 as Hasher>::Digest>::new());
         let grafting_height = grafting::height::<1>();
-        let graft_inputs = || vec![(0, Sha256::hash(&[b"replacement"], &Sequential), [1u8; 1])];
+        let graft_inputs = || vec![(0, Sha256::hash(&[b"replacement"]), [1u8; 1])];
         let waker = futures::task::noop_waker();
         let mut context = TaskContext::from_waker(&waker);
 

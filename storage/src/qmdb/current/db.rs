@@ -1200,7 +1200,6 @@ mod tests {
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
-    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::bitmap::Prunable as PrunableBitMap;
 
@@ -1256,8 +1255,8 @@ mod tests {
 
     #[test]
     fn combine_roots_deterministic() {
-        let ops = Sha256::hash(&[b"ops"], &Sequential);
-        let grafted = Sha256::hash(&[b"grafted"], &Sequential);
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
         let r1 = combine_roots::<Sha256>(&ops, &grafted, None, None);
         let r2 = combine_roots::<Sha256>(&ops, &grafted, None, None);
         assert_eq!(r1, r2);
@@ -1265,9 +1264,9 @@ mod tests {
 
     #[test]
     fn combine_roots_with_partial_differs() {
-        let ops = Sha256::hash(&[b"ops"], &Sequential);
-        let grafted = Sha256::hash(&[b"grafted"], &Sequential);
-        let partial_digest = Sha256::hash(&[b"partial"], &Sequential);
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
+        let partial_digest = Sha256::hash(&[b"partial"]);
 
         let without = combine_roots::<Sha256>(&ops, &grafted, None, None);
         let with = combine_roots::<Sha256>(&ops, &grafted, None, Some((5, &partial_digest)));
@@ -1276,9 +1275,9 @@ mod tests {
 
     #[test]
     fn combine_roots_with_pending_differs() {
-        let ops = Sha256::hash(&[b"ops"], &Sequential);
-        let grafted = Sha256::hash(&[b"grafted"], &Sequential);
-        let pending_digest = Sha256::hash(&[b"pending"], &Sequential);
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
+        let pending_digest = Sha256::hash(&[b"pending"]);
 
         let without = combine_roots::<Sha256>(&ops, &grafted, None, None);
         let with = combine_roots::<Sha256>(&ops, &grafted, Some(&pending_digest), None);
@@ -1287,10 +1286,10 @@ mod tests {
 
     #[test]
     fn combine_roots_pending_and_partial_independent() {
-        let ops = Sha256::hash(&[b"ops"], &Sequential);
-        let grafted = Sha256::hash(&[b"grafted"], &Sequential);
-        let pending_digest = Sha256::hash(&[b"pending"], &Sequential);
-        let partial_digest = Sha256::hash(&[b"partial"], &Sequential);
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
+        let pending_digest = Sha256::hash(&[b"pending"]);
+        let partial_digest = Sha256::hash(&[b"partial"]);
 
         let only_pending = combine_roots::<Sha256>(&ops, &grafted, Some(&pending_digest), None);
         let only_partial =
@@ -1308,9 +1307,9 @@ mod tests {
 
     #[test]
     fn combine_roots_different_ops_root() {
-        let ops_a = Sha256::hash(&[b"ops_a"], &Sequential);
-        let ops_b = Sha256::hash(&[b"ops_b"], &Sequential);
-        let grafted = Sha256::hash(&[b"grafted"], &Sequential);
+        let ops_a = Sha256::hash(&[b"ops_a"]);
+        let ops_b = Sha256::hash(&[b"ops_b"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
 
         let r1 = combine_roots::<Sha256>(&ops_a, &grafted, None, None);
         let r2 = combine_roots::<Sha256>(&ops_b, &grafted, None, None);
@@ -1323,10 +1322,10 @@ mod tests {
     #[test]
     fn combine_roots_format_golden() {
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-        let ops = Sha256::hash(&[b"ops"], &Sequential);
-        let grafted = Sha256::hash(&[b"grafted"], &Sequential);
-        let pending = Sha256::hash(&[b"pending"], &Sequential);
-        let partial = Sha256::hash(&[b"partial"], &Sequential);
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
+        let pending = Sha256::hash(&[b"pending"]);
+        let partial = Sha256::hash(&[b"partial"]);
         let next_bit: u64 = 0x1122_3344_5566_7788;
 
         // Neither pending nor partial.
@@ -1394,8 +1393,8 @@ mod tests {
     {
         let mut batch = db.new_batch();
         for idx in start..start + count {
-            let key = Sha256::hash(&[&idx.to_be_bytes()], &Sequential);
-            let value = Sha256::hash(&[&(idx + count).to_be_bytes()], &Sequential);
+            let key = Sha256::hash(&[&idx.to_be_bytes()]);
+            let value = Sha256::hash(&[&(idx + count).to_be_bytes()]);
             batch = batch.write(key, Some(value));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
@@ -1420,8 +1419,8 @@ mod tests {
 
             let mut batch = db.new_batch();
             for idx in 0..4u64 {
-                let key = Sha256::hash(&[&idx.to_be_bytes()], &Sequential);
-                let value = Sha256::hash(&[&(idx + 100).to_be_bytes()], &Sequential);
+                let key = Sha256::hash(&[&idx.to_be_bytes()]);
+                let value = Sha256::hash(&[&(idx + 100).to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
@@ -1446,8 +1445,8 @@ mod tests {
             )
             .await
             .unwrap();
-            let key = Sha256::hash(&[&0u64.to_be_bytes()], &Sequential);
-            let value = Sha256::hash(&[&1u64.to_be_bytes()], &Sequential);
+            let key = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let value = Sha256::hash(&[&1u64.to_be_bytes()]);
             let merkleized = db
                 .new_batch()
                 .write(key, Some(value))
@@ -1499,11 +1498,11 @@ mod tests {
         let db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
         let durable_floor = db.inactivity_floor_loc();
         let keys: Vec<_> = (0..512u64)
-            .map(|idx| Sha256::hash(&[&idx.to_be_bytes()], &Sequential))
+            .map(|idx| Sha256::hash(&[&idx.to_be_bytes()]))
             .collect();
         let (merkleized, expected) = if fixed {
             // Replace every update of a key with an even first byte and evict the rest.
-            let replacement = Sha256::hash(&[b"fixed-prune-value"], &Sequential);
+            let replacement = Sha256::hash(&[b"fixed-prune-value"]);
             let value = |key: &sha256::Digest| (key.as_ref()[0] % 2 == 0).then_some(replacement);
             let mut policy = Script::new(usize::MAX, u64::MAX, |key: &sha256::Digest| {
                 value(key).map_or(Choice::Evict, Choice::Replace)
@@ -1523,12 +1522,7 @@ mod tests {
         } else {
             let expected: Vec<_> = (0..512u64)
                 .zip(&keys)
-                .map(|(idx, key)| {
-                    (
-                        *key,
-                        Some(Sha256::hash(&[&(idx + 1024).to_be_bytes()], &Sequential)),
-                    )
-                })
+                .map(|(idx, key)| (*key, Some(Sha256::hash(&[&(idx + 1024).to_be_bytes()]))))
                 .collect();
             let merkleized = expected
                 .iter()
@@ -1627,14 +1621,14 @@ mod tests {
             assert!(witness.partial_chunk.is_none());
             assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
 
-            let wrong_ops_root = Sha256::hash(&[b"wrong ops root"], &Sequential);
+            let wrong_ops_root = Sha256::hash(&[b"wrong ops root"]);
             assert!(!witness.verify::<Sha256>(&wrong_ops_root, &canonical_root));
 
-            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"], &Sequential);
+            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"]);
             assert!(!witness.verify::<Sha256>(&ops_root, &wrong_canonical_root));
 
             let mut tampered = witness;
-            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"], &Sequential);
+            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"]);
             assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
         });
     }
@@ -1658,14 +1652,14 @@ mod tests {
             assert!(witness.partial_chunk.is_some());
             assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
 
-            let wrong_ops_root = Sha256::hash(&[b"wrong ops root"], &Sequential);
+            let wrong_ops_root = Sha256::hash(&[b"wrong ops root"]);
             assert!(!witness.verify::<Sha256>(&wrong_ops_root, &canonical_root));
 
-            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"], &Sequential);
+            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"]);
             assert!(!witness.verify::<Sha256>(&ops_root, &wrong_canonical_root));
 
             let mut tampered = witness.clone();
-            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"], &Sequential);
+            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"]);
             assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
 
             let mut tampered = witness.clone();
@@ -1673,8 +1667,7 @@ mod tests {
             assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
 
             let mut tampered = witness;
-            tampered.partial_chunk.as_mut().unwrap().1 =
-                Sha256::hash(&[b"wrong partial chunk"], &Sequential);
+            tampered.partial_chunk.as_mut().unwrap().1 = Sha256::hash(&[b"wrong partial chunk"]);
             assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
         });
     }
@@ -1707,11 +1700,11 @@ mod tests {
 
             assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
 
-            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"], &Sequential);
+            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"]);
             assert!(!witness.verify::<Sha256>(&ops_root, &wrong_canonical_root));
 
             let mut tampered = witness;
-            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"], &Sequential);
+            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"]);
             assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
         });
     }

@@ -777,7 +777,6 @@ mod test {
     };
     use commonware_macros::{test_collect_traces, test_traced};
     use commonware_math::algebra::Random;
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef,
@@ -849,9 +848,9 @@ mod test {
                 let db = TestStore::init(context.child("seed"), cfg.clone(), None)
                     .await
                     .unwrap();
-                let a = Blake3::hash(&[b"a"], &Sequential);
-                let b = Blake3::hash(&[b"b"], &Sequential);
-                let c = Blake3::hash(&[b"c"], &Sequential);
+                let a = Blake3::hash(&[b"a"]);
+                let b = Blake3::hash(&[b"b"]);
+                let c = Blake3::hash(&[b"c"]);
                 let batch = db
                     .new_batch()
                     .update(a, vec![1])
@@ -937,7 +936,7 @@ mod test {
             let db = TestStore::init(context.child("seed"), cfg.clone(), None)
                 .await
                 .unwrap();
-            let key = Blake3::hash(&[b"key"], &Sequential);
+            let key = Blake3::hash(&[b"key"]);
             let (db, _) = apply_entries(db, [(key, Some(vec![1]))]).await;
             let size = db.size();
             _ = db.sync().await.unwrap();
@@ -961,7 +960,7 @@ mod test {
             let mut db = TestStore::init(context.child("seed"), cfg.clone(), None)
                 .await
                 .unwrap();
-            let key = |i: u64| Blake3::hash(&[&i.to_be_bytes()], &Sequential);
+            let key = |i: u64| Blake3::hash(&[&i.to_be_bytes()]);
             for value in [1, 2] {
                 (db, _) = apply_entries(db, (0..KEYS).map(|i| (key(i), Some(vec![value])))).await;
             }
@@ -1047,7 +1046,7 @@ mod test {
             let pending = PendingSyncs::default();
             let open = open_delayed_store(ctx.child("delayed"), "start-sync-overlap", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            let key0 = Blake3::hash(&[&0u64.to_be_bytes()], &Sequential);
+            let key0 = Blake3::hash(&[&0u64.to_be_bytes()]);
             let value0 = vec![1u8; 8];
             db = apply_write(db, key0, value0.clone()).await;
 
@@ -1069,7 +1068,7 @@ mod test {
 
             // Reads and applies complete before the sync does.
             assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
-            let key1 = Blake3::hash(&[&1u64.to_be_bytes()], &Sequential);
+            let key1 = Blake3::hash(&[&1u64.to_be_bytes()]);
             let value1 = vec![2u8; 8];
             db = apply_write(db, key1, value1.clone()).await;
             assert_eq!(
@@ -1108,12 +1107,7 @@ mod test {
             let mut db = open_delayed_store(ctx.child("delayed"), "start-sync-fail", &pending)
                 .await
                 .unwrap();
-            db = apply_write(
-                db,
-                Blake3::hash(&[&0u64.to_be_bytes()], &Sequential),
-                vec![1u8; 8],
-            )
-            .await;
+            db = apply_write(db, Blake3::hash(&[&0u64.to_be_bytes()]), vec![1u8; 8]).await;
 
             // Arm all future syncs to resolve to an injected error.
             pending.arm_fail();
@@ -1142,7 +1136,7 @@ mod test {
     fn test_store_recovery_warns_when_discarding_uncommitted_suffix(traces: TraceStorage) {
         deterministic::Runner::default().start(|context| async move {
             let mut db = create_test_store(context.child("seed")).await;
-            let key = Blake3::hash(&[b"uncommitted"], &Sequential);
+            let key = Blake3::hash(&[b"uncommitted"]);
 
             // A crash during apply_batch can persist an update before its trailing commit.
             (db.log, _) = db
@@ -1177,7 +1171,7 @@ mod test {
             let mut db = open_delayed_store(ctx.child("delayed"), "start-sync-recovery", &pending)
                 .await
                 .unwrap();
-            let key = Blake3::hash(&[&0u64.to_be_bytes()], &Sequential);
+            let key = Blake3::hash(&[&0u64.to_be_bytes()]);
             let value = vec![1u8; 8];
             db = apply_write(db, key, value.clone()).await;
 
@@ -1204,18 +1198,8 @@ mod test {
             let open = open_delayed_store(ctx.child("delayed"), "start-sync-prune", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             // Two batches so the floor walks leave a non-trivial prune target.
-            db = apply_write(
-                db,
-                Blake3::hash(&[&0u64.to_be_bytes()], &Sequential),
-                vec![1u8; 8],
-            )
-            .await;
-            db = apply_write(
-                db,
-                Blake3::hash(&[&1u64.to_be_bytes()], &Sequential),
-                vec![2u8; 8],
-            )
-            .await;
+            db = apply_write(db, Blake3::hash(&[&0u64.to_be_bytes()]), vec![1u8; 8]).await;
+            db = apply_write(db, Blake3::hash(&[&1u64.to_be_bytes()]), vec![2u8; 8]).await;
 
             let starts_before = pending.starts();
             let handle;
@@ -1717,7 +1701,7 @@ mod test {
             deterministic::Runner::seeded,
         );
         executor.start(move |mut context| async move {
-            let key = |i: u64| Blake3::hash(&[&i.to_be_bytes()], &Sequential);
+            let key = |i: u64| Blake3::hash(&[&i.to_be_bytes()]);
             let value = |i: u64| i.to_be_bytes().to_vec();
             let db = create_test_store(context.child("store")).await;
             let db = match seed {
@@ -1852,7 +1836,7 @@ mod test {
 
             // Establish a durable state whose last commit declares an early inactivity floor.
             for i in 0u64..ELEMENTS {
-                let k = Blake3::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Blake3::hash(&[&i.to_be_bytes()]);
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 (db, _) = apply_entries(db, [(k, Some(v))]).await;
             }
@@ -1862,7 +1846,7 @@ mod test {
             // Apply (but do not commit) entries that advance the in-memory floor past the
             // durable commit's floor.
             for i in 0u64..ELEMENTS {
-                let k = Blake3::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Blake3::hash(&[&i.to_be_bytes()]);
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 (db, _) = apply_entries(db, [(k, Some(v))]).await;
             }
@@ -1895,7 +1879,7 @@ mod test {
             {
                 let mut batch = db.new_batch();
                 for i in 0u64..ELEMENTS {
-                    let k = Blake3::hash(&[&i.to_be_bytes()], &Sequential);
+                    let k = Blake3::hash(&[&i.to_be_bytes()]);
                     let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                     batch = batch.update(k, v);
                 }
@@ -1907,7 +1891,7 @@ mod test {
 
             // Apply the updates and commit them.
             for i in 0u64..ELEMENTS {
-                let k = Blake3::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Blake3::hash(&[&i.to_be_bytes()]);
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 (db, _) = apply_entries(db, [(k, Some(v.clone()))]).await;
             }
@@ -1918,7 +1902,7 @@ mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = Blake3::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Blake3::hash(&[&i.to_be_bytes()]);
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 (db, _) = apply_entries(db, [(k, Some(v.clone()))]).await;
             }
@@ -1930,7 +1914,7 @@ mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = Blake3::hash(&[&i.to_be_bytes()], &Sequential);
+                let k = Blake3::hash(&[&i.to_be_bytes()]);
                 (db, _) = apply_entries(db, [(k, None)]).await;
             }
             let db = db.commit().await.unwrap();
@@ -1957,8 +1941,8 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = create_test_store(context.child("store").with_attribute("index", 0)).await;
-            let key0 = Blake3::hash(&[&0u64.to_be_bytes()], &Sequential);
-            let key1 = Blake3::hash(&[&1u64.to_be_bytes()], &Sequential);
+            let key0 = Blake3::hash(&[&0u64.to_be_bytes()]);
+            let key1 = Blake3::hash(&[&1u64.to_be_bytes()]);
             let value0 = vec![0, 1, 2];
             let value1 = vec![3, 4, 5, 6];
 
@@ -2132,7 +2116,7 @@ mod test {
     }
 
     fn digest(i: u64) -> sha256::Digest {
-        Sha256::hash(&[&i.to_be_bytes()], &Sequential)
+        Sha256::hash(&[&i.to_be_bytes()])
     }
 
     /// Return writes of `n` keys in ascending order. The `i`th write has the value
@@ -2894,7 +2878,7 @@ mod test {
             // update, delete, and recreate colliding keys.
             let keys: Vec<Digest> = (0u8..24)
                 .map(|i| {
-                    let mut key = Blake3::hash(&[&[i]], &Sequential);
+                    let mut key = Blake3::hash(&[&[i]]);
                     key.0[0..2].copy_from_slice(&[0, i % 3]);
                     key
                 })

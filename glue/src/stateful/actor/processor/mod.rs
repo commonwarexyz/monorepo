@@ -1733,7 +1733,7 @@ mod tests {
         type Digest = Digest;
 
         fn digest(&self) -> Digest {
-            Sha256::hash(&[&self.encode()], &Sequential)
+            Sha256::hash(&[&self.encode()])
         }
     }
 
@@ -1800,11 +1800,11 @@ mod tests {
     }
 
     fn height_key(height: Height) -> Digest {
-        Sha256::hash(&[&height.get().to_be_bytes()], &Sequential)
+        Sha256::hash(&[&height.get().to_be_bytes()])
     }
 
     fn counter_key() -> Digest {
-        Sha256::hash(&[b"processor_harness_counter"], &Sequential)
+        Sha256::hash(&[b"processor_harness_counter"])
     }
 
     struct ApplyGate {

@@ -1237,8 +1237,8 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "immutable-stale").await;
 
-            let key1 = Sha256::hash(&[&[1]], &Sequential);
-            let key2 = Sha256::hash(&[&[2]], &Sequential);
+            let key1 = Sha256::hash(&[&[1]]);
+            let key2 = Sha256::hash(&[&[2]]);
             let value1 = Sha256::fill(10u8);
             let value2 = Sha256::fill(20u8);
 
@@ -1269,9 +1269,9 @@ mod tests {
     fn test_compact_delayed_merkleize_after_ancestor_apply() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "immutable-delayed-child").await;
-            let key1 = Sha256::hash(&[&[1]], &Sequential);
-            let key2 = Sha256::hash(&[&[2]], &Sequential);
-            let key3 = Sha256::hash(&[&[3]], &Sequential);
+            let key1 = Sha256::hash(&[&[1]]);
+            let key2 = Sha256::hash(&[&[2]]);
+            let key3 = Sha256::hash(&[&[3]]);
             let value1 = Sha256::fill(10u8);
             let value2 = Sha256::fill(20u8);
             let value3 = Sha256::fill(30u8);
@@ -1313,7 +1313,7 @@ mod tests {
                 "snapshot before any mutation should match the live root"
             );
 
-            let key = Sha256::hash(&[&[1]], &Sequential);
+            let key = Sha256::hash(&[&[1]]);
             let value = Sha256::fill(10u8);
             let batch = db
                 .new_batch()
@@ -1348,19 +1348,19 @@ mod tests {
 
             let common_parent = db
                 .new_batch()
-                .set(Sha256::hash(&[&[10]], &Sequential), Sha256::fill(10u8))
+                .set(Sha256::hash(&[&[10]]), Sha256::fill(10u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
             let sibling_a = common_parent
                 .new_batch::<Sha256>()
-                .set(Sha256::hash(&[&[11]], &Sequential), Sha256::fill(11u8))
+                .set(Sha256::hash(&[&[11]]), Sha256::fill(11u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
             let sibling_b = common_parent
                 .new_batch::<Sha256>()
-                .set(Sha256::hash(&[&[12]], &Sequential), Sha256::fill(12u8))
+                .set(Sha256::hash(&[&[12]]), Sha256::fill(12u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
@@ -1372,19 +1372,19 @@ mod tests {
 
             let parent_a = db
                 .new_batch()
-                .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(1u8))
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
             let parent_b = db
                 .new_batch()
-                .set(Sha256::hash(&[&[2]], &Sequential), Sha256::fill(2u8))
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
             let child_b = parent_b
                 .new_batch::<Sha256>()
-                .set(Sha256::hash(&[&[3]], &Sequential), Sha256::fill(3u8))
+                .set(Sha256::hash(&[&[3]]), Sha256::fill(3u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
@@ -1406,13 +1406,13 @@ mod tests {
 
             let parent = db
                 .new_batch()
-                .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(1u8))
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
             let child = parent
                 .new_batch::<Sha256>()
-                .set(Sha256::hash(&[&[2]], &Sequential), Sha256::fill(2u8))
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
@@ -1432,13 +1432,13 @@ mod tests {
 
             let parent = db
                 .new_batch()
-                .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(1u8))
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
             let child = parent
                 .new_batch::<Sha256>()
-                .set(Sha256::hash(&[&[2]], &Sequential), Sha256::fill(2u8))
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
@@ -1459,9 +1459,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "immutable-floor-regressed").await;
 
-            let advance_floor = db
-                .new_batch()
-                .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(1u8));
+            let advance_floor = db.new_batch().set(Sha256::hash(&[&[1]]), Sha256::fill(1u8));
             let advance_floor = advance_floor
                 .merkleize(&db, None, Location::new(1))
                 .await
@@ -1472,7 +1470,7 @@ mod tests {
 
             let regressed = db
                 .new_batch()
-                .set(Sha256::hash(&[&[2]], &Sequential), Sha256::fill(2u8))
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
@@ -1502,13 +1500,13 @@ mod tests {
 
             let parent = db
                 .new_batch()
-                .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(1u8))
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(1))
                 .await
                 .unwrap();
             let child = parent
                 .new_batch::<Sha256>()
-                .set(Sha256::hash(&[&[2]], &Sequential), Sha256::fill(2u8))
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
@@ -1535,7 +1533,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "immutable-rewind-meta").await;
 
-            let k1 = Sha256::hash(&[&[1]], &Sequential);
+            let k1 = Sha256::hash(&[&[1]]);
             let v1 = Sha256::fill(11u8);
             let meta1 = Sha256::fill(0xaa);
             let floor1 = Location::new(0);
@@ -1550,7 +1548,7 @@ mod tests {
             let root_after_first = db.root();
             let size_after_first = db.size();
 
-            let k2 = Sha256::hash(&[&[2]], &Sequential);
+            let k2 = Sha256::hash(&[&[2]]);
             let v2 = Sha256::fill(22u8);
             let meta2 = Sha256::fill(0xbb);
             // Advance the floor to the commit of the first batch (loc 1).
@@ -1597,7 +1595,7 @@ mod tests {
                 let db = open_db::<mmr::Family>(context.child("first"), partition).await;
                 let batch = db
                     .new_batch()
-                    .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(11u8))
+                    .set(Sha256::hash(&[&[1]]), Sha256::fill(11u8))
                     .merkleize(&db, Some(meta1), floor1)
                     .await
                     .unwrap();
@@ -1608,7 +1606,7 @@ mod tests {
 
                 let batch = db
                     .new_batch()
-                    .set(Sha256::hash(&[&[2]], &Sequential), Sha256::fill(22u8))
+                    .set(Sha256::hash(&[&[2]]), Sha256::fill(22u8))
                     .merkleize(&db, Some(meta2), floor2)
                     .await
                     .unwrap();
@@ -1648,7 +1646,7 @@ mod tests {
                 let db = open_db::<mmr::Family>(context.child("first"), partition).await;
                 let batch = db
                     .new_batch()
-                    .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(11u8))
+                    .set(Sha256::hash(&[&[1]]), Sha256::fill(11u8))
                     .merkleize(&db, Some(meta1), Location::new(0))
                     .await
                     .unwrap();
@@ -1657,7 +1655,7 @@ mod tests {
 
                 let batch = db
                     .new_batch()
-                    .set(Sha256::hash(&[&[2]], &Sequential), Sha256::fill(22u8))
+                    .set(Sha256::hash(&[&[2]]), Sha256::fill(22u8))
                     .merkleize(&db, Some(meta2), Location::new(1))
                     .await
                     .unwrap();
@@ -1686,7 +1684,7 @@ mod tests {
                 let db = open_db::<mmr::Family>(context.child("first"), partition).await;
                 let batch = db
                     .new_batch()
-                    .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(11u8))
+                    .set(Sha256::hash(&[&[1]]), Sha256::fill(11u8))
                     .merkleize(&db, Some(meta1), Location::new(0))
                     .await
                     .unwrap();
@@ -1697,7 +1695,7 @@ mod tests {
 
                 let batch = db
                     .new_batch()
-                    .set(Sha256::hash(&[&[2]], &Sequential), Sha256::fill(22u8))
+                    .set(Sha256::hash(&[&[2]]), Sha256::fill(22u8))
                     .merkleize(&db, Some(meta2), Location::new(1))
                     .await
                     .unwrap();
@@ -1735,7 +1733,7 @@ mod tests {
                 let db = open_db::<mmr::Family>(context.child("first"), partition).await;
                 let batch = db
                     .new_batch()
-                    .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(11u8))
+                    .set(Sha256::hash(&[&[1]]), Sha256::fill(11u8))
                     .merkleize(&db, Some(meta), Location::new(0))
                     .await
                     .unwrap();
@@ -1776,7 +1774,7 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("db"), partition).await;
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[7]], &Sequential), Sha256::fill(7u8))
+                .set(Sha256::hash(&[&[7]]), Sha256::fill(7u8))
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1))
                 .await
                 .unwrap();
@@ -1808,7 +1806,7 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("db"), partition).await;
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(1u8))
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(1))
                 .await
                 .unwrap();
@@ -1817,7 +1815,7 @@ mod tests {
             let initialization_bound = db.target().size;
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[2]], &Sequential), Sha256::fill(2u8))
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(1))
                 .await
                 .unwrap();
@@ -1880,7 +1878,7 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("db"), partition).await;
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[7]], &Sequential), Sha256::fill(7u8))
+                .set(Sha256::hash(&[&[7]]), Sha256::fill(7u8))
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1))
                 .await
                 .unwrap();
@@ -1917,7 +1915,7 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("db"), partition).await;
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[7]], &Sequential), Sha256::fill(7u8))
+                .set(Sha256::hash(&[&[7]]), Sha256::fill(7u8))
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1))
                 .await
                 .unwrap();
@@ -1958,7 +1956,7 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("db"), partition).await;
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[7]], &Sequential), Sha256::fill(7u8))
+                .set(Sha256::hash(&[&[7]]), Sha256::fill(7u8))
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1))
                 .await
                 .unwrap();
@@ -1999,7 +1997,7 @@ mod tests {
             // Commit state A.
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(1u8))
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(1))
                 .await
                 .unwrap();
@@ -2058,8 +2056,8 @@ mod tests {
             // A multi-op commit jumps the committed size from 1 (bootstrap) to 4.
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(1u8))
-                .set(Sha256::hash(&[&[2]], &Sequential), Sha256::fill(2u8))
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0))
                 .await
                 .unwrap();
@@ -2072,7 +2070,7 @@ mod tests {
             // A second commit moves the size to 6.
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[3]], &Sequential), Sha256::fill(3u8))
+                .set(Sha256::hash(&[&[3]]), Sha256::fill(3u8))
                 .merkleize(&db, Some(Sha256::fill(0xb1)), Location::new(0))
                 .await
                 .unwrap();
@@ -2109,7 +2107,7 @@ mod tests {
             // Commit A, B, C, recording the state after A.
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(1u8))
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0))
                 .await
                 .unwrap();
@@ -2123,7 +2121,7 @@ mod tests {
             for i in [2u8, 3] {
                 let batch = db
                     .new_batch()
-                    .set(Sha256::hash(&[&[i]], &Sequential), Sha256::fill(i))
+                    .set(Sha256::hash(&[&[i]]), Sha256::fill(i))
                     .merkleize(&db, Some(Sha256::fill(i)), Location::new(0))
                     .await
                     .unwrap();
@@ -2163,7 +2161,7 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("db"), "immutable-rewind-noop").await;
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(1u8))
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0))
                 .await
                 .unwrap();
@@ -2208,7 +2206,7 @@ mod tests {
             for i in [1u8, 2, 3] {
                 let batch = db
                     .new_batch()
-                    .set(Sha256::hash(&[&[i]], &Sequential), Sha256::fill(i))
+                    .set(Sha256::hash(&[&[i]]), Sha256::fill(i))
                     .merkleize(&db, Some(Sha256::fill(i)), Location::new(0))
                     .await
                     .unwrap();
@@ -2649,7 +2647,7 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("db"), partition).await;
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(1u8))
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0))
                 .await
                 .unwrap();
@@ -2680,7 +2678,7 @@ mod tests {
 
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(1u8))
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
@@ -2691,7 +2689,7 @@ mod tests {
             // Merkleize a batch against the post-commit-A state.
             let held = db
                 .new_batch()
-                .set(Sha256::hash(&[&[2]], &Sequential), Sha256::fill(2u8))
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
@@ -2699,7 +2697,7 @@ mod tests {
             // Advance past that state and commit, then reopen at that state.
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[3]], &Sequential), Sha256::fill(3u8))
+                .set(Sha256::hash(&[&[3]]), Sha256::fill(3u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
@@ -2730,9 +2728,9 @@ mod tests {
             let db =
                 open_db::<mmr::Family>(context.child("db"), "immutable-noop-after-commit").await;
 
-            let k1 = Sha256::hash(&[&[1]], &Sequential);
+            let k1 = Sha256::hash(&[&[1]]);
             let v1 = Sha256::fill(11u8);
-            let k2 = Sha256::hash(&[&[2]], &Sequential);
+            let k2 = Sha256::hash(&[&[2]]);
             let v2 = Sha256::fill(22u8);
             let batch = db
                 .new_batch()
@@ -2761,9 +2759,9 @@ mod tests {
 
             let (root_before_drop, size_before_drop) = {
                 let db = open_db::<mmr::Family>(context.child("first"), partition).await;
-                let k1 = Sha256::hash(&[&[1]], &Sequential);
+                let k1 = Sha256::hash(&[&[1]]);
                 let v1 = Sha256::fill(11u8);
-                let k2 = Sha256::hash(&[&[2]], &Sequential);
+                let k2 = Sha256::hash(&[&[2]]);
                 let v2 = Sha256::fill(22u8);
                 let batch = db
                     .new_batch()
@@ -2795,9 +2793,9 @@ mod tests {
             let db =
                 open_db::<mmr::Family>(context.child("db"), "immutable-noop-after-rewind").await;
 
-            let k1 = Sha256::hash(&[&[1]], &Sequential);
+            let k1 = Sha256::hash(&[&[1]]);
             let v1 = Sha256::fill(11u8);
-            let k2 = Sha256::hash(&[&[2]], &Sequential);
+            let k2 = Sha256::hash(&[&[2]]);
             let v2 = Sha256::fill(22u8);
             let batch = db
                 .new_batch()
@@ -2811,7 +2809,7 @@ mod tests {
             let root_after_first = db.root();
             let size_after_first = db.size();
 
-            let k3 = Sha256::hash(&[&[3]], &Sequential);
+            let k3 = Sha256::hash(&[&[3]]);
             let v3 = Sha256::fill(33u8);
             let batch = db
                 .new_batch()
@@ -2851,7 +2849,7 @@ mod tests {
 
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(1u8))
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
@@ -2861,7 +2859,7 @@ mod tests {
 
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[2]], &Sequential), Sha256::fill(2u8))
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
@@ -2871,7 +2869,7 @@ mod tests {
             // Merkleize a batch against the post-commit-B state, which the recovery will discard.
             let held = db
                 .new_batch()
-                .set(Sha256::hash(&[&[3]], &Sequential), Sha256::fill(3u8))
+                .set(Sha256::hash(&[&[3]]), Sha256::fill(3u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
@@ -2923,14 +2921,14 @@ mod tests {
             // parent: set + commit at loc 2, floor=3 (one past parent's commit).
             let parent = db
                 .new_batch()
-                .set(Sha256::hash(&[&[1]], &Sequential), Sha256::fill(1u8))
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(3))
                 .await
                 .unwrap();
             // child: valid on its own (floor=0), but parent's floor is bad.
             let child = parent
                 .new_batch::<Sha256>()
-                .set(Sha256::hash(&[&[2]], &Sequential), Sha256::fill(2u8))
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
