@@ -7,7 +7,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
     merkle::{
-        self, Graftable, Location, Position, Readable as _, hasher::Hasher as _, mem::Mem,
+        self, Graftable, Location, Position, hasher::Hasher as _, mem::Mem,
         storage::Storage as MerkleStorage,
     },
     metadata::{Config as MConfig, Metadata},
@@ -63,10 +63,6 @@ impl<D: Copy> GraftRoots<D> {
 
     fn end(&self) -> usize {
         self.start + self.roots.len()
-    }
-
-    fn push(&mut self, root: D) {
-        self.roots.push_back(root);
     }
 
     fn prune(&mut self, start: usize) {
@@ -736,16 +732,15 @@ where
         self.metrics.apply_batch_calls.inc();
         let range;
         (self.any, range) = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
-        // Newly graftable roots belong to this batch chain, including unapplied ancestors.
-        // Publish them only after the any layer has validated and applied the batch.
+        // Publish roots of newly graftable chunks only after the any layer has validated and
+        // applied the batch. Each root was born in the applied range, which the committed ops
+        // tree holds in memory until it next flushes.
+        let ops_tree = self.any.log.merkle.mem();
         for chunk in self.graft_roots.end()..*batch.grafted.leaves() as usize {
-            let pos = graft_root_position::<F, N>(chunk);
-            let digest = batch
-                .inner
-                .journal_batch
-                .get_node(pos)
-                .expect("newly graftable root exists in applied batch chain");
-            self.graft_roots.push(digest);
+            let digest = ops_tree
+                .get_node(graft_root_position::<F, N>(chunk))
+                .expect("newly graftable root is in the applied range");
+            self.graft_roots.roots.push_back(digest);
         }
         Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;
@@ -1089,7 +1084,8 @@ pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: 
         .collect())
 }
 
-/// Build a grafted [Mem] from scratch using bitmap chunks and the ops tree.
+/// Build a grafted [Mem] from scratch using bitmap chunks and the ops tree, returning it with the
+/// ops roots it read for the database to retain.
 ///
 /// For each non-pruned **graftable** chunk (index in `pruned_chunks..graftable_chunks`), reads the
 /// ops tree node at the grafting height to compute the grafted leaf (see the
@@ -1504,7 +1500,8 @@ mod tests {
                 );
             }
             let parent = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            // Applying a descendant also publishes roots created by its unapplied ancestors.
+            // Applying a descendant also publishes roots created by its unapplied ancestors, which
+            // need not outlive the descendant's merkleization.
             let child = parent
                 .new_batch::<Sha256>()
                 .write(
@@ -1514,6 +1511,7 @@ mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
+            drop(parent);
             (db, _) = db.apply_batch(child).await.unwrap();
             db = db.commit().await.unwrap();
             assert_eq!(db.graft_roots.end(), *db.grafted_tree.leaves() as usize);
