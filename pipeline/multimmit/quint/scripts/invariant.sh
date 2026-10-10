@@ -10,8 +10,24 @@ BASEDIR=$(dirname "$SCRIPT")
 # Default output directory
 QUINT_LOGS="./out_inv"
 
-# Default invariants list. Keep in sync with `all_invariants` in replica.qnt, same order.
-DEFAULT_INVARIANTS="no_proposal_equivocation,agreement,no_vote_equivocation_inv,no_nullification_and_finalization_in_the_same_view,validity,valid_last_finalized,certificates_are_valid_inv,notarized_consistency,safe_finalization"
+# Consensus-layer invariants. Keep in sync with `all_invariants` in
+# consensus.qnt, same order. The chain-layer members of `all_invariants`
+# are not in scope in the consensus instances -- consensus.qnt imports
+# da.qnt without re-exporting it -- so they live in their own list and
+# are checked against main_da_*.qnt.
+DEFAULT_INVARIANTS="vqc_id_matches_key,vqc_content_has_unique_id,vote_pool_one_per_signer,l1_lqc_vqc_designation,l2_no_nullify_and_finalize,a2_tips_are_real,e1a_final_below_safe,agreement"
+
+# Chain-layer invariants. Keep in sync with `da_invariants` in da.qnt,
+# same order. Selected automatically for a `main_da_*.qnt` spec.
+DA_INVARIANTS="c1_one_da_vote_per_height,c2_certified_blocks_compatible,c5_da_vote_implies_path,da_certs_wellformed"
+
+# Pick the list that matches the spec, unless one was given explicitly.
+default_invariants_for() {
+    case "$(basename "$1")" in
+        *_da_*) echo "$DA_INVARIANTS" ;;
+        *)      echo "$DEFAULT_INVARIANTS" ;;
+    esac
+}
 
 # Display usage information
 usage() {
@@ -28,14 +44,15 @@ usage() {
     echo "Run verification options:"
     echo "  spec.qnt              The specification file to check"
     echo "  max-steps             Maximum number of steps for verification"
-    echo "  invariants            Comma-separated list of invariants (default: all)"
+    echo "  invariants            Comma-separated list of invariants (default: all"
+    echo "                        invariants of the spec's layer)"
     echo "  --random-transitions  Enable random transitions mode"
     echo ""
     echo "Examples:"
-    echo "  $0 run spec.qnt 100"
-    echo "  $0 run spec.qnt 100 \"agreement,validity\""
-    echo "  $0 run spec.qnt 100 \"agreement,validity\" --random-transitions"
-    echo "  $0 run spec.qnt 100 --random-transitions"
+    echo "  $0 run main_n6t1f1.qnt 100"
+    echo "  $0 run main_n6t1f1.qnt 100 \"agreement,e1a_final_below_safe\""
+    echo "  $0 run main_n6t1f1.qnt 100 \"agreement\" --random-transitions"
+    echo "  $0 run main_da_n6t1f1.qnt 100 --random-transitions"
     echo "  $0 list"
     echo "  $0 check"
     echo "  $0 clean"
@@ -43,10 +60,13 @@ usage() {
 
 # List available invariants
 list() {
-    echo "Available invariants:"
+    echo "Consensus-layer invariants (main_n6t1f1.qnt, main_n7t1f1.qnt):"
     echo "$DEFAULT_INVARIANTS" | tr ',' '\n' | nl -v0 -w2 -s'. '
     echo ""
-    echo "Total: $(echo "$DEFAULT_INVARIANTS" | tr ',' '\n' | wc -l) invariants"
+    echo "Chain-layer invariants (main_da_n6t1f1.qnt):"
+    echo "$DA_INVARIANTS" | tr ',' '\n' | nl -v0 -w2 -s'. '
+    echo ""
+    echo "Total: $(echo "$DEFAULT_INVARIANTS,$DA_INVARIANTS" | tr ',' '\n' | wc -l) invariants"
 }
 
 # Parse invariants into array
@@ -66,7 +86,7 @@ run() {
 
     local spec=$1
     local max_steps=$2
-    local invariants_input=$DEFAULT_INVARIANTS
+    local invariants_input=$(default_invariants_for "$spec")
     local random_transitions=false
 
     # Parse remaining arguments

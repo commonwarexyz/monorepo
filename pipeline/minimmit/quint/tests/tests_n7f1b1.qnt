@@ -2,15 +2,21 @@ module tests {
     import types.* from "../types"
     import defs.* from "../defs"
     import option.* from "../option"
+    pure val VAL_B0 = mkBlock("val_b0", 0)
+    pure val VAL_B1 = mkBlock("val_b1", 0)
+    pure val VAL_B2 = mkBlock("val_b2", 0)
+    pure val INV_B3 = mkBlock("inv_b3", 0)
     import replica(
+        REPLICA_IDS = Set("n0", "n1", "n2", "n3", "n4", "n5"),
+        TWINS = Set(),
         CORRECT = Set("n0", "n1", "n2", "n3", "n4", "n5"),
         BYZANTINE = Set("n6"),
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3", "n4" -> "n4", "n5"->"n5", "n6"->"n6"),
         N = 7,
         F = 1,
         VIEWS = 0.to(2),
-        VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
-        INVALID_BLOCKS = Set("inv_b3")
+        VALID_BLOCK_IDS = Set(VAL_B0.id, VAL_B1.id, VAL_B2.id),
+        INVALID_BLOCK_IDS = Set(INV_B3.id)
     ).* from "../replica"
 
     run asuumptionsValidTest = all {
@@ -48,14 +54,14 @@ module tests {
 
     run livenessTest = {
         pure val proposal_from_n6_1 = { 
-            block: "val_b0",
+            block: VAL_B0,
             view: 0,
             view_parent: GENESIS_VIEW,
             block_parent: GENESIS_BLOCK,
             sig: sig_of("n6")
         }
         pure val proposal_from_n6_2 = { 
-            block: "val_b1",
+            block: VAL_B1,
             view: 0,
             view_parent: GENESIS_VIEW,
             block_parent: GENESIS_BLOCK,
@@ -81,29 +87,29 @@ module tests {
             
             
             // n0-n2 notarize 0 and move to view 1
-            .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n0"))
-            .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n1"))
-            .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n2"))
+            .then(replica_receives_notarize_vote("n0", VAL_B0, 0, "n0"))
+            .then(replica_receives_notarize_vote("n0", VAL_B0, 0, "n1"))
+            .then(replica_receives_notarize_vote("n0", VAL_B0, 0, "n2"))
 
-            .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n0"))
-            .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n1"))
-            .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n2"))
+            .then(replica_receives_notarize_vote("n1", VAL_B0, 0, "n0"))
+            .then(replica_receives_notarize_vote("n1", VAL_B0, 0, "n1"))
+            .then(replica_receives_notarize_vote("n1", VAL_B0, 0, "n2"))
 
-            .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n0"))
-            .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n1"))
-            .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n2"))
+            .then(replica_receives_notarize_vote("n2", VAL_B0, 0, "n0"))
+            .then(replica_receives_notarize_vote("n2", VAL_B0, 0, "n1"))
+            .then(replica_receives_notarize_vote("n2", VAL_B0, 0, "n2"))
 
-            .then(replica_receives_notarize_vote("n3", "val_b1", 0, "n3"))
-            .then(replica_receives_notarize_vote("n3", "val_b1", 0, "n4"))
-            .then(replica_receives_notarize_vote("n3", "val_b1", 0, "n5"))
+            .then(replica_receives_notarize_vote("n3", VAL_B1, 0, "n3"))
+            .then(replica_receives_notarize_vote("n3", VAL_B1, 0, "n4"))
+            .then(replica_receives_notarize_vote("n3", VAL_B1, 0, "n5"))
 
-            .then(replica_receives_notarize_vote("n4", "val_b1", 0, "n3"))
-            .then(replica_receives_notarize_vote("n4", "val_b1", 0, "n4"))
-            .then(replica_receives_notarize_vote("n4", "val_b1", 0, "n5"))
+            .then(replica_receives_notarize_vote("n4", VAL_B1, 0, "n3"))
+            .then(replica_receives_notarize_vote("n4", VAL_B1, 0, "n4"))
+            .then(replica_receives_notarize_vote("n4", VAL_B1, 0, "n5"))
 
-            .then(replica_receives_notarize_vote("n5", "val_b1", 0, "n3"))
-            .then(replica_receives_notarize_vote("n5", "val_b1", 0, "n4"))
-            .then(replica_receives_notarize_vote("n5", "val_b1", 0, "n5"))
+            .then(replica_receives_notarize_vote("n5", VAL_B1, 0, "n3"))
+            .then(replica_receives_notarize_vote("n5", VAL_B1, 0, "n4"))
+            .then(replica_receives_notarize_vote("n5", VAL_B1, 0, "n5"))
 
             
             .then(all {
@@ -117,13 +123,13 @@ module tests {
             })
 
             .then(all {
-                assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block == "val_b0").size() == 3),
-                assert(store_vote.get("n3").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block == "val_b1").size() == 3),
-                assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NullifyKind).size() == 0),
+                assert(store_vote.get("n0").filter(v=>vote_view(v)==0 and vote_kind(v)==NotarizeKind and vote_block(v) == VAL_B0).size() == 3),
+                assert(store_vote.get("n3").filter(v=>vote_view(v)==0 and vote_kind(v)==NotarizeKind and vote_block(v) == VAL_B1).size() == 3),
+                assert(store_vote.get("n0").filter(v=>vote_view(v)==0 and vote_kind(v)==NullifyKind).size() == 0),
                 assert(replica_state.get("n0").nullified == false),
                 assert(replica_state.get("n3").nullified == false),
-                assert(replica_state.get("n0").notarized.get(0) == "val_b0"),
-                assert(replica_state.get("n3").notarized.get(0) == "val_b1"),
+                assert(replica_state.get("n0").notarized.get(0) == Some(proposal_from_n6_1)),
+                assert(replica_state.get("n3").notarized.get(0) == Some(proposal_from_n6_2)),
                 assert(is_contradicted(replica_state.get("n0"), 0, store_vote.get("n0")) == false),
                 assert(is_contradicted(replica_state.get("n3"), 0, store_vote.get("n3")) == false),
                 unchanged_all,
@@ -132,6 +138,10 @@ module tests {
     }
 
     action inject_proposal(proposal: Proposal): bool = all {
+        or {
+            not(ghost_block_parent.keys().contains(proposal.block)),
+            ghost_block_parent.get(proposal.block) == proposal.block_parent,
+        },
         sent_proposal' = sent_proposal.union(Set(proposal)), 
         sent_vote' = sent_vote,
         sent_certificate' = sent_certificate,
@@ -139,6 +149,7 @@ module tests {
         store_certificate' = store_certificate,
         ghost_proposal' = ghost_proposal,
         ghost_committed_blocks' = ghost_committed_blocks,
+        ghost_block_parent' = ghost_block_parent.put(proposal.block, proposal.block_parent),
         leader' = leader,
         replica_state' = replica_state,
     }
@@ -151,12 +162,21 @@ module tests {
         store_certificate' = store_certificate,
         ghost_proposal' = ghost_proposal,
         ghost_committed_blocks' = ghost_committed_blocks,
+        ghost_block_parent' = ghost_block_parent,
         leader' = leader,
         replica_state' = replica_state,
     }
 
-     action replica_receives_notarize_vote(id: ReplicaId, block: Block, view: ViewNumber, src: ReplicaId): bool = 
-        on_vote_notarize(id, view, block,  Set(notarize(view, src, block)))  
+     action replica_receives_notarize_vote(id: ReplicaId, block: Block, view: ViewNumber, src: ReplicaId): bool = all {
+        val p = {
+            block: block,
+            view: view,
+            view_parent: GENESIS_VIEW,
+            block_parent: GENESIS_BLOCK,
+            sig: sig_of(leader.get(view))
+        }
+        on_vote_notarize(id, p, Set(notarize(p, src)))
+    }
 
     action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: str): bool = 
         on_vote_nullify(id, view, Set(nullify(view, src)))    
@@ -169,6 +189,7 @@ module tests {
         store_certificate' = store_certificate,
         ghost_proposal' = ghost_proposal,
         ghost_committed_blocks' = ghost_committed_blocks,
+        ghost_block_parent' = ghost_block_parent,
         leader' = leader,
         replica_state' = replica_state,
     }
