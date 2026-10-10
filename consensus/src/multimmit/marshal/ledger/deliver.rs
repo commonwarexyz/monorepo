@@ -38,6 +38,9 @@ const REASSERT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Most requests waiting for the fetch budget.
 pub(super) const MAX_DEFERRED: usize = 1024;
 
+/// Final blocks of one chain whose bodies are read ahead of their report.
+const FINAL_READ_AHEAD: usize = 2;
+
 impl<E, H, S, B, P, R, V, A> Ledger<E, H, S, B, P, R, V, A>
 where
     E: Context + Spawner,
@@ -141,6 +144,53 @@ where
         Ok(())
     }
 
+    /// Reports every chain's next final blocks whose bodies are in memory, oldest first, and reads
+    /// the bodies of the next few from local custody. Never fetches from peers.
+    pub(super) fn drive_finals(&mut self) -> Result<(), Error> {
+        if self
+            .install
+            .as_ref()
+            .is_some_and(|install| install.fenced())
+        {
+            return Ok(());
+        }
+        if std::mem::take(&mut self.finals_dirty) {
+            let blocks = &self.blocks;
+            self.finals
+                .advance(|block| blocks.header(block).map(|header| header.parent_ref()));
+        }
+        let mut reads = Vec::new();
+        for chain in 0..self.finals.chains() {
+            loop {
+                let Some(next) = self.finals.ready(chain).next() else {
+                    break;
+                };
+                let body = self
+                    .hot
+                    .get(next)
+                    .or_else(|| self.blocks.pending(next))
+                    .cloned();
+                let Some(body) = body else {
+                    reads.extend(self.finals.ready(chain).take(1 + FINAL_READ_AHEAD));
+                    break;
+                };
+                self.finals.delivered(next);
+                self.finals_dirty = true;
+                self.metrics.finals.inc();
+                let update = Update::Final(Digested::precomputed(body, next.digest()));
+                if self.application.report(update) == Feedback::Closed {
+                    return Err(failed(Cause::Application));
+                }
+            }
+        }
+        for block in reads {
+            if self.hot.get(block).is_none() {
+                self.read_body(block);
+            }
+        }
+        Ok(())
+    }
+
     /// Delivers one position to the application.
     fn dispatch(
         &mut self,
@@ -158,7 +208,9 @@ where
         self.outstanding += 1;
         self.metrics.delivered.set(index as i64);
         self.write_cut_entries(index);
-        let update = Update {
+        self.finals.delivered(block);
+        self.finals_dirty = true;
+        let update = Update::Block {
             index: OutputIndex::new(index),
             block: Digested::precomputed(body, block.digest()),
             acknowledgement,
