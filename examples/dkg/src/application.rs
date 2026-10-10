@@ -79,8 +79,10 @@ where
             context.1,
             parent.digest(),
             height,
-            merkleized.root(),
-            non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            Target::new(
+                merkleized.root(),
+                non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            ),
             payload,
         );
         Some(Proposed { block, merkleized })

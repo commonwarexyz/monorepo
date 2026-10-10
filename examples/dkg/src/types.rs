@@ -131,16 +131,15 @@ impl Block {
         context: Context<sha256::Digest, ed25519::PublicKey>,
         parent: sha256::Digest,
         height: Height,
-        state_root: sha256::Digest,
-        range: NonEmptyRange<Location>,
+        target: Target<mmr::Family, sha256::Digest>,
         payload: Option<Payload<MinSig, ed25519::PrivateKey>>,
     ) -> Self {
         let mut block = Self {
             context,
             parent,
             height,
-            state_root,
-            range,
+            state_root: target.root,
+            range: target.range,
             payload,
             digest: sha256::Digest::EMPTY,
         };
@@ -162,8 +161,7 @@ impl Block {
             },
             sha256::Digest::EMPTY,
             Height::zero(),
-            target.root,
-            target.range,
+            target,
             Some(Payload::EpochInfo(info)),
         )
     }
@@ -199,8 +197,7 @@ impl Read for Block {
             Context::read(buf)?,
             sha256::Digest::read(buf)?,
             Height::read(buf)?,
-            sha256::Digest::read(buf)?,
-            NonEmptyRange::read(buf)?,
+            Target::read(buf)?,
             Option::<Payload<MinSig, ed25519::PrivateKey>>::read_cfg(
                 buf,
                 &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE),
