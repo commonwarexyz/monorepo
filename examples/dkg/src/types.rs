@@ -121,6 +121,7 @@ pub struct Block {
     pub(crate) state_root: sha256::Digest,
     pub(crate) range: NonEmptyRange<Location>,
     pub(crate) payload: Option<Payload<MinSig, ed25519::PrivateKey>>,
+
     /// The SHA-256 digest of the block's encoding, computed when the block is built or decoded.
     digest: sha256::Digest,
 }

@@ -160,6 +160,7 @@ pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     parent: sha256::Digest,
     height: Height,
     payload: Option<Payload<V, ed25519::PrivateKey, D>>,
+
     /// The SHA-256 digest of the block's encoding, computed when the block is built or decoded.
     digest: sha256::Digest,
 }

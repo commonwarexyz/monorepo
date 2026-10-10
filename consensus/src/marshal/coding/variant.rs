@@ -208,6 +208,7 @@ mod tests {
     type TestScheme = ReedSolomon<Sha256>;
     type TestVariant = Coding<NoCloneBlock, TestScheme, Sha256, PublicKey>;
 
+    /// Coding configuration for the coded blocks built by these tests.
     const CONFIG: CodingConfig = CodingConfig {
         minimum_shards: NZU16!(1),
         extra_shards: NZU16!(2),
