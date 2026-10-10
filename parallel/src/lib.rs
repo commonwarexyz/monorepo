@@ -95,6 +95,7 @@ commonware_macros::stability_scope!(BETA {
             };
 
             mod policy;
+            mod topology;
         } else {
             extern crate alloc;
             use alloc::vec::Vec;
@@ -1662,6 +1663,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     // Offload: hand the job to the pool. The worker records the job wall (so
                     // job estimates survive a dropped future), and the awaiting future records
                     // the round-trip overhead when it observes the result.
+                    //
+                    // Pin the executor to the submitter's LLC domain if possible to avoid
+                    // cross-domain traffic (see [topology]). Resolving the target before the timed
+                    // round trip keeps the one-time topology discovery out of the overhead
+                    // estimate.
+                    let domain = topology::spawn_domain();
                     let spawn_start = measure.then(Instant::now);
                     let (tx, mut rx) = oneshot::channel();
                     let s = self.clone();
@@ -1673,6 +1680,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     };
                     let worker_recorder = recorder.clone();
                     self.thread_pool.spawn(move || {
+                        let _affinity = topology::AffinityGuard::pin(domain);
                         let job_start = worker_recorder.is_some().then(Instant::now);
 
                         // Catch the panic so a panicking job propagates to the awaiting task
