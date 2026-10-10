@@ -48,15 +48,33 @@ pub trait LqcVerifier<H: Hasher, V: Variant>: Send + 'static {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
-/// One complete block in the finalized application stream, at the next output index.
+/// One item marshal reports to the application.
 #[derive(Clone, Debug)]
-pub struct Update<B: Block> {
-    /// Canonical index of the block in the finalized stream.
-    pub index: OutputIndex,
-    /// Complete block, including its protocol-defined header and opaque application body.
-    pub block: Arc<B>,
-    /// Acknowledged after the application has durably applied the block.
-    pub acknowledgement: Exact,
+pub enum Update<B: Block> {
+    /// One complete block in the finalized application stream, at the next output index.
+    Block {
+        /// Canonical index of the block in the finalized stream.
+        index: OutputIndex,
+        /// Complete block, including its protocol-defined header and opaque application body.
+        block: Arc<B>,
+        /// Acknowledged after the application has durably applied the block.
+        acknowledgement: Exact,
+    },
+    /// A complete final block that marshal has not yet delivered as [`Update::Block`].
+    ///
+    /// A block is final once a leader finality fact names a final tip at or above it on its
+    /// producer chain, or once it is committed. Marshal reports it once the block is in local
+    /// custody, oldest first on its chain, so the application can start work for it while
+    /// earlier blocks are still being ordered or applied. The block is later delivered as
+    /// [`Update::Block`] at an index not yet known, unless installing a floor resumes the stream
+    /// past it.
+    ///
+    /// It carries no acknowledgement and does not change the finalized stream. While marshal
+    /// runs, it reports each final block at most once and never after the block's
+    /// [`Update::Block`]. After a restart, it may report again any final block it has not yet
+    /// delivered in the new run, including outputs redelivered from the acknowledgement cursor
+    /// that the application may already have applied.
+    Final(Arc<B>),
 }
 
 /// One value for each finalized artifact family.

@@ -44,6 +44,7 @@ const DEFAULT_HEADER_CACHE_CAPACITY: NonZeroUsize = NZUsize!(16 * 1024);
 const DEFAULT_MAX_BLOCK_BYTES: NonZeroUsize = NZUsize!(1024 * 1024);
 const DEFAULT_MAX_COMMIT_BLOCK_BYTES: NonZeroUsize = NZUsize!(256 * 1024 * 1024);
 const DEFAULT_MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(128);
+const DEFAULT_FINAL_LOOKAHEAD: NonZeroUsize = NZUsize!(4 * DEFAULT_MAX_PENDING_ACKS.get());
 const DEFAULT_MAX_DELIVERY_BYTES: NonZeroUsize = NZUsize!(16 * 1024 * 1024);
 const DEFAULT_MAX_HOT_BLOCK_BYTES: NonZeroUsize = NZUsize!(512 * 1024 * 1024);
 const DEFAULT_MAX_MATERIALIZED_BLOCK_BYTES: NonZeroUsize = NZUsize!(512 * 1024 * 1024);
@@ -228,6 +229,15 @@ pub struct Capacities {
     /// Contiguous acknowledged prefixes coalesce in constant space while the delivery cursor
     /// syncs, so cursor storage latency does not occupy this window.
     pub max_pending_acks: NonZeroUsize,
+    /// Most final blocks of one producer chain that marshal reads ahead of the ordered stream to
+    /// report as [`Update::Final`](super::Update::Final).
+    ///
+    /// Each chain reports its oldest unreported final blocks in windows of this many, sliding
+    /// forward as they are reported or delivered, and also reads its header ancestry in segments
+    /// of this many headers. Each chain keeps up to about three times this many block references
+    /// in memory. A larger value warms more blocks ahead of execution and walks ancestry in fewer
+    /// catalog reads.
+    pub final_lookahead: NonZeroUsize,
     /// Most independent ancestry or finalized-body fetches in flight.
     ///
     /// Ancestry discovery is sequential within each producer chain because each header reveals
@@ -254,6 +264,7 @@ impl Default for Capacities {
             resolver_mailbox_size: DEFAULT_RESOLVER_MAILBOX_SIZE,
             max_commit_outputs: DEFAULT_MAX_COMMIT_OUTPUTS,
             max_pending_acks: DEFAULT_MAX_PENDING_ACKS,
+            final_lookahead: DEFAULT_FINAL_LOOKAHEAD,
             backfill_concurrency: DEFAULT_BACKFILL_CONCURRENCY,
             header_cache_capacity: DEFAULT_HEADER_CACHE_CAPACITY,
         }
@@ -457,6 +468,12 @@ impl<T: Translator, V: Variant, B: Codec + Digestible> Config<T, V, B> {
     /// Sets [`Capacities::max_pending_acks`].
     pub const fn with_max_pending_acks(mut self, max_pending_acks: NonZeroUsize) -> Self {
         self.capacities.max_pending_acks = max_pending_acks;
+        self
+    }
+
+    /// Sets [`Capacities::final_lookahead`].
+    pub const fn with_final_lookahead(mut self, final_lookahead: NonZeroUsize) -> Self {
+        self.capacities.final_lookahead = final_lookahead;
         self
     }
 
@@ -753,6 +770,7 @@ mod tests {
                 256 * 1024 * 1024
             );
             assert_eq!(config.capacities.max_pending_acks.get(), 128);
+            assert_eq!(config.capacities.final_lookahead.get(), 512);
             assert_eq!(config.limits.max_delivery_bytes.get(), 16 * 1024 * 1024);
             assert_eq!(config.limits.max_hot_block_bytes.get(), 512 * 1024 * 1024);
             assert_eq!(
