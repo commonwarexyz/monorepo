@@ -84,9 +84,15 @@ use crate::{
     Relay, Reporter,
     marshal::{
         Update,
+        ancestry::Ancestry,
         application::{
             gates::{self, GateOutcome, Gates},
-            validation::{Stage, is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify},
+            prepare::Resolved,
+            propose,
+            validation::{
+                Stage, is_block_in_expected_epoch, is_inferred_reproposal_at_certify,
+                is_valid_reproposal_at_verify,
+            },
         },
         coding::{
             Coding, shards,
@@ -96,10 +102,10 @@ use crate::{
         core,
     },
     simplex::{Plan, scheme::Scheme, types::Context},
-    types::{Epoch, Epocher, Round, coding::Commitment},
+    types::{Epoch, Epocher, Round, View, coding::Commitment},
 };
 use commonware_actor::Feedback;
-use commonware_coding::Scheme as CodingScheme;
+use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
     Committable, Digestible, Hasher,
     certificate::{Provider, Scheme as _, Verifier},
@@ -120,9 +126,13 @@ use commonware_runtime::{
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future::Either;
 use rand_core::Rng;
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 use tracing::{Instrument as _, debug, info_span, warn};
 
+/// The outcome of the coding proposal checks. A build carries the coding configuration of the
+/// epoch's participants to the sealing step.
+type CodingResolved<B, C, H, A> =
+    Resolved<Commitment<B, C, H>, CodedBlock<B, C, H>, A, CodingConfig>;
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
 pub struct MarshaledConfig<A, B, C, H, Z, S, ES>
@@ -639,6 +649,98 @@ where
         });
         rx
     }
+
+    /// Runs the proposal checks for `consensus_context` and yields what the proposal path does
+    /// next: re-propose the epoch boundary block, skip the view, or build on the fetched parent.
+    ///
+    /// `parent_fallback` decides how a parent missing locally is acquired. A propose request
+    /// fetches it by round. A prepare request builds on a parent that only our own shard vote may
+    /// attest to, so it draws no peer fetch. Local reconstruction or the parent's certification,
+    /// which acquires the block from peers, delivers it.
+    ///
+    /// The returned future borrows nothing from `self`, so it can move into the spawned propose
+    /// task or into a prepare request's [`Parent`](crate::marshal::ancestry::Parent) handle.
+    fn checks(
+        &self,
+        consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+        parent_fallback: core::CommitmentFallback,
+    ) -> impl Future<Output = CodingResolved<B, C, H, impl Ancestry<B>>> + Send + 'static {
+        let scheme_provider = self.scheme_provider.clone();
+        let context = self.context.clone();
+        let marshal = self.marshal.clone();
+        let epocher = self.epocher.clone();
+        let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
+        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
+        let build_duration = self.build_duration.clone();
+        async move {
+            let Some(scheme) = scheme_provider.scheme(consensus_context.epoch()) else {
+                debug!(round = %consensus_context.round, "no scheme for epoch, skipping proposal");
+                return Resolved::Skip;
+            };
+            let n_participants =
+                u16::try_from(scheme.participants().len()).expect("too many participants");
+            let coding_config = coding_config_for_participants(n_participants);
+
+            // The parent for any consensus context is in the same epoch: the
+            // boundary block of the previous epoch is the genesis block of the
+            // current epoch.
+            //
+            // Proposal context carries the parent view and commitment but not
+            // the parent height. The parent may sit above the finalized tip and
+            // may still be uncertified, so a fetch must stay round-bound until the
+            // block is returned.
+            let (parent_view, parent_commitment) = consensus_context.parent;
+            let parent_request =
+                marshal.subscribe_by_commitment(parent_commitment, parent_fallback);
+            let parent_timer = proposal_parent_fetch_duration.timer(&*context);
+            let Ok(parent) = parent_request.await else {
+                debug!(
+                    ?parent_commitment,
+                    reason = "failed to fetch parent block",
+                    "skipping proposal"
+                );
+                return Resolved::Skip;
+            };
+            parent_timer.observe(&*context);
+
+            // Coding validators vote before reconstructing a block, so an uncertified handoff
+            // parent can carry any height. Build only on a parent whose height maps to the
+            // request's epoch, since any other parent can never certify. A parent at view zero
+            // is the epoch's genesis: for a later epoch that is the previous epoch's boundary
+            // block, whose height maps to the previous epoch.
+            if parent_view != View::zero()
+                && !is_block_in_expected_epoch(&epocher, parent.height(), consensus_context.epoch())
+            {
+                debug!(
+                    ?parent_commitment,
+                    reason = "parent is outside the epoch",
+                    "skipping proposal"
+                );
+                return Resolved::Skip;
+            }
+
+            // Special case: If the parent block is the last block in the epoch,
+            // re-propose it so as not to produce any blocks that will be cut out
+            // by the epoch transition.
+            let last_in_epoch = epocher
+                .last(consensus_context.epoch())
+                .expect("current epoch should exist");
+            if parent.height() == last_in_epoch {
+                return Resolved::Reuse(parent.commitment(), parent);
+            }
+
+            let ancestor_stream = marshal.ancestor_stream(
+                context.clone(),
+                [parent.inner_shared()],
+                ancestor_fetch_duration,
+            );
+            Resolved::Build(
+                ancestor_stream,
+                build_duration.timer(&*context),
+                coding_config,
+            )
+        }
+    }
 }
 
 impl<E, A, B, C, H, Z, S, ES> Automaton for Marshaled<E, A, B, C, H, Z, S, ES>
@@ -680,157 +782,43 @@ where
         &mut self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
-        let marshal = self.marshal.clone();
-        let mut application = self.application.clone();
-        let epocher = self.epocher.clone();
         let strategy = self.strategy.clone();
-        let gates = self.gates.clone();
-
-        // If there's no scheme for the current epoch, we cannot verify the proposal.
-        // Send back a receiver with a dropped sender.
-        let Some(scheme) = self.scheme_provider.scheme(consensus_context.epoch()) else {
-            debug!(
-                round = %consensus_context.round,
-                "no scheme for epoch, skipping propose"
-            );
-            let (_, rx) = oneshot::channel();
-            return rx;
-        };
-
-        let n_participants =
-            u16::try_from(scheme.participants().len()).expect("too many participants");
-        let coding_config = coding_config_for_participants(n_participants);
-
-        // Metrics
-        let build_duration = self.build_duration.clone();
-        let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
-
-        let (mut tx, rx) = oneshot::channel();
-        let context = self
-            .context
-            .child("propose")
-            .with_attribute("round", consensus_context.round);
+        let clock = self.context.clone();
+        let (parent_view, parent_commitment) = consensus_context.parent;
+        let checks = self.checks(
+            consensus_context.clone(),
+            core::CommitmentFallback::FetchByRound {
+                round: Round::new(consensus_context.epoch(), parent_view),
+            },
+        );
         let span = info_span!(
             "marshal.coding.propose.task",
             round = %consensus_context.round
         );
-        context.spawn(move |runtime_context| {
-            async move {
-                let last_in_epoch = epocher
-                    .last(consensus_context.epoch())
-                    .expect("current epoch should exist");
-                // The parent for any consensus context is in the same epoch: the
-                // boundary block of the previous epoch is the genesis block of the
-                // current epoch.
-                //
-                // Proposal context carries the certified parent view/commitment but
-                // not the parent height. The parent may be certified above the
-                // finalized tip, so this must stay round-bound until the block is
-                // returned.
-                let (parent_view, parent_commitment) = consensus_context.parent;
-                let parent_request = marshal.subscribe_by_commitment(
-                    parent_commitment,
-                    core::CommitmentFallback::FetchByRound {
-                        round: Round::new(consensus_context.epoch(), parent_view),
-                    },
-                );
-
-                let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
-                let parent = select! {
-                    _ = tx.closed() => {
-                        debug!(reason = "consensus dropped receiver", "skipping proposal");
-                        return;
-                    },
-                    result = parent_request => match result {
-                        Ok(parent) => parent,
-                        Err(_) => {
-                            debug!(
-                                ?parent_commitment,
-                                reason = "failed to fetch parent block",
-                                "skipping proposal"
-                            );
-                            return;
-                        }
-                    },
-                };
-                parent_timer.observe(&runtime_context);
-
-                // Special case: If the parent block is the last block in the epoch,
-                // re-propose it as to not produce any blocks that will be cut out
-                // by the epoch transition.
-                if parent.height() == last_in_epoch {
-                    let commitment = parent.commitment();
-                    let round = consensus_context.round;
-
-                    gates
-                        .stage(round, commitment, parent, tx, "re-proposed boundary block")
-                        .await;
-                    return;
-                }
-
-                let ancestor_stream = marshal.ancestor_stream(
-                    Arc::new(runtime_context.child("ancestor_stream")),
-                    [parent.inner_shared()],
-                    ancestor_fetch_duration,
-                );
-                let build_request = application
-                    .propose(
-                        (
-                            runtime_context.child("app_propose"),
-                            consensus_context.clone(),
-                        ),
-                        ancestor_stream,
-                        (),
-                    )
-                    .instrument(info_span!(
-                        "marshal.coding.application.propose",
-                        round = %consensus_context.round,
-                        parent_view = parent_view.traced(),
-                        parent = %parent_commitment
-                    ));
-
-                let build_timer = build_duration.timer(&runtime_context);
-                let built_block = select! {
-                    _ = tx.closed() => {
-                        debug!(reason = "consensus dropped receiver", "skipping proposal");
-                        return;
-                    },
-                    result = build_request => match result {
-                        Some(block) => block,
-                        None => {
-                            debug!(
-                                ?parent_commitment,
-                                reason = "block building failed",
-                                "skipping proposal"
-                            );
-                            return;
-                        }
-                    },
-                };
-                build_timer.observe(&runtime_context);
-
-                let erasure_timer = erasure_encode_duration.timer(&runtime_context);
-                let coded_block = CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy);
-                erasure_timer.observe(&runtime_context);
-
-                let commitment = coded_block.commitment();
-                let round = consensus_context.round;
-
-                gates
-                    .stage(
-                        round,
-                        commitment,
-                        Arc::new(coded_block),
-                        tx,
-                        "proposed block",
-                    )
-                    .await;
-            }
-            .instrument(span)
-        });
-        rx
+        let round = consensus_context.round;
+        propose::request(
+            self.context.as_ref(),
+            &self.application,
+            self.gates.clone(),
+            consensus_context,
+            checks,
+            span,
+            move || {
+                info_span!(
+                    "marshal.coding.application.propose",
+                    round = %round,
+                    parent_view = parent_view.traced(),
+                    parent = %parent_commitment
+                )
+            },
+            move |block: B, coding_config| {
+                let erasure_timer = erasure_encode_duration.timer(&*clock);
+                let coded_block = CodedBlock::<B, C, H>::new(block, coding_config, &strategy);
+                erasure_timer.observe(&*clock);
+                (coded_block.commitment(), Arc::new(coded_block))
+            },
+        )
     }
 
     /// Verifies a received shard for a given round.

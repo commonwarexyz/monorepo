@@ -131,7 +131,7 @@ impl<D: Digest, B> Gates<D, B> {
     /// durability handshake for `(round, id)`.
     ///
     /// Registers a certification gate and the staged block, publishes `id` to
-    /// consensus on `tx`, then awaits the durable-sync handle so
+    /// consensus through `publish`, then awaits the durable-sync handle so
     /// [`certify`](crate::CertifiableAutomaton::certify) can require durability
     /// before the finalize vote. Both registrations happen before `id` is
     /// published so the relay broadcast and `certify` always find them.
@@ -148,7 +148,7 @@ impl<D: Digest, B> Gates<D, B> {
         round: Round,
         id: D,
         block: Arc<B>,
-        tx: oneshot::Sender<D>,
+        publish: impl FnOnce(D),
         name: &'static str,
     ) {
         let (durable_tx, durable_rx) = oneshot::channel();
@@ -158,7 +158,7 @@ impl<D: Digest, B> Gates<D, B> {
             inner.certifications.insert((round, id), durable_rx);
             inner.proposals.insert((round, id), (block, ack));
         }
-        tx.send_lossy(id);
+        publish(id);
         let Ok(handle) = persist.await else {
             return;
         };
@@ -489,7 +489,17 @@ mod tests {
             context.spawn({
                 let gates = gates.clone();
                 move |_| async move {
-                    gates.stage(round(1), digest, Arc::new(7), tx, "test").await;
+                    gates
+                        .stage(
+                            round(1),
+                            digest,
+                            Arc::new(7),
+                            |id| {
+                                tx.send_lossy(id);
+                            },
+                            "test",
+                        )
+                        .await;
                 }
             });
 
@@ -520,7 +530,17 @@ mod tests {
             context.spawn({
                 let gates = gates.clone();
                 move |_| async move {
-                    gates.stage(round(1), digest, Arc::new(7), tx, "test").await;
+                    gates
+                        .stage(
+                            round(1),
+                            digest,
+                            Arc::new(7),
+                            |id| {
+                                tx.send_lossy(id);
+                            },
+                            "test",
+                        )
+                        .await;
                 }
             });
             assert_eq!(rx.await.expect("id published"), digest);

@@ -111,7 +111,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
+        Clock, Handle, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
         deterministic, utils::reschedule,
     };
     use commonware_storage::{
@@ -9969,6 +9969,36 @@ mod tests {
         });
     }
 
+    /// Stages `block` for `round` in `gates` as a propose or prepare build does, and returns
+    /// the staging task, which ends once the block is durable or its staged ack is dropped.
+    async fn stage_block(
+        context: &deterministic::Context,
+        gates: &Gates<D, B>,
+        round: Round,
+        block: B,
+    ) -> Handle<()> {
+        let digest = block.digest();
+        let (tx, rx) = oneshot::channel();
+        let stager = context.child("stager").spawn({
+            let gates = gates.clone();
+            move |_| async move {
+                gates
+                    .stage(
+                        round,
+                        digest,
+                        Arc::new(block),
+                        |id| {
+                            tx.send_lossy(id);
+                        },
+                        "test",
+                    )
+                    .await;
+            }
+        });
+        assert_eq!(rx.await.expect("id published"), digest);
+        stager
+    }
+
     /// A propose relay that finds no staged proposal must fall back to
     /// forwarding the persisted block. Staging then flushing at certify (the
     /// recovered-leader race) persists the block and resolves the
@@ -10002,17 +10032,7 @@ mod tests {
             // Stage the proposal as propose would, then flush it as certify
             // does when certification wins the race against the relay.
             let gates = Gates::new();
-            let (tx, rx) = oneshot::channel();
-            context.child("stager").spawn({
-                let gates = gates.clone();
-                let block = block.clone();
-                move |_| async move {
-                    gates
-                        .stage(round, digest, Arc::new(block), tx, "test")
-                        .await;
-                }
-            });
-            assert_eq!(rx.await.expect("id published"), digest);
+            stage_block(&context, &gates, round, block).await;
             let gate = gates.take(round, digest).expect("gate registered");
             gates.flush_unrelayed(&mailbox, round, digest);
             assert_eq!(
@@ -10069,17 +10089,7 @@ mod tests {
 
             // Stage the proposal as propose would.
             let gates = Gates::new();
-            let (tx, rx) = oneshot::channel();
-            context.child("stager").spawn({
-                let gates = gates.clone();
-                let block = block.clone();
-                move |_| async move {
-                    gates
-                        .stage(round, digest, Arc::new(block), tx, "test")
-                        .await;
-                }
-            });
-            assert_eq!(rx.await.expect("id published"), digest);
+            stage_block(&context, &gates, round, block).await;
             let gate = gates.take(round, digest).expect("gate registered");
 
             // The relay must take the staged proposal and dispatch it.
