@@ -76,6 +76,7 @@ where
     context: E,
     storage: Opened<E, H, V, B>,
     delivery: delivery::Receiver<H, B>,
+    delivery_mailbox: delivery::Mailbox<H, B>,
     bodies: Bodies<H, V, B>,
     backfill: backfill::Actor<E, H, V, B>,
     backfill_mailbox: backfill::Mailbox<H, V, B>,
@@ -126,8 +127,13 @@ where
     .await?;
     let (delivery_mailbox, delivery) =
         delivery::channel(context.child("delivery").child("mailbox"));
-    let storage =
-        open::storage(context.child("storage"), &config, &bounds, delivery_mailbox).await?;
+    let storage = open::storage(
+        context.child("storage"),
+        &config,
+        &bounds,
+        delivery_mailbox.clone(),
+    )
+    .await?;
     let promoter = storage
         .promoter
         .as_ref()
@@ -167,6 +173,7 @@ where
             context,
             storage,
             delivery,
+            delivery_mailbox,
             bodies,
             backfill,
             backfill_mailbox,
@@ -239,10 +246,13 @@ where
             bodies: bodies.clone(),
             application,
             mailbox: self.delivery,
+            codec: self.codec,
             bounds: delivery::Bounds {
                 pending_acks: self.capacities.max_pending_acks,
                 delivery_bytes: self.limits.max_delivery_bytes,
                 hot_block_bytes: self.limits.max_hot_block_bytes,
+                final_lookahead: self.capacities.final_lookahead,
+                header_requests: self.bounds.header_requests,
             },
         })
         .start();
@@ -271,6 +281,7 @@ where
             bodies,
             backfill,
             synchronizer: synchronizer_mailbox,
+            delivery: self.delivery_mailbox,
             broadcast: self.broadcast,
             mailbox_size: self.bounds.router_mailbox,
             max_jobs: self.bounds.router_jobs,
