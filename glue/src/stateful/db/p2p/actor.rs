@@ -65,6 +65,10 @@ where
     pub fetch_retry_timeout: Duration,
 
     /// Largest `max_ops` served in a peer's operations request. Larger requests go unanswered.
+    ///
+    /// Peers fetching from this node must keep their `fetch_batch_size` (see
+    /// [`SyncEngineConfig`](crate::stateful::db::SyncEngineConfig)) at or below this value, or
+    /// their requests never complete. Use the same value across the network.
     pub max_serve_ops: NonZeroU64,
 
     /// Whether fetch requests are sent with network priority.
@@ -1692,14 +1696,13 @@ mod tests {
                     context: pair_context.child("destination"),
                     source: pair.mailboxes[0].clone(),
                     target: target.clone(),
-                    max_outstanding_requests: 4,
+                    max_outstanding_requests: NZUsize!(4),
                     fetch_batch_size: NZU64!(2),
                     apply_batch_size: NZU64!(1),
                     db_config: db_config("multiple-batches-destination", &pair_context),
                     update_rx: None,
                     finish_rx: None,
                     reached_target_tx: None,
-                    max_retained_roots: 0,
                 }) => result.unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
                     panic!("multi-batch sync stopped making progress");
@@ -1818,14 +1821,13 @@ mod tests {
                     context: test_context.child("destination"),
                     source: mailbox,
                     target: target.clone(),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: NZU64!(16),
                     db_config: db_config("f7-destination", &test_context),
                     update_rx: None,
                     finish_rx: None,
                     reached_target_tx: None,
-                    max_retained_roots: 0,
                 }) => result.unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
                     panic!("sync waited for the rejected peer's full request timeout");

@@ -1,10 +1,14 @@
 //! BLAKE3 implementation of the [Hasher] trait.
 //!
-//! This implementation uses the [blake3] crate to generate BLAKE3 digests.
+//! This implementation uses the [blake3] crate to generate BLAKE3 digests. [Hasher::hash_across]
+//! splits a message of at least 128 KiB along the BLAKE3 tree and hashes the subtrees across the
+//! given strategy.
 //!
 //! # Example
 //! ```rust
 //! use commonware_cryptography::{Hasher, blake3::Blake3};
+//! use commonware_parallel::Rayon;
+//! use std::num::NonZeroUsize;
 //!
 //! // Hash data in a single shot
 //! let digest = Blake3::hash(&[b"hello,", b"world!"]);
@@ -16,14 +20,26 @@
 //! hasher.update(b"world!");
 //! let (_hasher, digest) = hasher.finalize();
 //! println!("digest: {:?}", digest);
+//!
+//! // Hash a long message across a thread pool
+//! let strategy = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
+//! let message = vec![7u8; 1 << 20];
+//! assert_eq!(
+//!     Blake3::hash_across(&[&message], &strategy),
+//!     Blake3::hash(&[&message]),
+//! );
 //! ```
 
 use crate::Hasher;
-use blake3::Hash;
+use blake3::{
+    CHUNK_LEN, Hash,
+    hazmat::{ChainingValue, HasherExt as _, Mode, merge_subtrees_non_root, merge_subtrees_root},
+};
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
+use commonware_parallel::Strategy;
 use commonware_utils::{Array, Span, sequence::FixedBytes};
 use core::{
     cmp::Ordering,
@@ -38,11 +54,109 @@ pub type CoreBlake3 = blake3::Hasher;
 
 const DIGEST_LENGTH: usize = blake3::OUT_LEN;
 
+/// Minimum number of tasks a split message spreads across: [`Hasher::hash_across`] bounds the
+/// subtree that each task hashes by the message's length divided by this.
+const SUBTREES: usize = 8;
+
+/// Lower clamp, in bytes, on the subtree bound: 16 chunks, the widest batch the SIMD kernels
+/// compress at once.
+const MIN_SUBTREE_LEN: usize = 16 * CHUNK_LEN;
+
+/// Upper clamp, in bytes, on the subtree bound: 64 chunks, enough to amortize the cost of a fork.
+const MAX_SUBTREE_LEN: usize = 64 * CHUNK_LEN;
+
+/// Length, in bytes, of the shortest message [`Hasher::hash_across`] splits: [`SUBTREES`]
+/// subtrees of [`MIN_SUBTREE_LEN`] bytes.
+const MIN_SPLIT_LEN: usize = SUBTREES * MIN_SUBTREE_LEN;
+
+/// Hash the `len`-byte concatenation of `parts`, which spans more than one chunk, across `strategy`
+/// as subtrees of at most `len / SUBTREES` bytes, clamped to [`MIN_SUBTREE_LEN`] and
+/// [`MAX_SUBTREE_LEN`].
+fn hash_subtrees(parts: &[&[u8]], len: usize, strategy: &impl Strategy) -> Digest {
+    let root = Node {
+        parts,
+        skip: 0,
+        offset: 0,
+        len,
+        task_len: (len / SUBTREES).clamp(MIN_SUBTREE_LEN, MAX_SUBTREE_LEN),
+    };
+    let (left, right) = root.children(strategy);
+    merge_subtrees_root(&left, &right, Mode::Hash).into()
+}
+
+/// A node of a message's BLAKE3 tree: the `len` bytes at byte `offset` of the message, which
+/// start `skip` bytes into the first of `parts`. Subtrees of at most `task_len` bytes hash as one
+/// task.
+///
+/// `parts` holds every byte of the node, and `skip` is at most the length of its first part.
+#[derive(Clone, Copy)]
+struct Node<'a> {
+    parts: &'a [&'a [u8]],
+    skip: usize,
+    offset: usize,
+    len: usize,
+    task_len: usize,
+}
+
+impl Node<'_> {
+    /// Hash the chaining values of the children of a node that spans more than one chunk, in
+    /// parallel across `strategy`.
+    fn children(self, strategy: &impl Strategy) -> (ChainingValue, ChainingValue) {
+        // The left child is the largest power-of-two number of chunks that leaves the right
+        // child nonempty, which for a node of more than one chunk is the largest power of two
+        // below its length. The right child starts in the first part that extends past it.
+        let left_len = 1 << (self.len - 1).ilog2();
+        let mut skip = self.skip + left_len;
+        let mut index = 0;
+        while skip >= self.parts[index].len() {
+            skip -= self.parts[index].len();
+            index += 1;
+        }
+        let left = Node {
+            parts: &self.parts[..=index],
+            len: left_len,
+            ..self
+        };
+        let right = Node {
+            parts: &self.parts[index..],
+            skip,
+            offset: self.offset + left_len,
+            len: self.len - left_len,
+            task_len: self.task_len,
+        };
+        strategy.join(
+            || left.chaining_value(strategy),
+            || right.chaining_value(strategy),
+        )
+    }
+
+    /// Hash the node's chaining value, splitting it until every subtree fits in `task_len` bytes.
+    fn chaining_value(self, strategy: &impl Strategy) -> ChainingValue {
+        if self.len > self.task_len {
+            let (left, right) = self.children(strategy);
+            return merge_subtrees_non_root(&left, &right, Mode::Hash);
+        }
+
+        // Feed the node's bytes, which start `skip` bytes into the first part.
+        let mut hasher = CoreBlake3::new();
+        hasher.set_input_offset(self.offset as u64);
+        let mut skip = self.skip;
+        let mut remaining = self.len;
+        for part in self.parts {
+            let bytes = &part[skip..];
+            let take = bytes.len().min(remaining);
+            hasher.update(&bytes[..take]);
+            remaining -= take;
+            if remaining == 0 {
+                break;
+            }
+            skip = 0;
+        }
+        hasher.finalize_non_root()
+    }
+}
+
 /// BLAKE3 hasher.
-#[cfg_attr(
-    feature = "blake3-parallel",
-    doc = "When the input message is larger than 128KiB, `rayon` is used to parallelize hashing."
-)]
 #[derive(Debug, Default)]
 pub struct Blake3 {
     hasher: CoreBlake3,
@@ -52,34 +166,43 @@ impl Hasher for Blake3 {
     type Digest = Digest;
 
     fn hash(parts: &[&[u8]]) -> Self::Digest {
-        let mut hasher = Self::default();
+        let mut hasher = CoreBlake3::new();
         for part in parts {
             hasher.update(part);
         }
-        hasher.finalize().1
+        hasher.finalize().into()
     }
 
-    fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
-        (Self::hash(left), Self::hash(right))
+    fn hash_across(parts: &[&[u8]], strategy: &impl Strategy) -> Self::Digest {
+        // A message shorter than `MIN_SPLIT_LEN` hashes on the calling thread. A total that
+        // overflows `usize` (possible only when parts alias) hashes serially, since the streaming
+        // hasher counts bytes in a `u64`.
+        match parts
+            .iter()
+            .try_fold(0usize, |len, part| len.checked_add(part.len()))
+        {
+            Some(len) if len >= MIN_SPLIT_LEN => strategy.run(
+                len,
+                || Self::hash(parts),
+                || hash_subtrees(parts, len, strategy),
+            ),
+            _ => Self::hash(parts),
+        }
+    }
+
+    fn hash_pair(
+        left: &[&[u8]],
+        right: &[&[u8]],
+        strategy: &impl Strategy,
+    ) -> (Self::Digest, Self::Digest) {
+        (
+            Self::hash_across(left, strategy),
+            Self::hash_across(right, strategy),
+        )
     }
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
-        #[cfg(not(feature = "blake3-parallel"))]
         self.hasher.update(message);
-
-        #[cfg(feature = "blake3-parallel")]
-        {
-            // 128 KiB
-            const PARALLEL_THRESHOLD: usize = 2usize.pow(17);
-
-            // Heuristic defined @ https://docs.rs/blake3/latest/blake3/struct.Hasher.html#method.update_rayon
-            if message.len() >= PARALLEL_THRESHOLD {
-                self.hasher.update_rayon(message);
-            } else {
-                self.hasher.update(message);
-            }
-        }
-
         self
     }
 
@@ -197,10 +320,25 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::{NZUsize, TestRng};
+    use rand::Rng as _;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering::Relaxed},
+        mpsc,
+    };
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"
     );
+
+    /// Return `len` random bytes, distinct per `seed`.
+    fn random(len: usize, seed: u64) -> Vec<u8> {
+        let mut bytes = vec![0; len];
+        TestRng::new(seed).fill_bytes(&mut bytes);
+        bytes
+    }
 
     #[test]
     fn test_blake3() {
@@ -260,6 +398,106 @@ mod tests {
             hasher.update(&input);
             let (_, digest) = hasher.finalize();
             assert_eq!(digest.as_ref(), expected, "len {len}");
+        }
+    }
+
+    /// Messages around multiples of [`MIN_SUBTREE_LEN`] and around [`MIN_SPLIT_LEN`], given whole,
+    /// cut inside chunks and subtrees, padded with empty parts, and paged, hash to the reference
+    /// digest on the calling thread and across workers. Splitting into subtrees on the calling
+    /// thread also matches, down to two chunks.
+    #[test]
+    fn test_hash_long_messages() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let data = random((1 << 20) + 5000, 0);
+        for len in [
+            0,
+            1,
+            CHUNK_LEN,
+            CHUNK_LEN + 1,
+            3 * CHUNK_LEN + 7,
+            MIN_SUBTREE_LEN - 1,
+            MIN_SUBTREE_LEN,
+            MIN_SUBTREE_LEN + 1,
+            MIN_SUBTREE_LEN + CHUNK_LEN,
+            2 * MIN_SUBTREE_LEN - 1,
+            2 * MIN_SUBTREE_LEN,
+            2 * MIN_SUBTREE_LEN + 1,
+            2 * MIN_SUBTREE_LEN + 3 * CHUNK_LEN + 7,
+            3 * MIN_SUBTREE_LEN + 17,
+            MIN_SPLIT_LEN - 1,
+            MIN_SPLIT_LEN,
+            MIN_SPLIT_LEN + MIN_SUBTREE_LEN + 1,
+            3 * MIN_SPLIT_LEN + 17,
+            (1 << 20) + 5000,
+        ] {
+            let message = &data[..len];
+            let expected: Digest = blake3::hash(message).into();
+            let (a, b) = (len / 3, len / 3 + MIN_SUBTREE_LEN.min(len - len / 3));
+            let splits: [Vec<&[u8]>; 4] = [
+                vec![message],
+                vec![&message[..a], &message[a..b], &message[b..]],
+                vec![&[], message, &[]],
+                message.chunks(1000).collect(),
+            ];
+            for parts in &splits {
+                assert_eq!(Blake3::hash(parts), expected, "len={len}");
+                assert_eq!(Blake3::hash_across(parts, &strategy), expected, "len={len}");
+                if len > CHUNK_LEN {
+                    assert_eq!(
+                        hash_subtrees(parts, len, &Sequential),
+                        expected,
+                        "len={len}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A message of at least [`MIN_SPLIT_LEN`] bytes is hashed across the strategy's pool, and a
+    /// shorter one on the calling thread.
+    #[test]
+    fn test_hash_splits_long_messages() {
+        // One worker, planned as four, counts the jobs it runs while looping. Splitting a message
+        // from outside the pool hands it one job, whose nested forks stay on the worker.
+        let pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .unwrap(),
+        );
+        let strategy = Rayon::with_pool(pool.clone())
+            .with_parallelism(NZUsize!(4))
+            .manual();
+        let data = random(2 * MIN_SPLIT_LEN, 0);
+        for (len, jobs) in [
+            (MIN_SPLIT_LEN - 1, 0),
+            (MIN_SPLIT_LEN, 1),
+            (2 * MIN_SPLIT_LEN, 1),
+        ] {
+            let done = Arc::new(AtomicBool::new(false));
+            let (started, ready) = mpsc::channel();
+            let (sender, receiver) = mpsc::channel();
+            pool.spawn({
+                let done = done.clone();
+                move || {
+                    started.send(()).unwrap();
+                    let mut jobs = 0;
+                    while !done.load(Relaxed) {
+                        if rayon::yield_now() == Some(rayon::Yield::Executed) {
+                            jobs += 1;
+                        }
+                    }
+                    sender.send(jobs).unwrap();
+                }
+            });
+            ready.recv().unwrap();
+
+            // Hash, then release the worker and compare its job count.
+            let message = &data[..len];
+            let digest = Blake3::hash_across(&[message], &strategy);
+            done.store(true, Relaxed);
+            assert_eq!(digest, blake3::hash(message).into(), "len={len}");
+            assert_eq!(receiver.recv().unwrap(), jobs, "len={len}");
         }
     }
 

@@ -737,19 +737,22 @@ pub(crate) mod test {
     // FromSyncTestable implementation for from_sync_result tests
     mod from_sync_testable {
         use super::*;
-        use crate::{merkle::mmr, qmdb::any::sync::tests::FromSyncTestable};
+        use crate::{
+            merkle::{Family, Location},
+            qmdb::any::sync::tests::FromSyncTestable,
+        };
 
-        type TestFrontier =
-            crate::journal::authenticated::Frontier<mmr::Family, deterministic::Context, Digest>;
-
-        impl FromSyncTestable for AnyTest {
-            type Merkle = TestFrontier;
+        impl<F: Family> FromSyncTestable
+            for Db<F, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Sequential>
+        {
+            type Merkle =
+                crate::journal::authenticated::Frontier<F, deterministic::Context, Digest>;
 
             fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
                 (self.log.frontier, self.log.journal)
             }
 
-            async fn pinned_nodes_at(&self, loc: mmr::Location) -> Vec<Digest> {
+            async fn pinned_nodes_at(&self, loc: Location<F>) -> Vec<Digest> {
                 self.log.pinned_nodes_at(loc).await.unwrap()
             }
         }

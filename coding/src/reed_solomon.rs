@@ -62,34 +62,6 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
         .map_err(|_| Error::TooManyTotalShards(total))
 }
 
-/// Hash ordered, equal-width payloads in balanced batches across the strategy.
-fn hash_shards<H: Hasher, M: AsRef<[u8]> + Sync>(
-    shards: &[M],
-    strategy: &impl Strategy,
-) -> Vec<H::Digest> {
-    if shards.is_empty() {
-        return Vec::new();
-    }
-    let work = shards.iter().fold(0usize, |sum, shard| {
-        sum.saturating_add(shard.as_ref().len().saturating_add(1))
-    });
-    strategy.run_batches(
-        shards.len(),
-        NZUsize!(1),
-        work.div_ceil(shards.len()),
-        |batches| {
-            batches
-                .map_collect_vec(
-                    |ranges| ranges.into_iter().map(move |range| &shards[range]),
-                    H::hash_many,
-                )
-                .into_iter()
-                .flatten()
-                .collect()
-        },
-    )
-}
-
 /// Validate the requested shard index, embedded index, proof leaf count, and shard width before
 /// hashing.
 ///
@@ -449,7 +421,7 @@ fn encode<H: Hasher, S: Strategy>(
         .map(|i| originals.slice(i * shard_len..(i + 1) * shard_len))
         .chain((0..m).map(|i| recoveries.slice(i * shard_len..(i + 1) * shard_len)))
         .collect();
-    let shard_hashes = hash_shards::<H, _>(&shard_slices, strategy);
+    let shard_hashes = H::hash_many(&shard_slices, strategy);
     for hash in &shard_hashes {
         builder.add(hash);
     }
@@ -914,7 +886,7 @@ fn verify_commitment<H: Hasher, S: Strategy>(
         .unzip();
     for (i, digest) in missing_indices
         .into_iter()
-        .zip(hash_shards::<H, _>(&missing_payloads, strategy))
+        .zip(H::hash_many(&missing_payloads, strategy))
     {
         shard_digests[i] = Some(digest);
     }
@@ -1242,7 +1214,9 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
             shard.shard.len() != width || check_metadata(total, index, shard).is_err()
         }) {
             return strategy.map_collect_vec(shards, |&(index, shard)| {
-                Self::check(config, commitment, index, shard)
+                check_chunk::<H>(total, commitment, index, shard, || {
+                    H::hash_across(&[&shard.shard], strategy)
+                })
             });
         }
 
@@ -1250,7 +1224,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
             .iter()
             .map(|(_, shard)| shard.shard.as_ref())
             .collect::<Vec<_>>();
-        let digests = hash_shards::<H, _>(&payloads, strategy);
+        let digests = H::hash_many(&payloads, strategy);
         strategy.map_collect_vec(
             shards.iter().copied().zip(digests),
             |((index, shard), digest)| check_chunk::<H>(total, commitment, index, shard, || digest),
@@ -1311,11 +1285,18 @@ mod tests {
             Sha256::hash(parts)
         }
 
-        fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
-            Sha256::hash_pair(left, right)
+        fn hash_pair(
+            left: &[&[u8]],
+            right: &[&[u8]],
+            strategy: &impl Strategy,
+        ) -> (Self::Digest, Self::Digest) {
+            Sha256::hash_pair(left, right, strategy)
         }
 
-        fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
+        fn hash_many<M: AsRef<[u8]> + Sync>(
+            messages: &[M],
+            _strategy: &impl Strategy,
+        ) -> Vec<Self::Digest> {
             HASH_INPUTS.with(|inputs| {
                 inputs
                     .borrow_mut()
@@ -1386,51 +1367,6 @@ mod tests {
             .collect();
 
         (root, chunks)
-    }
-
-    #[test]
-    fn test_hash_shards_parallel_preserves_order() {
-        let strategy = Rayon::new(NZUsize!(8)).unwrap().manual();
-        for count in [0, 1, 7, 9, 15, 16, 17, 128, 129, 144] {
-            let shards = (0..count)
-                .map(|index| vec![index as u8; 128])
-                .collect::<Vec<_>>();
-            let expected = shards
-                .iter()
-                .map(|shard| Sha256::hash(&[shard]))
-                .collect::<Vec<_>>();
-            assert_eq!(hash_shards::<Sha256, _>(&shards, &strategy), expected);
-        }
-    }
-
-    #[test]
-    fn test_hash_shards_keeps_balanced_batches_per_worker() {
-        // One execution thread makes the recorder observable while planning eight workers.
-        let strategy = Rayon::new(NZUsize!(1))
-            .unwrap()
-            .with_parallelism(NZUsize!(8))
-            .manual();
-        strategy.join(
-            || {
-                for count in [0, 1, 7, 9, 17, 128, 129, 144] {
-                    let shards = (0..count)
-                        .map(|index| vec![index as u8; 128])
-                        .collect::<Vec<_>>();
-                    reset_hash_many_calls();
-                    hash_shards::<InstrumentedSha256, _>(&shards, &strategy);
-                    let mut calls = take_hash_many_calls();
-                    assert_eq!(calls.len(), count.min(8));
-                    assert!(calls.iter().all(|batch| !batch.is_empty()));
-                    if let Some(min) = calls.iter().map(Vec::len).min() {
-                        let max = calls.iter().map(Vec::len).max().unwrap();
-                        assert!(max - min <= 1);
-                    }
-                    calls.sort_by_key(|batch| batch[0][0]);
-                    assert_eq!(calls.into_iter().flatten().collect::<Vec<_>>(), shards);
-                }
-            },
-            || (),
-        );
     }
 
     #[test]

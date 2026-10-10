@@ -52,6 +52,7 @@ stability_scope!(BETA {
     pub use bytes::{Buf, BufMut};
     use commonware_macros::select;
     use commonware_parallel::Rayon;
+    use futures::FutureExt as _;
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
     use iobuf::PoolError;
@@ -108,6 +109,33 @@ stability_scope!(BETA {
         #[allow(deprecated)]
         pub const ALL: std::ops::RangeInclusive<Self> = Self::V0..=DEFAULT_BLOB_LAYOUT;
     }
+
+    /// Size in bytes of a blob page, the smallest unit in which storage is expected to read and
+    /// persist [`Blob`] data.
+    ///
+    /// Blobs created with [`DEFAULT_BLOB_LAYOUT`] begin their data on a blob-page boundary, so blob
+    /// offset `n` lies in page `n / BLOB_PAGE_SIZE`.
+    ///
+    /// Writing part of a page costs about as much as writing all of it, so writes that share a
+    /// page are cheaper combined into one. Data read together is likewise cheaper when it stays
+    /// within one page.
+    ///
+    /// A host may use a larger power-of-two unit, such as a bigger memory page or filesystem block.
+    /// Each such unit holds whole blob pages, so data within one page still shares a unit, but a
+    /// structure larger than one page may straddle two of them.
+    ///
+    /// Page alignment affects performance only: a write within one page can still tear (see
+    /// [`Blob`]). The size is a fixed power of two, independent of the host's memory
+    /// [`page_size`], so layouts derived from it are the same on every host.
+    pub const BLOB_PAGE_SIZE: u32 = 4096;
+
+    // Blob pages are a power of two, and the default layout begins blob data on a page boundary.
+    const _: () = assert!(
+        BLOB_PAGE_SIZE.is_power_of_two()
+            && DEFAULT_BLOB_LAYOUT
+                .data_offset()
+                .is_multiple_of(BLOB_PAGE_SIZE as u64)
+    );
 
     /// Application-owned version of a [`Blob`]'s contents.
     ///
@@ -779,7 +807,8 @@ stability_scope!(BETA {
         -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
 
-    /// Options that alter one [`Blob::read_at`] or [`Blob::read_at_buf`] operation.
+    /// Options that alter one [`Blob::read_at`], [`Blob::read_at_buf`], or [`Blob::read_many`]
+    /// operation.
     ///
     /// [`ReadOptions::default`] applies no options.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -913,6 +942,20 @@ stability_scope!(BETA {
             options: ReadOptions,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
+        /// Read every `(offset, len)` range in `ranges`, yielding `(range index, buffer)` as each
+        /// read completes, in any order. Each buffer holds the `len` bytes at `offset`.
+        ///
+        /// Without an error, every range is yielded exactly once. An error need not identify the
+        /// ranges it affects, and those ranges may never be yielded, so treat any error as failing
+        /// the call. Reads may begin before the stream is polled and continue after it is dropped.
+        fn read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+            read_each(self, ranges, options)
+        }
+
         /// Write every remaining byte in `bufs` to the blob at `offset`.
         ///
         /// The buffers are treated as one logical byte sequence in chunk order.
@@ -960,6 +1003,14 @@ stability_scope!(BETA {
             self.as_ref().read_at(offset, len, options)
         }
 
+        fn read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+            self.as_ref().read_many(ranges, options)
+        }
+
         fn write_at(
             &self,
             offset: u64,
@@ -980,6 +1031,23 @@ stability_scope!(BETA {
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send {
             self.as_ref().start_sync()
         }
+    }
+
+    /// Serve `ranges` with one [`Blob::read_at`] per range, all in flight at once: the
+    /// [`Blob::read_many`] of a blob that cannot batch the reads.
+    pub(crate) fn read_each<'a, B: Blob + ?Sized>(
+        blob: &'a B,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send + 'a {
+        ranges
+            .iter()
+            .enumerate()
+            .map(|(index, &(offset, len))| {
+                blob.read_at(offset, len, options)
+                    .map(move |result| result.map(|bufs| (index, bufs)))
+            })
+            .collect::<futures::stream::FuturesUnordered<_>>()
     }
 
     /// Interface that any runtime must implement to provide buffer pools.

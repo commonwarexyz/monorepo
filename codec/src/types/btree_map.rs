@@ -16,8 +16,6 @@ use bytes::BufMut;
 
 const BTREEMAP_TYPE: &str = "BTreeMap";
 
-// ---------- BTreeMap ----------
-
 impl<K: Write, V: Write> Write for BTreeMap<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
