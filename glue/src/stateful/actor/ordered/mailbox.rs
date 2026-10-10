@@ -16,7 +16,11 @@ use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::channel::{oneshot, ring};
 use rand_core::Rng;
-use std::{collections::VecDeque, future, sync::Arc};
+use std::{
+    collections::VecDeque,
+    future,
+    sync::{Arc, OnceLock},
+};
 
 type Digest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type SyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
@@ -98,6 +102,8 @@ where
 {
     sender: Sender<Message<E, A>>,
     application: A,
+    /// The databases, once the actor opens them.
+    databases: Arc<OnceLock<A::Databases>>,
 }
 
 impl<E, A> Clone for Mailbox<E, A>
@@ -109,6 +115,7 @@ where
         Self {
             sender: self.sender.clone(),
             application: self.application.clone(),
+            databases: Arc::clone(&self.databases),
         }
     }
 }
@@ -118,10 +125,15 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    pub(super) const fn new(sender: Sender<Message<E, A>>, application: A) -> Self {
+    pub(super) const fn new(
+        sender: Sender<Message<E, A>>,
+        application: A,
+        databases: Arc<OnceLock<A::Databases>>,
+    ) -> Self {
         Self {
             sender,
             application,
+            databases,
         }
     }
 
@@ -215,6 +227,15 @@ where
             merkleized,
         });
         block
+    }
+
+    /// Prepares `input` through [`Application::prepare`] with readers of the databases, or does
+    /// nothing while they are not open.
+    async fn prepare(mut self, context: E, input: Arc<A::Input>) {
+        if let Some(databases) = self.databases.get() {
+            let readers = databases.readers();
+            self.application.prepare(context, input, readers).await;
+        }
     }
 }
 

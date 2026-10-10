@@ -2,7 +2,7 @@
 
 use super::{
     Context, Execute, Executed as _, Update,
-    mailbox::{Inbox, Input, Mailbox, Message, Subscriber},
+    mailbox::{Final, Inbox, Input, Mailbox, Message, Subscriber},
     store::{Opened, Store, StoreConfig},
 };
 use commonware_actor::{
@@ -34,8 +34,10 @@ use commonware_utils::{
 use futures::{FutureExt as _, future::BoxFuture};
 use rand_core::Rng;
 use std::{
-    collections::{BTreeMap, VecDeque},
-    future, mem,
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    future,
+    hash::Hash,
+    mem,
     num::NonZeroUsize,
     sync::Arc,
 };
@@ -122,6 +124,68 @@ struct Delivered<A> {
     applied: ExactWaiter,
 }
 
+/// The preparations of inputs ahead of their execution in the current run.
+///
+/// Every input with a running or finished preparation is final and not yet delivered, so marshal
+/// delivers it later unless a floor skips it, which it never does once the chain has a base. Its
+/// entry is released once the input finishes executing or is acknowledged without executing, so
+/// the entries are bounded by the final inputs marshal has not delivered.
+struct Preparations<D> {
+    /// Preparations, running or finished, of inputs that have not settled, by input digest.
+    prepared: HashMap<D, Handle<()>>,
+    /// The newest inputs that settled, by starting to execute or being acknowledged without
+    /// executing, oldest first.
+    ///
+    /// After a restart, marshal redelivers inputs from its acknowledgement floor, at most an
+    /// acknowledgement window below the applied cursor, and may report them final first. The
+    /// executor seeds this with the inputs of that window, and keeping that many settled inputs
+    /// keeps such reports from preparing inputs that will not execute.
+    settled: VecDeque<D>,
+    /// The members of `settled`.
+    recent: HashSet<D>,
+    capacity: NonZeroUsize,
+}
+
+impl<D: Copy + Eq + Hash> Preparations<D> {
+    fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            prepared: HashMap::new(),
+            settled: VecDeque::new(),
+            recent: HashSet::new(),
+            capacity,
+        }
+    }
+
+    /// Returns whether `input` was neither prepared nor settled in this run.
+    fn wanted(&self, input: &D) -> bool {
+        !self.prepared.contains_key(input) && !self.recent.contains(input)
+    }
+
+    fn insert(&mut self, input: D, preparation: Handle<()>) {
+        self.prepared.insert(input, preparation);
+    }
+
+    /// Records that `input` started executing or was acknowledged without executing.
+    fn settle(&mut self, input: D) {
+        if !self.recent.insert(input) {
+            return;
+        }
+        self.settled.push_back(input);
+        if self.settled.len() > self.capacity.get() {
+            let oldest = self.settled.pop_front().expect("settled is not empty");
+            self.recent.remove(&oldest);
+        }
+    }
+
+    /// Aborts the preparation of `input`, which finished executing or was acknowledged without
+    /// executing.
+    fn release(&mut self, input: &D) {
+        if let Some(preparation) = self.prepared.remove(input) {
+            preparation.abort();
+        }
+    }
+}
+
 /// Executes a finalized stream of inputs into a chain of blocks.
 ///
 /// Marshal must deliver every input after the applied one, once and in index order. The executor
@@ -146,6 +210,9 @@ where
     store: Store<E, T, X::Block>,
     /// Inputs from the engine's marshal, until it drops every [`Inbox`].
     inbox: Option<Receiver<Input<X::Input, A>>>,
+    /// Inputs the engine's marshal reports final before it orders them, until it drops every
+    /// [`Inbox`].
+    finals: Option<Receiver<Final<X::Input>>>,
     mailbox: Receiver<Message<X::Block>>,
     /// The executed chain, which backs each execution's ancestry.
     chain: Mailbox<X::Block>,
@@ -164,6 +231,8 @@ where
     execution: Option<Execution<X::Block, <X::Input as Digestible>::Digest, A>>,
     /// Blocks delivered to the consumer and awaiting its acknowledgement, oldest first.
     delivered: VecDeque<Delivered<A>>,
+    /// Preparations of inputs ahead of their execution.
+    preparations: Preparations<<X::Input as Digestible>::Digest>,
     /// Height below which the chain and marshal were last pruned.
     pruned: Height,
     /// Subscribers to blocks not yet executed, by height.
@@ -226,7 +295,27 @@ where
             Opened::Syncing(target) => (VecDeque::new(), target.map(Arc::new)),
         };
         let applied = store.applied();
+        let mut preparations = Preparations::new(ack_window);
+        if !line.is_empty() {
+            // Marshal redelivers the inputs from its acknowledgement floor, which trails the
+            // applied cursor by at most an acknowledgement window, and may report them final
+            // before it does. They are acknowledged without executing, so none is prepared.
+            let oldest = applied
+                .get()
+                .saturating_sub(ack_window.get() as u64 - 1)
+                .max(1);
+            for height in oldest..=applied.get() {
+                if let Some(input) = store
+                    .get(Height::new(height))
+                    .await
+                    .and_then(|block| block.input())
+                {
+                    preparations.settle(input);
+                }
+            }
+        }
         let (inputs, inbox) = actor_mailbox::new(context.child("inbox"), mailbox_size);
+        let (finals_sender, finals) = actor_mailbox::new(context.child("finals"), mailbox_size);
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), mailbox_size);
         let chain = Mailbox::new(sender, ack_window, epoch);
         let executed_height =
@@ -254,6 +343,7 @@ where
             consumer,
             store,
             inbox: Some(inbox),
+            finals: Some(finals),
             mailbox,
             chain: chain.clone(),
             line,
@@ -262,6 +352,7 @@ where
             inputs: VecDeque::new(),
             execution: None,
             delivered: VecDeque::new(),
+            preparations,
             pruned: Height::zero(),
             subscribers: BTreeMap::new(),
             checkpoint: None,
@@ -272,7 +363,7 @@ where
             ancestor_fetch_duration,
         };
         executor.syncing = target.map(|target| executor.start_sync(target));
-        (executor, Inbox::new(inputs), chain)
+        (executor, Inbox::new(inputs, finals_sender), chain)
     }
 
     /// Starts the executor on `marshal`, the engine's marshal that reports to its [`Inbox`].
@@ -305,7 +396,7 @@ where
                 debug!("executor stopped");
             },
             input = next_input(&mut self.inbox) => match input {
-                Some(input) => self.admit(input).await,
+                Some(input) => self.admit(input, true).await,
                 None => self.inbox = None,
             },
             Some(message) = self.mailbox.recv() else break => {
@@ -319,6 +410,11 @@ where
                     return Err(Halt::Unacknowledged);
                 }
                 self.applied().await?;
+            },
+            // Served last, so execution, acknowledgements, and ordered inputs always win.
+            input = next_final(&mut self.finals) => match input {
+                Some(input) => self.prepare(input),
+                None => self.finals = None,
             },
         }
         Ok(())
@@ -372,6 +468,13 @@ where
                 progress = next_progress(&mut self.syncing) => match progress {
                     Progress::Recorded(height) => self.recorded(height),
                     Progress::Reached(base) => break base,
+                },
+                // The application has no state to prepare against until the sync reaches a
+                // base, so final inputs are discarded.
+                input = next_final(&mut self.finals) => {
+                    if input.is_none() {
+                        self.finals = None;
+                    }
                 },
             }
         };
@@ -581,6 +684,9 @@ where
         self.line.push_back(Arc::clone(&base));
         self.expected = height.next();
         self.execute.resume(Arc::clone(&base));
+        if let Some(input) = base.input() {
+            self.preparations.settle(input);
+        }
 
         // Blocks below the base were never executed here, so their subscribers are dropped.
         let later = self.subscribers.split_off(&height.next());
@@ -592,7 +698,7 @@ where
             }
         }
         for input in mem::take(&mut self.inputs) {
-            self.admit(input).await;
+            self.admit(input, false).await;
         }
 
         // The base is a certified block, and a checkpoint reported while syncing is checked
@@ -680,9 +786,15 @@ where
     }
 
     /// Queues an input for execution, or acknowledges one the consumer already applied.
-    async fn admit(&mut self, input: Finalized<X::Input, A>) {
+    ///
+    /// With `prepare`, an input queued behind others that have not executed is prepared, unless
+    /// it already was.
+    async fn admit(&mut self, input: Finalized<X::Input, A>, prepare: bool) {
         let index = Height::new(input.index.get());
         if index <= self.store.applied() {
+            let digest = input.block.digest();
+            self.preparations.settle(digest);
+            self.preparations.release(&digest);
             // An applied block is durable, so a retained one must have executed this input. The
             // genesis block executed none, and marshal's block at its index is the engine's.
             if let Some(block) = self.store.get(index).await
@@ -706,7 +818,27 @@ where
             "marshal must deliver each input once, in index order"
         );
         self.expected = index.next();
+        if prepare && (self.execution.is_some() || !self.inputs.is_empty()) {
+            self.prepare(Arc::clone(&input.block));
+        }
         self.inputs.push_back(input);
+    }
+
+    /// Prepares `input` on a task of its own, unless the chain has no base or `input` was
+    /// already prepared or settled in this run.
+    fn prepare(&mut self, input: Arc<X::Input>) {
+        let digest = input.digest();
+        if self.line.is_empty() || !self.preparations.wanted(&digest) {
+            return;
+        }
+        let execute = self.execute.clone();
+        // Spawning calls its closure on this task, so the call to `prepare` is deferred into the
+        // spawned future.
+        let preparation = self
+            .context
+            .child("prepare")
+            .spawn(move |context| async move { execute.prepare(context, input).await });
+        self.preparations.insert(digest, preparation);
     }
 
     /// Takes the acknowledgement of an input above the applied one that marshal delivers again
@@ -774,6 +906,7 @@ where
         let execute = self.execute.clone();
         let runtime = self.context.child("execute");
         let block = input.block;
+        self.preparations.settle(context.input);
         self.execution = Some(Execution {
             height: context.height,
             input: context.input,
@@ -794,6 +927,7 @@ where
             ..
         } = self.execution.take().expect("an execution was in flight");
         timer.observe(self.context.as_ref());
+        self.preparations.release(&input);
         let parent = self.line.back().expect("line holds the applied block");
         assert_eq!(
             block.height(),
@@ -952,6 +1086,17 @@ where
 {
     match inbox {
         Some(inbox) => inbox.recv().await.map(|Input(input)| input),
+        None => future::pending().await,
+    }
+}
+
+/// Waits for the next input reported final, or forever once marshal dropped every [`Inbox`].
+async fn next_final<I>(finals: &mut Option<Receiver<Final<I>>>) -> Option<Arc<I>>
+where
+    I: Send + Sync + 'static,
+{
+    match finals {
+        Some(finals) => finals.recv().await.map(|Final(input)| input),
         None => future::pending().await,
     }
 }

@@ -33,6 +33,18 @@ where
     }
 }
 
+/// An input that is final but not yet delivered in the finalized stream.
+pub(super) struct Final<I>(pub(super) Arc<I>);
+
+/// Keeps every report, in order.
+impl<I: Send + Sync + 'static> Policy for Final<I> {
+    type Overflow = VecDeque<Self>;
+
+    fn handle(overflow: &mut Self::Overflow, input: Self) {
+        overflow.push_back(input);
+    }
+}
+
 /// A request to the executor.
 pub(super) enum Message<B: Digestible> {
     /// Returns the executed block at `height`, if retained.
@@ -85,22 +97,32 @@ impl<B: Digestible + Send + Sync + 'static> Policy for Message<B> {
     }
 }
 
-/// The executor's ingress for the engine's marshal, which reports finalized inputs to it.
+/// The executor's ingress for the engine's marshal, which reports finalized inputs to it, and
+/// final inputs before it orders them.
+///
+/// Final inputs arrive on an ingress of their own, which the executor serves only once it has
+/// nothing else to do, so a backlog of them never delays ordered inputs, execution, or
+/// acknowledgements.
 pub struct Inbox<U: Delivery> {
     sender: Sender<Input<U::Block, U::Acknowledgement>>,
+    finals: Sender<Final<U::Block>>,
 }
 
 impl<U: Delivery> Clone for Inbox<U> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
+            finals: self.finals.clone(),
         }
     }
 }
 
 impl<U: Delivery> Inbox<U> {
-    pub(super) const fn new(sender: Sender<Input<U::Block, U::Acknowledgement>>) -> Self {
-        Self { sender }
+    pub(super) const fn new(
+        sender: Sender<Input<U::Block, U::Acknowledgement>>,
+        finals: Sender<Final<U::Block>>,
+    ) -> Self {
+        Self { sender, finals }
     }
 }
 
@@ -110,7 +132,8 @@ impl<U: Delivery> Reporter for Inbox<U> {
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match activity.reported() {
             Reported::Finalized(input) => self.sender.enqueue(Input(input)),
-            Reported::Final(_) | Reported::Advisory => Feedback::Ok,
+            Reported::Final(input) => self.finals.enqueue(Final(input)),
+            Reported::Advisory => Feedback::Ok,
         }
     }
 }

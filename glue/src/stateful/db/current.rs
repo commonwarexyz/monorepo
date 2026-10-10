@@ -5,8 +5,9 @@
 //! snapshot taken when the batch was created.
 
 use crate::stateful::db::{
-    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
-    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
+    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Prefetch, Shared,
+    StateSyncDb, SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    validate_initialization,
 };
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -467,6 +468,24 @@ where
             db: self.db.clone(),
             metadata: None,
         }
+    }
+}
+
+impl<F, E, C, I, H, U, const N: usize, S> Prefetch for Db<F, E, C, I, H, U, N, S>
+where
+    F: Graftable,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    type Key = U::Key;
+
+    fn prefetch(&self, keys: &[&U::Key]) -> impl Future<Output = ()> + Send + 'static {
+        Self::prefetch(self, keys)
     }
 }
 
