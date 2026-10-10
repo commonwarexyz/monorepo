@@ -407,7 +407,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{NZUsize, test_rng};
+    use commonware_utils::{NZUsize, test_rng, union_unique};
 
     #[test]
     fn test_codec_private_key() {
@@ -589,6 +589,33 @@ mod tests {
 
         // Restoring every entry must verify again.
         check(&batch, true);
+    }
+
+    #[test]
+    fn batch_framing_matches_union_unique() {
+        // Namespaced batching must verify the same bytes as an explicitly framed raw signature.
+        let mut rng = test_rng();
+        let private = Private::random(&mut rng);
+        let namespace = b"namespace";
+        let message = b"message";
+        let signature = Signature::from(ops::sign::<MinPk>(
+            &private,
+            MinPk::MESSAGE,
+            &union_unique(namespace, message),
+        ));
+        let public_key = PrivateKey::from(private).public_key();
+        for supplied_namespace in [namespace.as_slice(), b"other"] {
+            let entries = [BatchEntry {
+                namespace: supplied_namespace,
+                message,
+                public_key: &public_key,
+                signature: &signature,
+            }];
+            assert_eq!(
+                PublicKey::verify_batch(&mut rng, &entries, |_, entry| *entry, &Sequential),
+                supplied_namespace == namespace,
+            );
+        }
     }
 
     #[cfg(feature = "arbitrary")]
