@@ -23,6 +23,8 @@ fn delivery_reset_preempts_cold_materialization() {
             pending_acks: config.capacities.max_pending_acks,
             delivery_bytes: config.limits.max_delivery_bytes,
             hot_block_bytes: config.limits.max_hot_block_bytes,
+            final_lookahead: config.capacities.final_lookahead,
+            header_requests: config.actor_bounds().unwrap().header_requests,
         };
         let (delivery_client, commands) = delivery::channel(delayed.child("delivery_mailbox"));
         let control = delivery_client.clone();
@@ -58,6 +60,7 @@ fn delivery_reset_preempts_cold_materialization() {
             bodies: Bodies::new(client.clone(), None),
             application: reporter.clone(),
             mailbox: commands,
+            codec: config.codec_config,
             bounds,
         })
         .start();
@@ -113,6 +116,8 @@ fn floor_install_supersedes_queued_committed_body_read() {
             pending_acks: config.capacities.max_pending_acks,
             delivery_bytes: config.limits.max_delivery_bytes,
             hot_block_bytes: config.limits.max_hot_block_bytes,
+            final_lookahead: config.capacities.final_lookahead,
+            header_requests: config.actor_bounds().unwrap().header_requests,
         };
         let (delivery_client, commands) = delivery::channel(delayed.child("delivery_mailbox"));
         let actor_bounds = config.actor_bounds().unwrap();
@@ -140,6 +145,7 @@ fn floor_install_supersedes_queued_committed_body_read() {
             bodies: Bodies::new(client.clone(), None),
             application: reporter.clone(),
             mailbox: commands,
+            codec: config.codec_config,
             bounds,
         })
         .start();
