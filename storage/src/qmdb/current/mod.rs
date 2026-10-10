@@ -525,7 +525,8 @@ pub mod tests {
                 test::{
                     Changes, Choice, Inspect, Links, Neighbors, Script, assert_bits, assert_exact,
                     build, colliding_digest, counter, hold, hold_batch, live, replay,
-                    test_any_activity_depths, test_any_ordered_policy_eviction_matrix,
+                    test_any_activity_depths, test_any_db_prefetch,
+                    test_any_ordered_policy_eviction_matrix,
                     test_any_ordered_policy_repair_across_ancestors,
                     test_any_policy_ancestor_twins, test_any_policy_decisions_match_writes,
                     test_any_policy_evicts_parent_created_key, test_any_policy_hold,
@@ -2259,6 +2260,94 @@ pub mod tests {
     {
         test_current_db_build_big::<M, C, F, Fut>(context, open_db).await;
     }
+
+    /// Prefetching a key whose bitmap chunk is graftable also warms the ops-tree node that
+    /// merkleizing a change to the key reads. `cache` is the database's page cache.
+    async fn test_prefetch_warms_graft_inputs<M, C>(context: Context, db: C, cache: CacheRef)
+    where
+        M: merkle::Graftable,
+        C: DbAny<M, Key = Digest, Value = Digest>,
+    {
+        let digest = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+
+        // Seed keys, then update the later half so every seeded key's chunk is graftable.
+        // Holding the floor keeps the seeded operations in place, and updates of existing keys
+        // leave other keys' operations in place in ordered variants too.
+        let seed: Vec<_> = (0..1200)
+            .map(|i| (digest(i), Some(digest(i + 10_000))))
+            .collect();
+        let updates: Vec<_> = (600..1200).map(|i| (digest(i), Some(digest(i)))).collect();
+        let db = hold(db, &seed).await;
+        let db = hold(db, &updates).await;
+        let db = db.sync().await.unwrap();
+
+        let key = digest(7);
+        let change = [(key, Some(digest(20_000)))];
+        let node_misses = || counter(&context, "merkle_journal_cache_misses_total");
+
+        // From a cold cache, merkleizing the change reads the key's graft input from storage.
+        cache.clear();
+        let before = node_misses();
+        drop(hold_batch(&db, db.new_batch(), &change).await);
+        assert!(
+            node_misses() > before,
+            "a cold change must read its graft input"
+        );
+
+        // After a prefetch, it reads none.
+        cache.clear();
+        db.prefetch(&[&key]).await;
+        let before = node_misses();
+        drop(hold_batch(&db, db.new_batch(), &change).await);
+        assert_eq!(node_misses(), before, "a prefetched change must not miss");
+
+        db.destroy().await.unwrap();
+    }
+
+    // Instantiate the prefetch tests for one variant over a page cache the tests can clear,
+    // with room for every page they warm. Small caches admit new pages through a single slot,
+    // so a warmed page would be evicted by the next.
+    macro_rules! prefetch_tests {
+        ($label:ident, $db:ty, $cfg:ident) => {
+            paste::paste! {
+                #[test_traced("WARN")]
+                fn [<test_prefetch_ $label>]() {
+                    deterministic::Runner::default().start(|context| async move {
+                        let (db, cache) = prefetch_tests!(@open context, $db, $cfg);
+                        let make_value = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+                        test_any_db_prefetch(context.child("test"), db, cache, make_value).await;
+                    });
+                }
+
+                #[test_traced("WARN")]
+                fn [<test_prefetch_warms_graft_inputs_ $label>]() {
+                    deterministic::Runner::default().start(|context| async move {
+                        let (db, cache) = prefetch_tests!(@open context, $db, $cfg);
+                        test_prefetch_warms_graft_inputs(context.child("test"), db, cache).await;
+                    });
+                }
+            }
+        };
+        (@open $context:ident, $db:ty, $cfg:ident) => {{
+            let cache = CacheRef::from_pooler(&$context, PAGE_SIZE, NZUsize!(256));
+            let mut cfg = $cfg::<OneCap>("prefetch", &$context);
+            cfg.merkle_config.page_cache = cache.clone();
+            cfg.journal_config.page_cache = cache.clone();
+            let db = <$db>::init($context.child("storage"), cfg, None)
+                .await
+                .unwrap();
+            (db, cache)
+        }};
+    }
+
+    prefetch_tests!(uf, UnorderedFixedDb, fixed_config);
+    prefetch_tests!(uv, UnorderedVariableDb, variable_config);
+    prefetch_tests!(of, OrderedFixedDb, fixed_config);
+    prefetch_tests!(ov, OrderedVariableDb, variable_config);
+    prefetch_tests!(ufp1, UnorderedFixedP1Db, fixed_config_partitioned);
+    prefetch_tests!(ovp2, OrderedVariableP2Db, variable_config_partitioned);
+    prefetch_tests!(uf_mmb, UnorderedFixedMmbDb, fixed_config);
+    prefetch_tests!(ov_mmb, OrderedVariableMmbDb, variable_config);
 
     test_for_all_variants!(test_build_random_close_reopen, "WARN");
     test_for_all_variants!(test_simulate_write_failures, "WARN");
