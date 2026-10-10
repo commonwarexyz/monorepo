@@ -59,7 +59,9 @@ mod tests {
                 batcher,
                 resolver::{self, MailboxMessage},
             },
-            elector::{self, Config as _, Random, RandomVersion, RoundRobin, RoundRobinElector},
+            elector::{
+                self, Config as _, Mode as _, Random, RandomVersion, RoundRobin, RoundRobinElector,
+            },
             metrics::TimeoutReason,
             mocks, quorum,
             scheme::{
@@ -2154,7 +2156,7 @@ mod tests {
             let elector_config = RoundRobin::<Sha256>::default();
             let temp_elector: RoundRobinElector<S> =
                 elector_config.clone().build(schemes[0].participants());
-            let leader_idx = temp_elector.elect(view2_round, None);
+            let leader_idx = temp_elector.elect(view2_round, ());
             let leader = participants[usize::from(leader_idx)].clone();
 
             // Create a voter with the leader's identity
@@ -3039,7 +3041,7 @@ mod tests {
             let first_round = Round::new(Epoch::new(333), View::new(1));
             let built_elector: RoundRobinElector<S> =
                 elector.clone().build(schemes[0].participants());
-            let leader_idx = built_elector.elect(first_round, None);
+            let leader_idx = built_elector.elect(first_round, ());
             let leader = participants[usize::from(leader_idx)].clone();
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &context,
@@ -3287,7 +3289,7 @@ mod tests {
             let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
                 elector.clone().build(schemes[0].participants());
             let local_index =
-                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), ()));
 
             let (_mailbox, mut batcher_receiver, _, _relay, _) = setup_voter(
                 &context,
@@ -3383,7 +3385,7 @@ mod tests {
             let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
                 elector.clone().build(schemes[0].participants());
             let local_index =
-                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), ()));
 
             let pending_syncs = PendingSyncs::default();
             let voter_context = DelayedSyncContext {
@@ -3582,7 +3584,7 @@ mod tests {
             );
             let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
                 elector.clone().build(schemes[0].participants());
-            let leader_idx = built_elector.elect(Round::new(epoch, View::new(1)), None);
+            let leader_idx = built_elector.elect(Round::new(epoch, View::new(1)), ());
             let local_index = (usize::from(leader_idx) + 1) % participants.len();
             let leader = participants[usize::from(leader_idx)].clone();
             let verify_requests = Arc::new(Mutex::new(Vec::new()));
@@ -3708,7 +3710,7 @@ mod tests {
             );
             let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
                 elector.clone().build(schemes[0].participants());
-            let leader_idx = built_elector.elect(Round::new(epoch, View::new(1)), None);
+            let leader_idx = built_elector.elect(Round::new(epoch, View::new(1)), ());
             let local_index = (usize::from(leader_idx) + 1) % participants.len();
             let leader = participants[usize::from(leader_idx)].clone();
             let verify_requests = Arc::new(Mutex::new(Vec::new()));
@@ -4958,7 +4960,7 @@ mod tests {
             let built_elector: RoundRobinElector<ed25519::Scheme> =
                 elector.clone().build(schemes[0].participants());
             let leader_index =
-                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), ()));
             let local_index = (leader_index + 1) % schemes.len();
             let verify_requests = Arc::new(Mutex::new(Vec::new()));
             let (mut mailbox, mut batcher_receiver, _, relay, reporter) = setup_voter(
@@ -7995,7 +7997,7 @@ mod tests {
             )
             .await;
             assert_ne!(
-                built_elector.elect(Round::new(Epoch::new(333), target_view), None),
+                built_elector.elect(Round::new(Epoch::new(333), target_view), ()),
                 Participant::new(0),
                 "we should not be leader at view 3"
             );
@@ -8114,7 +8116,7 @@ mod tests {
             )
             .await;
             assert_ne!(
-                built_elector.elect(Round::new(Epoch::new(333), target_view), None),
+                built_elector.elect(Round::new(Epoch::new(333), target_view), ()),
                 Participant::new(0),
                 "we should not be leader at view 3"
             );
@@ -8266,7 +8268,7 @@ mod tests {
             )
             .await;
             assert_eq!(
-                built_elector.elect(Round::new(Epoch::new(333), target_view), None),
+                built_elector.elect(Round::new(Epoch::new(333), target_view), ()),
                 Participant::new(0),
                 "we should be leader at view 2"
             );
@@ -9850,7 +9852,7 @@ mod tests {
             let leader_idx = elector
                 .clone()
                 .build(schemes[0].participants())
-                .elect(first_round, None);
+                .elect(first_round, <L::Elector as Elector<S>>::Mode::input(None));
             let leader = participants[usize::from(leader_idx)].clone();
 
             let (mut mailbox, mut batcher_receiver, _, relay, reporter) = setup_voter(

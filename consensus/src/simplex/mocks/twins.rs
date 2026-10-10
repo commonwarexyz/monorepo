@@ -71,7 +71,7 @@
 //! messages with that participant identity in that view.
 
 use crate::{
-    simplex::elector::{self, Terms},
+    simplex::elector::{self, Input, Terms},
     types::{Participant, Round, TermLength, View},
 };
 use commonware_cryptography::certificate::Scheme;
@@ -321,11 +321,15 @@ where
     S: Scheme,
     E: elector::Elector<S>,
 {
+    // Scripted leaders never read the input, so the fallback decides whether
+    // election needs the certificate.
+    type Mode = E::Mode;
+
     fn terms(&self) -> Terms {
         self.fallback.terms()
     }
 
-    fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant {
+    fn elect(&self, round: Round, input: Input<'_, S, Self>) -> Participant {
         let idx = term_index(round.view(), self.fallback.terms().length());
         if let Some(&leader) = self.round_leaders.get(idx) {
             return leader;
@@ -335,7 +339,7 @@ where
         // fallback elector rather than forcing an honest-only suffix. Twins
         // campaigns should not prevent the protocol from timing out in
         // later views (if a twin is elected).
-        self.fallback.elect(round, certificate)
+        self.fallback.elect(round, input)
     }
 }
 
@@ -2240,7 +2244,7 @@ mod tests {
         for (round_idx, round_scenario) in case.scenario.rounds().iter().enumerate() {
             let round = Round::new(Epoch::new(0), View::new((round_idx as u64) + 1));
             assert_eq!(
-                twins.elect(round, None),
+                twins.elect(round, ()),
                 Participant::from_usize(round_scenario.leader()),
                 "unexpected leader in scripted attack round"
             );
@@ -2248,7 +2252,7 @@ mod tests {
 
         for view in (framework.rounds as u64 + 1)..=20 {
             let round = Round::new(Epoch::new(333), View::new(view));
-            assert_eq!(twins.elect(round, None), fallback.elect(round, None));
+            assert_eq!(twins.elect(round, ()), fallback.elect(round, ()));
         }
     }
 
@@ -2296,14 +2300,14 @@ mod tests {
 
         for view in 1..=3 {
             let round = Round::new(Epoch::new(0), View::new(view));
-            assert_eq!(twins.elect(round, None), Participant::new(0));
+            assert_eq!(twins.elect(round, ()), Participant::new(0));
         }
         for view in 4..=6 {
             let round = Round::new(Epoch::new(0), View::new(view));
-            assert_eq!(twins.elect(round, None), Participant::new(2));
+            assert_eq!(twins.elect(round, ()), Participant::new(2));
         }
 
         let round = Round::new(Epoch::new(333), View::new(7));
-        assert_eq!(twins.elect(round, None), fallback.elect(round, None));
+        assert_eq!(twins.elect(round, ()), fallback.elect(round, ()));
     }
 }

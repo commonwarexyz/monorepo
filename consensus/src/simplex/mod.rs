@@ -662,7 +662,10 @@ mod tests {
     use crate::{
         Monitor, Viewable,
         simplex::{
-            elector::{self, Config as _, Elector as _, Random, RandomVersion, RoundRobin},
+            elector::{
+                self, Config as _, Elector, Random, RandomVersion, RoundRobin, RoundRobinElector,
+                Scheduled,
+            },
             mocks::{
                 scheme as scheme_mocks,
                 twins::{self, Elector as TwinsElector},
@@ -1581,6 +1584,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         RoundRobin: elector::Config<S>,
+        <RoundRobin as elector::Config<S>>::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 5;
         let required_containers = View::new(50);
@@ -1634,7 +1638,7 @@ mod tests {
                     certify_latency: (10.0, 5.0),
                     should_certify: mocks::application::Certifier::Custom(Box::new({
                         let built_elector_clone = built_elector.clone();
-                        move |round, _| built_elector_clone.elect(round, None) != dishonest
+                        move |round, _| built_elector_clone.elect(round, ()) != dishonest
                     })),
                 };
                 let (actor, application) = mocks::application::Application::new(
@@ -1829,9 +1833,8 @@ mod tests {
         }
 
         let participants_set = participants.clone().try_into().unwrap();
-        let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
-            elector.build(&participants_set);
-        let leader_idx = usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+        let built_elector: RoundRobinElector<ed25519::Scheme> = elector.build(&participants_set);
+        let leader_idx = usize::from(built_elector.elect(Round::new(epoch, View::new(1)), ()));
 
         (reporters, leader_idx, oracle)
     }
@@ -6427,6 +6430,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
+        L::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -6456,7 +6460,7 @@ mod tests {
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
-                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
             let byzantine = leader_of(10);
             let group = [leader_of(11), leader_of(12)];
             let lone = leader_of(13);
@@ -6637,6 +6641,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
+        L::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -6666,7 +6671,7 @@ mod tests {
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
-                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
             let byzantine = leader_of(10);
             let lone = leader_of(11);
             let group = [leader_of(12), leader_of(13)];
@@ -6852,6 +6857,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
+        L::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -6881,7 +6887,7 @@ mod tests {
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
-                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
             let byzantine = leader_of(10);
             let group = [leader_of(11), leader_of(12)];
             let lone = leader_of(13);
@@ -7091,6 +7097,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
+        L::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -7118,7 +7125,7 @@ mod tests {
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
-                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
             let offline = leader_of(1);
             assert_eq!(offline, leader_of(21), "offline must lead terms 1 and 5");
             let honest: Vec<usize> = (0..n as usize).filter(|idx| *idx != offline).collect();

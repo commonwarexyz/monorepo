@@ -4,7 +4,7 @@ use crate::{
     simplex::{
         Floor, Lookahead, Viewport,
         actors::span::MISSING_SPAN,
-        elector::Elector,
+        elector::{Elector, Mode as _},
         metrics::{Leader, Timeout, TimeoutReason},
         scheme::Scheme,
         types::{
@@ -374,7 +374,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if self.leader_is_set(view) {
             return;
         }
-        let leader = self.elector.elect(Rnd::new(self.epoch, view), certificate);
+        let leader = self
+            .elector
+            .elect(Rnd::new(self.epoch, view), L::Mode::input(certificate));
         self.create_round(view).set_leader(leader);
     }
 
@@ -1601,7 +1603,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 mod tests {
     use super::*;
     use crate::simplex::{
-        elector::{Config as _, RoundRobin, RoundRobinElector, Terms},
+        elector::{Config as _, Dynamic, RoundRobin, RoundRobinElector, Terms},
         scheme::ed25519,
         types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
@@ -1866,6 +1868,8 @@ mod tests {
     }
 
     impl<S: certificate::Scheme> Elector<S> for RequireCertificateElector<S> {
+        type Mode = Dynamic;
+
         fn terms(&self) -> Terms {
             Terms::stable(self.term_length, Duration::from_secs(30), ViewDelta::new(1))
         }
@@ -5648,7 +5652,7 @@ mod tests {
             );
             // Use a non-leader so its local vote is the event that opens the
             // optimistic child.
-            let leader_idx = usize::from(elector.elect(Rnd::new(epoch, View::new(1)), None));
+            let leader_idx = usize::from(elector.elect(Rnd::new(epoch, View::new(1)), ()));
             let local_idx = (leader_idx + 1) % schemes.len();
 
             let config = |scheme: ed25519::Scheme, elector| {
