@@ -23,14 +23,7 @@ use core::{
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
 };
-use futures::future::try_join_all;
 use std::sync::Arc;
-
-/// Fewest keys per shard of a [`Db::get_many_map`] batch. Issuing a shard's batched read costs
-/// a fixed few tens of microseconds on the calling task, while resolving a key against the
-/// index and page cache costs well under a microsecond, so a shard below about a hundred keys
-/// costs more to issue than the probing it hides.
-const SHARD_KEYS: usize = 128;
 
 /// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
 /// keys plus `(global key index, position)` pairs for page-cache misses.
@@ -245,76 +238,20 @@ where
         self.metrics.get_many_calls.inc();
         self.metrics.lookups_requested.inc_by(keys.len() as u64);
 
-        // Resolve and read shard by shard: each shard's misses go to the log in one batched read
-        // as soon as the shard resolves, so later shards probe the index and page cache while
-        // earlier shards' reads are in flight instead of every probe preceding the first read.
-        // A shard holds at least SHARD_KEYS keys, below which a batched read's fixed cost
-        // exceeds the probing it overlaps, and there are at most as many shards as the strategy
-        // pool has workers.
-        let shards = (keys.len() / SHARD_KEYS).clamp(1, self.strategy().manual().parallelism());
-        let shard_len = keys.len().div_ceil(shards);
-        let map = &map;
-        let shards = try_join_all(keys.chunks(shard_len).enumerate().map(|(ci, shard_keys)| {
-            async move {
-                let (results, mut misses) = self.resolve_shard(shard_keys, map, ci * shard_len);
-                if misses.is_empty() {
-                    return Ok((results, misses, Vec::new()));
-                }
-
-                // Read each distinct missed position once with one batched read, which also
-                // validates the missed positions: every candidate position is decoded by exactly
-                // one of the two passes, so corruption detection does not depend on cache state.
-                misses.sort_unstable_by_key(|&(_, pos)| pos);
-                let positions = Self::dedup_positions(&misses);
-                let ops = self.log.read_many(&positions).await?;
-                assert_eq!(
-                    ops.len(),
-                    positions.len(),
-                    "read_many returns one operation per position"
-                );
-                Ok::<_, crate::qmdb::Error<F>>((results, misses, ops))
-            }
-        }))
-        .await?;
-
-        let mut results = Vec::with_capacity(keys.len());
-        let mut reads = Vec::with_capacity(shards.len());
-        for (shard_results, misses, ops) in shards {
-            results.extend(shard_results);
-            reads.push((misses, ops));
-        }
-        for (misses, ops) in reads {
-            Self::match_read_ops(
-                keys,
-                &misses,
-                ops.into_iter().map(Some),
-                map,
-                &mut results,
-                |_, pos| unreachable!("read_many returns one operation per position, pos={pos}"),
-            );
-        }
-        Ok(results)
-    }
-
-    /// Resolve the shard of the batch holding `keys` from key index `base` against the index and
-    /// page cache. The strategy policy decides per shard size whether the pass runs on the
-    /// calling thread or sharded again across the pool.
-    fn resolve_shard<T: Send>(
-        &self,
-        keys: &[&U::Key],
-        map: &(impl Fn(U, Location<F>) -> T + Send + Sync),
-        base: usize,
-    ) -> ShardReads<T> {
+        // One fused pass resolves everything the page cache can serve: probe the index, sort
+        // candidate locations, read cached operations, and match them back to keys, collecting
+        // misses. The strategy policy decides per batch size whether the pass runs on the
+        // calling thread or sharded across the pool.
         let strategy = self.strategy();
-        strategy.run(
+        let (mut results, mut misses) = strategy.run(
             keys.len(),
-            || self.resolve_cached(keys, map, base),
+            || self.resolve_cached(keys, &map, 0),
             || {
                 let manual = strategy.manual();
                 let chunk = keys.len().div_ceil(manual.parallelism());
                 let shards = manual.map_collect_vec(
                     keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
-                    |(ci, shard_keys)| self.resolve_cached(shard_keys, map, base + ci * chunk),
+                    |(ci, shard_keys)| self.resolve_cached(shard_keys, &map, ci * chunk),
                 );
                 let mut results = Vec::with_capacity(keys.len());
                 let mut misses = Vec::new();
@@ -324,7 +261,31 @@ where
                 }
                 (results, misses)
             },
-        )
+        );
+        if misses.is_empty() {
+            return Ok(results);
+        }
+
+        // Fallback: read each distinct missed position once with one batched read, which also
+        // validates the missed positions: every candidate position is decoded by exactly one of
+        // the two passes, so corruption detection does not depend on cache state.
+        misses.sort_unstable_by_key(|&(_, pos)| pos);
+        let positions = Self::dedup_positions(&misses);
+        let ops = self.log.read_many(&positions).await?;
+        assert_eq!(
+            ops.len(),
+            positions.len(),
+            "read_many returns one operation per position"
+        );
+        Self::match_read_ops(
+            keys,
+            &misses,
+            ops.into_iter().map(Some),
+            &map,
+            &mut results,
+            |_, pos| unreachable!("read_many returns one operation per position, pos={pos}"),
+        );
+        Ok(results)
     }
 
     /// Probe the index for `keys`, serve page-cache hits synchronously, and match them back to
