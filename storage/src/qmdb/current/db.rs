@@ -582,6 +582,12 @@ where
         Ok(self)
     }
 
+    /// Hint that no operation below `loc` will be read soon, so the log may drop their cached
+    /// pages. See [`any::Db::evict_cached_before`](any::db::Db::evict_cached_before).
+    pub fn evict_cached_before(&mut self, loc: Location<F>) {
+        self.any.evict_cached_before(loc);
+    }
+
     /// Sync the metadata to disk.
     pub(crate) async fn sync_metadata(mut self) -> Result<Self, Error<F>> {
         self.metadata.clear();

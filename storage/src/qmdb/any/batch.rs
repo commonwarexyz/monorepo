@@ -3521,9 +3521,6 @@ where
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root();
 
-        // Operations below the floor are inactive, so free their cached pages for live data.
-        Mutable::evict_cached_before(&mut self.log, *self.inactivity_floor_loc);
-
         // Return range of operations that were written to the log.
         let range = start_loc..batch.bounds.tip.size;
         self.update_metrics();

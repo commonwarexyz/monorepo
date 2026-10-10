@@ -1781,6 +1781,87 @@ pub(crate) mod test {
         executor.start(log_replay_inner::<crate::merkle::mmb::Family>);
     }
 
+    /// The eviction hint retires the log's cached pages below the given location, clamped to the
+    /// inactivity floor. Retired pages leave the cache only as later batches append, and every
+    /// operation stays readable and provable from storage.
+    #[test_traced]
+    fn test_evict_cached_before_clamps_to_floor_and_keeps_log_readable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // One blob with small pages, and a log cache large enough that only the hint
+            // evicts. The Merkle tree keeps the shared default cache.
+            let seed = context.next_u64();
+            let mut cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
+            cfg.journal_config.items_per_blob = NZU64!(10_000);
+            cfg.journal_config.page_cache =
+                CacheRef::from_pooler(&context, NZU16!(256), NZUsize!(4096));
+            let mut db = AnyTest::init(context, cfg, None).await.unwrap();
+
+            // Write keys, then overwrite them so the floor walk advances past the first writes.
+            let keys: Vec<Digest> = (0..50u64)
+                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+                .collect();
+            for round in 0..2u64 {
+                let mut batch = db.new_batch();
+                for key in &keys {
+                    batch = batch.write(*key, Some(Sha256::hash(&[&round.to_be_bytes()])));
+                }
+                let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                (db, _) = db.apply_batch(merkleized).await.unwrap();
+            }
+            let floor = db.inactivity_floor_loc();
+            let size = db.bounds().end;
+            let root = db.root();
+            assert!(floor > Location::new(0));
+
+            // Warm the cache with every operation.
+            let retained: Vec<u64> = (0..*size).collect();
+            db.log.read_many(&retained).await.unwrap();
+            assert!(
+                retained
+                    .iter()
+                    .all(|&loc| db.log.try_read_sync(loc).is_some())
+            );
+
+            // A hint above the floor retires only the pages below it, and nothing leaves the
+            // cache until later appends need the slots.
+            db.evict_cached_before(size);
+            assert!(
+                retained
+                    .iter()
+                    .all(|&loc| db.log.try_read_sync(loc).is_some())
+            );
+
+            // Appending far more pages than the whole log held so far reclaims every retired
+            // page. The first operation reads from storage now, while operations at or above
+            // the floor keep their pages.
+            let mut batch = db.new_batch();
+            for i in 0..600u64 {
+                let key = Sha256::hash(&[&(1_000 + i).to_be_bytes()]);
+                batch = batch.write(key, Some(key));
+            }
+            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            assert!(db.log.try_read_sync(0).is_none());
+            assert!((*floor..*size).all(|loc| db.log.try_read_sync(loc).is_some()));
+
+            // Retired operations remain readable and provable from storage.
+            let (proof, ops) = db
+                .historical_proof(size, Location::new(0), NZU64!(*size))
+                .await
+                .unwrap();
+            assert_eq!(ops.len() as u64, *size);
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof,
+                Location::new(0),
+                &ops,
+                &root
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test]
     fn test_any_fixed_db_historical_proof_basic() {
         let executor = deterministic::Runner::default();

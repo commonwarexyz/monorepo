@@ -447,6 +447,18 @@ where
         Ok(self)
     }
 
+    /// Hint that no operation below `loc` will be read soon, so the log may drop their cached
+    /// pages in favor of live data. The operations remain readable from storage.
+    ///
+    /// The database itself never reads below its inactivity floor, but callers serving
+    /// historical proofs or state sync may. Pass the lowest location such requests may still
+    /// read; locations at or above the inactivity floor are clamped to it, since operations
+    /// there are live.
+    pub fn evict_cached_before(&mut self, loc: Location<F>) {
+        let loc = loc.min(self.inactivity_floor_loc);
+        Mutable::evict_cached_before(&mut self.log, *loc);
+    }
+
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
