@@ -4904,8 +4904,8 @@ mod tests {
 
     /// A propose relay with a staged proposal must send it through the shard
     /// engine and complete the durability handshake. The freshly built block
-    /// is nowhere persisted at broadcast time, so the forward fallback has
-    /// nothing to serve: only the staged-hit path can seed the shard engine.
+    /// is nowhere persisted at broadcast time, so only the staged proposal can
+    /// seed the shard engine.
     #[test_traced("WARN")]
     fn test_marshaled_propose_relay_sends_staged_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -5129,6 +5129,185 @@ mod tests {
                 assert_eq!(block.digest(), digest);
                 assert!(matches!(recipients, Recipients::All));
             }
+        });
+    }
+
+    /// A candidate whose shards a prepare relay sent and that certification claimed before the
+    /// lock-in goes out once. The propose relay that follows finds nothing staged and sends
+    /// nothing.
+    #[test_traced("WARN")]
+    fn test_coding_propose_relay_after_claim_sends_once() {
+        // The runner timeout is only a hang guard.
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "propose-relay-claim",
+                provider.clone(),
+                buffer.clone(),
+            )
+            .await;
+            let shards = start_shard_mailbox(
+                context.child("shards"),
+                participants.clone(),
+                provider.clone(),
+            )
+            .await;
+            let (ctx, candidate) = missing_candidate(participants[0].clone());
+            let round = ctx.round;
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new()
+                    .with_propose_result(candidate.inner().clone()),
+                marshal: marshal.clone(),
+                shards,
+                scheme_provider: provider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+            let commitment = marshaled
+                .propose(ctx)
+                .await
+                .await
+                .expect("propose should produce a commitment");
+            assert_eq!(commitment, candidate.commitment());
+
+            // The early relay sends the candidate's shards. Each lookup below goes through the
+            // same marshal mailbox as the relays, so it observes every send they requested.
+            let feedback = marshaled.broadcast(commitment, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            assert!(
+                marshal.get_verified(round).await.is_none(),
+                "an early relay must not store the candidate"
+            );
+            assert_eq!(buffer.sends.lock().len(), 1, "early relay must send once");
+
+            // Certification claims the candidate and persists it.
+            assert!(
+                marshaled
+                    .certify(round, commitment)
+                    .await
+                    .await
+                    .expect("certify result missing"),
+                "certification must persist the claimed candidate"
+            );
+
+            // The lock-in finds nothing staged and must not send the candidate again.
+            let feedback = marshaled.broadcast(commitment, Plan::Propose { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            assert_eq!(
+                marshal
+                    .get_verified(round)
+                    .await
+                    .map(|block| block.commitment()),
+                Some(commitment),
+                "certification must store the candidate"
+            );
+            assert_eq!(
+                buffer.sends.lock().len(),
+                1,
+                "the lock-in must not send a claimed candidate again"
+            );
+        });
+    }
+
+    /// A prepare request builds on a parent that only our own vote may attest to, so it waits
+    /// for the parent locally and draws no peer fetch. Local reconstruction or the parent's
+    /// certification delivers it and completes the prepare. An ordinary propose fetches the
+    /// parent by round.
+    #[test_traced("WARN")]
+    fn test_coding_prepare_waits_for_parent_without_fetching() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "prepare-parent-wait",
+                provider.clone(),
+                buffer.clone(),
+            )
+            .await;
+            let shards = start_shard_mailbox(
+                context.child("shards"),
+                participants.clone(),
+                provider.clone(),
+            )
+            .await;
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let (parent_ctx, parent) = missing_candidate(participants[1].clone());
+            let parent_round = parent_ctx.round;
+            let ctx = CodingCtx {
+                round: Round::new(Epoch::zero(), parent_round.view().next()),
+                leader: participants[0].clone(),
+                parent: (parent_round.view(), parent.commitment()),
+            };
+            let child = make_coding_block(ctx.clone(), parent.digest(), Height::new(2), 7);
+            let child_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                child.clone(),
+                coding_config,
+                &Sequential,
+            )
+            .commitment();
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new()
+                    .with_handoff(Handoff::Stage(()))
+                    .with_propose_result(child),
+                marshal: marshal.clone(),
+                shards,
+                scheme_provider: provider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // The actor issues any peer fetch for a missing block before it registers the local
+            // wait, so a registered wait shows the prepare's parent lookup has been handled. The
+            // runner timeout is only a hang guard for this loop.
+            let decision = marshaled.prepare(ctx.clone()).await;
+            while buffer.commitment_subscription_count() == 0 {
+                reschedule().await;
+            }
+            assert!(
+                resolver.fetches().is_empty(),
+                "prepare must not fetch its parent"
+            );
+
+            // An ordinary propose on the same parent fetches it by round. The runner timeout is
+            // only a hang guard for this loop.
+            let proposal = marshaled.propose(ctx).await;
+            while resolver.fetches().is_empty() {
+                reschedule().await;
+            }
+
+            // Local delivery of the parent completes both requests without another fetch.
+            assert!(marshal.verified(parent_round, parent).await);
+            assert_eq!(
+                decision.await.expect("prepare decision missing"),
+                Handoff::Stage(child_commitment)
+            );
+            assert_eq!(
+                proposal.await.expect("propose should produce a commitment"),
+                child_commitment
+            );
+            let fetches = resolver.fetches();
+            assert_eq!(fetches.len(), 1, "only the propose may fetch the parent");
+            assert!(matches!(
+                fetches[0].key,
+                handler::Key::Notarized { round } if round == parent_round
+            ));
         });
     }
 

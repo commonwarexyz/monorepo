@@ -283,12 +283,11 @@ pub enum CommitmentFallback {
     /// Use this when the caller knows a round and commitment from consensus but not the
     /// proposal height, such as proposal construction, verification of a known child, or
     /// certification of a notarized candidate. The round might not be notarized yet, as with
-    /// the uncertified parent of a pipelined handoff. Peers serve the request only once they
-    /// hold its notarization, so until then only local availability completes it. An unresolved
-    /// request remains eligible until the processed finalized-round floor reaches its round. Do
-    /// not infer height from the finalized tip or another block: proposals may build on a
-    /// parent that is not finalized locally yet, and an unverified child may lie about its
-    /// height.
+    /// an uncertified parent. Peers serve the request only once they hold its notarization, so
+    /// until then only local availability completes it. An unresolved request remains eligible
+    /// until the processed finalized-round floor reaches its round. Do not infer height from the
+    /// finalized tip or another block: proposals may build on a parent that is not finalized
+    /// locally yet, and an unverified child may lie about its height.
     ///
     /// The returned block is heightable once decoded, but that is too late for
     /// the in-flight resolver key or retention bound.

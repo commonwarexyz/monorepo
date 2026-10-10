@@ -125,7 +125,7 @@ pub enum Verify<S: Scheme<D>, D: Digest> {
         proposal: View,
         view: View,
         kind: Kind,
-        target: Option<S::PublicKey>,
+        target: S::PublicKey,
     },
     Wait,
 }
@@ -1156,17 +1156,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// so there is nothing to fetch yet. If we fall behind, our issuance
     /// anchor freezes and newer proposals leave the window (see
     /// [`Self::in_issuance_window`]), so the fetch resumes.
-    ///
-    /// The returned target is the proposal's leader, or `None` when any validator
-    /// may serve the fetch.
-    fn resolve_ancestry(
-        &self,
-        err: &ParentPayloadError,
-        leader: &S::PublicKey,
-    ) -> Option<(View, Kind, Option<S::PublicKey>)> {
+    fn resolve_ancestry(&self, err: &ParentPayloadError) -> Option<(View, Kind)> {
         match err {
             ParentPayloadError::MissingNullification { missing_view, .. } => {
-                Some((*missing_view, Kind::Nullification, Some(leader.clone())))
+                Some((*missing_view, Kind::Nullification))
             }
             ParentPayloadError::ParentNotCertified {
                 proposal_view,
@@ -1175,13 +1168,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 if self.in_issuance_window(*proposal_view) {
                     return None;
                 }
-                // A pipelined term-start leader may lack its immediate predecessor's
-                // certificate. Older parents, same-term repair, and electors that cannot
-                // pipeline retain leader affinity.
-                let pipelined_parent = parent_view.next() == *proposal_view
-                    && self.handoff_leader(*proposal_view).is_some();
-                let target = (!pipelined_parent).then(|| leader.clone());
-                Some((*parent_view, Kind::Notarization, target))
+                Some((*parent_view, Kind::Notarization))
             }
             _ => None,
         }
@@ -1190,9 +1177,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns work for the lowest locally admissible tracked proposal awaiting
     /// verification.
     ///
-    /// Requests missing ancestry from the proposal's elected leader, except where
-    /// [`Self::resolve_ancestry`] allows any validator to serve it. That function
-    /// also decides whether an error justifies a fetch.
+    /// Missing ancestry is requested from the proposal's elected leader
+    /// (see [`Self::resolve_ancestry`] for when an error justifies a fetch).
     pub fn try_verify(&mut self) -> Verify<S, D> {
         // Bound the scan as in [`Self::try_propose`].
         // Ascending order gives the current view precedence over optimistic work.
@@ -1216,7 +1202,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
             // Validate ancestry before claiming the request. Invalid structure
             // times out the view; missing evidence either waits for live
-            // certification or produces one fetch.
+            // certification or produces one targeted fetch.
             let parent_payload = match self.parent_payload(&proposal) {
                 Ok(parent_payload) => parent_payload,
                 Err(err) => {
@@ -1231,8 +1217,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                         ?err,
                         "proposal exists but ancestry is not yet certified"
                     );
-                    let Some((missing, kind, target)) = self.resolve_ancestry(&err, &leader.key)
-                    else {
+                    let Some((missing, kind)) = self.resolve_ancestry(&err) else {
                         continue;
                     };
                     if !self
@@ -1247,7 +1232,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                         proposal: proposal.view(),
                         view: missing,
                         kind,
-                        target,
+                        target: leader.key,
                     };
                 }
             };
@@ -1848,18 +1833,22 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns the parent whose explicit certification gates `proposal`.
     ///
     /// In-term proposals require their immediate predecessor. A term-start proposal
-    /// that names its immediate predecessor also requires it once we have broadcast a
-    /// notarize vote in its view, as the proposer of a pipelined handoff does before
-    /// that predecessor certifies.
+    /// that names its immediate predecessor also requires it once we, as the term's
+    /// early-elected leader, have broadcast a notarize vote in its view, as the proposer
+    /// of a pipelined handoff does before that predecessor certifies.
     ///
-    /// The vote marks the round, not one proposal. If the leader equivocates, a
-    /// conflicting proposal in the same view inherits the gate, which only delays
-    /// its certification.
+    /// The vote marks the round, not one proposal, so the gate also requires that we lead
+    /// the term. An honest leader signs one proposal per view, so the gate covers only our
+    /// own. Any other validator can vote for one proposal of an equivocating leader and
+    /// then see a quorum notarize another that names the immediate predecessor. That
+    /// certificate takes the exemption below, so the validator certifies it, and enters the
+    /// next view, without first certifying a predecessor it may lack.
     ///
-    /// The vote is journaled, so replay restores the gate without relying on the
-    /// transient application decision. A journaled vote for an ordinary term-start
-    /// proposal implies that its parent's certification or finalization was already
-    /// durable, so the gate passes after replay.
+    /// The vote is journaled and the early election depends only on the round, so replay
+    /// restores the gate without relying on the transient application decision. A
+    /// journaled vote for an ordinary term-start proposal implies that its parent's
+    /// certification or finalization was already durable, so the gate passes after
+    /// replay.
     ///
     /// A term-start proposal outside this gate needs none: validators other than the
     /// proposer verify a term-start proposal only on explicitly certified ancestry, so
@@ -1875,6 +1864,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.previous_in_term(view).or_else(|| {
             let previous = view.previous()?;
             (proposal.parent == previous
+                && self
+                    .handoff_leader(view)
+                    .is_some_and(|leader| self.is_me(leader))
                 && self
                     .views
                     .get(&view)
@@ -3851,7 +3843,7 @@ mod tests {
                 }
                     if proposal == View::new(6)
                         && view == View::new(2)
-                        && target == Some(leader)
+                        && target == leader
             ));
 
             // The round deduplicates the request while it is outstanding.
@@ -3871,64 +3863,6 @@ mod tests {
             };
             assert_eq!(ctx.parent, (View::new(2), parent.payload));
             assert_eq!(proposal, child);
-        });
-    }
-
-    /// A [`Dynamic`] elector never elects a term's leader early, so no pipelined
-    /// proposer exists, and a term-start proposal's missing immediate predecessor is
-    /// requested from the proposal's leader.
-    #[test]
-    fn try_verify_targets_leader_for_term_start_parent_without_early_election() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                verifier,
-                ..
-            } = ed25519::fixture(&mut context, b"ns", 4);
-            let mut state = State::new(
-                context.child("state"),
-                Config {
-                    scheme: schemes[1].clone(),
-                    elector: RequireCertificateElector {
-                        term_length: TermLength::new(NZU32!(5)),
-                        _phantom: PhantomData,
-                    },
-                    epoch: Epoch::new(9),
-                    view_retention: ViewDelta::new(10),
-                    leader_timeout: Duration::from_secs(1),
-                    certification_timeout: Duration::from_secs(2),
-                    timeout_retry: Duration::from_secs(3),
-                    skip_budget: 4,
-                },
-            );
-            state.set_genesis(test_genesis());
-
-            // A nullification at view 3 covers the rest of term 1 and enters
-            // term 2 at view 6.
-            let nullification =
-                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(3)));
-            assert!(state.add_nullification(nullification));
-            assert_eq!(state.current_view(), View::new(6));
-
-            // The proposal names its immediate predecessor, which this node never
-            // saw notarized.
-            assert!(state.set_proposal(View::new(6), fetch_proposal(6, 5, 66)));
-            let leader =
-                participants[usize::from(state.leader_index(View::new(6)).unwrap())].clone();
-            assert!(matches!(
-                state.try_verify(),
-                Verify::Resolve {
-                    proposal,
-                    view,
-                    kind: Kind::Notarization,
-                    target,
-                }
-                    if proposal == View::new(6)
-                        && view == View::new(5)
-                        && target == Some(leader)
-            ));
         });
     }
 
@@ -4044,7 +3978,7 @@ mod tests {
                     target,
                 } if proposal == View::new(3)
                     && view == View::new(2)
-                    && target == Some(participants[2].clone())
+                    && target == participants[2]
             ));
 
             // Notarization(3) triggers an untargeted request for the same
@@ -7344,6 +7278,93 @@ mod tests {
         });
     }
 
+    /// Replays the journaled notarize vote of `schemes[signer]` for a term-start proposal at
+    /// view 6 that names view 4, as a validator holding a nullification of view 5 may cast.
+    /// Then adds the notarization of a conflicting view-6 proposal that names view 5, signed
+    /// by the other validators, since an honest signer cannot vote for both proposals.
+    ///
+    /// That certificate includes a vote from an honest validator that certified view 5, so
+    /// a validator that is not the incoming leader must certify it without first fetching
+    /// and certifying view 5.
+    fn certify_conflicting_term_start<L: Elector<ed25519::Scheme>>(
+        state: &mut State<deterministic::Context, ed25519::Scheme, L, Sha256Digest>,
+        signer: usize,
+        verifier: &ed25519::Scheme,
+        schemes: &[ed25519::Scheme],
+    ) {
+        let nullification =
+            build_nullification(verifier, schemes, Rnd::new(Epoch::new(9), View::new(5)));
+        assert!(state.add_nullification(nullification));
+        let ours = fetch_proposal(6, 4, 61);
+        let vote = Notarize::sign(&schemes[signer], ours).expect("local notarize vote");
+        state.replay(&Artifact::Notarize(vote));
+
+        let conflicting = fetch_proposal(6, 5, 62);
+        let others: Vec<_> = schemes
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != signer)
+            .map(|(_, scheme)| scheme.clone())
+            .collect();
+        let notarization = build_notarization(verifier, &others, &conflicting);
+        assert!(state.add_notarization(notarization).0);
+        let (ready, fetches) = state.certify_candidates();
+        assert_eq!(ready, vec![conflicting]);
+        assert!(fetches.is_empty());
+    }
+
+    /// Every validator other than the incoming leader of view 6 (participant 3) certifies
+    /// the conflicting term start without its parent.
+    #[test]
+    fn term_start_gate_skips_non_leader_vote() {
+        for signer in 0..3 {
+            let runtime = deterministic::Runner::default();
+            runtime.start(move |mut context| async move {
+                let (
+                    Fixture {
+                        schemes, verifier, ..
+                    },
+                    mut state,
+                ) = setup_state_with_handoff(&mut context, 4, signer, 9);
+                assert_eq!(
+                    state.handoff_leader(View::new(6)),
+                    Some(Participant::new(3))
+                );
+                certify_conflicting_term_start(&mut state, signer, &verifier, &schemes);
+            });
+        }
+    }
+
+    /// A [`Dynamic`] elector elects no leader before the certificate that starts a term,
+    /// so no local vote gates a term-start certificate.
+    #[test]
+    fn term_start_gate_skips_dynamic_elector() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, b"ns", 4);
+            let mut state = State::new(
+                context.child("state"),
+                Config {
+                    scheme: schemes[1].clone(),
+                    elector: RequireCertificateElector {
+                        term_length: TermLength::new(NZU32!(5)),
+                        _phantom: PhantomData,
+                    },
+                    epoch: Epoch::new(9),
+                    view_retention: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    skip_budget: 4,
+                },
+            );
+            state.set_genesis(test_genesis());
+            certify_conflicting_term_start(&mut state, 1, &verifier, &schemes);
+        });
+    }
+
     #[test]
     fn pipelined_handoff_finalize_waits_for_parent_certification() {
         let runtime = deterministic::Runner::default();
@@ -7882,7 +7903,10 @@ mod tests {
         runtime.start(|mut context| async move {
             let (
                 Fixture {
-                    schemes, verifier, ..
+                    participants,
+                    schemes,
+                    verifier,
+                    ..
                 },
                 mut state,
             ) = setup_state_with_handoff(&mut context, 4, 1, 9);
@@ -7895,7 +7919,7 @@ mod tests {
 
             // The validator learns the incoming leader from the tip's notarization, so a
             // proposal that arrives first waits for it. Either way, the validator then
-            // requests the tip's certificate from any peer before verifying.
+            // requests the tip's certificate from the incoming leader before verifying.
             let tip_notarization = build_notarization(&verifier, &schemes, &tip);
             let child = fetch_proposal(6, 5, 66);
             match arrival {
@@ -7909,6 +7933,8 @@ mod tests {
                     assert!(state.set_proposal(View::new(6), child.clone()));
                 }
             }
+            let leader =
+                participants[usize::from(state.leader_index(View::new(6)).unwrap())].clone();
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
@@ -7919,7 +7945,7 @@ mod tests {
                 }
                     if proposal == View::new(6)
                         && view == View::new(5)
-                        && target.is_none()
+                        && target == leader
             ));
 
             assert!(state.certified(View::new(5), true).is_some());
@@ -8206,7 +8232,7 @@ mod tests {
                 }
                     if proposal == child_view
                         && view == skipped_view
-                        && target == Some(expected_leader)
+                        && target == expected_leader
             ));
 
             // The leader's preferred notarization is already known and does

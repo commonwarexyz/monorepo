@@ -114,7 +114,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
+        Clock, Handle, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
         deterministic, utils::reschedule,
     };
     use commonware_storage::{
@@ -10339,13 +10339,41 @@ mod tests {
         });
     }
 
-    /// A propose relay that finds no staged proposal must fall back to
-    /// forwarding the persisted block. Staging then claiming the gate at certify
-    /// persists the block and resolves the certification gate through the
-    /// staged ack, so the subsequent relay broadcast re-sends the block from
-    /// storage instead of dropping it.
+    /// Stages `block` for `round` in `gates` as a propose or prepare build does, and returns
+    /// the staging task, which ends once the block is durable or its staged ack is dropped.
+    async fn stage_block(
+        context: &deterministic::Context,
+        gates: &Gates<D, B>,
+        round: Round,
+        block: B,
+    ) -> Handle<()> {
+        let digest = block.digest();
+        let (tx, rx) = oneshot::channel();
+        let stager = context.child("stager").spawn({
+            let gates = gates.clone();
+            move |_| async move {
+                gates
+                    .stage(
+                        round,
+                        digest,
+                        Arc::new(block),
+                        |id| {
+                            tx.send_lossy(id);
+                        },
+                        "test",
+                    )
+                    .await;
+            }
+        });
+        assert_eq!(rx.await.expect("id published"), digest);
+        stager
+    }
+
+    /// A candidate that a prepare relay sent and that certification claimed before the lock-in
+    /// goes out once. The propose relay that follows finds nothing staged and sends nothing.
     #[test_traced("WARN")]
-    fn test_standard_propose_relay_miss_forwards_persisted_block() {
+    fn test_standard_propose_relay_after_claim_sends_once() {
+        // The runner timeout is only a hang guard.
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -10360,7 +10388,7 @@ mod tests {
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.child("validator").with_attribute("index", 0),
-                &format!("relay-miss-{me}"),
+                &format!("relay-claim-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
@@ -10369,28 +10397,19 @@ mod tests {
             .await;
             let buffer = buffer.expect("buffer was provided");
 
-            // Stage the proposal as propose would, then flush it as certify
-            // does when certification wins the race against the relay.
+            // The early relay sends the candidate. Each lookup below goes through the same
+            // marshal mailbox as the relays, so it observes every send they requested.
             let gates = Gates::new();
-            let (tx, rx) = oneshot::channel();
-            context.child("stager").spawn({
-                let gates = gates.clone();
-                let block = block.clone();
-                move |_| async move {
-                    gates
-                        .stage(
-                            round,
-                            digest,
-                            Arc::new(block),
-                            |id| {
-                                tx.send_lossy(id);
-                            },
-                            "test",
-                        )
-                        .await;
-                }
-            });
-            assert_eq!(rx.await.expect("id published"), digest);
+            stage_block(&context, &gates, round, block).await;
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            assert!(
+                mailbox.get_verified(round).await.is_none(),
+                "an early relay must not store the candidate"
+            );
+            assert_eq!(buffer.sends().len(), 1, "early relay must send once");
+
+            // Certification claims the candidate and persists it.
             let gate = gates
                 .claim(round, digest, |block, ack| {
                     mailbox.verified_deferred(round, block, ack)
@@ -10402,27 +10421,95 @@ mod tests {
                 "certify must persist the staged block and resolve the gate durably",
             );
 
-            // The relay finds nothing staged and must forward the persisted
-            // block instead of dropping the broadcast.
+            // The lock-in finds nothing staged and must not send the candidate again.
             let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Propose { round });
             assert!(matches!(feedback, Feedback::Ok));
-            wait_until(&context, Duration::from_secs(5), "fallback send", || {
-                !buffer.sends.lock().is_empty()
-            })
-            .await;
+            assert!(
+                mailbox.get_verified(round).await.is_some(),
+                "certify must store the candidate"
+            );
+            assert_eq!(
+                buffer.sends().len(),
+                1,
+                "the lock-in must not send a claimed candidate again"
+            );
+        });
+    }
 
-            let sends = buffer.sends();
-            assert_eq!(sends.len(), 1, "fallback must dispatch exactly once");
-            assert_eq!(sends[0].0, round);
-            assert_eq!(sends[0].1.digest(), digest);
-            assert!(matches!(sends[0].2, Recipients::All));
+    /// Pruning a decided round discards its staged candidate together with the mark that a
+    /// prepare relay sent it. A candidate staged again for that round must not go out from
+    /// either relay, and the lock-in still persists it and completes its durability handshake.
+    #[test_traced("WARN")]
+    fn test_standard_restage_after_prune_sends_once() {
+        // The runner timeout is only a hang guard.
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
+            let digest = block.digest();
+
+            let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("validator").with_attribute("index", 0),
+                &format!("relay-restage-{me}"),
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+            )
+            .await;
+            let buffer = buffer.expect("buffer was provided");
+
+            // The early relay sends the candidate. Each lookup below goes through the same
+            // marshal mailbox as the relays, so it observes every send they requested.
+            let gates = Gates::new();
+            let stager = stage_block(&context, &gates, round, block.clone()).await;
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            assert!(
+                mailbox.get_verified(round).await.is_none(),
+                "an early relay must not store the candidate"
+            );
+            assert_eq!(buffer.sends().len(), 1, "early relay must send once");
+
+            // A finalization past the round prunes the candidate, which ends its staging.
+            gates.retain_after(&Round::new(Epoch::zero(), View::new(2)));
+            stager.await.expect("pruning must end the staging");
+
+            // The candidate is staged again for the decided round. Neither relay sends it, and
+            // the lock-in persists it through the staged ack.
+            stage_block(&context, &gates, round, block).await;
+            let gate = gates.take(round, digest).expect("gate registered");
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Propose { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            assert_eq!(
+                gate.await.expect("gate resolved"),
+                GateOutcome::Ready(true),
+                "lock-in handshake must resolve the gate durably",
+            );
+            assert!(
+                mailbox.get_verified(round).await.is_some(),
+                "lock-in must store the candidate"
+            );
+            assert_eq!(
+                buffer.sends().len(),
+                1,
+                "a candidate staged again for a decided round must not be sent again"
+            );
         });
     }
 
     /// A propose relay with a staged proposal must dispatch it through the
     /// `Proposed` message and complete the durability handshake. The block is
-    /// never persisted beforehand, so the forward fallback has nothing to
-    /// serve: only the staged-hit path can produce the send.
+    /// never persisted beforehand, so only the staged proposal can produce the
+    /// send.
     #[test_traced("WARN")]
     fn test_standard_propose_relay_sends_staged_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -10450,25 +10537,7 @@ mod tests {
 
             // Stage the proposal as propose would.
             let gates = Gates::new();
-            let (tx, rx) = oneshot::channel();
-            context.child("stager").spawn({
-                let gates = gates.clone();
-                let block = block.clone();
-                move |_| async move {
-                    gates
-                        .stage(
-                            round,
-                            digest,
-                            Arc::new(block),
-                            |id| {
-                                tx.send_lossy(id);
-                            },
-                            "test",
-                        )
-                        .await;
-                }
-            });
-            assert_eq!(rx.await.expect("id published"), digest);
+            stage_block(&context, &gates, round, block).await;
             let gate = gates.take(round, digest).expect("gate registered");
 
             // The relay must take the staged proposal and dispatch it.
@@ -10530,25 +10599,7 @@ mod tests {
 
             // Stage the candidate as prepare would.
             let gates = Gates::new();
-            let (tx, rx) = oneshot::channel();
-            context.child("stager").spawn({
-                let gates = gates.clone();
-                let block = block.clone();
-                move |_| async move {
-                    gates
-                        .stage(
-                            round,
-                            digest,
-                            Arc::new(block),
-                            |id| {
-                                tx.send_lossy(id);
-                            },
-                            "test",
-                        )
-                        .await;
-                }
-            });
-            assert_eq!(rx.await.expect("id published"), digest);
+            stage_block(&context, &gates, round, block).await;
             let gate = gates.take(round, digest).expect("gate registered");
 
             // The early relay sends the candidate and keeps it staged, unstored.

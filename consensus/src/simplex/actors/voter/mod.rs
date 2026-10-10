@@ -6340,13 +6340,12 @@ mod tests {
     }
 
     /// A follower that entered a term start through a nullification of the outgoing
-    /// tip requests the tip's certificate from any validator, because a pipelined
-    /// proposer may not hold it.
+    /// tip requests the tip's certificate from the incoming leader, which built on it.
     #[test_traced]
-    fn test_pipelined_handoff_parent_repair_is_untargeted() {
+    fn test_pipelined_handoff_parent_repair_targets_leader() {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"pipelined_handoff_parent_repair_is_untargeted".to_vec();
+        let namespace = b"pipelined_handoff_parent_repair_targets_leader".to_vec();
         let epoch = Epoch::new(333);
         let term_length = TermLength::new(NZU32!(2));
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
@@ -6444,10 +6443,7 @@ mod tests {
                         assert_eq!(proposal, View::new(3));
                         assert_eq!(view, View::new(2));
                         assert!(matches!(kind, Kind::Notarization));
-                        assert!(
-                            target.is_none(),
-                            "term-start parent repair must allow any peer to respond"
-                        );
+                        assert_eq!(target, Some(incoming.clone()));
                         break;
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {

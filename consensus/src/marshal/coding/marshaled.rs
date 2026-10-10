@@ -653,11 +653,17 @@ where
     /// Runs the proposal checks for `consensus_context` and yields what the proposal path does
     /// next: re-propose the epoch boundary block, skip the view, or build on the fetched parent.
     ///
+    /// `parent_fallback` decides how a parent missing locally is acquired. A propose request
+    /// fetches it by round. A prepare request builds on a parent that only our own shard vote may
+    /// attest to, so it draws no peer fetch. Local reconstruction or the parent's certification,
+    /// which acquires the block from peers, delivers it.
+    ///
     /// The returned future borrows nothing from `self`, so it can move into the spawned propose
     /// task or into a prepare request's [`Parent`](crate::marshal::ancestry::Parent) handle.
     fn checks(
         &self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+        parent_fallback: core::CommitmentFallback,
     ) -> impl Future<Output = CodingResolved<B, C, H, impl Ancestry<B>>> + Send + 'static {
         let scheme_provider = self.scheme_provider.clone();
         let context = self.context.clone();
@@ -681,15 +687,11 @@ where
             //
             // Proposal context carries the parent view and commitment but not
             // the parent height. The parent may sit above the finalized tip and
-            // may still be uncertified, so this must stay round-bound until the
+            // may still be uncertified, so a fetch must stay round-bound until the
             // block is returned.
             let (parent_view, parent_commitment) = consensus_context.parent;
-            let parent_request = marshal.subscribe_by_commitment(
-                parent_commitment,
-                core::CommitmentFallback::FetchByRound {
-                    round: Round::new(consensus_context.epoch(), parent_view),
-                },
-            );
+            let parent_request =
+                marshal.subscribe_by_commitment(parent_commitment, parent_fallback);
             let parent_timer = proposal_parent_fetch_duration.timer(&*context);
             let Ok(parent) = parent_request.await else {
                 debug!(
@@ -783,13 +785,18 @@ where
         let strategy = self.strategy.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
         let clock = self.context.clone();
-        let checks = self.checks(consensus_context.clone());
+        let (parent_view, parent_commitment) = consensus_context.parent;
+        let checks = self.checks(
+            consensus_context.clone(),
+            core::CommitmentFallback::FetchByRound {
+                round: Round::new(consensus_context.epoch(), parent_view),
+            },
+        );
         let span = info_span!(
             "marshal.coding.propose.task",
             round = %consensus_context.round
         );
         let round = consensus_context.round;
-        let (parent_view, parent_commitment) = consensus_context.parent;
         propose::request(
             self.context.as_ref(),
             &self.application,
@@ -1058,11 +1065,11 @@ where
     ///
     /// The application receives the parent as a [`Parent`](crate::marshal::ancestry::Parent)
     /// handle. Asking the handle for the ancestry runs the same checks as [`Self::propose`], in the
-    /// same order. When those checks find the epoch boundary block, the marshal re-proposes it
-    /// without the application and answers [`Handoff::Stage`]. An application that declines without
-    /// asking costs no lookup or fetch, and if it also completes on its first poll, it is answered
-    /// [`Handoff::Wait`] on this task without a spawn. A round without a scheme answers
-    /// [`Handoff::Wait`] as well.
+    /// same order, except that a parent missing locally is awaited rather than fetched. When those
+    /// checks find the epoch boundary block, the marshal re-proposes it without the application and
+    /// answers [`Handoff::Stage`]. An application that declines without asking costs no lookup or
+    /// fetch, and if it also completes on its first poll, it is answered [`Handoff::Wait`] on this
+    /// task without a spawn. A round without a scheme answers [`Handoff::Wait`] as well.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
     async fn prepare(
@@ -1073,7 +1080,7 @@ where
         let strategy = self.strategy.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
         let clock = self.context.clone();
-        let checks = self.checks(consensus_context.clone());
+        let checks = self.checks(consensus_context.clone(), core::CommitmentFallback::Wait);
         let span = info_span!("marshal.coding.application.prepare", round = %round);
         prepare::request(
             self.context.as_ref(),

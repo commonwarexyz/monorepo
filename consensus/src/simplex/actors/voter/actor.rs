@@ -476,7 +476,7 @@ impl<
                 kind,
                 target,
             } => {
-                resolver.resolve(proposal, view, kind, target);
+                resolver.resolve(proposal, view, kind, Some(target));
                 return None;
             }
             Verify::Wait => return None,

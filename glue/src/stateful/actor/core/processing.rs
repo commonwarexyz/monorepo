@@ -188,7 +188,9 @@ where
 /// Re-enqueues each live request at the back of the mailbox.
 ///
 /// Messages enqueued before the requeue are handled before the next attempt, and later messages
-/// after it. Cancelled requests are dropped.
+/// after it. The exception is a message that an active proposal defers. The attempt can start
+/// first, and a deferred finalization then fences it like any other active verification.
+/// Cancelled requests are dropped.
 fn requeue<E, A>(
     mailbox: &(dyn Fn(Message<E, A>) + Send + Sync),
     requests: Vec<VerificationRequest<E, A>>,
@@ -242,7 +244,7 @@ where
     /// interrupts a barrier, processing stops and every pending acknowledgement is cancelled.
     pub async fn run(mut self) {
         let mut pending_prune = None;
-        let mut deferred_message = None;
+        let mut deferred_messages = VecDeque::new();
         let mut verifications = Verifications::new(self.marshal.clone());
         for request in std::mem::take(&mut self.deferred_verifications) {
             verifications.schedule(self.processor.verifier(), request);
@@ -281,7 +283,7 @@ where
                 let message = if prune_needs_barrier {
                     Err(TryRecvError::Empty)
                 } else {
-                    match deferred_message.take() {
+                    match deferred_messages.pop_front() {
                         Some(message) => Ok(message),
                         None => self.mailbox.try_recv(),
                     }
@@ -352,6 +354,12 @@ where
                         )
                         .instrument(process);
                     futures::pin_mut!(proposal);
+
+                    // Every verification is scheduled as it arrives, so a handoff build never
+                    // delays certification of its own parent, even when a finalization report is
+                    // queued between the build and the parent's verification. Other messages wait
+                    // for the proposal in arrival order, and a deferred finalization fences the
+                    // verifications scheduled here when it runs.
                     let mut receive_messages = true;
                     loop {
                         if receive_messages {
@@ -361,13 +369,7 @@ where
                                     Some(Message::Verify(request)) => {
                                         verifications.schedule(verifier.clone(), request);
                                     }
-                                    Some(message) => {
-                                        // Only verifications overtake an active proposal. The
-                                        // first other message waits for it, and later messages
-                                        // wait behind that one.
-                                        deferred_message = Some(message);
-                                        receive_messages = false;
-                                    }
+                                    Some(message) => deferred_messages.push_back(message),
                                     None => receive_messages = false,
                                 },
                                 _ = verifications.complete_next() => {},
@@ -545,21 +547,6 @@ mod tests {
         task::{Context, Poll},
         time::Duration,
     };
-
-    /// Runner budget for [`cancelled_handoff_proposal_unblocks_parent_certification`],
-    /// including its [`QUIET`] window.
-    const BUDGET: Duration = Duration::from_secs(1_000);
-
-    /// How long [`cancelled_handoff_proposal_unblocks_parent_certification`] checks that parent
-    /// verification stays behind the handoff build.
-    ///
-    /// The proposal gate has no timed release, and nothing in the fixture fires on a timer within
-    /// this window, so parent verification can only start inside it by overtaking the build.
-    const QUIET: Duration = Duration::from_secs(300);
-
-    /// How long [`cancelled_handoff_proposal_unblocks_parent_certification`] waits for parent
-    /// verification to start once the handoff build is cancelled.
-    const RESUME: Duration = Duration::from_secs(1);
 
     struct ApplicationGate {
         started: oneshot::Sender<()>,
@@ -1627,17 +1614,18 @@ mod tests {
         });
     }
 
-    /// A handoff build can hold back certification of its own parent. Once a finalization
-    /// report is deferred behind the active build, verification of the parent queues behind
-    /// that report, so certifying the parent waits for the build. Dropping the handoff
-    /// response, as consensus does when it votes to nullify the parent's view, cancels the
-    /// build and lets the parent certify.
+    /// A handoff build does not hold back certification of its own parent. The build is queued
+    /// ahead of a finalization report, which is queued ahead of the parent's verification. The
+    /// parent still verifies and certifies while the build is held, and the finalization applies
+    /// once the build ends.
     #[test]
-    fn cancelled_handoff_proposal_unblocks_parent_certification() {
-        deterministic::Runner::timed(BUDGET).start(|context| async move {
+    fn parent_certification_overtakes_deferred_finalization() {
+        // The runner budget is only a hang guard. The build stays held until the parent
+        // certifies, so a parent verification waiting for the build never starts.
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (outgoing_gate, outgoing_started, outgoing_release) = application_gate();
-            let (parent_gate, mut parent_started, parent_release) = application_gate();
-            let (proposal_gate, proposal_started, _proposal_release) = application_gate();
+            let (parent_gate, parent_started, parent_release) = application_gate();
+            let (proposal_gate, proposal_started, proposal_release) = application_gate();
             let app = GatedApp {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([outgoing_gate, parent_gate]))),
                 proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
@@ -1708,49 +1696,294 @@ mod tests {
                 .expect("outgoing verification should remain active");
             assert!(verify_outgoing.await);
 
-            // The handoff build on the uncertified parent starts, and a finalization
-            // report is deferred behind it.
-            let handoff = deferred
+            // The handoff build on the uncertified parent starts, and a finalization report
+            // queues behind it ahead of the parent's verification.
+            let mut handoff = deferred
                 .prepare(TestBlock::child(&parent, 3).context())
                 .await;
             proposal_started.await.expect("handoff build should start");
             let (acknowledgement, mut waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(outgoing.clone()), acknowledgement));
-            context.sleep(Duration::from_millis(10)).await;
-            assert!(poll!(&mut waiter).is_pending());
 
-            // Certifying the parent waits for the build.
+            // The parent verifies and certifies while the build is held.
             let optimistic = deferred.verify(parent.context(), parent.digest()).await;
             assert_eq!(optimistic.await, Ok(true));
             let mut certify = deferred
                 .certify(parent.context().round, parent.digest())
                 .await;
-            select! {
-                _ = &mut parent_started => {
-                    panic!("parent verification overtook the handoff build");
-                },
-                _ = context.sleep(QUIET) => {},
-            }
+            parent_started
+                .await
+                .expect("parent verification should start during the build");
             assert!(poll!(&mut certify).is_pending());
-
-            // Dropping the handoff response cancels the build and admits the parent.
-            drop(handoff);
-            select! {
-                result = &mut parent_started => {
-                    result.expect("parent verification should start");
-                },
-                _ = context.sleep(RESUME) => {
-                    panic!("cancelled handoff build blocked parent verification");
-                },
-            }
             parent_release
                 .send(())
                 .expect("parent verification should remain active");
             assert_eq!(certify.await, Ok(true));
+            assert!(poll!(&mut handoff).is_pending());
+            assert!(poll!(&mut waiter).is_pending());
+
+            // The deferred finalization applies once the build ends.
+            proposal_release
+                .send(())
+                .expect("handoff build should remain active");
             waiter.await.expect("finalization should be acknowledged");
+            assert!(handoff.await.expect("handoff should resolve").is_wait());
             actor.abort();
             let _ = actor.await;
             marshal.abort().await;
+        });
+    }
+
+    /// Messages deferred behind a proposal run in mailbox order once it ends, while a
+    /// verification queued after them starts during the proposal.
+    #[test]
+    fn deferred_messages_keep_mailbox_order() {
+        // The runner budget is only a hang guard. The proposal stays active until the
+        // verification completes, so a verification waiting for it never starts.
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let first = TestBlock::child(&genesis, 1);
+            let second = TestBlock::child(&first, 2);
+            let other = TestBlock::child(&genesis, 3);
+            let mut signing = context.child("signing");
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"deferred-order", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture_with_finalized_block(
+                context.child("marshal"),
+                "deferred-order",
+                scheme,
+                &genesis,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let (apply_gate, apply_started, apply_release) = application_gate();
+            let (verify_gate, verify_started, verify_release) = application_gate();
+            let applied_finalizations: Arc<Mutex<Vec<Height>>> = Arc::default();
+            let app = ReplayGatedApp {
+                gates: Arc::new(Mutex::new(VecDeque::from([apply_gate]))),
+                verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
+                finalized_gate: Arc::default(),
+                gate_height: second.height(),
+                unexecutable: None,
+                apply_calls: Arc::default(),
+                capture_calls: Arc::default(),
+                verify_calls: Arc::default(),
+                applied_finalizations: applied_finalizations.clone(),
+            };
+            let processor = Processor::new(
+                app.clone(),
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mut mailbox = Mailbox::new(sender, app);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                processor,
+                deferred_verifications: Vec::new(),
+            };
+            let actor = context.child("loop").spawn(move |_| processing.run());
+
+            // A proposal waiting for its parent stays active until its caller cancels it.
+            let mut proposer = mailbox.clone();
+            let mut proposal = Box::pin(proposer.propose(
+                (
+                    context.child("propose"),
+                    TestBlock::child(&genesis, 4).context(),
+                ),
+                PendingAncestry(Arc::default()),
+                (),
+            ));
+            assert!(poll!(&mut proposal).is_pending());
+
+            // Finalizations and subscriptions queue behind the proposal, then a verification.
+            let (acknowledgement, first_waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(first), acknowledgement));
+            let mut first_databases = Box::pin(mailbox.subscribe_databases());
+            assert!(poll!(&mut first_databases).is_pending());
+            let (acknowledgement, mut second_waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(second), acknowledgement));
+            let mut second_databases = Box::pin(mailbox.subscribe_databases());
+            assert!(poll!(&mut second_databases).is_pending());
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), other.context()),
+                ancestry::from_iter([Arc::new(other), Arc::new(genesis)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+
+            // The verification overtakes every deferred message.
+            verify_started
+                .await
+                .expect("verification should start during the proposal");
+            verify_release
+                .send(())
+                .expect("verification should remain active");
+            assert!(verify.await);
+            assert!(poll!(&mut first_databases).is_pending());
+            assert!(poll!(&mut second_databases).is_pending());
+            assert!(poll!(&mut second_waiter).is_pending());
+            assert!(applied_finalizations.lock().is_empty());
+
+            // Cancelling the proposal runs the deferred messages in order. Reconstructing the
+            // second finalized block holds the actor between the two subscriptions.
+            drop(proposal);
+            apply_started
+                .await
+                .expect("second finalization should start");
+            assert_eq!(applied_finalizations.lock().as_slice(), [Height::new(1)]);
+            assert!(poll!(&mut first_databases).is_ready());
+            assert!(poll!(&mut second_databases).is_pending());
+            apply_release
+                .send(())
+                .expect("second finalization should remain active");
+            drop(second_databases.await);
+            assert_eq!(
+                applied_finalizations.lock().as_slice(),
+                [Height::new(1), Height::new(2)]
+            );
+            first_waiter
+                .await
+                .expect("first finalization should be acknowledged");
+            second_waiter
+                .await
+                .expect("second finalization should be acknowledged");
+            actor.abort();
+            drop(marshal.guards);
+        });
+    }
+
+    /// A finalization deferred behind a proposal fences verifications that started after it
+    /// was queued. Work on the finalized branch continues, work on a competing branch is
+    /// rejected, and verification of the finalized block itself restarts and accepts it.
+    #[test]
+    fn deferred_finalization_fences_later_verifications() {
+        // The runner budget is only a hang guard. The proposal stays active until every
+        // verification starts, so a verification waiting for it never starts.
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let winner = TestBlock::child(&genesis, 1);
+            let losing = TestBlock::child(&genesis, 2);
+            let child = TestBlock::child(&winner, 3);
+            let losing_child = TestBlock::child(&losing, 4);
+            let mut signing = context.child("signing");
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"deferred-fence", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture_with_finalized_block(
+                context.child("marshal"),
+                "deferred-fence",
+                scheme,
+                &genesis,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let (winner_gate, winner_started, mut winner_release) = application_gate();
+            let (child_gate, child_started, child_release) = application_gate();
+            let (losing_gate, losing_started, mut losing_release) = application_gate();
+            let (proposal_gate, proposal_started, proposal_release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([
+                    winner_gate,
+                    child_gate,
+                    losing_gate,
+                ]))),
+                proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
+                verify_valid: true,
+                observed_contexts: Arc::default(),
+            };
+            let processor = Processor::new(
+                app.clone(),
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mut mailbox = Mailbox::new(sender, app);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                processor,
+                deferred_verifications: Vec::new(),
+            };
+            let actor = context.child("loop").spawn(move |_| processing.run());
+
+            // Hold a proposal and queue the winner's finalization behind it.
+            let mut proposer = mailbox.clone();
+            let mut proposal = Box::pin(proposer.propose(
+                (
+                    context.child("propose"),
+                    TestBlock::child(&genesis, 5).context(),
+                ),
+                ancestry::from_iter([Arc::new(genesis.clone())]),
+                (),
+            ));
+            assert!(poll!(&mut proposal).is_pending());
+            proposal_started.await.expect("proposal should start");
+            let (acknowledgement, mut waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(winner.clone()), acknowledgement));
+
+            // Verifications queued after the finalization start during the proposal, one at a
+            // time so each takes the next application gate.
+            let mut winner_verifier = mailbox.clone();
+            let mut verify_winner = Box::pin(winner_verifier.verify(
+                (context.child("verify_winner"), winner.context()),
+                ancestry::from_iter([Arc::new(winner.clone()), Arc::new(genesis)]),
+            ));
+            assert!(poll!(&mut verify_winner).is_pending());
+            winner_started
+                .await
+                .expect("winner verification should start");
+            let mut child_verifier = mailbox.clone();
+            let mut verify_child = Box::pin(child_verifier.verify(
+                (context.child("verify_child"), child.context()),
+                ancestry::from_iter([Arc::new(child), Arc::new(winner)]),
+            ));
+            assert!(poll!(&mut verify_child).is_pending());
+            child_started
+                .await
+                .expect("child verification should start");
+            let mut losing_verifier = mailbox.clone();
+            let mut verify_losing = Box::pin(losing_verifier.verify(
+                (context.child("verify_losing"), losing_child.context()),
+                ancestry::from_iter([Arc::new(losing_child), Arc::new(losing)]),
+            ));
+            assert!(poll!(&mut verify_losing).is_pending());
+            losing_started
+                .await
+                .expect("losing verification should start");
+            assert!(poll!(&mut waiter).is_pending());
+
+            // Ending the proposal runs the finalization, which fences each verification.
+            proposal_release
+                .send(())
+                .expect("proposal should remain active");
+            assert!(proposal.await.is_none());
+            waiter
+                .await
+                .expect("finalized winner should be acknowledged");
+            losing_release.closed().await;
+            assert!(!verify_losing.await, "competing branch must be rejected");
+            winner_release.closed().await;
+            assert!(
+                verify_winner.await,
+                "finalized block must be accepted on retry"
+            );
+            child_release
+                .send(())
+                .expect("compatible verification should remain active");
+            assert!(verify_child.await);
+            actor.abort();
+            drop(marshal.guards);
         });
     }
 

@@ -324,6 +324,16 @@
 //! validator still in an earlier term drops the vote that carries the proposal. If the quorum
 //! needs such a validator, the incoming term times out.
 //!
+//! An early relay also relies on validators keeping the candidate. The leader relays a handoff
+//! candidate once, before its parent certifies, and does not resend it (a `Stage` candidate is
+//! relayed when it is held). Other sends from the leader to a validator before that validator
+//! votes, such as forwards under [`ForwardPolicy`], share the validator's per-sender cache, so a
+//! small cache can evict the early copy. A marshal validator that loses it does not fetch the
+//! block before the candidate is notarized and cannot vote for it, so if the quorum needs that
+//! vote, the incoming term times out. Size the per-sender cache (the buffered broadcast engine's
+//! `deque_size`, or the coding shard engine's `peer_buffer_size`) to hold the leader's sends
+//! between its early relay and the validators' votes.
+//!
 //! ### Optimistic Finality
 //!
 //! The forced inclusion property provides a weaker but faster form of finality: a payload
@@ -428,12 +438,10 @@
 //! complete while rejecting the other's proposal ancestry.
 //!
 //! Proposal verification repairs this split by requesting the first missing nullification or named
-//! parent from the proposal's elected leader, even below the certified floor. With a
-//! [`elector::Scheduled`] elector, a term start's immediate predecessor may come from any
-//! validator instead, because a pipelined proposer might not hold its certificate. The voter
-//! rechecks the full ancestry after each delivery and votes only once it is valid. The voter does
-//! not request an uncertified parent inside the optimistic issuance window: its certificate is
-//! still forming from live votes (see [Optimistic Validation](#optimistic-validation)).
+//! parent from the proposal's elected leader, even below the certified floor. The voter rechecks the
+//! full ancestry after each delivery and votes only once it is valid. The voter does not request
+//! an uncertified parent inside the optimistic issuance window: its certificate is still forming
+//! from live votes (see [Optimistic Validation](#optimistic-validation)).
 //!
 //! The same split can block certification. A notarized view certifies only after its parent
 //! certifies, and certifying the parent requires its exact-view notarization. When the voter holds

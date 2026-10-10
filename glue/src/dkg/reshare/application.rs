@@ -209,12 +209,18 @@ where
     }
 
     /// Prepares a term-start block on an uncertified parent unless this node's dealer log is
-    /// due at that height.
+    /// due at that height or the block is the epoch's final block.
     ///
     /// The payload depends on the parent's height, so the parent is fetched before the inner
     /// application is asked. The inner application then receives the fetched ancestry as its
     /// parent, and an inner application that declines still costs the fetch and the payload
-    /// selection (a dealer-log request from the midpoint on, or the final block's epoch info).
+    /// selection (a dealer-log request from the midpoint on).
+    ///
+    /// The final block is left to [`Self::propose`] without asking the inner application. Its
+    /// epoch info is derived from the parent's ancestry, and deriving it on an uncertified parent
+    /// can start a ceremony verification that a replacement parent or the ordinary proposal
+    /// would then wait behind. The ordinary proposal at that height requests it once the parent
+    /// certifies.
     ///
     /// A height that would carry this node's dealer log is left to [`Self::propose`] without
     /// asking the inner application, and the reservation is released. Consensus can discard a
@@ -240,6 +246,12 @@ where
         let Some(ancestry) = parent.ancestry().await else {
             return Handoff::Wait;
         };
+        if ancestry
+            .peek()
+            .is_none_or(|parent| self.final_block(parent.height().next()))
+        {
+            return Handoff::Wait;
+        }
         let Some((payload, log_reservation)) = self.payload(ancestry.clone()).await else {
             return Handoff::Wait;
         };
@@ -701,10 +713,13 @@ mod tests {
         });
     }
 
-    /// A prepare request for an epoch's final block forwards the inner application's decision,
-    /// and the block it builds carries the epoch info selected for that height.
+    /// A prepare request whose child is the epoch's final block declines without asking the
+    /// inner application or requesting epoch info, whatever the inner decision would be. The
+    /// parent is uncertified, and epoch info for it can start a ceremony verification that
+    /// later requests wait behind. The ordinary proposal on the same parent carries the epoch
+    /// info.
     #[test]
-    fn prepare_forwards_final_epoch_info() {
+    fn prepare_leaves_final_block_to_propose() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let parent = mocks::genesis_block(leader().public_key());
@@ -714,11 +729,27 @@ mod tests {
                     handoff: decision,
                     ..RecordingApp::accepting()
                 };
-                let mut app = wrapper_with_inner(
-                    &context,
-                    EpochInfoResponse::Available(Some(payload.clone())),
-                    inner.clone(),
+                let (sender, mut receiver) = mailbox::new::<
+                    Message<TestBlock, TestBlsVariant, PrivateKey>,
+                >(
+                    context.child("mailbox"), NZUsize!(1)
                 );
+                let requests = Arc::new(Mutex::new(0usize));
+                context.child("fake_actor").spawn({
+                    let requests = requests.clone();
+                    let payload = payload.clone();
+                    move |_| async move {
+                        while let Some(message) = receiver.recv().await {
+                            if let Message::EpochInfo { response, .. } = message {
+                                *requests.lock() += 1;
+                                let _ = response
+                                    .send(EpochInfoResponse::Available(Some(payload.clone())));
+                            }
+                        }
+                    }
+                });
+                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
+
                 let prepared = app
                     .prepare(
                         (context.child("app"), block_context(&parent, 1)),
@@ -726,20 +757,28 @@ mod tests {
                         (),
                     )
                     .await;
-                match (decision, prepared) {
-                    (Handoff::Vote(()), Handoff::Vote(block))
-                    | (Handoff::Stage(()), Handoff::Stage(block)) => {
-                        assert!(inner.proposed() == vec![Some(payload.clone())]);
-                        assert!(block.payload() == Some(payload.clone()));
-                    }
-                    (Handoff::Wait, Handoff::Wait) => {
-                        assert!(
-                            inner.proposed().is_empty(),
-                            "a declined prepare builds nothing"
-                        );
-                    }
-                    _ => panic!("the wrapper must forward the inner decision"),
-                }
+                assert!(prepared.is_wait(), "the final block is left to propose");
+                assert!(
+                    inner.proposed().is_empty(),
+                    "a declined prepare builds nothing"
+                );
+                assert_eq!(
+                    *requests.lock(),
+                    0,
+                    "a declined prepare requests no epoch info"
+                );
+
+                let proposed = app
+                    .propose(
+                        (context.child("propose"), block_context(&parent, 1)),
+                        ancestry::from_iter([Arc::new(parent.clone())]),
+                        (),
+                    )
+                    .await
+                    .expect("the ordinary proposal builds");
+                assert!(proposed.payload() == Some(payload.clone()));
+                assert!(inner.proposed() == vec![Some(payload.clone())]);
+                assert_eq!(*requests.lock(), 1);
             }
         });
     }
