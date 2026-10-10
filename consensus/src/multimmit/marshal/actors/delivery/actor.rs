@@ -4,6 +4,7 @@ use super::{
     acks::{AcknowledgementEvent, PendingAcks},
     cache::DeliveryCache,
     cursor::DeliveryCursor,
+    finals::{Finals, Segment, WALK_SEGMENT_HEADERS, WalkRequest, Work},
     mailbox::{Message, Receiver},
     metrics::Metrics,
 };
@@ -16,11 +17,11 @@ use crate::{
             actors::catalog,
             bodies::{self, Bodies},
             storage::{Error as StorageError, catalog::StoredRef},
-            types::Update,
+            types::{BodyValues, Update},
         },
-        types::{Body, TransactionBlock},
+        types::{BlockRef, Body, CodecConfig, TransactionBlock},
     },
-    types::OutputIndex,
+    types::{Epoch, OutputIndex},
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
@@ -34,7 +35,7 @@ use commonware_utils::{
 };
 use futures::{FutureExt as _, future::BoxFuture};
 use std::{future::pending, num::NonZeroUsize, sync::Arc};
-use tracing::{Instrument as _, debug_span, info_span};
+use tracing::{Instrument as _, debug_span, info_span, warn};
 
 /// Delivery stopped before its durable cursor could advance.
 #[derive(Debug, thiserror::Error)]
@@ -71,6 +72,10 @@ pub(crate) struct Bounds {
     pub(crate) delivery_bytes: NonZeroUsize,
     /// Hot-byte bound of the cache of committed outputs.
     pub(crate) hot_block_bytes: NonZeroUsize,
+    /// Most final blocks each chain reads ahead of the ordered stream at a time.
+    pub(crate) final_lookahead: NonZeroUsize,
+    /// Most header segments the catalog serves in one read.
+    pub(crate) header_requests: NonZeroUsize,
 }
 
 /// Delivery configuration.
@@ -91,6 +96,8 @@ where
     pub(crate) application: A,
     /// The receiving half of [`super::channel`].
     pub(crate) mailbox: Receiver<H, B>,
+    /// Decode bounds for the epoch, which finality facts must match.
+    pub(crate) codec: CodecConfig,
     pub(crate) bounds: Bounds,
 }
 
@@ -116,6 +123,33 @@ where
     read: BoxFuture<'static, Result<ColdOutputs<H, B>, Error>>,
 }
 
+/// What a read of local custody for final blocks returned.
+enum FinalRead<H, B>
+where
+    H: Hasher,
+    B: Body<H>,
+{
+    /// Output rows in order from the requested start.
+    Seeded(Vec<(OutputIndex, BlockRef<H::Digest>)>),
+    /// One segment per request.
+    Walked {
+        requests: Vec<WalkRequest<H::Digest>>,
+        segments: Vec<Segment<H::Digest>>,
+    },
+    /// The bodies of `references`, `None` where custody lacks one.
+    Loaded {
+        references: Vec<BlockRef<H::Digest>>,
+        bodies: BodyValues<H, B>,
+    },
+}
+
+/// Encoded header bytes one walk reads per chain; ample for its headers, so a segment that ends
+/// early within it is rare and resumes on the next walk.
+const WALK_SEGMENT_BYTES: usize = WALK_SEGMENT_HEADERS * 1024;
+
+/// A read of local custody for final blocks in flight.
+type FinalJob<H, B> = BoxFuture<'static, Result<FinalRead<H, B>, Error>>;
+
 /// The single owner of the delivery cursor and the application window.
 pub(crate) struct Actor<E, H, V, B, A>
 where
@@ -133,6 +167,13 @@ where
     pending: PendingAcks,
     cache: DeliveryCache<H, B>,
     fetch: Option<Fetch<H, B>>,
+    /// Final blocks to report before they are ordered.
+    finals: Finals<H::Digest>,
+    /// Dropped whenever the generation changes.
+    final_job: Option<FinalJob<H, B>>,
+    codec: CodecConfig,
+    /// Epoch of the published checkpoint, which finality facts must match.
+    epoch: Epoch,
     metrics: Metrics,
     bounds: Bounds,
 }
@@ -153,6 +194,7 @@ where
             bodies,
             application,
             mailbox,
+            codec,
             bounds,
         } = config;
         Self {
@@ -166,6 +208,10 @@ where
             pending: PendingAcks::new(bounds.pending_acks),
             cache: DeliveryCache::new(bounds.hot_block_bytes),
             fetch: None,
+            finals: Finals::new(bounds.final_lookahead.get(), bounds.header_requests.get()),
+            final_job: None,
+            codec,
+            epoch: Epoch::zero(),
             bounds,
         }
     }
@@ -179,8 +225,9 @@ where
     ///
     /// Each turn first reports hot outputs, starting a cold read at the first output without a
     /// hot body, then starts a cursor sync for the ready acknowledged prefix. It then waits for the
-    /// first of: an acknowledgement event, a catalog message, the cold read. While a cold read
-    /// runs, acknowledgement events wait; a reset or generation change drops the read.
+    /// first of: an acknowledgement event, a mailbox message, the cold read, the read for final
+    /// blocks. While a cold read runs, acknowledgement events wait; a reset or generation change
+    /// drops both reads.
     async fn run(mut self) -> Result<(), Error> {
         let mut progress = self.catalog.progress().await?;
         if self.store.floor_generation() != progress.floor_generation
@@ -190,6 +237,7 @@ where
                 "delivery cursor does not match catalog progress",
             ));
         }
+        self.reset_finals(progress.acknowledged).await?;
         self.metrics.progress(progress.acknowledged);
         select_loop! {
             self.context,
@@ -200,6 +248,7 @@ where
                         self.start_sync(&progress).await?;
                     }
                 }
+                self.start_final();
                 let acknowledgements_open = self.fetch.is_none() && !self.pending.is_empty();
             },
             on_stopped => {},
@@ -228,6 +277,18 @@ where
                     .expect("a finished cold read was in flight")
                     .start;
                 self.report_cold(start, outputs?)?;
+            },
+            read = next_final(&mut self.final_job) => {
+                self.final_job = None;
+                match read {
+                    Ok(read) => self.report_finals(read)?,
+                    // These reads only serve early reports: a failure retries later, and a catalog
+                    // that stopped fails the reads ordered delivery depends on.
+                    Err(error) => {
+                        warn!(%error, "final block read failed");
+                        self.finals.stall();
+                    }
+                }
             },
         }
         Ok(())
@@ -315,7 +376,8 @@ where
         let _guard = span.enter();
         let (acknowledgement, waiter) = Exact::handle();
         self.metrics.attempted();
-        if self.application.report(Update {
+        let reference = block.reference();
+        if self.application.report(Update::Block {
             index,
             block,
             acknowledgement,
@@ -323,8 +385,106 @@ where
         {
             return Err(Error::ReporterClosed);
         }
+        self.finals.delivered(reference);
         self.pending.push(index, waiter);
         self.metrics.in_flight(self.pending.in_flight());
+        Ok(())
+    }
+
+    /// Starts reading local custody for the next final blocks unless a read is in flight.
+    fn start_final(&mut self) {
+        if self.final_job.is_some() {
+            return;
+        }
+        let Some(work) = self.finals.next() else {
+            return;
+        };
+        self.final_job = Some(match work {
+            Work::Seed { start, max } => {
+                let catalog = self.catalog.clone();
+                let max = NonZeroUsize::new(max).unwrap_or(NonZeroUsize::MIN);
+                let max_bytes = self.bounds.delivery_bytes;
+                async move {
+                    let rows = catalog
+                        .output_refs(start, max, max_bytes)
+                        .await?
+                        .into_iter()
+                        .map(|row| (row.index, row.reference))
+                        .collect();
+                    Ok(FinalRead::Seeded(rows))
+                }
+                .boxed()
+            }
+            Work::Walk(requests) => {
+                let catalog = self.catalog.clone();
+                async move {
+                    let heads = requests
+                        .iter()
+                        .map(|(_, tip, items)| (*tip, *items))
+                        .collect();
+                    let segments = catalog
+                        .header_segments(heads, WALK_SEGMENT_BYTES)
+                        .await?
+                        .into_iter()
+                        .map(|headers| {
+                            headers
+                                .iter()
+                                .map(|header| (header.block_ref::<H>(), header.parent_ref()))
+                                .collect()
+                        })
+                        .collect();
+                    Ok(FinalRead::Walked { requests, segments })
+                }
+                .boxed()
+            }
+            Work::Load(references) => {
+                let bodies = self.bodies.clone();
+                async move {
+                    let values = bodies.blocks(references.clone()).await?;
+                    Ok(FinalRead::Loaded {
+                        references,
+                        bodies: values,
+                    })
+                }
+                .boxed()
+            }
+        });
+    }
+
+    /// Applies a read of local custody, reporting the final blocks it made ready.
+    fn report_finals(&mut self, read: FinalRead<H, B>) -> Result<(), Error> {
+        match read {
+            FinalRead::Seeded(rows) => self.finals.seeded(rows),
+            FinalRead::Walked { requests, segments } => self.finals.walked(requests, segments),
+            FinalRead::Loaded { references, bodies } => {
+                for block in self.finals.loaded(references, bodies) {
+                    let _span = debug_span!(
+                        "multimmit.marshal.delivery.final",
+                        chain = block.header().chain().get(),
+                        height = block.header().height().get(),
+                    )
+                    .entered();
+                    if self.application.report(Update::Final(block)) == Feedback::Closed {
+                        return Err(Error::ReporterClosed);
+                    }
+                    self.metrics.final_reported();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resumes reporting final blocks from the acknowledgement cursor `acknowledged`, dropping any
+    /// read in flight.
+    async fn reset_finals(&mut self, acknowledged: OutputIndex) -> Result<(), Error> {
+        let checkpoint = self.catalog.checkpoint().await?;
+        self.epoch = checkpoint.epoch();
+        self.finals.reset(
+            checkpoint.emitted(),
+            acknowledged.min(checkpoint.committed()),
+            checkpoint.committed(),
+        );
+        self.final_job = None;
         Ok(())
     }
 
@@ -410,16 +570,34 @@ where
             Message::Committed(batch) => {
                 if batch.floor_generation == progress.floor_generation {
                     progress.committed = progress.committed.max(batch.committed);
+                    // Committed outputs are final.
+                    for output in &batch.outputs {
+                        self.finals.final_tip(output.stored().reference);
+                    }
                     self.cache
                         .insert(batch, self.pending.next(progress.acknowledged));
+                    // The commit may have brought custody a stalled chain lacked.
+                    self.finals.retry();
                     return Ok(());
                 }
                 drop(batch);
                 let next = self.catalog.progress().await?;
                 if next.floor_generation != progress.floor_generation {
                     self.reset_window();
+                    *progress = next;
+                    return self.reset_finals(progress.acknowledged).await;
                 }
                 *progress = next;
+            }
+            Message::Finality(fact) => {
+                if fact.is_well_formed(self.epoch, self.codec) {
+                    self.finals.finalized(fact.blocks());
+                }
+            }
+            Message::Admitted(chains) => {
+                for chain in chains {
+                    self.finals.wake(chain as usize);
+                }
             }
             Message::Reset {
                 floor_generation,
@@ -439,6 +617,7 @@ where
                     ));
                 }
                 *progress = next;
+                self.reset_finals(acknowledged).await?;
                 for waiter in waiters {
                     waiter.send_lossy(Ok(()));
                 }
@@ -464,6 +643,18 @@ where
 {
     match fetch {
         Some(fetch) => (&mut fetch.read).await,
+        None => pending().await,
+    }
+}
+
+/// Resolves once the read for final blocks finishes, and never while no read is in flight.
+async fn next_final<H, B>(job: &mut Option<FinalJob<H, B>>) -> Result<FinalRead<H, B>, Error>
+where
+    H: Hasher,
+    B: Body<H>,
+{
+    match job {
+        Some(job) => job.await,
         None => pending().await,
     }
 }

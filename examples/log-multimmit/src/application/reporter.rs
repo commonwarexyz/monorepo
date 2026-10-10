@@ -34,15 +34,19 @@ impl<C: Clock> Reporter for OutputReporter<C> {
     type Activity = Update<Block>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        let Update { block, .. } = &activity;
+        let Update::Block { block, .. } = &activity else {
+            return Feedback::Ok;
+        };
         self.application.ordered(block.reference());
         match &mut self.sink {
             Some(sink) => sink.report(activity),
             None => {
-                let Update {
+                if let Update::Block {
                     acknowledgement, ..
-                } = activity;
-                acknowledgement.acknowledge();
+                } = activity
+                {
+                    acknowledgement.acknowledge();
+                }
                 Feedback::Ok
             }
         }
