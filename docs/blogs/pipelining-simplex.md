@@ -3,12 +3,14 @@ title: "Simplex, Pipelined"
 description: "Simplex can now produce blocks as fast as its leader can build them. In a global deployment of 50 validators, it sustained 200 blocks per second with 300ms finality to your browser."
 date: "August 12th, 2026"
 published-time: "2026-08-12T00:00:00Z"
-modified-time: "2026-08-12T00:00:00Z"
+modified-time: "2026-10-07T00:00:00Z"
 author: "Brendan Chou"
 author_twitter: "https://x.com/B_Chou"
 url: "https://commonware.xyz/blogs/pipelining-simplex"
 image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 ---
+
+*Update (10/7/26): [Pipelined handoffs](https://github.com/commonwarexyz/monorepo/pull/4739) let an incoming leader build its first proposal before the outgoing leader's final view certifies. When the application also permits an early vote, rotating leaders can cut network-bound view time from two network trips to one. Applications opt in, and the default still waits for certification. Voting for a proposal early trusts the outgoing leader not to equivocate and to complete its term.*
 
 Simplex can now produce blocks as fast as its leader can build them.
 
@@ -104,7 +106,9 @@ Notarization is not finalization. After a block is notarized, each validator ask
 
 A participant only votes optimistically when every earlier proposal in the term is consistent with the chain it has already supported. A validator still waits for the parent to be certified before certifying the child. Once the child is certified, the validator broadcasts its finalize vote. It can certify later views without waiting for the child to finalize, so certification and finalization continue in parallel. If any proposal fails to notarize or certify, later optimistic votes in the term cannot be used. Validators can then vote to abandon the rest of the term through Simplex's normal nullification path.
 
-The term boundary is also a leader handoff, so optimistic work stops there. The first view of a new term must start from certified ancestry. Together, these rules let Simplex views pipeline without changing the evidence required for finalization.
+The term boundary is also a leader handoff, so by default optimistic work stops there. Validators verify the first view of a new term only on certified ancestry. Together, these rules let Simplex views pipeline without changing the evidence required for finalization.
+
+A *pipelined handoff* lets the incoming leader prepare its proposal before the parent certifies. The application may also permit an early vote, which trusts the outgoing leader not to equivocate and to complete its term. Rotating leaders benefit most, since every view is a handoff.
 
 The consensus configuration also sets a bound on how many views validators can work ahead at once. A value of zero disables Optimistic Validation. A larger bound can keep the pipeline full when notarizations fall behind, at the cost of more CPU and memory for work that could be discarded if an earlier view fails.
 

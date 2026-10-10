@@ -54,17 +54,17 @@
 //! target and contribute to its multiplicity.
 //!
 //! Scenario generation guarantees that every case within a campaign is
-//! structurally distinct -- no duplicate (scenario, compromised-assignment)
-//! pairs are ever emitted. The scenario space is counted with an exact
-//! compressed transition DAG: each edge stores a residual symmetry-cell
-//! transition and the exact number of concrete round scenarios represented by
-//! that transition. Counts are computed bottom-up over the reachable residual
-//! states. When the scenario space exceeds the configured budget, sampled
-//! campaigns choose canonical scenarios uniformly without replacement. For each
-//! selected scenario, `cases()` computes the residual symmetry cells and
-//! generates only the unique compromised-node assignments: two assignments that
-//! differ only in which members of a cell are chosen are equivalent and
-//! collapsed to a single representative.
+//! structurally distinct. No duplicate (scenario, compromised-assignment) pairs
+//! are ever emitted. The scenario space is counted with an exact compressed
+//! transition DAG: each edge stores a residual symmetry-cell transition and the
+//! exact number of concrete round scenarios represented by that transition.
+//! Counts are computed bottom-up over the reachable residual states. When the
+//! scenario space exceeds the configured budget, sampled campaigns choose
+//! canonical scenarios uniformly without replacement. For each selected
+//! scenario, `cases()` computes the residual symmetry cells and generates only
+//! the unique compromised-node assignments: two assignments that differ only in
+//! which members of a cell are chosen are equivalent and collapsed to a single
+//! representative.
 //!
 //! These recipient sets are not required to be disjoint. A participant may
 //! appear in both masks for a round, meaning both twin halves can exchange
@@ -359,7 +359,7 @@ pub enum Mode {
 /// The generator uses `u64` masks for recipient sets and residual cell
 /// boundaries, so campaigns support at most 64 participants.
 ///
-/// Each canonical scenario tracks residual symmetry cells -- participants that
+/// Each canonical scenario tracks residual symmetry cells, the participants that
 /// were treated identically across all rounds. Two compromised-node assignments
 /// that differ only in which members of a symmetry cell are compromised are
 /// equivalent under relabeling for the adversarial prefix, so the framework
@@ -1269,7 +1269,7 @@ mod tests {
         types::{Epoch, ViewDelta},
     };
     use commonware_cryptography::{Sha256, Signer, ed25519::PrivateKey};
-    use commonware_utils::{NZU32, TestRng, ordered::Set, test_rng};
+    use commonware_utils::{NZU32, TestRng, Widen, ordered::Set, test_rng};
     use std::{collections::HashSet, time::Duration};
 
     fn round(_: usize, leader: usize, primary_mask: u64, secondary_mask: u64) -> RoundScenario {
@@ -2242,7 +2242,7 @@ mod tests {
         );
 
         for (round_idx, round_scenario) in case.scenario.rounds().iter().enumerate() {
-            let round = Round::new(Epoch::new(0), View::new((round_idx as u64) + 1));
+            let round = Round::new(Epoch::new(0), View::new(Widen::widen(round_idx) + 1));
             assert_eq!(
                 twins.elect(round, ()),
                 Participant::from_usize(round_scenario.leader()),
@@ -2250,7 +2250,7 @@ mod tests {
             );
         }
 
-        for view in (framework.rounds as u64 + 1)..=20 {
+        for view in (Widen::widen(framework.rounds) + 1)..=20 {
             let round = Round::new(Epoch::new(333), View::new(view));
             assert_eq!(twins.elect(round, ()), fallback.elect(round, ()));
         }

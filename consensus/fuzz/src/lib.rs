@@ -14,7 +14,7 @@ use crate::{
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    Monitor, Viewable,
+    Handoff, Monitor, Viewable,
     simplex::{
         Engine, Floor, ForwardPolicy, SkipBudget, SkipPolicy, config,
         mocks::{application, relay, reporter, twins},
@@ -61,6 +61,11 @@ const MAX_REQUIRED_CONTAINERS: u64 = 50;
 const MAX_SLEEP_DURATION: Duration = Duration::from_secs(15);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
+
+/// Honest handoff decisions: wait for parent certification, relay early but hold the vote,
+/// or vote early.
+pub const HANDOFF_DECISIONS: [Handoff<()>; 3] =
+    [Handoff::Wait, Handoff::Stage(()), Handoff::Vote(())];
 
 /// Network configuration for fuzz testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +131,7 @@ pub struct FuzzInput {
     pub term_length: TermLength,
     pub optimistic_views: ViewDelta,
     pub heterogeneous_optimism: bool,
+    pub handoff: Handoff<()>,
     pub degraded_network: bool,
     pub configuration: Configuration,
     pub partition: Partition,
@@ -159,6 +165,7 @@ impl Arbitrary<'_> for FuzzInput {
         let optimistic_views =
             ViewDelta::new(u.int_in_range(0..=max_optimistic_views(term_length))?);
         let heterogeneous_optimism = u.arbitrary()?;
+        let handoff = *u.choose(&HANDOFF_DECISIONS)?;
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -192,6 +199,7 @@ impl Arbitrary<'_> for FuzzInput {
             term_length,
             optimistic_views,
             heterogeneous_optimism,
+            handoff,
             strategy,
         })
     }
@@ -377,6 +385,7 @@ fn spawn_honest_validator<
     participants: &[Ed25519PublicKey],
     term_length: TermLength,
     optimistic_views: ViewDelta,
+    handoff: Handoff<()>,
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
@@ -411,7 +420,9 @@ where
         certify_latency: (10.0, 5.0),
         should_certify: application::Certifier::Always,
     };
-    let (actor, application) = application::Application::new(context.child("application"), app_cfg);
+    let (mut actor, application) =
+        application::Application::new(context.child("application"), app_cfg);
+    actor.set_handoff(handoff);
     actor.start();
 
     let blocker = oracle.control(validator.clone());
@@ -483,6 +494,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 &participants,
                 input.term_length,
                 validator_optimistic_views(&input, i),
+                input.handoff,
                 schemes[i].clone(),
                 validator.clone(),
                 relay.clone(),
@@ -656,8 +668,9 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 certify_latency: (10.0, 5.0),
                 should_certify: application::Certifier::Always,
             };
-            let (actor, application) =
+            let (mut actor, application) =
                 application::Application::new(primary_context.child("application"), app_cfg);
+            actor.set_handoff(input.handoff);
             actor.start();
 
             let blocker = oracle.control(validator.clone());
@@ -720,6 +733,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 participants.as_ref(),
                 input.term_length,
                 validator_optimistic_views(&input, idx),
+                input.handoff,
                 schemes[idx].clone(),
                 validator.clone(),
                 relay.clone(),

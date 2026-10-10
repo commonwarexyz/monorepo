@@ -27,7 +27,7 @@ blocks as fast as its leader can build them. In a global deployment of
 your browser." />
     <meta property="article:author" content="Brendan Chou" />
     <meta property="article:published_time" content="2026-08-12T00:00:00Z" />
-    <meta property="article:modified_time" content="2026-08-12T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-10-07T00:00:00Z" />
 
     <link rel="canonical" href="https://commonware.xyz/blogs/pipelining-simplex" />
 
@@ -95,6 +95,15 @@ deployment of 50 validators, it sustained 200 blocks per second with
 Chou</a></div>
                         <div class="date">August 12th, 2026</div>
         </div>
+        <p><em>Update (10/7/26): <a
+        href="https://github.com/commonwarexyz/monorepo/pull/4739">Pipelined
+        handoffs</a> let an incoming leader build its first proposal
+        before the outgoing leader’s final view certifies. When the
+        application also permits an early vote, rotating leaders can cut
+        network-bound view time from two network trips to one.
+        Applications opt in, and the default still waits for
+        certification. Voting for a proposal early trusts the outgoing
+        leader not to equivocate and to complete its term.</em></p>
         <p>Simplex can now produce blocks as fast as its leader can
         build them.</p>
         <p>Today, we’re introducing <a
@@ -238,11 +247,16 @@ Chou</a></div>
         the term cannot be used. Validators can then vote to abandon the
         rest of the term through Simplex’s normal nullification
         path.</p>
-        <p>The term boundary is also a leader handoff, so optimistic
-        work stops there. The first view of a new term must start from
-        certified ancestry. Together, these rules let Simplex views
-        pipeline without changing the evidence required for
-        finalization.</p>
+        <p>The term boundary is also a leader handoff, so by default
+        optimistic work stops there. Validators verify the first view of
+        a new term only on certified ancestry. Together, these rules let
+        Simplex views pipeline without changing the evidence required
+        for finalization.</p>
+        <p>A <em>pipelined handoff</em> lets the incoming leader prepare
+        its proposal before the parent certifies. The application may
+        also permit an early vote, which trusts the outgoing leader not
+        to equivocate and to complete its term. Rotating leaders benefit
+        most, since every view is a handoff.</p>
         <p>The consensus configuration also sets a bound on how many
         views validators can work ahead at once. A value of zero
         disables Optimistic Validation. A larger bound can keep the
