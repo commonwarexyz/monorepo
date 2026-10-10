@@ -235,7 +235,7 @@ where
     }
 }
 
-/// Decodes a block response body against `commitment`, the payload of a verified
+/// Decodes a block response body and binds it to `commitment`, the payload of a verified
 /// finalization.
 pub(crate) fn read_block<V>(
     reader: impl Buf,

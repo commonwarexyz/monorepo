@@ -64,10 +64,16 @@ where
     fn decode_block(
         buf: impl Input,
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
-        _expected: ExpectedCommitment<Self::Commitment>,
+        expected: ExpectedCommitment<Self::Commitment>,
         _strategy: &impl Strategy,
     ) -> Result<Self::Block, CodecError> {
-        Self::Block::decode_cfg(buf, block_cfg)
+        let (ExpectedCommitment::Trusted(digest) | ExpectedCommitment::Untrusted(digest)) =
+            expected;
+        let block = Self::Block::decode_cfg(buf, block_cfg)?;
+        if block.digest() != digest {
+            return Err(CodecError::Invalid("Block", "digest mismatch"));
+        }
+        Ok(block)
     }
 
     fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
@@ -130,5 +136,46 @@ where
             )
         });
         async move { receiver?.await.ok() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{marshal::mocks::block::Block as MockBlock, types::Height};
+    use commonware_codec::Encode;
+    use commonware_cryptography::{
+        Digest as _, Hasher as _,
+        sha256::{Digest as Sha256Digest, Sha256},
+    };
+    use commonware_parallel::Sequential;
+
+    type TestBlock = MockBlock<Sha256Digest, u64>;
+    type TestVariant = Standard<TestBlock>;
+
+    #[test]
+    fn decode_block_binds_digest() {
+        let block = TestBlock::new::<Sha256>(0, Sha256Digest::EMPTY, Height::new(1), 0);
+        let encoded = block.encode();
+
+        for expected in [
+            ExpectedCommitment::Trusted(block.digest()),
+            ExpectedCommitment::Untrusted(block.digest()),
+        ] {
+            let decoded =
+                TestVariant::decode_block(encoded.clone(), &(), expected, &Sequential).unwrap();
+            assert_eq!(decoded.as_ref(), &block);
+        }
+
+        // A digest the bytes do not hash to is rejected, whether or not it is trusted.
+        let other = Sha256::hash(&[b"other block"]);
+        for expected in [
+            ExpectedCommitment::Trusted(other),
+            ExpectedCommitment::Untrusted(other),
+        ] {
+            assert!(
+                TestVariant::decode_block(encoded.clone(), &(), expected, &Sequential).is_err()
+            );
+        }
     }
 }

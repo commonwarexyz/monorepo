@@ -9,7 +9,7 @@ use crate::{
     stateful::probe::sample::Sample,
 };
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Buf, Encode as _, Error as CodecError, Read};
+use commonware_codec::{Buf, Encode as _, Read};
 use commonware_consensus::{
     Epochable, Heightable,
     marshal::core::Variant,
@@ -29,12 +29,6 @@ use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use std::collections::VecDeque;
 use tracing::{debug, warn};
-
-#[derive(Debug)]
-enum BoundaryBlockError {
-    Commitment,
-    Decode(CodecError),
-}
 
 struct Candidate<S, V>
 where
@@ -469,27 +463,20 @@ where
         }
 
         let commitment = candidate.finalization.proposal.payload;
-        let block =
-            match authenticate_boundary_block::<V>(&self.block_codec_config, commitment, body) {
-                Ok(block) => block,
-                Err(BoundaryBlockError::Decode(err)) => {
-                    commonware_p2p::block!(
-                        self.blocker,
-                        peer,
-                        ?err,
-                        "invalid bootstrap boundary block"
-                    );
-                    Self::request_next_block(&mut pending, boundary_sender);
-                    self.pending = Some(pending);
-                    return true;
-                }
-                Err(BoundaryBlockError::Commitment) => {
-                    commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary block");
-                    Self::request_next_block(&mut pending, boundary_sender);
-                    self.pending = Some(pending);
-                    return true;
-                }
-            };
+        let block = match wire::read_block::<V>(body, commitment, &self.block_codec_config) {
+            Ok(block) => block,
+            Err(err) => {
+                commonware_p2p::block!(
+                    self.blocker,
+                    peer,
+                    ?err,
+                    "invalid bootstrap boundary block"
+                );
+                Self::request_next_block(&mut pending, boundary_sender);
+                self.pending = Some(pending);
+                return true;
+            }
+        };
 
         let Some(artifact) = Self::artifact_from_block(&pending, candidate.finalization, block)
         else {
@@ -564,25 +551,12 @@ where
     }
 }
 
-fn authenticate_boundary_block<V: Variant>(
-    block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
-    commitment: V::Commitment,
-    body: impl Buf,
-) -> Result<V::Block, BoundaryBlockError> {
-    let block = wire::read_block::<V>(body, commitment, block_codec_config)
-        .map_err(BoundaryBlockError::Decode)?;
-    if V::commitment(&block) != commitment {
-        return Err(BoundaryBlockError::Commitment);
-    }
-    Ok(block)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dkg::tests::mocks;
     use bytes::{BufMut, Bytes};
-    use commonware_codec::{EncodeSize, Read, Write};
+    use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
     use commonware_coding::ReedSolomon;
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable,
@@ -850,9 +824,8 @@ mod tests {
                 mocks::TestMarshalVariant,
             >(block_message, &fixture.schemes[0]);
             assert_eq!(epoch, Epoch::zero());
-            let decoded =
-                authenticate_boundary_block::<mocks::TestMarshalVariant>(&(), commitment, body)
-                    .expect("standard block authenticated");
+            let decoded = wire::read_block::<mocks::TestMarshalVariant>(body, commitment, &())
+                .expect("standard block authenticated");
 
             assert_eq!(decoded.as_ref(), &block);
         });
@@ -903,7 +876,7 @@ mod tests {
             );
             assert_eq!(epoch, Epoch::zero());
             let commitment = finalization.proposal.payload;
-            let decoded = authenticate_boundary_block::<TestCodingVariant>(&(), commitment, body)
+            let decoded = wire::read_block::<TestCodingVariant>(body, commitment, &())
                 .expect("coding block authenticated");
 
             assert_eq!(decoded.height(), Height::new(1));
@@ -965,7 +938,7 @@ mod tests {
             >(block_message, &verifier);
             assert_eq!(epoch, Epoch::zero());
             let commitment = finalization.proposal.payload;
-            let decoded = authenticate_boundary_block::<TestCodingVariant>(&(), commitment, body)
+            let decoded = wire::read_block::<TestCodingVariant>(body, commitment, &())
                 .expect("coding block authenticated");
 
             assert_eq!(decoded.height(), Height::new(1));

@@ -379,4 +379,31 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn decode_block_binds_context_digest() {
+        let coded = CodedBlock::<NoCloneBlock, TestScheme, Sha256>::new(
+            no_clone_block(CONFIG),
+            CONFIG,
+            &Sequential,
+        );
+        let expected = coded.commitment();
+        let encoded = coded.encode();
+
+        // Only the context digest differs, which the coded block's own checks cannot see.
+        let other = TestCommitment::from((
+            expected.block(),
+            expected.root(),
+            Sha256::hash(&[b"other context"]),
+            CONFIG,
+        ));
+        for expected in [
+            ExpectedCommitment::Trusted(other),
+            ExpectedCommitment::Untrusted(other),
+        ] {
+            assert!(
+                TestVariant::decode_block(encoded.clone(), &(), expected, &Sequential).is_err()
+            );
+        }
+    }
 }

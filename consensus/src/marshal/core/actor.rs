@@ -1454,10 +1454,6 @@ where
                     response.send_lossy(false);
                     return self;
                 };
-                if V::commitment(&block) != commitment {
-                    response.send_lossy(false);
-                    return self;
-                }
 
                 // This block may match the pending floor request. Whether it
                 // installs or is rejected as the floor anchor, do not also
@@ -1736,10 +1732,6 @@ where
                         response.send_lossy(false);
                         continue;
                     };
-                    if V::commitment(&block) != commitment {
-                        response.send_lossy(false);
-                        continue;
-                    }
 
                     // Valid notarization received.
                     response.send_lossy(true);

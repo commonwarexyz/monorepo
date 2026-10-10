@@ -25,9 +25,10 @@ use std::{future::Future, marker::PhantomData, sync::Arc};
 pub enum ExpectedCommitment<C> {
     /// A locally certified or finalized block commitment, or an ancestor's.
     ///
-    /// Decoding may reuse commitment material. Notarization alone is insufficient.
+    /// Decoding reuses its expensive components instead of recomputing them. Notarization
+    /// alone is insufficient.
     Trusted(C),
-    /// A commitment without certification evidence.
+    /// A commitment without certification evidence, whose components decoding recomputes.
     Untrusted(C),
 }
 
@@ -82,11 +83,11 @@ pub trait Variant: Clone + Send + Sync + 'static {
     where
         S: Scheme<Self::Commitment>;
 
-    /// Decodes a [`Self::Block`] received over the wire.
+    /// Decodes a [`Self::Block`] received over the wire and binds it to `expected`.
     ///
-    /// Decoding may bind `expected`, reuse trusted commitment material, and recompute
-    /// untrusted commitment material across `strategy`. Decoding need not check every
-    /// component, so callers requiring a full commitment match must compare it after decoding.
+    /// On success, [`Self::commitment`] of the returned block equals the commitment in
+    /// `expected`. Decoding reuses the expensive components of a trusted commitment and
+    /// recomputes those of an untrusted one across `strategy`.
     fn decode_block(
         buf: impl Input,
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
