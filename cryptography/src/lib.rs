@@ -384,8 +384,8 @@ commonware_macros::stability_scope!(BETA {
     /// messages, so a kernel that hashes `lanes` messages at once finds every unit but the last
     /// one full.
     ///
-    /// `hash` must return one digest per message of its batch, in order. The work estimate
-    /// counts each message as its length in bytes plus one.
+    /// `hash` must return one digest per message of its batch, in order. The work estimate is
+    /// the total length of the messages in bytes.
     pub(crate) fn hash_batches<D, M>(
         messages: &[M],
         lanes: usize,
@@ -401,7 +401,7 @@ commonware_macros::stability_scope!(BETA {
         }
         let units = messages.len().div_ceil(lanes);
         let bytes = messages.iter().fold(0usize, |bytes, message| {
-            bytes.saturating_add(message.as_ref().len() + 1)
+            bytes.saturating_add(message.as_ref().len())
         });
         strategy.run_batches(units, NonZeroUsize::MIN, bytes.div_ceil(units), |batches| {
             // A serial run hashes the whole input as one batch, whose digests need no copy.
