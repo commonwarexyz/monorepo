@@ -1215,6 +1215,7 @@ mod tests {
     use commonware_coding::{Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{Digest as DigestTrait, Digestible, Hasher};
     use commonware_math::algebra::Random;
+    use commonware_parallel::Strategy;
     use commonware_utils::{Array, NZU16, NZU64, Span, test_rng};
     use std::{marker::PhantomData, ops::Deref};
 
@@ -1245,7 +1246,11 @@ mod tests {
             D::EMPTY
         }
 
-        fn hash_pair(_left: &[&[u8]], _right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+        fn hash_pair(
+            _left: &[&[u8]],
+            _right: &[&[u8]],
+            _strategy: &impl Strategy,
+        ) -> (Self::Digest, Self::Digest) {
             (D::EMPTY, D::EMPTY)
         }
 

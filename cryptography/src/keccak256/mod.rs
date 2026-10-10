@@ -24,6 +24,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
+use commonware_parallel::Strategy;
 use commonware_utils::{Array, Span, sequence::FixedBytes};
 use core::{
     cmp::Ordering,
@@ -56,7 +57,11 @@ impl Hasher for Keccak256 {
         hasher.finalize().1
     }
 
-    fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+    fn hash_pair(
+        left: &[&[u8]],
+        right: &[&[u8]],
+        _strategy: &impl Strategy,
+    ) -> (Self::Digest, Self::Digest) {
         (Self::hash(left), Self::hash(right))
     }
 
@@ -172,6 +177,7 @@ mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
     use commonware_formatting::hex;
+    use commonware_parallel::Sequential;
 
     const EMPTY_DIGEST: [u8; DIGEST_LENGTH] =
         hex!("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470");
@@ -184,7 +190,7 @@ mod tests {
         assert_eq!(Keccak256::hash(&[b"abc"]).as_ref(), ABC_DIGEST);
         assert_eq!(Keccak256::hash(&[b"a", b"", b"bc"]).as_ref(), ABC_DIGEST);
         assert_eq!(
-            Keccak256::hash_pair(&[], &[b"a", b"bc"]),
+            Keccak256::hash_pair(&[], &[b"a", b"bc"], &Sequential),
             (Digest(EMPTY_DIGEST), Digest(ABC_DIGEST))
         );
 

@@ -9,38 +9,31 @@ Lint benchmark names for naming convention violations.
 
 Background
 ----------
-Benchmark names are parsed by docs/benchmarks.html for display. The parsing
-expects the format: `module::function/params`
-
-    const parts = bench.name.split("::");
-    const moduleName = parts[0];
-    const functionPart = parts.slice(1).join("::");
-    let [funcName, params] = functionPart.split("/", 2);
-
-The `params` string becomes the chart title and is displayed as-is without
-further parsing. These rules ensure consistent, readable chart titles.
+Benchmark names use the format `module::function/params` (see the benchmark
+authoring section of CONTRIBUTING.md). These rules keep names consistent and
+readable.
 
 Rules
 -----
 1. Include module separator `::` (use `module_path!()` macro)
-   - Required for the benchmarks site to parse and group benchmarks correctly
+   - Groups benchmarks by the module that defines them
    - Example: `crate_name::bench_foo/n=10` not `bench_foo/n=10`
 
 2. Use `key=value` format in benchmark params (e.g., `group=g1`, not just `g1`)
-   - Chart titles should be self-documenting
+   - Names should be self-documenting
    - `n=5 t=4` is clearer than `5 4` when viewed in isolation
 
 3. Separate parameters with spaces, not commas
-   - Params are displayed as-is; commas add visual noise
+   - Commas add visual noise
    - `n=5 t=4` reads better than `n=5, t=4`
 
 4. Use only one `/` separator (between function name and params)
-   - The params string is extracted via `split("/", 2)` so only the first `/` matters
+   - Everything after the first `/` is the params string
    - Multiple `/` in params may indicate unclear parameter formatting
 
 5. Names must not be truncated by criterion
    - Criterion truncates names longer than 100 chars and appends `...`
-   - This causes collisions and broken dashboard entries
+   - This causes collisions between benchmarks
    - Shorten names so they stay under 100 characters
 
 How it works
