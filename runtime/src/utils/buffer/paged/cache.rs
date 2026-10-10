@@ -155,6 +155,9 @@ pub struct CacheRef {
     /// Shareable reference to the page cache.
     cache: Arc<RwLock<Cache>>,
 
+    /// Pages a full cache retains from a burst of newly inserted pages.
+    admission_capacity: usize,
+
     /// Pool used for page-cache and associated buffer allocations.
     pool: BufferPool,
 }
@@ -182,10 +185,13 @@ impl CacheRef {
             );
         }
 
+        let cache = Cache::new(pool.clone(), page_size, capacity);
+        let admission_capacity = cache.cache.admission_capacity();
         Self {
             page_size,
             next_id: Arc::new(AtomicU64::new(0)),
-            cache: Arc::new(RwLock::new(Cache::new(pool.clone(), page_size, capacity))),
+            cache: Arc::new(RwLock::new(cache)),
+            admission_capacity,
             pool,
         }
     }
@@ -205,6 +211,14 @@ impl CacheRef {
     #[inline]
     pub const fn page_size(&self) -> NonZeroU16 {
         self.page_size
+    }
+
+    /// The number of newly inserted pages a full cache retains before evicting the oldest of
+    /// them, absent intervening hits. A burst of inserts larger than this evicts its own
+    /// earliest pages.
+    #[inline]
+    pub const fn admission_capacity(&self) -> usize {
+        self.admission_capacity
     }
 
     /// Returns the storage buffer pool associated with this cache.

@@ -1042,6 +1042,14 @@ where
         self.journal.try_read_many_sync(positions)
     }
 
+    fn start_prefetch(
+        &self,
+        start: u64,
+        max_items: u64,
+    ) -> Option<futures::future::BoxFuture<'static, ()>> {
+        self.journal.start_prefetch(start, max_items)
+    }
+
     async fn replay_range(
         &self,
         range: Range<u64>,
