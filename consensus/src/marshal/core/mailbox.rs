@@ -166,6 +166,17 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel sent once the block sync has started.
         ack: oneshot::Sender<Handle<()>>,
     },
+    /// A request to broadcast a held term-start candidate without persisting it.
+    Prepared {
+        /// The span carried with this request.
+        span: Span,
+        /// The round in which the candidate was built.
+        round: Round,
+        /// The candidate block.
+        block: V::Block,
+        /// The recipients to broadcast the block to.
+        recipients: Recipients<S::PublicKey>,
+    },
     /// A notification that a block reached the verify stage. Persisting it
     /// does not imply application validity.
     Verified {
@@ -306,6 +317,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::SubscribeByCommitment { span, .. }
             | Self::Forward { span, .. }
             | Self::Proposed { span, .. }
+            | Self::Prepared { span, .. }
             | Self::Verified { span, .. }
             | Self::Certified { span, .. }
             | Self::Notarization { span, .. }
@@ -335,6 +347,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetVerified { .. } => "get_verified",
             Self::Forward { .. } => "forward",
             Self::Proposed { .. } => "proposed",
+            Self::Prepared { .. } => "prepared",
             Self::Verified { .. } => "verified",
             Self::Certified { .. } => "certified",
             Self::SetFloor { .. } => "set_floor",
@@ -377,6 +390,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::SubscribeByCommitment { .. }
             | Self::GetVerified { .. }
             | Self::Forward { .. }
+            | Self::Prepared { .. }
             | Self::SetFloor { .. }
             | Self::Prune { .. }
             | Self::Notarization { .. }
@@ -400,6 +414,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::HintFinalized { .. }
             | Self::Forward { .. }
             | Self::Proposed { .. }
+            | Self::Prepared { .. }
             | Self::Verified { .. }
             | Self::Certified { .. }
             | Self::SetFloor { .. }
@@ -931,6 +946,25 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             block: block.into(),
             recipients,
             ack,
+        })
+    }
+
+    /// Requests the broadcast of a held term-start candidate without persisting it.
+    ///
+    /// The caller keeps the candidate staged and persists it later through
+    /// [`Self::verified_deferred`], once consensus requests its propose broadcast or certification
+    /// needs it. A candidate abandoned before then is never stored.
+    pub fn prepared(
+        &self,
+        round: Round,
+        block: impl Into<V::Block>,
+        recipients: Recipients<S::PublicKey>,
+    ) -> Feedback {
+        self.sender.enqueue(Message::Prepared {
+            span: info_span!("marshal.mailbox.prepared", round = %round),
+            round,
+            block: block.into(),
+            recipients,
         })
     }
 

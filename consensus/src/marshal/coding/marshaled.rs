@@ -88,7 +88,7 @@ use crate::{
         application::{
             gates::{self, GateOutcome, Gates},
             prepare::Resolved,
-            propose,
+            propose, relay,
             validation::{
                 Stage, is_block_in_expected_epoch, is_inferred_reproposal_at_certify,
                 is_valid_reproposal_at_verify,
@@ -111,7 +111,6 @@ use commonware_cryptography::{
     certificate::{Provider, Scheme as _, Verifier},
 };
 use commonware_macros::select;
-use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     Clock, Metrics, Spawner, Storage,
@@ -1064,10 +1063,10 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
-        self.gates.flush_unrelayed(&self.marshal, round, payload);
-
         // First, check for an in-progress certification gate task.
-        let task = self.gates.take(round, payload);
+        let task = self.gates.claim(round, payload, |block, ack| {
+            self.marshal.verified_deferred(round, block, ack)
+        });
         if let Some(task) = task {
             return self.certify_from_existing_task(round, payload, task);
         }
@@ -1096,17 +1095,12 @@ where
     type Plan = Plan<Self::PublicKey>;
 
     fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) -> Feedback {
-        // Coding variant does not support targeted forwarding;
-        // peers reconstruct blocks from erasure-coded shards.
-        let Plan::Propose { round } = plan else {
+        // Coding variant does not support targeted forwarding; peers reconstruct
+        // blocks from erasure-coded shards.
+        if matches!(plan, Plan::Forward { .. }) {
             return Feedback::Ok;
-        };
-
-        let Some((block, ack)) = self.gates.take_staged(round, commitment) else {
-            debug!(%round, %commitment, "no staged proposal to relay, attempting forwarding");
-            return self.marshal.forward(round, commitment, Recipients::All);
-        };
-        self.marshal.proposed(round, block, Recipients::All, ack)
+        }
+        relay::broadcast(&self.gates, &self.marshal, commitment, plan)
     }
 }
 

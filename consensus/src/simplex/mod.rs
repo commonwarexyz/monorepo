@@ -618,13 +618,27 @@ cfg_if::cfg_if! {
 
         /// Describes how a payload should be broadcast to the network.
         pub enum Plan<P: PublicKey> {
-            /// Initial broadcast of a newly proposed block to all participants.
+            /// Early broadcast of a held term-start candidate to all participants.
+            ///
+            /// Requested when a [`crate::Handoff::Stage`] candidate is held for its
+            /// parent's certification. The proposer has not voted for the candidate
+            /// and may still abandon it for one built on a replacement parent, so
+            /// this plan commits to nothing. A relay may defer the send to the
+            /// matching [`Plan::Propose`].
+            Prepare {
+                /// The round in which the candidate was built.
+                round: Round,
+            },
+            /// Broadcast of a proposed block to all participants.
             ///
             /// Requested before the proposer's notarize vote is durable: a
             /// proposer that crashes and restarts may emit this plan again
             /// with a different payload for the same round. Consumers must
             /// tolerate multiple candidates per round (at most one is ever
             /// referenced by the proposer's signed votes).
+            ///
+            /// The proposer's notarize vote follows this plan. A relay that already
+            /// sent the payload for the matching [`Plan::Prepare`] does not send it again.
             Propose {
                 /// The round in which the block was proposed.
                 round: Round,

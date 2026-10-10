@@ -669,6 +669,17 @@ where
                     .persist_verified(round, block, ack, buffer, application, resolver)
                     .await;
             }
+            Message::Prepared {
+                round,
+                block,
+                recipients,
+                ..
+            } => {
+                // A held candidate is only sent. A later [Message::Verified],
+                // requested by the lock-in or by certification, stores it, so
+                // an abandoned candidate costs no storage write.
+                buffer.send(round, block, recipients);
+            }
             Message::Verified {
                 round, block, ack, ..
             } => {

@@ -382,9 +382,19 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
 
     fn broadcast(&mut self, payload: H::Digest, plan: Plan<P>) {
         let (contents, recipients) = match plan {
+            // A held candidate is sent when consensus requests `Plan::Prepare`.
+            // Its later `Plan::Propose` broadcast does not send it again,
+            // mirroring marshal's relay.
+            Plan::Prepare { .. } => {
+                let contents = self.pending.get(&payload).expect("missing payload").clone();
+                self.seen.insert(payload, contents.clone());
+                (contents, Recipients::All)
+            }
             Plan::Propose { .. } => {
                 let contents = self.pending.remove(&payload).expect("missing payload");
-                self.seen.insert(payload, contents.clone());
+                if self.seen.insert(payload, contents.clone()).is_some() {
+                    return;
+                }
                 (contents, Recipients::All)
             }
             Plan::Forward { recipients, .. } => {

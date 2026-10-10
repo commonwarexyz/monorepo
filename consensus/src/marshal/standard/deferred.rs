@@ -81,12 +81,12 @@ use crate::{
         application::{
             gates::{self, GateOutcome, Gates},
             prepare::Resolved,
-            propose,
+            propose, relay,
             validation::{Stage, is_inferred_reproposal_at_certify},
         },
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
-            Standard, relay,
+            Standard,
             validation::{
                 Decision, ParentCheck, await_and_validate_parent, precheck_epoch_and_reproposal,
                 run_app_verify,
@@ -770,10 +770,10 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        self.gates.flush_unrelayed(&self.marshal, round, digest);
-
         // Attempt to retrieve the existing certification gate task for this round/digest.
-        let task = self.gates.take(round, digest);
+        let task = self.gates.claim(round, digest, |block, ack| {
+            self.marshal.verified_deferred(round, block, ack)
+        });
         if let Some(task) = task {
             return self.certify_from_existing_task(round, digest, task);
         }
