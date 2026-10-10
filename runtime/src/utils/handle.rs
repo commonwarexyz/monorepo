@@ -165,9 +165,9 @@ where
 /// when the resumed task uses them. Creating a shared reference does not read memory inside an
 /// `UnsafeCell`, and `UnsafeCell<F>` has the same layout as `F`.
 ///
-/// Catching panics here means building a task needs no further wrappers. Unoptimized builds give
-/// each wrapper value its own stack slot the size of the future, in a frame that every poll of the
-/// task allocates.
+/// Catching panics here saves a task from adding wrappers for that. Unoptimized builds give each
+/// wrapper built around the future its own stack slot the size of the future, in a frame that
+/// every poll of the task allocates, so every extra wrapper would grow the stack of every poll.
 struct FutureCell<F>(UnsafeCell<F>);
 
 impl<F: Future> Future for FutureCell<F> {
