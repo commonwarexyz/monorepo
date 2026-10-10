@@ -218,6 +218,19 @@ impl merkle::Family for Family {
         }
         true
     }
+
+    fn subtree_root_position(leaf_start: Location, height: u32) -> Position {
+        let leaf_pos = Self::location_to_position(leaf_start);
+        let shift = 1u64
+            .checked_shl(height + 1)
+            .expect("height excessively large");
+
+        leaf_pos.checked_add(shift - 2).expect("position overflow")
+    }
+
+    fn subtree_birth_size(leaf_start: Location, height: u32) -> Option<Location> {
+        leaf_start.checked_add(1u64.checked_shl(height)?)
+    }
 }
 
 impl Graftable for Family {
@@ -242,18 +255,6 @@ impl Graftable for Family {
         let root_pos = Position::new(*first_leaf_pos + (1u64 << (grafting_height + 1)) - 2);
 
         core::iter::once((root_pos, grafting_height))
-    }
-
-    fn subtree_root_position(leaf_start: Location, height: u32) -> Position {
-        let leaf_pos = Self::location_to_position(leaf_start);
-        let shift = 1u64
-            .checked_shl(height + 1)
-            .expect("height excessively large");
-
-        leaf_pos
-            .checked_add(shift)
-            .and_then(|v| v.checked_sub(2))
-            .expect("position overflow")
     }
 
     fn leftmost_leaf(pos: Position, height: u32) -> Location {
@@ -861,9 +862,30 @@ mod tests {
                     *pos, next_pos,
                     "height-{h} subtree_root_position mismatch at leaf {leaf_idx}"
                 );
+                assert_eq!(
+                    Family::subtree_birth_size(Location::new(leftmost), h),
+                    Some(Location::new(leaf_idx + 1)),
+                    "height-{h} subtree_birth_size mismatch at leaf {leaf_idx}"
+                );
                 next_pos += 1;
             }
         }
+    }
+
+    #[test]
+    fn test_subtree_limits() {
+        // The root of a full 2^62-leaf MMR is the last node that can exist.
+        let root = Location::new(0);
+        assert_eq!(
+            Family::subtree_birth_size(root, 62),
+            Some(Family::MAX_LEAVES)
+        );
+        assert_eq!(
+            Family::subtree_root_position(root, 62),
+            Family::MAX_NODES - 1
+        );
+        assert_eq!(Family::subtree_birth_size(root, 63), None);
+        assert_eq!(Family::subtree_birth_size(Family::MAX_LEAVES, 0), None);
     }
 
     #[test]
