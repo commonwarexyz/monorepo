@@ -1,4 +1,4 @@
-//! Durable pruning boundary, import status, and checkpoint of an authenticated journal.
+//! Durable pruning boundary and import status of an authenticated journal.
 
 use super::Error;
 use crate::{
@@ -10,12 +10,9 @@ use bytes::BufMut;
 use commonware_codec::{Buf, Copying, DecodeExt, Encode, EncodeSize, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
 use commonware_utils::sequence::prefixed_u64::U64;
-use tracing::warn;
 
 const MAGIC: [u8; 8] = *b"CWAUTH01";
 const KEY: U64 = U64::new(0, 0);
-const CHECKPOINT_MAGIC: [u8; 8] = *b"CWCKPT01";
-const CHECKPOINT_KEY: U64 = U64::new(0, 1);
 
 /// The durable boundary and its digests in [`Family::nodes_to_pin`] order.
 #[derive(Clone, Debug)]
@@ -116,65 +113,13 @@ impl<F: Family, D: Digest> Read for Record<F, D> {
     }
 }
 
-/// A committed leaf count whose resident digests are durable, and the peaks there.
-pub(crate) struct Checkpoint<F: Family, D: Digest> {
-    /// The resident height the digests were saved under, which fixes each digest's index.
-    pub(crate) height: u32,
-    /// The committed leaf count, and the digests [`Family::nodes_to_pin`] lists there.
-    pub(crate) peaks: Boundary<F, D>,
-}
-
-impl<F: Family, D: Digest> Write for Checkpoint<F, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        CHECKPOINT_MAGIC.write(buf);
-        self.height.write(buf);
-        self.peaks.location.write(buf);
-        for digest in &self.peaks.digests {
-            digest.write(buf);
-        }
-    }
-}
-
-impl<F: Family, D: Digest> EncodeSize for Checkpoint<F, D> {
-    fn encode_size(&self) -> usize {
-        CHECKPOINT_MAGIC.len()
-            + self.height.encode_size()
-            + self.peaks.location.encode_size()
-            + self.peaks.digests.len() * D::SIZE
-    }
-}
-
-impl<F: Family, D: Digest> Read for Checkpoint<F, D> {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        if <[u8; 8]>::read(buf)? != CHECKPOINT_MAGIC {
-            return Err(commonware_codec::Error::Invalid(
-                "Checkpoint",
-                "unsupported format",
-            ));
-        }
-        let height = u32::read(buf)?;
-        let location = Location::<F>::read(buf)?;
-        let digests = F::nodes_to_pin(location)
-            .map(|_| D::read(buf))
-            .collect::<Result<_, _>>()?;
-        Ok(Self {
-            height,
-            peaks: Boundary { location, digests },
-        })
-    }
-}
-
 /// Atomic durable pruning state for an operation-backed authenticated journal.
 ///
 /// An importing frontier prevents ordinary recovery until synchronization authenticates and
-/// activates the replacement operation range. Starting an import also drops the checkpoint, since
-/// it describes the operations being replaced.
+/// activates the replacement operation range.
 pub(crate) struct Frontier<F: Family, E: Context, D: Digest> {
     metadata: Metadata<E, U64, Vec<u8>>,
     record: Option<Record<F, D>>,
-    /// Kept only while the frontier is active.
-    checkpoint: Option<Checkpoint<F, D>>,
 }
 
 impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
@@ -182,7 +127,7 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
     pub(crate) async fn open(context: E, partition: String) -> Result<Self, Error<F>> {
         // MMB can pin two nodes at each of the at most 64 heights.
         let max_size = 128 * D::SIZE + 32;
-        let mut metadata = Metadata::init(
+        let metadata = Metadata::init(
             context,
             metadata::Config {
                 partition,
@@ -190,10 +135,7 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
             },
         )
         .await?;
-        if metadata
-            .keys()
-            .any(|key| key != &KEY && key != &CHECKPOINT_KEY)
-        {
+        if metadata.keys().any(|key| key != &KEY) {
             return Err(Error::UnsupportedFormat);
         }
         let record = metadata
@@ -206,64 +148,7 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
                     .map_err(|err| Error::Journal(super::JournalError::Codec(err)))
             })
             .transpose()?;
-        // The checkpoint only saves work, so one that does not decode, or that outlived the
-        // active frontier it belongs to, is forgotten rather than failing the open.
-        let active = matches!(
-            record,
-            Some(Record {
-                status: Status::Active,
-                ..
-            })
-        );
-        let checkpoint = metadata.get(&CHECKPOINT_KEY).map(|bytes: &Vec<u8>| {
-            Checkpoint::decode(Copying(bytes.as_slice()))
-                .ok()
-                .filter(|_| active)
-        });
-        if let Some(None) = checkpoint {
-            warn!("forgetting an unusable checkpoint");
-            metadata.remove(&CHECKPOINT_KEY);
-        }
-        let checkpoint = checkpoint.flatten();
-        Ok(Self {
-            metadata,
-            record,
-            checkpoint,
-        })
-    }
-
-    /// A committed leaf count whose resident digests are durable, and the peaks
-    /// [`Family::nodes_to_pin`] lists there.
-    pub(crate) const fn checkpoint(&self) -> Option<&Checkpoint<F, D>> {
-        self.checkpoint.as_ref()
-    }
-
-    /// Record that resident digests are durable through `checkpoint`.
-    pub(crate) async fn save_checkpoint(
-        mut self,
-        checkpoint: Checkpoint<F, D>,
-    ) -> Result<Self, Error<F>> {
-        if self.active_boundary()?.is_none() {
-            return Err(Error::MissingFrontier);
-        }
-        let peaks = &checkpoint.peaks;
-        if F::nodes_to_pin(peaks.location).count() != peaks.digests.len() {
-            return Err(crate::merkle::Error::InvalidPinnedNodes.into());
-        }
-        self.metadata
-            .put(CHECKPOINT_KEY, checkpoint.encode().to_vec());
-        self.metadata = self.metadata.sync().await?;
-        self.checkpoint = Some(checkpoint);
-        Ok(self)
-    }
-
-    /// Forget the checkpoint, so its resident digests are never restored.
-    pub(crate) async fn drop_checkpoint(mut self) -> Result<Self, Error<F>> {
-        if self.checkpoint.take().is_some() {
-            self.metadata.remove(&CHECKPOINT_KEY);
-            self.metadata = self.metadata.sync().await?;
-        }
-        Ok(self)
+        Ok(Self { metadata, record })
     }
 
     /// The boundary of an active frontier, or [Error::IncompleteSync] during an import.
@@ -291,9 +176,6 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
     }
 
     async fn store(mut self, record: Record<F, D>) -> Result<Self, Error<F>> {
-        if record.status != Status::Active && self.checkpoint.take().is_some() {
-            self.metadata.remove(&CHECKPOINT_KEY);
-        }
         self.metadata.put(KEY, record.encode().to_vec());
         self.metadata = self.metadata.sync().await?;
         self.record = Some(record);
@@ -402,25 +284,6 @@ mod tests {
     fn codec<F: Family>() {
         for location in [0, 1, 31, 32, 33, 46, 47, 48, *F::MAX_LEAVES] {
             let location = Location::new(location);
-            let checkpoint = Checkpoint::<F, D> {
-                height: 5,
-                peaks: Boundary {
-                    location,
-                    digests: pins(location),
-                },
-            };
-            let encoded = checkpoint.encode();
-            let decoded = Checkpoint::<F, D>::decode(encoded.clone()).unwrap();
-            assert_eq!(decoded.height, 5);
-            assert_eq!(decoded.peaks.location, location);
-            assert_eq!(decoded.peaks.digests, pins(location));
-            for end in 0..encoded.len() {
-                assert!(Checkpoint::<F, D>::decode(encoded.slice(..end)).is_err());
-            }
-            let mut trailing = encoded.to_vec();
-            trailing.push(0);
-            assert!(Checkpoint::<F, D>::decode(trailing).is_err());
-
             for status in [Status::Active, Status::Importing] {
                 let record = Record::<F, D> {
                     status,
@@ -551,86 +414,6 @@ mod tests {
             assert_eq!(
                 frontier.active_boundary().unwrap().unwrap().location,
                 Location::new(47)
-            );
-        });
-    }
-
-    #[test]
-    fn checkpoint_lives_only_while_active() {
-        deterministic::Runner::default().start(|context| async move {
-            type F = mmb::Family;
-            let open = |label: &'static str| {
-                Frontier::<F, _, D>::open(context.child(label), "frontier".into())
-            };
-            let frontier = open("fresh")
-                .await
-                .unwrap()
-                .activate(Location::new(31), pins::<F>(Location::new(31)))
-                .await
-                .unwrap();
-            let location = Location::new(47);
-            let checkpoint = || Checkpoint {
-                height: 3,
-                peaks: Boundary {
-                    location,
-                    digests: pins::<F>(location),
-                },
-            };
-            drop(frontier.save_checkpoint(checkpoint()).await.unwrap());
-            let frontier = open("saved").await.unwrap();
-            let saved = frontier.checkpoint().unwrap();
-            assert_eq!(saved.height, 3);
-            assert_eq!(saved.peaks.location, location);
-            assert_eq!(saved.peaks.digests, pins::<F>(location));
-
-            // Pruning keeps the checkpoint, and an import drops it.
-            let frontier = frontier
-                .activate(Location::new(33), pins::<F>(Location::new(33)))
-                .await
-                .unwrap();
-            assert!(frontier.checkpoint().is_some());
-            drop(frontier.begin_import().await.unwrap());
-            let frontier = open("importing").await.unwrap();
-            assert!(frontier.checkpoint().is_none());
-            assert!(matches!(
-                frontier.save_checkpoint(checkpoint()).await,
-                Err(Error::IncompleteSync)
-            ));
-        });
-    }
-
-    /// A checkpoint that does not decode only saves work, so opening forgets it and keeps the
-    /// frontier.
-    #[test]
-    fn forgets_undecodable_checkpoint() {
-        deterministic::Runner::default().start(|context| async move {
-            type F = mmr::Family;
-            let frontier = Frontier::<F, _, D>::open(context.child("fresh"), "frontier".into())
-                .await
-                .unwrap()
-                .activate(Location::new(7), pins::<F>(Location::new(7)))
-                .await
-                .unwrap();
-            drop(frontier);
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
-                context.child("corrupt"),
-                metadata::Config {
-                    partition: "frontier".into(),
-                    codec_config: ((0..=4096).into(), ()),
-                },
-            )
-            .await
-            .unwrap();
-            metadata.put(CHECKPOINT_KEY, b"CWCKPT00".to_vec());
-            drop(metadata.sync().await.unwrap());
-
-            let frontier = Frontier::<F, _, D>::open(context.child("open"), "frontier".into())
-                .await
-                .unwrap();
-            assert!(frontier.checkpoint().is_none());
-            assert_eq!(
-                frontier.active_boundary().unwrap().unwrap().location,
-                Location::new(7)
             );
         });
     }

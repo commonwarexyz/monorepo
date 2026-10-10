@@ -1,8 +1,6 @@
 //! Durable state of an operation range being imported by synchronization.
 
-use super::{
-    APPLY_BATCH_SIZE, Config, Error, Frontier, ReplayEncoded, Tree, metrics::Metrics, resident,
-};
+use super::{APPLY_BATCH_SIZE, Config, Error, Frontier, ReplayEncoded, Tree, metrics::Metrics};
 use crate::{
     Context,
     merkle::{Family, Location, hasher::Hasher},
@@ -23,7 +21,6 @@ pub(crate) enum Local<D> {
 /// Durable state of an operation range being imported by synchronization.
 pub struct Import<F: Family, E: Context, D: Digest, S: Strategy> {
     pub(super) frontier: Frontier<F, E, D>,
-    pub(super) resident: resident::Recovery<E, D>,
     pub(super) metrics: Metrics,
     /// Digests rebuilt by [Self::authenticate], pruned to the boundary it returned pins for.
     pub(super) tree: Option<Tree<F, D, S>>,
@@ -40,7 +37,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Import<F, E, D, S> {
             .await?;
         Ok(Self {
             frontier,
-            resident: resident::Recovery::discarded(context.child("resident"), config),
             metrics: Metrics::new(&context.child("merkle")),
             tree: None,
         })

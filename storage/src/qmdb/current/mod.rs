@@ -365,8 +365,7 @@ use self::db::Metrics;
 /// Configuration for a `Current` authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, J, S: Strategy, B = ()> {
-    /// Configuration for the authenticated journal: its frontier, resident digests, and digest
-    /// cache.
+    /// Configuration for durable pruning metadata and the volatile Merkle digest cache.
     pub merkle_config: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
@@ -5986,7 +5985,6 @@ pub mod tests {
     /// `current` decide the same updates, reach the same floors, and merkleize the same operations.
     /// This holds for policies that keep, evict, replace, stop, or mix those choices, under
     /// unbounded limits and under entry, skip, combined, and zero-entry limits.
-    #[boxed]
     async fn assert_policy_matches_any<M, A, C>(mut any: A, mut current: C)
     where
         M: merkle::Graftable,

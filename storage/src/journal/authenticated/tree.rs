@@ -132,37 +132,6 @@ impl<D: Copy> Resident<D> {
         Ok(())
     }
 
-    /// Levels holding the nodes at or above `height` with positions from `start` to `end`, whose
-    /// `digests` are given in position order.
-    fn restored<F: Family>(
-        height: u32,
-        start: Position<F>,
-        end: Position<F>,
-        digests: impl IntoIterator<Item = D>,
-    ) -> Result<Self, merkle::Error<F>> {
-        let mut resident = Self::new(height);
-        let mut digests = digests.into_iter();
-        for (h, ordinal, pos) in ResidentOrder::new(height, start, end) {
-            let digest = digests.next().ok_or(merkle::Error::MissingNode(pos))?;
-            let index = (h - height) as usize;
-            while resident.levels.len() <= index {
-                resident.levels.push(Level {
-                    first: 0,
-                    nodes: VecDeque::new(),
-                });
-            }
-            let level = &mut resident.levels[index];
-            if level.nodes.is_empty() {
-                level.first = ordinal;
-            }
-            level.nodes.push_back(digest);
-        }
-        if digests.next().is_some() {
-            return Err(merkle::Error::DataCorrupted("extra resident digests"));
-        }
-        Ok(resident)
-    }
-
     /// Drop nodes before `boundary`.
     fn trim<F: Family>(&mut self, boundary: Position<F>) {
         for (index, level) in self.levels.iter_mut().enumerate() {
@@ -186,83 +155,6 @@ impl<D: Copy> Resident<D> {
         self.levels.iter().fold((0, 0), |(len, capacity), level| {
             (len + level.nodes.len(), capacity + level.nodes.capacity())
         })
-    }
-}
-
-/// The position of the `ordinal`-th node of height `h`.
-fn root_position<F: Family>(h: u32, ordinal: u64) -> Position<F> {
-    F::subtree_root_position(Location::new(ordinal << h), h)
-}
-
-/// The number of born or unborn nodes of height `h` whose positions are below `pos`.
-fn count_below<F: Family>(h: u32, pos: Position<F>) -> u64 {
-    // A node's position is at least its leftmost leaf's location, so no ordinal past this has a
-    // position below `pos`.
-    let (mut lo, mut hi) = (0u64, (*pos >> h) + 1);
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if root_position::<F>(h, mid) < pos {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
-}
-
-/// The number of nodes at or above `height` whose positions are below `pos`.
-pub(super) fn resident_rank<F: Family>(height: u32, pos: Position<F>) -> u64 {
-    (height..u64::BITS)
-        .map(|h| count_below::<F>(h, pos))
-        .take_while(|&count| count > 0)
-        .sum()
-}
-
-/// The next node of one height in a [ResidentOrder].
-struct Cursor<F: Family> {
-    height: u32,
-    ordinal: u64,
-    end: u64,
-    position: Position<F>,
-}
-
-/// Nodes at or above a height with positions in a range, in position order, as
-/// `(height, ordinal, position)`.
-struct ResidentOrder<F: Family> {
-    cursors: Vec<Cursor<F>>,
-}
-
-impl<F: Family> ResidentOrder<F> {
-    fn new(height: u32, start: Position<F>, end: Position<F>) -> Self {
-        let cursors = (height..u64::BITS)
-            .map(|h| (h, count_below::<F>(h, start), count_below::<F>(h, end)))
-            .take_while(|&(.., to)| to > 0)
-            .filter(|&(_, from, to)| from < to)
-            .map(|(height, from, to)| Cursor {
-                height,
-                ordinal: from,
-                end: to,
-                position: root_position(height, from),
-            })
-            .collect();
-        Self { cursors }
-    }
-}
-
-impl<F: Family> Iterator for ResidentOrder<F> {
-    type Item = (u32, u64, Position<F>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let index = (0..self.cursors.len()).min_by_key(|&i| self.cursors[i].position)?;
-        let cursor = &mut self.cursors[index];
-        let node = (cursor.height, cursor.ordinal, cursor.position);
-        cursor.ordinal += 1;
-        if cursor.ordinal == cursor.end {
-            self.cursors.swap_remove(index);
-        } else {
-            cursor.position = root_position(cursor.height, cursor.ordinal);
-        }
-        Some(node)
     }
 }
 
@@ -570,11 +462,6 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         &self.strategy
     }
 
-    /// The lowest height of the nodes kept in memory.
-    pub(crate) const fn resident_height(&self) -> u32 {
-        self.resident.height
-    }
-
     pub(crate) fn snapshot(&self) -> Arc<Mem<F, D>> {
         Arc::clone(&self.mem)
     }
@@ -635,76 +522,6 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             .collect::<Result<Vec<_>, _>>()?;
         Arc::make_mut(&mut self.mem).skip_to(leaves, peaks)?;
         Ok(self)
-    }
-
-    /// Resident digests at positions from `start` to the current size, in position order.
-    pub(crate) fn resident_digests(
-        &self,
-        start: Position<F>,
-    ) -> impl Iterator<Item = Result<D, merkle::Error<F>>> + '_ {
-        ResidentOrder::new(self.resident.height, start, self.size()).map(|(h, _, pos)| {
-            self.resident
-                .get(pos, h)
-                .ok_or(merkle::Error::MissingNode(pos))
-        })
-    }
-
-    /// The digests [`Family::nodes_to_pin`] lists at the current size.
-    pub(crate) fn peaks(&self) -> Result<Vec<D>, merkle::Error<F>> {
-        F::nodes_to_pin(self.leaves())
-            .map(|pos| {
-                self.mem
-                    .get_node(pos)
-                    .ok_or(merkle::Error::MissingNode(pos))
-            })
-            .collect()
-    }
-
-    /// Advance a tree holding nothing past its boundary to `leaves`, given the resident `digests`
-    /// from the boundary in position order and the `peaks` [`Family::nodes_to_pin`] lists at
-    /// `leaves`. On error, including digests that disagree with the peaks, the tree is unchanged.
-    pub(crate) fn restore(
-        &mut self,
-        leaves: Location<F>,
-        peaks: &[D],
-        digests: impl IntoIterator<Item = D>,
-    ) -> Result<(), merkle::Error<F>> {
-        if self.leaves() != self.boundary || leaves < self.boundary {
-            return Err(merkle::Error::DataCorrupted(
-                "restored size precedes the boundary",
-            ));
-        }
-        if F::nodes_to_pin(leaves).count() != peaks.len() {
-            return Err(merkle::Error::InvalidPinnedNodes);
-        }
-        let start = self.size();
-        let end = Position::try_from(leaves)?;
-        let resident = Resident::restored(self.resident.height, start, end, digests)?;
-
-        // Peaks before `start` are pinned at the boundary, and later ones at the resident height
-        // or above must be the restored nodes there.
-        let mut pins = Vec::new();
-        for (pos, &peak) in F::nodes_to_pin(leaves).zip(peaks) {
-            let held = if pos < start {
-                self.mem.get_node(pos)
-            } else {
-                pins.push((pos, peak));
-                let h = F::pos_to_height(pos);
-                if h < resident.height {
-                    continue;
-                }
-                resident.get(pos, h)
-            };
-            if held != Some(peak) {
-                return Err(merkle::Error::DataCorrupted(
-                    "resident digests disagree with their peaks",
-                ));
-            }
-        }
-        Arc::make_mut(&mut self.mem).skip_to(leaves, pins)?;
-        self.resident = resident;
-        self.flush();
-        Ok(())
     }
 
     /// Unpin peaks from sizes before the current one.
@@ -1237,97 +1054,6 @@ mod tests {
     #[test]
     fn reconstructs_mmb() {
         deterministic::Runner::default().start(reconstruction::<mmb::Family>);
-    }
-
-    /// A tree restored from the resident digests and peaks of a replayed tree matches the oracle
-    /// once both replay to the end.
-    async fn restoration<F: Family>(context: deterministic::Context) {
-        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
-        let ops = Operations::new(300);
-        let expected = oracle::<F>(&ops, &hasher);
-        let end = Location::new(300);
-        for height in [0, 1, 3, 5] {
-            for boundary in [0, 7, 32, 48] {
-                let boundary = Location::new(boundary);
-                let pins = F::nodes_to_pin(boundary)
-                    .map(|p| expected.get_node(p).unwrap())
-                    .collect::<Vec<_>>();
-                let empty = || {
-                    Tree::<F, D, _>::new(
-                        boundary,
-                        pins.clone(),
-                        &config(height, 0, 73),
-                        Metrics::new(&context),
-                    )
-                    .unwrap()
-                };
-                let checkpoints = [33, 64, 100, 128, 192, 256, 257, 288];
-                for leaves in [*boundary, *boundary + 1].into_iter().chain(checkpoints) {
-                    let leaves = Location::new(leaves);
-                    if leaves < boundary {
-                        continue;
-                    }
-                    let replayed = empty()
-                        .replay(&ops, &hasher, leaves, NZU64!(17))
-                        .await
-                        .unwrap();
-                    let start = Position::try_from(boundary).unwrap();
-                    let digests = replayed
-                        .resident_digests(start)
-                        .collect::<Result<Vec<_>, _>>()
-                        .unwrap();
-                    assert_eq!(
-                        digests.len() as u64,
-                        resident_rank(height, replayed.size()) - resident_rank(height, start)
-                    );
-
-                    // Too few, too many, or shifted digests are rejected and leave the tree as it
-                    // was. The last digest is a peak, so a shift disagrees with the peaks.
-                    let peaks = replayed.peaks().unwrap();
-                    let mut tree = empty();
-                    if let Some((_, fewer)) = digests.split_last() {
-                        assert!(tree.restore(leaves, &peaks, fewer.to_vec()).is_err());
-                    }
-                    let mut more = digests.clone();
-                    more.push(D::EMPTY);
-                    assert!(tree.restore(leaves, &peaks, more).is_err());
-                    if digests.len() > 1 {
-                        let mut shifted = digests.clone();
-                        shifted.rotate_left(1);
-                        assert!(tree.restore(leaves, &peaks, shifted).is_err());
-                    }
-                    assert_eq!(tree.leaves(), boundary);
-
-                    tree.restore(leaves, &peaks, digests).unwrap();
-                    let restored = tree.replay(&ops, &hasher, end, NZU64!(17)).await.unwrap();
-                    assert_eq!(
-                        restored.root(&hasher, 0).unwrap(),
-                        expected.root(&hasher, 0).unwrap()
-                    );
-                    let positions: Vec<_> = (0..*expected.size())
-                        .map(Position::new)
-                        .filter(|&p| restored.available(p))
-                        .collect();
-                    let got = restored.get_nodes(&ops, &hasher, &positions).await.unwrap();
-                    for (&pos, node) in positions.iter().zip(got) {
-                        assert_eq!(
-                            Some(node),
-                            expected.get_node(pos),
-                            "height {height}, boundary {boundary}, leaves {leaves}, position {pos}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn restores_mmr() {
-        deterministic::Runner::default().start(restoration::<mmr::Family>);
-    }
-    #[test]
-    fn restores_mmb() {
-        deterministic::Runner::default().start(restoration::<mmb::Family>);
     }
 
     async fn demand_cache<F: Family>(context: deterministic::Context) {

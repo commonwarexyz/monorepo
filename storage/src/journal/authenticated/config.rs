@@ -7,8 +7,7 @@ use std::num::NonZeroUsize;
 pub struct CacheConfig {
     /// Lowest node height kept in memory, at most eight. Resident memory is about `2 / 2^height`
     /// digests per retained operation. Height zero keeps every node. Current databases lower it
-    /// to their grafting height. Changing it discards the checkpoint, so the next startup
-    /// replays every retained operation.
+    /// to their grafting height.
     pub resident_height: u32,
     /// Budget for cached regions of rebuilt digests below the resident height. Zero disables the
     /// cache, and a nonzero budget must hold at least one region (see [Self::with_regions]).
@@ -57,8 +56,7 @@ const fn region_bytes<D: Digest>(resident_height: u32) -> usize {
 /// Configuration for an operation-backed authenticated journal.
 #[derive(Clone)]
 pub struct Config<S: Strategy> {
-    /// Partition holding the pruning frontier and checkpoint. Resident digests are stored in
-    /// partitions prefixed with `{metadata_partition}-resident`.
+    /// Partition containing the versioned pruning frontier.
     pub metadata_partition: String,
     /// Memory policy for Merkle digests.
     pub cache: CacheConfig,

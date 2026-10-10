@@ -626,9 +626,6 @@ where
 
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
-    ///
-    /// Saves a checkpoint of the Merkle digests once enough operations have accumulated since
-    /// the last one.
     #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]
     #[boxed]
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
@@ -636,8 +633,7 @@ where
         Ok(self)
     }
 
-    /// Sync all database state to disk and save a checkpoint of the Merkle digests, so startup
-    /// replays only operations applied after it.
+    /// Sync all database state to disk.
     #[tracing::instrument(name = "qmdb.current.db.sync", level = "info", skip_all)]
     #[boxed]
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
