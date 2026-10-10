@@ -13,7 +13,7 @@ use commonware_utils::{
     sync::{Mutex, MutexGuard},
 };
 #[cfg(target_os = "linux")]
-use futures::{StreamExt as _, stream};
+use futures::StreamExt as _;
 #[cfg(test)]
 use std::sync::mpsc;
 use std::{
@@ -512,42 +512,7 @@ impl crate::Blob for Blob {
         if !options.contains(ReadOptions::DONT_CACHE) {
             return crate::read_each(self, ranges, options).boxed();
         }
-
-        // Direct I/O serves a batch the page cache need not retain: the device sees every read
-        // at once and no thread blocks per read. Such a batch uses direct I/O on every Linux
-        // kernel, so it does not read data the OS page cache holds. Its concurrency assumes
-        // filesystem-native direct I/O (such as ext4 or XFS): a filesystem that serves direct
-        // I/O through a buffered fallback stays correct but completes each submission's reads
-        // one at a time.
-        let mut reads = Vec::with_capacity(ranges.len());
-        for (index, &(offset, len)) in ranges.iter().enumerate() {
-            let Some(offset) = offset.checked_add(self.data_offset) else {
-                return stream::iter(vec![Err(Error::OffsetOverflow)]).boxed();
-            };
-            reads.push(aio::Read { index, offset, len });
-        }
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut reads = reads.into_iter().peekable();
-        while reads.peek().is_some() {
-            let chunk: Vec<_> = reads.by_ref().take(aio::NR_EVENTS).collect();
-            let file = self.shared.clone();
-            let pool = self.pool.clone();
-            let tx = tx.clone();
-            task::spawn_blocking(move || aio::run(&file, &pool, chunk, &tx));
-        }
-
-        // The stream ends once every range is yielded or at the first error. A submitting
-        // task that ends without reporting its reads (it panicked, or the runtime shut down)
-        // closes the channel early, which is an error.
-        stream::unfold((rx, ranges.len()), |(mut rx, remaining)| async move {
-            if remaining == 0 {
-                return None;
-            }
-            let item = rx.recv().await.unwrap_or(Err(Error::ReadFailed));
-            let remaining = if item.is_ok() { remaining - 1 } else { 0 };
-            Some((item, (rx, remaining)))
-        })
-        .boxed()
+        aio::read_many(&self.shared, &self.pool, self.data_offset, ranges)
     }
 
     async fn write_at(
@@ -1238,8 +1203,7 @@ mod tests {
             .unwrap();
 
         // Whole aligned blocks, small unaligned ranges inside and across blocks (read through an
-        // aligned superset), an empty range, and more ranges than one submission holds, all out
-        // of offset order.
+        // aligned superset), and an empty range, all out of offset order.
         let mut ranges: Vec<(u64, usize)> = Vec::new();
         for i in (0..BLOCKS).rev() {
             ranges.push((i * BLOCK as u64, BLOCK));
@@ -1252,8 +1216,6 @@ mod tests {
                 ranges.push((i * BLOCK as u64 + 100, 2 * BLOCK - 200));
             }
         }
-        #[cfg(target_os = "linux")]
-        assert!(ranges.len() > aio::NR_EVENTS);
         let mut bufs: Vec<(usize, IoBufsMut)> = blob
             .read_many(&ranges, ReadOptions::DONT_CACHE)
             .try_collect()

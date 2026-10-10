@@ -5,17 +5,18 @@
 use super::*;
 use crate::{BLOB_PAGE_SIZE, BufMut as _, IoBufMut};
 use commonware_utils::NZUsize;
+use futures::stream::{self, BoxStream};
 use std::os::unix::fs::OpenOptionsExt as _;
 
 /// The `nr_events` each AIO context is created with (`io_setup`): the requests it processes
 /// concurrently, and so the reads one blocking task submits through one context in
-/// [`crate::Blob::read_many`].
+/// [`read_many`].
 ///
 /// One context's worth is one device queue's worth of reads: NVMe queues hold 256 to 1024
 /// commands, and a queue depth of 256 saturates the devices this runtime targets. A larger
 /// `read_many` splits into that many reads per task, so issue cost spreads across tasks while
 /// each task keeps a full queue in flight.
-pub(super) const NR_EVENTS: usize = 256;
+const NR_EVENTS: usize = 256;
 
 /// Requests (iocbs) issued per `io_submit` call before the completions that have landed are
 /// reaped.
@@ -27,15 +28,15 @@ pub(super) const NR_EVENTS: usize = 256;
 /// overhead than they return.
 const IOCBS_PER_SUBMIT: usize = 32;
 
-/// A pending read: its index among the `read_many` call's ranges and the physical file range.
-pub(super) struct Read {
-    pub(super) index: usize,
-    pub(super) offset: u64,
-    pub(super) len: usize,
+/// A pending read: its index among the [`read_many`] call's ranges and the physical file range.
+struct Read {
+    index: usize,
+    offset: u64,
+    len: usize,
 }
 
 /// One completed read, sent to the stream as soon as the kernel reports it.
-pub(super) type Completion = Result<(usize, IoBufsMut), Error>;
+type Completion = Result<(usize, IoBufsMut), Error>;
 
 /// The blob's `O_DIRECT` descriptor on its inode, opened by the first submission that needs
 /// it and shared by every later one. `None` when the filesystem rejects direct I/O, which
@@ -314,7 +315,7 @@ fn reap(ctx: &Context, events: &mut [IoEvent], wait: bool) -> Result<usize, Erro
 
 /// Serve `reads` without native AIO: one blocking task per read, as
 /// [`crate::Blob::read_at`] does.
-pub(super) fn read_positioned_each(
+fn read_positioned_each(
     file: &Arc<Shared>,
     pool: &BufferPool,
     reads: Vec<Read>,
@@ -329,7 +330,7 @@ pub(super) fn read_positioned_each(
 }
 
 /// Run one submission on the calling (blocking) thread.
-pub(super) fn run(
+fn run(
     file: &Arc<Shared>,
     pool: &BufferPool,
     reads: Vec<Read>,
@@ -352,6 +353,51 @@ pub(super) fn run(
     }
 }
 
+/// Read `ranges` of a blob's data with direct I/O, yielding each range's `(index, bytes)` as
+/// it completes. Offsets are relative to `data_offset`. Without an error every range is
+/// yielded exactly once, and an error ends the stream.
+///
+/// Every [NR_EVENTS] reads run on one blocking task through one AIO context, so the device
+/// sees them all at once and no thread blocks per read. The reads use direct I/O on every
+/// Linux kernel, so they do not read data the OS page cache holds. Their concurrency assumes
+/// filesystem-native direct I/O (such as ext4 or XFS): a filesystem that serves direct I/O
+/// through a buffered fallback stays correct but completes each submission's reads one at a
+/// time.
+pub(super) fn read_many(
+    file: &Arc<Shared>,
+    pool: &BufferPool,
+    data_offset: u64,
+    ranges: &[(u64, usize)],
+) -> BoxStream<'static, Completion> {
+    let mut reads = Vec::with_capacity(ranges.len());
+    for (index, &(offset, len)) in ranges.iter().enumerate() {
+        let Some(offset) = offset.checked_add(data_offset) else {
+            return stream::iter(vec![Err(Error::OffsetOverflow)]).boxed();
+        };
+        reads.push(Read { index, offset, len });
+    }
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut reads = reads.into_iter().peekable();
+    while reads.peek().is_some() {
+        let chunk: Vec<_> = reads.by_ref().take(NR_EVENTS).collect();
+        let (file, pool, tx) = (file.clone(), pool.clone(), tx.clone());
+        task::spawn_blocking(move || run(&file, &pool, chunk, &tx));
+    }
+
+    // The stream ends once every range is yielded or at the first error. A submitting task
+    // that ends without reporting its reads (it panicked, or the runtime shut down) closes
+    // the channel early, which is an error.
+    stream::unfold((rx, ranges.len()), |(mut rx, remaining)| async move {
+        if remaining == 0 {
+            return None;
+        }
+        let item = rx.recv().await.unwrap_or(Err(Error::ReadFailed));
+        let remaining = if item.is_ok() { remaining - 1 } else { 0 };
+        Some((item, (rx, remaining)))
+    })
+    .boxed()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +409,7 @@ mod tests {
         },
         telemetry::metrics::Registry,
     };
+    use futures::TryStreamExt as _;
     use std::{
         path::PathBuf,
         sync::atomic::{AtomicBool, Ordering},
@@ -524,6 +571,37 @@ mod tests {
         // which is recorded instead.
         let opened = direct(&blob.shared).is_some();
         assert_eq!(opened, matches!(blob.shared.direct.get(), Some(Some(_))));
+        remove(storage, blob, directory).await;
+    }
+
+    /// More ranges than one context holds are split across blocking tasks and still yield
+    /// every range exactly once, each served by its direct read.
+    #[tokio::test]
+    async fn test_read_many_serves_more_ranges_than_one_submission() {
+        let block: usize = Widen::widen(BLOB_PAGE_SIZE);
+        let data: Vec<u8> = (0..8 * block).map(|i| (i % 251) as u8).collect();
+        let (storage, blob, directory) = direct_blob("many_submissions", data.clone()).await;
+
+        let ranges: Vec<(u64, usize)> = (0..2 * NR_EVENTS + 1)
+            .map(|i| (Widen::widen((i % 16) * 2048), 2048))
+            .collect();
+        let before = blob.shared.test.direct_reads.load(Ordering::Relaxed);
+        let mut served: Vec<(usize, IoBufsMut)> =
+            read_many(&blob.shared, &pool(), blob.data_offset, &ranges)
+                .try_collect()
+                .await
+                .unwrap();
+        assert_eq!(
+            blob.shared.test.direct_reads.load(Ordering::Relaxed) - before,
+            ranges.len()
+        );
+        served.sort_by_key(|(index, _)| *index);
+        assert!(served.iter().map(|(index, _)| *index).eq(0..ranges.len()));
+        for (index, bufs) in served {
+            let (offset, len) = ranges[index];
+            let offset = usize::try_from(offset).unwrap();
+            assert_eq!(bufs.coalesce().as_ref(), &data[offset..offset + len]);
+        }
         remove(storage, blob, directory).await;
     }
 
