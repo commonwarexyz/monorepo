@@ -49,6 +49,19 @@
 //! sync runs, as it follows the newest finalized block in the speculative mode. Once the databases
 //! are open, by either path, the resolvers serve them to peers.
 //!
+//! # Preparation
+//!
+//! The executor [prepares](crate::executor#preparation) inputs before it executes them, as soon
+//! as the engine's marshal reports them final or once they queue behind earlier inputs, and
+//! [`Mailbox`] forwards each preparation to [`Application::prepare`] with readers of the applied
+//! databases. An application can use it to warm the storage an input will read, for example by
+//! prefetching the keys of a transaction's access list through [`Reader::prefetch`], so execution
+//! reads them from memory. Nothing is prepared while the databases are not open.
+//!
+//! Prefetched pages land in the databases' page cache, where pages not read soon after they are
+//! warmed are evicted first. The page cache must hold what is prefetched for the inputs between
+//! the one executing and the newest one prepared, or warmed pages are evicted before they are read.
+//!
 //! # Pruning
 //!
 //! With a [`PruneConfig`](super::PruneConfig), [`Stateful`] prunes the databases and the executed
@@ -60,6 +73,7 @@
 //! [`aggregation`]: commonware_consensus::aggregation
 //!
 //! [`DatabaseSet::apply`]: super::db::DatabaseSet::apply
+//! [`Reader::prefetch`]: super::db::Reader::prefetch
 
 pub use super::actor::ordered::{Config, Mailbox, Stateful};
 use crate::{
@@ -184,4 +198,25 @@ where
         captured: Self::Captured,
         readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) -> impl Future<Output = ()> + Send;
+
+    /// Starts work that speeds up a later [`execute`](Self::execute) of `input`, such as
+    /// prefetching the keys it will read through `readers`, which observe the applied state.
+    ///
+    /// The contract of [`Execute::prepare`] applies: preparation is only a hint that may run
+    /// late, concurrently with any execution or application, more than once across restarts, or
+    /// not at all, and it may be aborted at any await point. Execution never waits for it, so it
+    /// must not affect any execution's result. It must not hold a read guard while it waits for
+    /// storage, which would hold up applying blocks.
+    ///
+    /// The default does nothing.
+    ///
+    /// [`Execute::prepare`]: crate::executor::Execute::prepare
+    fn prepare(
+        &mut self,
+        _context: E,
+        _input: Arc<Self::Input>,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 }

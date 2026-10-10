@@ -7,7 +7,7 @@
 
 use super::{
     common::{PAGE_CACHE_SIZE, PAGE_SIZE},
-    ordered::{State, Tally, Worth, read_counter, until_applied},
+    ordered::{Stage, State, Tally, Worth, read_counter, until_applied},
     single_db_app::{Qmdb, qmdb_config},
 };
 use crate::{
@@ -53,6 +53,7 @@ use commonware_runtime::{
 use commonware_storage::{mmr, translator::TwoCap};
 use commonware_utils::{NZDuration, NZU64, NZUsize, acknowledgement::Exact, probability};
 use std::{
+    collections::HashMap,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     time::Duration,
 };
@@ -122,6 +123,37 @@ impl Worth for Input {
     fn worth(&self) -> u64 {
         self.body().0
     }
+}
+
+/// Asserts that every prepared input `tally` executed was prepared before it executed, and that
+/// nearly every executed input was prepared.
+///
+/// Marshal reports inputs final before it orders them, so the executor prepares them well ahead.
+/// Preparing only the inputs delivered behind others that have not executed leaves many more
+/// unprepared.
+fn assert_prepared_ahead(tally: &Tally<Input>) {
+    let mut first: HashMap<(Stage, Digest), usize> = HashMap::new();
+    for (position, entry) in tally.stages.lock().iter().enumerate() {
+        first.entry(*entry).or_insert(position);
+    }
+    let (mut executed, mut ahead) = (0, 0);
+    for (&(stage, digest), &position) in &first {
+        if stage != Stage::Executed {
+            continue;
+        }
+        executed += 1;
+        if let Some(&prepared) = first.get(&(Stage::Prepared, digest)) {
+            assert!(
+                prepared < position,
+                "an input executed before it was prepared"
+            );
+            ahead += 1;
+        }
+    }
+    assert!(
+        ahead * 10 >= executed * 9,
+        "only {ahead} of {executed} executed inputs were prepared"
+    );
 }
 
 /// A running validator.
@@ -484,6 +516,11 @@ fn validators_execute_certify_and_prune_one_chain() {
             }
         }
         assert!(validators[0].counter().await > 0);
+
+        // Each validator prepared inputs ahead of executing them.
+        for validator in &validators {
+            assert_prepared_ahead(&validator.tally);
+        }
 
         // Pruning reclaimed the first executed block and, once the engine released it, the first
         // input's body, so retention stays bounded.

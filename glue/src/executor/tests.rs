@@ -12,7 +12,7 @@ use commonware_consensus::{
         scheme::ed25519,
         types::{Ack, Activity, Certificate, Item},
     },
-    marshal::{Finalized, Ledger},
+    marshal::{Delivery as Reportable, Finalized, Ledger, Reported},
     types::{Epoch, OutputIndex},
 };
 use commonware_cryptography::{
@@ -31,7 +31,13 @@ use commonware_utils::{
     sync::Mutex,
 };
 use futures::{FutureExt as _, StreamExt as _};
-use std::{convert::Infallible, future, num::NonZeroUsize, time::Duration};
+use std::{
+    convert::Infallible,
+    future,
+    num::NonZeroUsize,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 
 /// A finalized input: an amount to add.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,8 +173,56 @@ struct Adder {
     synced: Arc<Mutex<Vec<u64>>>,
     /// The height of each block reported as certified.
     certified: Arc<Mutex<Vec<u64>>>,
+    /// The height of each input prepared, in order.
+    prepared: Arc<Mutex<Vec<u64>>>,
+    /// The height of each input whose preparation was aborted.
+    aborted: Arc<Mutex<Vec<u64>>>,
+    /// Keeps every preparation pending until it is aborted.
+    stall: bool,
+    /// Every preparation and execution, in the order they started.
+    events: Arc<Mutex<Vec<Event>>>,
+    /// Counts the clones of the adder.
+    clones: Clones,
+    /// How many clones of the adder existed when each execution started.
+    clones_at_execution: Arc<Mutex<Vec<usize>>>,
     /// Which block a state sync reaches.
     reach: Reach,
+}
+
+/// When an input reached an [`Adder`] hook.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Event {
+    Prepared(u64),
+    Executed(u64),
+}
+
+/// Counts its clones.
+#[derive(Default)]
+struct Clones(Arc<AtomicUsize>);
+
+impl Clone for Clones {
+    fn clone(&self) -> Self {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl Clones {
+    fn count(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Records the height of an input whose preparation is dropped before finishing.
+struct Aborted {
+    height: u64,
+    aborted: Arc<Mutex<Vec<u64>>>,
+}
+
+impl Drop for Aborted {
+    fn drop(&mut self) {
+        self.aborted.lock().push(self.height);
+    }
 }
 
 /// Which block [`Adder`]'s state sync reaches.
@@ -238,6 +292,10 @@ impl Execute<deterministic::Context> for Adder {
         ancestry: impl Ancestry<Total>,
         input: Arc<Input>,
     ) -> Total {
+        self.events
+            .lock()
+            .push(Event::Executed(context.height.get()));
+        self.clones_at_execution.lock().push(self.clones.count());
         let ancestry = ancestry.collect::<Vec<_>>().await;
         self.ancestries
             .lock()
@@ -248,6 +306,27 @@ impl Execute<deterministic::Context> for Adder {
             parent: parent.digest(),
             input: Some(context.input),
             total: parent.total + input.amount + self.bias,
+        }
+    }
+
+    /// Records the preparation before returning its future, as an implementation that resolves
+    /// what to prepare synchronously would.
+    fn prepare(
+        self,
+        _: deterministic::Context,
+        input: Arc<Input>,
+    ) -> impl Future<Output = ()> + Send {
+        let height = input.height.get();
+        self.prepared.lock().push(height);
+        self.events.lock().push(Event::Prepared(height));
+        async move {
+            if self.stall {
+                let _aborted = Aborted {
+                    height,
+                    aborted: Arc::clone(&self.aborted),
+                };
+                future::pending::<()>().await;
+            }
         }
     }
 }
@@ -351,8 +430,27 @@ impl Reporter for Consumer {
     }
 }
 
+/// What the test's marshal reports: an input at its index, or one that is final but not yet
+/// delivered.
+enum Report {
+    Finalized(Finalized<Input>),
+    Final(Arc<Input>),
+}
+
+impl Reportable for Report {
+    type Block = Input;
+    type Acknowledgement = Exact;
+
+    fn reported(self) -> Reported<Input> {
+        match self {
+            Self::Finalized(input) => Reported::Finalized(input),
+            Self::Final(input) => Reported::Final(input),
+        }
+    }
+}
+
 type TestExecutor = Executor<deterministic::Context, Adder, Marshal, Consumer, TwoCap, Exact>;
-type TestInbox = Inbox<Finalized<Input>>;
+type TestInbox = Inbox<Report>;
 type TestMailbox = Mailbox<Total>;
 
 /// The executor's collaborators, kept across restarts.
@@ -392,7 +490,7 @@ impl Parts {
             mailbox_size: NZUsize!(16),
         };
         let (executor, inbox, mailbox) =
-            TestExecutor::init::<Finalized<Input>>(context.child("executor"), config).await;
+            TestExecutor::init::<Report>(context.child("executor"), config).await;
         (executor.start(self.marshal.clone()), inbox, mailbox)
     }
 }
@@ -493,10 +591,18 @@ fn report(inbox: &mut TestInbox, inputs: &[(u64, u64)]) -> Vec<ExactWaiter> {
         .iter()
         .map(|&(index, amount)| {
             let (input, waiter) = input(index, amount);
-            assert_eq!(inbox.report(input), Feedback::Ok);
+            assert_eq!(inbox.report(Report::Finalized(input)), Feedback::Ok);
             waiter
         })
         .collect()
+}
+
+/// Reports the inputs `(index, amount)` as final before marshal orders them.
+fn report_final(inbox: &mut TestInbox, inputs: &[(u64, u64)]) {
+    for &(index, amount) in inputs {
+        let (input, _) = input(index, amount);
+        assert!(inbox.report(Report::Final(input.block)).accepted());
+    }
 }
 
 #[test]
@@ -1341,5 +1447,250 @@ fn certified_blocks_reach_the_application_once_executed() {
         let digest = chain[5].digest();
         checkpoints.report(Activity::Certified(certificate(&mut context, 2, digest)));
         until(&context, || *parts.adder.certified.lock() == vec![3, 5]).await;
+    });
+}
+
+#[test]
+fn final_inputs_are_prepared_before_they_execute() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts::default();
+        let (_executor, mut inbox, _) = parts.start(&context).await;
+        report_final(&mut inbox, &[(1, 5), (2, 7)]);
+        until(&context, || *parts.adder.prepared.lock() == vec![1, 2]).await;
+        assert!(parts.consumer.heights().is_empty());
+
+        // Once ordered, they execute without being prepared again.
+        report(&mut inbox, &[(1, 5), (2, 7)]);
+        until(&context, || parts.consumer.heights() == vec![1, 2]).await;
+        assert_eq!(parts.consumer.totals(), vec![5, 12]);
+        assert_eq!(*parts.adder.prepared.lock(), vec![1, 2]);
+    });
+}
+
+#[test]
+fn repeated_and_late_final_reports_are_not_prepared_again() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts::default();
+        let (_executor, mut inbox, _) = parts.start(&context).await;
+        report_final(&mut inbox, &[(1, 5), (1, 5)]);
+        until(&context, || *parts.adder.prepared.lock() == vec![1]).await;
+
+        // A report that repeats a prepared input, or follows its execution, prepares nothing.
+        report(&mut inbox, &[(1, 5)]);
+        report_final(&mut inbox, &[(1, 5)]);
+        until(&context, || parts.consumer.heights() == vec![1]).await;
+        report_final(&mut inbox, &[(1, 5)]);
+        parts.consumer.apply(1);
+        report_final(&mut inbox, &[(1, 5)]);
+        context.sleep(Duration::from_millis(10)).await;
+        assert_eq!(*parts.adder.prepared.lock(), vec![1]);
+    });
+}
+
+#[test]
+fn queued_inputs_are_prepared_but_one_that_executes_at_once_is_not() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts::default();
+        let (_executor, mut inbox, _) = parts.start(&context).await;
+
+        // The first input executes as it arrives, and the others wait behind it.
+        report(&mut inbox, &[(1, 5), (2, 7), (3, 3)]);
+        until(&context, || parts.consumer.heights() == vec![1, 2, 3]).await;
+        assert_eq!(*parts.adder.prepared.lock(), vec![2, 3]);
+
+        // An input that arrives once every earlier one executed has nothing to wait for.
+        report(&mut inbox, &[(4, 1)]);
+        until(&context, || parts.consumer.heights() == vec![1, 2, 3, 4]).await;
+        assert_eq!(*parts.adder.prepared.lock(), vec![2, 3]);
+    });
+}
+
+#[test]
+fn redelivered_inputs_at_or_below_applied_are_not_prepared_after_restart() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts::default();
+        let (executor, mut inbox, _) = parts.start(&context).await;
+        let mut waiters = report(&mut inbox, &[(1, 5), (2, 7), (3, 3)]);
+        until(&context, || parts.consumer.heights() == vec![1, 2, 3]).await;
+        for height in 1..=3 {
+            parts.consumer.apply(height);
+        }
+        until_acknowledged(&context, &mut waiters[2]).await;
+        executor.abort();
+        let _ = executor.await;
+        assert_eq!(*parts.adder.prepared.lock(), vec![2, 3]);
+
+        // Marshal redelivers the applied inputs, which are acknowledged without executing. The
+        // next input executes at once, and only the one queued behind it is prepared, even as
+        // marshal reports an applied one final again.
+        let restarted_context = context.child("restarted");
+        let (_executor, mut inbox, _) = parts.start(&restarted_context).await;
+        let mut waiters = report(&mut inbox, &[(1, 5), (2, 7), (3, 3), (4, 1), (5, 2)]);
+        report_final(&mut inbox, &[(2, 7)]);
+        until_acknowledged(&context, &mut waiters[2]).await;
+        until(&context, || parts.consumer.heights() == vec![1, 2, 3, 4, 5]).await;
+        context.sleep(Duration::from_millis(10)).await;
+        assert_eq!(*parts.adder.prepared.lock(), vec![2, 3, 5]);
+    });
+}
+
+#[test]
+fn nothing_is_prepared_without_a_base() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (_executor, mut inbox, mailbox) = parts.start(&context).await;
+
+        // Inputs reported while the chain has no base are not prepared, before or after the base
+        // is known.
+        report_final(&mut inbox, &[(11, 2), (12, 3)]);
+        report(&mut inbox, &[(11, 2), (12, 3)]);
+        context.sleep(Duration::from_millis(10)).await;
+        assert!(parts.adder.prepared.lock().is_empty());
+        assert!(mailbox.sync_to(certified(10, 1, 100)).await);
+        until(&context, || parts.consumer.heights() == vec![11, 12]).await;
+        assert!(parts.adder.prepared.lock().is_empty());
+
+        // Once it has a base, final inputs are prepared.
+        report_final(&mut inbox, &[(13, 4)]);
+        until(&context, || *parts.adder.prepared.lock() == vec![13]).await;
+    });
+}
+
+#[test]
+fn execution_does_not_wait_for_preparation_and_aborts_it() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            adder: Adder {
+                stall: true,
+                ..Adder::default()
+            },
+            ..Parts::default()
+        };
+        let (_executor, mut inbox, _) = parts.start(&context).await;
+        report_final(&mut inbox, &[(1, 5), (2, 7), (3, 3)]);
+        until(&context, || *parts.adder.prepared.lock() == vec![1, 2, 3]).await;
+
+        // Preparations never finish, yet each input executes and is acknowledged, and the
+        // preparation of each executed input is aborted.
+        let mut waiters = report(&mut inbox, &[(1, 5), (2, 7)]);
+        until(&context, || parts.consumer.heights() == vec![1, 2]).await;
+        parts.consumer.apply(1);
+        parts.consumer.apply(2);
+        until_acknowledged(&context, &mut waiters[1]).await;
+        until(&context, || {
+            let mut aborted = parts.adder.aborted.lock().clone();
+            aborted.sort_unstable();
+            aborted == vec![1, 2]
+        })
+        .await;
+    });
+}
+
+#[test]
+fn a_burst_of_final_inputs_does_not_delay_execution() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts::default();
+        let (_executor, mut inbox, _) = parts.start(&context).await;
+        let finals: Vec<_> = (100..1_100).map(|index| (index, 1)).collect();
+        report_final(&mut inbox, &finals);
+        let before = parts.adder.clones.count();
+        report(&mut inbox, &[(1, 5)]);
+        until(&context, || parts.consumer.heights() == vec![1]).await;
+
+        // The input executed before the executor cloned the application for most of the
+        // preparations reported ahead of it.
+        let at_execution = parts.adder.clones_at_execution.lock()[0];
+        assert!(
+            at_execution - before < 100,
+            "execution waited for {} preparations",
+            at_execution - before
+        );
+        until(&context, || {
+            parts.adder.prepared.lock().len() == finals.len()
+        })
+        .await;
+    });
+}
+
+#[test]
+fn preparation_runs_on_its_own_task() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts::default();
+        let (_executor, mut inbox, _) = parts.start(&context).await;
+
+        // The second input is prepared as it queues, but its preparation is called on its own
+        // task, which runs only once the executor yields, after the first input started
+        // executing.
+        report(&mut inbox, &[(1, 5), (2, 7)]);
+        until(&context, || parts.consumer.heights() == vec![1, 2]).await;
+        let events = parts.adder.events.lock().clone();
+        let prepared = events.iter().position(|event| *event == Event::Prepared(2));
+        let executed = events.iter().position(|event| *event == Event::Executed(1));
+        assert!(executed.unwrap() < prepared.unwrap(), "{events:?}");
+    });
+}
+
+#[test]
+fn final_reports_of_redeliverable_inputs_are_not_prepared_after_restart() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts::default();
+        let (executor, mut inbox, _) = parts.start(&context).await;
+        let mut waiters = report(&mut inbox, &[(1, 5), (2, 7), (3, 3)]);
+        until(&context, || parts.consumer.heights() == vec![1, 2, 3]).await;
+        for height in 1..=3 {
+            parts.consumer.apply(height);
+        }
+        until_acknowledged(&context, &mut waiters[2]).await;
+        executor.abort();
+        let _ = executor.await;
+        assert_eq!(*parts.adder.prepared.lock(), vec![2, 3]);
+
+        // Marshal reports the applied inputs final before redelivering them, and they are not
+        // prepared. A new input is.
+        let restarted_context = context.child("restarted");
+        let (_executor, mut inbox, _) = parts.start(&restarted_context).await;
+        report_final(&mut inbox, &[(1, 5), (2, 7), (3, 3), (4, 1)]);
+        until(&context, || *parts.adder.prepared.lock() == vec![2, 3, 4]).await;
+        report(&mut inbox, &[(1, 5), (2, 7), (3, 3), (4, 1)]);
+        until(&context, || parts.consumer.heights() == vec![1, 2, 3, 4]).await;
+        context.sleep(Duration::from_millis(10)).await;
+        assert_eq!(*parts.adder.prepared.lock(), vec![2, 3, 4]);
+    });
+}
+
+#[test]
+fn preparations_of_inputs_a_state_sync_skipped_are_released() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            adder: Adder {
+                stall: true,
+                ..Adder::default()
+            },
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (_executor, mut inbox, mailbox) = parts.start(&context).await;
+        assert!(mailbox.sync_to(certified(10, 1, 100)).await);
+        until(&context, || parts.adder.resumed.lock().len() == 1).await;
+
+        // Marshal resumed from a floor below the base, so it reports inputs the base covers
+        // final. The base's own input is known and not prepared.
+        report_final(&mut inbox, &[(9, 5), (10, 1), (11, 2)]);
+        until(&context, || *parts.adder.prepared.lock() == vec![9, 11]).await;
+
+        // Delivering them acknowledges those at or below the base, executes the rest, and
+        // releases every preparation.
+        let mut waiters = report(&mut inbox, &[(9, 5), (10, 1), (11, 2)]);
+        until_acknowledged(&context, &mut waiters[0]).await;
+        until(&context, || parts.consumer.heights() == vec![11]).await;
+        until(&context, || {
+            let mut aborted = parts.adder.aborted.lock().clone();
+            aborted.sort_unstable();
+            aborted == vec![9, 11]
+        })
+        .await;
     });
 }

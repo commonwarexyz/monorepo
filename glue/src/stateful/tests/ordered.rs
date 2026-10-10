@@ -27,7 +27,7 @@ use commonware_consensus::{
         types::{Ack, Activity, Certificate, Item},
     },
     ancestry::Ancestry,
-    marshal::{Finalized, Ledger, Linear},
+    marshal::{Delivery, Finalized, Ledger, Linear, Reported},
     types::{Epoch, Height, OutputIndex},
 };
 use commonware_cryptography::{
@@ -254,12 +254,22 @@ pub(super) trait Worth {
     fn worth(&self) -> u64;
 }
 
+/// When an input reached a [`Tally`] hook.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Stage {
+    Prepared,
+    Executed,
+}
+
 /// Adds each ordered input's worth to the counter, rejecting inputs worth a multiple of seven.
+/// Preparing an input prefetches the counter.
 pub(super) struct Tally<I> {
     /// The first input executed.
     pub(super) first: Arc<Mutex<Option<Arc<I>>>>,
     /// Heights of every applied block, in order.
     pub(super) applied: Arc<Mutex<Vec<u64>>>,
+    /// The digest of every input prepared or executed, in the order the hooks started.
+    pub(super) stages: Arc<Mutex<Vec<(Stage, Digest)>>>,
 }
 
 impl<I> Clone for Tally<I> {
@@ -267,6 +277,7 @@ impl<I> Clone for Tally<I> {
         Self {
             first: Arc::clone(&self.first),
             applied: Arc::clone(&self.applied),
+            stages: Arc::clone(&self.stages),
         }
     }
 }
@@ -276,6 +287,7 @@ impl<I> Default for Tally<I> {
         Self {
             first: Arc::default(),
             applied: Arc::default(),
+            stages: Arc::default(),
         }
     }
 }
@@ -309,6 +321,7 @@ impl<I: Block<Digest = Digest> + Worth> Application<deterministic::Context> for 
         batches: Batches,
     ) -> Execution<Self, deterministic::Context> {
         self.first.lock().get_or_insert_with(|| Arc::clone(&input));
+        self.stages.lock().push((Stage::Executed, input.digest()));
         let parent = Box::pin(ancestry)
             .next()
             .await
@@ -336,6 +349,16 @@ impl<I: Block<Digest = Digest> + Worth> Application<deterministic::Context> for 
     ) {
         self.applied.lock().push(block.height.get());
     }
+
+    async fn prepare(
+        &mut self,
+        _: deterministic::Context,
+        input: Arc<I>,
+        readers: <Databases as DatabaseSet<deterministic::Context>>::Readers,
+    ) {
+        self.stages.lock().push((Stage::Prepared, input.digest()));
+        readers.prefetch(&[&counter_key()]).await;
+    }
 }
 
 /// Waits until every tally applied a block at or above `height`.
@@ -361,6 +384,10 @@ type Gate = Arc<Mutex<Option<(u64, oneshot::Receiver<()>)>>>;
 struct Counter {
     /// Heights of every execution, in order.
     executed: Arc<Mutex<Vec<u64>>>,
+    /// Heights of every input prepared, in order.
+    prepared: Arc<Mutex<Vec<u64>>>,
+    /// Heights of every input whose counter was prefetched, in order.
+    prefetched: Arc<Mutex<Vec<u64>>>,
     /// Height, and the counter before and after, of every applied block, in order.
     applied: Arc<Mutex<Vec<(u64, u64, u64)>>>,
     /// Holds [`Application::capture`] for the block at a height until released.
@@ -466,6 +493,17 @@ impl Application<deterministic::Context> for Counter {
             .lock()
             .push((block.height.get(), before, after));
     }
+
+    async fn prepare(
+        &mut self,
+        _: deterministic::Context,
+        input: Arc<Input>,
+        readers: <Databases as DatabaseSet<deterministic::Context>>::Readers,
+    ) {
+        self.prepared.lock().push(input.height.get());
+        readers.prefetch(&[&counter_key()]).await;
+        self.prefetched.lock().push(input.height.get());
+    }
 }
 
 /// The engine's marshal, which ignores prunes.
@@ -487,6 +525,25 @@ impl Ledger for Marshal {
 
 type TestMailbox = Mailbox<deterministic::Context, Counter>;
 type Chain = executor::Mailbox<State>;
+
+/// What the test's marshal reports: an input at its index, or one that is final but not yet
+/// delivered.
+enum Report {
+    Finalized(Finalized<Input>),
+    Final(Arc<Input>),
+}
+
+impl Delivery for Report {
+    type Block = Input;
+    type Acknowledgement = Exact;
+
+    fn reported(self) -> Reported<Input> {
+        match self {
+            Self::Finalized(input) => Reported::Finalized(input),
+            Self::Final(input) => Reported::Final(input),
+        }
+    }
+}
 
 /// The executed chain as stateful sees it, recording the prunes stateful requests.
 #[derive(Clone)]
@@ -515,7 +572,7 @@ impl Linear for Recorded {}
 struct Running {
     stateful: Handle<()>,
     executor: Handle<Result<(), Halt>>,
-    inbox: Inbox<Finalized<Input>>,
+    inbox: Inbox<Report>,
     mailbox: TestMailbox,
     chain: Chain,
 }
@@ -536,17 +593,27 @@ impl Running {
             .iter()
             .map(|&(index, amount)| {
                 let (acknowledgement, waiter) = Exact::handle();
-                let _ = self.inbox.report(Finalized {
+                let _ = self.inbox.report(Report::Finalized(Finalized {
                     index: OutputIndex::new(index),
                     block: Arc::new(Input {
                         height: Height::new(index),
                         amount,
                     }),
                     acknowledgement,
-                });
+                }));
                 waiter
             })
             .collect()
+    }
+
+    /// Reports inputs as `(index, amount)` that are final but not yet ordered.
+    fn report_final(&mut self, inputs: &[(u64, u64)]) {
+        for &(index, amount) in inputs {
+            let _ = self.inbox.report(Report::Final(Arc::new(Input {
+                height: Height::new(index),
+                amount,
+            })));
+        }
     }
 
     /// Returns the applied counter.
@@ -671,32 +738,31 @@ impl Node {
                 prune_config: self.prune_config,
             },
         );
-        let (executor, inbox, chain) =
-            Executor::<_, _, _, _, TwoCap, Exact>::init::<Finalized<Input>>(
-                context.child("executor"),
-                executor::Config {
-                    execute: mailbox.clone(),
-                    consumer: consumer(mailbox.clone()),
-                    ack_window: Marshal.ack_window(),
-                    epoch: Epoch::zero(),
-                    start: if self.checkpoint {
-                        executor::Start::Checkpoint
-                    } else {
-                        executor::Start::Genesis
-                    },
-                    store: StoreConfig {
-                        partition_prefix: self.name.into(),
-                        translator: TwoCap,
-                        page_cache,
-                        items_per_section: NZU64!(4),
-                        write_buffer: NZUsize!(1024),
-                        replay_buffer: NZUsize!(1024),
-                        codec_config: (),
-                    },
-                    mailbox_size: NZUsize!(16),
+        let (executor, inbox, chain) = Executor::<_, _, _, _, TwoCap, Exact>::init::<Report>(
+            context.child("executor"),
+            executor::Config {
+                execute: mailbox.clone(),
+                consumer: consumer(mailbox.clone()),
+                ack_window: Marshal.ack_window(),
+                epoch: Epoch::zero(),
+                start: if self.checkpoint {
+                    executor::Start::Checkpoint
+                } else {
+                    executor::Start::Genesis
                 },
-            )
-            .await;
+                store: StoreConfig {
+                    partition_prefix: self.name.into(),
+                    translator: TwoCap,
+                    page_cache,
+                    items_per_section: NZU64!(4),
+                    write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                    codec_config: (),
+                },
+                mailbox_size: NZUsize!(16),
+            },
+        )
+        .await;
         let recorded = Recorded {
             chain: chain.clone(),
             pruned: Arc::clone(&self.pruned),
@@ -1094,5 +1160,46 @@ fn pruning_keeps_what_peers_sync_to() {
         assert!(oldest > Location::new(0));
         assert!(oldest <= checkpoint.range.start());
         assert_eq!(oldest_retained(&without).await, Location::new(0));
+    });
+}
+
+#[test]
+fn preparation_prefetches_through_readers_without_changing_results() {
+    deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+        let node = Node::default();
+        let mut running = node.start(&context).await;
+        acknowledged(running.report(&[(1, 5)])).await;
+
+        // Final inputs are prepared before they are ordered, prefetching applied state.
+        let release = node.counter.gate(2);
+        running.report_final(&[(2, 7), (3, 3)]);
+        while node.counter.prefetched.lock().len() < 2 {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(*node.counter.executed.lock(), vec![1]);
+
+        // Preparation proceeds while an earlier block is held mid-application.
+        let mut waiters = running.report(&[(2, 7), (3, 3)]);
+        while node.counter.executed.lock().len() < 3 {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        running.report_final(&[(4, 1)]);
+        while node.counter.prefetched.lock().len() < 3 {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(*node.counter.applied.lock(), vec![(1, 0, 5)]);
+
+        // Results are those of a run without preparation, and nothing was prepared twice.
+        release.send(()).expect("block 2 is held");
+        waiters.extend(running.report(&[(4, 1)]));
+        acknowledged(waiters).await;
+        assert_eq!(running.counter().await, 16);
+        assert_eq!(
+            *node.counter.applied.lock(),
+            vec![(1, 0, 5), (2, 5, 12), (3, 12, 15), (4, 15, 16)]
+        );
+        let mut prepared = node.counter.prepared.lock().clone();
+        prepared.sort_unstable();
+        assert_eq!(prepared, vec![2, 3, 4]);
     });
 }
