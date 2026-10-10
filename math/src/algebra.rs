@@ -136,7 +136,7 @@ pub trait Additive:
     ///
     /// This has a default implementation involving a clone.
     ///
-    /// This can be overriden if a more efficient implementation is available.
+    /// This can be overridden if a more efficient implementation is available.
     fn double(&mut self) {
         *self += &self.clone();
     }
@@ -190,7 +190,7 @@ pub trait Multiplicative:
     ///
     /// This has a default implementation involving a clone.
     ///
-    /// This can be overriden for a specific type that's better.
+    /// This can be overridden for a specific type that's better.
     fn square(&mut self) {
         *self *= &self.clone();
     }
