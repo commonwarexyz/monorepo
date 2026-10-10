@@ -369,6 +369,8 @@ pub(super) fn read_many(
     data_offset: u64,
     ranges: &[(u64, usize)],
 ) -> BoxStream<'static, Completion> {
+    // Translate each range to its physical file range, keeping its index so the stream can
+    // name it. An offset beyond the file's address space fails the call before anything is read.
     let mut reads = Vec::with_capacity(ranges.len());
     for (index, &(offset, len)) in ranges.iter().enumerate() {
         let Some(offset) = offset.checked_add(data_offset) else {
@@ -376,6 +378,9 @@ pub(super) fn read_many(
         };
         reads.push(Read { index, offset, len });
     }
+
+    // Run every [NR_EVENTS] reads as one submission on its own blocking task. The tasks share
+    // the channel the stream drains, so completions arrive in whatever order they land.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut reads = reads.into_iter().peekable();
     while reads.peek().is_some() {
