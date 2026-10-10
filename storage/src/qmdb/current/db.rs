@@ -218,6 +218,41 @@ where
         self.any.get_many(keys).await
     }
 
+    /// Return a future that reads the storage holding the committed operations of `keys` into
+    /// the page cache, along with the ops-tree nodes that merkleizing a change to those keys
+    /// reads: the node covering each touched bitmap chunk at the grafting height.
+    ///
+    /// See [any::db::Db::prefetch] for the contract: locations resolve under the caller's borrow
+    /// in time linear in the keys, the returned future borrows nothing from the database,
+    /// warming is best effort, only committed state is warmed, and warmed pages share the same
+    /// page-cache sizing contract.
+    pub fn prefetch(
+        &self,
+        keys: &[&U::Key],
+    ) -> impl core::future::Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S> {
+        let positions = self.any.committed_positions(keys);
+        let grafting_height = grafting::height::<N>();
+        let graftable = grafting::graftable_chunks::<F>(*self.any.log.size(), grafting_height);
+        let pruned = self.any.bitmap.pruned_chunks() as u64;
+        let mut nodes = Vec::new();
+        for &position in &positions {
+            let chunk = position >> grafting_height;
+            if chunk >= graftable {
+                break;
+            }
+            let node =
+                F::subtree_root_position(Location::new(chunk << grafting_height), grafting_height);
+            if chunk >= pruned && nodes.last() != Some(&node) {
+                nodes.push(node);
+            }
+        }
+        let operations = self.any.log.prefetch(&positions);
+        let nodes = self.any.log.merkle.prefetch_nodes(&nodes);
+        async move {
+            futures::join!(operations, nodes);
+        }
+    }
+
     /// Return the retained operation range `[start, end)`.
     ///
     /// Proof generation also requires the necessary Merkle nodes to be retained. Proofs against

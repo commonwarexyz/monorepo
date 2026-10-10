@@ -222,6 +222,40 @@ where
         self.get_many_map(keys, |data, _| data.into_value()).await
     }
 
+    /// Return a future that reads the storage holding the committed operations of `keys` into
+    /// the page cache, so later reads of those keys are served without storage I/O while the
+    /// pages stay cached.
+    ///
+    /// Locations resolve now, under the caller's borrow, with one index lookup per key and a sort
+    /// of the resulting locations, so a caller holding a lock across this call holds it for that
+    /// work. The returned future then reads storage without borrowing the database: it can run
+    /// while the database is read, mutated, pruned, or dropped. Warming is best effort and
+    /// returns nothing. Absent keys and bytes still in the log's write buffer (which reads serve
+    /// from memory) are skipped, failures are logged, and dropping the future at any point is
+    /// safe. Pending batches are ignored: a key resolves to its committed location, if any.
+    ///
+    /// Warmed pages survive until their first read only while the page cache has room for them
+    /// alongside the pages read meanwhile. In a page cache of capacity `C`, the pages warmed
+    /// (`W`), plus pages admitted ahead of their first read by other prefetches and pages read
+    /// again before this prefetch's pages are read, must stay below `C - max(C / 10, 1)` (see
+    /// [commonware_runtime::buffer::paged::Sealed::warm]).
+    pub fn prefetch(
+        &self,
+        keys: &[&U::Key],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S> {
+        self.log.prefetch(&self.committed_positions(keys))
+    }
+
+    /// The sorted, distinct committed locations the index holds for `keys`, including those of
+    /// colliding keys.
+    pub(crate) fn committed_positions(&self, keys: &[&U::Key]) -> Vec<u64> {
+        let mut positions = Vec::with_capacity(keys.len());
+        self.snapshot.get_many(keys, |_, &loc| positions.push(*loc));
+        positions.sort_unstable();
+        positions.dedup();
+        positions
+    }
+
     /// Like [`Self::get_many`] but maps each matched update through `map`, which takes the
     /// update by value along with the committed location it was read from. A key repeated in
     /// `keys` receives a clone of its update in every slot but the last.
