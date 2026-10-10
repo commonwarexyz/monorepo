@@ -1064,6 +1064,14 @@ pub(crate) mod test {
             positions.iter().map(|_| None).collect()
         }
 
+        #[commonware_macros::stability(ALPHA)]
+        fn prefetch(
+            &self,
+            positions: &[u64],
+        ) -> impl Future<Output = ()> + Send + 'static + use<C> {
+            self.0.prefetch(positions)
+        }
+
         fn replay(
             &self,
             range: Range<u64>,
