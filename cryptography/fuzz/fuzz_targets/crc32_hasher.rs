@@ -5,7 +5,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     Hasher,
     crc32::{Crc32 as OurCrc32, Digest},
-    fuzz::Plan,
+    fuzz::{BatchPlan, Plan},
 };
 use crc::{CRC_32_ISCSI, Crc};
 use libfuzzer_sys::fuzz_target;
@@ -31,6 +31,8 @@ enum Operation {
     Determinism(Vec<Vec<u8>>),
     /// One-shot and pair entrypoints match streaming.
     HasherPlan(Plan<OurCrc32>),
+    /// Batch entrypoints match streaming.
+    HasherBatchPlan(BatchPlan<OurCrc32>),
 }
 
 fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
@@ -149,5 +151,6 @@ fuzz_target!(|op: Operation| {
         Operation::DigestU32Roundtrip(data) => fuzz_digest_u32_roundtrip(&data),
         Operation::Determinism(chunks) => fuzz_determinism(&chunks),
         Operation::HasherPlan(plan) => plan.run(),
+        Operation::HasherBatchPlan(plan) => plan.run(),
     }
 });
