@@ -38,6 +38,7 @@ use std::{
     collections::{VecDeque, hash_map::Entry},
     mem,
     num::{NonZeroU16, NonZeroUsize},
+    ops::Range,
     pin::{Pin, pin},
     sync::{
         Arc, Weak,
@@ -133,6 +134,19 @@ impl Drop for PageFetchGuard<'_> {
 /// before this read registers its batch, so overlapping reads can read such a page more than once.
 const MISSES_PER_LOCK: usize = 64;
 
+/// Most consecutive pages a [Batch] reads with one range. At the common 4 KiB page size a full
+/// run is a ~256 KiB read, already on the flat part of NVMe sequential-read efficiency, so longer
+/// runs would only grow the read's buffer.
+const MAX_RUN_PAGES: usize = 64;
+
+/// Consecutive pages of a [Batch] that one range of its blob read covers.
+struct Run {
+    /// The run's physical range in the blob.
+    physical: (u64, usize),
+    /// The indices of its pages in the batch.
+    pages: Range<usize>,
+}
+
 /// The read of a [Batch]. It fails if the read fails or does not yield every page exactly once.
 type BatchFuture = BoxFuture<'static, Result<(), Error>>;
 
@@ -187,9 +201,11 @@ impl Batch {
         }
     }
 
-    /// Read the batch's pages from `physical` (their physical ranges in `blob`), publishing each
-    /// as it arrives. A page failing validation is published as failed while the others continue.
-    /// A read error, or a read that does not yield every page exactly once, fails the batch.
+    /// Read the batch's pages from `physical` (their physical ranges in `blob`, one per page),
+    /// publishing each as it arrives. Consecutive pages are read as runs of up to [MAX_RUN_PAGES]
+    /// with one range each, and a run's pages are published as it arrives. A page failing
+    /// validation is published as failed while the others continue. A read error, or a read that
+    /// does not yield every run exactly once at its full length, fails the batch.
     ///
     /// The future owns `_retire` from its creation, so the batch retires once the future ends or
     /// is dropped, polled or not.
@@ -202,18 +218,51 @@ impl Batch {
         _retire: RetireGuard,
     ) -> Result<(), Error> {
         let result = async {
+            // A page whose physical range starts where the last run ends extends that run.
+            let mut runs: Vec<Run> = Vec::new();
+            for (index, &(start, len)) in physical.iter().enumerate() {
+                match runs.last_mut() {
+                    Some(run)
+                        if run.pages.len() < MAX_RUN_PAGES
+                            && run.physical.0.checked_add(run.physical.1 as u64) == Some(start) =>
+                    {
+                        run.physical.1 += len;
+                        run.pages.end = index + 1;
+                    }
+                    _ => runs.push(Run {
+                        physical: (start, len),
+                        pages: index..index + 1,
+                    }),
+                }
+            }
+            let ranges: Vec<(u64, usize)> = runs.iter().map(|run| run.physical).collect();
+            let mut unread: Vec<Option<Range<usize>>> =
+                runs.iter().map(|run| Some(run.pages.clone())).collect();
+
             // CacheRef retains the pages, so the source pages need not remain in the OS page
             // cache.
-            let mut stream = pin!(blob.read_many(&physical, ReadOptions::DONT_CACHE));
+            let mut stream = pin!(blob.read_many(&ranges, ReadOptions::DONT_CACHE));
             while let Some((index, bufs)) = stream.try_next().await? {
-                // Each page is yielded exactly once (see Blob::read_many).
-                let Some(&page_num) = self.pages.get(index) else {
+                // Each run is yielded exactly once (see Blob::read_many) and holds its length.
+                let Some(pages) = unread.get_mut(index).and_then(Option::take) else {
                     return Err(Error::ReadFailed);
                 };
-                let page = validate_physical_page(bufs.coalesce())
-                    .and_then(|(page, _)| cacheable_page(page, page_num, page_size))
-                    .inspect_err(|err| error!(page_num, ?err, "Batched page failed validation"));
-                self.publish(&cache, index, page)?;
+                let bytes = bufs.coalesce().freeze();
+                if bytes.len() != ranges[index].1 {
+                    return Err(Error::ReadFailed);
+                }
+                let mut start = 0;
+                for index in pages {
+                    let len = physical[index].1;
+                    let page_num = self.pages[index];
+                    let page = validate_physical_page(bytes.slice(start..start + len))
+                        .and_then(|(page, _)| cacheable_page(page, page_num, page_size))
+                        .inspect_err(|err| {
+                            error!(page_num, ?err, "Batched page failed validation")
+                        });
+                    start += len;
+                    self.publish(&cache, index, page)?;
+                }
             }
             if self.state.lock().joiners.iter().any(Option::is_some) {
                 return Err(Error::ReadFailed);
@@ -793,8 +842,9 @@ impl CacheRef {
     ///
     /// Each page the ranges touch is copied from the cache when resident, joined when another
     /// reader is fetching it, alone or in a batch, and otherwise read with one batched blob read
-    /// that validates, caches, and serves each page as it arrives. Other readers that miss a page
-    /// of that batch join it. Serving never depends on the cache still holding a page, so no page
+    /// that validates, caches, and serves each page as it arrives, reading each run of up to
+    /// [MAX_RUN_PAGES] consecutive pages as one range. Other readers that miss a page of that
+    /// batch join it. Serving never depends on the cache still holding a page, so no page
     /// this call reads is read again to serve it. A page failing validation returns an error, like
     /// a single fetch, as does a failed read of this call's own batch, or of a joined batch while
     /// this call still awaits one of its pages. Pages cached before it remain, subject to normal
@@ -1158,8 +1208,8 @@ async fn fetch_cacheable_page(
     cacheable_page(page, page_num, page_size)
 }
 
-/// Return a validated page's logical bytes, rejecting partial pages because cache entries must
-/// always contain a full logical page.
+/// Return a validated page's logical bytes, rejecting partial pages because cache entries and
+/// batched reads both require a full logical page.
 fn cacheable_page(page: IoBuf, page_num: u64, page_size: NonZeroU16) -> Result<IoBuf, Error> {
     // We should never be fetching partial pages through the page cache. This can happen if a
     // non-last page is corrupted and falls back to a partial CRC.
@@ -1779,7 +1829,9 @@ mod tests {
                 .read_after_misses(&blob, 0, pending)
                 .await
                 .unwrap();
-            assert_eq!(recordings.snapshot().reads.len(), 5);
+
+            // Page 0 is read alone and the consecutive pages 3-6 as one run.
+            assert_eq!(recordings.snapshot().reads.len(), 2);
             for ((offset, len), buf) in ranges.into_iter().zip(&bufs) {
                 let expected: Vec<u8> = (offset..offset + len as u64)
                     .map(|o| (o / PAGE_SIZE_U64) as u8)
@@ -1817,6 +1869,34 @@ mod tests {
                 .unwrap();
             assert_eq!((inside, straddling), ([0], [3, 4]));
             assert!(recordings.snapshot().reads.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_read_after_misses_coalesces_runs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (recording, recordings) = crate::mocks::RecordingContext::new(context);
+            let blob = checksummed_blob(&recording, 140).await;
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(4));
+
+            // One byte from each of pages 0-129 and from page 135. The consecutive pages split
+            // into runs of at most MAX_RUN_PAGES (64, 64, and 2), and page 135 is read alone.
+            let pages: Vec<u64> = (0..130).chain([135]).collect();
+            let mut bufs = vec![[0u8; 1]; pages.len()];
+            let pending: Vec<(&mut [u8], u64)> = bufs
+                .iter_mut()
+                .zip(&pages)
+                .map(|(buf, &page)| (buf.as_mut_slice(), page * PAGE_SIZE_U64 + 1))
+                .collect();
+            cache_ref
+                .read_after_misses(&blob, 0, pending)
+                .await
+                .unwrap();
+            assert_eq!(recordings.snapshot().reads.len(), 4);
+            for (buf, page) in bufs.iter().zip(pages) {
+                assert_eq!(buf, &[page as u8]);
+            }
         });
     }
 
@@ -1879,8 +1959,8 @@ mod tests {
             }
             recordings.clear();
 
-            // Caching the 10 missing pages evicts most of them before they are served, but each
-            // is still read from the blob once.
+            // Caching the 10 missing pages evicts most of them before they are served, but the
+            // one read of their run serves them all.
             let size = 40 * PAGE_SIZE_U64;
             let view = View {
                 blob: &blob,
@@ -1898,7 +1978,7 @@ mod tests {
                 .unwrap();
             assert_eq!(served, 0);
             assert_eq!(buf, (0u8..10).collect::<Vec<_>>());
-            assert_eq!(recordings.snapshot().reads.len(), offsets.len());
+            assert_eq!(recordings.snapshot().reads.len(), 1);
         });
     }
 
@@ -1910,7 +1990,8 @@ mod tests {
             let blob = checksummed_blob(&recording, 6).await;
 
             // Page 1 is resident in a 2-page cache. Caching the five other pages one item spans
-            // evicts it, yet it is never read from the blob.
+            // evicts it, yet it is never read from the blob: page 0 and pages 2-5 are read as two
+            // runs.
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2));
             let mut buf = [0u8; 1];
             cache_ref
@@ -1936,7 +2017,7 @@ mod tests {
             assert_eq!(served, 0);
             let expected: Vec<u8> = (0..size).map(|o| (o / PAGE_SIZE_U64) as u8).collect();
             assert_eq!(buf, expected);
-            assert_eq!(recordings.snapshot().reads.len(), 5);
+            assert_eq!(recordings.snapshot().reads.len(), 2);
         });
     }
 
@@ -1962,7 +2043,8 @@ mod tests {
         bytes
     }
 
-    /// Serves [full_page]s, holding each page's first read until its gate opens.
+    /// Serves [full_page]s, holding each read until the gates of all its pages open. A page's
+    /// gate is taken by the first read that covers it.
     struct GatedBlob {
         gates: Mutex<Vec<Option<oneshot::Receiver<()>>>>,
         reads: Mutex<Vec<usize>>,
@@ -2014,20 +2096,32 @@ mod tests {
         async fn read_at_buf(
             &self,
             offset: u64,
-            _len: usize,
+            len: usize,
             _bufs: impl Into<IoBufsMut> + Send,
             _options: ReadOptions,
         ) -> Result<IoBufsMut, Error> {
-            let page = (offset / (PAGE_SIZE_U64 + CHECKSUM_SIZE)) as usize;
-            self.reads.lock().push(page);
-            let corrupted = self.corrupt.lock().take_if(|corrupt| *corrupt == page);
-            let bytes = if corrupted.is_some() {
-                corrupt_page(page)
-            } else {
-                full_page(page)
-            };
-            let gate = self.gates.lock()[page].take();
-            if let Some(gate) = gate {
+            let physical_page_size = (PAGE_SIZE_U64 + CHECKSUM_SIZE) as usize;
+            let first = offset as usize / physical_page_size;
+            let pages = first..first + len / physical_page_size;
+            self.reads.lock().extend(pages.clone());
+            let corrupted = self
+                .corrupt
+                .lock()
+                .take_if(|corrupt| pages.contains(corrupt));
+            let bytes: Vec<u8> = pages
+                .clone()
+                .flat_map(|page| {
+                    if corrupted == Some(page) {
+                        corrupt_page(page)
+                    } else {
+                        full_page(page)
+                    }
+                })
+                .collect();
+            let gates: Vec<_> = pages
+                .filter_map(|page| self.gates.lock()[page].take())
+                .collect();
+            for gate in gates {
                 let _ = gate.await;
             }
             Ok(IoBufsMut::from(bytes))
@@ -2083,10 +2177,15 @@ mod tests {
     }
 
     impl Step {
-        /// Yield [full_page] `index` as the read of the range at `index`.
-        fn page(index: usize) -> Self {
-            Self::Yield(index, full_page(index))
+        /// Yield [full_page] `page` as the read of the range at `index`.
+        fn page(index: usize, page: usize) -> Self {
+            Self::Yield(index, full_page(page))
         }
+    }
+
+    /// The physical bytes of a run of `pages`, as one read of their ranges yields them.
+    fn run_bytes(pages: Range<usize>) -> Vec<u8> {
+        pages.flat_map(full_page).collect()
     }
 
     /// A blob whose first batched read yields its script, whatever ranges it is asked for. It
@@ -2398,21 +2497,21 @@ mod tests {
     fn test_joined_read_finishes_before_its_batch() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let (blob, mut opens) = GatedBlob::new(3);
+            let (blob, mut opens) = GatedBlob::new(5);
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
-            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2]));
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 2, 4]));
             assert!(poll!(first.as_mut()).is_pending());
 
-            // A read of page 1 completes once that page arrives, while the batch waits for the
+            // A read of page 2 completes once that page arrives, while the batch waits for the
             // others.
-            let mut second = pin!(read_first_byte(&blob, &cache_ref, 1));
+            let mut second = pin!(read_first_byte(&blob, &cache_ref, 2));
             assert!(poll!(second.as_mut()).is_pending());
-            opens[1].take().unwrap().send(()).unwrap();
-            assert_eq!(second.await.unwrap(), 1);
+            opens[2].take().unwrap().send(()).unwrap();
+            assert_eq!(second.await.unwrap(), 2);
             assert_eq!(joiners(&cache_ref), [Some((0, 0)), None, Some((0, 0))]);
 
             open(&mut opens);
-            assert_eq!(first.await.unwrap(), [0, 1, 2]);
+            assert_eq!(first.await.unwrap(), [0, 2, 4]);
             assert_idle(&cache_ref);
         });
     }
@@ -2422,13 +2521,13 @@ mod tests {
         const PAGES: usize = 32;
         const JOINERS: usize = 4;
 
-        // Stream polls while each page of one batch arrives on its own, with `joiners` other
-        // reads of the same pages waiting on the batch.
+        // Stream polls while each page of one batch arrives on its own (every other page, so no
+        // run joins them), with `joiners` other reads of the same pages waiting on the batch.
         let polls = |joiners: usize| {
             deterministic::Runner::default().start(|context| async move {
-                let (blob, mut opens) = GatedBlob::new(PAGES);
+                let (blob, mut opens) = GatedBlob::new(2 * PAGES);
                 let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2 * PAGES));
-                let pages: Vec<u64> = (0..PAGES as u64).collect();
+                let pages: Vec<u64> = (0..PAGES as u64).map(|page| 2 * page).collect();
                 let reads: Vec<_> = (0..=joiners)
                     .map(|_| {
                         let (blob, cache_ref, pages) =
@@ -2444,12 +2543,12 @@ mod tests {
                     let _ = open.take().unwrap().send(());
                     context.sleep(Duration::from_millis(1)).await;
                 }
-                let expected: Vec<u8> = (0..PAGES as u8).collect();
+                let expected: Vec<u8> = (0..PAGES as u8).map(|page| 2 * page).collect();
                 for read in futures::future::join_all(reads).await {
                     assert_eq!(read.unwrap(), expected);
                 }
                 for page in 0..PAGES {
-                    assert_eq!(blob.reads_of(page), 1);
+                    assert_eq!(blob.reads_of(2 * page), 1);
                 }
                 blob.polls.load(Ordering::Relaxed) - before
             })
@@ -2476,7 +2575,7 @@ mod tests {
 
         // The batch's read stalls, keeping the waker it is polled with, then yields page 0. Next,
         // its read is woken while it is still being polled, and in that window the starter, as if
-        // on another thread, takes page 0 and polls the driver. Last, it yields page 1.
+        // on another thread, takes page 0 and polls the driver. Last, it yields page 2.
         let mut first_call = true;
         let stall = {
             let stalled = stalled.clone();
@@ -2506,16 +2605,16 @@ mod tests {
         };
         let blob = ScriptedBlob::new(vec![
             Step::Call(Box::new(stall)),
-            Step::page(0),
+            Step::page(0, 0),
             Step::Call(Box::new(race)),
-            Step::page(1),
+            Step::page(1, 2),
         ]);
         let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
         // The starter reads both pages with one batch, which stalls.
         *starter.lock() = Some(Box::pin({
             let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-            async move { read_first_bytes(&blob, &cache_ref, &[0, 1]).await }
+            async move { read_first_bytes(&blob, &cache_ref, &[0, 2]).await }
         }));
         let poll_starter = || {
             let mut starter = starter.lock();
@@ -2536,7 +2635,7 @@ mod tests {
         // The joiner's poll ended after the read was woken, so it re-woke the starter, which runs
         // again and finishes.
         assert!(starter_wakes.0.load(Ordering::SeqCst) > woken_before.load(Ordering::SeqCst));
-        assert!(matches!(poll_starter(), Poll::Ready(Ok(ref bytes)) if bytes == &[0, 1]));
+        assert!(matches!(poll_starter(), Poll::Ready(Ok(ref bytes)) if bytes == &[0, 2]));
     }
 
     /// Bounds each wait of [test_reader_that_stops_driving_rewakes_waiting_reader_on_tokio]'s
@@ -2650,7 +2749,7 @@ mod tests {
                 });
                 let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(4));
 
-                // The starter reads pages 0 and 1 with one batch, and its first poll finds no
+                // The starter reads pages 0 and 2 with one batch, and its first poll finds no
                 // completion. Its second poll, after the first completion woke it, holds its
                 // thread until the last completion has arrived, then finds the joiner driving.
                 let (first_polled_tx, first_polled_rx) = std::sync::mpsc::channel();
@@ -2660,7 +2759,7 @@ mod tests {
                 let starter = context.child("starter").spawn({
                     let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
                     move |_| async move {
-                        let mut read = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1]));
+                        let mut read = pin!(read_first_bytes(&blob, &cache_ref, &[0, 2]));
                         let mut polls = 0;
                         poll_fn(move |cx| {
                             polls += 1;
@@ -2697,7 +2796,7 @@ mod tests {
                     start_joiner_tx.send(()).unwrap();
                     paused_rx.recv_timeout(SCHEDULE_DEADLINE).unwrap();
                     completions
-                        .send(Ok((1, IoBufsMut::from(full_page(1)))))
+                        .send(Ok((1, IoBufsMut::from(full_page(2)))))
                         .unwrap();
                     resume_starter_tx.send(()).unwrap();
                     second_polled_rx.recv_timeout(SCHEDULE_DEADLINE).unwrap();
@@ -2727,7 +2826,7 @@ mod tests {
                         panic!("starter stalled after the joiner left")
                     },
                 };
-                assert_eq!(started.unwrap(), [0, 1]);
+                assert_eq!(started.unwrap(), [0, 2]);
                 assert_eq!(blob.yielded.load(Ordering::SeqCst), 2);
                 assert_idle(&cache_ref);
             }
@@ -2744,8 +2843,8 @@ mod tests {
             let (end, ended) = oneshot::channel();
             let mut script = vec![
                 Step::Wait(started),
-                Step::page(0),
-                Step::page(1),
+                Step::page(0, 0),
+                Step::page(1, 2),
                 Step::Wait(ended),
             ];
             if fail {
@@ -2755,7 +2854,7 @@ mod tests {
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
             // A read of both pages starts a batch, and a read of page 0 joins it.
-            let mut read = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1]));
+            let mut read = pin!(read_first_bytes(&blob, &cache_ref, &[0, 2]));
             assert!(poll!(read.as_mut()).is_pending());
             let mut joiner = pin!(read_first_byte(&blob, &cache_ref, 0));
             assert!(poll!(joiner.as_mut()).is_pending());
@@ -2770,7 +2869,7 @@ mod tests {
             if fail {
                 assert!(matches!(result, Err(Error::ReadFailed)));
             } else {
-                assert_eq!(result.unwrap(), [0, 1]);
+                assert_eq!(result.unwrap(), [0, 2]);
             }
             assert_idle(&cache_ref);
         });
@@ -2780,29 +2879,29 @@ mod tests {
     fn test_failed_page_fails_its_readers() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let (blob, mut opens) = GatedBlob::new(2);
-            *blob.corrupt.lock() = Some(1);
+            let (blob, mut opens) = GatedBlob::new(3);
+            *blob.corrupt.lock() = Some(2);
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
-            // A batch of both pages starts reading, and a read of each page joins it.
-            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1]));
+            // A batch of pages 0 and 2 starts reading, and a read of each page joins it.
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 2]));
             assert!(poll!(first.as_mut()).is_pending());
             let mut zero = pin!(read_first_byte(&blob, &cache_ref, 0));
             assert!(poll!(zero.as_mut()).is_pending());
-            let mut one = pin!(read_first_byte(&blob, &cache_ref, 1));
-            assert!(poll!(one.as_mut()).is_pending());
+            let mut two = pin!(read_first_byte(&blob, &cache_ref, 2));
+            assert!(poll!(two.as_mut()).is_pending());
 
-            // Page 1 fails validation, which fails every read waiting on it.
-            open(&mut opens[1..]);
+            // Page 2 fails validation, which fails every read waiting on it.
+            open(&mut opens[2..]);
             assert!(matches!(first.await, Err(Error::InvalidChecksum)));
-            assert!(matches!(one.await, Err(Error::InvalidChecksum)));
+            assert!(matches!(two.await, Err(Error::InvalidChecksum)));
 
-            // A later read of page 1 reads it again rather than join the batch, which still reads
+            // A later read of page 2 reads it again rather than join the batch, which still reads
             // page 0 for its other read.
-            assert_eq!(read_first_byte(&blob, &cache_ref, 1).await.unwrap(), 1);
+            assert_eq!(read_first_byte(&blob, &cache_ref, 2).await.unwrap(), 2);
             open(&mut opens);
             assert_eq!(zero.await.unwrap(), 0);
-            assert_eq!(blob.reads_of(1), 2);
+            assert_eq!(blob.reads_of(2), 2);
             assert_idle(&cache_ref);
         });
     }
@@ -2815,21 +2914,21 @@ mod tests {
             let (fail, failed) = oneshot::channel();
             let blob = ScriptedBlob::new(vec![
                 Step::Wait(started),
-                Step::page(0),
+                Step::page(0, 0),
                 Step::Wait(failed),
                 Step::Fail(Error::ReadFailed),
             ]);
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
-            // A batch of pages 0-2 starts reading. A read of page 0, a read of page 2, and a read
-            // of pages 0 and 2 join it.
-            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2]));
+            // A batch of pages 0, 2, and 4 starts reading. A read of page 0, a read of page 4,
+            // and a read of pages 0 and 4 join it.
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 2, 4]));
             assert!(poll!(first.as_mut()).is_pending());
             let mut zero = pin!(read_first_byte(&blob, &cache_ref, 0));
             assert!(poll!(zero.as_mut()).is_pending());
-            let mut two = pin!(read_first_byte(&blob, &cache_ref, 2));
-            assert!(poll!(two.as_mut()).is_pending());
-            let mut second = pin!(read_first_bytes(&blob, &cache_ref, &[0, 2]));
+            let mut four = pin!(read_first_byte(&blob, &cache_ref, 4));
+            assert!(poll!(four.as_mut()).is_pending());
+            let mut second = pin!(read_first_bytes(&blob, &cache_ref, &[0, 4]));
             assert!(poll!(second.as_mut()).is_pending());
 
             // The batch publishes page 0, which completes the read of page 0 alone. Then the
@@ -2844,36 +2943,65 @@ mod tests {
                     .cache
                     .read()
                     .batches
-                    .find_unpublished(0, 2)
+                    .find_unpublished(0, 4)
                     .is_none()
             );
-            assert!(matches!(two.await, Err(Error::ReadFailed)));
+            assert!(matches!(four.await, Err(Error::ReadFailed)));
             assert!(matches!(second.await, Err(Error::ReadFailed)));
             assert_idle(&cache_ref);
         });
     }
 
+    // Pages 0, 2, and 4 are one range each; pages 0-2 are one run.
     #[rstest]
-    #[case::out_of_order(vec![Step::page(2), Step::page(0), Step::page(1)], None)]
-    #[case::out_of_range(vec![Step::page(0), Step::page(3)], Some(Error::ReadFailed))]
-    #[case::duplicate(
-        vec![Step::page(0), Step::page(0), Step::page(1), Step::page(2)],
+    #[case::out_of_order(
+        vec![0, 2, 4],
+        vec![Step::page(2, 4), Step::page(0, 0), Step::page(1, 2)],
+        None
+    )]
+    #[case::out_of_range(
+        vec![0, 2, 4],
+        vec![Step::page(0, 0), Step::page(3, 6)],
         Some(Error::ReadFailed)
     )]
-    #[case::missing(vec![Step::page(0), Step::page(1)], Some(Error::ReadFailed))]
+    #[case::duplicate(
+        vec![0, 2, 4],
+        vec![Step::page(0, 0), Step::page(0, 0), Step::page(1, 2), Step::page(2, 4)],
+        Some(Error::ReadFailed)
+    )]
+    #[case::missing(
+        vec![0, 2, 4],
+        vec![Step::page(0, 0), Step::page(1, 2)],
+        Some(Error::ReadFailed)
+    )]
     #[case::corrupt(
-        vec![Step::page(0), Step::Yield(1, corrupt_page(1)), Step::page(2)],
+        vec![0, 2, 4],
+        vec![Step::page(0, 0), Step::Yield(1, corrupt_page(2)), Step::page(2, 4)],
         Some(Error::InvalidChecksum)
     )]
     #[case::partial(
-        vec![Step::page(0), Step::Yield(1, page_bytes(1, 100)), Step::page(2)],
+        vec![0, 2, 4],
+        vec![Step::page(0, 0), Step::Yield(1, page_bytes(2, 100)), Step::page(2, 4)],
         Some(Error::InvalidChecksum)
     )]
     #[case::error(
-        vec![Step::page(0), Step::Fail(Error::BlobInsufficientLength)],
+        vec![0, 2, 4],
+        vec![Step::page(0, 0), Step::Fail(Error::BlobInsufficientLength)],
         Some(Error::BlobInsufficientLength)
     )]
+    #[case::run(vec![0, 1, 2], vec![Step::Yield(0, run_bytes(0..3))], None)]
+    #[case::short_run(
+        vec![0, 1, 2],
+        vec![Step::Yield(0, run_bytes(0..2))],
+        Some(Error::ReadFailed)
+    )]
+    #[case::corrupt_in_run(
+        vec![0, 1, 2],
+        vec![Step::Yield(0, [full_page(0), corrupt_page(1), full_page(2)].concat())],
+        Some(Error::InvalidChecksum)
+    )]
     fn test_batch_checks_read_many_output(
+        #[case] pages: Vec<u64>,
         #[case] script: Vec<Step>,
         #[case] expected: Option<Error>,
     ) {
@@ -2884,18 +3012,19 @@ mod tests {
                 ScriptedBlob::new(std::iter::once(Step::Wait(started)).chain(script).collect());
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
-            // A batch of pages 0-2 starts reading, and a read of the same pages joins it.
-            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2]));
+            // A batch of the pages starts reading, and a read of the same pages joins it.
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &pages));
             assert!(poll!(first.as_mut()).is_pending());
-            let mut second = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2]));
+            let mut second = pin!(read_first_bytes(&blob, &cache_ref, &pages));
             assert!(poll!(second.as_mut()).is_pending());
 
             // Both reads see the batch's result.
             start.send(()).unwrap();
             let (first, second) = futures::join!(first, second);
+            let bytes: Vec<u8> = pages.iter().map(|&page| page as u8).collect();
             for result in [first, second] {
                 match &expected {
-                    None => assert_eq!(result.unwrap(), [0, 1, 2]),
+                    None => assert_eq!(result.unwrap(), bytes),
                     Some(expected) => assert_eq!(
                         std::mem::discriminant(&result.unwrap_err()),
                         std::mem::discriminant(expected)
@@ -3052,18 +3181,18 @@ mod tests {
             let (start, started) = oneshot::channel();
             let blob = ScriptedBlob::new(vec![
                 Step::Wait(started),
-                Step::page(0),
+                Step::page(0, 0),
                 Step::Fail(Error::ReadFailed),
             ]);
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
-            // A batch of pages 0 and 1 starts reading. A read of page 0 and a read of pages 0
-            // and 1 join it.
-            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1]));
+            // A batch of pages 0 and 2 starts reading. A read of page 0 and a read of pages 0
+            // and 2 join it.
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 2]));
             assert!(poll!(first.as_mut()).is_pending());
             let mut zero = pin!(read_first_byte(&blob, &cache_ref, 0));
             assert!(poll!(zero.as_mut()).is_pending());
-            let mut both = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1]));
+            let mut both = pin!(read_first_bytes(&blob, &cache_ref, &[0, 2]));
             assert!(poll!(both.as_mut()).is_pending());
 
             // Only the starting read drives the batch. It publishes page 0 to both joiners, which
@@ -3071,7 +3200,7 @@ mod tests {
             start.send(()).unwrap();
             assert!(matches!(first.await, Err(Error::ReadFailed)));
 
-            // The joiner that already has its page finishes with it. The one still missing page 1
+            // The joiner that already has its page finishes with it. The one still missing page 2
             // fails with the batch.
             assert_eq!(zero.await.unwrap(), 0);
             assert!(matches!(both.await, Err(Error::ReadFailed)));
@@ -3255,8 +3384,11 @@ mod tests {
             }
 
             // On one thread, no read runs between another's lock holds, so each joins the batch
-            // of the first, and every page is read once.
-            assert_eq!(recordings.snapshot().reads.len(), PAGES as usize);
+            // of the first, and every page is read once, in runs of MAX_RUN_PAGES.
+            assert_eq!(
+                recordings.snapshot().reads.len(),
+                PAGES as usize / MAX_RUN_PAGES
+            );
         });
     }
 
