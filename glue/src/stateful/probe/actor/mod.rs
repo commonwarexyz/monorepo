@@ -1,7 +1,5 @@
-use super::{
-    mailbox::{Mailbox, Message},
-    sample::Sample,
-};
+use super::mailbox::{Mailbox, Message};
+use crate::probe::sample::Sample;
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_consensus::{
     simplex::{marshal::core::Variant, scheme::Scheme},
@@ -117,7 +115,8 @@ where
             strategy: self.strategy,
             blocker: self.blocker,
             retry_timeout: self.retry_timeout,
-            sample: Sample::new(self.minimum_epoch),
+            minimum_epoch: self.minimum_epoch,
+            sample: Sample::new(),
             subscribers: Vec::new(),
         }
         .run(&mut sender, &mut receiver)

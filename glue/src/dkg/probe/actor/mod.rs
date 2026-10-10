@@ -1,7 +1,7 @@
 use super::mailbox::{Mailbox, Message};
 use crate::{
     dkg::{ReshareBlock, network::Manager, probe::Bootstrap, types::EpochInfo},
-    stateful::probe::sample::Sample,
+    probe::sample::Sample,
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as ActorReceiver};
 use commonware_codec::Read;
@@ -170,7 +170,8 @@ where
             context: self.context,
             mailbox: self.mailbox,
             manager: self.manager,
-            sample: Sample::new(minimum),
+            minimum_epoch: minimum,
+            sample: Sample::new(),
             bootstrap: self.bootstrap,
             verifier: self.verifier,
             genesis: self.genesis,
