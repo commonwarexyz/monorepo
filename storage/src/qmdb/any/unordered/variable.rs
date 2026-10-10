@@ -921,13 +921,13 @@ pub(crate) mod test {
             let keys = [&key_a];
             assert!(matches!(
                 db_a.new_batch().stage(&keys, &db_b).await,
-                Err(Error::StaleBatch)
+                Err(Error::StaleRead)
             ));
 
             let (_, staged) = db_a.new_batch().stage(&keys, &db_a).await.unwrap();
             assert!(matches!(
                 staged.expand(&keys, &db_b).await,
-                Err(Error::StaleBatch)
+                Err(Error::StaleRead)
             ));
         });
     }
