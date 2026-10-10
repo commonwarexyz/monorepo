@@ -33,6 +33,8 @@ use commonware_utils::{
     futures::{Shared, WeakShared},
     sync::{Mutex, RwLock, RwLockWriteGuard},
 };
+#[commonware_macros::stability(ALPHA)]
+use futures::StreamExt as _;
 use futures::{FutureExt, Stream, TryStreamExt as _, future::BoxFuture, stream::FuturesUnordered};
 use std::{
     collections::{VecDeque, hash_map::Entry},
@@ -64,7 +66,12 @@ struct PageFetchEntry {
     fetch: PageFetch,
     /// Count of waiters that still need cancellation cleanup for this fetch generation.
     waiters: usize,
+    /// How this fetch admits its page: demand insertion, or expected insertion requested by a warm.
+    insert: Insert,
 }
+
+/// Caches a validated page: `(cache, blob id, page, page number)`.
+type Insert = fn(&mut Cache, u64, &[u8], u64);
 
 /// Removes a stale in-flight page fetch when the last unresolved waiter is dropped.
 ///
@@ -157,6 +164,8 @@ struct BatchState {
     /// The joiners of each page not yet published. `None` once the page is published, or the
     /// batch fails.
     joiners: Box<[Option<Vec<Joiner>>]>,
+    /// How each page enters the cache. A warm selects expected-entry insertion before publication.
+    insert: Box<[Insert]>,
     /// The pages published to each reader and not yet taken, by reader, starting with [STARTER].
     /// `None` once the reader is dropped. A dropped reader's slot stays until the batch ends, since
     /// the selections it made still name it, so this grows with every reader that joins.
@@ -177,6 +186,7 @@ impl Batch {
     fn new(blob_id: u64, pages: Vec<u64>) -> Self {
         let state = BatchState {
             joiners: vec![Some(Vec::new()); pages.len()].into(),
+            insert: vec![Cache::cache as Insert; pages.len()].into(),
             inboxes: vec![Some(VecDeque::new())],
             error: None,
         };
@@ -238,13 +248,16 @@ impl Batch {
         let mut cache = cache.write();
         let mut state = self.state.lock();
         let BatchState {
-            joiners, inboxes, ..
+            joiners,
+            inboxes,
+            insert,
+            ..
         } = &mut *state;
         let Some(joiners) = joiners[index].take() else {
             return Err(Error::ReadFailed);
         };
         if let Ok(page) = &result {
-            cache.cache(self.blob_id, page.as_ref(), self.pages[index]);
+            insert[index](&mut cache, self.blob_id, page.as_ref(), self.pages[index]);
         }
         drop(cache);
         for (tag, reader) in joiners {
@@ -906,6 +919,119 @@ impl CacheRef {
         Ok(())
     }
 
+    /// Read pages `page_nums` (strictly increasing) into the cache ahead of their first request,
+    /// returning how many pages this call starts reading.
+    ///
+    /// Resident pages are marked expected without recording use. In-flight pages are joined and
+    /// cached as expected entries when published. Each caller drives its joined reads even if
+    /// their starters cancel. The remaining pages use one registered batch. Validation errors
+    /// skip the affected page; the first error is returned after all sources finish.
+    ///
+    /// The scan yields the cache lock every [MISSES_PER_LOCK] pages. Pages claimed by another
+    /// reader between a scan hold and batch registration may be read by both.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn warm<B: Blob>(
+        &self,
+        blob: &Arc<B>,
+        blob_id: u64,
+        page_nums: &[u64],
+    ) -> Result<usize, Error> {
+        // Validate offsets before registering interests whose guards take the lock on drop.
+        let physical = page_nums
+            .iter()
+            .map(|&page| physical_page(page, self.page_size.widen()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut fetches = Vec::with_capacity(page_nums.len());
+        let mut subscriptions: Vec<Subscription> = Vec::new();
+        let mut pages = Vec::with_capacity(page_nums.len());
+        let mut ranges = Vec::with_capacity(page_nums.len());
+        {
+            let mut cache = self.cache.write();
+            cache.batches.unregister_retired();
+            for (i, (&page_num, physical)) in page_nums.iter().zip(physical).enumerate() {
+                if i > 0 && i % MISSES_PER_LOCK == 0 {
+                    RwLockWriteGuard::bump(&mut cache);
+                }
+                let key = (blob_id, page_num);
+                if cache.cache.expect(&key) {
+                    continue;
+                }
+                if let Some(entry) = cache.page_fetches.get_mut(&key) {
+                    entry.insert = Cache::cache_expected;
+                    entry.waiters += 1;
+                    fetches.push(PageFetchGuard::new(&self.cache, key, entry.fetch.clone()));
+                } else if let Some((batch, index, driver)) =
+                    cache.batches.find_unpublished(blob_id, page_num)
+                {
+                    batch.state.lock().insert[index] = Cache::cache_expected;
+                    let joined = subscriptions
+                        .iter()
+                        .rposition(|subscription| Arc::ptr_eq(&subscription.batch, &batch));
+                    let joined = joined.unwrap_or_else(|| {
+                        subscriptions.push(Subscription::joining(batch, driver));
+                        subscriptions.len() - 1
+                    });
+                    subscriptions[joined].select(index, 0);
+                } else {
+                    pages.push(page_num);
+                    ranges.push(physical);
+                }
+            }
+        }
+        let count = pages.len();
+        // Build the batch outside the scan lock so allocation does not lengthen its last hold.
+        let completion = if pages.is_empty() {
+            None
+        } else {
+            let batch = Arc::new(Batch::new(blob_id, pages));
+            batch.state.lock().insert.fill(Cache::cache_expected);
+            let mut cache = self.cache.write();
+            let retire = cache.batches.retire_on_drop(&batch);
+            let read = batch.clone().read(
+                self.cache.clone(),
+                blob.clone(),
+                ranges,
+                self.page_size,
+                retire,
+            );
+            let driver = Shared::new(read.boxed());
+            cache.batches.register(&batch, &driver);
+            subscriptions.push(Subscription::starting(batch, driver.clone()));
+            Some(driver)
+        };
+        let fetches = fetches
+            .into_iter()
+            .map(|fetch| async move { fetch.wait().await.map(|_| ()) })
+            .collect::<FuturesUnordered<_>>();
+        let reads = subscriptions
+            .into_iter()
+            .map(|mut subscription| async move {
+                let mut result = Ok(());
+                while let Some(page) = subscription.next().await {
+                    if let Err(err) = page
+                        && result.is_ok()
+                    {
+                        result = Err(err);
+                    }
+                }
+                result
+            })
+            .collect::<FuturesUnordered<_>>();
+        let mut sources = futures::stream::select(fetches, reads);
+        let mut result = Ok(());
+        while let Some(source) = sources.next().await {
+            if let Err(err) = source
+                && result.is_ok()
+            {
+                result = Err(err);
+            }
+        }
+        if let Some(driver) = completion {
+            result = result.and(driver.await);
+        }
+        result.map(|()| count)
+    }
+
     /// Fetch the requested page after encountering a page fault, which may involve joining the
     /// fetch or batch already reading it, or retrieving it from `blob` & caching the result in the
     /// page cache. Returns the number of bytes read, which should always be non-zero.
@@ -978,7 +1104,8 @@ impl CacheRef {
                             // start a new generation.
                             let mut cache = cache.write();
                             if let Ok(page) = &result {
-                                cache.cache(blob_id, page.as_ref(), page_num);
+                                let insert = cache.page_fetches[&key].insert;
+                                insert(&mut cache, blob_id, page.as_ref(), page_num);
                             }
                             let _ = cache.page_fetches.remove(&key);
                             result
@@ -989,6 +1116,7 @@ impl CacheRef {
                         v.insert(PageFetchEntry {
                             fetch: fetch.clone(),
                             waiters: 1,
+                            insert: Cache::cache,
                         });
                         PageSource::Fetch(fetch)
                     }
@@ -1097,6 +1225,19 @@ impl Cache {
         buf[..bytes_to_copy].copy_from_slice(&page[offset_in_page..offset_in_page + bytes_to_copy]);
 
         bytes_to_copy
+    }
+
+    /// Admit a validated page as expected without recording a request for it.
+    #[commonware_macros::stability(ALPHA)]
+    fn cache_expected(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
+        let page_size: usize = self.page_size.widen();
+        assert_eq!(page.len(), page_size);
+        let (slot, buf) = self
+            .cache
+            .get_or_insert_mut_expected((blob_id, page_num), || IoBufMut::zeroed(page_size));
+        buf.as_mut().copy_from_slice(page);
+        let hint = self.hint_index(blob_id, page_num);
+        self.hints[hint] = slot;
     }
 
     /// Put the given `page` into the page cache and record its slot hint.
@@ -1960,6 +2101,506 @@ mod tests {
         let mut bytes = full_page(page);
         bytes[0] ^= 0xFF;
         bytes
+    }
+
+    /// A view over the first `pages` pages of `blob` under cache id `id`.
+    fn full_view<'a, B: Blob>(
+        blob: &'a Arc<B>,
+        cache_ref: &'a CacheRef,
+        id: u64,
+        pages: u64,
+    ) -> View<'a, B> {
+        let size = pages * PAGE_SIZE_U64;
+        View {
+            blob,
+            cache_ref,
+            id,
+            size,
+            tail_offset: size,
+            tail: Tail::Sealed(&[]),
+        }
+    }
+
+    #[test_traced]
+    fn test_warm_survives_full_cache() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // A full 50-page cache (Small holds 5 pages) of blob 0, a third of it read again.
+            let blob = checksummed_blob(&context, 60).await;
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(50));
+            let resident = full_view(&blob, &cache_ref, 0, 60);
+            let offsets: Vec<u64> = (0..60).map(|page| page * PAGE_SIZE_U64).collect();
+            let mut buf = vec![0u8; 60];
+            resident
+                .read_many_into(&mut buf, &offsets, NZUsize!(1))
+                .await
+                .unwrap();
+            let hot: Vec<u64> = (0..60)
+                .filter(|&page| {
+                    let mut byte = [0u8];
+                    cache_ref.read_cached(0, &mut byte, page * PAGE_SIZE_U64) == 1
+                })
+                .take(15)
+                .collect();
+            assert_eq!(hot.len(), 15);
+
+            // Warm 20 pages of blob 1: more than Small holds, within the cache.
+            let warmed = full_view(&blob, &cache_ref, 1, 20);
+            let ranges = [
+                (7, 3 * PAGE_SIZE_U64),
+                (5 * PAGE_SIZE_U64 - 1, 15 * PAGE_SIZE_U64),
+            ];
+            assert_eq!(warmed.warm(&ranges).await.unwrap(), 20);
+            assert_eq!(
+                warmed.warm(&ranges).await.unwrap(),
+                0,
+                "resident pages are not read again"
+            );
+
+            // Every warmed page and every referenced page is still cached.
+            for page in 0..20u64 {
+                let mut byte = [0u8];
+                assert_eq!(cache_ref.read_cached(1, &mut byte, page * PAGE_SIZE_U64), 1);
+                assert_eq!(byte[0], page as u8);
+            }
+            for page in hot {
+                let mut byte = [0u8];
+                assert_eq!(cache_ref.read_cached(0, &mut byte, page * PAGE_SIZE_U64), 1);
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_warm_spans_lock_chunks() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Every third page of a blob spanning several lock chunks is resident.
+            const PAGES: u64 = 3 * MISSES_PER_LOCK as u64 + 7;
+            let blob = checksummed_blob(&context, PAGES).await;
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(1024));
+            let view = full_view(&blob, &cache_ref, 0, PAGES);
+            let resident: Vec<u64> = (0..PAGES)
+                .step_by(3)
+                .map(|page| page * PAGE_SIZE_U64)
+                .collect();
+            let mut buf = vec![0u8; resident.len()];
+            view.read_many_into(&mut buf, &resident, NZUsize!(1))
+                .await
+                .unwrap();
+
+            // A warm of every page reads only the others, and caches them all.
+            let missing = PAGES as usize - resident.len();
+            assert_eq!(
+                view.warm(&[(0, PAGES * PAGE_SIZE_U64)]).await.unwrap(),
+                missing
+            );
+            for page in 0..PAGES {
+                let mut byte = [0u8];
+                assert_eq!(cache_ref.read_cached(0, &mut byte, page * PAGE_SIZE_U64), 1);
+                assert_eq!(byte[0], page as u8);
+            }
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
+    fn test_warm_keeps_resident_pages() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // A full 50-page cache (Main holds 45) of blob 0, none of it referenced.
+            let blob = checksummed_blob(&context, 60).await;
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(50));
+            let first = full_view(&blob, &cache_ref, 0, 60);
+            let offsets: Vec<u64> = (0..60).map(|page| page * PAGE_SIZE_U64).collect();
+            let mut buf = vec![0u8; 60];
+            first
+                .read_many_into(&mut buf, &offsets, NZUsize!(1))
+                .await
+                .unwrap();
+            let resident: Vec<u64> = (0..60)
+                .filter(|&page| {
+                    let mut byte = [0u8];
+                    cache_ref.read_cached(0, &mut byte, page * PAGE_SIZE_U64) == 1
+                })
+                .collect();
+            assert_eq!(resident.len(), 50);
+
+            // Warm the 10 oldest resident pages of blob 0, then 30 pages of blob 1: together within
+            // Main (45 pages), the second warm sweeps the hand past where those resident pages
+            // would otherwise be evicted.
+            let ranges: Vec<(u64, u64)> = resident
+                .iter()
+                .map(|&page| (page * PAGE_SIZE_U64, PAGE_SIZE_U64))
+                .collect();
+            assert_eq!(first.warm(&ranges[..10]).await.unwrap(), 0);
+            let second = full_view(&blob, &cache_ref, 1, 30);
+            assert_eq!(second.warm(&[(0, 30 * PAGE_SIZE_U64)]).await.unwrap(), 30);
+            for &page in &resident[..10] {
+                let mut byte = [0u8];
+                assert_eq!(
+                    cache_ref.read_cached(0, &mut byte, page * PAGE_SIZE_U64),
+                    1,
+                    "page {page}"
+                );
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_overlapping_warms_and_reads_fetch_each_page_once() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const PAGES: usize = 6;
+            let (blob, mut opens) = GatedBlob::new(PAGES);
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
+            let warm = |name: &'static str, pages: std::ops::Range<u64>| {
+                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                context.child(name).spawn(move |_| async move {
+                    let ranges: Vec<(u64, u64)> =
+                        pages.map(|page| (page * PAGE_SIZE_U64, 1)).collect();
+                    full_view(&blob, &cache_ref, 0, PAGES as u64)
+                        .warm(&ranges)
+                        .await
+                        .unwrap()
+                })
+            };
+
+            // A warm of pages 0-3 starts reading. An overlapping warm of pages 2-5 reads only
+            // pages 4 and 5.
+            let first = warm("first", 0..4);
+            while blob.reads.lock().len() < 4 {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let second = warm("second", 2..6);
+            while blob.reads.lock().len() < 6 {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            // A read of pages 1 and 5 joins both warms.
+            let read = context.child("read").spawn({
+                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                move |_| async move {
+                    let mut buf = [0u8; 2];
+                    full_view(&blob, &cache_ref, 0, PAGES as u64)
+                        .read_many_into(&mut buf, &[PAGE_SIZE_U64, 5 * PAGE_SIZE_U64], NZUsize!(1))
+                        .await
+                        .unwrap();
+                    buf
+                }
+            });
+            context.sleep(Duration::from_millis(10)).await;
+            for open in &mut opens {
+                open.take().unwrap().send(()).unwrap();
+            }
+            assert_eq!(first.await.unwrap(), 4);
+            assert_eq!(second.await.unwrap(), 2);
+            assert_eq!(read.await.unwrap(), [1, 5]);
+            let mut reads = blob.reads.lock().clone();
+            reads.sort_unstable();
+            assert_eq!(reads, (0..PAGES).collect::<Vec<_>>());
+        });
+    }
+
+    #[test_traced]
+    fn test_warm_expects_page_another_reader_is_fetching() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // A full 20-page cache admits demand misses through a 2-page probation queue.
+            const PAGES: usize = 12;
+            let (blob, mut opens) = GatedBlob::new(PAGES);
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(20));
+            let filler = checksummed_blob(&context, 20).await;
+            let offsets: Vec<u64> = (0..20).map(|page| page * PAGE_SIZE_U64).collect();
+            full_view(&filler, &cache_ref, 1, 20)
+                .read_many_into(&mut [0u8; 20], &offsets, NZUsize!(1))
+                .await
+                .unwrap();
+            let read = |page: u64| {
+                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                context.child("read").spawn(move |_| async move {
+                    let mut buf = [0u8; 1];
+                    cache_ref
+                        .read_after_miss(&blob, 0, &mut buf, page * PAGE_SIZE_U64)
+                        .await
+                        .unwrap();
+                    buf
+                })
+            };
+
+            // A demand read of page 0 blocks in its fetch while a warm expects the page.
+            let first = read(0);
+            while blob.reads.lock().is_empty() {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let warm = context.child("warm").spawn({
+                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                move |_| async move {
+                    full_view(&blob, &cache_ref, 0, PAGES as u64)
+                        .warm(&[(0, PAGE_SIZE_U64)])
+                        .await
+                        .unwrap()
+                }
+            });
+            context.sleep(Duration::from_millis(10)).await;
+            opens[0].take().unwrap().send(()).unwrap();
+            assert_eq!(first.await.unwrap(), [0]);
+            assert_eq!(warm.await.unwrap(), 0);
+
+            // Later demand misses churn the probation queue, but page 0 was cached as expected.
+            for page in 1..PAGES as u64 {
+                let index = usize::try_from(page).unwrap();
+                opens[index].take().unwrap().send(()).unwrap();
+                assert_eq!(read(page).await.unwrap(), [page as u8]);
+            }
+            let mut byte = [0u8];
+            assert_eq!(cache_ref.read_cached(0, &mut byte, 0), 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_warm_expects_page_another_batch_is_reading() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // A full 20-page cache admits demand misses through a 2-page probation queue.
+            const PAGES: usize = 12;
+            let (blob, mut opens) = GatedBlob::new(PAGES);
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(20));
+            let filler = checksummed_blob(&context, 20).await;
+            let offsets: Vec<u64> = (0..20).map(|page| page * PAGE_SIZE_U64).collect();
+            full_view(&filler, &cache_ref, 1, 20)
+                .read_many_into(&mut [0u8; 20], &offsets, NZUsize!(1))
+                .await
+                .unwrap();
+
+            // A batched read of pages 0 and 1 blocks in its read while a warm expects page 0.
+            let batch = context.child("batch").spawn({
+                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                move |_| async move {
+                    let mut buf = [0u8; 2];
+                    full_view(&blob, &cache_ref, 0, PAGES as u64)
+                        .read_many_into(&mut buf, &[0, PAGE_SIZE_U64], NZUsize!(1))
+                        .await
+                        .unwrap();
+                    buf
+                }
+            });
+            while blob.reads.lock().len() < 2 {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let warm = context.child("warm").spawn({
+                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                move |_| async move {
+                    full_view(&blob, &cache_ref, 0, PAGES as u64)
+                        .warm(&[(0, PAGE_SIZE_U64)])
+                        .await
+                        .unwrap()
+                }
+            });
+            context.sleep(Duration::from_millis(10)).await;
+            for open in &mut opens[..2] {
+                open.take().unwrap().send(()).unwrap();
+            }
+            assert_eq!(batch.await.unwrap(), [0, 1]);
+            assert_eq!(warm.await.unwrap(), 0);
+            assert_idle(&cache_ref);
+
+            // Later demand misses churn the probation queue, but page 0 was cached as expected.
+            for page in 2..PAGES as u64 {
+                let index = usize::try_from(page).unwrap();
+                opens[index].take().unwrap().send(()).unwrap();
+                let mut buf = [0u8; 1];
+                cache_ref
+                    .read_after_miss(&blob, 0, &mut buf, page * PAGE_SIZE_U64)
+                    .await
+                    .unwrap();
+                assert_eq!(buf, [page as u8]);
+            }
+            let mut byte = [0u8];
+            assert_eq!(cache_ref.read_cached(0, &mut byte, 0), 1);
+            assert_eq!(blob.reads.lock().len(), PAGES);
+        });
+    }
+
+    #[test_traced]
+    fn test_warm_completes_fetch_of_cancelled_reader() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, mut opens) = GatedBlob::new(1);
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
+
+            // A demand read of page 0 blocks in its fetch, and a warm of the page joins it.
+            let read = context.child("read").spawn({
+                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                move |_| async move {
+                    let mut buf = [0u8; 1];
+                    cache_ref
+                        .read_after_miss(&blob, 0, &mut buf, 0)
+                        .await
+                        .unwrap();
+                }
+            });
+            while blob.reads.lock().is_empty() {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let warm = context.child("warm").spawn({
+                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                move |_| async move {
+                    full_view(&blob, &cache_ref, 0, 1)
+                        .warm(&[(0, PAGE_SIZE_U64)])
+                        .await
+                        .unwrap()
+                }
+            });
+            context.sleep(Duration::from_millis(10)).await;
+
+            // The reader cancels, and the warm completes the fetch it joined.
+            read.abort();
+            assert!(read.await.is_err());
+            opens[0].take().unwrap().send(()).unwrap();
+            assert_eq!(warm.await.unwrap(), 0);
+            let mut byte = [0u8];
+            assert_eq!(cache_ref.read_cached(0, &mut byte, 0), 1);
+            assert_eq!(*blob.reads.lock(), [0]);
+            assert!(cache_ref.cache.read().page_fetches.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_warm_completes_batch_of_cancelled_reader() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const PAGES: usize = 2;
+            let (blob, mut opens) = GatedBlob::new(PAGES);
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
+
+            // A batched read of both pages blocks in its read, and a warm of page 0 joins it.
+            let batch = context.child("batch").spawn({
+                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                move |_| async move {
+                    let mut buf = [0u8; 2];
+                    full_view(&blob, &cache_ref, 0, PAGES as u64)
+                        .read_many_into(&mut buf, &[0, PAGE_SIZE_U64], NZUsize!(1))
+                        .await
+                        .unwrap();
+                }
+            });
+            while blob.reads.lock().len() < PAGES {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let warm = context.child("warm").spawn({
+                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                move |_| async move {
+                    full_view(&blob, &cache_ref, 0, PAGES as u64)
+                        .warm(&[(0, PAGE_SIZE_U64)])
+                        .await
+                        .unwrap()
+                }
+            });
+            context.sleep(Duration::from_millis(10)).await;
+
+            // The starter cancels, and the warm drives the batch until its page arrives.
+            batch.abort();
+            assert!(batch.await.is_err());
+            opens[0].take().unwrap().send(()).unwrap();
+            assert_eq!(warm.await.unwrap(), 0);
+            let mut byte = [0u8];
+            assert_eq!(cache_ref.read_cached(0, &mut byte, 0), 1);
+            assert_eq!(
+                blob.reads.lock().iter().filter(|&&page| page == 0).count(),
+                1
+            );
+            assert_idle(&cache_ref);
+            drop(opens.drain(..));
+        });
+    }
+
+    #[test_traced]
+    fn test_read_completes_batch_of_cancelled_warm() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const PAGES: usize = 2;
+            let (blob, mut opens) = GatedBlob::new(PAGES);
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
+
+            // A warm of both pages blocks in its read.
+            let warm = context.child("warm").spawn({
+                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                move |_| async move {
+                    full_view(&blob, &cache_ref, 0, PAGES as u64)
+                        .warm(&[(0, 2 * PAGE_SIZE_U64)])
+                        .await
+                        .unwrap()
+                }
+            });
+            while blob.reads.lock().len() < PAGES {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            // A read joins the warm's fetch of page 1, then the warm is dropped.
+            let read = context.child("read").spawn({
+                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                move |_| async move {
+                    let mut buf = [0u8; 1];
+                    cache_ref
+                        .read_after_miss(&blob, 0, &mut buf, PAGE_SIZE_U64)
+                        .await
+                        .unwrap();
+                    buf
+                }
+            });
+            context.sleep(Duration::from_millis(10)).await;
+            warm.abort();
+            assert!(warm.await.is_err());
+
+            // The reader drives the same batch after the warm cancels.
+            opens[1].take().unwrap().send(()).unwrap();
+            assert_eq!(read.await.unwrap(), [1]);
+            assert_eq!(
+                blob.reads.lock().iter().filter(|&&page| page == 1).count(),
+                1
+            );
+            assert_idle(&cache_ref);
+            drop(opens.drain(..));
+        });
+    }
+
+    #[rstest]
+    #[case::corrupt(
+        vec![Step::Yield(0, corrupt_page(0)), Step::page(1), Step::page(2)],
+        Error::InvalidChecksum,
+        &[1, 2]
+    )]
+    #[case::missing(vec![Step::page(0)], Error::ReadFailed, &[0])]
+    #[case::late_error(
+        vec![Step::page(0), Step::page(1), Step::page(2), Step::Fail(Error::ReadFailed)],
+        Error::ReadFailed,
+        &[0, 1, 2]
+    )]
+    fn test_warm_caches_valid_pages_before_returning_error(
+        #[case] script: Vec<Step>,
+        #[case] expected: Error,
+        #[case] cached: &[u64],
+    ) {
+        deterministic::Runner::default().start(|_| async move {
+            let blob = ScriptedBlob::new(script);
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
+            let result = cache_ref.warm(&blob, 0, &[0, 1, 2]).await;
+            assert_eq!(
+                std::mem::discriminant(&result.unwrap_err()),
+                std::mem::discriminant(&expected)
+            );
+            for page in 0..3 {
+                let mut byte = [0u8];
+                assert_eq!(
+                    cache_ref.read_cached(0, &mut byte, page * PAGE_SIZE_U64),
+                    usize::from(cached.contains(&page))
+                );
+                if cached.contains(&page) {
+                    assert_eq!(byte, [page as u8]);
+                }
+            }
+            assert_idle(&cache_ref);
+        });
     }
 
     /// Serves [full_page]s, holding each page's first read until its gate opens.

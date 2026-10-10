@@ -530,7 +530,8 @@ pub mod tests {
                 test::{
                     Changes, Choice, Inspect, Links, Neighbors, Script, assert_bits, assert_exact,
                     build, colliding_digest, counter, hold, hold_batch, live, replay,
-                    test_any_activity_depths, test_any_ordered_policy_eviction_matrix,
+                    test_any_activity_depths, test_any_db_prefetch,
+                    test_any_ordered_policy_eviction_matrix,
                     test_any_ordered_policy_repair_across_ancestors,
                     test_any_policy_ancestor_twins, test_any_policy_decisions_match_writes,
                     test_any_policy_evicts_parent_created_key, test_any_policy_hold,
@@ -540,7 +541,7 @@ pub mod tests {
                     test_any_policy_own_writes, test_any_proportional_bound,
                     test_any_proportional_one_batch,
                 },
-                traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+                traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
             },
             chain::Bounds,
             floor::{Bounded, Hold, Proportional},
@@ -2259,6 +2260,104 @@ pub mod tests {
     {
         test_current_db_build_big::<M, C, F, Fut>(context, open_db).await;
     }
+
+    /// Graft roots remain resident after a sync and page-cache eviction. Prefetching a key and
+    /// merkleizing its change require no Merkle journal reads and produce the same root as a cold
+    /// change. `cache` is the database's page cache.
+    async fn test_prefetch_uses_retained_graft_inputs<M, C>(
+        context: Context,
+        db: C,
+        cache: CacheRef,
+    ) where
+        M: merkle::Graftable,
+        C: DbAny<M, Key = Digest, Value = Digest>,
+        C::Merkleized: MerkleizedBatch<Digest = <C as DbAny<M>>::Digest>,
+    {
+        let digest = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+
+        // Seed keys, then update the later half so every seeded key's chunk is graftable.
+        // Holding the floor keeps the seeded operations in place, and updates of existing keys
+        // leave other keys' operations in place in ordered variants too.
+        let seed: Vec<_> = (0..1200)
+            .map(|i| (digest(i), Some(digest(i + 10_000))))
+            .collect();
+        let updates: Vec<_> = (600..1200).map(|i| (digest(i), Some(digest(i)))).collect();
+        let db = hold(db, &seed).await;
+        let db = hold(db, &updates).await;
+        let db = db.sync().await.unwrap();
+
+        let key = digest(7);
+        let change = [(key, Some(digest(20_000)))];
+        let node_misses = || counter(&context, "merkle_journal_cache_misses_total");
+
+        cache.clear();
+        let before = node_misses();
+        let cold = hold_batch(&db, db.new_batch(), &change).await;
+        assert_eq!(node_misses(), before, "graft roots must remain resident");
+        let root = cold.root();
+        assert_ne!(root, db.root(), "the change must update the database root");
+        drop(cold);
+
+        cache.clear();
+        let before = node_misses();
+        db.prefetch(&[&key]).await;
+        assert_eq!(node_misses(), before, "prefetch must not read graft roots");
+        let warmed = hold_batch(&db, db.new_batch(), &change).await;
+        assert_eq!(node_misses(), before, "a prefetched change must not miss");
+        assert_eq!(
+            warmed.root(),
+            root,
+            "prefetch must not affect merkleization"
+        );
+        drop(warmed);
+
+        db.destroy().await.unwrap();
+    }
+
+    // Instantiate the prefetch tests for one variant over a page cache the tests can clear,
+    // with room for every page they warm. Small caches admit new pages through a single slot,
+    // so a warmed page would be evicted by the next.
+    macro_rules! prefetch_tests {
+        ($label:ident, $db:ty, $cfg:ident) => {
+            paste::paste! {
+                #[test_traced("WARN")]
+                fn [<test_prefetch_ $label>]() {
+                    deterministic::Runner::default().start(|context| async move {
+                        let (db, cache) = prefetch_tests!(@open context, $db, $cfg);
+                        let make_value = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+                        test_any_db_prefetch(context.child("test"), db, cache, make_value).await;
+                    });
+                }
+
+                #[test_traced("WARN")]
+                fn [<test_prefetch_uses_retained_graft_inputs_ $label>]() {
+                    deterministic::Runner::default().start(|context| async move {
+                        let (db, cache) = prefetch_tests!(@open context, $db, $cfg);
+                        test_prefetch_uses_retained_graft_inputs(context.child("test"), db, cache).await;
+                    });
+                }
+            }
+        };
+        (@open $context:ident, $db:ty, $cfg:ident) => {{
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(256));
+            let mut cfg = $cfg::<OneCap>("prefetch");
+            cfg.merkle_config.page_cache = cache.clone();
+            cfg.journal_config.page_cache = cache.clone();
+            let db = <$db>::init($context.child("storage"), cfg, None)
+                .await
+                .unwrap();
+            (db, cache)
+        }};
+    }
+
+    prefetch_tests!(uf, UnorderedFixedDb, fixed_config);
+    prefetch_tests!(uv, UnorderedVariableDb, variable_config);
+    prefetch_tests!(of, OrderedFixedDb, fixed_config);
+    prefetch_tests!(ov, OrderedVariableDb, variable_config);
+    prefetch_tests!(ufp1, UnorderedFixedP1Db, fixed_config_partitioned);
+    prefetch_tests!(ovp2, OrderedVariableP2Db, variable_config_partitioned);
+    prefetch_tests!(uf_mmb, UnorderedFixedMmbDb, fixed_config);
+    prefetch_tests!(ov_mmb, OrderedVariableMmbDb, variable_config);
 
     test_for_all_variants!(test_build_random_close_reopen, "WARN");
     test_for_all_variants!(test_simulate_write_failures, "WARN");

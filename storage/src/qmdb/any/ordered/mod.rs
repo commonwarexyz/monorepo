@@ -1969,6 +1969,14 @@ mod test {
     impl<C: Contiguous> Contiguous for Controlled<C> {
         type Item = C::Item;
 
+        #[commonware_macros::stability(ALPHA)]
+        fn prefetch(
+            &self,
+            positions: &[u64],
+        ) -> impl Future<Output = ()> + Send + 'static + use<C> {
+            self.inner.prefetch(positions)
+        }
+
         fn bounds(&self) -> Range<u64> {
             self.inner.bounds()
         }
