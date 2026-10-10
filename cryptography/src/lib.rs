@@ -76,6 +76,7 @@ commonware_macros::stability_scope!(BETA {
     use commonware_math::algebra::Random;
     use commonware_parallel::Strategy;
     use commonware_utils::Array;
+    use core::num::NonZeroUsize;
     use rand_chacha::ChaCha20Rng;
     use rand_core::{CryptoRng, SeedableRng as _};
     #[cfg(feature = "std")]
@@ -333,22 +334,42 @@ commonware_macros::stability_scope!(BETA {
         /// the overhead of the streaming machinery.
         fn hash(parts: &[&[u8]]) -> Self::Digest;
 
+        /// Hash the concatenation of `parts` in a single shot, splitting the
+        /// work across `strategy` when the hash function allows it.
+        ///
+        /// Returns the same digest as [`Hasher::hash`], which the default
+        /// implementation calls.
+        fn hash_across(parts: &[&[u8]], _strategy: &impl Strategy) -> Self::Digest {
+            Self::hash(parts)
+        }
+
         /// Hash two messages, each given as a concatenation of parts, in a
-        /// single shot.
+        /// single shot, splitting the work across `strategy` when the hash
+        /// function allows it.
         ///
         /// Must be equivalent to hashing each message with [`Hasher::hash`].
-        fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest);
+        fn hash_pair(
+            left: &[&[u8]],
+            right: &[&[u8]],
+            strategy: &impl Strategy,
+        ) -> (Self::Digest, Self::Digest);
 
-        /// Hash multiple independent byte slices.
+        /// Hash multiple independent byte slices, splitting them across
+        /// `strategy`.
         ///
         /// Returns one digest per input in the same order. Inputs may be empty,
         /// differ in length, or overlap. Output position `i` is equivalent to
         /// `Self::hash(&[messages[i].as_ref()])`.
-        fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
-            messages
-                .iter()
-                .map(|message| Self::hash(&[message.as_ref()]))
-                .collect()
+        fn hash_many<M: AsRef<[u8]> + Sync>(
+            messages: &[M],
+            strategy: &impl Strategy,
+        ) -> Vec<Self::Digest> {
+            hash_batches(messages, 1, strategy, |batch| {
+                batch
+                    .iter()
+                    .map(|message| Self::hash_across(&[message.as_ref()], strategy))
+                    .collect()
+            })
         }
 
         /// Append `bytes` to the hasher's running state.
@@ -357,6 +378,48 @@ commonware_macros::stability_scope!(BETA {
         /// Consume the hasher, returning a freshly-reset hasher alongside the
         /// digest of everything written so far.
         fn finalize(self) -> (Self, Self::Digest);
+    }
+
+    /// Hash `messages` in strategy-supplied batches of whole units of `lanes` (at least one)
+    /// messages, so a kernel that hashes `lanes` messages at once finds every unit but the last
+    /// one full.
+    ///
+    /// `hash` must return one digest per message of its batch, in order. The work estimate is
+    /// the total length of the messages in bytes.
+    pub(crate) fn hash_batches<D, M>(
+        messages: &[M],
+        lanes: usize,
+        strategy: &impl Strategy,
+        hash: impl Fn(&[M]) -> Vec<D> + Sync,
+    ) -> Vec<D>
+    where
+        D: Clone + Send,
+        M: AsRef<[u8]> + Sync,
+    {
+        if messages.is_empty() {
+            return Vec::new();
+        }
+        let units = messages.len().div_ceil(lanes);
+        let bytes = messages.iter().fold(0usize, |bytes, message| {
+            bytes.saturating_add(message.as_ref().len())
+        });
+        strategy.run_batches(units, NonZeroUsize::MIN, bytes.div_ceil(units), |batches| {
+            // A serial run hashes the whole input as one batch, whose digests need no copy.
+            if batches.is_whole() {
+                return hash(messages);
+            }
+            batches
+                .map_collect_vec(
+                    |ranges| {
+                        ranges.into_iter().map(|range| {
+                            let end = range.end.saturating_mul(lanes).min(messages.len());
+                            &messages[range.start * lanes..end]
+                        })
+                    },
+                    &hash,
+                )
+                .concat()
+        })
     }
 
     /// Authenticated encryption of an ordered sequence of messages.
@@ -389,7 +452,8 @@ commonware_macros::stability_scope!(BETA {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, FixedSize};
-    use commonware_utils::test_rng;
+    use commonware_parallel::Rayon;
+    use commonware_utils::{NZUsize, test_rng};
     use std::collections::HashSet;
 
     fn test_validate<C: PrivateKey>() {
@@ -734,5 +798,38 @@ mod tests {
     #[test]
     fn test_sha512_hasher_multiple_runs() {
         test_hasher_multiple_runs::<Sha512>();
+    }
+
+    /// Shares cut the messages only between whole units of `lanes`, cover every message once,
+    /// and return their digests in input order.
+    #[test]
+    fn test_hash_batches_shares_whole_units() {
+        let strategy = Rayon::new(NZUsize!(4))
+            .unwrap()
+            .with_parallelism(NZUsize!(8))
+            .manual();
+        for lanes in [1, 2, 8, 16] {
+            for count in [0, 1, lanes + 1, 3 * lanes, 7 * lanes + 1, 9 * lanes, 100] {
+                // Each message holds its index, and its digest pairs that index with the index of
+                // the first message in its share.
+                let messages: Vec<[u8; 4]> = (0..count as u32).map(u32::to_le_bytes).collect();
+                let digests = hash_batches(&messages, lanes, &strategy, |batch| {
+                    let first = u32::from_le_bytes(batch[0]);
+                    batch
+                        .iter()
+                        .map(|message| (u32::from_le_bytes(*message), first))
+                        .collect()
+                });
+                assert!(digests.iter().map(|&(index, _)| index).eq(0..count as u32));
+
+                // Every unit but the last is whole, so every share but the last holds a multiple
+                // of `lanes` messages.
+                let shares: Vec<_> = digests.chunk_by(|a, b| a.1 == b.1).collect();
+                assert_eq!(shares.len(), count.div_ceil(lanes).min(8));
+                if let Some((_, rest)) = shares.split_last() {
+                    assert!(rest.iter().all(|share| share.len() % lanes == 0));
+                }
+            }
+        }
     }
 }

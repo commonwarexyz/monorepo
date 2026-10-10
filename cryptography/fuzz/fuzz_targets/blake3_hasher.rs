@@ -1,22 +1,52 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use blake3::Hasher as RefBlake3;
+use blake3::{CHUNK_LEN, Hasher as RefBlake3};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     Hasher,
     blake3::{Blake3 as OurBlake3, Digest},
     fuzz::Plan,
 };
+use commonware_parallel::{Manual, Rayon, Strategy as _};
+use commonware_utils::{NZUsize, TestRng};
 use libfuzzer_sys::fuzz_target;
+use rand::Rng as _;
+use std::sync::LazyLock;
 use zeroize::Zeroize;
 
+/// A four-worker strategy with adaptive decisions disabled, so it takes every split a hasher
+/// offers it. It is built once and reused across invocations because starting a thread pool is
+/// expensive.
+static STRATEGY: LazyLock<Manual<Rayon>> =
+    LazyLock::new(|| Rayon::new(NZUsize!(4)).unwrap().manual());
+
 #[derive(Debug, Arbitrary)]
-pub struct FuzzInput {
-    pub chunks: Vec<Vec<u8>>,
-    pub data: Vec<u8>,
-    pub plan: Plan<OurBlake3>,
-    pub case_selector: u8,
+enum Operation {
+    /// Streaming matches the reference, and one-shot hashing matches streaming.
+    BasicHashing(Vec<Vec<u8>>),
+    /// The hasher returned by finalize starts over.
+    ResetFunctionality(Vec<Vec<u8>>),
+    /// Streaming in chunks matches the reference over the whole input.
+    ChunkedVsWhole(Vec<Vec<u8>>),
+    /// One-shot hashing matches the reference.
+    DiffHash(Vec<u8>),
+    /// Codec roundtrip.
+    EncodeDecode(Vec<u8>),
+    /// Determinism and Debug/Display formatting.
+    CloneAndFormat(Vec<Vec<u8>>),
+    /// Digest slicing and zeroize.
+    DigestOperations(Vec<u8>),
+    /// Conversion from the reference digest, and Deref.
+    FromHashAndDeref(Vec<u8>),
+    /// One-shot and pair entrypoints match streaming.
+    HasherPlan(Plan<OurBlake3>),
+    /// A long message cut into parts hashes across workers to the reference digest.
+    HashAcross {
+        seed: u64,
+        extra_len: u16,
+        cuts: Vec<u32>,
+    },
 }
 
 fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
@@ -157,21 +187,41 @@ fn fuzz_from_hash_and_deref(data: &[u8]) {
     assert_eq!(our_digest.as_ref(), our_hash.as_ref());
 }
 
-fn fuzz(input: FuzzInput) {
-    match input.case_selector % 9 {
-        0 => fuzz_basic_hashing(&input.chunks),
-        1 => fuzz_reset_functionality(&input.chunks),
-        2 => fuzz_chunked_vs_whole(&input.chunks),
-        3 => fuzz_diff_hash(&input.data),
-        4 => fuzz_encode_decode(&input.data),
-        5 => fuzz_clone_and_format(&input.chunks),
-        6 => fuzz_digest_operations(&input.data),
-        7 => fuzz_from_hash_and_deref(&input.data),
-        8 => input.plan.run(),
-        _ => unreachable!(),
-    }
+// Hash a message of 127 to 191 KiB, around the 128 KiB from which `hash_across` splits a
+// message across workers, cut into parts at `cuts` (a repeated cut leaves an empty part).
+fn fuzz_hash_across(seed: u64, extra_len: u16, cuts: &[u32]) {
+    let len = 128 * 1024 - CHUNK_LEN + usize::from(extra_len);
+    let mut message = vec![0; len];
+    TestRng::new(seed).fill_bytes(&mut message);
+
+    let mut bounds: Vec<usize> = cuts.iter().map(|&cut| cut as usize % (len + 1)).collect();
+    bounds.extend([0, len]);
+    bounds.sort_unstable();
+    let parts: Vec<&[u8]> = bounds
+        .windows(2)
+        .map(|bound| &message[bound[0]..bound[1]])
+        .collect();
+
+    let our_result = OurBlake3::hash_across(&parts, &*STRATEGY);
+    let ref_result = RefBlake3::new().update(&message).finalize();
+    assert_eq!(our_result.as_ref(), ref_result.as_bytes());
 }
 
-fuzz_target!(|input: FuzzInput| {
-    fuzz(input);
+fuzz_target!(|op: Operation| {
+    match op {
+        Operation::BasicHashing(chunks) => fuzz_basic_hashing(&chunks),
+        Operation::ResetFunctionality(chunks) => fuzz_reset_functionality(&chunks),
+        Operation::ChunkedVsWhole(chunks) => fuzz_chunked_vs_whole(&chunks),
+        Operation::DiffHash(data) => fuzz_diff_hash(&data),
+        Operation::EncodeDecode(data) => fuzz_encode_decode(&data),
+        Operation::CloneAndFormat(chunks) => fuzz_clone_and_format(&chunks),
+        Operation::DigestOperations(data) => fuzz_digest_operations(&data),
+        Operation::FromHashAndDeref(data) => fuzz_from_hash_and_deref(&data),
+        Operation::HasherPlan(plan) => plan.run(),
+        Operation::HashAcross {
+            seed,
+            extra_len,
+            cuts,
+        } => fuzz_hash_across(seed, extra_len, &cuts),
+    }
 });
