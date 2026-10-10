@@ -60,14 +60,14 @@ const SUBTREES: usize = 8;
 
 /// Lower clamp, in bytes, on the subtree bound: 16 chunks, the widest batch the SIMD kernels
 /// compress at once.
-pub(crate) const MIN_SUBTREE_LEN: usize = 16 * CHUNK_LEN;
+const MIN_SUBTREE_LEN: usize = 16 * CHUNK_LEN;
 
 /// Upper clamp, in bytes, on the subtree bound: 64 chunks, enough to amortize the cost of a fork.
 const MAX_SUBTREE_LEN: usize = 64 * CHUNK_LEN;
 
 /// Length, in bytes, of the shortest message [`Hasher::hash_across`] splits: [`SUBTREES`]
 /// subtrees of [`MIN_SUBTREE_LEN`] bytes.
-pub(crate) const MIN_SPLIT_LEN: usize = SUBTREES * MIN_SUBTREE_LEN;
+const MIN_SPLIT_LEN: usize = SUBTREES * MIN_SUBTREE_LEN;
 
 /// Hash the `len`-byte concatenation of `parts`, which spans more than one chunk, across `strategy`
 /// as subtrees of at most `len / SUBTREES` bytes, clamped to [`MIN_SUBTREE_LEN`] and

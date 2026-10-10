@@ -669,6 +669,7 @@ fn current_thread_id() -> usize {
 }
 
 #[cfg(all(test, not(feature = "loom")))]
+#[commonware_macros::test_group("miri")]
 pub(super) mod tests {
     use super::*;
     use crate::{BufferPool, BufferPoolConfig, IoBufMut, iobuf::PoolError};

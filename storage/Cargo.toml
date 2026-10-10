@@ -92,6 +92,11 @@ test-traits = []
 bench = false
 
 [[bench]]
+name = "cold_read"
+harness = false
+path = "src/qmdb/benches/cold_read.rs"
+
+[[bench]]
 name = "constantinople"
 harness = false
 path = "src/qmdb/benches/constantinople.rs"

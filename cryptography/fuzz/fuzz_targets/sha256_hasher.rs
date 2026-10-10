@@ -21,12 +21,27 @@ static STRATEGY: LazyLock<Manual<Rayon>> =
     LazyLock::new(|| Rayon::new(NZUsize!(4)).unwrap().manual());
 
 #[derive(Debug, Arbitrary)]
-pub struct FuzzInput {
-    pub chunks: Vec<Vec<u8>>,
-    pub data: Vec<u8>,
-    pub plan: Plan<OurSha256>,
-    pub batch_plan: BatchPlan<OurSha256>,
-    pub case_selector: u8,
+enum Operation {
+    /// Streaming matches the reference, and one-shot hashing matches streaming.
+    BasicHashing(Vec<Vec<u8>>),
+    /// The hasher returned by finalize starts over.
+    ResetFunctionality(Vec<Vec<u8>>),
+    /// Streaming in chunks matches the reference over the whole input.
+    ChunkedVsWhole(Vec<Vec<u8>>),
+    /// One-shot hashing matches the reference.
+    DiffHash(Vec<u8>),
+    /// Codec roundtrip.
+    EncodeDecode(Vec<u8>),
+    /// Two default hashers agree.
+    DefaultClone,
+    /// A filled digest's bytes and formatting.
+    FillAndFormat(u8),
+    /// Zeroize clears a digest.
+    Zeroize,
+    /// One-shot and pair entrypoints match streaming.
+    HasherPlan(Plan<OurSha256>),
+    /// Batched hashing matches streaming, on the calling thread and across workers.
+    HasherBatchPlan(BatchPlan<OurSha256>),
 }
 
 // Basic hashing comparison with chunks
@@ -155,22 +170,17 @@ fn fuzz_zeroize() {
     assert!(digest.as_ref().iter().all(|&b| b == 0));
 }
 
-fn fuzz(input: FuzzInput) {
-    match input.case_selector % 10 {
-        0 => fuzz_basic_hashing(&input.chunks),
-        1 => fuzz_reset_functionality(&input.chunks),
-        2 => fuzz_chunked_vs_whole(&input.chunks),
-        3 => fuzz_diff_hash(&input.data),
-        4 => fuzz_encode_decode(&input.data),
-        5 => fuzz_default_clone(),
-        6 => fuzz_fill_and_format(input.data.first().copied().unwrap_or(0)),
-        7 => fuzz_zeroize(),
-        8 => input.plan.run(&*STRATEGY),
-        9 => input.batch_plan.run(&*STRATEGY),
-        _ => unreachable!(),
+fuzz_target!(|op: Operation| {
+    match op {
+        Operation::BasicHashing(chunks) => fuzz_basic_hashing(&chunks),
+        Operation::ResetFunctionality(chunks) => fuzz_reset_functionality(&chunks),
+        Operation::ChunkedVsWhole(chunks) => fuzz_chunked_vs_whole(&chunks),
+        Operation::DiffHash(data) => fuzz_diff_hash(&data),
+        Operation::EncodeDecode(data) => fuzz_encode_decode(&data),
+        Operation::DefaultClone => fuzz_default_clone(),
+        Operation::FillAndFormat(byte) => fuzz_fill_and_format(byte),
+        Operation::Zeroize => fuzz_zeroize(),
+        Operation::HasherPlan(plan) => plan.run(),
+        Operation::HasherBatchPlan(plan) => plan.run(&*STRATEGY),
     }
-}
-
-fuzz_target!(|input: FuzzInput| {
-    fuzz(input);
 });
