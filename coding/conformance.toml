@@ -1,3 +1,11 @@
+["commonware_coding::ocelot::scheme::conformance::CodecConformance<StrongShard<Sha256Digest>>"]
+n_cases = 65536
+hash = "cf5aeb77dac4e5393e7fbc57e53cf8181b8d279baffc9f7d1c3c8e7db884e0c6"
+
+["commonware_coding::ocelot::scheme::conformance::CodecConformance<WeakShard<Sha256Digest>>"]
+n_cases = 65536
+hash = "45545e4d4aeb18b8bdb019e630fb9a1fa6dda9ed32b2d529a9213ec07ccab07c"
+
 ["commonware_coding::reed_solomon::tests::conformance::CodecConformance<Chunk<Sha256Digest>>"]
 n_cases = 65536
 hash = "45545e4d4aeb18b8bdb019e630fb9a1fa6dda9ed32b2d529a9213ec07ccab07c"
