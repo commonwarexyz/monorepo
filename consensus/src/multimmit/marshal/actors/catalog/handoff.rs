@@ -249,11 +249,11 @@ mod tests {
     use super::*;
     use crate::{
         multimmit::{
-            marshal::{OutputIndex, storage::commit::CustodyRef},
+            marshal::storage::commit::CustodyRef,
             testing::TestBody,
             types::{ChainId, TransactionBlock, TransactionBlockHeader},
         },
-        types::{Epoch, Height},
+        types::{Epoch, Height, OutputIndex},
     };
     use commonware_cryptography::{Digestible as _, Sha256};
     use std::{num::NonZeroUsize, sync::Arc};

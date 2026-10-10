@@ -25,10 +25,10 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_consensus::{
     CertifiableAutomaton as _, Reporter,
+    ancestry::Ancestry,
     simplex::{
         marshal::{
             self,
-            ancestry::Ancestry,
             core::Actor as MarshalActor,
             resolver::handler,
             standard::{Deferred, Standard},
@@ -931,7 +931,6 @@ struct GatedMultiApp {
 }
 
 impl Application<deterministic::Context> for GatedMultiApp {
-    type SigningScheme = <MultiApp as Application<deterministic::Context>>::SigningScheme;
     type Context = <MultiApp as Application<deterministic::Context>>::Context;
     type Block = MultiBlock;
     type Databases = MultiDatabaseSet<deterministic::Context>;

@@ -110,6 +110,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;
 
+    pub mod ancestry;
     mod reporter;
     pub use reporter::*;
 
@@ -289,8 +290,9 @@ stability_scope!(ALPHA {
     pub mod aggregation;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::simplex::marshal::ancestry::Ancestry;
-    use commonware_cryptography::certificate::Scheme;
+    pub mod marshal;
+
+    use crate::ancestry::Ancestry;
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand_core::Rng;
 
@@ -300,9 +302,6 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     where
         E: Rng + Spawner + Metrics + Clock,
     {
-        /// The signing scheme used by the application.
-        type SigningScheme: Scheme;
-
         /// Context is metadata provided by the consensus engine associated with a given payload.
         ///
         /// This often includes things like the proposer, view number, the height, or the epoch.

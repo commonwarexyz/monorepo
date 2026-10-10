@@ -65,10 +65,10 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 mod tests {
     use crate::{
         Automaton, Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay, Reporter,
+        ancestry::{Ancestry, BlockProvider},
         simplex::{
             Plan,
             marshal::{
-                ancestry::{Ancestry, BlockProvider},
                 coding::{
                     Coding, Marshaled, MarshaledConfig, shards,
                     types::{
@@ -224,7 +224,6 @@ mod tests {
     impl crate::Application<deterministic::Context> for WalkingVerifyingApp {
         type Block = CodingB;
         type Context = CodingCtx;
-        type SigningScheme = S;
         type Input = ();
 
         async fn propose(
@@ -1284,6 +1283,16 @@ mod tests {
     #[test_traced("WARN")]
     fn test_coding_get_finalization_by_height() {
         harness::get_finalization_by_height::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_finalization_floors() {
+        harness::finalization_floors::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_finalization_floors_survive_pruning() {
+        harness::finalization_floors_survive_pruning::<CodingHarness>();
     }
 
     #[test_traced("WARN")]

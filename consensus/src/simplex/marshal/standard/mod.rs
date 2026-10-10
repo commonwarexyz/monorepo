@@ -61,13 +61,13 @@ mod tests {
     use super::{Deferred, Inline, Standard, relay};
     use crate::{
         Automaton, CertifiableAutomaton, Heightable, Relay, Reporter,
+        ancestry::BlockProvider,
         simplex::{
             self, Plan,
             config::{ForwardPolicy, SkipBudget, SkipPolicy},
             elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
             marshal::{
                 Identifier, Update,
-                ancestry::BlockProvider,
                 application::gates::{GateOutcome, Gates},
                 config::{Config, Start},
                 core::{
@@ -1422,6 +1422,18 @@ mod tests {
     fn test_standard_get_finalization_by_height() {
         harness::get_finalization_by_height::<InlineHarness>();
         harness::get_finalization_by_height::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalization_floors() {
+        harness::finalization_floors::<InlineHarness>();
+        harness::finalization_floors::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalization_floors_survive_pruning() {
+        harness::finalization_floors_survive_pruning::<InlineHarness>();
+        harness::finalization_floors_survive_pruning::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]

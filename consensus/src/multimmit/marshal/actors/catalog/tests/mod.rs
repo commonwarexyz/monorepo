@@ -9,7 +9,7 @@ use crate::{
     Epochable as _, Reporter, Viewable as _,
     multimmit::{
         marshal::{
-            MarshalProgress, OutputIndex,
+            MarshalProgress,
             actors::delivery::{self, DeliveryOutput, DurableBatch, HotOutput},
             bodies::Bodies,
             config::{ArchiveConfig, ArchiveMode, Config, Retention, Start},
@@ -31,7 +31,7 @@ use crate::{
             TransactionBlockHeader, genesis_history,
         },
     },
-    types::{Height, Participant, View},
+    types::{Height, OutputIndex, Participant, View},
 };
 use commonware_actor::Feedback;
 use commonware_codec::EncodeSize as _;
