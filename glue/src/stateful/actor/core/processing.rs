@@ -12,7 +12,7 @@ use crate::stateful::{
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     Heightable,
-    marshal::{
+    simplex::marshal::{
         ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
     },
@@ -512,12 +512,15 @@ mod tests {
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
         Application as _, CertifiableBlock as _, Heightable as _, Reporter as _, Reporters,
-        marshal::{
-            Update,
-            ancestry::{self, Ancestry},
-            core::Processed,
+        simplex::{
+            marshal::{
+                Update,
+                ancestry::{self, Ancestry},
+                core::Processed,
+            },
+            mocks::scheme as scheme_mocks,
+            types::Activity,
         },
-        simplex::{mocks::scheme as scheme_mocks, types::Activity},
         types::Height,
     };
     use commonware_cryptography::Digestible as _;

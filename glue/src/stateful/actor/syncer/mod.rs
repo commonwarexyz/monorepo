@@ -6,11 +6,13 @@ use crate::stateful::{
 use commonware_codec::{Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{
     Heightable,
-    marshal::{
-        Identifier,
-        core::{CommitmentFallback, Floor, Mailbox as MarshalMailbox, Processed, Variant},
+    simplex::{
+        marshal::{
+            Identifier,
+            core::{CommitmentFallback, Floor, Mailbox as MarshalMailbox, Processed, Variant},
+        },
+        types::Finalization,
     },
-    simplex::types::Finalization,
     types::Height,
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
