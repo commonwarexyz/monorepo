@@ -926,7 +926,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             finality_floor: self.signing_floor_view(),
             proposal_anchor_view: self.durable.state.proposal_anchor_view(),
             produced_blocks: self.durable.state.produced_blocks,
-            producer: self.chain.producer_status::<H>(self.finality.finalized()),
+            producer: self.chain.producer_status::<H>(),
             artifact_cache_occupancy: self.store.artifacts.len()
                 + self.local_artifact_reservations(),
             artifact_cache_capacity: resources.max_cached_artifacts(),
