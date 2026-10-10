@@ -15,6 +15,7 @@
 
 use crate::translator::Translator;
 use commonware_runtime::Metrics;
+use core::ops::Bound::{self, Excluded, Included};
 
 mod storage;
 
@@ -256,6 +257,31 @@ pub trait Ordered: Unordered {
     ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>
     where
         Self::Value: 'a;
+
+    /// Returns the values of each translated key within `start` and `end`, in ascending
+    /// translated-key order. Each bound applies to its key's translation, so excluding a key
+    /// excludes every key that shares its translation. The iteration does not cycle.
+    fn translated_range<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> impl Iterator<Item = impl Iterator<Item = &'a Self::Value> + Send + use<'a, Self>>
+    + Send
+    + use<'a, Self>
+    where
+        Self::Value: 'a;
+}
+
+/// Whether no key lies within `start` and `end`. `BTreeMap::range` panics on these bounds when
+/// `start` exceeds `end`, or when they are equal and both excluded.
+fn is_empty_range<K: Ord>(start: Bound<&K>, end: Bound<&K>) -> bool {
+    match (start, end) {
+        (Included(start), Included(end)) => start > end,
+        (Included(start) | Excluded(start), Excluded(end)) | (Excluded(start), Included(end)) => {
+            start >= end
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -273,6 +299,7 @@ mod tests {
     use rand::RngExt as _;
     use std::{
         collections::{HashMap, HashSet},
+        ops::Bound::Unbounded,
         sync::Arc,
         thread,
     };
@@ -475,6 +502,120 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Verify `translated_range` yields each translated key's values in order within translated
+    /// bounds, without cycling. Expects a two-byte translation (TwoCap, or OneCap after a one-byte
+    /// partition prefix).
+    fn run_ordered_translated_range<I: Ordered<Value = u64>>(index: &mut I) {
+        let range = |index: &I, start: Bound<&[u8]>, end: Bound<&[u8]>| {
+            index
+                .translated_range(start, end)
+                .map(|values| {
+                    let mut values: Vec<u64> = values.copied().collect();
+                    values.sort_unstable();
+                    values
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(range(index, Unbounded, Unbounded).is_empty());
+        assert!(range(index, Included(&[0x00]), Excluded(&[0x00])).is_empty());
+
+        // Values 1 and 2 collide, and value 3 shares their partition.
+        let keys: [&[u8]; 6] = [
+            &[0x00, 0x01, 0x01],
+            &[0x00, 0x01, 0x02],
+            &[0x00, 0x02],
+            &[0x01, 0x00],
+            &[0x05, 0x05],
+            &[0xFF, 0xFF],
+        ];
+        for (value, &key) in (1..).zip(keys.iter()) {
+            index.insert(key, value);
+        }
+
+        let all = vec![vec![1, 2], vec![3], vec![4], vec![5], vec![6]];
+        assert_eq!(range(index, Unbounded, Unbounded), all);
+        assert_eq!(
+            range(
+                index,
+                Included(&[0x00, 0x02, 0xAA]),
+                Included(&[0x05, 0x05])
+            ),
+            all[1..4]
+        );
+        assert_eq!(range(index, Included(&[0x00, 0x03]), Unbounded), all[2..]);
+        assert_eq!(
+            range(index, Unbounded, Included(&[0x01, 0x00, 0x07])),
+            all[..3]
+        );
+        assert_eq!(
+            range(
+                index,
+                Included(&[0x01, 0x00, 0x07]),
+                Included(&[0x01, 0x00])
+            ),
+            all[2..3]
+        );
+        assert_eq!(
+            range(index, Included(&[0x00, 0x01]), Included(&[0x00, 0x01])),
+            all[..1]
+        );
+        assert!(range(index, Included(&[0x02]), Included(&[0x04])).is_empty());
+        assert!(range(index, Included(&[0x05, 0x05]), Included(&[0x00, 0x01])).is_empty());
+        assert!(range(index, Included(&[0x00, 0x02]), Included(&[0x00, 0x01])).is_empty());
+
+        // Excluding a key excludes every key that shares its translation.
+        assert_eq!(
+            range(
+                index,
+                Excluded(&[0x00, 0x01, 0x07]),
+                Excluded(&[0x05, 0x05, 0x07])
+            ),
+            all[1..3]
+        );
+        assert_eq!(range(index, Excluded(&[0x00, 0x03]), Unbounded), all[2..]);
+        assert_eq!(range(index, Unbounded, Excluded(&[0x00, 0x02])), all[..1]);
+        assert_eq!(range(index, Unbounded, Excluded(&[0x01, 0x00])), all[..2]);
+        assert_eq!(
+            range(index, Excluded(&[0x01]), Excluded(&[0xFF, 0xFF])),
+            all[3..4]
+        );
+        assert_eq!(
+            range(index, Included(&[0x00, 0x02]), Excluded(&[0x00, 0x03])),
+            all[1..2]
+        );
+        assert!(range(index, Included(&[0x00, 0x02]), Excluded(&[0x00, 0x02])).is_empty());
+        assert!(range(index, Excluded(&[0x00, 0x02]), Included(&[0x00, 0x02])).is_empty());
+        assert!(range(index, Excluded(&[0x00, 0x02]), Excluded(&[0x00, 0x02])).is_empty());
+        assert!(range(index, Excluded(&[0xFF, 0xFF]), Unbounded).is_empty());
+        assert!(range(index, Unbounded, Excluded(&[0x00, 0x01])).is_empty());
+    }
+
+    #[test_traced]
+    fn test_ordered_translated_range_flat() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            run_ordered_translated_range(&mut new_ordered(context));
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_translated_range_partitioned() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            run_ordered_translated_range(&mut new_partitioned_ordered(context));
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_translated_range_partitioned_spilled() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_partitioned_ordered_spilling(context);
+            run_ordered_translated_range(&mut index);
+            assert!(index.spilled_count() > 0);
+        });
     }
 
     #[test_traced]

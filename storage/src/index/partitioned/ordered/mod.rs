@@ -47,7 +47,7 @@ use self::partition::Partition;
 use crate::index::partitioned::{PartitionRange, Partitioned};
 use crate::{
     index::{
-        Cursor as CursorTrait, Factory, Ordered, Unordered,
+        Cursor as CursorTrait, Factory, Ordered, Unordered, is_empty_range,
         partitioned::partition_index_and_sub_key,
     },
     translator::Translator,
@@ -714,6 +714,58 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
             }
         }
         None
+    }
+
+    fn translated_range<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> impl Iterator<Item = impl Iterator<Item = &'a V> + Send + use<'a, T, V, P>>
+    + Send
+    + use<'a, T, V, P>
+    where
+        V: 'a,
+    {
+        // Keys order by partition, then by translated sub-key, so each bound applies its
+        // sub-key only within its own partition.
+        let translate = |key: &[u8]| {
+            let (i, sub) = partition_index_and_sub_key::<P>(key);
+            (i, self.translator.transform(sub))
+        };
+        let start = start.map(translate);
+        let end = end.map(translate);
+        let first = match start {
+            Bound::Included((i, _)) | Bound::Excluded((i, _)) => i,
+            Bound::Unbounded => 0,
+        };
+        let last = match end {
+            Bound::Included((i, _)) | Bound::Excluded((i, _)) => i,
+            Bound::Unbounded => self.partitions.len() - 1,
+        };
+
+        // The walk visits every partition between the bounds' partitions, empty or not, so skip
+        // it when there is nothing to find.
+        (!self.is_empty())
+            .then_some(first..=last)
+            .into_iter()
+            .flatten()
+            .flat_map(move |p| {
+                let local = |bound: Bound<(usize, T::Key)>| match bound {
+                    Bound::Included((i, k)) if i == p => Bound::Included(k),
+                    Bound::Excluded((i, k)) if i == p => Bound::Excluded(k),
+                    _ => Bound::Unbounded,
+                };
+                let (start, end) = (local(start), local(end));
+                let spilled = self
+                    .spilled_partition(p)
+                    .filter(|_| !is_empty_range(start.as_ref(), end.as_ref()))
+                    .into_iter()
+                    .flat_map(move |inner| {
+                        inner.range((start, end)).map(|(_, vals)| vals.as_slice())
+                    });
+                self.partitions[p].runs(start, end).chain(spilled)
+            })
+            .map(|vals| vals.iter())
     }
 }
 
