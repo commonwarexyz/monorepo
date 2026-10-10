@@ -336,7 +336,7 @@ impl CacheRef {
     /// caches, and serves each page as it arrives. Serving never depends on the cache still
     /// holding a page, so no page this call reads is read again to serve it. Other readers do
     /// not join the batched read. A page failing validation returns an error, like a single
-    /// fetch; pages cached before it remain, subject to normal eviction.
+    /// fetch. Pages cached before it remain, subject to normal eviction.
     pub(super) async fn read_after_misses<B: Blob>(
         &self,
         blob: &Arc<B>,
@@ -345,7 +345,7 @@ impl CacheRef {
     ) -> Result<(), Error> {
         // Split every range at page boundaries. Copy resident pieces now, before this call's own
         // insertions can evict their pages. Pieces whose page another reader is fetching join that
-        // fetch; the rest wait for the batched read.
+        // fetch, and the rest wait for the batched read.
         let mut waiting = Vec::new();
         let mut joins = FuturesUnordered::new();
         {
@@ -1335,7 +1335,7 @@ mod tests {
                 .unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
 
-            // A corrupt page fails the read and never enters the cache; pages that passed their
+            // A corrupt page fails the read and never enters the cache. Pages that passed their
             // own validation before the failure may already be resident.
             let mut bufs = [[0u8; 1]; 3];
             let pending: Vec<(&mut [u8], u64)> = bufs

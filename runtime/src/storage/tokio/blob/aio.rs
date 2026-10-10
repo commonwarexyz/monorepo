@@ -20,7 +20,7 @@ pub(super) const SUBMISSION: usize = 256;
 /// The kernel spends about 2 us issuing each direct read, so a whole submission takes
 /// longer to issue than one read takes to complete. Reaping between slices lets the
 /// earliest completions reach the stream while the rest of the submission is still being
-/// issued, at the cost of one non-blocking `io_getevents` per slice; slices much smaller
+/// issued, at the cost of one non-blocking `io_getevents` per slice. Slices much smaller
 /// than this pay more in per-call overhead than they return.
 const SLICE: usize = 32;
 
@@ -85,14 +85,14 @@ struct IoEvent {
 /// The `aio_lio_opcode` of a positioned read.
 const IOCB_CMD_PREAD: u16 = 0;
 
-/// A long-lived AIO context, owned by one submission at a time: `io_submit` and
-/// `io_getevents` block the submitting thread, and concurrent submissions each hold their own.
+/// A long-lived AIO context. Each submission in flight holds one of its own: `io_getevents`
+/// returns any completion in a context, so sharing one would hand a submission the reads of
+/// others.
 ///
-/// Destroying one waits for RCU grace periods (~30 ms), so a context is destroyed only when
-/// a submission fails with reads in flight, because the slab must outlive them. The pool
-/// therefore holds as many contexts as submissions ever ran concurrently in this process,
-/// each charging [SUBMISSION] against the host-wide `fs.aio-max-nr` budget (65,536 by
-/// default, so 256 contexts) until the process exits and the kernel reclaims them. A
+/// Destroying a context waits for RCU grace periods (~30 ms), so one is destroyed only when
+/// a submission fails with reads in flight, because the slab must outlive them. Every
+/// pooled context charges [SUBMISSION] against the host-wide `fs.aio-max-nr` budget (65,536
+/// by default, so 256 contexts) until the process exits and the kernel reclaims them. A
 /// submission that cannot obtain a context is served one blocking task per read, and other
 /// users of Linux AIO on the same host see that budget as taken.
 struct Context(libc::c_ulong);
@@ -109,9 +109,10 @@ impl Drop for Context {
     }
 }
 
-/// The process-wide free list of contexts no submission is using; none holds an outstanding
-/// request. The lock guards one pop or push per submission and is never held across a
-/// syscall.
+/// The process-wide free list of idle contexts. A submission takes one before `io_submit`
+/// and returns it after reaping every completion, so the list grows to the peak number of
+/// concurrent submissions. The lock guards one pop or push per submission and is never held
+/// across a syscall.
 static CONTEXTS: Mutex<Vec<Context>> = Mutex::new(Vec::new());
 
 /// Take a pooled context or create one sized for a full submission. `None` when the kernel
@@ -138,7 +139,7 @@ fn read_positioned(file: &Shared, pool: &BufferPool, read: &Read) -> Completion 
 
 /// Submit every read in `batch` through `ctx`, delivering each one as it completes. A read
 /// the kernel rejects, fails, or completes short is served by [`read_positioned`] instead.
-/// Returns `ctx` once every submitted read has completed; on error, dropping it waits for the
+/// Returns `ctx` once every submitted read has completed. On error, dropping it waits for the
 /// reads still in flight.
 fn submit(
     file: &Shared,
@@ -153,8 +154,8 @@ fn submit(
 
     // Every read covers the superset of its range aligned to a blob page, which is the largest
     // logical block size of supported devices and so satisfies direct I/O's alignment of
-    // offsets, lengths, and buffers. The supersets lie back to back in one aligned slab; the
-    // requested bytes are copied into pool buffers on completion.
+    // offsets, lengths, and buffers. The supersets lie back to back in one aligned slab, and
+    // the requested bytes are copied into pool buffers on completion.
     let block: usize = Widen::widen(BLOB_PAGE_SIZE);
     let mut spans = Vec::with_capacity(n);
     let mut slab_len = 0usize;
@@ -195,7 +196,7 @@ fn submit(
             // integer address, so it exposes the slab's provenance.
             aio_buf: Widen::widen(unsafe { slab_ptr.add(start) }.expose_provenance()),
             aio_nbytes: Widen::widen(aligned_len),
-            // An offset past the largest signed file offset wraps negative; the kernel
+            // An offset past the largest signed file offset wraps negative. The kernel
             // rejects it at submission and the read is served positioned.
             aio_offset: aligned_offset as i64,
             ..Iocb::default()
@@ -240,7 +241,7 @@ fn submit(
     while next < n {
         let count = (n - next).min(SLICE);
         // SAFETY: `ptrs[next..next + count]` are valid iocbs whose buffers lie in the slab,
-        // which outlives every accepted request; the context holds at least `n` slots
+        // which outlives every accepted request. The context holds at least `n` slots
         // because `n <= SUBMISSION`.
         let r = unsafe {
             libc::syscall(

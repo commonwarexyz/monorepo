@@ -86,7 +86,7 @@ struct Shared {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: AtomicBool,
-    /// Descriptor for direct I/O on the same inode, opened by the first batched read; `None`
+    /// Descriptor for direct I/O on the same inode, opened by the first batched read. `None`
     /// once the filesystem has rejected direct I/O on this file. Empty until an open succeeds
     /// or is rejected (see [aio::direct]).
     #[cfg(target_os = "linux")]
@@ -1502,7 +1502,7 @@ mod tests {
                 .collect()
         }
 
-        // Two buffered, unsynced generations of the same blocks; each batched read sees the
+        // Two buffered, unsynced generations of the same blocks. Each batched read sees the
         // latest one.
         for generation in [0x11u8, 0x22] {
             let data = vec![generation; 2 * BLOCK];

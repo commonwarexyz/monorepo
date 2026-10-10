@@ -1,8 +1,8 @@
 //! Cold random-read harness for QMDB: seeds a large unordered fixed-value `any` DB on the tokio
 //! runtime, then times batches of random keys, reporting device statistics from /proc/diskstats
-//! alongside each batch (Linux; zeros elsewhere). Pages a batch reads stay in the page cache, so
-//! until the cache fills a later batch of the same run finds about
-//! `batch * iteration / log pages` of its keys resident; size `keys` so this stays small.
+//! alongside each batch (Linux only, zeros elsewhere). Pages a batch reads stay in the page
+//! cache, so until the cache fills a later batch of the same run finds about
+//! `batch * iteration / log pages` of its keys resident. Size `keys` so this stays small.
 //!
 //! Seed a directory once with `seed`, drop the OS page cache (`sudo purge` on macOS), then run
 //! `read` or `blob` variants against the same directory:
@@ -21,14 +21,14 @@
 //! per run.
 //!
 //! - dir: storage directory (required)
-//! - keys: seeded keys (required); `read` samples keys from this range and first checks that the
+//! - keys: seeded keys (required). `read` samples keys from this range and first checks that the
 //!   last one is present
 //! - mode (required): for `read`, one of get_many, chunked (up to 8 concurrent get_many),
 //!   get_concurrent (one `get` per key, joined), get_serial (one `get` at a time), stage (stage,
 //!   merkleize, apply, commit), pipeline (prefetch the next batch with get_many while staging
 //!   this one, then commit), or sustained (keep `depth` independent get_many batches in flight
 //!   for 2 x iters batches and report the whole run: the steady-state device throughput a
-//!   pipelined caller sees); for `blob` (raw reads of random 4 KiB pages of the first log blob
+//!   pipelined caller sees). For `blob` (raw reads of random 4 KiB pages of the first log blob
 //!   through the runtime, no QMDB or page cache), one of blob_read_at or blob_read_many
 //! - seed_batch: keys per seeding batch (default 1,000,000)
 //! - batch: random keys (or blob pages) per timed batch (default 1500)
@@ -474,7 +474,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
             }
             "sustained" => {
                 // Keep `depth` independent batches in flight for the whole run, refilling as each
-                // completes, as a pipelined application does; one iteration covers all batches.
+                // completes, as a pipelined application does. One iteration covers all batches.
                 let depth = args.depth;
                 let total = args.iters * 2;
                 let mut rng2 = TestRng::new(args.rseed.wrapping_add(99));
@@ -503,7 +503,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                     next += 1;
                 }
 
-                // Time the run from its first read; generating the key pool above is setup.
+                // Time the run from its first read. Generating the key pool above is setup.
                 let before = diskstats(&args.disk);
                 let start = Instant::now();
                 let mut done = 0usize;
@@ -561,7 +561,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
 }
 
 fn main() {
-    // `cargo bench` appends a trailing `--bench` arg even for harness=false binaries; drop it so
+    // `cargo bench` appends a trailing `--bench` arg even for harness=false binaries. Drop it so
     // trailing optional args parse.
     let raw: Vec<String> = std::env::args()
         .skip(1)
