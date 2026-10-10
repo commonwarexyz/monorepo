@@ -12,6 +12,8 @@ use commonware_utils::{
     channel::oneshot,
     sync::{Mutex, MutexGuard},
 };
+#[cfg(target_os = "linux")]
+use futures::{StreamExt as _, stream};
 #[cfg(test)]
 use std::sync::mpsc;
 use std::{
@@ -36,7 +38,8 @@ const IOVEC_BATCH_SIZE: usize = 1024;
 #[cfg(target_os = "linux")]
 mod aio {
     use super::*;
-    use crate::BufMut as _;
+    use crate::{BLOB_PAGE_SIZE, BufMut as _, IoBufMut};
+    use commonware_utils::NZUsize;
     use std::os::unix::fs::OpenOptionsExt as _;
 
     /// Reads one blocking task submits as a single batch in [`crate::Blob::read_many`].
@@ -66,69 +69,24 @@ mod aio {
     /// One completed read, sent to the stream as soon as the kernel reports it.
     pub(super) type Completion = Result<(usize, IoBufsMut), Error>;
 
-    /// The blob's `O_DIRECT` descriptor on its inode, opened by the first submission on the
-    /// submitting thread and kept for the blob's lifetime. `None` when the filesystem rejects
-    /// direct I/O, which the blob remembers so later batches take the per-read path without
-    /// trying again, or when the open fails for a transient reason such as a descriptor limit,
-    /// which the next submission retries.
-    ///
-    /// The submissions of a blob's first batch run concurrently, so several of them may find
-    /// no descriptor yet and each open one. The first to finish wins and the rest close theirs
-    /// at once; every submission then reads through the winner. Serializing the open would
-    /// force a transient failure to be remembered as if the filesystem had rejected direct I/O,
-    /// so the duplicate opens, bounded by the submissions of one batch and paid once per blob,
-    /// are accepted instead.
+    /// The blob's `O_DIRECT` descriptor on its inode, opened once by the first submission on
+    /// the submitting thread and kept for the blob's lifetime. `None` when that open failed,
+    /// which the blob remembers so later batches take the per-read path without trying again.
     pub(super) fn direct(file: &Shared) -> Option<&File> {
-        if let Some(direct) = file.direct.get() {
-            return Some(direct);
-        }
-        if file.direct_unsupported.load(Ordering::Relaxed) {
-            return None;
-        }
-        let path = format!("/proc/self/fd/{}", file.as_raw_fd());
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true).custom_flags(libc::O_DIRECT);
-        match options.open(path) {
-            Ok(direct) => Some(file.direct.get_or_init(|| direct)),
-            Err(err) => {
-                if err.raw_os_error() == Some(libc::EINVAL) {
-                    file.direct_unsupported.store(true, Ordering::Relaxed);
-                }
-                None
-            }
-        }
+        file.direct
+            .get_or_init(|| {
+                let path = format!("/proc/self/fd/{}", file.as_raw_fd());
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true).custom_flags(libc::O_DIRECT);
+                options.open(path).ok()
+            })
+            .as_ref()
     }
 
-    /// Alignment direct I/O requires of buffer addresses, file offsets, and lengths: the largest
-    /// logical block size of supported devices.
-    const ALIGN: usize = 4096;
-
-    /// A block-aligned heap buffer: one submission's reads land here before being copied into
-    /// their pool buffers.
-    struct Aligned {
-        ptr: *mut u8,
-        len: usize,
-    }
-    impl Aligned {
-        fn new(len: usize) -> Result<Self, Error> {
-            let layout = std::alloc::Layout::from_size_align(len, ALIGN)
-                .map_err(|_| Error::OffsetOverflow)?;
-            // SAFETY: `len` is a non-zero multiple of ALIGN.
-            let ptr = unsafe { std::alloc::alloc(layout) };
-            if ptr.is_null() {
-                std::alloc::handle_alloc_error(layout);
-            }
-            Ok(Self { ptr, len })
-        }
-    }
-    impl Drop for Aligned {
-        fn drop(&mut self) {
-            let layout =
-                std::alloc::Layout::from_size_align(self.len, ALIGN).expect("aligned layout");
-            // SAFETY: allocated in `new` with the same layout.
-            unsafe { std::alloc::dealloc(self.ptr, layout) };
-        }
-    }
+    /// Alignment direct I/O requires of buffer addresses, file offsets, and lengths. A blob page
+    /// is the largest logical block size of supported devices, so blob-page alignment satisfies
+    /// every one of them.
+    const ALIGN: usize = BLOB_PAGE_SIZE as usize;
 
     /// Kernel ABI (`struct iocb`, little-endian layout).
     #[repr(C)]
@@ -158,11 +116,20 @@ mod aio {
         res2: i64,
     }
 
+    /// The `aio_lio_opcode` of a positioned read.
     const IOCB_CMD_PREAD: u16 = 0;
 
-    /// A long-lived AIO context. Creating one and destroying it each cost an RCU grace period,
-    /// so contexts are pooled and reused by submitting threads.
+    /// A long-lived AIO context, pooled and reused by submitting threads.
+    ///
+    /// Destroying one waits for RCU grace periods (~30 ms), so a context is destroyed only when
+    /// a submission fails with reads in flight, because the slab must outlive them. The pool
+    /// therefore holds as many contexts as submissions ever ran concurrently in this process,
+    /// each charging [AIO_SUBMISSION] against the host-wide `fs.aio-max-nr` budget (65,536 by
+    /// default, so 256 contexts) until the process exits and the kernel reclaims them. A
+    /// submission that cannot obtain a context is served one blocking task per read, and other
+    /// users of Linux AIO on the same host see that budget as taken.
     struct Context(libc::c_ulong);
+
     impl Drop for Context {
         fn drop(&mut self) {
             // SAFETY: this handle belongs exclusively to this owner. Successful destruction
@@ -175,16 +142,15 @@ mod aio {
         }
     }
 
-    /// Contexts not in use by a submission. None of them holds an outstanding request.
-    fn contexts() -> &'static Mutex<Vec<Context>> {
-        static POOL: OnceLock<Mutex<Vec<Context>>> = OnceLock::new();
-        POOL.get_or_init(|| Mutex::new(Vec::new()))
-    }
+    /// Contexts not in use by a submission. None of them holds an outstanding request. The lock
+    /// guards one pop or push per submission and is never held across a syscall.
+    static CONTEXTS: Mutex<Vec<Context>> = Mutex::new(Vec::new());
 
-    /// Take a pooled context or create one sized for a full submission. `None` when the kernel's
-    /// outstanding-request limit (`fs.aio-max-nr`) is exhausted.
+    /// Take a pooled context or create one sized for a full submission. `None` when the kernel
+    /// cannot create one, for example when its outstanding-request limit (`fs.aio-max-nr`) is
+    /// exhausted.
     fn take_context() -> Option<Context> {
-        if let Some(ctx) = contexts().lock().pop() {
+        if let Some(ctx) = CONTEXTS.lock().pop() {
             return Some(ctx);
         }
         let mut ctx: libc::c_ulong = 0;
@@ -230,7 +196,8 @@ mod aio {
         let align: u64 = Widen::widen(ALIGN);
         for read in &batch {
             let aligned_offset = read.offset / align * align;
-            let skip = (read.offset - aligned_offset) as usize;
+            let skip = usize::try_from(read.offset - aligned_offset)
+                .expect("an offset within a block fits in usize");
             let aligned_len = skip
                 .checked_add(read.len)
                 .and_then(|len| len.checked_next_multiple_of(ALIGN))
@@ -240,7 +207,15 @@ mod aio {
                 .checked_add(aligned_len)
                 .ok_or(Error::OffsetOverflow)?;
         }
-        let slab = Aligned::new(slab_len)?;
+
+        // Like an overflowing span, a slab no allocation layout can hold fails the submission.
+        // The allocation adds a header and alignment padding, each shorter than a block, so a
+        // slab within two blocks of the largest layout cannot be allocated either.
+        if slab_len > isize::MAX.cast_unsigned() - 2 * ALIGN {
+            return Err(Error::OffsetOverflow);
+        }
+        let mut slab = IoBufMut::with_alignment(slab_len, NZUsize!(ALIGN));
+        let slab_ptr = slab.chunk_mut().as_mut_ptr();
 
         // This local drops before the slab. Context destruction waits for pending kernel
         // writes, including when submission or completion processing unwinds.
@@ -252,8 +227,9 @@ mod aio {
                 aio_data: Widen::widen(i),
                 aio_lio_opcode: IOCB_CMD_PREAD,
                 aio_fildes: fd,
-                // SAFETY: `start + aligned_len <= slab_len`.
-                aio_buf: Widen::widen(unsafe { slab.ptr.add(start) }.addr()),
+                // SAFETY: `start + aligned_len <= slab_len`. The kernel writes through this
+                // integer address, so it exposes the slab's provenance.
+                aio_buf: Widen::widen(unsafe { slab_ptr.add(start) }.expose_provenance()),
                 aio_nbytes: Widen::widen(aligned_len),
                 // An offset past the largest signed file offset wraps negative; the kernel
                 // rejects it at submission and the read is served positioned.
@@ -262,6 +238,8 @@ mod aio {
             })
             .collect();
 
+        // Each completion is delivered as it is reaped: a request the kernel completed in full
+        // is copied out of the slab, anything else is re-served by a positioned read.
         let ptrs: Vec<*mut Iocb> = iocbs.iter_mut().map(|iocb| iocb as *mut Iocb).collect();
         let deliver = |event: &IoEvent| -> Result<(), Error> {
             let i = event.data as usize;
@@ -278,9 +256,11 @@ mod aio {
                 // SAFETY: this completed request initialized the requested range, which
                 // is disjoint from every other request's destination in the slab.
                 let bytes =
-                    unsafe { std::slice::from_raw_parts(slab.ptr.add(start + skip), read.len) };
+                    unsafe { std::slice::from_raw_parts(slab_ptr.add(start + skip), read.len) };
                 let mut buf = pool.alloc(read.len);
                 buf.put_slice(bytes);
+                #[cfg(test)]
+                file.test.direct_reads.fetch_add(1, Ordering::Relaxed);
                 (read.index, buf.into())
             };
             let _ = tx.send(Ok(item));
@@ -355,6 +335,7 @@ mod aio {
             if got >= 0 {
                 return Ok(got as usize);
             }
+
             // A signal interrupts the wait before it reaps anything, and the kernel never
             // restarts it.
             let err = std::io::Error::last_os_error();
@@ -387,19 +368,9 @@ mod aio {
         batch: Vec<Read>,
         tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
     ) {
-        // Empty ranges need no I/O.
-        let (empty, batch): (Vec<Read>, Vec<Read>) =
-            batch.into_iter().partition(|read| read.len == 0);
-        for read in empty {
-            let _ = tx.send(Ok((read.index, IoBufsMut::default())));
-        }
-        if batch.is_empty() {
-            return;
-        }
-
         // Without a direct descriptor (the filesystem rejects direct I/O, or a transient open
-        // failure) or a context (the kernel's request limit is exhausted), the submission is
-        // served one blocking task per read, as read_at would.
+        // failure) or a context (for example, the kernel's request limit is exhausted), the
+        // submission is served one blocking task per read, as read_at would.
         let Some(direct) = direct(file) else {
             return read_positioned_each(file, pool, batch, tx);
         };
@@ -407,7 +378,7 @@ mod aio {
             return read_positioned_each(file, pool, batch, tx);
         };
         match submit(file, direct, pool, ctx, batch, tx) {
-            Ok(ctx) => contexts().lock().push(ctx),
+            Ok(ctx) => CONTEXTS.lock().push(ctx),
             Err(err) => {
                 let _ = tx.send(Err(err));
             }
@@ -485,13 +456,9 @@ mod aio {
                 let direct = direct(&blob.shared).unwrap();
                 assert!(submit(&blob.shared, direct, &pool, ctx, batch, &tx).is_err());
 
-                let canary = Aligned::new(LEN + ALIGN).unwrap();
-                // SAFETY: `canary` owns `canary.len` writable bytes.
-                unsafe { std::ptr::write_bytes(canary.ptr, 0, canary.len) };
+                let canary = IoBufMut::zeroed_with_alignment(LEN + ALIGN, NZUsize!(ALIGN));
                 std::thread::sleep(Duration::from_millis(10));
-                // SAFETY: `canary` owns `canary.len` bytes, initialized above.
-                let bytes = unsafe { std::slice::from_raw_parts(canary.ptr, canary.len) };
-                assert!(!bytes.contains(&0xAB));
+                assert!(!canary.as_ref().contains(&0xAB));
             }
             remove(storage, blob, directory).await;
         }
@@ -554,7 +521,7 @@ mod aio {
         }
 
         #[tokio::test]
-        async fn test_reads_without_context_are_served_concurrently() {
+        async fn test_reads_without_context_are_served_individually() {
             let data: Vec<u8> = (0..3 * ALIGN).map(|i| (i % 251) as u8).collect();
             let (storage, blob, directory) = direct_blob("without_context", data.clone()).await;
 
@@ -651,13 +618,10 @@ struct Shared {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: AtomicBool,
-    /// Descriptor for direct I/O on the same inode, opened by the first batched read (see
-    /// [aio::direct] for the concurrent first open).
+    /// Descriptor for direct I/O on the same inode, opened by the first batched read; `None`
+    /// once that open has failed.
     #[cfg(target_os = "linux")]
-    direct: OnceLock<File>,
-    /// Whether the filesystem has rejected direct I/O on this file, so batched reads skip it.
-    #[cfg(target_os = "linux")]
-    direct_unsupported: AtomicBool,
+    direct: OnceLock<Option<File>>,
     #[cfg(test)]
     test: Hooks,
 }
@@ -673,6 +637,9 @@ struct Hooks {
     after_sync: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
     /// Pause the next start_sync worker after publishing its completion.
     after_start_sync: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
+    /// Ranges batched reads served from their direct reads rather than a positioned fallback.
+    #[cfg(target_os = "linux")]
+    direct_reads: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -847,8 +814,6 @@ impl Blob {
             dont_cache_supported: AtomicBool::new(true),
             #[cfg(target_os = "linux")]
             direct: OnceLock::new(),
-            #[cfg(target_os = "linux")]
-            direct_unsupported: AtomicBool::new(false),
             #[cfg(test)]
             test: Hooks::default(),
         });
@@ -1074,8 +1039,6 @@ impl crate::Blob for Blob {
         ranges: &[(u64, usize)],
         options: ReadOptions,
     ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
-        use futures::{StreamExt as _, stream};
-
         // Direct I/O serves a batch the page cache need not retain: the device sees every read
         // at once and no thread blocks per read. Everything else goes through the page cache
         // one read per blocking task.
@@ -1084,9 +1047,7 @@ impl crate::Blob for Blob {
         // page cache holds. Its concurrency assumes filesystem-native direct I/O (such as ext4
         // or XFS): a filesystem that serves direct I/O through a buffered fallback stays correct
         // but completes each submission's reads one at a time.
-        if options.contains(ReadOptions::DONT_CACHE)
-            && !self.shared.direct_unsupported.load(Ordering::Relaxed)
-        {
+        if options.contains(ReadOptions::DONT_CACHE) {
             let mut reads = Vec::with_capacity(ranges.len());
             for (index, &(offset, len)) in ranges.iter().enumerate() {
                 let Some(offset) = offset.checked_add(self.data_offset) else {
@@ -1103,6 +1064,7 @@ impl crate::Blob for Blob {
                 let tx = tx.clone();
                 task::spawn_blocking(move || aio::run(&file, &pool, batch, &tx));
             }
+
             // The stream ends once every range is yielded or at the first error. A submitting
             // task that ends without reporting its reads (it panicked, or the runtime shut down)
             // closes the channel early, which is an error.
@@ -1806,9 +1768,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Whole aligned blocks (served in place by direct I/O), small unaligned ranges inside
-        // and across blocks (served through an aligned superset), an empty range, and more
-        // ranges than one submission holds, all out of offset order.
+        // Whole aligned blocks, small unaligned ranges inside and across blocks (read through an
+        // aligned superset), an empty range, and more ranges than one submission holds, all out
+        // of offset order.
         let mut ranges: Vec<(u64, usize)> = Vec::new();
         for i in (0..BLOCKS).rev() {
             ranges.push((i * BLOCK as u64, BLOCK));
@@ -1988,11 +1950,18 @@ mod tests {
         const RANGES: [(u64, usize); 3] =
             [(0, BLOCK), (BLOCK as u64, BLOCK), (BLOCK as u64 + 100, 300)];
         async fn read_all(blob: &Blob) -> Vec<Vec<u8>> {
+            let before = blob.shared.test.direct_reads.load(Ordering::Relaxed);
             let mut bufs: Vec<(usize, IoBufsMut)> = blob
                 .read_many(&RANGES, ReadOptions::DONT_CACHE)
                 .try_collect()
                 .await
                 .unwrap();
+
+            // Every range was served by its direct read rather than a positioned fallback.
+            assert_eq!(
+                blob.shared.test.direct_reads.load(Ordering::Relaxed) - before,
+                RANGES.len()
+            );
             bufs.sort_by_key(|(index, _)| *index);
             bufs.into_iter()
                 .map(|(_, bufs)| bufs.coalesce().as_ref().to_vec())
@@ -2046,11 +2015,13 @@ mod tests {
         );
 
         // No slab can hold these batches: the first range overflows its aligned length, the
-        // second exceeds the largest allocation, and the third pair overflows the slab total.
-        // The call must yield that error rather than end without yielding the ranges.
+        // second and third exceed the largest allocation (the third only once the allocation's
+        // own header is counted), and the last pair overflows the slab total. The call must
+        // yield that error rather than end without yielding the ranges.
         for ranges in [
             vec![(0, usize::MAX - 10)],
-            vec![(0, 1 << 63)],
+            vec![(0, 1usize << (usize::BITS - 1))],
+            vec![(0, (1usize << (usize::BITS - 1)) - 4096)],
             vec![(0, usize::MAX - 8191), (0, 8192)],
         ] {
             let result = blob

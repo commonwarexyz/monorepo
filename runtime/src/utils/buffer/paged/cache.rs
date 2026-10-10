@@ -1,7 +1,9 @@
 //! A page cache for caching _logical_ pages of [Blob] data in memory. The cache is unaware of the
 //! physical page format used by the blob, which is left to the blob implementation.
 
-use super::{CHECKSUM_SIZE, Checksum};
+use super::{
+    CHECKSUM_SIZE, get_page_with_checksum_from_blob, physical_page, validate_physical_page,
+};
 use crate::{BLOB_PAGE_SIZE, Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
 use ahash::AHashMap;
 use commonware_utils::{Widen, cache, sync::RwLock};
@@ -327,14 +329,14 @@ impl CacheRef {
     }
 
     /// Complete the unread suffixes a [Self::read_cached_many] probe left in `ranges` (each
-    /// `(destination, logical offset)`, non-empty).
+    /// `(destination, logical offset)`, non-empty, in ascending offset order).
     ///
     /// Each page the ranges touch is copied from the cache when resident, joined when another
     /// reader is fetching it, and otherwise read with one batched blob read that validates,
     /// caches, and serves each page as it arrives. Serving never depends on the cache still
     /// holding a page, so no page this call reads is read again to serve it. Other readers do
     /// not join the batched read. A page failing validation returns an error, like a single
-    /// fetch; pages validated before it stay cached.
+    /// fetch; pages cached before it remain, subject to normal eviction.
     pub(super) async fn read_after_misses<B: Blob>(
         &self,
         blob: &Arc<B>,
@@ -367,18 +369,15 @@ impl CacheRef {
             }
         }
 
-        // Collect the physical range of every waiting page for one batched read.
-        waiting.sort_unstable_by_key(|&(page_num, _, _)| page_num);
-        let mut pages: Vec<u64> = waiting.iter().map(|&(page_num, _, _)| page_num).collect();
-        pages.dedup();
+        // Group the waiting pieces by page, which the ranges' offset order keeps adjacent, and
+        // collect each page's physical range for one batched read. A page's group is taken when
+        // its read completes.
         let page_size: u64 = self.page_size.widen();
-        let physical_page_size = page_size + CHECKSUM_SIZE;
-        let mut physical = Vec::with_capacity(pages.len());
-        for &page in &pages {
-            let start = page
-                .checked_mul(physical_page_size)
-                .ok_or(Error::OffsetOverflow)?;
-            physical.push((start, physical_page_size as usize));
+        let mut groups = Vec::new();
+        let mut physical = Vec::new();
+        for group in waiting.chunk_by_mut(|(a, _, _), (b, _, _)| a == b) {
+            physical.push(physical_page(group[0].0, page_size)?);
+            groups.push(Some(group));
         }
 
         // Validate, cache, and serve each page as its read completes so this work overlaps the
@@ -386,33 +385,25 @@ impl CacheRef {
         // the source pages need not remain in the OS page cache.
         let read = async {
             let mut stream = std::pin::pin!(blob.read_many(&physical, ReadOptions::DONT_CACHE));
-            let mut delivered = vec![false; pages.len()];
             while let Some(item) = stream.next().await {
                 let (index, bufs) = item.inspect_err(|err| error!(?err, "Page fetch failed"))?;
 
                 // Each page is yielded exactly once (see Blob::read_many).
-                if delivered
-                    .get_mut(index)
-                    .is_none_or(|delivered| std::mem::replace(delivered, true))
-                {
+                let Some(group) = groups.get_mut(index).and_then(Option::take) else {
                     return Err(Error::ReadFailed);
-                }
-                let page_num = pages[index];
-                let page = cacheable_page(bufs.coalesce(), page_num, self.page_size)
+                };
+                let page_num = group[0].0;
+                let page = validate_physical_page(bufs.coalesce())
+                    .and_then(|(page, _)| cacheable_page(page, page_num, self.page_size))
                     .inspect_err(|err| error!(page_num, ?err, "Page fetch failed"))?;
                 self.cache.write().cache(blob_id, page.as_ref(), page_num);
-                let first =
-                    waiting.partition_point(|&(waiting_page, _, _)| waiting_page < page_num);
-                for (_, offset_in_page, piece) in waiting[first..]
-                    .iter_mut()
-                    .take_while(|(waiting_page, _, _)| *waiting_page == page_num)
-                {
+                for (_, offset_in_page, piece) in group.iter_mut() {
                     piece.copy_from_slice(
                         &page.as_ref()[*offset_in_page..*offset_in_page + piece.len()],
                     );
                 }
             }
-            if delivered.contains(&false) {
+            if groups.iter().any(Option::is_some) {
                 return Err(Error::ReadFailed);
             }
             Ok(())
@@ -665,46 +656,39 @@ async fn fetch_cacheable_page(
     page_num: u64,
     page_size: NonZeroU16,
 ) -> Result<IoBuf, Error> {
-    let width: u64 = page_size.widen();
-    let physical_page_size = width + CHECKSUM_SIZE;
-    let start = page_num
-        .checked_mul(physical_page_size)
-        .ok_or(Error::OffsetOverflow)?;
-
     // CacheRef retains the page, so the source page need not remain in the OS page cache.
-    let page = blob
-        .read_at(start, physical_page_size as usize, ReadOptions::DONT_CACHE)
-        .await?
-        .coalesce();
+    let width: u64 = page_size.widen();
+    let (page, _) =
+        get_page_with_checksum_from_blob(blob, page_num, width, ReadOptions::DONT_CACHE).await?;
     cacheable_page(page, page_num, page_size)
 }
 
-/// Validate one physical page read from a blob and return its logical bytes, rejecting partial
-/// pages because cache entries must always contain a full logical page.
-fn cacheable_page(page: IoBufMut, page_num: u64, page_size: NonZeroU16) -> Result<IoBuf, Error> {
-    let Some(checksum) = Checksum::validate_page(page.as_ref()) else {
-        return Err(Error::InvalidChecksum);
-    };
-
+/// Return a validated page's logical bytes, rejecting partial pages because cache entries must
+/// always contain a full logical page.
+fn cacheable_page(page: IoBuf, page_num: u64, page_size: NonZeroU16) -> Result<IoBuf, Error> {
     // We should never be fetching partial pages through the page cache. This can happen if a
     // non-last page is corrupted and falls back to a partial CRC.
+    let len = page.len();
     let expected: usize = page_size.widen();
-    if usize::from(checksum.len) != expected {
+    if len != expected {
         error!(
             page_num,
             expected = page_size,
-            actual = checksum.len,
+            actual = len,
             "attempted to fetch partial page from blob"
         );
         return Err(Error::InvalidChecksum);
     }
-    Ok(page.freeze().slice(..expected))
+    Ok(page)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        super::view::{Tail, View},
+        super::{
+            Checksum,
+            view::{Tail, View},
+        },
         *,
     };
     use crate::{

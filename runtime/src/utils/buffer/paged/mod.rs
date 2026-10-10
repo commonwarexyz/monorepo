@@ -42,7 +42,7 @@
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
 //! full or partial. A partial page's durable prefix remains recoverable while it is rewritten.
 
-use crate::{Blob, BufMut, Error, IoBuf, ReadOptions};
+use crate::{Blob, BufMut, Error, IoBuf, IoBufMut, ReadOptions};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::{Storage, WriteOptions};
 use commonware_codec::{Buf, Copying, EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
@@ -219,6 +219,27 @@ fn validate_read_ranges(
     Ok(())
 }
 
+/// Return the blob offset and length of physical page `page_num` for `page_size`-byte logical
+/// pages.
+fn physical_page(page_num: u64, page_size: u64) -> Result<(u64, usize), Error> {
+    let physical_page_size = page_size
+        .checked_add(CHECKSUM_SIZE)
+        .ok_or(Error::OffsetOverflow)?;
+    let physical_page_start = page_num
+        .checked_mul(physical_page_size)
+        .ok_or(Error::OffsetOverflow)?;
+    let len = usize::try_from(physical_page_size).map_err(|_| Error::OffsetOverflow)?;
+    Ok((physical_page_start, len))
+}
+
+/// Validate a physical page read from a blob and return its logical bytes and validated checksum.
+fn validate_physical_page(page: IoBufMut) -> Result<(IoBuf, ActiveChecksum), Error> {
+    let Some(checksum) = Checksum::validate_page(page.as_ref()) else {
+        return Err(Error::InvalidChecksum);
+    };
+    Ok((page.freeze().slice(..usize::from(checksum.len)), checksum))
+}
+
 /// Read the designated page and return both its logical bytes and validated checksum.
 async fn get_page_with_checksum_from_blob(
     blob: &impl Blob,
@@ -226,27 +247,9 @@ async fn get_page_with_checksum_from_blob(
     page_size: u64,
     read_options: ReadOptions,
 ) -> Result<(IoBuf, ActiveChecksum), Error> {
-    let physical_page_size = page_size
-        .checked_add(CHECKSUM_SIZE)
-        .ok_or(Error::OffsetOverflow)?;
-    let physical_page_start = page_num
-        .checked_mul(physical_page_size)
-        .ok_or(Error::OffsetOverflow)?;
-
-    let page = blob
-        .read_at(
-            physical_page_start,
-            physical_page_size as usize,
-            read_options,
-        )
-        .await?
-        .coalesce();
-
-    let Some(checksum) = Checksum::validate_page(page.as_ref()) else {
-        return Err(Error::InvalidChecksum);
-    };
-
-    Ok((page.freeze().slice(..checksum.len as usize), checksum))
+    let (start, len) = physical_page(page_num, page_size)?;
+    let page = blob.read_at(start, len, read_options).await?.coalesce();
+    validate_physical_page(page)
 }
 
 /// One of a page footer's two CRC slots, laid out back to back after the page data.

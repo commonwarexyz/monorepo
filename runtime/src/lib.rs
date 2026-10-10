@@ -52,6 +52,7 @@ stability_scope!(BETA {
     pub use bytes::{Buf, BufMut};
     use commonware_macros::select;
     use commonware_parallel::Rayon;
+    use futures::FutureExt as _;
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
     use iobuf::PoolError;
@@ -1039,7 +1040,6 @@ stability_scope!(BETA {
         ranges: &[(u64, usize)],
         options: ReadOptions,
     ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send + 'a {
-        use futures::FutureExt as _;
         ranges
             .iter()
             .enumerate()
