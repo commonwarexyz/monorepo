@@ -6,11 +6,11 @@ use crate::{
         elector::{self, Elector as _},
         scheme,
         types::{
-            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Subject,
+            Activity, ConflictingFinalize, ConflictingNotarize, Finalization, Finalize,
+            Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Subject,
         },
     },
-    types::{Round, View},
+    types::{Attributable, Round, View},
 };
 use commonware_actor::Feedback;
 use commonware_codec::{Decode, DecodeExt, Encode};
