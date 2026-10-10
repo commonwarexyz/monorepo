@@ -1606,14 +1606,14 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
 }
 
 impl<E: Context, V: CodecShared> Inner<E, V> {
-    /// Drop cached data and offsets pages that hold only items below `position`, continuing from
-    /// the previous call. See [Mutable::evict_cached_before].
+    /// Retire cached data and offsets pages that hold only items below `position`, continuing
+    /// from the previous call. See [Mutable::evict_cached_before].
     fn evict_cached_before(&mut self, position: u64) {
         let position = position.clamp(self.bounds.start, self.bounds.end);
         let blob = super::position_to_blob(position, self.items_per_blob.get());
 
-        // The item's offset bounds the eviction within its blob. Without a cached offset, only
-        // earlier blobs are dropped, since a lookup could cost a read.
+        // The item's offset bounds the retirement within its blob. Without a cached offset, only
+        // earlier blobs are retired, since a lookup could cost a read.
         let offset = if position < self.bounds.end {
             self.offsets.reader().try_read_sync(position).unwrap_or(0)
         } else {
@@ -4958,9 +4958,10 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_evict_cached_before_drops_only_earlier_items() {
-        // Eviction drops the cached pages that hold only items below the position. Evicted items
-        // still read correctly, and items at or after the position stay cached.
+    fn test_variable_evict_cached_before_retires_only_earlier_items() {
+        // The hint retires the cached pages that hold only items below the position. Later
+        // appends reclaim their slots, after which those items read from storage while items at
+        // or after the position stay cached.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -4972,36 +4973,49 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
-            let items = (0..13)
+            let items = (0..23)
                 .map(|i| FixedBytes::new([i as u8; 300]))
                 .collect::<Vec<_>>();
+            let (first, later) = items.split_at(13);
             let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
                 .await
                 .unwrap();
-            (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(first)).await.unwrap();
             journal = journal.sync().await.unwrap();
 
             // Warm the cache.
-            let positions: Vec<u64> = (0..items.len() as u64).collect();
-            assert_eq!(journal.read_many(&positions).await.unwrap(), items);
+            let positions: Vec<u64> = (0..first.len() as u64).collect();
+            assert_eq!(journal.read_many(&positions).await.unwrap(), first);
             assert!(
                 positions
                     .iter()
                     .all(|&p| journal.try_read_sync(p).is_some())
             );
 
-            // Position 7 is the third item of the second blob. Every item of the first blob
-            // loses its cached pages, while items 7 and later keep theirs.
+            // Position 7 is the third item of the second blob, so the hint retires every page of
+            // the first blob and the second blob's pages below item 7. Nothing is reclaimed yet.
             journal.evict_cached_before(7);
+            assert!(
+                positions
+                    .iter()
+                    .all(|&p| journal.try_read_sync(p).is_some())
+            );
+
+            // Appending two more blobs of items inserts more pages than were retired, reclaiming
+            // every retired page. The first blob's items now read from storage while items 7 and
+            // later keep their pages.
+            (journal, _) = journal.append_many(Many::Flat(later)).await.unwrap();
+            journal = journal.sync().await.unwrap();
             for position in 0..5 {
                 assert!(journal.try_read_sync(position).is_none());
             }
-            for position in 7..13 {
+            for position in 7..first.len() as u64 {
                 assert_eq!(
                     journal.try_read_sync(position).as_ref(),
                     Some(&items[position as usize])
                 );
             }
+            let positions: Vec<u64> = (0..items.len() as u64).collect();
             assert_eq!(journal.read_many(&positions).await.unwrap(), items);
 
             journal.destroy().await.unwrap();

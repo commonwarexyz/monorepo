@@ -304,7 +304,9 @@ pub trait Mutable: Contiguous + Sized {
     ) -> impl std::future::Future<Output = Result<(Self, bool), Error>> + Send;
 
     /// Hint that items at positions strictly less than `min_position` will not be read again
-    /// soon, so the journal may drop cached copies of them. The items remain readable.
+    /// soon, so the journal may let the page cache reclaim their pages as it admits new ones. The
+    /// items remain readable. Calling this costs no per-item work; each call continues from the
+    /// position of the previous one.
     fn evict_cached_before(&mut self, _min_position: u64) {}
 
     /// Begin durably persisting the current state of the journal.

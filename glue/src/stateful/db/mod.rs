@@ -408,6 +408,14 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
         async { Ok(self) }
     }
 
+    /// Hints that this node will not serve state sync for targets older than `target`, a
+    /// previously applied sync target, so the database may drop cached operations that only
+    /// older targets need.
+    ///
+    /// Those operations remain readable. The default implementation does nothing, for databases
+    /// without such a cache.
+    fn evict_cached_before(&mut self, _target: &Self::SyncTarget) {}
+
     /// Returns the target of the latest applied checkpoint (which need not be durable yet).
     fn sync_target(&self) -> Self::SyncTarget;
 }
@@ -574,6 +582,15 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// The state represented by `targets` must already be durable, and no barrier may be pending.
     /// Pruning effects must be durable before this returns.
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
+
+    /// Hints each database that its target in `targets` is the oldest sync target this node will
+    /// serve, so it may drop cached operations that only older targets need (see
+    /// [`ManagedDb::evict_cached_before`]).
+    ///
+    /// The default implementation does nothing.
+    fn evict_cached_before(&self, _targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Returns the targets of the latest applied checkpoints (which need not be durable yet).
     fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
@@ -808,6 +825,10 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
 
     async fn prune(&self, target: &Self::SyncTargets) {
         prune_shared::<E, T>(self, target, None).await;
+    }
+
+    async fn evict_cached_before(&self, target: &Self::SyncTargets) {
+        evict_cached_before_shared::<E, T>(self, target).await;
     }
 
     async fn committed_targets(&self) -> Self::SyncTargets {
@@ -1073,6 +1094,13 @@ macro_rules! impl_database_set {
                     &self.$idx,
                     &targets.$idx,
                     Some($idx),
+                ),)+);
+            }
+
+            async fn evict_cached_before(&self, targets: &Self::SyncTargets) {
+                join!($(evict_cached_before_shared::<E, $T>(
+                    &self.$idx,
+                    &targets.$idx,
                 ),)+);
             }
 
@@ -1903,6 +1931,16 @@ async fn prune<E, T: ManagedDb<E>>(database: T, target: &T::SyncTarget, index: O
             );
         }
     }
+}
+
+/// Passes the eviction hint to one database while holding only that database's write lock.
+async fn evict_cached_before_shared<E, T: ManagedDb<E>>(
+    shared: &Shared<T>,
+    target: &T::SyncTarget,
+) {
+    let (slot, mut database) = shared.write().await;
+    database.evict_cached_before(target);
+    slot.put(database);
 }
 
 /// A resolver that serves sync requests from a database attached after startup.
