@@ -10,6 +10,7 @@
 //! - [`order`]: the proven positions and the exact block of each.
 //! - [`feed`]: proofs from consensus and peers, the order's target, and record walks.
 //! - [`deliver`]: fetching, dispatch, acknowledgements and the progress record.
+//! - [`finals`]: final blocks reported ahead of their ordered delivery.
 //! - [`custody`]: staged and subscribed blocks, lookups and certificates.
 //! - [`floor`]: floors and pruning.
 //! - [`serve`]: answering peers.
@@ -18,6 +19,7 @@ mod custody;
 mod deliver;
 mod ends;
 mod feed;
+mod finals;
 mod floor;
 mod hot;
 pub(super) mod order;
@@ -60,6 +62,7 @@ use commonware_utils::{
     channel::{mpsc, oneshot},
     futures::Pool,
 };
+use finals::Finals;
 use futures::{
     FutureExt as _, StreamExt as _,
     future::{BoxFuture, pending},
@@ -248,6 +251,10 @@ where
 
     /// The exact last delivered block of every chain.
     delivered: Vec<BlockRef<H::Digest>>,
+    /// Final blocks to report ahead of their ordered delivery.
+    finals: Finals<H::Digest>,
+    /// Whether a final tip, a held block or delivery changed since the reports last advanced.
+    finals_dirty: bool,
     /// The acknowledged cut, ahead of [`Meta`] until written.
     acked: Ack<H::Digest>,
     /// Outputs delivered and not yet acknowledged.
@@ -367,6 +374,16 @@ where
             target: None,
             ends: ends::Ends::new(ordinal),
             delivered: state.ack.emitted.clone(),
+            finals: Finals::new(
+                limits.final_lookahead,
+                &state
+                    .ack
+                    .emitted
+                    .iter()
+                    .map(BlockRef::height)
+                    .collect::<Vec<_>>(),
+            ),
+            finals_dirty: false,
             acked: state.ack,
             outstanding: 0,
             custody: HashMap::new(),
@@ -448,6 +465,7 @@ where
         self.drive_feed()?;
         self.drive_order()?;
         self.drive_dispatch()?;
+        self.drive_finals()?;
         self.drive_acquire();
         self.reassert();
         self.drive_walk();
@@ -741,6 +759,7 @@ where
         }
         self.hot.insert(block);
         self.metrics.hot_bytes.set(self.hot.bytes as i64);
+        self.finals_dirty = true;
     }
 
     /// Queues a block for `stream` and holds its body in memory.

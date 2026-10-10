@@ -20,6 +20,10 @@ pub struct Limits {
     pub max_block_bytes: NonZeroUsize,
     /// Most delivered outputs awaiting the application's acknowledgement.
     pub max_pending_acks: NonZeroUsize,
+    /// Most final blocks of one chain handed out at a time to report as
+    /// [`Update::Final`](super::Update::Final), and the spacing of the references kept on the way
+    /// to a far final tip.
+    pub final_lookahead: NonZeroUsize,
     /// Most requests queued from the public mailbox.
     pub mailbox_size: NonZeroUsize,
     /// Bytes of staged blocks accepted and not yet appended to the custody stream; staging more
@@ -69,6 +73,7 @@ impl Limits {
         Self {
             max_block_bytes,
             max_pending_acks: NZUsize!(128),
+            final_lookahead: NZUsize!(128),
             mailbox_size: NZUsize!(1024),
             max_staged_bytes: max_block_bytes,
             max_response_bytes: NonZeroUsize::new(16 * block + 64).expect("nonzero"),

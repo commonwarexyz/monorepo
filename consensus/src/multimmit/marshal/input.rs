@@ -100,10 +100,25 @@ pub(crate) struct Fed<S: Scheme, D: Digest> {
     pub(crate) placed: VecDeque<Placement<D>>,
     /// The newest released height reported per chain.
     pub(crate) released: Vec<Option<Height>>,
+    /// The highest final block reported per chain.
+    pub(crate) finals: Vec<Option<BlockRef<D>>>,
     /// Bytes of the records held.
     record_bytes: usize,
     /// Whether the record backlog overflowed.
     pub(crate) overflowed: bool,
+}
+
+impl<S: Scheme, D: Digest> Fed<S, D> {
+    /// Keeps the highest final block of every chain `fact` names.
+    fn final_tips(&mut self, fact: &FinalityFact<D>) {
+        for block in fact.blocks() {
+            if let Some(slot) = self.finals.get_mut(block.chain().get() as usize)
+                && slot.is_none_or(|known| known.height() < block.height())
+            {
+                *slot = Some(*block);
+            }
+        }
+    }
 }
 
 /// The consensus feed: a lane that never blocks consensus.
@@ -127,6 +142,7 @@ impl<S: Scheme, D: Digest> Lane<S, D> {
                 proofs: VecDeque::new(),
                 placed: VecDeque::new(),
                 released: vec![None; chains],
+                finals: vec![None; chains],
                 record_bytes: 0,
                 overflowed: false,
             }),
@@ -147,6 +163,7 @@ impl<S: Scheme, D: Digest> Lane<S, D> {
                 proofs: VecDeque::new(),
                 placed: VecDeque::new(),
                 released: vec![None; chains],
+                finals: vec![None; chains],
                 record_bytes: 0,
                 overflowed: false,
             },
@@ -163,6 +180,7 @@ impl<S: Scheme, D: Digest> Lane<S, D> {
                     fact,
                     records,
                 } => {
+                    fed.final_tips(&fact);
                     for record in records.iter() {
                         fed.record_bytes += record.encode_size();
                         fed.records.push(Arc::clone(record));
@@ -191,6 +209,9 @@ impl<S: Scheme, D: Digest> Lane<S, D> {
                     if let Some(slot) = fed.released.get_mut(chain) {
                         *slot = Some(slot.map_or(released, |known| known.max(released)));
                     }
+                }
+                Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } => {
+                    fed.final_tips(&fact);
                 }
                 _ => return Feedback::Ok,
             }

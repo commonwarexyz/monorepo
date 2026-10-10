@@ -97,6 +97,8 @@ pub(super) struct Delivered {
 struct ApplicationState {
     delivered: Vec<Delivered>,
     pending: VecDeque<(OutputIndex, Exact)>,
+    /// Final blocks reported ahead of delivery, with the outputs delivered before each report.
+    finals: Vec<(usize, Arc<TestBlock>)>,
 }
 
 /// Records every update and acknowledges it at once or when the test says so.
@@ -112,6 +114,7 @@ impl Application {
             state: Arc::new(Mutex::new(ApplicationState {
                 delivered: Vec::new(),
                 pending: VecDeque::new(),
+                finals: Vec::new(),
             })),
             auto: Arc::new(Mutex::new(auto)),
         }
@@ -119,6 +122,12 @@ impl Application {
 
     pub(super) fn delivered(&self) -> Vec<Delivered> {
         self.state.lock().delivered.clone()
+    }
+
+    /// Returns the final blocks reported ahead of delivery, each with the number of outputs
+    /// delivered before it.
+    pub(super) fn finals(&self) -> Vec<(usize, Arc<TestBlock>)> {
+        self.state.lock().finals.clone()
     }
 
     pub(super) fn set_auto(&self, auto: bool) {
@@ -145,7 +154,9 @@ impl Application {
     }
 
     pub(super) fn clear(&self) {
-        self.state.lock().delivered.clear();
+        let mut state = self.state.lock();
+        state.delivered.clear();
+        state.finals.clear();
     }
 }
 
@@ -153,11 +164,24 @@ impl Reporter for Application {
     type Activity = Update<TestBlock>;
 
     fn report(&mut self, update: Self::Activity) -> Feedback {
-        let Update {
-            index,
-            block,
-            acknowledgement,
-        } = update;
+        let (index, block, acknowledgement) = match update {
+            Update::Block {
+                index,
+                block,
+                acknowledgement,
+            } => (index, block, acknowledgement),
+            Update::Final(block) => {
+                assert_eq!(
+                    block.digest(),
+                    block.inner().reference().digest(),
+                    "final blocks carry their own digest"
+                );
+                let mut state = self.state.lock();
+                let delivered = state.delivered.len();
+                state.finals.push((delivered, block.into()));
+                return Feedback::Ok;
+            }
+        };
         let auto = *self.auto.lock();
         let mut state = self.state.lock();
         assert_eq!(
@@ -448,6 +472,19 @@ impl Script {
         let mut reporter = mailbox.clone();
         assert_eq!(
             reporter.report(certified.proven(self.codec(), vec![Arc::clone(&certified.history)])),
+            Feedback::Ok
+        );
+    }
+
+    /// Reports view `view`'s finality to `mailbox` as direct finality, without a proof.
+    pub(super) fn finalize(&self, mailbox: &TestMailbox, view: usize) {
+        let Activity::Proven { fact, .. } = self.views[view].proven(self.codec(), Vec::new())
+        else {
+            unreachable!("a certified view proves its finality");
+        };
+        let mut reporter = mailbox.clone();
+        assert_eq!(
+            reporter.report(Activity::LeaderFinalized { fact }),
             Feedback::Ok
         );
     }

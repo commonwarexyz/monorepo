@@ -30,9 +30,7 @@ use commonware_consensus::{
         self, Planes, Running,
         checkpoint::Scheme as CheckpointScheme,
         config::Tuning,
-        marshal::{
-            self as marshal, Inline, SchemeVerifier, ServiceHandle,
-        },
+        marshal::{self as marshal, Inline, SchemeVerifier, ServiceHandle},
         mocks::{Bls, Committee, MockBody},
         types::{Context as Producing, TransactionBlock},
     },

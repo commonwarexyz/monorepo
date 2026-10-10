@@ -3,7 +3,7 @@
 use super::harness::*;
 use crate::{multimmit::marshal::Error, types::OutputIndex};
 use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 #[test]
 fn a_node_delivers_its_staged_blocks_in_proven_order() {
@@ -1141,5 +1141,149 @@ fn engine_neutral_floors_install_at_the_floor_index() {
         );
         assert_eq!(Floors::install(&follower, floor).await.unwrap(), None);
         assert_eq!(Ledger::ack_window(&follower), follower.max_pending_acks());
+    });
+}
+
+/// Waits until node `index` reported at least `count` final blocks and returns them.
+async fn wait_finals(
+    harness: &Harness,
+    index: usize,
+    count: usize,
+) -> Vec<(usize, Arc<TestBlock>)> {
+    for _ in 0..2_000 {
+        let finals = harness.applications[index].finals();
+        if finals.len() >= count {
+            return finals;
+        }
+        harness.settle(Duration::from_millis(5)).await;
+    }
+    panic!(
+        "node {index} reported {} of {count} final blocks",
+        harness.applications[index].finals().len()
+    );
+}
+
+/// Checks that each chain's final reports are in ascending height order.
+fn assert_oldest_first(finals: &[(usize, Arc<TestBlock>)]) {
+    let mut last = std::collections::HashMap::new();
+    for (_, block) in finals {
+        let reference = block.reference();
+        if let Some(previous) = last.insert(reference.chain(), reference.height()) {
+            assert!(
+                previous < reference.height(),
+                "chain reports go oldest first"
+            );
+        }
+    }
+}
+
+#[test]
+fn final_blocks_are_reported_before_ordering_and_never_after() {
+    runner(15).start(|context| async move {
+        let mut harness = Harness::new(context, 15, 1).await;
+        harness.start(0).await;
+        for counts in [[2, 1], [1, 2], [2, 2]] {
+            harness.script.certify(counts);
+        }
+        let node = harness.mailbox(0);
+        for view in 0..3 {
+            harness.script.stage(&node, view).await;
+        }
+        // The first view is proven; the second is final without a proof yet, as when its sweep
+        // stops short; the third is neither.
+        harness.script.prove(&node, 0);
+        harness.script.finalize(&node, 1);
+        let first = harness.script.views[0].ordered();
+        let second = harness.script.views[1].ordered();
+        let third = references(&harness.script.views[2].ordered());
+        harness.wait_delivered(0, first.len()).await;
+        let finals = loop {
+            let finals = harness.applications[0].finals();
+            let reported = references(
+                &finals
+                    .iter()
+                    .map(|(_, block)| Arc::clone(block))
+                    .collect::<Vec<_>>(),
+            );
+            if references(&second)
+                .iter()
+                .all(|block| reported.contains(block))
+            {
+                break finals;
+            }
+            harness.settle(Duration::from_millis(5)).await;
+        };
+        harness.settle(Duration::from_millis(100)).await;
+        assert_eq!(harness.applications[0].finals().len(), finals.len());
+        assert_eq!(harness.applications[0].delivered().len(), first.len());
+        assert_oldest_first(&finals);
+        for (_, block) in &finals {
+            assert!(
+                !third.contains(&block.reference()),
+                "blocks above the final tips are never reported"
+            );
+        }
+
+        // Proving the second view delivers its blocks in order without reporting them again.
+        harness.script.prove(&node, 1);
+        let ordered = [first.clone(), second.clone()].concat();
+        let delivered = harness.wait_delivered(0, ordered.len()).await;
+        assert_eq!(stream(&delivered), numbered(1, &ordered));
+        harness.settle(Duration::from_millis(100)).await;
+        let finals = harness.applications[0].finals();
+        let mut seen = std::collections::HashSet::new();
+        for (before, block) in &finals {
+            assert!(
+                seen.insert(block.reference()),
+                "a final block is reported once per run"
+            );
+            assert!(
+                !delivered[..*before]
+                    .iter()
+                    .any(|update| update.block.reference() == block.reference()),
+                "a final block is never reported after its delivery"
+            );
+        }
+    });
+}
+
+#[test]
+fn final_blocks_missing_from_custody_are_reported_once_held_and_again_after_a_restart() {
+    runner(16).start(|context| async move {
+        let mut harness = Harness::new(context, 16, 1).await;
+        harness.start(0).await;
+        harness.script.certify([2, 2]);
+        let node = harness.mailbox(0);
+        harness.script.finalize(&node, 0);
+        harness.settle(Duration::from_millis(100)).await;
+        assert!(
+            harness.applications[0].finals().is_empty(),
+            "nothing is fetched to be reported"
+        );
+
+        harness.script.stage(&node, 0).await;
+        let blocks = harness.script.views[0].ordered();
+        let finals = wait_finals(&harness, 0, blocks.len()).await;
+        assert_oldest_first(&finals);
+        let mut reported = finals
+            .iter()
+            .map(|(_, block)| block.reference())
+            .collect::<Vec<_>>();
+        let mut expected = references(&blocks);
+        reported.sort();
+        expected.sort();
+        assert_eq!(reported, expected);
+        assert!(
+            harness.applications[0].delivered().is_empty(),
+            "a final block is not ordered"
+        );
+
+        // After a restart, final blocks not yet delivered are reported again.
+        harness.crash(0).await;
+        harness.applications[0].clear();
+        harness.start(0).await;
+        harness.script.finalize(&harness.mailbox(0), 0);
+        let finals = wait_finals(&harness, 0, blocks.len()).await;
+        assert_eq!(finals.len(), blocks.len());
     });
 }

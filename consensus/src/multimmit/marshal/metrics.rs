@@ -39,6 +39,8 @@ pub(crate) struct Metrics {
     pub(crate) floors: Counter,
     /// Prunes applied.
     pub(crate) prunes: Counter,
+    /// Final blocks reported ahead of their ordered delivery.
+    pub(crate) finals: Counter,
 }
 
 impl Metrics {
@@ -72,6 +74,10 @@ impl Metrics {
             custody_cuts: context.counter("custody_cuts", "Durability cuts of the custody stream"),
             floors: context.counter("floors", "Floors installed"),
             prunes: context.counter("prunes", "Prunes applied"),
+            finals: context.counter(
+                "finals",
+                "Final blocks reported ahead of their ordered delivery",
+            ),
         }
     }
 }
