@@ -83,11 +83,8 @@ pub trait Variant: Clone + Send + Sync + 'static {
     where
         S: Scheme<Self::Commitment>;
 
-    /// Decodes a [`Self::Block`] received over the wire and binds it to `expected`.
-    ///
-    /// On success, [`Self::commitment`] of the returned block equals the commitment in
-    /// `expected`. Decoding reuses the expensive components of a trusted commitment and
-    /// recomputes those of an untrusted one across `strategy`.
+    /// Decodes a [`Self::Block`] received over the wire and binds it to `expected`: on success,
+    /// [`Self::commitment`] of the returned block equals the expected commitment.
     fn decode_block(
         buf: impl Input,
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
