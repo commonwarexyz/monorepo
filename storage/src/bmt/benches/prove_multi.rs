@@ -29,16 +29,15 @@ fn bench_prove_multi(c: &mut Criterion) {
                     || {
                         let samples: Vec<_> =
                             queries.sample(&mut sampler, SAMPLE_SIZE).cloned().collect();
-                        let positions: Vec<u32> = samples.iter().map(|(pos, _)| *pos).collect();
-                        let proof = tree.multi_proof(&positions).unwrap();
+                        let positions = samples.iter().map(|(pos, _)| *pos);
+                        let proof = tree.multi_proof(positions).unwrap();
                         (samples, proof)
                     },
                     |(samples, proof)| {
-                        let elements: Vec<_> =
-                            samples.iter().map(|(pos, elem)| (*elem, *pos)).collect();
+                        let elements = samples.into_iter().map(|(pos, elem)| (elem, pos));
                         assert!(
                             proof
-                                .verify_multi_inclusion::<Sha256>(&elements, &root)
+                                .verify_multi_inclusion::<Sha256>(elements, &root)
                                 .is_ok()
                         );
                     },

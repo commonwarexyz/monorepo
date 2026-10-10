@@ -135,12 +135,12 @@ pub trait Unordered: Send + Sync {
     /// so visits are identified by `key_idx` rather than issued in input order.
     fn get_many<'a, K: AsRef<[u8]>>(
         &'a self,
-        keys: &[K],
+        keys: impl IntoIterator<Item = K>,
         mut visit: impl FnMut(usize, &'a Self::Value),
     ) where
         Self::Value: 'a,
     {
-        for (key_idx, key) in keys.iter().enumerate() {
+        for (key_idx, key) in keys.into_iter().enumerate() {
             for value in self.get(key.as_ref()) {
                 visit(key_idx, value);
             }
@@ -550,7 +550,9 @@ mod tests {
         // keys produce no visits, and duplicate input keys are visited once per slot.
         let keys: Vec<&[u8]> = vec![b"zz", b"missing", b"ab", b"zz"];
         let mut visits: Vec<Vec<u64>> = vec![Vec::new(); keys.len()];
-        index.get_many(&keys, |key_idx, value| visits[key_idx].push(*value));
+        index.get_many(keys.iter().copied(), |key_idx, value| {
+            visits[key_idx].push(*value)
+        });
         visits[2].sort_unstable();
         assert_eq!(visits[0], vec![4]);
         assert!(visits[1].is_empty());
@@ -558,7 +560,9 @@ mod tests {
         assert_eq!(visits[3], vec![4]);
 
         // Empty input visits nothing.
-        index.get_many::<&[u8]>(&[], |_, _| panic!("no visits expected"));
+        index.get_many(core::iter::empty::<&[u8]>(), |_, _| {
+            panic!("no visits expected")
+        });
     }
 
     #[test_traced]
