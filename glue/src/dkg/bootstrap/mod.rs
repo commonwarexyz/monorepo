@@ -160,20 +160,40 @@ pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     parent: sha256::Digest,
     height: Height,
     payload: Option<Payload<V, ed25519::PrivateKey, D>>,
+
+    /// The SHA-256 digest of the block's encoding, computed when the block is built or decoded.
+    digest: sha256::Digest,
 }
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
-    const fn genesis(leader: ed25519::PublicKey) -> Self {
-        Self {
-            context: Context {
+    fn new(
+        context: Context<sha256::Digest, ed25519::PublicKey>,
+        parent: sha256::Digest,
+        height: Height,
+        payload: Option<Payload<V, ed25519::PrivateKey, D>>,
+    ) -> Self {
+        let mut block = Self {
+            context,
+            parent,
+            height,
+            payload,
+            digest: Sha256Digest::EMPTY,
+        };
+        block.digest = Sha256::hash(&[&block.encode()]);
+        block
+    }
+
+    fn genesis(leader: ed25519::PublicKey) -> Self {
+        Self::new(
+            Context {
                 round: Round::new(Epoch::zero(), View::zero()),
                 leader,
                 parent: (View::zero(), Sha256Digest::EMPTY),
             },
-            parent: Sha256Digest::EMPTY,
-            height: Height::zero(),
-            payload: None,
-        }
+            Sha256Digest::EMPTY,
+            Height::zero(),
+            None,
+        )
     }
 
     /// Returns the DKG result carried by this block, if present.
@@ -207,12 +227,12 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            context: Context::read(buf)?,
-            parent: sha256::Digest::read(buf)?,
-            height: Height::read(buf)?,
-            payload: Option::<Payload<V, ed25519::PrivateKey, D>>::read_cfg(buf, cfg)?,
-        })
+        Ok(Self::new(
+            Context::read(buf)?,
+            sha256::Digest::read(buf)?,
+            Height::read(buf)?,
+            Option::<Payload<V, ed25519::PrivateKey, D>>::read_cfg(buf, cfg)?,
+        ))
     }
 }
 
@@ -220,7 +240,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Digestible for Block<V, D> {
     type Digest = sha256::Digest;
 
     fn digest(&self) -> sha256::Digest {
-        Sha256::hash(&[&self.encode()])
+        self.digest
     }
 }
 
@@ -654,12 +674,7 @@ where
     ) -> Option<Self::Block> {
         let parent = ancestry.peek()?.clone();
         let height = parent.height().next();
-        Some(Block {
-            context,
-            parent: parent.digest(),
-            height,
-            payload: input.payload,
-        })
+        Some(Block::new(context, parent.digest(), height, input.payload))
     }
 
     async fn verify(

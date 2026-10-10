@@ -13,9 +13,10 @@
 //! for lookup purposes.
 
 use crate::{Block, simplex::scheme::Scheme, types::Round};
-use commonware_codec::{Codec, Read};
+use commonware_codec::{Codec, Error as CodecError, Input, Read};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_p2p::Recipients;
+use commonware_parallel::Strategy;
 use commonware_utils::channel::oneshot;
 use std::{future::Future, marker::PhantomData, sync::Arc};
 
@@ -24,9 +25,10 @@ use std::{future::Future, marker::PhantomData, sync::Arc};
 pub enum ExpectedCommitment<C> {
     /// A locally certified or finalized block commitment, or an ancestor's.
     ///
-    /// Decoding may reuse commitment material. Notarization alone is insufficient.
+    /// Decoding reuses its expensive components instead of recomputing them. Notarization
+    /// alone is insufficient.
     Trusted(C),
-    /// A commitment without certification evidence.
+    /// A commitment without certification evidence, whose components decoding recomputes.
     Untrusted(C),
 }
 
@@ -81,15 +83,14 @@ pub trait Variant: Clone + Send + Sync + 'static {
     where
         S: Scheme<Self::Commitment>;
 
-    /// Returns the codec configuration used to decode [`Self::Block`] received over the wire.
-    ///
-    /// The configuration may bind `expected` and reuse trusted commitment material.
-    /// Decoding need not check every component, so callers requiring a full commitment
-    /// match must compare it after decoding.
-    fn block_cfg(
+    /// Decodes a [`Self::Block`] received over the wire and binds it to `expected`: on success,
+    /// [`Self::commitment`] of the returned block equals the expected commitment.
+    fn decode_block(
+        buf: impl Input,
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         expected: ExpectedCommitment<Self::Commitment>,
-    ) -> <Self::Block as Read>::Cfg;
+        strategy: &impl Strategy,
+    ) -> Result<Self::Block, CodecError>;
 
     /// Converts a working block to a shared application block without copying the payload.
     fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock>;

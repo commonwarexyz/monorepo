@@ -75,14 +75,16 @@ where
         let height = parent.height().next();
         let merkleized = Self::execute(height, batches).await;
         let bounds = merkleized.bounds();
-        let block = Block {
-            context: context.1,
-            parent: parent.digest(),
+        let block = Block::new(
+            context.1,
+            parent.digest(),
             height,
-            state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            Target::new(
+                merkleized.root(),
+                non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            ),
             payload,
-        };
+        );
         Some(Proposed { block, merkleized })
     }
 

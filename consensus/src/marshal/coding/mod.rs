@@ -3296,7 +3296,7 @@ mod tests {
 
         // Construct a Commitment with all-zero bytes (invalid CodingConfig:
         // minimum_shards=0, extra_shards=0). Serialize it and attempt to
-        // deserialize -- this must fail.
+        // deserialize it, which must fail.
         let malformed_bytes = [0u8; <TestCommitment as FixedSize>::SIZE];
         let result = TestCommitment::read(&mut commonware_codec::Copying(&malformed_bytes));
         assert!(
@@ -4399,8 +4399,14 @@ mod tests {
                 // A leader can obtain notarize votes with valid assigned shards even
                 // though their root encodes different bytes from the named block.
                 for (index, shard) in other.shards(&Sequential).iter().enumerate() {
-                    ReedSolomon::<Sha256>::check(&config, &commitment.root(), index as u16, shard)
-                        .expect("assigned shard should verify against the advertised root");
+                    ReedSolomon::<Sha256>::check(
+                        &config,
+                        &commitment.root(),
+                        index as u16,
+                        shard,
+                        &Sequential,
+                    )
+                    .expect("assigned shard should verify against the advertised root");
                 }
 
                 let (value, fallback) = if notarized {

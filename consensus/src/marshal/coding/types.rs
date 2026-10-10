@@ -161,21 +161,23 @@ pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
 
 impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     /// Erasure codes the block.
+    #[allow(clippy::type_complexity)]
     fn encode(
         inner: &B,
         config: CodingConfig,
         strategy: &impl Strategy,
-    ) -> (C::Commitment, Vec<C::Shard>) {
+    ) -> Result<(C::Commitment, Vec<C::Shard>), C::Error> {
         let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
         inner.write(&mut buf);
         config.write(&mut buf);
 
-        C::encode(&config, buf.as_slice(), strategy).expect("must encode block successfully")
+        C::encode(&config, buf.as_slice(), strategy)
     }
 
     /// Create a new [`CodedBlock`] from a [`Block`] and a configuration.
     pub fn new(inner: B, config: CodingConfig, strategy: &impl Strategy) -> Self {
-        let (commitment, shards) = Self::encode(&inner, config, strategy);
+        let (commitment, shards) =
+            Self::encode(&inner, config, strategy).expect("must encode block successfully");
         Self {
             inner: Arc::new(inner),
             config,
@@ -213,7 +215,8 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     /// If the shards have not yet been generated, they will be created via [`Scheme::encode`].
     pub fn shards(&self, strategy: &impl Strategy) -> &[C::Shard] {
         self.shards.get_or_init(|| {
-            let (commitment, shards) = Self::encode(&self.inner, self.config, strategy);
+            let (commitment, shards) = Self::encode(&self.inner, self.config, strategy)
+                .expect("must encode block successfully");
 
             // A mismatch means a commitment trusted at construction does not
             // encode this block, which is a contract violation or a consensus
@@ -247,6 +250,63 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     /// Returns a shared reference to the inner [`Block`].
     pub fn inner_shared(&self) -> Arc<B> {
         Arc::clone(&self.inner)
+    }
+}
+
+impl<B: CertifiableBlock, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
+    /// Builds a [`CodedBlock`] from a decoded block and coding configuration and binds it to
+    /// `expected`: on success, its commitment equals the expected one.
+    ///
+    /// [`ExpectedCommitment::Untrusted`] recomputes the coding root across `strategy`.
+    pub(crate) fn from_decoded(
+        inner: B,
+        config: CodingConfig,
+        expected: ExpectedCommitment<Commitment<B, C, H>>,
+        strategy: &impl Strategy,
+    ) -> Result<Self, commonware_codec::Error> {
+        let (ExpectedCommitment::Trusted(commitment) | ExpectedCommitment::Untrusted(commitment)) =
+            expected;
+
+        // Erasure coding is bounded by the expected config and skipped for a block that
+        // cannot match, so both are checked before it.
+        if config != commitment.config() {
+            return Err(commonware_codec::Error::Invalid(
+                "CodedBlock",
+                "config mismatch",
+            ));
+        }
+        if inner.digest() != commitment.block() {
+            return Err(commonware_codec::Error::Invalid(
+                "CodedBlock",
+                "block digest mismatch",
+            ));
+        }
+
+        // A certified commitment already fixes the coding root of these bytes,
+        // so recomputing it would only re-derive the root already in `expected`.
+        let block = if matches!(expected, ExpectedCommitment::Trusted(_)) {
+            Self::new_trusted(inner, commitment)
+        } else {
+            let (root, shards) = Self::encode(&inner, config, strategy).map_err(|_| {
+                commonware_codec::Error::Invalid("CodedBlock", "Failed to re-commit to block")
+            })?;
+            Self {
+                inner: Arc::new(inner),
+                config,
+                commitment: root,
+                shards: OnceLock::from(Arc::<[C::Shard]>::from(shards)),
+                _hasher: PhantomData,
+            }
+        };
+
+        // Binds the components not checked above: a recomputed root and the context digest.
+        if block.commitment() != commitment {
+            return Err(commonware_codec::Error::Invalid(
+                "CodedBlock",
+                "commitment mismatch",
+            ));
+        }
+        Ok(block)
     }
 }
 
@@ -318,10 +378,11 @@ impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
 
 /// Codec configuration for decoding a [`CodedBlock`] from the wire.
 ///
-/// Decoding checks the expected digest and coding configuration.
-/// [`ExpectedCommitment::Untrusted`] also recomputes the coding root;
-/// [`ExpectedCommitment::Trusted`] reuses it and defers shard generation to
-/// [`CodedBlock::shards`].
+/// Decoding binds the block to the expected commitment. [`ExpectedCommitment::Untrusted`]
+/// recomputes the coding root; [`ExpectedCommitment::Trusted`] reuses it and defers shard
+/// generation to [`CodedBlock::shards`]. A codec read recomputes the root sequentially, while
+/// [`Variant::decode_block`](crate::marshal::core::Variant::decode_block) recomputes it
+/// across a [`Strategy`].
 pub struct CodedBlockCfg<B: Block, C: Scheme, H: Hasher> {
     /// Codec configuration for the inner application block.
     pub inner: <B as Read>::Cfg,
@@ -338,7 +399,7 @@ impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlockCfg<B, C, H> {
     }
 }
 
-impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
+impl<B: CertifiableBlock, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
     type Cfg = CodedBlockCfg<B, C, H>;
 
     fn read_cfg(
@@ -347,55 +408,7 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
     ) -> Result<Self, commonware_codec::Error> {
         let inner = B::read_cfg(buf, &cfg.inner)?;
         let config = CodingConfig::read(buf)?;
-        let (ExpectedCommitment::Trusted(expected) | ExpectedCommitment::Untrusted(expected)) =
-            cfg.expected;
-
-        if config != expected.config() {
-            return Err(commonware_codec::Error::Invalid(
-                "CodedBlock",
-                "config mismatch",
-            ));
-        }
-        if inner.digest() != expected.block() {
-            return Err(commonware_codec::Error::Invalid(
-                "CodedBlock",
-                "block digest mismatch",
-            ));
-        }
-
-        // A certified commitment already fixes the coding root of these bytes,
-        // so recomputing it would only re-derive the root already in `expected`.
-        if matches!(cfg.expected, ExpectedCommitment::Trusted(_)) {
-            return Ok(Self::new_trusted(inner, expected));
-        }
-
-        // Recompute the coding root and require it to match the expected
-        // commitment.
-        //
-        // The context digest is not checkable here because [`Block`] does not
-        // expose a context, so callers that need the full commitment to match
-        // must compare it after decoding.
-        let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
-        inner.write(&mut buf);
-        config.write(&mut buf);
-        let (commitment, shards) =
-            C::encode(&config, buf.as_slice(), &Sequential).map_err(|_| {
-                commonware_codec::Error::Invalid("CodedBlock", "Failed to re-commit to block")
-            })?;
-        if commitment != expected.root() {
-            return Err(commonware_codec::Error::Invalid(
-                "CodedBlock",
-                "coding root mismatch",
-            ));
-        }
-
-        Ok(Self {
-            inner: Arc::new(inner),
-            config,
-            commitment,
-            shards: OnceLock::from(Arc::<[C::Shard]>::from(shards)),
-            _hasher: PhantomData,
-        })
+        Self::from_decoded(inner, config, cfg.expected, &Sequential)
     }
 }
 
@@ -441,8 +454,8 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 ///
 /// This type should be preferred for storing verified [`CodedBlock`]s on disk - it
 /// should never be sent over the network. Use [`CodedBlock`] for network transmission.
-/// Its [`Read`] impl recomputes the coding root with [`Scheme::encode`] unless the
-/// expected commitment is trusted (see [`CodedBlockCfg`]).
+/// [`CodedBlock`]'s [`Read`] impl recomputes the coding root with [`Scheme::encode`] unless
+/// the expected commitment is trusted (see [`CodedBlockCfg`]).
 ///
 /// When reading from storage, we don't need to re-encode the block to compute
 /// the commitment - we stored it alongside the block when we first verified it.
@@ -803,7 +816,7 @@ mod test {
         };
 
         assert!(
-            matches!(err, Error::Invalid("CodedBlock", "coding root mismatch")),
+            matches!(err, Error::Invalid("CodedBlock", "commitment mismatch")),
             "unexpected error: {err:?}"
         );
     }

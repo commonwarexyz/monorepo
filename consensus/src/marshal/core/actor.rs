@@ -1448,15 +1448,12 @@ where
                 } else {
                     ExpectedCommitment::Untrusted(commitment)
                 };
-                let block_cfg = V::block_cfg(&self.block_codec_config, expected);
-                let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
+                let Ok(block) =
+                    V::decode_block(value, &self.block_codec_config, expected, &self.strategy)
+                else {
                     response.send_lossy(false);
                     return self;
                 };
-                if V::commitment(&block) != commitment {
-                    response.send_lossy(false);
-                    return self;
-                }
 
                 // This block may match the pending floor request. Whether it
                 // installs or is rejected as the floor anchor, do not also
@@ -1726,18 +1723,15 @@ where
                     // Notarization alone does not prove the commitment encodes the block,
                     // so decoding must recompute it.
                     let commitment = notarization.proposal.payload;
-                    let block_cfg = V::block_cfg(
+                    let Ok(block) = V::decode_block(
+                        block,
                         &self.block_codec_config,
                         ExpectedCommitment::Untrusted(commitment),
-                    );
-                    let Ok(block) = V::Block::decode_cfg(block, &block_cfg) else {
+                        &self.strategy,
+                    ) else {
                         response.send_lossy(false);
                         continue;
                     };
-                    if V::commitment(&block) != commitment {
-                        response.send_lossy(false);
-                        continue;
-                    }
 
                     // Valid notarization received.
                     response.send_lossy(true);
