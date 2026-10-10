@@ -88,8 +88,8 @@ where
         )
         .await?;
 
-        let mut snapshot: Index<T, Location<F>> =
-            Index::new(context.child("snapshot"), db_config.translator.clone());
+        let mut index: Index<T, Location<F>> =
+            Index::new(context.child("index"), db_config.translator.clone());
 
         let size = journal.size();
         if size == 0 {
@@ -98,11 +98,11 @@ where
         let inactivity_floor_loc =
             crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size).await?;
 
-        // Replay the log from the inactivity floor to build the snapshot.
-        immutable::build_snapshot(
+        // Replay the log from the inactivity floor to build the index.
+        immutable::build_index(
             inactivity_floor_loc,
             &journal.journal,
-            &mut snapshot,
+            &mut index,
             db_config.init_buffer,
         )
         .await?;
@@ -113,7 +113,7 @@ where
         let db = Self {
             journal,
             root,
-            snapshot,
+            index,
             inactivity_floor_loc,
             metrics,
         };

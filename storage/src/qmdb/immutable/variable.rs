@@ -276,6 +276,7 @@ mod tests {
         test_variable_proof_refused_after_sibling_apply => run_proof_refused_after_sibling_apply, open;
         test_variable_bounded_initialization_preserves_collision_bucket =>
             run_bounded_initialization_preserves_collision_bucket, open_with_max;
+        test_variable_snapshot => run_snapshot, open;
     }
 
     #[boxed]

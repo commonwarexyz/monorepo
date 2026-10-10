@@ -184,17 +184,17 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     pub translator: T,
 
     /// Maximum number of entries in the `(location -> key)` cache used during init to resolve
-    /// snapshot collisions without re-reading the log; `None` disables it.
+    /// index collisions without re-reading the log; `None` disables it.
     pub init_cache: Option<NonZeroUsize>,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
-    /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]): `()`
-    /// for index types that build serially, and the number of build tasks for index types that
-    /// build in parallel. A value of `1` builds the index entirely on the init task. Values of
-    /// `2` and `3` decode on the init task and insert on one or two workers. Larger values split
-    /// between spawned decode and insert tasks while the init task merely forwards batches.
+    /// The index-build concurrency (see [crate::qmdb::IndexBuild::Concurrency]): `()` for index
+    /// types that build serially, and the number of build tasks for index types that build in
+    /// parallel. A value of `1` builds the index entirely on the init task. Values of `2` and `3`
+    /// decode on the init task and insert on one or two workers. Larger values split between
+    /// spawned decode and insert tasks while the init task merely forwards batches.
     pub init_concurrency: B,
 }
 
@@ -212,7 +212,7 @@ pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 /// requires one operation. Subsequent appends may exceed this initialization bound.
 pub async fn init<F, E, U, H, I, J, S>(
     context: E,
-    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
     max_size: Option<Location<F>>,
 ) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, QmdbError<F>>
 where
@@ -220,7 +220,7 @@ where
     E: Context + Spawner,
     U: Update,
     H: Hasher,
-    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::IndexBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
@@ -234,7 +234,7 @@ where
 #[boxed]
 pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
-    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
     bitmap: Option<Arc<Shared<N>>>,
     max_size: Option<Location<F>>,
     pair_absorption_threshold: Option<u64>,
@@ -244,7 +244,7 @@ where
     E: Context + Spawner,
     U: Update,
     H: Hasher,
-    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::IndexBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
@@ -259,7 +259,7 @@ where
     )
     .await?;
 
-    // Snapshot replay requires both the selected commit and its floor to remain above the bitmap
+    // Index replay requires both the selected commit and its floor to remain above the bitmap
     // boundary. Current also requires every absorbed chunk pair to exist at the selected size.
     let size = pending.bounds().end;
     if bitmap
@@ -288,12 +288,12 @@ where
         log = log.sync().await?;
     }
 
-    // Rebuild the volatile snapshot and bitmap from the selected commit's retained floor.
+    // Rebuild the volatile index and bitmap from the selected commit's retained floor.
     let index = I::new(context.child("index"), cfg.translator);
-    let snapshot_context = context.child("snapshot");
+    let index_context = context.child("index_build");
     let metrics = Metrics::new(context);
     db::Db::init_from_log(
-        snapshot_context,
+        index_context,
         index,
         log,
         bitmap,
@@ -367,7 +367,7 @@ pub(crate) mod test {
     }
 
     /// Shared config construction for every fixed-value flavor, generic over the strategy and
-    /// the index's snapshot-build concurrency.
+    /// the index-build concurrency.
     pub(crate) fn fixed_db_config_full<
         T: Translator + Default,
         S: commonware_parallel::Strategy,
@@ -427,7 +427,7 @@ pub(crate) mod test {
     }
 
     /// Shared config construction for every variable-value flavor, generic over the index's
-    /// snapshot-build concurrency.
+    /// index-build concurrency.
     pub(crate) fn variable_db_config_full<T: Translator + Default, B>(
         suffix: &str,
         pooler: &impl BufferPooler,
@@ -807,7 +807,7 @@ pub(crate) mod test {
         let initial_size = db.size();
         let initial_floor = db.inactivity_floor_loc();
 
-        // Selecting the earlier empty commit must rebuild an empty snapshot.
+        // Selecting the earlier empty commit must rebuild an empty index.
         let merkleized = db
             .new_batch()
             .merkleize(&db, None, &mut Proportional)
@@ -1406,7 +1406,7 @@ pub(crate) mod test {
     struct Observed<F: Family, D, V> {
         /// Number of active keys.
         active_keys: usize,
-        /// Sorted snapshot locations in the translated bucket of each observed key.
+        /// Sorted index locations in the translated bucket of each observed key.
         locs: Vec<Vec<GenericLocation<F>>>,
         /// Active locations of the bitmap in `[pruned_bits, len)`.
         bits: Vec<u64>,
@@ -1444,7 +1444,7 @@ pub(crate) mod test {
             locs: keys
                 .iter()
                 .map(|key| {
-                    let mut locs: Vec<_> = db.snapshot.get(key).copied().collect();
+                    let mut locs: Vec<_> = db.index.get(key).copied().collect();
                     locs.sort();
                     locs
                 })
@@ -1460,8 +1460,8 @@ pub(crate) mod test {
     }
 
     /// Commit and drop `db`, await `reopen` to rebuild it from the log, and assert the rebuilt
-    /// snapshot locations, bitmap, inactivity floor, root, and values of `keys` equal the live
-    /// ones. The live snapshot must also hold as many entries as active keys. Returns the rebuilt
+    /// index locations, bitmap, inactivity floor, root, and values of `keys` equal the live
+    /// ones. The live index must also hold as many entries as active keys. Returns the rebuilt
     /// db.
     ///
     /// The rebuilt pruned prefix is the retained log start rounded down to a chunk boundary, so it
@@ -1482,9 +1482,9 @@ pub(crate) mod test {
         Operation<F, U>: Codec,
     {
         assert_eq!(
-            db.snapshot.items(),
+            db.index.items(),
             db.active_keys,
-            "live snapshot entries diverged from active keys",
+            "live index entries diverged from active keys",
         );
         assert_exact(&db).await;
 
@@ -1515,7 +1515,7 @@ pub(crate) mod test {
         );
         assert_eq!(
             rebuilt.locs, live.locs,
-            "snapshot locations diverged on reopen",
+            "index locations diverged on reopen",
         );
         assert_eq!(rebuilt.len, live.len, "bitmap len diverged on reopen");
         assert_eq!(
@@ -1576,7 +1576,7 @@ pub(crate) mod test {
     /// Assert that the activity bitmap of `db` is exact against a replay of its retained log.
     /// The bitmap covers the log. Every unpruned bit is set if and only if its location holds a
     /// live update or the last commit, and every live update lies at or above the inactivity
-    /// floor. The active key count matches the live keys, and the snapshot maps each live key to
+    /// floor. The active key count matches the live keys, and the index maps each live key to
     /// its update and holds no other entry.
     pub(crate) async fn assert_exact<F, C, I, H, U, const N: usize, S>(
         db: &Db<F, Context, C, I, H, U, N, S>,
@@ -1604,14 +1604,14 @@ pub(crate) mod test {
             "active keys diverged from the log"
         );
         assert_eq!(
-            db.snapshot.items(),
+            db.index.items(),
             live.len(),
-            "snapshot entries diverged from the log",
+            "index entries diverged from the log",
         );
         for (key, loc) in &live {
             assert!(
-                db.snapshot.get(key).any(|entry| entry == loc),
-                "snapshot misses the live update at {loc}",
+                db.index.get(key).any(|entry| entry == loc),
+                "index misses the live update at {loc}",
             );
         }
     }
@@ -1918,9 +1918,9 @@ pub(crate) mod test {
         assert_rebuild_matches(db, reopen, &keys).await
     }
 
-    /// Batches applied across dropped, applied, and pending ancestors must leave a live snapshot,
+    /// Batches applied across dropped, applied, and pending ancestors must leave a live index,
     /// bitmap, floor, root, and values equal to a rebuild from the log. A superseded location
-    /// misresolved to `None` leaves a duplicate snapshot entry and a stale bitmap bit.
+    /// misresolved to `None` leaves a duplicate index entry and a stale bitmap bit.
     pub(crate) async fn test_any_db_chained_rebuild<F, C, I, U, const N: usize, S, Fut>(
         context: Context,
         db: Db<F, Context, C, I, Sha256, U, N, S>,
@@ -1985,7 +1985,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
 
         // Shape 4: rewrite the seed eight times so the floor passes a bitmap chunk, then prune to
-        // the sync boundary and reopen. Shape 3 then runs over a rebuilt snapshot and a pruned
+        // the sync boundary and reopen. Shape 3 then runs over a rebuilt index and a pruned
         // bitmap.
         let db = reopen(context.child("shape").with_attribute("index", 4)).await;
         let mut model = Model::default();
@@ -3814,7 +3814,7 @@ pub(crate) mod test {
     /// Writes staged in the batch supersede their keys' updates, so the policy passes those
     /// updates as inactive, and it decides the staged writes themselves: it evicts a staged update
     /// that won by last-write-wins and replaces an upsert. The batch matches an unstaged batch with
-    /// the same writes and policy. A staged key resolves in the applied snapshot or in a live
+    /// the same writes and policy. A staged key resolves in the applied index or in a live
     /// parent.
     pub(crate) async fn test_any_policy_after_staged_writes<F, C, I, U, const N: usize, S>(
         _context: Context,
@@ -3856,7 +3856,7 @@ pub(crate) mod test {
             (keys[3], Some(make_value(103))),
         ];
 
-        // The staged keys resolve in the applied snapshot.
+        // The staged keys resolve in the applied index.
         let decided =
             staged_matches_writes(&db, &[], || db.new_batch(), &writes, &make_value).await;
         assert_eq!(decided[..2], [1, 5].map(GenericLocation::<F>::new));
@@ -6053,17 +6053,17 @@ pub(crate) mod test {
     }
 
     /// Dropping an in-flight parallel init (e.g. losing a select against a timeout) aborts
-    /// its snapshot workers and decoders rather than leaving them running until they happen
+    /// its index workers and decoders rather than leaving them running until they happen
     /// to observe a closed channel.
     #[test_traced("INFO")]
     fn test_parallel_init_aborted_on_cancel() {
-        /// Sum of the runtime's running-task gauges for snapshot build tasks.
+        /// Sum of the runtime's running-task gauges for index build tasks.
         fn running_build_tasks(metrics: &str) -> u64 {
             metrics
                 .lines()
                 .filter(|line| {
                     line.starts_with("runtime_tasks_running{")
-                        && (line.contains("snapshot_worker") || line.contains("snapshot_decoder"))
+                        && (line.contains("index_worker") || line.contains("index_decoder"))
                 })
                 .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
                 .sum()
@@ -6090,7 +6090,7 @@ pub(crate) mod test {
             drop(db);
 
             {
-                // Poll until snapshot tasks own the pending build, then cancel before init returns.
+                // Poll until index tasks own the pending build, then cancel before init returns.
                 let init = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None);
                 pin_mut!(init);
                 let mut spawned = false;
@@ -7450,7 +7450,7 @@ pub(crate) mod test {
 #[cfg(test)]
 mod bitmap_tests {
     //! Regression tests for activity-bitmap maintenance in `any::Db`. The mutation code in
-    //! `apply_batch`, `prune_bitmap`, and initialization is independent of the snapshot index
+    //! `apply_batch`, `prune_bitmap`, and initialization is independent of the index
     //! variant, so one variant (`unordered::variable`) suffices as the test bed.
     use crate::{
         merkle::Location,
@@ -7608,7 +7608,7 @@ mod bitmap_tests {
                 .unwrap();
             let (db, _) = db.apply_batch(b).await.unwrap();
 
-            // Setup sanity: anchor in committed snapshot.
+            // Setup sanity: anchor in committed index.
             assert_eq!(db.get(&anchor).await.unwrap(), Some(vec![1]));
             let committed_bitmap_len = db.bitmap.len();
 
