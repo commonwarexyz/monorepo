@@ -123,9 +123,10 @@ use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
+        authenticated::Config as MerkleConfig,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{Family, Location, full::Config as MerkleConfig},
+    merkle::{Family, Location},
     qmdb::{
         Error as QmdbError,
         any::operation::{Operation, Update},
@@ -381,13 +382,10 @@ pub(crate) mod test {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy,
-                page_cache: page_cache.clone(),
+                cache: crate::journal::authenticated::single_region_cache(),
             },
             journal_config: FConfig {
                 partition: format!("log-journal-{suffix}"),
@@ -436,13 +434,10 @@ pub(crate) mod test {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: crate::journal::authenticated::single_region_cache(),
             },
             journal_config: VConfig {
                 partition: format!("log-journal-{suffix}"),

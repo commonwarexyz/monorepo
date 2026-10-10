@@ -2016,10 +2016,13 @@ mod tests {
             Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
         };
         use commonware_storage::{
-            journal::contiguous::{
-                fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+            journal::{
+                authenticated::Config as MerkleConfig,
+                contiguous::{
+                    fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+                },
             },
-            merkle::{full::Config as MerkleConfig, mmr},
+            merkle::mmr,
             qmdb::{
                 any as storage_any, current as storage_current, immutable as storage_immutable,
                 keyless as storage_keyless,
@@ -2141,15 +2144,12 @@ mod tests {
             CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11))
         }
 
-        fn merkle_config(context: &Context, suffix: &str) -> MerkleConfig<Sequential> {
+        fn merkle_config(suffix: &str) -> MerkleConfig<Sequential> {
             MerkleConfig {
-                journal_partition: format!("initial-target-{suffix}-merkle-journal"),
                 metadata_partition: format!("initial-target-{suffix}-merkle-metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache(context),
+                cache: Default::default(),
             }
         }
 
@@ -2184,7 +2184,7 @@ mod tests {
             suffix: &str,
         ) -> storage_any::FixedConfig<TwoCap, Sequential> {
             storage_any::Config {
-                merkle_config: merkle_config(context, suffix),
+                merkle_config: merkle_config(suffix),
                 journal_config: fixed_journal_config(context, suffix),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
@@ -2198,7 +2198,7 @@ mod tests {
             suffix: &str,
         ) -> storage_any::VariableConfig<TwoCap, ((), ()), Sequential> {
             storage_any::Config {
-                merkle_config: merkle_config(context, suffix),
+                merkle_config: merkle_config(suffix),
                 journal_config: variable_journal_config(context, suffix, ((), ())),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
@@ -2212,7 +2212,7 @@ mod tests {
             suffix: &str,
         ) -> storage_current::FixedConfig<TwoCap, Sequential> {
             storage_current::Config {
-                merkle_config: merkle_config(context, suffix),
+                merkle_config: merkle_config(suffix),
                 journal_config: fixed_journal_config(context, suffix),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
@@ -2227,7 +2227,7 @@ mod tests {
             suffix: &str,
         ) -> storage_current::VariableConfig<TwoCap, ((), ()), Sequential> {
             storage_current::Config {
-                merkle_config: merkle_config(context, suffix),
+                merkle_config: merkle_config(suffix),
                 journal_config: variable_journal_config(context, suffix, ((), ())),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
@@ -2242,7 +2242,7 @@ mod tests {
             suffix: &str,
         ) -> storage_immutable::fixed::Config<TwoCap, Sequential> {
             storage_immutable::Config {
-                merkle_config: merkle_config(context, suffix),
+                merkle_config: merkle_config(suffix),
                 log: fixed_journal_config(context, suffix),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
@@ -2254,7 +2254,7 @@ mod tests {
             suffix: &str,
         ) -> storage_immutable::variable::Config<TwoCap, ((), ()), Sequential> {
             storage_immutable::Config {
-                merkle_config: merkle_config(context, suffix),
+                merkle_config: merkle_config(suffix),
                 log: variable_journal_config(context, suffix, ((), ())),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
@@ -2266,7 +2266,7 @@ mod tests {
             suffix: &str,
         ) -> storage_keyless::fixed::Config<Sequential> {
             storage_keyless::Config {
-                merkle: merkle_config(context, suffix),
+                merkle: merkle_config(suffix),
                 log: fixed_journal_config(context, suffix),
             }
         }
@@ -2276,7 +2276,7 @@ mod tests {
             suffix: &str,
         ) -> storage_keyless::variable::Config<(), Sequential> {
             storage_keyless::Config {
-                merkle: merkle_config(context, suffix),
+                merkle: merkle_config(suffix),
                 log: variable_journal_config(context, suffix, ()),
             }
         }

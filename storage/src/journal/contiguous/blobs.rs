@@ -674,6 +674,20 @@ impl<'a, B: RBlob> Replay<'a, B> {
         }
     }
 
+    /// Move the next `len` bytes, which must be buffered, to the end of `out`.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn append_to(&mut self, out: &mut Vec<u8>, mut len: usize) {
+        out.reserve(len);
+        while len > 0 {
+            let chunk = bytes::Buf::chunk(self);
+            let n = chunk.len().min(len);
+            assert!(n > 0, "replay buffered fewer bytes than requested");
+            out.extend_from_slice(&chunk[..n]);
+            bytes::Buf::advance(self, n);
+            len -= n;
+        }
+    }
+
     /// Wrap a paged replay handle.
     const fn paged(replay: PagedReplay<B>) -> Self {
         Self {

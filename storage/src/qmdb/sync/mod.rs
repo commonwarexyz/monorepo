@@ -30,8 +30,8 @@ mod metrics;
 pub use metrics::Metrics;
 
 mod database;
-pub use database::Database;
-pub(crate) use database::{Config as DatabaseConfig, journal_covers_range, local_pinned_nodes};
+pub(crate) use database::open_sync_journal;
+pub use database::{Database, SyncState};
 
 pub mod source;
 pub use source::{Feedback, Request, Response, ResponseOf, Source};
@@ -55,6 +55,11 @@ where
 }
 
 /// Create/open a database and sync it to a target state
+///
+/// Once started, a sync of a full database must complete before the database can be opened
+/// again: an interrupted or failed sync leaves it unopenable until a later sync to some target
+/// succeeds. If recording a root mismatch fails, that storage error is returned instead of the
+/// mismatch.
 #[boxed]
 pub async fn sync<DB, S>(
     config: Config<DB, S>,

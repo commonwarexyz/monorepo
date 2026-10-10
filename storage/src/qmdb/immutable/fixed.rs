@@ -28,7 +28,8 @@ pub type CompactConfig<S> = super::CompactConfig<(), S>;
 mod tests {
     use super::*;
     use crate::{
-        merkle::{Family, Location, full::Config as MmrConfig, mmb, mmr},
+        journal::authenticated::Config as MerkleConfig,
+        merkle::{Family, Location, mmb, mmr},
         qmdb::{
             Error,
             immutable::tests::{self, immutable_tests},
@@ -59,14 +60,11 @@ mod tests {
     fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            merkle_config: MmrConfig {
-                journal_partition: format!("journal-{suffix}"),
+            merkle_config: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: crate::journal::authenticated::single_region_cache(),
             },
             log: JournalConfig {
                 items_per_blob: NZU64!(5),
@@ -128,12 +126,20 @@ mod tests {
         suffix: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
+        open_delayed_db_with_blobs(context, suffix, pending, NZU64!(1000))
+    }
+
+    /// [open_delayed_db] with `items_per_blob` operations per blob.
+    fn open_delayed_db_with_blobs(
+        context: deterministic::Context,
+        suffix: &str,
+        pending: &PendingSyncs,
+        items_per_blob: std::num::NonZeroU64,
+    ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
         let mut cfg = config(suffix, &context);
         let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
-        cfg.log.items_per_blob = NZU64!(1000);
-        cfg.log.page_cache = page_cache.clone();
-        cfg.merkle_config.items_per_blob = NZU64!(1000);
-        cfg.merkle_config.page_cache = page_cache;
+        cfg.log.items_per_blob = items_per_blob;
+        cfg.log.page_cache = page_cache;
         DelayedDb::init(
             DelayedSyncContext {
                 inner: context,
@@ -291,11 +297,19 @@ mod tests {
     fn test_fixed_start_sync_prune_waits() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(ctx.child("delayed"), "start-sync-prune", &pending);
+            let open = open_delayed_db_with_blobs(
+                ctx.child("delayed"),
+                "start-sync-prune",
+                &pending,
+                NZU64!(7),
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            // Two batches: the second declares floor 2 so the prune below is non-trivial.
-            db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), Location::new(0)).await;
-            db = apply_set(db, Sha256::fill(3u8), Sha256::fill(4u8), Location::new(2)).await;
+            // Each batch raises the floor to its own key, so the prune below crosses a blob.
+            for i in 0..10u8 {
+                let floor = db.bounds().end;
+                let set = apply_set(db, Sha256::fill(i), Sha256::fill(i + 100), floor);
+                db = drive_pending_syncs(&pending, set).await;
+            }
 
             let starts_before = pending.starts();
             let handle;
@@ -491,7 +505,7 @@ mod tests {
         test_fixed_batch_chain => run_batch_chain, open;
         test_fixed_operations_match_applied_log => run_operations_match_applied_log, open;
         test_fixed_build_and_authenticate => run_build_and_authenticate, open;
-        test_fixed_recovery_from_failed_merkle_sync => run_recovery_from_failed_merkle_sync, open;
+        test_fixed_recovery_from_unsynced_commit => run_recovery_from_unsynced_commit, open;
         test_fixed_recovery_from_failed_log_sync => run_recovery_from_failed_log_sync, open;
         test_fixed_pruning => run_pruning, open;
         test_fixed_prune_beyond_floor => run_prune_beyond_floor, open;
@@ -625,7 +639,6 @@ mod tests {
                 NonZeroU16::new(<Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16)
                     .unwrap();
             let mut cfg = config("rebranch", pooler);
-            cfg.merkle_config.items_per_blob = NZU64!(100_000);
             cfg.log.items_per_blob = NZU64!(100_000);
             cfg.log.page_cache = CacheRef::from_pooler(pooler, page_size, PAGE_CACHE_SIZE);
             cfg

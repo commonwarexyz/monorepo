@@ -47,9 +47,10 @@ use crate::{
     Context,
     journal::{
         authenticated,
+        authenticated::Config as MerkleConfig,
         contiguous::{Contiguous, Mutable},
     },
-    merkle::{Family, Location, Proof, full::Config as MerkleConfig},
+    merkle::{Family, Location, Proof},
     qmdb::{
         Error, any::value::ValueEncoding, chain, metrics::Metrics, single_operation_root,
         sync::source,
@@ -270,8 +271,6 @@ where
     }
 
     /// Return the retained operation range `[start, end)`.
-    ///
-    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.journal.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
@@ -386,11 +385,7 @@ where
 
     /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
-        self.journal
-            .merkle
-            .pinned_nodes_at(loc)
-            .await
-            .map_err(Into::into)
+        self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 
     /// Prune historical operations prior to `loc`. This does not affect the db's root.
@@ -433,13 +428,13 @@ where
     /// Begin durably persisting the journal state published by prior [`Keyless::apply_batch`]
     /// calls.
     ///
-    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
-    /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
-    /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
-    /// of the deferred durability work surface on the returned handle. A failed data sync also
-    /// fails the next durability operation. A failed recovery-watermark sync is not observed by
-    /// [Self::commit], and a failed merkle-node sync may not be. Both resurface on the next
-    /// [Self::sync].
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
+    /// The backing journal also attempts to advance its recovery watermark. Recovery always
+    /// replays retained operations to rebuild Merkle state.
+    ///
+    /// A new sync waits for the prior sync before starting. A failed data sync surfaces on the
+    /// returned handle and the next durability operation. A recovery-watermark failure surfaces
+    /// on the handle and the next [Self::sync], but is not observed by [Self::commit].
     #[tracing::instrument(name = "qmdb.keyless.db.start_sync", level = "info", skip_all)]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         self.metrics.start_sync_calls.inc();

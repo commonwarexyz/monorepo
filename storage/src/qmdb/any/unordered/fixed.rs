@@ -238,8 +238,18 @@ pub(crate) mod test {
         suffix: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedTest, crate::qmdb::Error<mmr::Family>>> {
+        open_delayed_db_with_blobs(context, suffix, pending, NZU64!(1000))
+    }
+
+    /// [open_delayed_db] with `items_per_blob` operations per blob.
+    fn open_delayed_db_with_blobs(
+        context: Context,
+        suffix: &str,
+        pending: &PendingSyncs,
+        items_per_blob: std::num::NonZeroU64,
+    ) -> impl Future<Output = Result<DelayedTest, crate::qmdb::Error<mmr::Family>>> {
         let mut cfg = fixed_db_config::<TwoCap>(suffix, &context);
-        cfg.journal_config.items_per_blob = NZU64!(1000);
+        cfg.journal_config.items_per_blob = items_per_blob;
         cfg.journal_config.page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
         DelayedTest::init(
             DelayedSyncContext {
@@ -373,18 +383,26 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(context.child("delayed"), "start_sync_prune", &pending);
+            let open = open_delayed_db_with_blobs(
+                context.child("delayed"),
+                "start_sync_prune",
+                &pending,
+                NZU64!(7),
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
-            let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
-            db = apply_write(db, key0, value0).await;
+            // Overwriting one key moves the floor up with each commit, so the prune below crosses
+            // a blob.
+            let key = Sha256::hash(&[&0u64.to_be_bytes()]);
+            for i in 0..10u64 {
+                let value = Sha256::hash(&[&i.to_be_bytes()]);
+                db = drive_pending_syncs(&pending, apply_write(db, key, value)).await;
+            }
 
             let starts_before = pending.starts();
             let handle;
             (db, handle) = db.start_sync().await.unwrap();
             assert!(pending.starts() > starts_before);
 
-            // A non-trivial prune: the floor advanced past the seed commit.
             let floor = db.inactivity_floor_loc();
             assert!(*floor > 0);
             let db = {
@@ -393,34 +411,6 @@ pub(crate) mod test {
                     prune.as_mut().now_or_never().is_none(),
                     "prune proceeded while the commit sync was pending"
                 );
-                assert_eq!(
-                    pending.starts(),
-                    starts_before + 2,
-                    "prune started the merkle journal sync before blocking"
-                );
-
-                // Release only the merkle sync (parked last): prune must still wait on the
-                // in-flight commit's sync before mutating the log.
-                {
-                    let mut parked = pending.lock();
-                    assert_eq!(
-                        parked.len(),
-                        2,
-                        "expected the commit and merkle syncs parked"
-                    );
-                    let merkle_sync = parked.pop().unwrap();
-                    merkle_sync.release.send(Ok(())).unwrap();
-                }
-                assert!(
-                    prune.as_mut().now_or_never().is_none(),
-                    "prune proceeded while the commit sync was pending"
-                );
-                assert_eq!(
-                    pending.lock().len(),
-                    1,
-                    "prune is blocked on the commit sync, not a new sync of its own"
-                );
-
                 pending.unblock();
                 prune.await.unwrap()
             };
@@ -1994,26 +1984,22 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            merkle::{Family, Location, full::Merkle},
+            merkle::{Family, Location},
             qmdb::any::sync::tests::FromSyncTestable,
         };
-        use futures::future::join_all;
 
         impl<F: Family> FromSyncTestable
             for Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>
         {
-            type Merkle = Merkle<F, deterministic::Context, Digest, Sequential>;
+            type Merkle =
+                crate::journal::authenticated::Frontier<F, deterministic::Context, Digest>;
 
             fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
-                (self.log.merkle, self.log.journal)
+                (self.log.frontier, self.log.journal)
             }
 
             async fn pinned_nodes_at(&self, loc: Location<F>) -> Vec<Digest> {
-                join_all(F::nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
-                    .await
-                    .into_iter()
-                    .map(|n| n.unwrap().unwrap())
-                    .collect()
+                self.log.pinned_nodes_at(loc).await.unwrap()
             }
         }
     }

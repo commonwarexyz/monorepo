@@ -69,8 +69,8 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     archive::prunable,
-    journal::contiguous::fixed::Config as FixedLogConfig,
-    mmr::{self, Location, full::Config as MmrJournalConfig},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedLogConfig},
+    mmr::{self, Location},
     qmdb::{
         any::{FixedConfig, unordered::fixed},
         sync::Target,
@@ -1082,14 +1082,11 @@ impl EngineDefinition for ReshareEngine {
             .insert(public_key.clone(), marshal.clone());
 
         let db_config = FixedConfig {
-            merkle_config: MmrJournalConfig {
-                journal_partition: format!("{partition_prefix}-qmdb-mmr-journal"),
+            merkle_config: MerkleConfig {
                 metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: IO_BUFFER_SIZE,
                 replay_buffer: IO_BUFFER_SIZE,
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             journal_config: FixedLogConfig {
                 partition: format!("{partition_prefix}-qmdb-log-journal"),

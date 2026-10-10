@@ -1,10 +1,7 @@
 use crate::{
     Context,
     journal::{authenticated, contiguous::Mutable},
-    merkle::{
-        Family, Location,
-        full::{self, Merkle},
-    },
+    merkle::{Family, Location},
     qmdb::{
         self,
         keyless::{CompactDb, Keyless, Metrics, Operation, operation::Codec},
@@ -22,7 +19,9 @@ where
     F: Family,
     E: Context,
     V: Codec,
-    C: Mutable<Item = Operation<F, V>> + sync::Journal<F, Context = E, Op = Operation<F, V>>,
+    C: Mutable<Item = Operation<F, V>>
+        + sync::Journal<F, Context = E, Op = Operation<F, V>>
+        + crate::journal::authenticated::ReplayEncoded,
     C::Config: Clone + Send,
     H: Hasher,
     S: Strategy,
@@ -35,18 +34,27 @@ where
     type Config = super::Config<C::Config, S>;
     type Digest = H::Digest;
     type Context = E;
+    type SyncState = authenticated::Import<F, E, H::Digest, S>;
+
+    async fn open_sync_journal(
+        context: &Self::Context,
+        config: &Self::Config,
+        target: &sync::Target<F, Self::Digest>,
+    ) -> Result<(Self::SyncState, Self::Journal, Option<Vec<Self::Digest>>), qmdb::Error<F>> {
+        sync::open_sync_journal::<F, _, H, _, _>(
+            context,
+            context.child("journal"),
+            &config.merkle,
+            config.log.clone(),
+            target,
+        )
+        .await
+    }
 
     /// Returns a [Keyless] db initialized from data collected in the sync process.
     ///
-    /// # Behavior
-    ///
-    /// This method handles different initialization scenarios based on existing data:
-    /// - If the Merkle journal is empty or the last item is before the range start, it creates
-    ///   a fresh Merkle structure from the provided `pinned_nodes`
-    /// - If the Merkle journal has data but is incomplete (has length < range end), missing
-    ///   operations from the log are applied to bring it up to the target state
-    /// - If the Merkle journal has data beyond the range end, initialization truncates it to the
-    ///   sync target
+    /// The operations are replayed from the boundary staged at `range`'s start. Nothing is
+    /// persisted until [sync::Database::persist_sync_result].
     ///
     /// # Returns
     ///
@@ -55,26 +63,20 @@ where
         context: Self::Context,
         config: Self::Config,
         log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        state: Self::SyncState,
+        pinned_nodes: Vec<Self::Digest>,
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {
         let hasher = qmdb::hasher::<H>();
 
-        let merkle = Merkle::<F, _, _, S>::init_sync(
-            context.child("merkle"),
-            full::SyncConfig {
-                config: config.merkle.clone(),
-                range: range.clone(),
-                pinned_nodes,
-            },
-        )
-        .await?;
-
         let journal = authenticated::Journal::<F, _, _, _, S>::from_components(
-            merkle,
+            state,
+            &config.merkle,
             log,
             hasher,
+            range.start(),
+            pinned_nodes,
             apply_batch_size,
         )
         .await?;
@@ -96,37 +98,17 @@ where
         };
         db.update_metrics();
 
-        db.sync().await
+        Ok(db)
     }
 
-    async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+    async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
+        self.journal = self.journal.activate().await?;
         Ok(self)
     }
 
-    async fn local_pinned_nodes(
-        context: Self::Context,
-        config: &Self::Config,
-        target: &sync::Target<F, Self::Digest>,
-        journal: &Self::Journal,
-    ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
-        if target.range.start() == Location::new(0)
-            || !sync::journal_covers_range(journal.bounds(), &target.range)
-        {
-            return Ok(None);
-        }
-
-        // The inactivity floor is carried by the last commit operation rather than being
-        // the target range's start.
-        let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
-
-        sync::local_pinned_nodes::<F, _, H, S>(
-            context,
-            config.merkle.clone(),
-            target,
-            inactivity_floor,
-        )
-        .await
+    async fn reject_sync_result(self) -> Result<(), qmdb::Error<F>> {
+        self.journal.reject().await?;
+        Ok(())
     }
 
     fn root(&self) -> Self::Digest {
@@ -152,12 +134,22 @@ where
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;
+    type SyncState = ();
+
+    async fn open_sync_journal(
+        context: &Self::Context,
+        _config: &Self::Config,
+        target: &sync::Target<F, Self::Digest>,
+    ) -> Result<(Self::SyncState, Self::Journal, Option<Vec<Self::Digest>>), qmdb::Error<F>> {
+        crate::qmdb::compact::open_sync_journal(context, target).await
+    }
 
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
         log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        _state: Self::SyncState,
+        pinned_nodes: Vec<Self::Digest>,
         range: NonEmptyRange<Location<F>>,
         _apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {
@@ -176,13 +168,8 @@ where
         self.sync().await
     }
 
-    async fn local_pinned_nodes(
-        _context: Self::Context,
-        _config: &Self::Config,
-        _target: &sync::Target<F, Self::Digest>,
-        _journal: &Self::Journal,
-    ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
-        Ok(None)
+    async fn reject_sync_result(self) -> Result<(), qmdb::Error<F>> {
+        Ok(())
     }
 
     fn root(&self) -> Self::Digest {

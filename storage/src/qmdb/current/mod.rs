@@ -329,9 +329,10 @@ use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
+        authenticated::Config as MerkleConfig,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, Location, full::Config as MerkleConfig},
+    merkle::{self, Location},
     qmdb::{
         any::{
             self, Config as AnyConfig,
@@ -342,7 +343,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::{Codec, FixedSize};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
@@ -410,6 +411,20 @@ pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 /// Configuration for a `Current` authenticated db with variable-sized values.
 pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
+/// Validate `config` as given, then lower its resident height to the grafting height so chunk roots
+/// stay resident.
+fn merkle_config<F: merkle::Family, D: Digest, S: Strategy, const N: usize>(
+    config: &MerkleConfig<S>,
+) -> Result<MerkleConfig<S>, authenticated::Error<F>> {
+    config
+        .cache
+        .capacity::<D>()
+        .map_err(authenticated::Error::InvalidConfig)?;
+    let mut config = config.clone();
+    config.cache.resident_height = config.cache.resident_height.min(grafting::height::<N>());
+    Ok(config)
+}
+
 /// Initialize a `Current` authenticated db from the given config.
 #[boxed]
 pub(super) async fn init<F, E, U, H, I, J, const N: usize, S>(
@@ -441,6 +456,8 @@ where
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
+    let mut config = config;
+    config.merkle_config = merkle_config::<F, H::Digest, S, N>(&config.merkle_config)?;
     let strategy = config.merkle_config.strategy.clone();
     let metadata_partition = config.grafted_metadata_partition.clone();
 
@@ -470,7 +487,7 @@ where
     let (grafted_tree, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,
-        &any.log.merkle,
+        &any.log,
         any.inactivity_floor_loc,
         any.root(),
         &strategy,
@@ -813,13 +830,10 @@ pub mod tests {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
-                journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: crate::journal::authenticated::single_region_cache(),
             },
             journal_config: FConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
@@ -854,13 +868,10 @@ pub mod tests {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
-                journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: crate::journal::authenticated::single_region_cache(),
             },
             journal_config: VConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
@@ -1981,7 +1992,7 @@ pub mod tests {
                 <mmb::Family as merkle::Family>::location_to_position(end)
             );
 
-            let ops_pos = <mmb::Family as merkle::Graftable>::subtree_root_position(
+            let ops_pos = <mmb::Family as merkle::Family>::subtree_root_position(
                 Location::new(0),
                 grafting_height,
             );
@@ -2033,13 +2044,10 @@ pub mod tests {
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = VariableConfig {
                 merkle_config: MerkleConfig {
-                    journal_partition: "forged-exclusion-journal".to_string(),
                     metadata_partition: "forged-exclusion-metadata".to_string(),
-                    items_per_blob: NZU64!(11),
-                    write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                     strategy: Sequential,
-                    page_cache: page_cache.clone(),
+                    cache: Default::default(),
                 },
                 journal_config: VConfig {
                     partition: "forged-exclusion-log".to_string(),
@@ -2994,7 +3002,7 @@ pub mod tests {
             let youngest = pruned_chunks - 1;
             let pair_chunk = youngest & !1;
             let pair_start = pair_chunk << gh;
-            let pair_pos = <mmb::Family as merkle::Graftable>::subtree_root_position(
+            let pair_pos = <mmb::Family as merkle::Family>::subtree_root_position(
                 merkle::Location::<mmb::Family>::new(pair_start),
                 gh + 1,
             );
@@ -5084,6 +5092,31 @@ pub mod tests {
 
             db.destroy().await.unwrap();
         });
+    }
+
+    /// `merkle_config` validates the given config, then lowers its resident height to the
+    /// grafting height.
+    #[test]
+    fn merkle_config_clamps_resident_height_to_grafting_height() {
+        let config = |resident_height| MerkleConfig {
+            metadata_partition: String::new(),
+            cache: crate::journal::authenticated::CacheConfig {
+                resident_height,
+                region_cache_bytes: 0,
+            },
+            replay_buffer: NZUsize!(1),
+            strategy: Sequential,
+        };
+        let clamp = |resident_height| {
+            super::merkle_config::<mmr::Family, Digest, _, 16>(&config(resident_height))
+        };
+        assert_eq!(grafting::height::<16>(), 7);
+        assert_eq!(clamp(5).unwrap().cache.resident_height, 5);
+        assert_eq!(clamp(8).unwrap().cache.resident_height, 7);
+        assert!(matches!(
+            clamp(9),
+            Err(crate::journal::authenticated::Error::InvalidConfig(_))
+        ));
     }
 
     /// A child policy over a pending parent replaces and evicts applied updates and passes the

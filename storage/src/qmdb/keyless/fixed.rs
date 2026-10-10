@@ -61,14 +61,11 @@ mod tests {
     fn db_config<S: Strategy>(suffix: &str, pooler: &impl BufferPooler, strategy: S) -> Config<S> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            merkle: crate::merkle::full::Config {
-                journal_partition: format!("fixed-journal-{suffix}"),
+            merkle: crate::journal::authenticated::Config {
                 metadata_partition: format!("fixed-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy,
-                page_cache: page_cache.clone(),
+                cache: crate::journal::authenticated::single_region_cache(),
             },
             log: JournalConfig {
                 partition: format!("fixed-log-journal-{suffix}"),
@@ -360,12 +357,20 @@ mod tests {
         suffix: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
+        open_delayed_db_with_blobs(context, suffix, pending, NZU64!(1000))
+    }
+
+    /// [open_delayed_db] with `items_per_blob` operations per blob.
+    fn open_delayed_db_with_blobs(
+        context: deterministic::Context,
+        suffix: &str,
+        pending: &PendingSyncs,
+        items_per_blob: std::num::NonZeroU64,
+    ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
         let mut cfg = db_config(suffix, &context, Sequential);
         let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
-        cfg.log.items_per_blob = NZU64!(1000);
-        cfg.log.page_cache = page_cache.clone();
-        cfg.merkle.items_per_blob = NZU64!(1000);
-        cfg.merkle.page_cache = page_cache;
+        cfg.log.items_per_blob = items_per_blob;
+        cfg.log.page_cache = page_cache;
         DelayedDb::init(
             DelayedSyncContext {
                 inner: context,
@@ -521,7 +526,7 @@ mod tests {
     /// An interrupted sibling sync must recover operations and a root from the same history.
     #[test_traced]
     fn test_keyless_fixed_rebranch_sync_crash() {
-        for merkle_first in [false, true] {
+        for completed in [true, false] {
             let ((root_p, root_b), checkpoint) = deterministic::Runner::default()
                 .start_and_recover(move |ctx| async move {
                     let pending = PendingSyncs::default();
@@ -568,31 +573,27 @@ mod tests {
                     let root_b = db.root();
                     assert_ne!(root_a, root_b);
 
-                    // Complete only one side of the paired operation/Merkle sync before crashing.
+                    // Complete or park the operation sync before crashing.
                     let starts = pending.starts();
                     let completions = pending.completions();
                     let handle;
                     (db, handle) = db.start_sync().await.unwrap();
-                    assert_eq!(pending.starts() - starts, 2);
+                    assert_eq!(pending.starts() - starts, 1);
                     let operation_data = next_pending_sync(&pending);
-                    let merkle_data = next_pending_sync(&pending);
-                    let (completed, _parked) = if merkle_first {
-                        (merkle_data, operation_data)
-                    } else {
-                        (operation_data, merkle_data)
-                    };
                     let _waiter = ctx.child("partial_sync").spawn(|_| handle);
-                    completed.release.send(Ok(())).unwrap();
-                    while pending.completions() < completions + 1 {
-                        reschedule().await;
+                    if completed {
+                        operation_data.release.send(Ok(())).unwrap();
+                        while pending.completions() < completions + 1 {
+                            reschedule().await;
+                        }
+                        assert_eq!(pending.completions(), completions + 1);
                     }
-                    assert_eq!(pending.completions(), completions + 1);
                     drop(db);
                     (root_p, root_b)
                 });
 
-            // Recovery may publish the new branch only when its operation journal completed first;
-            // otherwise both journals must remain on the genesis state.
+            // Recovery publishes the new branch only when its operation sync completed; otherwise it
+            // remains on the genesis state.
             deterministic::Runner::from(checkpoint).start(move |ctx| async move {
                 let pending = PendingSyncs::default();
                 let mut cfg = db_config("rebranch-sync-crash", &ctx, Sequential);
@@ -607,14 +608,10 @@ mod tests {
                     None,
                 );
                 let db = drive_pending_syncs(&pending, open).await.unwrap();
-                let (size, root) = if merkle_first {
-                    (1, root_p)
-                } else {
-                    (3, root_b)
-                };
+                let (size, root) = if completed { (3, root_b) } else { (1, root_p) };
                 assert_eq!(db.bounds().end, Location::new(size));
                 assert_eq!(db.root(), root);
-                if !merkle_first {
+                if completed {
                     assert_eq!(db.get(Location::new(1)).await.unwrap(), Some(U64::new(22)));
                 }
                 let (proof, operations) = db.proof(Location::new(0), NZU64!(size)).await.unwrap();
@@ -633,11 +630,19 @@ mod tests {
     fn test_keyless_fixed_start_sync_prune_waits() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(ctx.child("delayed"), "start-sync-prune", &pending);
+            let open = open_delayed_db_with_blobs(
+                ctx.child("delayed"),
+                "start-sync-prune",
+                &pending,
+                NZU64!(7),
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            // Two batches: the second declares floor 2 so the prune below is non-trivial.
-            (db, _) = apply_append(db, U64::new(1), Location::new(0)).await;
-            (db, _) = apply_append(db, U64::new(2), Location::new(2)).await;
+            // Each batch declares the previous append as its floor, so the prune below crosses a blob.
+            let mut floor = Location::new(0);
+            for i in 0..10 {
+                (db, floor) =
+                    drive_pending_syncs(&pending, apply_append(db, U64::new(i), floor)).await;
+            }
 
             let starts_before = pending.starts();
             let handle;
@@ -931,14 +936,11 @@ mod tests {
             let page_size =
                 NonZeroU16::new(<Operation<mmr::Family, U64> as FixedSize>::SIZE as u16).unwrap();
             Config {
-                merkle: crate::merkle::full::Config {
-                    journal_partition: "rebranch-merkle-journal".into(),
+                merkle: crate::journal::authenticated::Config {
                     metadata_partition: "rebranch-merkle-metadata".into(),
-                    items_per_blob: NZU64!(100_000),
-                    write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                     strategy: Sequential,
-                    page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    cache: Default::default(),
                 },
                 log: JournalConfig {
                     partition: "rebranch-log".into(),

@@ -30,7 +30,7 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
 };
-use commonware_codec::{Copying, DecodeExt, Write};
+use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, buffer::paged::CacheRef};
@@ -64,17 +64,6 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     pub fn add_leaf_digest(self, digest: D) -> Self {
         Self {
             inner: self.inner.add_leaf_digest(digest),
-        }
-    }
-
-    /// Encode and hash `items` across the strategy, adding their leaf digests in order.
-    pub(crate) fn add_many<Item: Write + Send + Sync>(
-        self,
-        hasher: &impl Hasher<F, Digest = D>,
-        items: &[Item],
-    ) -> Self {
-        Self {
-            inner: self.inner.add_many(hasher, items),
         }
     }
 
@@ -154,10 +143,8 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// all un-synced nodes, and the pinned node set as derived from both its own pruning boundary
     /// and the full structure's pruning boundary.
     ///
-    /// Held in an [`Arc`] so [`Merkle::snapshot`] can hand a zero-copy, immutable view to jobs
-    /// running off the calling task. Mutations go through [`Arc::make_mut`]: they are in-place
-    /// while no snapshot is alive and copy-on-write otherwise, so a snapshot never observes
-    /// later mutations.
+    /// Held in an [`Arc`] to keep this by-value handle small. Nothing else holds it, so
+    /// [`Arc::make_mut`] never copies.
     mem: Arc<Mem<F, D>>,
 
     /// The highest position for which this structure has been pruned, or 0 if it has never been
@@ -199,11 +186,6 @@ pub(crate) struct Recovery<F: Family, E: Context, D: Digest, S: Strategy> {
 }
 
 impl<F: Family, E: Context, D: Digest, S: Strategy> Recovery<F, E, D, S> {
-    /// Number of leaves available before operation replay.
-    pub(crate) fn leaves(&self) -> Location<F> {
-        self.mem.leaves()
-    }
-
     /// Finalize a validated prefix and publish its Merkle handle.
     pub(crate) async fn finish(mut self) -> Result<Merkle<F, E, D, S>, Error<F>> {
         // Reconcile the journal with the validated complete size and durable metadata boundary.
@@ -887,26 +869,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         Ok(self)
     }
 
-    /// Create an owned [`batch::MerkleizedBatch`] representing the current committed state.
-    ///
-    /// The batch has no data (the committed items are on disk, not in memory).
-    /// This is the starting point for building owned batch chains.
-    pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D, S>> {
-        batch::MerkleizedBatch::from_mem_with_strategy(&self.mem, self.strategy.clone())
-    }
-
     /// The committed [`Mem`].
     pub fn mem(&self) -> &Mem<F, D> {
         &self.mem
-    }
-
-    /// Return a zero-copy, immutable snapshot of the committed Mem.
-    ///
-    /// The snapshot never observes later mutations: mutators copy-on-write while a snapshot is
-    /// alive. Use this to move committed node fallback into a job running off the calling task;
-    /// prefer [`Merkle::mem()`] when a borrow suffices.
-    pub(crate) fn snapshot(&self) -> Arc<Mem<F, D>> {
-        Arc::clone(&self.mem)
     }
 
     /// Create a new speculative batch with this structure as its parent.
@@ -5699,7 +5664,9 @@ mod tests {
         // Attempt to update leaf 0 which has been synced out of memory.
         // Use the inner batch type directly since the full wrapper
         // intentionally hides update_leaf.
-        let batch = mmr.to_batch().new_batch();
+        let batch =
+            batch::MerkleizedBatch::from_mem_with_strategy(mmr.mem(), mmr.strategy().clone())
+                .new_batch();
         let result = batch.update_leaf(&hasher, Location::<F>::new(0), b"updated");
         assert!(matches!(result, Err(Error::ElementPruned(_))));
 

@@ -5,7 +5,8 @@
 //! the modules the shared macro generates.
 
 use crate::{
-    merkle::{Location, full::Config as MerkleConfig},
+    journal::authenticated::Config as MerkleConfig,
+    merkle::Location,
     qmdb::{
         self,
         immutable::{self, variable::Operation},
@@ -13,8 +14,8 @@ use crate::{
             self, Target,
             engine::Config,
             harness::{
-                CompactConfigOf, CompactOpOf, CompactSyncTestHarness, ConfigOf, DbOf, JournalOf,
-                OpOf, PAGE_CACHE_SIZE, PAGE_SIZE, SyncTestHarness, prune_boxed,
+                CompactConfigOf, CompactOpOf, CompactSyncTestHarness, ConfigOf, DbOf, OpOf,
+                PAGE_CACHE_SIZE, PAGE_SIZE, SyncTestHarness, prune_boxed,
             },
         },
     },
@@ -166,13 +167,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -434,13 +432,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -463,13 +458,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::fixed::Config {
                 partition: format!("log-{suffix}"),
@@ -885,47 +877,35 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         assert!(local_start > Location::new(0));
         let sync_root = H::db_root(&db);
 
-        // Reopen the operation journal independently to probe the persisted Merkle boundary.
+        // Reopen the database as the sync engine does. A matching target authenticates locally.
         drop(db);
-        let journal = <JournalOf<H> as qmdb::sync::Journal<_>>::new(
-            context.child("journal"),
-            qmdb::sync::DatabaseConfig::journal_config(&config),
-            non_empty_range!(local_start, local_end),
-        )
-        .await
-        .unwrap();
-
-        let stale_target = Target {
-            root: sync_root,
-            range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
-        };
-        assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
-                context.child("probe_stale"),
-                &config,
-                &stale_target,
-                &journal,
-            )
-            .await
-            .unwrap()
-            .is_none()
-        );
-
         let matching_target = Target {
             root: sync_root,
             range: non_empty_range!(local_start, local_end),
         };
-        assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
-                context.child("probe_matching"),
-                &config,
-                &matching_target,
-                &journal,
-            )
-            .await
-            .unwrap()
-            .is_some()
+        let (state, journal, pins) = <DbOf<H> as qmdb::sync::Database>::open_sync_journal(
+            &context,
+            &config,
+            &matching_target,
+        )
+        .await
+        .unwrap();
+        assert!(pins.is_some());
+        drop((state, journal));
+
+        // A journal pruned past a target's start cannot hold that target.
+        let stale_target = Target {
+            root: sync_root,
+            range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
+        };
+        let (_, journal, pins) =
+            <DbOf<H> as qmdb::sync::Database>::open_sync_journal(&context, &config, &stale_target)
+                .await
+                .unwrap();
+        assert!(pins.is_none());
+        assert_eq!(
+            crate::journal::contiguous::Contiguous::bounds(&journal),
+            *stale_target.range.start()..*stale_target.range.start()
         );
-        drop(journal);
     });
 }

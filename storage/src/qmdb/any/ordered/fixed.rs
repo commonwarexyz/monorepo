@@ -2242,26 +2242,22 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            merkle::{Family, Location, full::Merkle},
+            merkle::{Family, Location},
             qmdb::any::sync::tests::FromSyncTestable,
         };
-        use futures::future::join_all;
 
         impl<F: Family> FromSyncTestable
             for Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>
         {
-            type Merkle = Merkle<F, deterministic::Context, Digest, Sequential>;
+            type Merkle =
+                crate::journal::authenticated::Frontier<F, deterministic::Context, Digest>;
 
             fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
-                (self.log.merkle, self.log.journal)
+                (self.log.frontier, self.log.journal)
             }
 
             async fn pinned_nodes_at(&self, loc: Location<F>) -> Vec<Digest> {
-                join_all(F::nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
-                    .await
-                    .into_iter()
-                    .map(|n| n.unwrap().unwrap())
-                    .collect()
+                self.log.pinned_nodes_at(loc).await.unwrap()
             }
         }
     }
