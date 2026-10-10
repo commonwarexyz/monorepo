@@ -315,14 +315,21 @@ mod tests {
             assert_eq!(journal.bounds(), 35..50);
             drop((import, journal));
 
-            // Operations that do not rebuild the target's root are discarded.
-            let (_, journal, pins) = open(Target {
-                root: sha256::Digest::from([1; 32]),
-                range: non_empty_range!(start, Location::new(50)),
-            })
-            .await;
-            assert!(pins.is_none());
-            assert_eq!(journal.bounds(), 35..35);
+            // Operations that cannot be the target's are discarded: those that do not rebuild its
+            // root, and those whose last operation is not a commit.
+            for (root, end) in [(sha256::Digest::from([1; 32]), 50), (root, 49)] {
+                let (_, mut journal, pins) = open(Target {
+                    root,
+                    range: non_empty_range!(start, Location::new(end)),
+                })
+                .await;
+                assert!(pins.is_none());
+                assert_eq!(journal.bounds(), 35..35);
+                for i in 35..50 {
+                    (journal, _) = journal.append(&op(i)).await.unwrap();
+                }
+                drop(journal.sync().await.unwrap());
+            }
         });
     }
 

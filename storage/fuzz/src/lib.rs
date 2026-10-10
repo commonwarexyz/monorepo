@@ -184,16 +184,6 @@ pub fn bounded_items(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
     u.int_in_range(1..=64)
 }
 
-/// Generate an authenticated journal resident height in `0..=8`.
-pub fn bounded_resident_height(u: &mut Unstructured<'_>) -> arbitrary::Result<u32> {
-    u.int_in_range(0..=8)
-}
-
-/// Generate a number of cached digest regions in `0..=2`.
-pub fn bounded_cache_regions(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    u.int_in_range(0..=2)
-}
-
 /// A cache of one region of SHA-256 digests, so proofs evict and rebuild digests.
 pub fn single_region_cache() -> CacheConfig {
     CacheConfig::with_regions::<sha256::Digest>(2, 1)

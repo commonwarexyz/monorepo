@@ -26,7 +26,6 @@ use commonware_runtime::{
     BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, channel::mpsc, non_empty_range};
-use futures::FutureExt as _;
 use harnesses::VariableMmrHarness as H;
 use rand::Rng as _;
 use std::{
@@ -71,16 +70,10 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     fn sample_metadata() -> Self::Metadata;
 
     fn init_db(ctx: deterministic::Context) -> impl Future<Output = Self::Db> + Send;
-    fn try_init_db_with_config(
-        ctx: deterministic::Context,
-        config: ConfigOf<Self>,
-    ) -> impl Future<Output = Result<Self::Db, qmdb::Error<Self::Family>>> + Send;
     fn init_db_with_config(
         ctx: deterministic::Context,
         config: ConfigOf<Self>,
-    ) -> impl Future<Output = Self::Db> + Send {
-        Self::try_init_db_with_config(ctx, config).map(Result::unwrap)
-    }
+    ) -> impl Future<Output = Self::Db> + Send;
     fn destroy(db: Self::Db) -> impl Future<Output = ()> + Send;
     fn db_sync(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
 
@@ -480,68 +473,6 @@ where
         let target_db =
             Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
         H::destroy(target_db).await;
-    });
-}
-
-/// A reused local prefix that diverges from the target fails root verification. The database
-/// stays unopenable until a later sync discards the divergent operations and completes.
-pub(crate) fn test_sync_rejected_import_blocks_open_until_resync<H: SyncTestHarness>()
-where
-    OpOf<H>: Encode + Clone,
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let source = H::init_db(context.child("source")).await;
-        let source = H::apply_ops(source, H::create_ops(50), None).await;
-        let target = Target {
-            root: H::db_root(&source),
-            range: non_empty_range!(Location::new(0), H::bounds(&source).end),
-        };
-        let source = Arc::new(source);
-
-        // Retain a divergent prefix that stops short of the target.
-        let config = H::config(&format!("rejected_{}", context.next_u64()), &context);
-        let client = H::init_db_with_config(context.child("divergent"), config.clone()).await;
-        let client = H::apply_ops(client, H::create_ops_seeded(10, 1), None).await;
-        assert!(H::bounds(&client).end < target.range.end());
-        drop(client);
-
-        let engine_config = |context: deterministic::Context| Config {
-            db_config: config.clone(),
-            fetch_batch_size: NZU64!(10),
-            target: target.clone(),
-            context,
-            source: source.clone(),
-            apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
-            update_rx: None,
-            finish_rx: None,
-            reached_target_tx: None,
-            max_retained_roots: 0,
-        };
-        let result: Result<DbOf<H>, _> = sync::sync(engine_config(context.child("first"))).await;
-        assert!(matches!(
-            result,
-            Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
-        ));
-        assert!(matches!(
-            H::try_init_db_with_config(context.child("blocked"), config.clone()).await,
-            Err(qmdb::Error::Authenticated(
-                crate::journal::authenticated::Error::IncompleteSync
-            ))
-        ));
-
-        let synced: DbOf<H> = sync::sync(engine_config(context.child("second")))
-            .await
-            .unwrap();
-        assert_eq!(H::db_root(&synced), target.root);
-        drop(synced);
-        let reopened = H::init_db_with_config(context.child("reopened"), config.clone()).await;
-        assert_eq!(H::db_root(&reopened), target.root);
-        H::destroy(reopened).await;
-        let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
-        H::destroy(source).await;
     });
 }
 
@@ -1043,11 +974,11 @@ pub(crate) mod harnesses {
             Self::Db::init(ctx, config, None).await.unwrap()
         }
 
-        async fn try_init_db_with_config(
+        async fn init_db_with_config(
             ctx: deterministic::Context,
             config: ConfigOf<Self>,
-        ) -> Result<Self::Db, qmdb::Error<F>> {
-            Self::Db::init(ctx, config, None).await
+        ) -> Self::Db {
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         #[boxed]
@@ -1200,11 +1131,6 @@ macro_rules! sync_tests_for_harness {
             #[test_traced("WARN")]
             fn test_sync_nonzero_floor() {
                 super::test_sync_nonzero_floor::<$harness>();
-            }
-
-            #[test_traced("WARN")]
-            fn test_sync_rejected_import_blocks_open_until_resync() {
-                super::test_sync_rejected_import_blocks_open_until_resync::<$harness>();
             }
         }
     };
