@@ -36,7 +36,13 @@ use commonware_utils::{
 };
 use futures::{FutureExt as _, future::BoxFuture};
 use rand_core::Rng;
-use std::{collections::VecDeque, future, num::NonZeroUsize, pin::pin, sync::Arc};
+use std::{
+    collections::VecDeque,
+    future,
+    num::NonZeroUsize,
+    pin::pin,
+    sync::{Arc, OnceLock},
+};
 use tracing::{debug, warn};
 
 type SyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
@@ -110,6 +116,9 @@ where
     resolvers: R,
     sync_config: SyncEngineConfig,
     prune_config: Option<PruneConfig>,
+    /// The databases once open, shared with every [`Mailbox`] so preparations read them without
+    /// a request to the actor.
+    databases: Arc<OnceLock<A::Databases>>,
 }
 
 impl<E, A, R> Stateful<E, A, R>
@@ -124,6 +133,7 @@ where
     /// The actor does nothing until [`start`](Self::start)ed.
     pub fn init(context: E, config: Config<E, A, R>) -> (Self, Mailbox<E, A>) {
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
+        let databases = Arc::new(OnceLock::new());
         (
             Self {
                 context: ContextCell::new(context),
@@ -133,8 +143,9 @@ where
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
                 prune_config: config.prune_config,
+                databases: Arc::clone(&databases),
             },
-            Mailbox::new(sender, config.application),
+            Mailbox::new(sender, config.application, databases),
         )
     }
 
@@ -155,6 +166,7 @@ where
         let Some((databases, tip)) = self.open(&mut subscribers).await else {
             return;
         };
+        let _ = self.databases.set(databases.clone());
         self.resolvers.attach_databases(databases.clone()).await;
         for response in subscribers {
             response.send_lossy(databases.clone());
