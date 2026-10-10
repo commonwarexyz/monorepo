@@ -1906,10 +1906,13 @@ impl TestHarness for StandardHarness {
         let broadcast_config = buffered::Config {
             public_key: validator.clone(),
             mailbox_size: config.mailbox_size,
+            ingress_size: config.mailbox_size,
             deque_size: 10,
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: control.clone(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -2138,10 +2141,13 @@ impl TestHarness for StandardHarness {
         let broadcast_config = buffered::Config {
             public_key: validator.clone(),
             mailbox_size: config.mailbox_size,
+            ingress_size: config.mailbox_size,
             deque_size: 10,
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: control.clone(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
