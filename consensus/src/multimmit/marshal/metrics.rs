@@ -43,6 +43,8 @@ pub(crate) struct Metrics {
     pub(crate) turns: Counter,
     /// Inputs the owner took.
     pub(crate) inputs: Counter,
+    /// Final blocks reported ahead of their ordered delivery.
+    pub(crate) finals: Counter,
 }
 
 impl Metrics {
@@ -81,6 +83,10 @@ impl Metrics {
                 "Turns of the owner, each driving the machines once",
             ),
             inputs: context.counter("inputs", "Inputs the owner took"),
+            finals: context.counter(
+                "finals",
+                "Final blocks reported ahead of their ordered delivery",
+            ),
         }
     }
 }
