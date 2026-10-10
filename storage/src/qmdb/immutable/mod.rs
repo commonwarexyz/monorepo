@@ -158,7 +158,7 @@ where
 /// Configuration for an [Immutable] authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, J, S: Strategy> {
-    /// Configuration for durable pruning metadata and the volatile Merkle digest cache.
+    /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle_config: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
@@ -572,8 +572,9 @@ where
         self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 
-    /// Sync all database state to disk. This isn't necessary to ensure durability of committed
-    /// operations.
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
     #[tracing::instrument(name = "qmdb.immutable.db.sync", level = "info", skip_all)]
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         let _timer = self.metrics.sync_timer();

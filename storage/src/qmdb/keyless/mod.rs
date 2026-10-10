@@ -92,7 +92,7 @@ where
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
 pub struct Config<J, S: Strategy> {
-    /// Configuration for durable pruning metadata and the volatile Merkle digest cache.
+    /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
@@ -414,8 +414,9 @@ where
         Ok(self)
     }
 
-    /// Sync all database state to disk. This isn't necessary to ensure durability of committed
-    /// operations.
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
     #[tracing::instrument(name = "qmdb.keyless.db.sync", level = "info", skip_all)]
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         let _timer = self.metrics.sync_timer();

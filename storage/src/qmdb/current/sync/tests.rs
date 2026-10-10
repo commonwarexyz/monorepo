@@ -596,7 +596,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
 }
 
 #[test_traced]
-fn test_current_open_sync_journal_target_before_local_lower_bound() {
+fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     type Db = crate::qmdb::current::unordered::variable::Db<
         crate::merkle::mmr::Family,
         Context,
@@ -799,8 +799,8 @@ macro_rules! current_sync_tests_for_harness {
             }
 
             #[test_traced]
-            fn test_local_operations_authenticate_below_floor() {
-                crate::qmdb::any::sync::tests::test_local_operations_authenticate_below_floor::<$harness>();
+            fn test_local_pinned_nodes_below_floor() {
+                crate::qmdb::any::sync::tests::test_local_pinned_nodes_below_floor::<$harness>();
             }
 
             #[test_traced("WARN")]

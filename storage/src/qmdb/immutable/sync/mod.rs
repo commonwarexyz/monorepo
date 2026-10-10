@@ -75,11 +75,13 @@ where
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
-        let journal = authenticated::Journal::<F, _, _, _, S>::from_components(
+        let hasher = qmdb::hasher::<H>();
+
+        let journal = authenticated::Journal::<_, _, _, _, S>::from_components(
             state,
             &db_config.merkle_config,
             log,
-            qmdb::hasher::<H>(),
+            hasher,
             range.start(),
             pinned_nodes,
             apply_batch_size,

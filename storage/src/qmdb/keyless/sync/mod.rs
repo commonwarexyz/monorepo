@@ -68,11 +68,13 @@ where
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {
+        let hasher = qmdb::hasher::<H>();
+
         let journal = authenticated::Journal::<F, _, _, _, S>::from_components(
             state,
             &config.merkle,
             log,
-            qmdb::hasher::<H>(),
+            hasher,
             range.start(),
             pinned_nodes,
             apply_batch_size,

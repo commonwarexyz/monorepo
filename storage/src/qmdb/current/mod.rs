@@ -365,7 +365,7 @@ use self::db::Metrics;
 /// Configuration for a `Current` authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, J, S: Strategy, B = ()> {
-    /// Configuration for durable pruning metadata and the volatile Merkle digest cache.
+    /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle_config: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
@@ -429,12 +429,7 @@ fn merkle_config<F: merkle::Family, D: Digest, S: Strategy, const N: usize>(
 #[boxed]
 pub(super) async fn init<F, E, U, H, I, J, const N: usize, S>(
     context: E,
-    mut config: Config<
-        I::Translator,
-        J::Config,
-        S,
-        <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
-    >,
+    config: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     max_size: Option<Location<F>>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
@@ -461,6 +456,7 @@ where
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
+    let mut config = config;
     config.merkle_config = merkle_config::<F, H::Digest, S, N>(&config.merkle_config)?;
     let strategy = config.merkle_config.strategy.clone();
     let metadata_partition = config.grafted_metadata_partition.clone();

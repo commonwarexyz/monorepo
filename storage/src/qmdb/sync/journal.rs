@@ -205,7 +205,7 @@ where
     }
 
     async fn resize(mut self, start: Location<F>) -> Result<Self, Self::Error> {
-        if start < self.start || *start > self.size() {
+        if start < self.start || *start >= self.size() {
             self.start = start;
             self.ops.clear();
         } else {

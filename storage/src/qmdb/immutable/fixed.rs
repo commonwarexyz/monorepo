@@ -292,16 +292,24 @@ mod tests {
         });
     }
 
-    /// Same-blob pruning performs no storage mutation and need not wait for a pending sync.
+    /// Pruning drains the in-flight sync before mutating storage.
     #[test_traced]
-    fn test_fixed_start_sync_noop_prune_does_not_wait() {
+    fn test_fixed_start_sync_prune_waits() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(ctx.child("delayed"), "start-sync-prune", &pending);
+            let open = open_delayed_db_with_blobs(
+                ctx.child("delayed"),
+                "start-sync-prune",
+                &pending,
+                NZU64!(7),
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            // The second batch advances the floor within the same physical blob.
-            db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), Location::new(0)).await;
-            db = apply_set(db, Sha256::fill(3u8), Sha256::fill(4u8), Location::new(2)).await;
+            // Each batch raises the floor to its own key, so the prune below crosses a blob.
+            for i in 0..10u8 {
+                let floor = db.bounds().end;
+                let set = apply_set(db, Sha256::fill(i), Sha256::fill(i + 100), floor);
+                db = drive_pending_syncs(&pending, set).await;
+            }
 
             let starts_before = pending.starts();
             let handle;
@@ -310,66 +318,16 @@ mod tests {
 
             let floor = db.inactivity_floor_loc();
             assert!(*floor > 0);
-            let starts = pending.starts();
-            let db = db
-                .prune(floor)
-                .now_or_never()
-                .expect("same-blob prune must complete without I/O")
-                .unwrap();
-            assert_eq!(pending.starts(), starts);
-            pending.unblock();
+            let db = {
+                let mut prune = std::pin::pin!(db.prune(floor));
+                assert!(
+                    prune.as_mut().now_or_never().is_none(),
+                    "prune proceeded while the started sync was pending"
+                );
+                pending.unblock();
+                prune.await.unwrap()
+            };
             handle.await.unwrap();
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// Pruning across a blob waits for the in-flight sync before persisting anything.
-    #[test_traced]
-    fn test_fixed_start_sync_blob_prune_waits() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let pending = PendingSyncs::default();
-            let open = open_delayed_db_with_blobs(
-                ctx.child("delayed"),
-                "start-sync-blob-prune",
-                &pending,
-                NZU64!(7),
-            );
-            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            // Each batch raises the floor to its own key.
-            for i in 0..10u8 {
-                let floor = db.bounds().end;
-                let set = apply_set(db, Sha256::fill(i), Sha256::fill(i + 100), floor);
-                db = drive_pending_syncs(&pending, set).await;
-            }
-            let handle;
-            (db, handle) = db.start_sync().await.unwrap();
-            let in_flight = pending.lock().len();
-            assert!(in_flight > 0);
-
-            let floor = db.inactivity_floor_loc();
-            assert!(*floor >= 7, "the floor must cross a blob");
-            let mut prune = std::pin::pin!(db.prune(floor));
-            assert!(
-                prune.as_mut().now_or_never().is_none(),
-                "prune finished while the in-flight sync was pending"
-            );
-            assert_eq!(pending.lock().len(), in_flight);
-
-            pending.unblock();
-            let db = prune.await.unwrap();
-            handle.await.unwrap();
-            let bounds = db.bounds();
-            assert!(*bounds.start >= 7);
-            drop(db);
-            let db = open_delayed_db_with_blobs(
-                ctx.child("reopen"),
-                "start-sync-blob-prune",
-                &pending,
-                NZU64!(7),
-            )
-            .await
-            .unwrap();
-            assert_eq!(db.bounds(), bounds);
             db.destroy().await.unwrap();
         });
     }

@@ -175,7 +175,7 @@ pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, J, S: Strategy, B = ()> {
-    /// Configuration for durable pruning metadata and the volatile Merkle digest cache.
+    /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle_config: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.

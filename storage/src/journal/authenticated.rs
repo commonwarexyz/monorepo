@@ -57,7 +57,7 @@ use core::{
 };
 use futures::{Stream, TryFutureExt as _, try_join};
 use thiserror::Error;
-use tracing::warn;
+use tracing::{debug, warn};
 
 mod config;
 mod frontier;
@@ -71,6 +71,8 @@ pub(crate) use frontier::Frontier;
 pub use import::Import;
 pub(crate) use import::Local;
 use metrics::Metrics;
+#[cfg(test)]
+pub(crate) use tests::init_sync;
 use tree::Tree;
 
 /// Errors that can occur when interacting with an authenticated journal.
@@ -442,8 +444,9 @@ where
 
     /// Inclusion proof for the items `batch` appends, anchored at the batch's speculative tip.
     ///
-    /// Nodes below the batch chain are the peaks at its base, which this journal keeps until the
-    /// batch's changes are flushed.
+    /// Nodes below the batch chain are read from this journal's
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// the batch's changes are flushed.
     pub fn speculative_proof(
         &self,
         batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
@@ -463,8 +466,9 @@ where
 
     /// Merkle frontier at the first item `batch` appends ([`Family::nodes_to_pin`]).
     ///
-    /// Nodes below the batch chain are the peaks at its base, which this journal keeps until the
-    /// batch's changes are flushed.
+    /// Nodes below the batch chain are read from this journal's
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// the batch's changes are flushed.
     pub fn speculative_pinned_nodes(
         &self,
         batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
@@ -658,10 +662,11 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Begin durably persisting operations.
+    /// Begin durably persisting the journal.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
-    /// Also tries to advance the operation journal's recovery watermark.
+    /// Also tries to advance the recovery watermark to bound startup recovery. Use
+    /// [Self::sync] to guarantee no recovery is needed.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         let handle;
         (self.journal, handle) = self.journal.start_sync().await?;
@@ -679,6 +684,7 @@ where
     /// Build provisional authenticated state from an import staged at `start` with `pins`.
     ///
     /// Nothing is persisted. [Self::activate] makes the result durable once authenticated.
+    #[boxed]
     pub(crate) async fn from_components(
         import: Import<F, E, H::Digest, S>,
         config: &Config<S>,
@@ -854,6 +860,7 @@ where
             self.journal = self.journal.commit().await?;
             self.frontier = self.frontier.activate(target, pins.clone()).await?;
             self.merkle.prune(target, pins);
+            debug!(size = ?self.journal.bounds().end, ?prune_loc, boundary = ?target, "pruned inactive ops");
         }
         let pruned;
         (self.journal, pruned) = self.journal.prune(*target).await?;
@@ -900,7 +907,7 @@ where
     frontier: Frontier<F, E, H::Digest>,
     /// Digests at the frontier, awaiting replay of the selected operations.
     merkle: Tree<F, H::Digest, S>,
-    /// Hasher and peak-bagging mode retained for replay and the published journal.
+    /// Hasher and peak-bagging mode retained for Merkle alignment and the published journal.
     hasher: StandardHasher<H>,
     /// Exclusive operation end chosen for publication.
     selected_end: u64,
@@ -950,18 +957,16 @@ where
         if frontier.boundary().is_none() {
             frontier = frontier.activate(Location::new(0), Vec::new()).await?;
         }
-        let end = Location::new(self.selected_end);
-        let merkle = self
-            .merkle
-            .replay(&journal, &self.hasher, end, APPLY_BATCH_SIZE)
-            .await?;
+        let merkle =
+            Journal::<F, E, C, H, S>::align(self.merkle, &journal, &self.hasher, APPLY_BATCH_SIZE)
+                .await?;
 
         // Delete operations below the frontier, left by a crash during pruning or by a sync.
         let (journal, _) = journal.prune(*merkle.bounds().start).await?;
         Ok(Journal {
+            journal,
             merkle,
             frontier,
-            journal,
             hasher: self.hasher,
         })
     }
@@ -1559,6 +1564,17 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
+    }
+
+    /// [open_sync], then prune below the start of `range`.
+    pub(crate) async fn init_sync<E: crate::Context, J: Backing<E>>(
+        context: E,
+        cfg: J::Config,
+        range: Range<u64>,
+    ) -> Result<J, JournalError> {
+        let journal = open_sync::<E, J>(context, cfg, range.clone()).await?;
+        let (journal, _) = journal.prune(range.start).await?;
+        Ok(journal)
     }
 
     /// Create a new empty authenticated journal.

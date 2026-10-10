@@ -1422,10 +1422,11 @@ macro_rules! sync_tests_for_harness {
 sync_tests_for_harness!(harnesses::VariableMmrHarness, variable_mmr);
 sync_tests_for_harness!(harnesses::VariableMmbHarness, variable_mmb);
 
-/// A completed local journal serves a matching target's pinned nodes, but cannot hold a target
-/// starting below its pruning boundary.
+/// A completed sync journal reuses local pinned nodes only when the persisted state can
+/// authenticate the target: a target starting below the local pruning boundary is declined,
+/// while a matching target serves the pinned nodes locally.
 #[commonware_macros::test_traced]
-fn test_keyless_open_sync_journal_target_before_local_lower_bound() {
+fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let suffix = context.next_u64().to_string();

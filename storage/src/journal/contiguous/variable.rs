@@ -1956,12 +1956,12 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.bounds.end
     }
 
-    /// Return the retained start that [Self::prune] would leave for `requested`.
-    fn prune_target(&self, requested: u64) -> Result<u64, Error> {
-        // The blob containing `requested`, capped to the tail (which is guaranteed to exist by
-        // our invariant).
+    /// Return the retained start that [Self::prune] would leave for `min_position`.
+    fn prune_target(&self, min_position: u64) -> Result<u64, Error> {
+        // Calculate the blob that would contain min_position, capped to the tail (which is
+        // guaranteed to exist by our invariant).
         let items_per_blob = self.items_per_blob.get();
-        let target = position_to_blob(requested.min(self.bounds.end), items_per_blob);
+        let target = position_to_blob(min_position.min(self.bounds.end), items_per_blob);
         if target <= self.blobs.oldest_blob_index() {
             return Ok(self.bounds.start);
         }
@@ -2957,7 +2957,7 @@ mod tests {
             authenticated::{self, BackingRecovery as _},
             contiguous::{
                 checkpoint::Checkpoint,
-                tests::{init_sync, read_encoded, run_contiguous_tests},
+                tests::{read_encoded, run_contiguous_tests},
             },
         },
         utils::{codec::View, storage_pool_allocated_bytes},
@@ -3278,8 +3278,12 @@ mod tests {
             // Without data blobs the span would collapse to the offsets start 0. Start 7 lies
             // inside the acknowledged range but an empty span at 0 does not cover it, so init_sync
             // would clear the acknowledged items. The span must report corruption instead.
-            let result =
-                init_sync::<_, Journal<_, u64>>(context.child("sync"), config.clone(), 7..27).await;
+            let result = authenticated::init_sync::<_, Journal<_, u64>>(
+                context.child("sync"),
+                config.clone(),
+                7..27,
+            )
+            .await;
             assert!(
                 matches!(
                     &result,
@@ -9192,7 +9196,7 @@ mod tests {
             // Initialize journal with sync boundaries when no existing data exists
             let lower_bound = 10;
             let upper_bound = 26;
-            let mut journal = init_sync::<_, Journal<_, u64>>(
+            let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
                 context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
@@ -9251,7 +9255,7 @@ mod tests {
             // lower_bound: 8 (blob 1), upper_bound: 31 (last location 30, blob 6)
             let lower_bound = 8;
             let upper_bound = 31;
-            let mut journal = init_sync::<_, Journal<_, u64>>(
+            let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
                 context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
@@ -9306,7 +9310,7 @@ mod tests {
             };
 
             #[allow(clippy::reversed_empty_ranges)]
-            let _result = init_sync::<_, Journal<_, u64>>(
+            let _result = authenticated::init_sync::<_, Journal<_, u64>>(
                 context.child("storage"),
                 cfg,
                 10..5, // invalid range: lower > upper
@@ -9347,7 +9351,7 @@ mod tests {
             // Initialize with sync boundaries that exactly match existing data
             let lower_bound = 5; // blob 1
             let upper_bound = 20; // blob 3
-            let mut journal = init_sync::<_, Journal<_, u64>>(
+            let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
                 context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
@@ -9417,7 +9421,7 @@ mod tests {
             // Initialize with sync boundaries that are exceeded by existing data.
             let lower_bound = 8; // blob 1
             let upper_bound = 20;
-            let journal = init_sync::<_, Journal<_, u64>>(
+            let journal = authenticated::init_sync::<_, Journal<_, u64>>(
                 context.child("sync"),
                 cfg.clone(),
                 lower_bound..upper_bound,
@@ -9462,7 +9466,7 @@ mod tests {
 
             let lower_bound = 10;
             let upper_bound = 26;
-            let mut journal = init_sync::<_, Journal<_, u64>>(
+            let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
                 context.child("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
@@ -9516,7 +9520,7 @@ mod tests {
 
             let lower_bound = 7;
             let upper_bound = 20;
-            let journal = init_sync::<_, Journal<_, u64>>(
+            let journal = authenticated::init_sync::<_, Journal<_, u64>>(
                 context.child("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
@@ -9576,7 +9580,7 @@ mod tests {
             // No ordinary open consumes the intent first. The span of a staged clear is empty at
             // its target, so only a start of 50 calls `recover`, which completes the staged clear.
             // Starts 7 and 60 call `clear`, which replaces the intent with a clear to the start.
-            let mut journal = init_sync::<_, Journal<_, u64>>(
+            let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
                 context.child("sync"),
                 cfg.clone(),
                 start..start + 20,
@@ -9656,7 +9660,7 @@ mod tests {
             // Initialize with sync boundaries beyond all existing data
             let lower_bound = 15; // blob 3
             let upper_bound = 26; // last element in blob 5
-            let journal = init_sync::<_, Journal<_, u64>>(
+            let journal = authenticated::init_sync::<_, Journal<_, u64>>(
                 context.child("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
@@ -9710,7 +9714,7 @@ mod tests {
             // Test sync boundaries exactly at blob boundaries
             let lower_bound = 15; // Exactly at blob boundary (15/5 = 3)
             let upper_bound = 25; // Last element exactly at blob boundary (24/5 = 4)
-            let mut journal = init_sync::<_, Journal<_, u64>>(
+            let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
                 context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
@@ -9780,7 +9784,7 @@ mod tests {
             // Test sync boundaries within the same blob
             let lower_bound = 10; // operation 10 (blob 2: 10/5 = 2)
             let upper_bound = 15; // Last operation 14 (blob 2: 14/5 = 2)
-            let mut journal = init_sync::<_, Journal<_, u64>>(
+            let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
                 context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,

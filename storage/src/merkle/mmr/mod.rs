@@ -218,6 +218,7 @@ impl merkle::Family for Family {
         }
         true
     }
+
     fn subtree_root_position(leaf_start: Location, height: u32) -> Position {
         let leaf_pos = Self::location_to_position(leaf_start);
         let shift = 1u64
@@ -229,6 +230,7 @@ impl merkle::Family for Family {
             .and_then(|v| v.checked_sub(2))
             .expect("position overflow")
     }
+
     fn leftmost_leaf(pos: Position, height: u32) -> Location {
         let shift = 1u64
             .checked_shl(height + 1)

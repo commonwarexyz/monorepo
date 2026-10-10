@@ -82,6 +82,8 @@ pub(crate) trait Destructible {
     ) -> impl std::future::Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
 }
 
+// Implement Destructible once for the frontier used in tests.
+// This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
 impl<F: merkle::Family> Destructible
     for crate::journal::authenticated::Frontier<F, deterministic::Context, Digest>
 {
@@ -2442,8 +2444,9 @@ where
     });
 }
 
-/// Local operations authenticate a target whose lower bound precedes its inactivity floor.
-pub(crate) fn test_local_operations_authenticate_below_floor<H: SyncTestHarness>() {
+/// Test that local pinned nodes are found for a target whose lower bound precedes its inactivity
+/// floor.
+pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let config = H::config(&context.next_u64().to_string(), &context);
@@ -3411,8 +3414,8 @@ macro_rules! sync_tests_for_harness {
             }
 
             #[test_traced]
-            fn test_local_operations_authenticate_below_floor() {
-                super::test_local_operations_authenticate_below_floor::<$harness>();
+            fn test_local_pinned_nodes_below_floor() {
+                super::test_local_pinned_nodes_below_floor::<$harness>();
             }
 
             #[test_traced("WARN")]

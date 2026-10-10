@@ -187,6 +187,10 @@ fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Resul
 }
 
 /// Build a replay stream over the retained blob range.
+///
+/// The stream is split into one state per blob so replay can start at a mid-blob pruning boundary,
+/// stop at the journal's logical end, and avoid reading across blob files. `buffer` is a byte
+/// budget for each blob replay, not an item count.
 fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     blobs: &Blobs<'a, B>,
     bounds: Range<u64>,
@@ -199,11 +203,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     Ok(super::replay_stream_from_states(states))
 }
 
-/// Build one replay state per blob in the retained blob range.
-///
-/// Replay is split by blob so it can start at a mid-blob pruning boundary, stop at the journal's
-/// logical end, and avoid reading across blob files. `buffer` is a byte budget for each blob
-/// replay, not an item count.
+/// Build one replay state per blob in the retained blob range, as [replay_stream] reads them.
 fn replay_states<'a, B: RBlob, A: CodecFixedShared>(
     blobs: &Blobs<'a, B>,
     bounds: Range<u64>,
@@ -257,6 +257,7 @@ fn replay_states<'a, B: RBlob, A: CodecFixedShared>(
             });
         }
     }
+
     Ok(states)
 }
 
@@ -1496,12 +1497,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.bounds.start
     }
 
-    /// Return the retained start that [Self::prune] would leave for `requested`.
-    fn prune_target(&self, requested: u64) -> Result<u64, Error> {
-        // The blob containing `requested`, capped to the tail (which is guaranteed to exist by
-        // our invariant).
+    /// Return the retained start that [Self::prune] would leave for `min_item_pos`.
+    fn prune_target(&self, min_item_pos: u64) -> Result<u64, Error> {
+        // Calculate the blob that would contain min_item_pos, capped to the tail (which is
+        // guaranteed to exist by our invariant).
         let items_per_blob = self.items_per_blob.get();
-        let target = super::position_to_blob(requested.min(self.bounds.end), items_per_blob);
+        let target = super::position_to_blob(min_item_pos.min(self.bounds.end), items_per_blob);
         if target <= self.blobs.oldest_blob_index() {
             return Ok(self.bounds.start);
         }
@@ -7405,7 +7406,7 @@ mod tests {
 
             // A staged clear spans only its target. Any other start replaces the intent without
             // recovering the stale blobs. A start at 50 completes it.
-            let mut journal = super::super::tests::init_sync::<_, Journal<_, Digest>>(
+            let mut journal = authenticated::init_sync::<_, Journal<_, Digest>>(
                 context.child("sync"),
                 cfg.clone(),
                 start..start + 20,

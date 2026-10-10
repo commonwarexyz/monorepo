@@ -55,12 +55,15 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    let hasher = qmdb::hasher::<H>();
+
     let index = I::new(context.child("index"), translator);
+
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
         state,
         &merkle_config,
         log,
-        qmdb::hasher::<H>(),
+        hasher,
         range.start(),
         pinned_nodes,
         apply_batch_size,
