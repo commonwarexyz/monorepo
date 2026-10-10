@@ -209,14 +209,14 @@ pub(super) struct Writable<E: Context> {
     /// Sync of the tail's predecessor.
     tail_predecessor_sync: Option<SyncCompletion>,
 
-    /// The (blob index, logical offset) below which cached pages have been dropped.
+    /// The (blob index, logical offset) below which cached pages have been retired.
     ///
     /// # Invariant
     ///
     /// Never below `(oldest_blob_index, 0)`, so it always names a retained blob. Recovery starts it
     /// at the oldest blob, pruning advances it before raising the oldest blob, and clearing resets
     /// both together.
-    evicted: (u64, u64),
+    retired: (u64, u64),
 }
 
 impl<E: Context> Writable<E> {
@@ -286,7 +286,7 @@ impl<E: Context> Writable<E> {
             sealed,
             sealed_snapshot: None,
             tail_predecessor_sync: None,
-            evicted: (oldest_blob_index, 0),
+            retired: (oldest_blob_index, 0),
         })
     }
 
@@ -388,7 +388,7 @@ impl<E: Context> Writable<E> {
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
 
-        // Free the cached pages of the blobs being pruned.
+        // Retire the cached pages of the blobs being pruned.
         self.evict_cached_before(min_blob, 0);
 
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
@@ -425,34 +425,35 @@ impl<E: Context> Writable<E> {
         self.oldest_blob_index = tail_blob;
         self.sealed.clear();
         self.sealed_snapshot = None;
-        self.evicted = (tail_blob, 0);
+        self.retired = (tail_blob, 0);
         Ok(self)
     }
 
-    /// Drop cached pages lying entirely below logical `offset` of blob `blob`, continuing from
-    /// where the previous call stopped. The bytes remain readable from storage. A position past
-    /// the tail's end is clamped to it, and a position at or below an earlier one has no effect.
+    /// Retire cached pages lying entirely below logical `offset` of blob `blob`, continuing from
+    /// where the previous call stopped, so the page cache reclaims their slots as it admits new
+    /// pages. The bytes remain readable from storage. A position past the tail's end is clamped
+    /// to it, and a position at or below an earlier one has no effect.
     pub(super) fn evict_cached_before(&mut self, blob: u64, offset: u64) {
         let target = (blob, offset).min((self.tail_blob_index(), self.tail.size()));
-        let (mut blob, mut from) = self.evicted;
+        let (mut blob, mut from) = self.retired;
         if target <= (blob, from) {
             return;
         }
         while blob < target.0 {
-            self.blob_evict_cached(blob, from..u64::MAX);
+            self.blob_retire_cached(blob, from..u64::MAX);
             blob += 1;
             from = 0;
         }
-        self.blob_evict_cached(blob, from..target.1);
-        self.evicted = target;
+        self.blob_retire_cached(blob, from..target.1);
+        self.retired = target;
     }
 
-    /// Drop the cached pages of retained blob `blob` that end within `range`.
-    fn blob_evict_cached(&self, blob: u64, range: Range<u64>) {
+    /// Retire the cached pages of retained blob `blob` that end within `range`.
+    fn blob_retire_cached(&self, blob: u64, range: Range<u64>) {
         if blob == self.tail_blob_index() {
-            self.tail.evict_cached(range);
+            self.tail.retire_cached(range);
         } else {
-            self.sealed[(blob - self.oldest_blob_index) as usize].evict_cached(range);
+            self.sealed[(blob - self.oldest_blob_index) as usize].retire_cached(range);
         }
     }
 

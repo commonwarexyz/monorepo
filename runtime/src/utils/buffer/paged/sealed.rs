@@ -81,13 +81,14 @@ impl<B: Blob> Sealed<B> {
         self.inner.size
     }
 
-    /// Drop this blob's cached pages that end within `(range.start, range.end]` (logical byte
-    /// offsets). Callers advancing a boundary pass the previous boundary as `range.start`, so each
-    /// page is dropped once. The bytes remain readable.
-    pub fn evict_cached(&self, range: Range<u64>) {
+    /// Retire this blob's cached pages that end within `(range.start, range.end]` (logical byte
+    /// offsets): the cache reclaims their slots as it admits new pages. Callers advancing a
+    /// boundary pass the previous boundary as `range.start`, so each page is retired once. The
+    /// bytes remain readable.
+    pub fn retire_cached(&self, range: Range<u64>) {
         self.inner
             .cache_ref
-            .evict_ending_in(self.inner.id, range, self.inner.size);
+            .retire(self.inner.id, range, self.inner.size);
     }
 
     /// Logical offset at which the partial-page bytes begin. Equal to `size` when there is no

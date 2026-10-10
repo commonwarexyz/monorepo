@@ -956,7 +956,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
 }
 
 impl<E: Context, A: CodecFixedShared> Inner<E, A> {
-    /// Drop cached pages that hold only items below `position`, continuing from the previous
+    /// Retire cached pages that hold only items below `position`, continuing from the previous
     /// call. See [super::Mutable::evict_cached_before].
     pub(super) fn evict_cached_before(&mut self, position: u64) {
         let position = position.clamp(self.bounds.start, self.bounds.end);

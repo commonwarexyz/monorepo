@@ -968,12 +968,12 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         self.buffer.size()
     }
 
-    /// Drop this blob's cached pages that end within `(range.start, range.end]` (logical byte
-    /// offsets). Callers advancing a boundary pass the previous boundary as `range.start`, so each
-    /// page is dropped once. The bytes remain readable.
-    pub fn evict_cached(&self, range: Range<u64>) {
-        self.cache_ref
-            .evict_ending_in(self.id, range, self.buffer.size());
+    /// Retire this blob's cached pages that end within `(range.start, range.end]` (logical byte
+    /// offsets): the cache reclaims their slots as it admits new pages. Callers advancing a
+    /// boundary pass the previous boundary as `range.start`, so each page is retired once. The
+    /// bytes remain readable.
+    pub fn retire_cached(&self, range: Range<u64>) {
+        self.cache_ref.retire(self.id, range, self.buffer.size());
     }
 
     /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync.
@@ -2175,9 +2175,9 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    fn test_evict_cached_drops_pages_ending_in_range() {
-        // Eviction drops the cached pages that end within the range, and their bytes stay
-        // readable from the blob.
+    fn test_retire_cached_reclaims_pages_ending_in_range() {
+        // Retiring leaves the pages that end within the range cached until later insertions
+        // reclaim their slots, one per inserted page, and their bytes stay readable from the blob.
         fn cached<B: Blob>(append: &Writer<B>, page: u64) -> bool {
             let page_size = PAGE_SIZE.get() as usize;
             let mut probe = vec![0u8; page_size];
@@ -2187,24 +2187,31 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            let (blob, blob_size) = context.open("test_partition", b"evict").await.unwrap();
+            let (blob, blob_size) = context.open("test_partition", b"retire").await.unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
             let page_size = PAGE_SIZE.get() as u64;
-            let data: Vec<u8> = (0..page_size * 7 / 2).map(|i| (i % 251) as u8).collect();
-            (append, _) = append.append(&data).await.unwrap();
+            let data: Vec<u8> = (0..page_size * 11 / 2).map(|i| (i % 251) as u8).collect();
+            let (first, rest) = data.split_at((page_size * 7 / 2) as usize);
+            (append, _) = append.append(first).await.unwrap();
             append = append.sync().await.unwrap();
             assert!((0..3).all(|page| cached(&append, page)));
 
-            // Page 0 ends past the range start and page 1 ends at the range end. Page 2 ends
-            // beyond it.
-            append.evict_cached(page_size / 2..2 * page_size);
+            // Page 0 ends past the range start and page 1 ends at the range end, so both are
+            // retired. Page 2 ends beyond it. Nothing leaves the cache until pages are inserted.
+            append.retire_cached(page_size / 2..2 * page_size);
+            assert!((0..3).all(|page| cached(&append, page)));
+
+            // Completing page 3 reclaims the oldest retired page; completing page 4 reclaims the
+            // other. Page 5 stays a partial tip, so nothing else is inserted.
+            (append, _) = append.append(rest).await.unwrap();
+            append = append.sync().await.unwrap();
             assert!(!cached(&append, 0));
             assert!(!cached(&append, 1));
-            assert!(cached(&append, 2));
+            assert!((2..5).all(|page| cached(&append, page)));
 
             let read = append.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read, &data[..]);
