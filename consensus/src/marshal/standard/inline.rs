@@ -46,13 +46,18 @@
 //! - You are willing to perform full application verification before casting a notarize vote.
 
 use crate::{
-    Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
+    Application, Automaton, Block, CertifiableAutomaton, Epochable, Handoff, Relay, Reporter,
     marshal::{
         Update,
-        application::gates::{GateOutcome, Gates},
+        ancestry::Ancestry,
+        application::{
+            gates::{GateOutcome, Gates},
+            prepare::{self, Resolved},
+            propose, relay,
+        },
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
-            Standard, relay,
+            Standard,
             validation::{
                 Decision, ParentCheck, await_and_validate_parent, precheck_epoch_and_reproposal,
                 run_app_verify,
@@ -77,7 +82,7 @@ use commonware_runtime::{
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand_core::Rng;
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 use tracing::{Instrument as _, debug, info_span};
 
 /// Waits for a marshal block subscription while allowing consensus to cancel the work.
@@ -219,6 +224,62 @@ where
             ancestor_fetch_duration,
         }
     }
+
+    /// Runs the proposal checks for `consensus_context` and yields what the proposal path does
+    /// next: re-propose the epoch boundary block, skip the view, or build on the fetched parent.
+    ///
+    /// The returned future borrows nothing from `self`, so it can move into the spawned propose
+    /// task or into a prepare request's [`Parent`](crate::marshal::ancestry::Parent) handle.
+    fn checks(
+        &self,
+        consensus_context: Context<B::Digest, S::PublicKey>,
+    ) -> impl Future<Output = Resolved<B::Digest, B, impl Ancestry<B>>> + Send + 'static {
+        let context = self.context.clone();
+        let marshal = self.marshal.clone();
+        let epocher = self.epocher.clone();
+        let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
+        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
+        let build_duration = self.build_duration.clone();
+        async move {
+            // The parent for any consensus context is in the same epoch: the
+            // boundary block of the previous epoch is the genesis block of the
+            // current epoch.
+            //
+            // Proposal context carries the parent view and commitment but not
+            // the parent height. The parent may sit above the finalized tip and
+            // may still be uncertified, so this must stay round-bound until the
+            // block is returned.
+            let (parent_view, parent_commitment) = consensus_context.parent;
+            let parent_request = marshal.subscribe_by_commitment(
+                parent_commitment,
+                CommitmentFallback::FetchByRound {
+                    round: Round::new(consensus_context.epoch(), parent_view),
+                },
+            );
+            let parent_timer = proposal_parent_fetch_duration.timer(&*context);
+            let Ok(parent) = parent_request.await else {
+                debug!(
+                    ?parent_commitment,
+                    reason = "failed to fetch parent block",
+                    "skipping proposal"
+                );
+                return Resolved::Skip;
+            };
+            parent_timer.observe(&*context);
+
+            // At epoch boundary, re-propose the parent block.
+            let last_in_epoch = epocher
+                .last(consensus_context.epoch())
+                .expect("current epoch should exist");
+            if parent.height() == last_in_epoch {
+                return Resolved::Reuse(parent.digest(), parent);
+            }
+
+            let ancestor_stream =
+                marshal.ancestor_stream(context.clone(), [parent], ancestor_fetch_duration);
+            Resolved::Build(ancestor_stream, build_duration.timer(&*context), ())
+        }
+    }
 }
 
 impl<E, S, A, B, ES> Automaton for Inline<E, S, A, B, ES>
@@ -252,157 +313,30 @@ where
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
-        let marshal = self.marshal.clone();
-        let mut application = self.application.clone();
-        let epocher = self.epocher.clone();
-        let gates = self.gates.clone();
-        let build_duration = self.build_duration.clone();
-        let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
-
-        let (mut tx, rx) = oneshot::channel();
-        let context = self
-            .context
-            .child("propose")
-            .with_attribute("round", consensus_context.round);
+        let checks = self.checks(consensus_context.clone());
         let span = info_span!(
             "marshal.inline.propose.task",
             round = %consensus_context.round
         );
-        context.spawn(move |runtime_context| {
-            async move {
-                // On leader recovery, marshal may already hold a verified block
-                // for this round (persisted by a pre-crash propose that reached
-                // its relay broadcast while the notarize vote never reached the
-                // journal).
-                //
-                // The parent context recovered by simplex may differ from the one
-                // the cached block was built against, so the stored block is not
-                // safe to reuse, and proposing a fresh block for a round whose
-                // digest may already have been broadcast would equivocate.
-                //
-                // Skip this view and let the voter nullify it via timeout.
-                if marshal
-                    .get_verified(consensus_context.round)
-                    .await
-                    .is_some()
-                {
-                    debug!(
-                        round = ?consensus_context.round,
-                        "skipping proposal: verified block already exists for round on restart"
-                    );
-                    return;
-                }
-
-                // The parent for any consensus context is in the same epoch: the
-                // boundary block of the previous epoch is the genesis block of the
-                // current epoch.
-                //
-                // Proposal context carries the certified parent view/commitment but
-                // not the parent height. The parent may be certified above the
-                // finalized tip, so this must stay round-bound until the block is
-                // returned.
-                let (parent_view, parent_commitment) = consensus_context.parent;
-                let parent_request = marshal.subscribe_by_commitment(
-                    parent_commitment,
-                    CommitmentFallback::FetchByRound {
-                        round: Round::new(consensus_context.epoch(), parent_view),
-                    },
-                );
-
-                let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
-                let parent = select! {
-                    _ = tx.closed() => {
-                        debug!(reason = "consensus dropped receiver", "skipping proposal");
-                        return;
-                    },
-                    result = parent_request => match result {
-                        Ok(parent) => parent,
-                        Err(_) => {
-                            debug!(
-                                ?parent_commitment,
-                                reason = "failed to fetch parent block",
-                                "skipping proposal"
-                            );
-                            return;
-                        }
-                    },
-                };
-                parent_timer.observe(&runtime_context);
-
-                // At epoch boundary, re-propose the parent block.
-                let last_in_epoch = epocher
-                    .last(consensus_context.epoch())
-                    .expect("current epoch should exist");
-                if parent.height() == last_in_epoch {
-                    let digest = parent.digest();
-                    gates
-                        .stage(
-                            consensus_context.round,
-                            digest,
-                            parent,
-                            tx,
-                            "re-proposed boundary block",
-                        )
-                        .await;
-                    return;
-                }
-
-                let ancestor_stream = marshal.ancestor_stream(
-                    Arc::new(runtime_context.child("ancestor_stream")),
-                    [parent],
-                    ancestor_fetch_duration,
-                );
-                let build_request = application
-                    .propose(
-                        (
-                            runtime_context.child("app_propose"),
-                            consensus_context.clone(),
-                        ),
-                        ancestor_stream,
-                        (),
-                    )
-                    .instrument(info_span!(
-                        "marshal.inline.application.propose",
-                        round = %consensus_context.round,
-                        parent_view = parent_view.traced(),
-                        parent = %parent_commitment
-                    ));
-
-                let build_timer = build_duration.timer(&runtime_context);
-                let built_block = select! {
-                    _ = tx.closed() => {
-                        debug!(reason = "consensus dropped receiver", "skipping proposal");
-                        return;
-                    },
-                    result = build_request => match result {
-                        Some(block) => block,
-                        None => {
-                            debug!(
-                                ?parent_commitment,
-                                reason = "block building failed",
-                                "skipping proposal"
-                            );
-                            return;
-                        }
-                    },
-                };
-                build_timer.observe(&runtime_context);
-
-                let digest = built_block.digest();
-                gates
-                    .stage(
-                        consensus_context.round,
-                        digest,
-                        Arc::new(built_block),
-                        tx,
-                        "proposed block",
-                    )
-                    .await;
-            }
-            .instrument(span)
-        });
-        rx
+        let round = consensus_context.round;
+        let (parent_view, parent_commitment) = consensus_context.parent;
+        propose::request(
+            self.context.as_ref(),
+            &self.application,
+            self.gates.clone(),
+            consensus_context,
+            checks,
+            span,
+            move || {
+                info_span!(
+                    "marshal.inline.application.propose",
+                    round = %round,
+                    parent_view = parent_view.traced(),
+                    parent = %parent_commitment
+                )
+            },
+            |block: B, ()| (block.digest(), Arc::new(block)),
+        )
     }
 
     /// Performs complete verification inline.
@@ -592,16 +526,46 @@ where
     B: Block,
     ES: Epocher,
 {
+    /// Prepares a term-start proposal on an uncertified parent.
+    ///
+    /// The application receives the parent as a [`Parent`](crate::marshal::ancestry::Parent)
+    /// handle. Asking the handle for the ancestry runs the same checks as [`Self::propose`], in the
+    /// same order. When those checks find the epoch boundary block, the marshal re-proposes it
+    /// without the application and answers [`Handoff::Stage`]. An application that declines without
+    /// asking costs no fetch, and if it also completes on its first poll, it is answered
+    /// [`Handoff::Wait`] on this task without a spawn.
+    #[allow(clippy::async_yields_async)]
+    #[tracing::instrument(name = "marshal.inline.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
+    async fn prepare(
+        &mut self,
+        consensus_context: Context<Self::Digest, S::PublicKey>,
+    ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+        let checks = self.checks(consensus_context.clone());
+        let span = info_span!(
+            "marshal.inline.application.prepare",
+            round = %consensus_context.round
+        );
+        prepare::request(
+            self.context.as_ref(),
+            &self.application,
+            self.gates.clone(),
+            consensus_context,
+            checks,
+            span,
+            |block: B, ()| (block.digest(), Arc::new(block)),
+        )
+    }
+
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        self.gates.flush_unrelayed(&self.marshal, round, digest);
-
         // `propose`/`verify` register an in-flight certification gate whose result resolves
         // once the block's sync handle completes. Awaiting it here is the durability barrier
         // for the finalize vote, and it lets the sync overlap consensus voting
         // instead of freezing certify with a fresh fsync.
-        let task = self.gates.take(round, digest);
+        let task = self.gates.claim(round, digest, |block, ack| {
+            self.marshal.verified_deferred(round, block, ack)
+        });
 
         // `verify()` waits only on local broadcast delivery, so nudge a
         // round-bound notarized fetch that can unblock the existing waiter
@@ -1468,99 +1432,6 @@ mod tests {
                     panic!("certify should resolve after verification is released");
                 },
             }
-        });
-    }
-
-    /// Regression: if marshal persisted a verified block for a round before
-    /// a crash (via a prior `propose` call) but the simplex notarize artifact
-    /// never reached the journal, the restarted leader must skip proposing
-    /// for that round. The cached block was built against a parent context
-    /// that replay may have changed, so reusing it can broadcast a proposal
-    /// whose payload no longer matches the recovered header. Building a
-    /// fresh block would also be unsafe because the pre-crash digest may
-    /// already have been broadcast, so a second proposal for the round would
-    /// equivocate. Dropping the receiver lets the voter nullify the view via
-    /// `MissingProposal`.
-    #[test_traced("WARN")]
-    fn test_propose_skips_when_verified_block_exists_on_restart() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                participants.clone(),
-            )
-            .await;
-
-            let me = participants[0].clone();
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
-            let ctx = Ctx {
-                round,
-                leader: me.clone(),
-                parent: (View::zero(), genesis.digest()),
-            };
-
-            // Pre-crash: seed `verified_blocks[V=1]` through the live mailbox,
-            // mirroring an aborted pre-crash `Inline::propose` that persisted
-            // its verified block before the voter could journal a notarize.
-            let pre_setup = StandardHarness::setup_validator(
-                context.child("validator").with_attribute("index", 0),
-                &mut oracle,
-                me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
-            )
-            .await;
-            let pre_marshal = pre_setup.mailbox;
-            let pre_actor = pre_setup.actor_handle;
-            let pre_extra = pre_setup.extra;
-            let pre_application = pre_setup.application;
-
-            let stale_block = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
-            assert!(pre_marshal.verified(round, stale_block).await);
-
-            // Simulate a crash: abort the actor and drop every handle so the
-            // storage partition is fully released before reopening.
-            pre_actor.abort();
-            let _ = pre_actor.await;
-            drop(pre_marshal);
-            drop(pre_extra);
-            drop(pre_application);
-
-            // Post-crash: reopen the same partition. The verified block must
-            // be recovered from storage during archive restore so that
-            // `Message::GetVerified` on the new mailbox observes it.
-            let post_setup = StandardHarness::setup_validator(
-                context
-                    .child("validator_restart")
-                    .with_attribute("index", 0),
-                &mut oracle,
-                me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
-            )
-            .await;
-            let post_marshal = post_setup.mailbox;
-
-            let fresh_block = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
-            let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new().with_propose_result(fresh_block);
-            let mut inline = Inline::new(
-                context.child("inline"),
-                mock_app,
-                post_marshal.clone(),
-                FixedEpocher::new(BLOCKS_PER_EPOCH),
-            );
-
-            let digest_rx = inline.propose(ctx).await;
-            assert!(
-                digest_rx.await.is_err(),
-                "propose must drop the receiver so the voter nullifies the round via timeout"
-            );
         });
     }
 

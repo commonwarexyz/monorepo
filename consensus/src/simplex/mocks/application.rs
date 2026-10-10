@@ -3,7 +3,7 @@
 
 use super::relay::Relay;
 use crate::{
-    Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
+    Automaton as Au, CertifiableAutomaton as CAu, Handoff, Relay as Re,
     simplex::{Plan, types::Context},
     types::{Epoch, Round},
 };
@@ -31,6 +31,10 @@ pub enum Message<D: Digest, P: PublicKey> {
     Propose {
         context: Context<D, P>,
         response: oneshot::Sender<D>,
+    },
+    Handoff {
+        context: Context<D, P>,
+        response: oneshot::Sender<Handoff<D>>,
     },
     Verify {
         context: Context<D, P>,
@@ -86,6 +90,16 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 }
 
 impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
+    async fn prepare(
+        &mut self,
+        context: Self::Context,
+    ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send_lossy(Message::Handoff { context, response });
+        receiver
+    }
+
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         self.sender.send_lossy(Message::Certify {
@@ -119,22 +133,29 @@ pub fn genesis<H: Hasher>(epoch: Epoch) -> H::Digest {
 
 type Latency = (f64, f64);
 
-/// Observer invoked on every `Message::Propose` request. Used by tests to
-/// detect spurious propose calls.
+/// Callback that receives the context of each ordinary or handoff proposal request.
 type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Send + 'static>;
+
+/// Callback that receives a built handoff proposal's round, the proposal, and its response sender.
+type HandoffController<D> =
+    Box<dyn Fn(Round, Handoff<D>, oneshot::Sender<Handoff<D>>) + Send + 'static>;
 
 /// Observer invoked on every `Message::Verify` request. Used by tests to
 /// detect spurious verification calls.
 type VerifyObserver<H, P> =
     Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
 
-/// Predicate to determine whether a payload should be certified.
-/// Returning true means certify, false means reject.
+/// Callback that receives a certification request's round, payload, and response sender.
+type CertificationController<D> = Box<dyn Fn(Round, D, oneshot::Sender<bool>) + Send + 'static>;
+
+/// Behavior used to resolve application certification requests.
 pub enum Certifier<D: Digest> {
     /// Always certify.
     Always,
     /// A custom predicate function that receives the round and payload digest.
     Custom(Box<dyn Fn(Round, D) -> bool + Send + 'static>),
+    /// Lets a test decide when and how to complete each certification request.
+    Controlled(CertificationController<D>),
     /// Drop the sender without responding, causing the receiver to be cancelled.
     /// This simulates scenarios where the automaton cannot determine certification
     /// (e.g., missing verification context in Marshaled).
@@ -178,6 +199,8 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     fail_verification: bool,
     drop_proposals: bool,
     stall_proposals: bool,
+    /// The decision attached to a handoff candidate. `Wait` builds nothing.
+    handoff: Handoff<()>,
     drop_verifications: bool,
     should_certify: Certifier<H::Digest>,
 
@@ -186,9 +209,14 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
 
     verified: HashSet<H::Digest>,
 
-    /// Invoked on every `Message::Propose` request received by the application.
-    /// Used by tests to detect spurious local-leader propose attempts (e.g. after replay).
+    /// Invoked for every ordinary and handoff proposal request. Tests use it to
+    /// count requests per view and detect spurious local-leader requests after
+    /// replay.
     propose_observer: Option<ProposeObserver<H, P>>,
+
+    /// Receives each built handoff proposal with its response sender, so a test
+    /// decides when and how to respond.
+    handoff_controller: Option<HandoffController<H::Digest>>,
 
     /// Invoked on every `Message::Verify` request received by the application.
     /// Used by tests to detect spurious verification requests (e.g. after replay
@@ -198,6 +226,8 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     /// Senders held alive to simulate proposals that hang indefinitely
     /// (used when `stall_proposals` is set).
     pending_proposes: Vec<oneshot::Sender<H::Digest>>,
+    /// Handoff response senders held alive while `stall_proposals` is set.
+    pending_handoffs: Vec<oneshot::Sender<Handoff<H::Digest>>>,
 
     /// Senders held alive to simulate certifications that hang indefinitely
     /// (used by [`Certifier::Pending`]).
@@ -233,6 +263,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 fail_verification: false,
                 drop_proposals: false,
                 stall_proposals: false,
+                handoff: Handoff::Wait,
                 drop_verifications: false,
                 should_certify: cfg.should_certify,
 
@@ -240,8 +271,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 seen: HashMap::new(),
                 verified: HashSet::new(),
                 propose_observer: None,
+                handoff_controller: None,
                 verify_observer: None,
                 pending_proposes: Vec::new(),
+                pending_handoffs: Vec::new(),
                 pending_certifications: Vec::new(),
             },
             Mailbox::new(sender),
@@ -256,12 +289,18 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.drop_proposals = drop;
     }
 
-    /// When set, `Message::Propose` requests are held open indefinitely: the
-    /// response sender is parked in `pending_proposes`, keeping the oneshot
-    /// alive so the caller's `receiver` never resolves. This simulates a
-    /// propose that is still in flight at the moment the voter crashes.
+    /// When set, `Message::Propose` requests, and `Message::Handoff` requests unless the handoff
+    /// decision is `Wait`, are held open indefinitely: the response sender is parked in
+    /// `pending_proposes` or `pending_handoffs`, keeping the oneshot alive so the caller's
+    /// `receiver` never resolves. This simulates a propose that is still in flight at the moment
+    /// the voter crashes.
     pub const fn set_stall_proposals(&mut self, stall: bool) {
         self.stall_proposals = stall;
+    }
+
+    /// Sets the handoff decision, which defaults to `Wait`.
+    pub const fn set_handoff(&mut self, handoff: Handoff<()>) {
+        self.handoff = handoff;
     }
 
     pub const fn set_drop_verifications(&mut self, drop: bool) {
@@ -270,6 +309,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
 
     pub fn set_propose_observer(&mut self, observer: ProposeObserver<H, P>) {
         self.propose_observer = Some(observer);
+    }
+
+    pub fn set_handoff_controller(&mut self, controller: HandoffController<H::Digest>) {
+        self.handoff_controller = Some(controller);
     }
 
     pub fn set_verify_observer(&mut self, observer: VerifyObserver<H, P>) {
@@ -365,26 +408,43 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         round: Round,
         payload: H::Digest,
         _contents: Bytes,
-    ) -> Option<bool> {
+        response: oneshot::Sender<bool>,
+    ) {
         // Simulate the certify latency
         let duration = self.certify_latency.sample(self.context.as_mut());
         self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
 
-        // Use configured predicate to determine certification
+        // Complete, hand off, park, or drop the response as configured.
         match &self.should_certify {
-            Certifier::Always => Some(true),
-            Certifier::Custom(func) => Some(func(round, payload)),
-            Certifier::Cancel | Certifier::Pending => None,
+            Certifier::Always => {
+                response.send_lossy(true);
+            }
+            Certifier::Custom(func) => {
+                response.send_lossy(func(round, payload));
+            }
+            Certifier::Controlled(controller) => controller(round, payload, response),
+            Certifier::Cancel => {}
+            Certifier::Pending => self.pending_certifications.push(response),
         }
     }
 
     fn broadcast(&mut self, payload: H::Digest, plan: Plan<P>) {
         let (contents, recipients) = match plan {
+            // A held candidate is sent when consensus requests `Plan::Prepare`.
+            // Its later `Plan::Propose` broadcast does not send it again,
+            // mirroring marshal's relay.
+            Plan::Prepare { .. } => {
+                let contents = self.pending.get(&payload).expect("missing payload").clone();
+                self.seen.insert(payload, contents.clone());
+                (contents, Recipients::All)
+            }
             Plan::Propose { .. } => {
                 let contents = self.pending.remove(&payload).expect("missing payload");
-                self.seen.insert(payload, contents.clone());
+                if self.seen.insert(payload, contents.clone()).is_some() {
+                    return;
+                }
                 (contents, Recipients::All)
             }
             Plan::Forward { recipients, .. } => {
@@ -440,6 +500,34 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         let digest = self.propose(context).await;
                         response.send_lossy(digest);
                     }
+                    Message::Handoff {
+                        context,
+                        response,
+                    } => {
+                        if let Some(observer) = &self.propose_observer {
+                            observer(context.clone());
+                        }
+                        let decision = self.handoff;
+                        if decision.is_wait() {
+                            response.send_lossy(Handoff::Wait);
+                            continue;
+                        }
+                        if self.stall_proposals {
+                            self.pending_handoffs.push(response);
+                            continue;
+                        }
+                        if self.drop_proposals {
+                            continue;
+                        }
+                        let round = context.round;
+                        let digest = self.propose(context).await;
+                        let proposal = decision.map(|()| digest);
+                        if let Some(controller) = &self.handoff_controller {
+                            controller(round, proposal, response);
+                        } else {
+                            response.send_lossy(proposal);
+                        }
+                    }
                     Message::Verify {
                         context,
                         payload,
@@ -467,15 +555,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         response,
                     } => {
                         let contents = self.seen.get(&payload).cloned().unwrap_or_default();
-                        if let Some(certified) = self.certify(round, payload, contents).await {
-                            response.send_lossy(certified);
-                        } else if matches!(self.should_certify, Certifier::Pending) {
-                            // Hold the sender alive so the receiver never resolves.
-                            // This simulates a certify that hangs indefinitely (e.g.,
-                            // block never arrives for reconstruction).
-                            self.pending_certifications.push(response);
-                        }
-                        // Cancel: drop sender -> immediate RecvError on receiver.
+                        self.certify(round, payload, contents, response).await;
                     }
                     Message::Broadcast { payload, plan } => {
                         self.broadcast(payload, plan);

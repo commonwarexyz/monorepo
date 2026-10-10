@@ -107,7 +107,9 @@
 //! [`Inline`]: commonware_consensus::marshal::standard::Inline
 //! [`coding::Marshaled`]: commonware_consensus::marshal::coding::Marshaled
 
-use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
+use commonware_consensus::{
+    CertifiableBlock, Epochable, Handoff, Viewable, marshal::ancestry::Ancestry,
+};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use db::DatabaseSet;
@@ -189,6 +191,25 @@ where
 
     /// Returns the block used to initialize the consensus engine in the first epoch.
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
+
+    /// Decide whether to prepare a proposal on a parent that has not yet been certified.
+    ///
+    /// With [`Handoff::Vote`] or [`Handoff::Stage`], [`Stateful`] fetches the parent, builds
+    /// the block through [`propose`](Self::propose), and attaches the decision to the block. If no
+    /// block is built, the request declines with [`Handoff::Wait`].
+    ///
+    /// See [`commonware_consensus::Application::prepare`] for the contract, including the trust
+    /// an early vote places in the outgoing leader. If readiness is uncertain, return
+    /// [`Handoff::Wait`], which costs no work: consensus requests an ordinary proposal once the
+    /// parent certifies, unless it has voted to nullify the view.
+    ///
+    /// [`Stateful`] calls this method on a clone of the application, outside the processing
+    /// actor and without database batches. Metadata used only for this decision may live outside
+    /// the batches, since the decision does not affect execution, but the application must share
+    /// it across clones. The call can run on the consensus task, so decide without blocking.
+    fn prepare(&self, _context: &Self::Context) -> Handoff<()> {
+        Handoff::Wait
+    }
 
     /// Builds a block on top of the provided parent ancestry.
     ///

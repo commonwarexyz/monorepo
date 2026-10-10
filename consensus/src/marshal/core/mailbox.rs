@@ -166,6 +166,17 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel sent once the block sync has started.
         ack: oneshot::Sender<Handle<()>>,
     },
+    /// A request to broadcast a held term-start candidate without persisting it.
+    Prepared {
+        /// The span carried with this request.
+        span: Span,
+        /// The round in which the candidate was built.
+        round: Round,
+        /// The candidate block.
+        block: V::Block,
+        /// The recipients to broadcast the block to.
+        recipients: Recipients<S::PublicKey>,
+    },
     /// A notification that a block reached the verify stage. Persisting it
     /// does not imply application validity.
     Verified {
@@ -269,12 +280,14 @@ pub enum CommitmentFallback {
     Wait,
     /// Request the notarized proposal for `round` from peers.
     ///
-    /// Use this when the caller knows a trusted notarized or certified round and
-    /// commitment but not the proposal height, such as proposal construction,
-    /// verification of a known child, or certification of a notarized candidate. Do not infer
-    /// height from the finalized tip or another block: proposals may build on
-    /// a certified parent that is not finalized locally yet, and an unverified
-    /// child may lie about its height.
+    /// Use this when the caller knows a round and commitment from consensus but not the
+    /// proposal height, such as proposal construction, verification of a known child, or
+    /// certification of a notarized candidate. The round might not be notarized yet, as with
+    /// an uncertified parent. Peers serve the request only once they hold its notarization, so
+    /// until then only local availability completes it. An unresolved request remains eligible
+    /// until the processed finalized-round floor reaches its round. Do not infer height from the
+    /// finalized tip or another block: proposals may build on a parent that is not finalized
+    /// locally yet, and an unverified child may lie about its height.
     ///
     /// The returned block is heightable once decoded, but that is too late for
     /// the in-flight resolver key or retention bound.
@@ -282,9 +295,9 @@ pub enum CommitmentFallback {
     /// Request the exact commitment from peers and prune the request at
     /// `height`.
     ///
-    /// Use this only when no certified parent round is available. The caller must have a locally
-    /// validated resolver retention bound. Examples include repairing a finalized gap or walking
-    /// an accepted ancestry stream. Do not use it for a candidate's immediate parent when the
+    /// Use this only when no parent round is available. The caller must have a locally validated
+    /// resolver retention bound. Examples include repairing a finalized gap or walking an
+    /// accepted ancestry stream. Do not use it for a candidate's immediate parent when the
     /// consensus context supplies the parent round.
     ///
     /// The height is not sent to peers. It is a local hint for request retention.
@@ -306,6 +319,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::SubscribeByCommitment { span, .. }
             | Self::Forward { span, .. }
             | Self::Proposed { span, .. }
+            | Self::Prepared { span, .. }
             | Self::Verified { span, .. }
             | Self::Certified { span, .. }
             | Self::Notarization { span, .. }
@@ -335,6 +349,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetVerified { .. } => "get_verified",
             Self::Forward { .. } => "forward",
             Self::Proposed { .. } => "proposed",
+            Self::Prepared { .. } => "prepared",
             Self::Verified { .. } => "verified",
             Self::Certified { .. } => "certified",
             Self::SetFloor { .. } => "set_floor",
@@ -377,6 +392,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::SubscribeByCommitment { .. }
             | Self::GetVerified { .. }
             | Self::Forward { .. }
+            | Self::Prepared { .. }
             | Self::SetFloor { .. }
             | Self::Prune { .. }
             | Self::Notarization { .. }
@@ -400,6 +416,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::HintFinalized { .. }
             | Self::Forward { .. }
             | Self::Proposed { .. }
+            | Self::Prepared { .. }
             | Self::Verified { .. }
             | Self::Certified { .. }
             | Self::SetFloor { .. }
@@ -892,10 +909,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Returns the verified block previously persisted for `round`, if any.
     ///
-    /// Multiple candidates can exist for one round (an equivocating leader can
-    /// land one before a crash and another after), and this returns the first
-    /// stored. Callers must not assume it is the most recently verified
-    /// candidate: check context/digest before reuse, or look up by digest.
+    /// Multiple candidates can exist for one round (a leader that restarts in
+    /// its propose window rebuilds, and an equivocating leader proposes
+    /// several), and this returns the first stored. Callers must not assume it
+    /// is the most recently verified candidate: look up by digest for a
+    /// particular one.
     pub async fn get_verified(&self, round: Round) -> Option<V::Block> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetVerified {
@@ -930,6 +948,25 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             block: block.into(),
             recipients,
             ack,
+        })
+    }
+
+    /// Requests the broadcast of a held term-start candidate without persisting it.
+    ///
+    /// The caller keeps the candidate staged and persists it later through
+    /// [`Self::verified_deferred`], once consensus requests its propose broadcast or certification
+    /// needs it. A candidate abandoned before then is never stored.
+    pub fn prepared(
+        &self,
+        round: Round,
+        block: impl Into<V::Block>,
+        recipients: Recipients<S::PublicKey>,
+    ) -> Feedback {
+        self.sender.enqueue(Message::Prepared {
+            span: info_span!("marshal.mailbox.prepared", round = %round),
+            round,
+            block: block.into(),
+            recipients,
         })
     }
 

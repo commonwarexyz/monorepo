@@ -30,7 +30,7 @@
 //!
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
-//! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
+//! * Set timer for leader proposal `t_l = 2 * delta` and advance `t_a = 3 * delta`
 //!     * If leader `l` has not been active for the configured skip timeout while a quorum of
 //!       participants has been, set both `t_l` and `t_a` to 0.
 //! * If leader `l`, broadcast `notarize(c,v)`
@@ -134,6 +134,9 @@
 //!   `optimistic_views` views ahead of certified ancestry within a term (configured alongside the
 //!   term length, see [`elector::Terms::stable`]); certification and `finalize` votes always wait
 //!   for explicit parent certification (see [Optimistic Validation](#optimistic-validation)).
+//! * Let a term's incoming leader build and relay its first proposal, and optionally vote on it,
+//!   before the outgoing term's final view certifies (see [Pipelined Handoff](#pipelined-handoff)).
+//!   Other validators verify that proposal only on explicitly certified ancestry.
 //! * If an entered view remains unfinalized for the stall timeout (configured alongside the term
 //!   length, see [`elector::Terms`]) and we are still in the same term, we locally time out the
 //!   current view and vote `nullify`. In practice, this tracks the oldest unfinalized view we have
@@ -221,8 +224,9 @@
 //! proposal and broadcasts its `notarize` vote before the parent is certified, if all of the
 //! following hold:
 //!
-//! * The proposal's view is in the same term as its parent (optimism never crosses a term
-//!   boundary; a term start always requires explicitly certified ancestry).
+//! * The proposal's view is in the same term as its parent. A term start requires explicitly
+//!   certified ancestry, except that a [pipelined handoff](#pipelined-handoff) lets the incoming
+//!   leader propose and cast its own vote early.
 //! * At most `optimistic_views` views lie between the proposal's view and the last *directly
 //!   notarized* view (a view with an observed notarization or finalization certificate; a view is
 //!   *indirectly notarized* when only a descendant's certificate implies it), bounding
@@ -240,6 +244,95 @@
 //! not yet observed the sender's ancestry. The setting is local: mismatched values across
 //! participants only degrade the optimization (votes beyond a peer's window are dropped until it
 //! catches up), never safety.
+//!
+//! ### Pipelined Handoff
+//!
+//! A pipelined handoff lets the incoming leader prepare its term-start proposal before the parent
+//! certifies. The application decides, per request, whether to prepare a candidate and whether
+//! consensus may vote for it before the parent certifies.
+//!
+//! Handoff requests require a [`elector::Scheduled`] elector, which knows the incoming leader
+//! before the certificate that unlocks the term exists. A [`elector::Dynamic`] elector never
+//! pipelines handoffs. The incoming leader must also hold the outgoing term's final view as
+//! optimistic ancestry: its notarization, or the leader's own vote for it and for each uncertified
+//! view below it down to a notarized one (see [Optimistic Validation](#optimistic-validation)).
+//! The outgoing term must have no nullification or failed certification. Otherwise, the leader
+//! uses the ordinary proposal path.
+//!
+//! Consensus handles each handoff response as follows:
+//!
+//! * [`crate::Handoff::Wait`]: request an ordinary proposal once the parent certifies.
+//! * [`crate::Handoff::Stage`]: relay the candidate now and hold the proposer's notarize vote
+//!   until the parent certifies or finalizes (see [`Plan::Prepare`]).
+//! * [`crate::Handoff::Vote`]: relay the candidate and cast the proposer's notarize vote
+//!   without waiting for the parent to certify.
+//! * Closed response: time out the view as a missing proposal once the parent certifies or
+//!   finalizes.
+//!
+//! Consensus checks ordinary proposal eligibility before it records a candidate and votes for it.
+//! Parent certification does not cancel a pending request or discard a held candidate.
+//!
+//! Consensus cancels a pending build once its captured ancestry is no longer valid, as after a
+//! nullification in the parent's term, even if no replacement parent is selectable yet. It also
+//! cancels it once the incoming leader votes to nullify the view it is waiting in, at or below
+//! the uncertified parent. While the leader waits in that view, it requests no new handoff on
+//! that parent. The application may verify other blocks only after the build completes, so the
+//! build could otherwise keep the parent, the view the leader waits in, or a fallback parent
+//! from certifying. A cancelled request waits as if the application had responded with `Wait`.
+//!
+//! When the parent of a waiting request certifies or finalizes, consensus requests an ordinary
+//! proposal for the same context, unless the leader has already voted to nullify the request's
+//! view. In that case, consensus drops the request, since no proposal can be recorded there.
+//!
+//! Consensus discards pending, waiting, held, and closed requests on view exit. When a replacement
+//! parent supersedes their ancestry, consensus discards them and requests a proposal on the
+//! replacement once the rules above permit it. Restart also discards all of them, and the voter
+//! can then issue a fresh request.
+//!
+//! Marshal applications opt in through [`crate::Application::prepare`], which receives the
+//! uncertified parent as a handle, asks it for the ancestry to build, and returns the block with
+//! [`crate::Handoff::Vote`] or [`crate::Handoff::Stage`], or declines with the default
+//! [`crate::Handoff::Wait`] at no cost. Stateful Glue decides synchronously through its own
+//! `prepare` hook and builds through its ordinary proposal path. The decision is final for the
+//! request.
+//!
+//! Asking for the ancestry runs the ordinary construction checks. When the parent is the last block
+//! of the epoch, the marshal re-proposes it without the application and answers
+//! [`crate::Handoff::Stage`]. A build that yields no block answers `Wait`. With `Stage`,
+//! construction and distribution overlap parent certification while consensus holds the vote. An
+//! application can choose it for any handoff whose outgoing leader it does not trust.
+//!
+//! With [`crate::Handoff::Vote`], rotating leaders can pipeline every view. The leader
+//! distributes each proposal in parallel with its parent's votes, allowing network-bound view time
+//! to drop from two network trips to one. With stable leaders, optimistic validation pipelines
+//! every view except the term start, so the handoff only moves each term's first view one network
+//! trip earlier.
+//!
+//! Voting before certification trusts the outgoing leader not to equivocate and to complete
+//! its term. Other validators require explicitly certified ancestry before verifying a term-start
+//! proposal, and so before voting to notarize it. The early proposal becomes usable only if every
+//! uncertified view it builds on certifies, and with stable leaders that can include several views
+//! of the outgoing term. If one of them never certifies, validators cannot use the proposal, and
+//! the usual timeout path nullifies the incoming term.
+//!
+//! If the outgoing term fails, `Vote` costs more than `Stage` or `Wait`. Having voted for the
+//! proposal, the leader cannot rebuild on another parent. Validators that hold the proposal also
+//! wait for the certification timeout, because the leader timeout ends once a proposal arrives.
+//!
+//! An early vote also relies on validators keeping pace. A validator admits a term-start vote
+//! only once it has entered the outgoing term, and the leader does not resend its vote, so a
+//! validator still in an earlier term drops the vote that carries the proposal. If the quorum
+//! needs such a validator, the incoming term times out.
+//!
+//! An early relay also relies on validators keeping the candidate. The leader relays a handoff
+//! candidate once, before its parent certifies, and does not resend it (a `Stage` candidate is
+//! relayed when it is held). Other sends from the leader to a validator before that validator
+//! votes, such as forwards under [`ForwardPolicy`], share the validator's per-sender cache, so a
+//! small cache can evict the early copy. A marshal validator that loses it does not fetch the
+//! block before the candidate is notarized and cannot vote for it, so if the quorum needs that
+//! vote, the incoming term times out. Size the per-sender cache (the buffered broadcast engine's
+//! `deque_size`, or the coding shard engine's `peer_buffer_size`) to hold the leader's sends
+//! between its early relay and the validators' votes.
 //!
 //! ### Optimistic Finality
 //!
@@ -362,6 +455,73 @@
 //! delivered notarization completes its fetch on arrival, because certification judges evidence
 //! already in hand. Matching evidence or finalization retires pending work.
 //!
+//! ## Metrics
+//!
+//! ### Handoff Metrics
+//!
+//! `handoff_events` counts lifecycle events by label:
+//!
+//! * `Requested`: a handoff request reached the automaton. It counts requests, not unique views.
+//! * `WaitReturned`: the automaton returned [`crate::Handoff::Wait`], including default
+//!   responses and marshal builds that yielded no block. Consensus can still abandon a waiting
+//!   request later.
+//! * `CandidateReturned`: the automaton returned a candidate.
+//! * `RelayedBeforeCertification`: consensus requested the candidate's relay before the exact
+//!   parent had certified or finalized, either when it held the candidate or when it voted for
+//!   it early.
+//! * `RelayedAfterCertification`: consensus requested the candidate's relay once the exact
+//!   parent had certified or finalized.
+//! * `VotedBeforeCertification`: consensus recorded the candidate and cast its notarize vote
+//!   before the exact parent had certified or finalized.
+//! * `VotedAfterCertification`: consensus recorded the candidate and cast its notarize vote
+//!   once the exact parent had certified or finalized, including a held candidate it released.
+//!
+//! One request can count several events. Relay events do not imply network delivery. A held
+//! candidate counts a relay before certification and, once released, a vote after it, so
+//! `RelayedBeforeCertification` less `VotedBeforeCertification` counts the candidates consensus
+//! held for parent certification.
+//!
+//! `handoff_abandoned` counts handoff requests or candidates that consensus discards before
+//! voting for them, and pending builds that it cancels, by reason:
+//!
+//! * `ViewExit`: the request's view ended.
+//! * `AncestrySuperseded`: the captured ancestry became invalid while a replacement parent was
+//!   selectable, so consensus can request a proposal on the replacement instead, unless it has
+//!   voted to nullify the view.
+//! * `ParentNullify`: a pending build was cancelled after a local nullify vote for the view the
+//!   leader waits in, at or below the parent.
+//! * `AncestryInvalidated`: a pending build was cancelled because its captured ancestry became
+//!   invalid, as after a nullification in the parent's term or a failed certification, before a
+//!   replacement parent was selectable.
+//! * `ViewNullify`: the parent of a waiting request certified or finalized after a local
+//!   nullify vote for the request's view.
+//! * `ResponseClosed`: the parent of a closed response certified or finalized.
+//! * `IneligibleAtRecording`: a returned candidate could not be recorded for its view.
+//!
+//! A cancelled build leaves its request waiting, so the request counts again if consensus later
+//! discards it. A closed response counts under view exit or superseded ancestry instead if one of
+//! those discards it first.
+//!
+//! Neither family tracks the ordinary request that replaces a waiting handoff, losses across
+//! restart, or whether a candidate was newly built or reused.
+//!
+//! ### Latency Metrics
+//!
+//! `notarization_latency` and `finalization_latency` measure leader-local time from accepted
+//! local proposal recording to local certificate readiness, falling back to first local view
+//! entry when no local proposal was recorded. Holding a prepared candidate happens before
+//! proposal recording, so that wait is excluded. An early vote can record the proposal before
+//! parent certification and include the remaining wait in these metrics.
+//!
+//! `notarization_latency_from_view_entry` and `finalization_latency_from_view_entry` measure from
+//! first local view entry, regardless of proposal timing, and omit samples when no entry was
+//! recorded.
+//!
+//! Both metric pairs sample only the view's leader at the same certificate-ready event, before the
+//! journal sync and network publication of that certificate. Timestamps are process-local and are
+//! not restored on restart. These durations do not measure transaction latency or total speculative
+//! work.
+//!
 //! ## Pluggable Hashing and Cryptography
 //!
 //! Hashing is abstracted via the [commonware_cryptography::Hasher] trait and cryptography is abstracted via
@@ -445,7 +605,9 @@
 //! any are broadcast (even if there is nothing to broadcast). The proposal payload relay is not a
 //! consensus message and is not gated on this sync: to lower view latency, it is requested as soon
 //! as the automaton returns a payload, which is safe because extra payload bytes (unlike votes)
-//! cannot form a conflicting certificate (see [`Plan::Propose`]).
+//! cannot form a conflicting certificate (see [`Plan::Propose`]). A staged handoff candidate is
+//! relayed when it is held (see [`Plan::Prepare`]), and its notarize vote waits until its
+//! parent certifies or finalizes.
 //!
 //! ## Automaton Failure Semantics
 //!
@@ -537,8 +699,8 @@ impl Lookahead {
     /// Returns the lowest view whose direct notarization can anchor
     /// `view` inside the optimistic *issuance* window, or `None` when
     /// `view` can never be issued optimistically, either because
-    /// optimism is disabled or because `view` starts a term and so
-    /// requires explicitly certified ancestry.
+    /// optimism is disabled or because `view` starts a term and peers
+    /// verify a term-start proposal only on explicitly certified ancestry.
     ///
     /// An anchor below the floor fails the hop bound exactly like no
     /// anchor at all, so a caller decides membership by asking whether
@@ -618,13 +780,27 @@ cfg_if::cfg_if! {
 
         /// Describes how a payload should be broadcast to the network.
         pub enum Plan<P: PublicKey> {
-            /// Initial broadcast of a newly proposed block to all participants.
+            /// Early broadcast of a held term-start candidate to all participants.
+            ///
+            /// Requested when a [`crate::Handoff::Stage`] candidate is held for its
+            /// parent's certification. The proposer has not voted for the candidate
+            /// and may still abandon it for one built on a replacement parent, so
+            /// this plan commits to nothing. A relay may defer the send to the
+            /// matching [`Plan::Propose`].
+            Prepare {
+                /// The round in which the candidate was built.
+                round: Round,
+            },
+            /// Broadcast of a proposed block to all participants.
             ///
             /// Requested before the proposer's notarize vote is durable: a
             /// proposer that crashes and restarts may emit this plan again
             /// with a different payload for the same round. Consumers must
             /// tolerate multiple candidates per round (at most one is ever
             /// referenced by the proposer's signed votes).
+            ///
+            /// The proposer's notarize vote follows this plan. A relay that already
+            /// sent the payload for the matching [`Plan::Prepare`] does not send it again.
             Propose {
                 /// The round in which the block was proposed.
                 round: Round,
@@ -660,9 +836,12 @@ pub(crate) fn quorum(n: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::{
-        Monitor, Viewable,
+        Handoff, Monitor, Viewable,
         simplex::{
-            elector::{self, Config as _, Elector as _, Random, RandomVersion, RoundRobin},
+            elector::{
+                Config as _, Elector, Random, RandomVersion, RoundRobin, RoundRobinElector,
+                Scheduled,
+            },
             mocks::{
                 scheme as scheme_mocks,
                 twins::{self, Elector as TwinsElector},
@@ -704,8 +883,13 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, non_empty, ordered::Set, probability,
-        sync::Mutex, test_rng,
+        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, Widen,
+        channel::{fallible::OneshotExt as _, oneshot},
+        non_empty,
+        ordered::Set,
+        probability,
+        sync::Mutex,
+        test_rng,
     };
     use engine::Engine;
     use futures::future::join_all;
@@ -714,7 +898,10 @@ mod tests {
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
     use tracing::{debug, info, warn};
@@ -1581,6 +1768,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         RoundRobin: elector::Config<S>,
+        <RoundRobin as elector::Config<S>>::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 5;
         let required_containers = View::new(50);
@@ -1634,7 +1822,7 @@ mod tests {
                     certify_latency: (10.0, 5.0),
                     should_certify: mocks::application::Certifier::Custom(Box::new({
                         let built_elector_clone = built_elector.clone();
-                        move |round, _| built_elector_clone.elect(round, None) != dishonest
+                        move |round, _| built_elector_clone.elect(round, ()) != dishonest
                     })),
                 };
                 let (actor, application) = mocks::application::Application::new(
@@ -1719,35 +1907,37 @@ mod tests {
         dishonest_leader_certification_rejected::<_, _>(secp256r1::fixture);
     }
 
-    /// Reporter used by the stable-leader end-to-end tests.
-    type StableLeaderReporter = mocks::reporter::Reporter<
+    /// Reporter used by the round-robin end-to-end tests.
+    type RoundRobinReporter = mocks::reporter::Reporter<
         deterministic::Context,
         ed25519::Scheme,
         RoundRobin<Sha256>,
         Sha256Digest,
     >;
 
-    /// Spins up the fully-linked five-validator ed25519 cluster shared by the
-    /// stable-leader end-to-end tests, parameterized by the knobs that differ
-    /// between them. Returns the per-validator reporters, the index of the
-    /// leader elected for view 1 (stable for the whole term), and the network
-    /// oracle.
+    /// Leader timeout of every [`setup_round_robin_cluster`] validator.
+    const CLUSTER_LEADER_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+    /// Certification timeout of every [`setup_round_robin_cluster`] validator.
+    const CLUSTER_CERTIFICATION_TIMEOUT: Duration = Duration::from_millis(3_500);
+
+    /// Starts a fully linked five-validator ed25519 round-robin cluster and returns each
+    /// validator's reporter, the view-1 leader's index, and the network oracle.
     ///
-    /// The 1.5s leader and 3.5s certification timeouts are tuned to the
-    /// callers' link latencies: with latency near or above
-    /// half the leader timeout, a view that waits for its parent's
-    /// certification (two or more network trips) times out, so runs stay
-    /// nullification-free only when views pipeline optimistically.
-    async fn setup_stable_leader_cluster(
+    /// Every application uses `handoff` to answer handoff proposal requests.
+    ///
+    /// Runs stay free of nullifications only while the link latency stays below
+    /// [`CLUSTER_LEADER_TIMEOUT`], since a view's proposal arrives about one link latency after
+    /// the view starts.
+    async fn setup_round_robin_cluster(
         context: &mut deterministic::Context,
         namespace: &[u8],
         link: Link,
-        term_length: TermLength,
-        optimistic_views: ViewDelta,
+        elector: RoundRobin<Sha256>,
         propose_latency: (f64, f64),
-        stall_timeout: Duration,
+        handoff: Handoff<()>,
     ) -> (
-        Vec<StableLeaderReporter>,
+        Vec<RoundRobinReporter>,
         usize,
         Oracle<PublicKey, deterministic::Context>,
     ) {
@@ -1763,8 +1953,6 @@ mod tests {
         let mut registrations = register_validators(&mut oracle, &participants).await;
         link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
-        let elector =
-            RoundRobin::<Sha256>::default().with_term(term_length, stall_timeout, optimistic_views);
         let relay = Arc::new(mocks::relay::Relay::new());
         let mut reporters = Vec::new();
 
@@ -1789,8 +1977,9 @@ mod tests {
                 certify_latency: (1.0, 0.0),
                 should_certify: mocks::application::Certifier::Always,
             };
-            let (actor, application) =
+            let (mut actor, application) =
                 mocks::application::Application::new(context.child("application"), application_cfg);
+            actor.set_handoff(handoff);
             actor.start();
 
             let blocker = oracle.control(validator.clone());
@@ -1806,8 +1995,8 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 epoch,
                 floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
-                leader_timeout: Duration::from_millis(1_500),
-                certification_timeout: Duration::from_millis(3_500),
+                leader_timeout: CLUSTER_LEADER_TIMEOUT,
+                certification_timeout: CLUSTER_CERTIFICATION_TIMEOUT,
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: ViewDelta::new(10),
@@ -1829,9 +2018,8 @@ mod tests {
         }
 
         let participants_set = participants.clone().try_into().unwrap();
-        let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
-            elector.build(&participants_set);
-        let leader_idx = usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+        let built_elector: RoundRobinElector<ed25519::Scheme> = elector.build(&participants_set);
+        let leader_idx = usize::from(built_elector.elect(Round::new(epoch, View::new(1)), ()));
 
         (reporters, leader_idx, oracle)
     }
@@ -1842,7 +2030,7 @@ mod tests {
         let link_latency = Duration::from_millis(100);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            let (reporters, leader_idx, _oracle) = setup_stable_leader_cluster(
+            let (reporters, leader_idx, _oracle) = setup_round_robin_cluster(
                 &mut context,
                 b"consensus_stable_leader_high_latency",
                 Link {
@@ -1850,10 +2038,13 @@ mod tests {
                     jitter: Duration::from_millis(0),
                     success_rate: probability!(1.0),
                 },
-                TermLength::new(NZU32!(128)),
-                ViewDelta::new(128),
+                RoundRobin::<Sha256>::default().with_term(
+                    TermLength::new(NZU32!(128)),
+                    /* stall_timeout */ Duration::from_secs(20),
+                    ViewDelta::new(128),
+                ),
                 /* propose_latency */ (10.0, 0.0),
-                /* stall_timeout */ Duration::from_secs(20),
+                Handoff::Wait,
             )
             .await;
 
@@ -1884,16 +2075,304 @@ mod tests {
         });
     }
 
+    /// A pipelined handoff lets each term-start view notarize about one link latency
+    /// after its parent. Waiting for parent certification takes two.
+    ///
+    /// Without the handoff, intra-term optimism refills the pipeline one view
+    /// after the boundary stall. The handoff therefore barely changes average
+    /// block time. This test measures each boundary view relative to its parent.
+    #[test_traced]
+    fn test_pipelined_handoff_reduces_boundary_latency() {
+        let measured_views = 10u64..=100;
+        let link_latency = Duration::from_millis(100);
+        let term_length = TermLength::new(NZU32!(2));
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let (reporters, _, _oracle) = setup_round_robin_cluster(
+                &mut context,
+                b"consensus_pipelined_handoff_boundary_latency",
+                Link {
+                    latency: link_latency,
+                    jitter: Duration::from_millis(0),
+                    success_rate: probability!(1.0),
+                },
+                RoundRobin::<Sha256>::default().with_term(
+                    term_length,
+                    /* stall_timeout */ Duration::from_secs(20),
+                    ViewDelta::new(4),
+                ),
+                /* propose_latency */ (10.0, 0.0),
+                Handoff::Vote(()),
+            )
+            .await;
+
+            // Record when each view's notarization is first observed.
+            let reporter = reporters[0].clone();
+            let mut observed_at = Vec::new();
+            for view in measured_views.clone() {
+                while !reporter.notarizations.lock().contains_key(&View::new(view)) {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                observed_at.push(context.current());
+            }
+
+            // Each boundary view must notarize before the two network trips
+            // required when proposal distribution waits for parent certification.
+            for (view, window) in measured_views.skip(1).zip(observed_at.windows(2)) {
+                if !View::new(view).is_term_start(term_length) {
+                    continue;
+                }
+                let gap = window[1].duration_since(window[0]).unwrap_or_default();
+                assert!(
+                    gap < 2 * link_latency,
+                    "expected pipelined boundary view {view} within two link latencies of its \
+                     parent, got {gap:?}"
+                );
+            }
+
+            for reporter in reporters.iter() {
+                reporter.assert_no_invalid();
+                reporter.assert_no_faults();
+                assert!(
+                    reporter.nullifies.lock().is_empty(),
+                    "expected nullification-free boundaries"
+                );
+            }
+        });
+    }
+
+    /// With rotating leaders, pipelined handoffs reduce sustained view time
+    /// from two link latencies to about one.
+    #[test_traced]
+    fn test_pipelined_handoff_halves_rotating_view_time() {
+        let measured_views = 10u64..=100;
+        let link_latency = Duration::from_millis(100);
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let (reporters, _, _oracle) = setup_round_robin_cluster(
+                &mut context,
+                b"consensus_pipelined_handoff_rotating",
+                Link {
+                    latency: link_latency,
+                    jitter: Duration::from_millis(0),
+                    success_rate: probability!(1.0),
+                },
+                RoundRobin::<Sha256>::default(),
+                /* propose_latency */ (10.0, 0.0),
+                Handoff::Vote(()),
+            )
+            .await;
+
+            // Time the span from the first measured notarization to the last.
+            let reporter = reporters[0].clone();
+            let start = View::new(*measured_views.start());
+            while !reporter.notarizations.lock().contains_key(&start) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let first = context.current();
+            let end = View::new(*measured_views.end());
+            while !reporter.notarizations.lock().contains_key(&end) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let elapsed = context.current().duration_since(first).unwrap_or_default();
+            let views = measured_views.end() - measured_views.start();
+            let average = elapsed / u32::try_from(views).unwrap();
+            assert!(
+                average < 3 * link_latency / 2,
+                "expected pipelined rotating views near one link latency, got {average:?}"
+            );
+
+            for reporter in reporters.iter() {
+                reporter.assert_no_invalid();
+                reporter.assert_no_faults();
+                assert!(
+                    reporter.nullifies.lock().is_empty(),
+                    "expected nullification-free views"
+                );
+            }
+        });
+    }
+
+    /// The incoming leader's application may verify its handoff parent only after the
+    /// pending handoff build completes, so certifying the parent waits for that build. With
+    /// one validator offline, every certificate needs the incoming leader's vote. The
+    /// network resumes because the leader cancels the build once it votes to nullify the
+    /// parent's view.
+    #[test_traced]
+    fn test_pipelined_handoff_parent_nullify_releases_blocked_certification() {
+        let n = 4;
+        let epoch = Epoch::new(333);
+        let required = View::new(10);
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, b"pipelined_handoff_blocked_certification", n);
+            let mut oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: probability!(1.0),
+            };
+            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+
+            // The outgoing term covers views 1 and 2, the incoming leader starts its term at
+            // view 3, and the offline validator leads the following term.
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(2)),
+                Duration::from_secs(30),
+                ViewDelta::new(1),
+            );
+            let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
+            let schedule: RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(&participant_set);
+            let leader_of =
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
+            let incoming = leader_of(3);
+            let offline = leader_of(5);
+            assert!(![leader_of(1), incoming].contains(&offline));
+
+            // The incoming leader's application holds its view 3 handoff build and leaves
+            // the certification of view 2 to this test.
+            let build: Arc<Mutex<Option<oneshot::Sender<Handoff<D>>>>> = Arc::default();
+            let certification: Arc<Mutex<Option<oneshot::Sender<bool>>>> = Arc::default();
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            for (idx, validator) in participants.iter().enumerate() {
+                if idx == offline {
+                    continue;
+                }
+                let context = context
+                    .child("validator")
+                    .with_attribute("public_key", validator);
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+                let should_certify = if idx == incoming {
+                    let certification = certification.clone();
+                    mocks::application::Certifier::Controlled(Box::new(
+                        move |round, _, response| {
+                            if round.view() == View::new(2) {
+                                *certification.lock() = Some(response);
+                            } else {
+                                response.send_lossy(true);
+                            }
+                        },
+                    ))
+                } else {
+                    mocks::application::Certifier::Always
+                };
+                let application_cfg = mocks::application::Config::<Sha256, _> {
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (1.0, 0.0),
+                    verify_latency: (1.0, 0.0),
+                    certify_latency: (1.0, 0.0),
+                    should_certify,
+                };
+                let (mut actor, application) = mocks::application::Application::new(
+                    context.child("application"),
+                    application_cfg,
+                );
+                if idx == incoming {
+                    actor.set_handoff(Handoff::Stage(()));
+                    let build = build.clone();
+                    actor.set_handoff_controller(Box::new(move |round, proposal, response| {
+                        if round.view() == View::new(3) {
+                            *build.lock() = Some(response);
+                        } else {
+                            response.send_lossy(proposal);
+                        }
+                    }));
+                }
+                actor.start();
+
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                    blocker: oracle.control(validator.clone()),
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: validator.to_string(),
+                    mailbox_size: NZUsize!(1024),
+                    epoch,
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    view_retention: ViewDelta::new(10),
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(11),
+                        budget: SkipBudget::Participants,
+                    },
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    forward: ForwardPolicy::Disabled,
+                    track_historical_votes: false,
+                };
+                let engine = Engine::new(context.child("engine"), cfg);
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                engine.start(pending, recovered, resolver);
+            }
+
+            // Certify view 2 once the incoming leader cancels its build, as an application
+            // whose parent verification was queued behind that build would.
+            let deadline = context.current() + Duration::from_secs(60);
+            while !reporters.iter().all(|reporter| {
+                reporter
+                    .finalizations
+                    .lock()
+                    .keys()
+                    .any(|view| *view >= required)
+            }) {
+                if build.lock().as_ref().is_some_and(|build| build.is_closed())
+                    && let Some(response) = certification.lock().take()
+                {
+                    response.send_lossy(true);
+                }
+                assert!(
+                    context.current() < deadline,
+                    "network did not finalize past the blocked handoff"
+                );
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                build.lock().as_ref().is_some_and(|build| build.is_closed()),
+                "the incoming leader must cancel its handoff build"
+            );
+            for reporter in reporters.iter() {
+                reporter.assert_no_faults();
+                reporter.assert_no_invalid();
+            }
+        });
+    }
+
     #[test_group("slow")]
     #[test]
     fn test_stable_leader_finalizes_full_term_without_nullification() {
         let required_view = View::new(1000);
         let executor = deterministic::Runner::timed(Duration::from_secs(40));
         executor.start(|mut context| async move {
-            let (reporters, leader_idx, oracle) = setup_stable_leader_cluster(
+            let (reporters, leader_idx, oracle) = setup_round_robin_cluster(
                 &mut context,
                 b"consensus_stable_leader_full_term_no_nullify",
-                // 1s latency shrinks the 1.5s leader timeout below a
+                // 1s latency shrinks `CLUSTER_LEADER_TIMEOUT` below a
                 // certification round-trip: staying nullification-free (the
                 // assertion below) is only possible via optimistic pipelining.
                 Link {
@@ -1901,10 +2380,13 @@ mod tests {
                     jitter: Duration::from_millis(1),
                     success_rate: probability!(1.0),
                 },
-                TermLength::new(NZU32!(1000)),
-                ViewDelta::new(100),
+                RoundRobin::<Sha256>::default().with_term(
+                    TermLength::new(NZU32!(1000)),
+                    /* stall_timeout */ Duration::from_secs(6),
+                    ViewDelta::new(100),
+                ),
                 /* propose_latency */ (1.0, 0.0),
-                /* stall_timeout */ Duration::from_secs(6),
+                Handoff::Wait,
             )
             .await;
 
@@ -6427,6 +6909,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
+        L::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -6456,7 +6939,7 @@ mod tests {
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
-                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
             let byzantine = leader_of(10);
             let group = [leader_of(11), leader_of(12)];
             let lone = leader_of(13);
@@ -6637,6 +7120,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
+        L::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -6666,7 +7150,7 @@ mod tests {
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
-                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
             let byzantine = leader_of(10);
             let lone = leader_of(11);
             let group = [leader_of(12), leader_of(13)];
@@ -6852,6 +7336,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
+        L::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -6881,7 +7366,7 @@ mod tests {
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
-                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
             let byzantine = leader_of(10);
             let group = [leader_of(11), leader_of(12)];
             let lone = leader_of(13);
@@ -7091,6 +7576,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
+        L::Elector: Elector<S, Mode = Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -7118,7 +7604,7 @@ mod tests {
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
-                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
             let offline = leader_of(1);
             assert_eq!(offline, leader_of(21), "offline must lead terms 1 and 5");
             let honest: Vec<usize> = (0..n as usize).filter(|idx| *idx != offline).collect();
@@ -7961,6 +8447,9 @@ mod tests {
     ///   the protocol actually commits blocks under synchrony, not just
     ///   reaches a high view via nullifications.
     ///
+    /// - `handoffs`: Whether applications return handoff candidates for an early vote
+    ///   during the attack prefix instead of waiting for every parent to certify.
+    ///
     /// The term structure (length and optimistic lookahead) comes from the
     /// elector passed to [twins_campaign]: multi-view terms exercise the
     /// stable-leader finalize gate under equivocation, and a nonzero
@@ -7972,6 +8461,27 @@ mod tests {
         mode: twins::Mode,
         max_cases: usize,
         trailing_finalizations: usize,
+        handoffs: bool,
+    }
+
+    /// Makes an application return handoff candidates for an early vote during the adversarial
+    /// prefix and wait for parent certification afterward, so early-vote evidence comes only from
+    /// prefix views. `returned` counts the candidates the application returns during the
+    /// prefix.
+    fn configure_twins_handoff(
+        actor: &mut mocks::application::Application<deterministic::Context, Sha256, PublicKey>,
+        prefix_end: View,
+        returned: Arc<AtomicUsize>,
+    ) {
+        actor.set_handoff(Handoff::Vote(()));
+        actor.set_handoff_controller(Box::new(move |round, proposal, response| {
+            if round.view() <= prefix_end {
+                returned.fetch_add(1, Ordering::Relaxed);
+                response.send_lossy(proposal);
+            } else {
+                response.send_lossy(Handoff::Wait);
+            }
+        }));
     }
 
     fn twins_campaign<S, F, L>(
@@ -7985,6 +8495,9 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
+        let honest_handoffs = Arc::new(AtomicUsize::new(0));
+        let twin_handoffs = Arc::new(AtomicUsize::new(0));
+        let early_vote_series = Arc::new(Mutex::new(0u64));
         let n = campaign.n;
         let faults = N3f1::max_faults(n) as usize;
         let cases = twins::cases(
@@ -8016,6 +8529,9 @@ mod tests {
             let link = link.clone();
             let trailing_finalizations = campaign.trailing_finalizations;
             let elector = elector.clone();
+            let honest_handoffs = honest_handoffs.clone();
+            let twin_handoffs = twin_handoffs.clone();
+            let early_vote_series = early_vote_series.clone();
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
             let rng: deterministic::BoxDynRng = Box::new(StdRng::from_rng(&mut *rng));
@@ -8050,6 +8566,11 @@ mod tests {
                     &scenario,
                     n as usize,
                 );
+
+                // Each scripted round drives one full leader term, so the
+                // adversarial prefix spans `rounds * term_length` views.
+                let prefix_end = View::new(Widen::widen(scenario.rounds().len()) * term_length.get());
+
                 let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
                 let mut reporters = Vec::new();
                 let mut engine_handlers = Vec::new();
@@ -8166,10 +8687,13 @@ mod tests {
                             certify_latency: (10.0, 5.0),
                             should_certify: mocks::application::Certifier::Always,
                         };
-                        let (actor, application) = mocks::application::Application::new(
+                        let (mut actor, application) = mocks::application::Application::new(
                             context.child("application"),
                             application_cfg,
                         );
+                        if campaign.handoffs {
+                            configure_twins_handoff(&mut actor, prefix_end, twin_handoffs.clone());
+                        }
                         actor.start();
 
                         let blocker = oracle.control(validator.clone());
@@ -8238,10 +8762,13 @@ mod tests {
                         certify_latency: (10.0, 5.0),
                         should_certify: mocks::application::Certifier::Always,
                     };
-                    let (actor, application) = mocks::application::Application::new(
+                    let (mut actor, application) = mocks::application::Application::new(
                         context.child("application"),
                         application_cfg,
                     );
+                    if campaign.handoffs {
+                        configure_twins_handoff(&mut actor, prefix_end, honest_handoffs.clone());
+                    }
                     actor.start();
 
                     let blocker = oracle.control(validator.clone());
@@ -8299,10 +8826,6 @@ mod tests {
                 //
                 // Twin halves are Byzantine test machinery and are not required to
                 // make progress for the campaign to establish honest-node liveness.
-                //
-                // Each scripted round drives one full leader term, so the
-                // adversarial prefix spans `rounds * term_length` views.
-                let prefix_end = View::new(scenario.rounds().len() as u64 * term_length.get());
                 let mut finalizers = Vec::new();
                 for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
                     let (_latest, mut monitor) = reporter.subscribe().await;
@@ -8320,6 +8843,15 @@ mod tests {
                     ));
                 }
                 join_all(finalizers).await;
+                if campaign.handoffs {
+                    *early_vote_series.lock() += u64::from(count_nonzero_metric_lines(
+                        &context.encode(),
+                        &[
+                            "_handoff_events_total{",
+                            "event=\"VotedBeforeCertification\"",
+                        ],
+                    ));
+                }
 
                 // Verify safety: no conflicting finalizations across honest reporters.
                 let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
@@ -8410,6 +8942,20 @@ mod tests {
                 }
             });
         }
+        if campaign.handoffs {
+            assert!(
+                *early_vote_series.lock() > 0,
+                "campaign must vote for prefix handoffs before certification"
+            );
+            assert!(
+                honest_handoffs.load(Ordering::Relaxed) > 0,
+                "honest apps must return handoffs during the adversarial prefix"
+            );
+            assert!(
+                twin_handoffs.load(Ordering::Relaxed) > 0,
+                "twin apps must return handoffs during the adversarial prefix"
+            );
+        }
     }
 
     const TWINS_CAMPAIGN: TwinsCampaign = TwinsCampaign {
@@ -8418,6 +8964,7 @@ mod tests {
         mode: twins::Mode::Sampled,
         max_cases: 20,
         trailing_finalizations: 10,
+        handoffs: false,
     };
 
     const TWINS_LINK: Link = Link {
@@ -8450,6 +8997,18 @@ mod tests {
     #[test_traced("INFO")]
     fn test_twins_sampled() {
         twins_campaign_all_links(TWINS_CAMPAIGN, RoundRobin::default());
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_pipelined_handoff() {
+        twins_campaign_all_links(
+            TwinsCampaign {
+                handoffs: true,
+                ..TWINS_CAMPAIGN
+            },
+            RoundRobin::default(),
+        );
     }
 
     #[test_group("slow")]

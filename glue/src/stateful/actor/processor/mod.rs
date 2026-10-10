@@ -285,7 +285,8 @@ where
     }
 }
 
-/// In-progress replays shared by verifications and finalization, keyed by block digest.
+/// In-progress replays shared by proposals, verifications, and finalization, keyed by block
+/// digest.
 ///
 /// Keying by digest is sound because a digest identifies a [`CertifiableBlock`] together with its
 /// embedded context. Execution state is locked before the registry whenever both are held, so a
@@ -295,11 +296,14 @@ struct ReplayFlights<D: Copy + Ord> {
     entries: ReplayRegistry<D>,
 }
 
-/// Replay sharing and progress reporting for one verification attempt.
+/// Replay sharing and progress reporting for one request.
+///
+/// A verification attempt reports its phase so a finalization can classify it. A proposal
+/// reports none: finalization and pruning wait for the active proposal to end.
 #[derive(Clone, Copy)]
 struct ReplayTracking<'a, D: Copy + Ord> {
     flights: &'a ReplayFlights<D>,
-    progress: &'a VerificationProgress<D>,
+    progress: Option<&'a VerificationProgress<D>>,
 }
 
 impl<D: Copy + Ord> Default for ReplayFlights<D> {
@@ -702,10 +706,13 @@ where
 
     /// Builds a proposal on the first block of `ancestry` and sends it on `response`.
     ///
-    /// Sends `None` if `ancestry` is empty, if the parent's ancestry is invalid, or if the
-    /// application declines to propose. Sends nothing and returns once `response` closes if the
-    /// parent's ancestry is incomplete, and returns without sending if `response` closes first. A
-    /// proposed block's state is cached as verified.
+    /// Sends `None` if `ancestry` is empty, if the parent's ancestry is invalid or incomplete,
+    /// or if the application declines to propose. An ancestor subscription ends only once the
+    /// provider can no longer obtain the block (see [`BlockProvider::subscribe_parent`]), so an
+    /// incomplete ancestry declines at once rather than holding the actor until consensus
+    /// abandons the request. Returns without sending if `response` closes first. A proposed
+    /// block's state is cached as verified. Replaying the parent's uncached ancestry is shared
+    /// with concurrent verifications of the same blocks.
     ///
     /// Panics if the application proposes state that does not match the block's commitments.
     pub(super) async fn propose<S, V>(
@@ -750,9 +757,9 @@ where
             Err(PrepareBatchesError::Incomplete) => {
                 debug!(
                     ?parent_digest,
-                    "proposal request waiting on incomplete ancestry during prepare_batches"
+                    "proposal declined: incomplete ancestry during prepare_batches"
                 );
-                response.closed().await;
+                response.send_lossy(None);
                 return;
             }
             Err(PrepareBatchesError::Cancelled) => {
@@ -828,7 +835,17 @@ where
         C: Cancellation,
     {
         self.execution
-            .prepare_batches(&mut self.app, context, marshal, parent, cancellation, None)
+            .prepare_batches(
+                &mut self.app,
+                context,
+                marshal,
+                parent,
+                cancellation,
+                ReplayTracking {
+                    flights: &self.replays,
+                    progress: None,
+                },
+            )
             .await
     }
 
@@ -853,7 +870,17 @@ where
         C: Cancellation,
     {
         self.execution
-            .rebuild_pending(&mut self.app, context, provider, target, cancellation, None)
+            .rebuild_pending(
+                &mut self.app,
+                context,
+                provider,
+                target,
+                cancellation,
+                ReplayTracking {
+                    flights: &self.replays,
+                    progress: None,
+                },
+            )
             .await
     }
 
@@ -1173,7 +1200,7 @@ where
         }
     }
 
-    /// Claims replay of `digest` for a verification.
+    /// Claims replay of `digest` for a request.
     ///
     /// Returns [`ReplayClaim::Ready`] if `digest` is the processed anchor, is cached, or is the
     /// winner with a retained batch, [`ReplayClaim::Wait`] if a replay of `digest` is in flight,
@@ -1311,7 +1338,7 @@ where
         .ok_or(PrepareBatchesError::Invalid)
     }
 
-    /// Replays `block` as [`Self::replay`] does, sharing the work with concurrent verifications.
+    /// Replays `block` as [`Self::replay`] does, sharing the work with concurrent requests.
     ///
     /// One request executes the replay and the others wait for its result. If the executing
     /// request is cancelled, a remaining request takes over. A waiter adopts the executing
@@ -1333,7 +1360,9 @@ where
             match self.claim_replay(tracking.flights, digest) {
                 ReplayClaim::Ready => return Ok(()),
                 ReplayClaim::Owner(owner) => {
-                    tracking.progress.set_replaying(digest, parent, round);
+                    if let Some(progress) = tracking.progress {
+                        progress.set_replaying(digest, parent, round);
+                    }
                     let result = self
                         .replay(
                             app,
@@ -1349,7 +1378,9 @@ where
                     return result;
                 }
                 ReplayClaim::Wait(mut waiter) => {
-                    tracking.progress.set_replaying(digest, parent, round);
+                    if let Some(progress) = tracking.progress {
+                        progress.set_replaying(digest, parent, round);
+                    }
                     let Some(completion) =
                         await_or_cancel(cancellation, &mut waiter.completion).await
                     else {
@@ -1372,7 +1403,7 @@ where
     /// Replays `parent` and its uncached ancestors if `parent` is neither cached nor the processed
     /// anchor, then forks batches from its state.
     ///
-    /// With `tracking`, replays are shared with concurrent verifications. Returns
+    /// Replays are shared with concurrent requests through `tracking`. Returns
     /// [`PrepareBatchesError::Invalid`] if the ancestry is invalid or a concurrent finalization
     /// discards `parent`'s branch, [`PrepareBatchesError::Incomplete`] if marshal stops delivering
     /// the ancestry, and [`PrepareBatchesError::Cancelled`] if `cancellation` fires first.
@@ -1383,7 +1414,7 @@ where
         marshal: MarshalMailbox<S, V>,
         parent: Arc<A::Block>,
         cancellation: &mut C,
-        tracking: Option<ReplayTracking<'_, BlockDigest<A, E>>>,
+        tracking: ReplayTracking<'_, BlockDigest<A, E>>,
     ) -> Result<Unmerkleized<A, E>, PrepareBatchesError>
     where
         S: Scheme,
@@ -1407,7 +1438,8 @@ where
     }
 
     /// Walks back from `target` to the nearest cached block or the processed anchor, then replays
-    /// the uncached blocks in height order.
+    /// the uncached blocks in height order, sharing each replay with concurrent requests through
+    /// `tracking`.
     ///
     /// Returns [`PrepareBatchesError::Invalid`] if the walk reaches the processed height without
     /// meeting the processed anchor, if `provider` returns a block that is not the parent at the
@@ -1421,7 +1453,7 @@ where
         provider: P,
         target: Arc<A::Block>,
         cancellation: &mut C,
-        tracking: Option<ReplayTracking<'_, BlockDigest<A, E>>>,
+        tracking: ReplayTracking<'_, BlockDigest<A, E>>,
     ) -> Result<(), PrepareBatchesError>
     where
         P: BlockProvider<Block = A::Block> + Clone,
@@ -1473,7 +1505,9 @@ where
                 return Err(PrepareBatchesError::Incomplete);
             };
 
-            if parent.digest() != cursor.parent() || parent.height().next() != cursor_height {
+            if parent.digest() != cursor.parent()
+                || cursor_height.previous() != Some(parent.height())
+            {
                 warn!(
                     ?target_digest,
                     cursor = ?cursor.digest(),
@@ -1492,13 +1526,8 @@ where
 
         let depth = replay_path.len();
         for block in replay_path.into_iter().rev() {
-            if let Some(tracking) = tracking {
-                self.replay_shared(app, context, target_digest, block, cancellation, tracking)
-                    .await?;
-            } else {
-                self.replay(app, context, target_digest, block, cancellation)
-                    .await?;
-            }
+            self.replay_shared(app, context, target_digest, block, cancellation, tracking)
+                .await?;
         }
 
         self.update_pending_metric();
@@ -2726,7 +2755,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &owner_progress,
+                    progress: Some(&owner_progress),
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -2740,7 +2769,7 @@ mod tests {
                 &mut waiter_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &waiter_progress,
+                    progress: Some(&waiter_progress),
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
@@ -2819,7 +2848,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &owner_progress,
+                    progress: Some(&owner_progress),
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -2833,7 +2862,7 @@ mod tests {
                 &mut waiter_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &waiter_progress,
+                    progress: Some(&waiter_progress),
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
@@ -2903,7 +2932,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &owner_progress,
+                    progress: Some(&owner_progress),
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -2967,7 +2996,7 @@ mod tests {
                 &mut waiter_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &waiter_progress,
+                    progress: Some(&waiter_progress),
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
@@ -3090,7 +3119,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &owner_progress,
+                    progress: Some(&owner_progress),
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -3104,7 +3133,7 @@ mod tests {
                 &mut waiter_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &waiter_progress,
+                    progress: Some(&waiter_progress),
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
@@ -3446,10 +3475,10 @@ mod tests {
                     first_provider,
                     Arc::new(block2.clone()),
                     &mut first_cancellation,
-                    Some(ReplayTracking {
+                    ReplayTracking {
                         flights: &first_replays,
-                        progress: &first_progress,
-                    }),
+                        progress: Some(&first_progress),
+                    },
                 ));
                 select! {
                     result = &mut first => panic!("first rebuild completed before replay gate: {result:?}"),
@@ -3462,10 +3491,10 @@ mod tests {
                     second_provider,
                     Arc::new(block2.clone()),
                     &mut second_cancellation,
-                    Some(ReplayTracking {
+                    ReplayTracking {
                         flights: &second_replays,
-                        progress: &second_progress,
-                    }),
+                        progress: Some(&second_progress),
+                    },
                 ));
                 let mut third = Box::pin(third_execution.rebuild_pending(
                     &mut third_app,
@@ -3473,10 +3502,10 @@ mod tests {
                     third_provider,
                     Arc::new(block3),
                     &mut third_cancellation,
-                    Some(ReplayTracking {
+                    ReplayTracking {
                         flights: &third_replays,
-                        progress: &third_progress,
-                    }),
+                        progress: Some(&third_progress),
+                    },
                 ));
                 let mut fourth = Box::pin(fourth_execution.rebuild_pending(
                     &mut fourth_app,
@@ -3484,10 +3513,10 @@ mod tests {
                     fourth_provider,
                     Arc::new(block2),
                     &mut fourth_cancellation,
-                    Some(ReplayTracking {
+                    ReplayTracking {
                         flights: &fourth_replays,
-                        progress: &fourth_progress,
-                    }),
+                        progress: Some(&fourth_progress),
+                    },
                 ));
                 let mut waiters_registered = false;
                 for _ in 0..100 {
@@ -3757,6 +3786,47 @@ mod tests {
             assert_eq!(result, Err(PrepareBatchesError::Invalid));
             assert_eq!(provider.fetches(), 1);
             assert!(!harness.processor.pending_contains(&block3.digest()));
+        });
+    }
+
+    /// An unverified ancestor can claim any height, including `u64::MAX`, which has no
+    /// successor. An ancestor whose height is not contiguous with the cursor is rejected.
+    #[test]
+    fn execution_rebuild_pending_rejects_parent_at_max_height() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(block1.clone()).await);
+
+            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+            let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
+            let parent = Block {
+                height: Height::new(u64::MAX),
+                ..block2
+            };
+            let child = Block {
+                parent: parent.digest(),
+                ..block3
+            };
+            harness.processor.clear_pending();
+
+            let provider = ScriptedParentProvider::default();
+            provider.push(&child, [Some(parent)]);
+            let (mut response, _rx) = oneshot::channel::<bool>();
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    provider.clone(),
+                    Arc::new(child.clone()),
+                    &mut response,
+                )
+                .await;
+
+            assert_eq!(result, Err(PrepareBatchesError::Invalid));
+            assert_eq!(provider.fetches(), 1);
+            assert!(!harness.processor.pending_contains(&child.digest()));
         });
     }
 

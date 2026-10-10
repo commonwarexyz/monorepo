@@ -188,7 +188,7 @@ where
             Self {
                 context: ContextCell::new(context),
                 mailbox,
-                application: config.application,
+                application: config.application.clone(),
                 provider: config.provider,
                 marshal: config.marshal,
                 db_config: config.db_config,
@@ -197,7 +197,7 @@ where
                 sync_config: config.sync_config,
                 pruning,
             },
-            Mailbox::new(sender),
+            Mailbox::new(sender, config.application),
         )
     }
 
@@ -284,8 +284,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Stateful};
+    use super::{Config, Mailbox, Stateful};
     use crate::stateful::{
+        Application,
         actor::syncer::SyncPlan,
         db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
         tests::{
@@ -294,13 +295,18 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Reporter as _,
-        marshal::{Update, ancestry},
+        Application as _, CertifiableBlock as _, Handoff, Reporter as _,
+        marshal::{
+            Update,
+            ancestry::{self, Ancestry, BoxedAncestry, Parent},
+        },
         simplex::mocks::scheme as scheme_mocks,
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
-    use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        Clock, Handle, Metrics, Runner as _, Spawner, Supervisor as _, deterministic,
+    };
     use commonware_utils::{
         Acknowledgement as _, NZU64, NZUsize,
         acknowledgement::Exact,
@@ -308,7 +314,15 @@ mod tests {
         sync::Mutex,
     };
     use futures::poll;
-    use std::{convert::Infallible, sync::Arc, time::Duration};
+    use rand_core::Rng;
+    use std::{
+        convert::Infallible,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
 
     /// Blocks startup before the actor begins polling its mailbox.
     struct StartupGate {
@@ -372,6 +386,166 @@ mod tests {
         ) -> Result<Self, Self::SyncError> {
             Ok(Self::default())
         }
+    }
+
+    /// A parent handle that records whether the application asked for its ancestry.
+    #[derive(Clone)]
+    struct Watched(Arc<AtomicBool>);
+
+    impl Parent<TestBlock> for Watched {
+        async fn ancestry(self) -> Option<impl Ancestry<TestBlock>> {
+            self.0.store(true, Ordering::SeqCst);
+            None::<BoxedAncestry<TestBlock>>
+        }
+    }
+
+    /// Starts a [`Stateful`] around `application` and returns its mailbox, the actor handle,
+    /// and the guards that keep its marshal alive.
+    async fn stateful_with(
+        context: &deterministic::Context,
+        application: TestApp,
+    ) -> (
+        Mailbox<deterministic::Context, TestApp>,
+        Handle<()>,
+        Box<dyn std::any::Any>,
+    ) {
+        let mut signing_context = context.child("signing");
+        let fixture = scheme_mocks::fixture(&mut signing_context, b"handoff", 1);
+        let marshal = fixtures::marshal_fixture(
+            context.child("marshal"),
+            "stateful-handoff",
+            fixture.schemes[0].clone(),
+            None,
+            NZUsize!(8),
+            true,
+        )
+        .await;
+        let plan = SyncPlan::init(context.child("plan"), "stateful-handoff-stateful").await;
+        let (stateful, mailbox) = Stateful::new(
+            context.child("stateful"),
+            Config {
+                application,
+                db_config: (),
+                provider: (),
+                marshal: (marshal.mailbox.clone(), marshal.floor),
+                mailbox_size: NZUsize!(8),
+                plan,
+                resolvers: NoopResolver::default(),
+                sync_config: SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: NZUsize!(1),
+                    update_channel_size: NZUsize!(1),
+                },
+                prune_config: None,
+            },
+        );
+        (mailbox, stateful.start(), marshal.guards)
+    }
+
+    /// A `Wait` decision answers without asking for the parent.
+    #[test]
+    fn mailbox_prepare_wait_skips_parent() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut mailbox, handle, _guards) =
+                stateful_with(&context, TestApp::with_handoff(Handoff::Wait)).await;
+            let asked = Arc::new(AtomicBool::new(false));
+            let block = TestBlock::new(1, 1);
+            let prepared = mailbox
+                .prepare(
+                    (context.child("wait"), block.context()),
+                    Watched(asked.clone()),
+                    (),
+                )
+                .await;
+            assert!(prepared.is_wait());
+            assert!(
+                !asked.load(Ordering::SeqCst),
+                "a Wait decision must not fetch the parent"
+            );
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
+    /// A decision other than `Wait` fetches the parent and forwards the build to the actor as
+    /// an ordinary proposal. An absent ancestry or a build that yields no block declines.
+    #[test]
+    fn mailbox_prepare_declines_without_block() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut mailbox, handle, _guards) =
+                stateful_with(&context, TestApp::with_handoff(Handoff::Vote(()))).await;
+            let asked = Arc::new(AtomicBool::new(false));
+            let block = TestBlock::new(1, 1);
+            let prepared = mailbox
+                .prepare(
+                    (context.child("vote"), block.context()),
+                    Watched(asked.clone()),
+                    (),
+                )
+                .await;
+            assert!(prepared.is_wait(), "an absent ancestry declines");
+            assert!(
+                asked.load(Ordering::SeqCst),
+                "a Vote decision fetches the parent"
+            );
+
+            let genesis = TestBlock::new(0, 0);
+            assert_eq!(
+                mailbox
+                    .prepare(
+                        (context.child("vote"), block.context()),
+                        ancestry::from_iter([Arc::new(genesis)]),
+                        (),
+                    )
+                    .await
+                    .map(|_| ()),
+                Handoff::Wait,
+                "a build that yields no block declines"
+            );
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
+    /// A built block comes back under the application's decision.
+    #[test]
+    fn mailbox_prepare_attaches_decision() {
+        for decision in [Handoff::Vote(()), Handoff::Stage(())] {
+            deterministic::Runner::timed(Duration::from_secs(5)).start(move |context| async move {
+                let genesis = TestBlock::new(0, 0);
+                let child = TestBlock::child(&genesis, 1);
+                let application = TestApp::with_handoff(decision).with_proposal(child.clone());
+                let (mut mailbox, handle, _guards) = stateful_with(&context, application).await;
+                let prepared = mailbox
+                    .prepare(
+                        (context.child("build"), child.context()),
+                        ancestry::from_iter([Arc::new(genesis)]),
+                        (),
+                    )
+                    .await;
+                assert_eq!(
+                    prepared,
+                    decision.map(|()| child),
+                    "a built block must carry the {decision:?} decision"
+                );
+                handle.abort();
+                let _ = handle.await;
+            });
+        }
+    }
+
+    fn is_send<T: Send>(_: T) {}
+
+    /// [`Mailbox::subscribe_databases`] returns a `Send` future even for an application
+    /// that is not `Sync`, so callers can await it in spawned tasks.
+    #[allow(dead_code)]
+    fn assert_mailbox_futures_are_send<E, A>(mailbox: &Mailbox<E, A>)
+    where
+        E: Rng + Spawner + Metrics + Clock,
+        A: Application<E>,
+    {
+        is_send(mailbox.subscribe_databases());
     }
 
     #[test]

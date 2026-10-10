@@ -6,10 +6,11 @@ use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Reporter, Viewable,
+    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Handoff, Reporter,
+    Viewable,
     marshal::{
         Update,
-        ancestry::{Ancestry, BoxedAncestry},
+        ancestry::{Ancestry, BoxedAncestry, Parent},
     },
 };
 use commonware_cryptography::Digestible;
@@ -178,8 +179,10 @@ where
 /// Handle to the [`Stateful`](super::Stateful) actor.
 ///
 /// Implements the consensus [`Application`](commonware_consensus::Application) and receives
-/// finalized blocks from marshal as a [`Reporter`]. If the actor stops before responding,
-/// `propose` returns `None` and `verify` panics.
+/// finalized blocks from marshal as a [`Reporter`]. The mailbox forwards proposal, verification,
+/// and reporting calls to the actor. If the actor stops before responding, `propose` returns
+/// `None`, `prepare` returns [`Handoff::Wait`], and `verify` panics with "stateful actor dropped
+/// during verify".
 pub struct Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -187,6 +190,7 @@ where
 {
     sender: Sender<Message<E, A>>,
     retry_mailbox: RetryMailbox<E, A>,
+    application: A,
 }
 
 impl<E, A> Clone for Mailbox<E, A>
@@ -198,6 +202,7 @@ where
         Self {
             sender: self.sender.clone(),
             retry_mailbox: self.retry_mailbox.clone(),
+            application: self.application.clone(),
         }
     }
 }
@@ -208,7 +213,7 @@ where
     A: Application<E>,
 {
     /// Creates a mailbox from the send half of the actor's message channel.
-    pub(super) fn new(sender: Sender<Message<E, A>>) -> Self {
+    pub(super) fn new(sender: Sender<Message<E, A>>, application: A) -> Self {
         let retry_sender = sender.clone();
         let retry_mailbox = Arc::new(move |message| {
             let _ = retry_sender.enqueue(message);
@@ -216,6 +221,7 @@ where
         Self {
             sender,
             retry_mailbox,
+            application,
         }
     }
 
@@ -231,14 +237,15 @@ where
     /// # Panics
     ///
     /// Panics if the actor stops before replying.
-    pub async fn subscribe_databases(&self) -> A::Databases {
-        let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .enqueue(Message::SubscribeDatabases { response });
-        receiver
-            .await
-            .expect("stateful actor dropped during subscribe_databases")
+    pub fn subscribe_databases(&self) -> impl Future<Output = A::Databases> + Send + use<E, A> {
+        let sender = self.sender.clone();
+        async move {
+            let (response, receiver) = oneshot::channel();
+            let _ = sender.enqueue(Message::SubscribeDatabases { response });
+            receiver
+                .await
+                .expect("stateful actor dropped during subscribe_databases")
+        }
     }
 }
 
@@ -272,6 +279,29 @@ where
             response,
         });
         receiver.await.ok().flatten()
+    }
+
+    /// Decides through [`Application::prepare`] before any work, so a [`Handoff::Wait`]
+    /// decision never touches the parent or the actor queue. Otherwise the ancestry is fetched,
+    /// the block is built as an ordinary proposal by the actor (which owns the database batches),
+    /// and the decision is attached to the block. An absent ancestry or a proposal that builds no
+    /// block returns [`Handoff::Wait`].
+    async fn prepare(
+        &mut self,
+        context: (E, Self::Context),
+        parent: impl Parent<Self::Block>,
+        upstream: Self::Input,
+    ) -> Handoff<Self::Block> {
+        let decision = self.application.prepare(&context.1);
+        if decision.is_wait() {
+            return Handoff::Wait;
+        }
+        let Some(ancestry) = parent.ancestry().await else {
+            return Handoff::Wait;
+        };
+        self.propose(context, ancestry, upstream)
+            .await
+            .map_or(Handoff::Wait, |block| decision.map(|()| block))
     }
 
     async fn verify(

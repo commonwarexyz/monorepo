@@ -269,10 +269,10 @@ where
                 marshal,
                 block.clone(),
                 verification,
-                Some(ReplayTracking {
+                ReplayTracking {
                     flights: &self.replays,
-                    progress,
-                }),
+                    progress: Some(progress),
+                },
             )
             .await
         {

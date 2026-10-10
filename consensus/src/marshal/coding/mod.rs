@@ -64,7 +64,8 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 #[cfg(test)]
 mod tests {
     use crate::{
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay, Reporter,
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, Relay,
+        Reporter,
         marshal::{
             ancestry::{Ancestry, BlockProvider},
             coding::{
@@ -75,7 +76,7 @@ mod tests {
                 },
             },
             config::{Config, Start},
-            core::{self, Processed},
+            core::{self, Processed, durability::Durable as _},
             mocks::{
                 application::Application,
                 harness::{
@@ -102,7 +103,7 @@ mod tests {
     use commonware_coding::{Config as CodingConfig, ReedSolomon, Scheme as _};
     use commonware_cryptography::{
         Committable, Digestible, Hasher,
-        certificate::{ConstantProvider, Verifier as _, mocks::Fixture},
+        certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
         sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
@@ -117,8 +118,35 @@ mod tests {
     use commonware_utils::{
         NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
     };
-    use futures::StreamExt;
-    use std::{sync::Arc, time::Duration};
+    use futures::{FutureExt as _, StreamExt};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    #[derive(Clone)]
+    struct CountingProvider<P> {
+        inner: P,
+        lookups: Arc<AtomicUsize>,
+    }
+
+    impl<P: Provider> Provider for CountingProvider<P> {
+        type Scope = P::Scope;
+        type Scheme = P::Scheme;
+
+        fn scoped(&self, scope: Self::Scope) -> Option<Scoped<Self::Scheme>> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            self.inner.scoped(scope)
+        }
+
+        fn scheme(&self, scope: Self::Scope) -> Option<Arc<Self::Scheme>> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            self.inner.scheme(scope)
+        }
+    }
 
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
@@ -3296,7 +3324,7 @@ mod tests {
 
         // Construct a Commitment with all-zero bytes (invalid CodingConfig:
         // minimum_shards=0, extra_shards=0). Serialize it and attempt to
-        // deserialize -- this must fail.
+        // deserialize, which must fail.
         let malformed_bytes = [0u8; <TestCommitment as FixedSize>::SIZE];
         let result = TestCommitment::read(&mut commonware_codec::Copying(&malformed_bytes));
         assert!(
@@ -4493,6 +4521,68 @@ mod tests {
         })
     }
 
+    #[test_traced("WARN")]
+    fn test_coding_default_prepare_no_lookup() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "default-prepare",
+                provider.clone(),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+            let shards = start_shard_mailbox(
+                context.child("shards"),
+                participants.clone(),
+                provider.clone(),
+            )
+            .await;
+            let lookups = Arc::new(AtomicUsize::new(0));
+            let cfg = MarshaledConfig {
+                application: WalkingVerifyingApp::default(),
+                marshal,
+                shards,
+                scheme_provider: CountingProvider {
+                    inner: provider,
+                    lookups: lookups.clone(),
+                },
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("declining"), cfg);
+            let genesis = CodingHarness::genesis_block(NUM_VALIDATORS as u16);
+            let ctx = CodingCtx {
+                round: Round::new(Epoch::zero(), View::new(1)),
+                leader: participants[0].clone(),
+                parent: (View::zero(), genesis.commitment()),
+            };
+
+            // Only provider calls made by this prepare request count.
+            lookups.store(0, Ordering::SeqCst);
+            let response = marshaled
+                .prepare(ctx)
+                .now_or_never()
+                .expect("default prepare must return its receiver on the first poll");
+            let decision = response
+                .now_or_never()
+                .expect("default prepare response must be ready")
+                .expect("default prepare decision missing");
+            assert_eq!(decision, Handoff::Wait);
+            assert_eq!(
+                lookups.load(Ordering::SeqCst),
+                0,
+                "default prepare must not query the scheme provider"
+            );
+        });
+    }
+
     /// When the scheme provider has no entry for the current epoch,
     /// `Marshaled::propose` and `Marshaled::verify` must return a dropped
     /// receiver (the consensus engine treats `RecvError` as "abstain").
@@ -4814,8 +4904,8 @@ mod tests {
 
     /// A propose relay with a staged proposal must send it through the shard
     /// engine and complete the durability handshake. The freshly built block
-    /// is nowhere persisted at broadcast time, so the forward fallback has
-    /// nothing to serve: only the staged-hit path can seed the shard engine.
+    /// is nowhere persisted at broadcast time, so only the staged proposal can
+    /// seed the shard engine.
     #[test_traced("WARN")]
     fn test_marshaled_propose_relay_sends_staged_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -4919,17 +5009,494 @@ mod tests {
         });
     }
 
-    /// Regression: if marshal already holds a verified block for a round
-    /// (say, persisted by a pre-crash propose whose notarize vote never
-    /// reached the journal), a restarted leader's `propose` must return
-    /// that block's commitment instead of rebuilding. The pre-crash
-    /// commitment may already have been broadcast, so proposing a rebuilt
-    /// block for the same round would equivocate. The recovered proposal
-    /// must also be staged for the relay, so the broadcast re-sends its
-    /// shards and certification resolves through the deduplicated
-    /// re-persist.
+    /// A prepare relay sends a held candidate without storing it, so an abandoned candidate
+    /// costs no storage write, and a replacement candidate for the same round is sent the same
+    /// way. The propose relay that locks the replacement in stores it without sending it again
+    /// and completes the durability handshake.
     #[test_traced("WARN")]
-    fn test_propose_reuses_verified_block_on_restart() {
+    fn test_coding_prepare_relay_sends_once_and_propose_stores() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "prepare-relay",
+                provider.clone(),
+                buffer.clone(),
+            )
+            .await;
+            let shards = start_shard_mailbox(
+                context.child("shards"),
+                participants.clone(),
+                provider.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let genesis = genesis_block();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let ctx = CodingCtx {
+                round,
+                leader: me,
+                parent: (View::zero(), genesis_coding_commitment(&genesis)),
+            };
+
+            // Stage two candidates for the round as prepare would. The mock application
+            // builds one fixed block, so each candidate is staged by its own wrapper.
+            let mut candidates = Vec::new();
+            for data in [100, 200] {
+                let block = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), data);
+                let digest = block.digest();
+                let commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                    block.clone(),
+                    coding_config,
+                    &Sequential,
+                )
+                .commitment();
+                let mock_app: MockVerifyingApp<CodingB, S> =
+                    MockVerifyingApp::new().with_propose_result(block);
+                let cfg = MarshaledConfig {
+                    application: mock_app,
+                    marshal: marshal.clone(),
+                    shards: shards.clone(),
+                    scheme_provider: provider.clone(),
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    strategy: Sequential,
+                };
+                let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+                let staged = marshaled
+                    .propose(ctx.clone())
+                    .await
+                    .await
+                    .expect("propose should produce a commitment");
+                assert_eq!(staged, commitment);
+                candidates.push((marshaled, commitment, digest));
+            }
+            let (mut abandoned, abandoned_commitment, abandoned_digest) = candidates.remove(0);
+            let (mut replacement, replacement_commitment, replacement_digest) =
+                candidates.remove(0);
+
+            // The early relay sends each held candidate and stores neither.
+            let feedback = abandoned.broadcast(abandoned_commitment, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            let feedback = replacement.broadcast(replacement_commitment, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            while buffer.sends.lock().len() < 2 {
+                reschedule().await;
+            }
+            assert!(
+                marshal.get_verified(round).await.is_none(),
+                "an early relay must not store a candidate"
+            );
+
+            // The lock-in stores the replacement without sending it again, and certification
+            // resolves through the staged durability handshake.
+            let feedback = replacement.broadcast(replacement_commitment, Plan::Propose { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            assert!(
+                replacement
+                    .certify(round, replacement_commitment)
+                    .await
+                    .await
+                    .expect("certify result missing"),
+                "lock-in handshake must resolve certification durably"
+            );
+            assert_eq!(
+                marshal
+                    .get_verified(round)
+                    .await
+                    .map(|block| block.commitment()),
+                Some(replacement_commitment),
+                "lock-in must store the replacement"
+            );
+            assert!(
+                marshal.get_block(&abandoned_digest).await.is_none(),
+                "an abandoned candidate is never stored"
+            );
+            let sends = buffer.sends.lock();
+            assert_eq!(sends.len(), 2, "each candidate is sent once");
+            for ((sent_round, block, recipients), digest) in
+                sends.iter().zip([abandoned_digest, replacement_digest])
+            {
+                assert_eq!(*sent_round, round);
+                assert_eq!(block.digest(), digest);
+                assert!(matches!(recipients, Recipients::All));
+            }
+        });
+    }
+
+    /// A candidate whose shards a prepare relay sent and that certification claimed before the
+    /// lock-in goes out once. The propose relay that follows finds nothing staged and sends
+    /// nothing.
+    #[test_traced("WARN")]
+    fn test_coding_propose_relay_after_claim_sends_once() {
+        // The runner timeout is only a hang guard.
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "propose-relay-claim",
+                provider.clone(),
+                buffer.clone(),
+            )
+            .await;
+            let shards = start_shard_mailbox(
+                context.child("shards"),
+                participants.clone(),
+                provider.clone(),
+            )
+            .await;
+            let (ctx, candidate) = missing_candidate(participants[0].clone());
+            let round = ctx.round;
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new()
+                    .with_propose_result(candidate.inner().clone()),
+                marshal: marshal.clone(),
+                shards,
+                scheme_provider: provider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+            let commitment = marshaled
+                .propose(ctx)
+                .await
+                .await
+                .expect("propose should produce a commitment");
+            assert_eq!(commitment, candidate.commitment());
+
+            // The early relay sends the candidate's shards. Each lookup below goes through the
+            // same marshal mailbox as the relays, so it observes every send they requested.
+            let feedback = marshaled.broadcast(commitment, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            assert!(
+                marshal.get_verified(round).await.is_none(),
+                "an early relay must not store the candidate"
+            );
+            assert_eq!(buffer.sends.lock().len(), 1, "early relay must send once");
+
+            // Certification claims the candidate and persists it.
+            assert!(
+                marshaled
+                    .certify(round, commitment)
+                    .await
+                    .await
+                    .expect("certify result missing"),
+                "certification must persist the claimed candidate"
+            );
+
+            // The lock-in finds nothing staged and must not send the candidate again.
+            let feedback = marshaled.broadcast(commitment, Plan::Propose { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            assert_eq!(
+                marshal
+                    .get_verified(round)
+                    .await
+                    .map(|block| block.commitment()),
+                Some(commitment),
+                "certification must store the candidate"
+            );
+            assert_eq!(
+                buffer.sends.lock().len(),
+                1,
+                "the lock-in must not send a claimed candidate again"
+            );
+        });
+    }
+
+    /// A prepare request builds on a parent that only our own vote may attest to, so it waits
+    /// for the parent locally and draws no peer fetch. Local reconstruction or the parent's
+    /// certification delivers it and completes the prepare. An ordinary propose fetches the
+    /// parent by round.
+    #[test_traced("WARN")]
+    fn test_coding_prepare_waits_for_parent_without_fetching() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "prepare-parent-wait",
+                provider.clone(),
+                buffer.clone(),
+            )
+            .await;
+            let shards = start_shard_mailbox(
+                context.child("shards"),
+                participants.clone(),
+                provider.clone(),
+            )
+            .await;
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let (parent_ctx, parent) = missing_candidate(participants[1].clone());
+            let parent_round = parent_ctx.round;
+            let ctx = CodingCtx {
+                round: Round::new(Epoch::zero(), parent_round.view().next()),
+                leader: participants[0].clone(),
+                parent: (parent_round.view(), parent.commitment()),
+            };
+            let child = make_coding_block(ctx.clone(), parent.digest(), Height::new(2), 7);
+            let child_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                child.clone(),
+                coding_config,
+                &Sequential,
+            )
+            .commitment();
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new()
+                    .with_handoff(Handoff::Stage(()))
+                    .with_propose_result(child),
+                marshal: marshal.clone(),
+                shards,
+                scheme_provider: provider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // The actor issues any peer fetch for a missing block before it registers the local
+            // wait, so a registered wait shows the prepare's parent lookup has been handled. The
+            // runner timeout is only a hang guard for this loop.
+            let decision = marshaled.prepare(ctx.clone()).await;
+            while buffer.commitment_subscription_count() == 0 {
+                reschedule().await;
+            }
+            assert!(
+                resolver.fetches().is_empty(),
+                "prepare must not fetch its parent"
+            );
+
+            // An ordinary propose on the same parent fetches it by round. The runner timeout is
+            // only a hang guard for this loop.
+            let proposal = marshaled.propose(ctx).await;
+            while resolver.fetches().is_empty() {
+                reschedule().await;
+            }
+
+            // Local delivery of the parent completes both requests without another fetch.
+            assert!(marshal.verified(parent_round, parent).await);
+            assert_eq!(
+                decision.await.expect("prepare decision missing"),
+                Handoff::Stage(child_commitment)
+            );
+            assert_eq!(
+                proposal.await.expect("propose should produce a commitment"),
+                child_commitment
+            );
+            let fetches = resolver.fetches();
+            assert_eq!(fetches.len(), 1, "only the propose may fetch the parent");
+            assert!(matches!(
+                fetches[0].key,
+                handler::Key::Notarized { round } if round == parent_round
+            ));
+        });
+    }
+
+    /// Coding validators vote on a block before reconstructing it, so a notarized or locally
+    /// voted parent of a handoff can carry any height. A parent outside the request's epoch,
+    /// up to the maximum height, yields no ancestry, as it can never certify, while a parent
+    /// inside the epoch still builds.
+    #[test_traced("WARN")]
+    fn test_coding_prepare_skips_parent_outside_epoch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let genesis = genesis_block();
+            let genesis_parent_commitment = genesis_coding_commitment(&genesis);
+
+            for (view, height, built) in [
+                (1, Height::new(u64::MAX), false),
+                (3, Height::new(3 * BLOCKS_PER_EPOCH.get()), false),
+                (5, Height::new(1), true),
+            ] {
+                let parent_round = Round::new(Epoch::zero(), View::new(view));
+                let parent_ctx = CodingCtx {
+                    round: parent_round,
+                    leader: participants[1].clone(),
+                    parent: (View::zero(), genesis_parent_commitment),
+                };
+                let parent_block = make_coding_block(parent_ctx, genesis.digest(), height, view);
+                let parent_digest = parent_block.digest();
+                let parent = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                    parent_block,
+                    coding_config,
+                    &Sequential,
+                );
+                let parent_commitment = parent.commitment();
+                assert!(setup.mailbox.verified(parent_round, parent).await);
+
+                let ctx = CodingCtx {
+                    round: Round::new(Epoch::zero(), View::new(view + 1)),
+                    leader: me.clone(),
+                    parent: (View::new(view), parent_commitment),
+                };
+                let child = make_coding_block(ctx.clone(), parent_digest, Height::new(2), 7);
+                let child_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                    child.clone(),
+                    coding_config,
+                    &Sequential,
+                )
+                .commitment();
+                let cfg = MarshaledConfig {
+                    application: MockVerifyingApp::<CodingB, S>::new()
+                        .with_handoff(Handoff::Stage(()))
+                        .with_propose_result(child),
+                    marshal: setup.mailbox.clone(),
+                    shards: setup.extra.clone(),
+                    scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    strategy: Sequential,
+                };
+                let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+                let decision = marshaled
+                    .prepare(ctx)
+                    .await
+                    .await
+                    .expect("prepare must return a decision");
+                let expected = if built {
+                    Handoff::Stage(child_commitment)
+                } else {
+                    Handoff::Wait
+                };
+                assert_eq!(decision, expected, "parent height {height:?}");
+            }
+        });
+    }
+
+    /// The genesis parent of a later epoch is the previous epoch's boundary block, whose
+    /// height maps to the previous epoch. A handoff on that parent at view zero must still
+    /// build the epoch's first block rather than decline as a parent outside the epoch.
+    #[test_traced("WARN")]
+    fn test_coding_prepare_builds_on_epoch_genesis() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let genesis = genesis_block();
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+
+            // Store the last block of epoch 0, which is the genesis of epoch 1.
+            let boundary_height = epocher.last(Epoch::zero()).expect("epoch 0 exists");
+            let boundary_round = Round::new(Epoch::zero(), View::new(BLOCKS_PER_EPOCH.get()));
+            let boundary_ctx = CodingCtx {
+                round: boundary_round,
+                leader: participants[1].clone(),
+                parent: (View::zero(), genesis_coding_commitment(&genesis)),
+            };
+            let boundary_block =
+                make_coding_block(boundary_ctx, genesis.digest(), boundary_height, 1);
+            let boundary_digest = boundary_block.digest();
+            let boundary = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                boundary_block,
+                coding_config,
+                &Sequential,
+            );
+            let boundary_commitment = boundary.commitment();
+            assert!(setup.mailbox.verified(boundary_round, boundary).await);
+
+            // The first proposal of epoch 1 names the boundary block at view zero.
+            let ctx = CodingCtx {
+                round: Round::new(Epoch::new(1), View::new(1)),
+                leader: me.clone(),
+                parent: (View::zero(), boundary_commitment),
+            };
+            let child = make_coding_block(ctx.clone(), boundary_digest, boundary_height.next(), 2);
+            let child_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                child.clone(),
+                coding_config,
+                &Sequential,
+            )
+            .commitment();
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new()
+                    .with_handoff(Handoff::Stage(()))
+                    .with_propose_result(child),
+                marshal: setup.mailbox.clone(),
+                shards: setup.extra.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher,
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+            let decision = marshaled
+                .prepare(ctx)
+                .await
+                .await
+                .expect("prepare must return a decision");
+            assert_eq!(decision, Handoff::Stage(child_commitment));
+        });
+    }
+
+    /// A leader that crashes between its relay broadcast and the journaling
+    /// of its notarize vote holds a verified block for the round on restart.
+    /// No vote names that block, so it cannot be notarized, and the restarted
+    /// leader builds a fresh one on the recovered context whatever the stored
+    /// block's own context says. The request is a handoff, which builds through
+    /// the same checks as an ordinary proposal and answers under the
+    /// application's decision. The relay persist stores the fresh block beside
+    /// the stale one.
+    ///
+    /// Both blocks must then survive another restart. Reading them back
+    /// afterwards checks storage itself, since the in-memory cache that serves
+    /// a block right after it is sent does not survive the restart.
+    #[test_traced("WARN")]
+    fn test_propose_rebuilds_despite_verified_block_on_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let Fixture {
@@ -4954,8 +5521,6 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
-            let marshal = setup.mailbox;
-            let shards = setup.extra;
 
             let genesis_ctx = CodingCtx {
                 round: Round::zero(),
@@ -4965,73 +5530,146 @@ mod tests {
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
             let genesis_parent_commitment = genesis_coding_commitment(&genesis);
 
-            let round = Round::new(Epoch::zero(), View::new(1));
+            // The stale block was built on a parent that replay has since
+            // replaced, and its relay broadcast persisted it at the round.
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let stale_ctx = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (
+                    View::new(1),
+                    TestCommitment::from((
+                        Sha256::hash(&[b"replaced-parent-block"]),
+                        Sha256::hash(&[b"replaced-parent-inner"]),
+                        Sha256::hash(&[b"replaced-parent-ctx"]),
+                        coding_config,
+                    )),
+                ),
+            };
+            let stale = make_coding_block(stale_ctx, genesis.digest(), Height::new(1), 100);
+            let stale_digest = stale.digest();
+            let coded_stale: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+                CodedBlock::new(stale, coding_config, &Sequential);
+            let stale_commitment = coded_stale.commitment();
+            let (ack, persisted) = oneshot::channel();
+            let _ = setup
+                .mailbox
+                .proposed(round, coded_stale, Recipients::All, ack);
+            let sync = persisted.await.expect("stale block sync handle missing");
+            assert!(sync.durable(round, "stale block").await);
+            setup.crash().await;
+
+            let setup = CodingHarness::setup_validator(
+                context.child("restarted").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox.clone();
+            assert_eq!(
+                marshal
+                    .get_verified(round)
+                    .await
+                    .map(|block| block.commitment()),
+                Some(stale_commitment),
+                "the restarted marshal must restore the stale block"
+            );
+
             let ctx = CodingCtx {
                 round,
                 leader: me.clone(),
                 parent: (View::zero(), genesis_parent_commitment),
             };
-
-            // Seed block A in marshal's verified cache for `round`.
-            let block_a = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), 100);
-            let coded_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
-                CodedBlock::new(block_a.clone(), coding_config, &Sequential);
-            let commitment_a = coded_a.commitment();
-            assert!(marshal.verified(round, coded_a).await);
-
-            // The app cannot build (`propose` returns None) and its
-            // verification never completes, so the assertions below hold
-            // only if the stored block is reused as-is and certification
-            // resolves through the durability gate registered by the
-            // recovery staging.
-            let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
-                GatedVerifyingApp::new();
+            let fresh = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), 200);
+            let fresh_digest = fresh.digest();
+            let fresh_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                fresh.clone(),
+                coding_config,
+                &Sequential,
+            )
+            .commitment();
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new()
+                .with_handoff(Handoff::Vote(()))
+                .with_propose_result(fresh);
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
-                shards: shards.clone(),
+                shards: setup.extra.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            let commitment = marshaled
-                .propose(ctx)
+            let decision = marshaled
+                .prepare(ctx)
                 .await
                 .await
-                .expect("propose must return a commitment");
+                .expect("prepare must return a decision");
             assert_eq!(
-                commitment, commitment_a,
-                "propose must reuse the block marshal already persisted for this round"
+                decision,
+                Handoff::Vote(fresh_commitment),
+                "a restarted leader must build a fresh block under the application's decision"
             );
 
-            // The relay broadcast must find the recovered proposal staged and
-            // re-persist it (a dedup no-op whose handle covers the pre-crash
-            // write), resolving the certification gate registered by the
-            // recovery path.
-            let _ = marshaled.broadcast(commitment, Plan::Propose { round });
-            let certify_rx = marshaled.certify(round, commitment).await;
-            select! {
-                result = certify_rx => {
-                    assert!(
-                        result.expect("certify result missing"),
-                        "recovered proposal must certify through the relay handshake"
-                    );
-                },
-                _ = verify_started => {
-                    panic!("certifying a recovered proposal must not run app verification");
-                },
+            let _ = marshaled.broadcast(fresh_commitment, Plan::Propose { round });
+            assert!(
+                marshaled
+                    .certify(round, fresh_commitment)
+                    .await
+                    .await
+                    .expect("certify result missing"),
+                "the fresh block must certify through the relay handshake"
+            );
+            assert_eq!(
+                marshal
+                    .get_verified(round)
+                    .await
+                    .map(|block| block.commitment()),
+                Some(stale_commitment),
+                "the stale block stays stored first at the round"
+            );
+            setup.crash().await;
+
+            let setup = CodingHarness::setup_validator(
+                context.child("recovered").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            for (label, digest) in [("stale", stale_digest), ("fresh", fresh_digest)] {
+                assert!(
+                    setup.mailbox.get_block(&digest).await.is_some(),
+                    "the {label} block must be recoverable from storage"
+                );
             }
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new(),
+                marshal: setup.mailbox.clone(),
+                shards: setup.extra.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut certifier = Marshaled::new(context.child("certifier"), cfg);
+            assert!(
+                certifier
+                    .certify(round, fresh_commitment)
+                    .await
+                    .await
+                    .expect("certify result missing"),
+                "the fresh block must certify from storage after a restart"
+            );
         });
     }
 
-    /// Regression: a boundary re-proposal stores the parent block itself at
-    /// the re-proposal round, under the parent's original embedded context.
-    /// A leader that crashes after that relay broadcast must recognize the
-    /// cached parent as the re-proposal on restart and propose it again,
-    /// rather than skipping the round because its embedded context names an
-    /// older round.
+    /// A boundary re-proposal stores the parent block itself at the
+    /// re-proposal round, under the parent's original embedded context. A
+    /// leader that crashes after that relay broadcast fetches the stored
+    /// parent by its commitment on restart and re-proposes it, and the relay
+    /// persist deduplicates against the pre-crash write.
     #[test_traced("WARN")]
     fn test_propose_reuses_reproposed_boundary_block_on_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -5130,95 +5768,6 @@ mod tests {
                     panic!("certifying a re-proposed boundary block must not run app verification");
                 },
             }
-        });
-    }
-
-    /// Regression: if a pre-crash leader persisted a verified block for a
-    /// round but the simplex `Notarize` never reached the journal, replay
-    /// can recover a `consensus_context` whose parent differs from the one
-    /// the cached block was built against. The restarted leader must then
-    /// drop the receiver so the voter nullifies the view via
-    /// `MissingProposal`, rather than broadcasting the stale cached block
-    /// under a header that peers will reject.
-    #[test_traced("WARN")]
-    fn test_propose_skips_when_verified_block_context_changed() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(60));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                participants.clone(),
-            )
-            .await;
-
-            let me = participants[0].clone();
-            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
-
-            let setup = CodingHarness::setup_validator(
-                context.child("validator").with_attribute("index", 0),
-                &mut oracle,
-                me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
-            )
-            .await;
-            let marshal = setup.mailbox;
-            let shards = setup.extra;
-
-            let genesis_ctx = CodingCtx {
-                round: Round::zero(),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()),
-            };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
-            let genesis_parent_commitment = genesis_coding_commitment(&genesis);
-
-            // Stash a stale block built against genesis as its parent at round V=2.
-            let round = Round::new(Epoch::zero(), View::new(2));
-            let stale_ctx = CodingCtx {
-                round,
-                leader: me.clone(),
-                parent: (View::zero(), genesis_parent_commitment),
-            };
-            let stale_block = make_coding_block(stale_ctx, genesis.digest(), Height::new(1), 100);
-            let stale_coded: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
-                CodedBlock::new(stale_block, coding_config, &Sequential);
-            assert!(marshal.verified(round, stale_coded).await);
-
-            // Simulate a replay where parent selection now points to a
-            // different parent commitment than the cached block was built for.
-            let new_parent_commitment = TestCommitment::from((
-                Sha256::hash(&[b"different-parent-block"]),
-                Sha256::hash(&[b"different-parent-inner"]),
-                Sha256::hash(&[b"different-parent-ctx"]),
-                coding_config,
-            ));
-            let new_ctx = CodingCtx {
-                round,
-                leader: me.clone(),
-                parent: (View::new(1), new_parent_commitment),
-            };
-
-            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
-            let cfg = MarshaledConfig {
-                application: mock_app,
-                marshal: marshal.clone(),
-                shards: shards.clone(),
-                scheme_provider: ConstantProvider::new(schemes[0].clone()),
-                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                strategy: Sequential,
-            };
-            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
-
-            let commitment_rx = marshaled.propose(new_ctx).await;
-            assert!(
-                commitment_rx.await.is_err(),
-                "propose must drop the receiver when the cached block's context no longer matches"
-            );
         });
     }
 }

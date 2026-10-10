@@ -113,8 +113,9 @@ pub struct Round<S: Scheme, D: Digest> {
     certify: CertifyState,
     last_ancestry_request: Option<View>,
 
-    // Proposal and resolved parent payload selected when peer verification
-    // started. A certificate may replace either while the request is in flight.
+    // Proposal and exact parent payload captured by peer verification, by
+    // recording a local proposal, or recovered from a replayed local vote. A
+    // certificate may replace either.
     verifying: Option<(Proposal<D>, D)>,
 }
 
@@ -171,6 +172,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(leader)
     }
 
+    /// Clears the local proposal request. A new build may follow only while
+    /// the slot has no proposal.
+    pub const fn clear_proposal_request(&mut self) {
+        self.proposal.clear_request();
+    }
+
     /// Returns the leader info if we should verify a proposal.
     fn verify_ready(&self) -> Option<&Leader<S::PublicKey>> {
         let leader = self.leader.as_ref()?;
@@ -201,8 +208,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.request_verify()
     }
 
-    /// Records the ancestry view that proposal verification requested from the
-    /// leader. Returns `false` for a repeated request.
+    /// Records the ancestry view that proposal verification requested. Returns
+    /// `false` for a repeated request.
     ///
     /// Certification repair bypasses this latch so an untargeted request can
     /// widen the resolver fetch.
@@ -214,12 +221,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         true
     }
 
-    /// Records the proposal and parent payload selected when verification started.
+    /// Records the proposal and its captured parent payload.
     pub const fn set_verifying(&mut self, proposal: Proposal<D>, parent_payload: D) {
         self.verifying = Some((proposal, parent_payload));
     }
 
-    /// Returns the proposal binding recorded when verification started, if any.
+    /// Returns the known proposal and parent binding, if any.
     pub const fn verifying(&self) -> Option<&(Proposal<D>, D)> {
         self.verifying.as_ref()
     }
@@ -431,6 +438,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     pub fn elapsed_since_start(&self, now: SystemTime) -> Option<Duration> {
         self.proposed_at
             .or(self.entered_at)
+            .map(|start| now.duration_since(start).unwrap_or_default())
+    }
+
+    /// Returns time since the local node first entered this view, ignoring when it built its own
+    /// proposal. None if it never entered the view.
+    pub fn elapsed_since_entry(&self, now: SystemTime) -> Option<Duration> {
+        self.entered_at
             .map(|start| now.duration_since(start).unwrap_or_default())
     }
 
@@ -867,6 +881,7 @@ mod tests {
         // Never started: no sample.
         let mut round = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
         assert!(round.elapsed_since_start(at(5)).is_none());
+        assert!(round.elapsed_since_entry(at(5)).is_none());
 
         // Follower: anchored at view entry, first entry wins.
         round.mark_entered(at(1));
@@ -876,15 +891,26 @@ mod tests {
             Some(Duration::from_secs(4))
         );
 
+        assert_eq!(
+            round.elapsed_since_entry(at(5)),
+            Some(Duration::from_secs(4))
+        );
+
         // Optimistic leader: proposing before entering the view anchors the
         // sample at the proposal.
         let mut round = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
         let proposal = Proposal::new(round_info, View::new(9), Sha256Digest::from([1u8; 32]));
         assert!(round.proposed(at(2), proposal.clone()));
+        assert!(round.elapsed_since_entry(at(3)).is_none());
         round.mark_entered(at(4));
         assert_eq!(
             round.elapsed_since_start(at(6)),
             Some(Duration::from_secs(4))
+        );
+
+        assert_eq!(
+            round.elapsed_since_entry(at(6)),
+            Some(Duration::from_secs(2))
         );
 
         // Normal leader: the proposal anchors the sample even when the view
@@ -895,6 +921,10 @@ mod tests {
         assert_eq!(
             round.elapsed_since_start(at(6)),
             Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            round.elapsed_since_entry(at(6)),
+            Some(Duration::from_secs(5))
         );
     }
 
