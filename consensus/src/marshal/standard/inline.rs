@@ -46,13 +46,13 @@
 //! - You are willing to perform full application verification before casting a notarize vote.
 
 use crate::{
-    Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
+    Application, Automaton, Block, CertifiableAutomaton, Epochable, Handoff, Relay, Reporter,
     marshal::{
         Update,
         ancestry::Ancestry,
         application::{
             gates::{GateOutcome, Gates},
-            prepare::Resolved,
+            prepare::{self, Resolved},
             propose, relay,
         },
         core::{CommitmentFallback, DigestFallback, Mailbox},
@@ -526,6 +526,36 @@ where
     B: Block,
     ES: Epocher,
 {
+    /// Prepares a term-start proposal on an uncertified parent.
+    ///
+    /// The application receives the parent as a [`Parent`](crate::marshal::ancestry::Parent)
+    /// handle. Asking the handle for the ancestry runs the same checks as [`Self::propose`], in the
+    /// same order. When those checks find the epoch boundary block, the marshal re-proposes it
+    /// without the application and answers [`Handoff::Stage`]. An application that declines without
+    /// asking costs no fetch, and if it also completes on its first poll, it is answered
+    /// [`Handoff::Wait`] on this task without a spawn.
+    #[allow(clippy::async_yields_async)]
+    #[tracing::instrument(name = "marshal.inline.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
+    async fn prepare(
+        &mut self,
+        consensus_context: Context<Self::Digest, S::PublicKey>,
+    ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+        let checks = self.checks(consensus_context.clone());
+        let span = info_span!(
+            "marshal.inline.application.prepare",
+            round = %consensus_context.round
+        );
+        prepare::request(
+            self.context.as_ref(),
+            &self.application,
+            self.gates.clone(),
+            consensus_context,
+            checks,
+            span,
+            |block: B, ()| (block.digest(), Arc::new(block)),
+        )
+    }
+
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {

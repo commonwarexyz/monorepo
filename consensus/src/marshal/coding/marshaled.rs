@@ -80,14 +80,14 @@
 //! ```
 
 use crate::{
-    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
-    Relay, Reporter,
+    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
+    Heightable, Relay, Reporter,
     marshal::{
         Update,
         ancestry::Ancestry,
         application::{
             gates::{self, GateOutcome, Gates},
-            prepare::Resolved,
+            prepare::{self, Resolved},
             propose, relay,
             validation::{
                 Stage, is_block_in_expected_epoch, is_inferred_reproposal_at_certify,
@@ -132,6 +132,7 @@ use tracing::{Instrument as _, debug, info_span, warn};
 /// epoch's participants to the sealing step.
 type CodingResolved<B, C, H, A> =
     Resolved<Commitment<B, C, H>, CodedBlock<B, C, H>, A, CodingConfig>;
+
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
 pub struct MarshaledConfig<A, B, C, H, Z, S, ES>
@@ -1060,6 +1061,43 @@ where
     S: Strategy,
     ES: Epocher,
 {
+    /// Prepares a term-start proposal on an uncertified parent.
+    ///
+    /// The application receives the parent as a [`Parent`](crate::marshal::ancestry::Parent)
+    /// handle. Asking the handle for the ancestry runs the same checks as [`Self::propose`], in the
+    /// same order, except that a parent missing locally is awaited rather than fetched. When those
+    /// checks find the epoch boundary block, the marshal re-proposes it without the application and
+    /// answers [`Handoff::Stage`]. An application that declines without asking costs no lookup or
+    /// fetch, and if it also completes on its first poll, it is answered [`Handoff::Wait`] on this
+    /// task without a spawn. A round without a scheme answers [`Handoff::Wait`] as well.
+    #[allow(clippy::async_yields_async)]
+    #[tracing::instrument(name = "marshal.coding.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
+    async fn prepare(
+        &mut self,
+        consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
+    ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+        let round = consensus_context.round;
+        let strategy = self.strategy.clone();
+        let erasure_encode_duration = self.erasure_encode_duration.clone();
+        let clock = self.context.clone();
+        let checks = self.checks(consensus_context.clone(), core::CommitmentFallback::Wait);
+        let span = info_span!("marshal.coding.application.prepare", round = %round);
+        prepare::request(
+            self.context.as_ref(),
+            &self.application,
+            self.gates.clone(),
+            consensus_context,
+            checks,
+            span,
+            move |block: B, coding_config| {
+                let erasure_timer = erasure_encode_duration.timer(&*clock);
+                let coded_block = CodedBlock::<B, C, H>::new(block, coding_config, &strategy);
+                erasure_timer.observe(&*clock);
+                (coded_block.commitment(), Arc::new(coded_block))
+            },
+        )
+    }
+
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {

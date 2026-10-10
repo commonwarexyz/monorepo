@@ -59,7 +59,7 @@ pub use variant::Standard;
 mod tests {
     use super::{Deferred, Inline, Standard};
     use crate::{
-        Automaton, CertifiableAutomaton, Heightable, Relay, Reporter,
+        Automaton, CertifiableAutomaton, Handoff, Heightable, Relay, Reporter,
         marshal::{
             Identifier, Update,
             ancestry::BlockProvider,
@@ -2201,6 +2201,15 @@ mod tests {
     }
 
     impl CertifiableAutomaton for Wrapper {
+        async fn prepare(
+            &mut self,
+            context: Self::Context,
+        ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+            match self {
+                Self::Inline(inline) => inline.prepare(context).await,
+                Self::Deferred(deferred) => deferred.prepare(context).await,
+            }
+        }
         async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
             Self::certify(self, round, digest).await
         }
@@ -3595,7 +3604,7 @@ mod tests {
                     leader: me.clone(),
                     parent: (View::zero(), genesis.digest()),
                 };
-                let proposal_rx = wrapper.propose(non_boundary_context).await;
+                let proposal_rx = wrapper.propose(non_boundary_context.clone()).await;
                 assert!(
                     proposal_rx.await.is_err(),
                     "{kind:?}: proposal should be dropped when application returns no block"
@@ -3606,6 +3615,29 @@ mod tests {
                         .contains("wrapper_under_test_build_duration_count 0"),
                     "{kind:?}: failed application builds should not be timed"
                 );
+
+                // A failed build answers Wait, so consensus can still request an ordinary
+                // proposal once the parent certifies.
+                let failing_app = MockVerifyingApp::new().with_handoff(Handoff::Stage(()));
+                let mut failing =
+                    Wrapper::new(kind, context.child("failed"), failing_app, marshal.clone());
+                let handoff_rx = failing.prepare(non_boundary_context.clone()).await;
+                assert_eq!(
+                    handoff_rx.await.expect("handoff decision missing"),
+                    Handoff::Wait,
+                    "{kind:?}: a failed handoff build must answer Wait"
+                );
+
+                // Dropping a prepare response must cancel the application's build.
+                let (gated_app, started, dropped) = MockVerifyingApp::new()
+                    .with_handoff(Handoff::Vote(()))
+                    .with_proposal_gate();
+                let mut gated =
+                    Wrapper::new(kind, context.child("cancelled"), gated_app, marshal.clone());
+                let response = gated.prepare(non_boundary_context.clone()).await;
+                started.await.expect("handoff build should start");
+                drop(response);
+                assert!(dropped.await.is_err(), "handoff build should be cancelled");
 
                 // Boundary propose should re-propose the parent block even if the app cannot build.
                 let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
@@ -3638,6 +3670,13 @@ mod tests {
                     leader: me,
                     parent: (View::new(boundary_height.get()), boundary_digest),
                 };
+                let handoff_rx = wrapper.prepare(reproposal_context.clone()).await;
+                assert_eq!(
+                    handoff_rx.await.expect("handoff decision missing"),
+                    Handoff::Wait,
+                    "{kind:?}: application Wait must precede automatic boundary reproposal"
+                );
+
                 let reproposal_rx = wrapper.propose(reproposal_context).await;
                 assert_eq!(
                     reproposal_rx.await.expect("reproposal result missing"),
@@ -3655,6 +3694,45 @@ mod tests {
                 assert!(
                     marshal.get_verified(reproposal_round).await.is_some(),
                     "{kind:?}: re-proposed boundary block must be stored at the re-proposal round"
+                );
+
+                // An accepted handoff takes the automatic boundary re-proposal path, and the
+                // marshal discards the block that the application returns despite the absent
+                // ancestry. The re-proposed block carries no application decision, so it is
+                // answered Stage.
+                let pipeline_round =
+                    Round::new(Epoch::zero(), View::new(boundary_height.get() + 2));
+                let pipeline_context = Ctx {
+                    round: pipeline_round,
+                    leader: default_leader(),
+                    parent: (View::new(boundary_height.get()), boundary_digest),
+                };
+                let unwanted = B::new::<Sha256>(
+                    pipeline_context.clone(),
+                    boundary_digest,
+                    boundary_height.next(),
+                    2000,
+                );
+                let pipeline_app = MockVerifyingApp::new()
+                    .with_handoff(Handoff::Vote(()))
+                    .with_propose_result(unwanted)
+                    .ignoring_absence();
+                let mut pipeline = Wrapper::new(
+                    kind,
+                    context.child("pipeline"),
+                    pipeline_app,
+                    marshal.clone(),
+                );
+                let pipeline_rx = pipeline.prepare(pipeline_context.clone()).await;
+                assert_eq!(
+                    pipeline_rx.await.expect("pipeline result missing"),
+                    Handoff::Stage(boundary_digest),
+                    "{kind:?}: a re-proposed boundary block is staged regardless of the decision"
+                );
+                let certify_rx = pipeline.certify(pipeline_round, boundary_digest).await;
+                assert!(
+                    certify_rx.await.expect("pipeline certify result missing"),
+                    "{kind:?}: pipelined boundary re-proposal must certify"
                 );
             });
         }
@@ -3802,6 +3880,293 @@ mod tests {
                 );
             });
         }
+    }
+
+    /// Returns whether the runtime spawned a task whose label contains `label`.
+    fn spawned_task(metrics: &str, label: &str) -> bool {
+        metrics
+            .lines()
+            .any(|line| line.starts_with("runtime_tasks_spawned_total{") && line.contains(label))
+    }
+
+    /// A prepare request costs a declining application nothing beyond the call: no parent
+    /// fetch, no build, and no task.
+    ///
+    /// A block returned without asking for the parent is discarded, whether the build
+    /// completes on its first poll or from a task, so the checks always precede a staged
+    /// block. A block stored for the round before a restart does not replace the
+    /// application's build.
+    ///
+    /// An application that asks builds on the fetched parent and is answered under its
+    /// decision.
+    #[test_traced("WARN")]
+    fn test_prepare_paths() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let mut oracle = setup_network_with_participants(
+                    context.child("network"),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let me = participants[0].clone();
+                let setup = StandardHarness::setup_validator(
+                    context.child("validator").with_attribute("index", 0),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let marshal = setup.mailbox;
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+                let handoff_context = Ctx {
+                    round: Round::new(Epoch::zero(), View::new(1)),
+                    leader: me.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let child = B::new::<Sha256>(
+                    handoff_context.clone(),
+                    genesis.digest(),
+                    Height::new(1),
+                    100,
+                );
+
+                // The default declines on the caller's task without touching marshal.
+                let mut declining = Wrapper::new(
+                    kind,
+                    context.child("declining"),
+                    MockVerifyingApp::<B, S>::new(),
+                    marshal.clone(),
+                );
+                let response = declining.prepare(handoff_context.clone()).await;
+                assert_eq!(
+                    response.await.expect("prepare decision missing"),
+                    Handoff::Wait,
+                    "{kind:?}: the default prepare declines"
+                );
+                let metrics = context.encode();
+                assert!(
+                    metrics.contains("declining_parent_fetch_duration_count 0"),
+                    "{kind:?}: a declining prepare must not fetch the parent"
+                );
+                assert!(
+                    !spawned_task(&metrics, "declining_prepare"),
+                    "{kind:?}: a declining prepare must not spawn a task"
+                );
+
+                // A block returned without asking for the parent is discarded.
+                let unasked_app = MockVerifyingApp::new()
+                    .with_handoff(Handoff::Stage(()))
+                    .with_propose_result(child.clone())
+                    .without_parent();
+                let mut unasked =
+                    Wrapper::new(kind, context.child("unasked"), unasked_app, marshal.clone());
+                let response = unasked.prepare(handoff_context.clone()).await;
+                assert_eq!(
+                    response.await.expect("prepare decision missing"),
+                    Handoff::Wait,
+                    "{kind:?}: a block built without the parent handle must be discarded"
+                );
+                assert!(
+                    context
+                        .encode()
+                        .contains("unasked_parent_fetch_duration_count 0"),
+                    "{kind:?}: an unasked prepare must not fetch the parent"
+                );
+
+                // The same block is discarded when the unasked build completes from a task.
+                let suspended_app = MockVerifyingApp::new()
+                    .with_handoff(Handoff::Vote(()))
+                    .with_propose_result(child.clone())
+                    .without_parent()
+                    .suspending();
+                let mut suspended = Wrapper::new(
+                    kind,
+                    context.child("suspended"),
+                    suspended_app,
+                    marshal.clone(),
+                );
+                let response = suspended.prepare(handoff_context.clone()).await;
+                assert_eq!(
+                    response.await.expect("prepare decision missing"),
+                    Handoff::Wait,
+                    "{kind:?}: an unasked block completed from a task must be discarded"
+                );
+                let metrics = context.encode();
+                assert!(
+                    metrics.contains("suspended_parent_fetch_duration_count 0"),
+                    "{kind:?}: a suspended unasked prepare must not fetch the parent"
+                );
+                assert!(
+                    spawned_task(&metrics, "suspended_prepare"),
+                    "{kind:?}: a suspended prepare is driven by a task"
+                );
+
+                // A block stored for the round before a restart does not decide the view: the
+                // application builds on the parent named by the recovered context and is
+                // answered under its decision, whatever the stored block's own context says.
+                let rebuilt_round = Round::new(Epoch::zero(), View::new(2));
+                let stored = B::new::<Sha256>(
+                    Ctx {
+                        round: rebuilt_round,
+                        leader: me.clone(),
+                        parent: (View::new(1), Sha256::hash(&[b"replaced parent"])),
+                    },
+                    genesis.digest(),
+                    Height::new(1),
+                    101,
+                );
+                assert!(marshal.clone().verified(rebuilt_round, stored).await);
+                let rebuilt_context = Ctx {
+                    round: rebuilt_round,
+                    leader: me.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let rebuilt = B::new::<Sha256>(
+                    rebuilt_context.clone(),
+                    genesis.digest(),
+                    Height::new(1),
+                    102,
+                );
+                let rebuilding_app = MockVerifyingApp::new()
+                    .with_handoff(Handoff::Vote(()))
+                    .with_propose_result(rebuilt.clone());
+                let mut rebuilding = Wrapper::new(
+                    kind,
+                    context.child("rebuilding"),
+                    rebuilding_app,
+                    marshal.clone(),
+                );
+                let response = rebuilding.prepare(rebuilt_context).await;
+                assert_eq!(
+                    response.await.expect("prepare decision missing"),
+                    Handoff::Vote(rebuilt.digest()),
+                    "{kind:?}: a stored block must not replace the application's build"
+                );
+
+                for (label, decision) in [
+                    ("staging", Handoff::Stage(())),
+                    ("voting", Handoff::Vote(())),
+                ] {
+                    let asking_app = MockVerifyingApp::new()
+                        .with_handoff(decision)
+                        .with_propose_result(child.clone());
+                    let mut asking =
+                        Wrapper::new(kind, context.child(label), asking_app, marshal.clone());
+                    let response = asking.prepare(handoff_context.clone()).await;
+                    assert_eq!(
+                        response.await.expect("prepare decision missing"),
+                        decision.map(|()| child.digest()),
+                        "{kind:?}: a prepared block carries the application's {label} decision"
+                    );
+                    let metrics = context.encode();
+                    assert!(
+                        metrics.contains(&format!("{label}_parent_fetch_duration_count 1")),
+                        "{kind:?}: an asking prepare fetches the parent once"
+                    );
+                    assert!(
+                        metrics.contains(&format!("{label}_build_duration_count 1")),
+                        "{kind:?}: a prepared build is timed"
+                    );
+                    assert!(
+                        spawned_task(&metrics, &format!("{label}_prepare")),
+                        "{kind:?}: an asking prepare is driven by a task"
+                    );
+                }
+            });
+        }
+    }
+
+    /// Deferred votes on a block before checking its parent link, so a pipelined
+    /// handoff can request a build on a parent whose link was never validated. The
+    /// build may walk ancestry only through the parent that the tip's own consensus
+    /// context names.
+    ///
+    /// The application returns its block even when the parent handle yields no
+    /// ancestry, so the unlinked case also checks that the marshal discards it.
+    #[test_traced("WARN")]
+    fn test_deferred_handoff_rejects_unvalidated_parent_link() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+
+            // Both outgoing tips carry an authentic consensus context naming genesis.
+            // Only the second also links to genesis.
+            let tip_round = Round::new(Epoch::zero(), View::new(1));
+            let tip_context = Ctx {
+                round: tip_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let forged = B::new::<Sha256>(
+                tip_context.clone(),
+                Sha256::hash(&[b"forged parent link"]),
+                Height::new(1),
+                100,
+            );
+            let linked = B::new::<Sha256>(tip_context, genesis.digest(), Height::new(1), 101);
+            for (label, tip, built) in [("forged", &forged, false), ("linked", &linked, true)] {
+                assert!(marshal.clone().verified(tip_round, tip.clone()).await);
+                let handoff_context = Ctx {
+                    round: Round::new(Epoch::zero(), View::new(2)),
+                    leader: me.clone(),
+                    parent: (View::new(1), tip.digest()),
+                };
+                let child =
+                    B::new::<Sha256>(handoff_context.clone(), tip.digest(), Height::new(2), 200);
+                let app = MockVerifyingApp::new()
+                    .with_handoff(Handoff::Stage(()))
+                    .with_propose_result(child.clone())
+                    .ignoring_absence();
+                let mut deferred = Wrapper::new(
+                    WrapperKind::Deferred,
+                    context.child(label),
+                    app,
+                    marshal.clone(),
+                );
+                let response = deferred.prepare(handoff_context).await.await;
+                let expected = if built {
+                    Handoff::Stage(child.digest())
+                } else {
+                    Handoff::Wait
+                };
+                assert_eq!(
+                    response.expect("handoff decision missing"),
+                    expected,
+                    "{label}: a handoff build must require a parent linked to its context"
+                );
+            }
+        });
     }
     #[test_traced("WARN")]
     fn test_verify_reproposal_validation() {
