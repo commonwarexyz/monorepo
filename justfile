@@ -191,7 +191,7 @@ udeps:
 
 # Run the tests in the `miri` test group under Miri (optionally filtered: just miri -p commonware-runtime iobuf::)
 miri *args='':
-    MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --lib {{ args }}
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --profile miri --lib {{ args }}
 
 # Run zepter feature checks
 check-features:
