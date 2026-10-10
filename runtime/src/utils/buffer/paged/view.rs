@@ -276,6 +276,25 @@ impl<B: Blob> View<'_, B> {
         Ok(offsets.len() - blob_reads)
     }
 
+    /// Read the pages covering the `(offset, len)` byte ranges (ascending by offset) into the
+    /// page cache ahead of their first request, returning how many pages were read from the
+    /// blob. Ranges are clipped to `tail_offset`: later bytes are already in memory. See
+    /// [CacheRef::warm].
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn warm(&self, ranges: &[(u64, u64)]) -> Result<usize, Error> {
+        let page_size: u64 = self.cache_ref.page_size().widen();
+        let mut pages: Vec<u64> = Vec::with_capacity(ranges.len());
+        for &(offset, len) in ranges {
+            let end = offset.saturating_add(len).min(self.tail_offset);
+            if offset >= end {
+                continue;
+            }
+            let next = pages.last().map_or(0, |&last| last + 1);
+            pages.extend((offset / page_size).max(next)..=(end - 1) / page_size);
+        }
+        self.cache_ref.warm(self.blob, self.id, &pages).await
+    }
+
     /// Like [`Self::read_many_into`], but synchronous and cache-only.
     ///
     /// Items fully served from the in-memory tail and page cache are written to their slots in

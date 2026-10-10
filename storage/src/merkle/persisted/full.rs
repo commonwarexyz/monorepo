@@ -672,6 +672,20 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             .collect())
     }
 
+    /// Return a future that reads the stored nodes at `positions` (strictly increasing) into
+    /// the page cache. Memory-resident nodes are skipped. See [Contiguous::prefetch].
+    pub(crate) fn prefetch_nodes(
+        &self,
+        positions: &[Position<F>],
+    ) -> impl core::future::Future<Output = ()> + Send + 'static + use<F, E, D, S> {
+        let stored: Vec<u64> = positions
+            .iter()
+            .filter(|&&position| self.mem.get_node(position).is_none())
+            .map(|&position| *position)
+            .collect();
+        self.journal.prefetch(&stored)
+    }
+
     /// Return the pinned nodes needed to authenticate a lower leaf boundary at `loc`.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<D>, Error<F>> {
         if !loc.is_valid() {
