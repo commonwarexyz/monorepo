@@ -1402,6 +1402,71 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    /// Ranges that are not block-aligned, under a layout whose data offset is not block-aligned
+    /// either, are served by direct reads of their aligned superset, including a superset that
+    /// ends past the unaligned end of the blob. A range past the end fails as read_at does.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_read_many_serves_unaligned_ranges_directly() {
+        const BLOCK: usize = 4096;
+        const LEN: usize = BLOCK + 1000;
+        let data: Vec<u8> = (0..LEN).map(|i| (i % 251) as u8).collect();
+        for layout in [Layout::V0, Layout::V1] {
+            let (storage, directory) = storage_for_reopen_test(
+                &format!("read_many_unaligned_{layout:?}"),
+                layout..=layout,
+            );
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            assert!(
+                aio::direct(&blob.shared).is_some(),
+                "temporary directory must support O_DIRECT"
+            );
+            blob.write_at(0, data.clone(), WriteOptions::default())
+                .await
+                .unwrap();
+
+            // Within a block, across a block boundary, up to the end, and the whole blob.
+            let ranges = [
+                (100u64, 50usize),
+                (BLOCK as u64 - 3, 6),
+                (BLOCK as u64 + 500, 500),
+                (LEN as u64 - 1, 1),
+                (0, LEN),
+            ];
+            let before = blob.shared.test.direct_reads.load(Ordering::Relaxed);
+            let bufs: Vec<(usize, IoBufsMut)> = blob
+                .read_many(&ranges, ReadOptions::DONT_CACHE)
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(
+                blob.shared.test.direct_reads.load(Ordering::Relaxed) - before,
+                ranges.len()
+            );
+            assert_eq!(bufs.len(), ranges.len());
+            for (index, bufs) in bufs {
+                let (offset, len) = ranges[index];
+                let offset = usize::try_from(offset).unwrap();
+                assert_eq!(bufs.coalesce().as_ref(), &data[offset..offset + len]);
+            }
+
+            // A range ending one byte past the end fails as read_at does.
+            let result = blob
+                .read_many(&[(LEN as u64 - 100, 101)], ReadOptions::DONT_CACHE)
+                .try_collect::<Vec<_>>()
+                .await;
+            assert!(matches!(
+                result,
+                Err(Error::Io(ref err)) if err.kind() == std::io::ErrorKind::UnexpectedEof
+            ));
+
+            drop(blob);
+            storage.remove("partition", None).await.unwrap();
+            drop(storage);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
     /// A batched direct read goes through its own open file description, and the kernel writes
     /// the range's dirty pages back before a direct read, so the batch sees every buffered write
     /// that completed before it, synced or not.
