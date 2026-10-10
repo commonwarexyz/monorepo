@@ -20,7 +20,7 @@ use crate::{
         authenticated::{Backing as _, BackingRecovery as _, Stored},
         contiguous::{
             Contiguous, Many,
-            fixed::{Admission, Config as JConfig, Journal, Recovery as JournalRecovery},
+            fixed::{Config as JConfig, Journal, Recovery as JournalRecovery},
         },
     },
     merkle::{
@@ -635,8 +635,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Returns [`Error::ElementPruned`] for the first of `positions` that falls below the
     /// journal's pruning boundary.
     pub async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
-        self.get_nodes_with_admission(positions, Admission::Admit)
-            .await
+        self.get_nodes_with_admission(positions, true).await
     }
 
     /// A read-only view that uses resident pages but does not admit pages on cache misses.
@@ -650,7 +649,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     async fn get_nodes_with_admission(
         &self,
         positions: &[Position<F>],
-        admission: Admission,
+        admit: bool,
     ) -> Result<Vec<D>, Error<F>> {
         assert!(
             positions.is_sorted_by(|a, b| a < b),
@@ -675,9 +674,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let items = if journal_positions.is_empty() {
             Vec::new()
         } else {
-            match admission {
-                Admission::Admit => self.journal.read_many(&journal_positions).await,
-                Admission::Bypass => self.journal.read_many_uncached(&journal_positions).await,
+            if admit {
+                self.journal.read_many(&journal_positions).await
+            } else {
+                self.journal.read_many_uncached(&journal_positions).await
             }
             .map_err(Error::Journal)?
         };
@@ -1097,11 +1097,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Stor
     }
 
     async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
-        match self
-            .0
-            .get_nodes_with_admission(&[position], Admission::Bypass)
-            .await
-        {
+        match self.0.get_nodes_with_admission(&[position], false).await {
             Ok(nodes) => Ok(Some(nodes[0])),
             Err(Error::ElementPruned(_)) => Ok(None),
             Err(error) => Err(error),
@@ -1109,9 +1105,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Stor
     }
 
     async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
-        self.0
-            .get_nodes_with_admission(positions, Admission::Bypass)
-            .await
+        self.0.get_nodes_with_admission(positions, false).await
     }
 }
 

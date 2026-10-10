@@ -152,7 +152,9 @@ impl<B: Blob> Sealed<B> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
-        self.view().read_many_into(buf, offsets, item_size).await
+        self.view()
+            .read_many_into(buf, offsets, item_size, true)
+            .await
     }
 
     /// Like [`Self::read_many_into`], but cache misses read from the blob without admitting
@@ -165,7 +167,7 @@ impl<B: Blob> Sealed<B> {
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
         self.view()
-            .read_many_into_uncached(buf, offsets, item_size)
+            .read_many_into(buf, offsets, item_size, false)
             .await
     }
 

@@ -967,7 +967,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         // validated against `bounds`, so the offsets journal must have them.
         let fetched = self
             .offsets
-            .read_many_inner(&unresolved)
+            .read_many_inner(&unresolved, true)
             .await
             .map_err(|e| match e {
                 Error::ItemOutOfRange(e) | Error::ItemPruned(e) => {

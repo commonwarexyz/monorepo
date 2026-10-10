@@ -1554,22 +1554,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 }
 
-/// Whether a batched read admits faulted pages into the page cache.
-#[derive(Clone, Copy)]
-pub(crate) enum Admission {
-    /// Cache faulted pages for future reads.
-    Admit,
-    /// Do not cache faulted pages.
-    #[cfg(not(any(
-        commonware_stability_BETA,
-        commonware_stability_GAMMA,
-        commonware_stability_DELTA,
-        commonware_stability_EPSILON,
-        commonware_stability_RESERVED
-    )))] // ALPHA
-    Bypass,
-}
-
 /// Implementation of [super::Mutable] for fixed-size value journals.
 ///
 /// # Repair
@@ -1608,10 +1592,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         }
         let _timer = self.0.metrics.read_many_timer();
         self.0.metrics.read_many_calls.inc();
-        self.0
-            .reader()
-            .read_many_admission(positions, Admission::Bypass)
-            .await
+        self.0.reader().read_many_inner(positions, false).await
     }
 
     /// Initialize a new `Journal` instance.
@@ -1818,20 +1799,14 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         Ok((blob, offsets))
     }
 
-    /// Shared body of [`super::Contiguous::read_many`] and the variable journal's offsets
-    /// reads; the callers record the batch-read metrics, so routing them through `read_many`
-    /// would count every batch twice.
-    pub(super) fn read_many_inner(
+    /// Shared body of [`super::Contiguous::read_many`], `Journal::read_many_uncached`, and the
+    /// variable journal's offsets reads; the callers record the batch-read metrics, so routing
+    /// them through `read_many` would count every batch twice. Pages read from the blobs enter
+    /// the page cache only when `admit` is set.
+    pub(super) async fn read_many_inner(
         &self,
         positions: &[u64],
-    ) -> impl Future<Output = Result<Vec<A>, Error>> + Send {
-        self.read_many_admission(positions, Admission::Admit)
-    }
-
-    async fn read_many_admission(
-        &self,
-        positions: &[u64],
-        admission: Admission,
+        admit: bool,
     ) -> Result<Vec<A>, Error> {
         if positions.is_empty() {
             return Ok(Vec::new());
@@ -1869,26 +1844,16 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             let (group_buf, rest) = remaining_buf.split_at_mut(group.len() * A::SIZE);
             remaining_buf = rest;
             reads.push(async move {
-                match admission {
-                    Admission::Admit => {
-                        blob.read_many_into(group_buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE)
-                            .await
-                    }
-                    #[cfg(not(any(
-                        commonware_stability_BETA,
-                        commonware_stability_GAMMA,
-                        commonware_stability_DELTA,
-                        commonware_stability_EPSILON,
-                        commonware_stability_RESERVED
-                    )))] // ALPHA
-                    Admission::Bypass => {
-                        blob.read_many_into_uncached(
-                            group_buf,
-                            &blob_offsets,
-                            Inner::<E, A>::CHUNK_SIZE,
-                        )
+                if admit {
+                    blob.read_many_into(group_buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE)
                         .await
-                    }
+                } else {
+                    blob.read_many_into_uncached(
+                        group_buf,
+                        &blob_offsets,
+                        Inner::<E, A>::CHUNK_SIZE,
+                    )
+                    .await
                 }
             });
         }
@@ -2023,7 +1988,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         }
         let _timer = self.metrics.read_many_timer();
         self.metrics.read_many_calls.inc();
-        self.read_many_inner(positions).await
+        self.read_many_inner(positions, true).await
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
