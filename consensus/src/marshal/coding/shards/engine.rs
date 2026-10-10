@@ -107,6 +107,11 @@
 //! _Per-peer buffers are only kept for peers in `latest.primary`, matching [`commonware_broadcast::buffered`].
 //! When a peer is no longer in `latest.primary`, all its buffered shards are evicted._
 //!
+//! _A buffered shard has no epoch yet, so its coding config cannot be checked against the
+//! epoch's participants. A config with fewer minimum shards would let a peer buffer wider shards.
+//! Shards are therefore buffered only under the canonical coding config for at least as many
+//! participants as `latest.primary` holds._
+//!
 //! # Peer Validation and Blocking Rules
 //!
 //! The engine enforces strict validation to prevent Byzantine attacks:
@@ -154,7 +159,7 @@ use super::{
 use crate::{
     Block, CertifiableBlock, Heightable,
     marshal::coding::{
-        types::{CodedBlock, Shard},
+        types::{CodedBlock, Shard, coding_config_for_participants},
         validation::{ReconstructionError as InvariantError, validate_reconstruction},
     },
     types::{Epoch, Round, coding::Commitment},
@@ -177,6 +182,7 @@ use commonware_runtime::{
     telemetry::metrics::HistogramExt,
 };
 use commonware_utils::{
+    Faults, N3f1,
     bitmap::BitMap,
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Aborter},
@@ -220,6 +226,19 @@ pub enum Error<C: CodingScheme> {
     /// The reconstructed block is larger than the maximum block size
     #[error("oversized block: reconstructed block exceeds the maximum block size")]
     Oversized,
+}
+
+/// Returns whether `config` is the canonical coding config for at least `participants`
+/// participants.
+fn covers_participants(config: CodingConfig, participants: usize) -> bool {
+    let Ok(total) = u16::try_from(config.total_shards()) else {
+        return false;
+    };
+
+    // [`coding_config_for_participants`] requires enough participants to tolerate a fault.
+    usize::from(total) >= participants
+        && N3f1::max_faults(total) > 0
+        && config == coding_config_for_participants(total)
 }
 
 /// The outcome of a reconstruction job.
@@ -388,9 +407,9 @@ where
     /// [`Mailbox::notarized`].
     ///
     /// The shard buffers hold at most `peer_buffer_size` shards per `latest.primary` peer. Each
-    /// shard is no wider than the coding scheme produces for a `max_block_size` block under the
-    /// coding config the shard claims. A config that claims one minimum shard makes a shard span
-    /// the whole coded block, so each peer buffers about `peer_buffer_size` blocks.
+    /// shard is no wider than the coding scheme produces for a `max_block_size` block coded for
+    /// `latest.primary`, so each peer buffers about `peer_buffer_size` such shards. A shard that
+    /// claims a coding config for fewer participants than `latest.primary` holds is not buffered.
     pub peer_buffer_size: NonZeroUsize,
 
     /// The maximum number of commitment records retained.
@@ -1174,6 +1193,13 @@ where
             debug!(
                 ?peer,
                 "pre-leader shard from peer outside latest.primary not buffered"
+            );
+            return;
+        }
+        if !covers_participants(shard.commitment().config(), self.latest_primary_peers.len()) {
+            debug!(
+                ?peer,
+                "pre-leader shard with coding config not covering latest.primary not buffered"
             );
             return;
         }
@@ -1997,7 +2023,7 @@ mod tests {
     use commonware_parallel::{Manual, Rayon, Sequential};
     use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic, utils::reschedule};
     use commonware_utils::{
-        N3f1, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
+        N3f1, NZU16, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
         probability, sync::Mutex,
     };
     use futures::FutureExt as _;
@@ -7755,6 +7781,58 @@ mod tests {
                 !engine.peer_buffers.contains_key(&sender_pk),
                 "peer buffer should be evicted once sender leaves latest.primary"
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_preleader_shard_with_narrow_coding_config_is_not_buffered() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    max_peers_per_set: NZUsize!(7),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let mut private_keys: Vec<PrivateKey> = (0..7).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|key| key.public_key());
+            let sender = private_keys[1].public_key();
+            let (mut engine, _) =
+                unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16), STRATEGY).await;
+
+            // Fewer minimum shards widen each shard, so only the canonical config for at least
+            // the seven primary peers is buffered.
+            let cases = [
+                (coding_config_for_participants(4), false),
+                (
+                    CodingConfig {
+                        minimum_shards: NZU16!(1),
+                        extra_shards: NZU16!(6),
+                    },
+                    false,
+                ),
+                (coding_config_for_participants(7), true),
+                (coding_config_for_participants(10), true),
+            ];
+            for (config, expected) in cases {
+                let block = CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
+                    config,
+                    &STRATEGY,
+                );
+                let shard = block.shard(1).expect("missing shard");
+                engine.buffer_peer_shard(sender.clone(), shard);
+                assert_eq!(
+                    buffered(&engine, &sender, block.commitment()),
+                    usize::from(expected),
+                    "unexpected buffering for {config:?}"
+                );
+            }
         });
     }
 
