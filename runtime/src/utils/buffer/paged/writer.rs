@@ -63,6 +63,7 @@ use commonware_utils::Widen;
 use std::{
     marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
+    ops::Range,
     sync::Arc,
 };
 use tracing::warn;
@@ -965,6 +966,14 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     /// Returns the size of the blob.
     pub const fn size(&self) -> u64 {
         self.buffer.size()
+    }
+
+    /// Drop this blob's cached pages that end within `(range.start, range.end]` (logical byte
+    /// offsets). Callers advancing a boundary pass the previous boundary as `range.start`, so each
+    /// page is dropped once. The bytes remain readable.
+    pub fn evict_cached(&self, range: Range<u64>) {
+        self.cache_ref
+            .evict_ending_in(self.id, range, self.buffer.size());
     }
 
     /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync.
@@ -2163,6 +2172,43 @@ mod tests {
             // A read straddling the cached first page and the uncached second page misses.
             let mut buf = vec![0xAA; 4];
             assert!(!append.try_read_sync_into(&mut buf, (page_size - 2) as u64));
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_evict_cached_drops_pages_ending_in_range() {
+        // Eviction drops the cached pages that end within the range, and their bytes stay
+        // readable from the blob.
+        fn cached<B: Blob>(append: &Writer<B>, page: u64) -> bool {
+            let page_size = PAGE_SIZE.get() as usize;
+            let mut probe = vec![0u8; page_size];
+            let offset = page * page_size as u64;
+            append.cache_ref.read_cached(append.id, &mut probe, offset) == page_size
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"evict").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as u64;
+            let data: Vec<u8> = (0..page_size * 7 / 2).map(|i| (i % 251) as u8).collect();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
+            assert!((0..3).all(|page| cached(&append, page)));
+
+            // Page 0 ends past the range start and page 1 ends at the range end. Page 2 ends
+            // beyond it.
+            append.evict_cached(page_size / 2..2 * page_size);
+            assert!(!cached(&append, 0));
+            assert!(!cached(&append, 1));
+            assert!(cached(&append, 2));
+
+            let read = append.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read, &data[..]);
         });
     }
 

@@ -15,6 +15,7 @@ use futures::{
 use std::{
     collections::hash_map::Entry,
     num::{NonZeroU16, NonZeroUsize},
+    ops::Range,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -541,6 +542,33 @@ impl CacheRef {
             };
         }
         cached
+    }
+
+    /// Drop the cached pages of blob `blob_id` numbered in `pages`, freeing their slots for new
+    /// pages. The bytes remain readable from the blob.
+    fn evict(&self, blob_id: u64, pages: Range<u64>) {
+        // Bound how long one acquisition holds the write lock against readers.
+        const PAGES_PER_LOCK: u64 = 4096;
+
+        let mut start = pages.start;
+        while start < pages.end {
+            let end = pages.end.min(start.saturating_add(PAGES_PER_LOCK));
+            let mut cache = self.cache.write();
+            for page_num in start..end {
+                cache.cache.remove(&(blob_id, page_num));
+            }
+            start = end;
+        }
+    }
+
+    /// Drop the cached pages of blob `blob_id` (of logical `size` bytes) that end within
+    /// `(range.start, range.end]`: pages lying entirely below `range.end` but not entirely below
+    /// `range.start`.
+    pub(super) fn evict_ending_in(&self, blob_id: u64, range: Range<u64>, size: u64) {
+        let page_size: u64 = self.page_size.widen();
+        let first = range.start / page_size;
+        let end = range.end.min(size) / page_size;
+        self.evict(blob_id, first..end);
     }
 
     /// Drop all cached pages while retaining the backing page buffers for reuse.
