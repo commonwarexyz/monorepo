@@ -50,11 +50,14 @@ impl Reporter for OrderedReporter {
     type Activity = Update<Block>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        let Update {
+        let Update::Block {
             index,
             block,
             acknowledgement,
-        } = activity;
+        } = activity
+        else {
+            return Feedback::Ok;
+        };
         let header = block.inner().header();
         let ordered = OrderedBlock {
             index: index.get(),
@@ -107,7 +110,7 @@ mod tests {
         for index in 1..=ORDERING_CAPACITY + 1 {
             let (acknowledgement, mut waiter) = Exact::handle();
             assert_eq!(
-                reporter.report(Update {
+                reporter.report(Update::Block {
                     index: OutputIndex::new(index as u64),
                     block: block.clone(),
                     acknowledgement,
