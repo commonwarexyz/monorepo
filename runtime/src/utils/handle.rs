@@ -152,22 +152,15 @@ where
     }
 }
 
-/// Polls a task future held in an [`UnsafeCell`], catching any panic it raises.
+/// Polls a task's future, catching any panic it raises.
 ///
-/// The cell keeps a shared reference to a wrapper around the future from conflicting with borrows
-/// the future holds into its own state.
-///
-/// A suspended `async` block can hold a reference into its own state across an `.await`, and
-/// [`Abortable`] checks for cancellation through `&self`, which covers the future it wraps. Safe
-/// code may create such shared references at any time (rust-lang/rust#137750), but until
-/// coroutines are built on `UnsafePinned` (rust-lang/rust#125735), Miri treats creating one as a
-/// read of the whole future that invalidates its borrows of itself, and reports undefined behavior
-/// when the resumed task uses them. Creating a shared reference does not read memory inside an
-/// `UnsafeCell`, and `UnsafeCell<F>` has the same layout as `F`.
-///
-/// Catching panics here saves a task from adding wrappers for that. Unoptimized builds give each
-/// wrapper built around the future its own stack slot the size of the future, in a frame that
-/// every poll of the task allocates, so every extra wrapper would grow the stack of every poll.
+/// The future lives in an [`UnsafeCell`], which has the same layout as `F`, so the shared
+/// reference [`Abortable`] takes to check for cancellation does not invalidate borrows the future
+/// holds into its own state. Catching panics here spares a task separate wrappers for that, each
+/// of which would add a stack slot the size of the future to every poll in unoptimized builds.
+// Miri treats creating a shared reference as a read of everything outside an `UnsafeCell`, which
+// conflicts with a suspended future's borrows of itself (rust-lang/rust#137750) until coroutines
+// are built on `UnsafePinned` (rust-lang/rust#125735).
 struct FutureCell<F>(UnsafeCell<F>);
 
 impl<F: Future> Future for FutureCell<F> {
