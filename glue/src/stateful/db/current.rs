@@ -4,7 +4,7 @@
 //! write, and return a `StaleRead` error once the database is at no state of that chain.
 
 use crate::stateful::db::{
-    Shared,
+    Prefetch, Shared,
     qmdb::{Merkleized, Qmdb, Unmerkleized},
 };
 use commonware_codec::Codec;
@@ -343,6 +343,24 @@ where
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
+    }
+}
+
+impl<F, E, C, I, H, U, const N: usize, S> Prefetch for Db<F, E, C, I, H, U, N, S>
+where
+    F: Graftable,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    type Key = U::Key;
+
+    fn prefetch(&self, keys: &[&U::Key]) -> impl Future<Output = ()> + Send + 'static {
+        Self::prefetch(self, keys)
     }
 }
 
