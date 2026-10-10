@@ -57,6 +57,7 @@ pub use variant::Standard;
 
 #[cfg(test)]
 mod tests {
+    mod pipeline;
     use super::{Deferred, Inline, Standard};
     use crate::{
         Automaton, CertifiableAutomaton, Handoff, Heightable, Relay, Reporter,
@@ -2210,6 +2211,7 @@ mod tests {
                 Self::Deferred(deferred) => deferred.prepare(context).await,
             }
         }
+
         async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
             Self::certify(self, round, digest).await
         }
@@ -4168,6 +4170,7 @@ mod tests {
             }
         });
     }
+
     #[test_traced("WARN")]
     fn test_verify_reproposal_validation() {
         for kind in wrapper_kinds() {
@@ -10648,6 +10651,169 @@ mod tests {
             assert_eq!(sends[0].1.digest(), digest);
             assert!(matches!(sends[0].2, Recipients::All));
         });
+    }
+
+    /// A boundary payload relayed before parent replacement is not sent again at lock-in.
+    #[test_traced("WARN")]
+    fn test_standard_boundary_restage_sends_once() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let outgoing = participants[0].clone();
+                let incoming = participants[1].clone();
+                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                let (mut marshal, buffer, _resolver, _actor_handle) = start_standard_actor(
+                    context.child("validator").with_attribute("index", 1),
+                    "boundary-restage",
+                    ConstantProvider::new(schemes[1].clone()),
+                    Application::<B>::manual_ack(),
+                    Some(RecordingBuffer::default()),
+                    Start::Genesis(genesis.clone().into()),
+                )
+                .await;
+                let buffer = buffer.expect("buffer was provided");
+                let mut wrapper = Wrapper::new(
+                    kind,
+                    context.child("wrapper"),
+                    MockVerifyingApp::new().with_handoff(Handoff::Stage(())),
+                    marshal.clone(),
+                );
+
+                let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+                let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
+                let mut boundary = genesis;
+                for height in 1..=boundary_height.get() {
+                    let parent = boundary.digest();
+                    let round = Round::new(Epoch::zero(), View::new(height));
+                    boundary = B::new::<Sha256>(
+                        Ctx {
+                            round,
+                            leader: outgoing.clone(),
+                            parent: (View::new(height - 1), parent),
+                        },
+                        parent,
+                        Height::new(height),
+                        height * 100,
+                    );
+                    assert!(marshal.verified(round, boundary.clone()).await);
+                }
+                let digest = boundary.digest();
+                let notarization = StandardHarness::make_notarization(
+                    Proposal::new(boundary_round, View::new(boundary_height.get() - 1), digest),
+                    &schemes,
+                    QUORUM,
+                );
+                StandardHarness::report_notarization(&mut marshal, notarization).await;
+                assert!(
+                    wrapper.certify(boundary_round, digest).await.await.unwrap(),
+                    "{kind:?}: boundary must certify"
+                );
+                assert!(
+                    marshal.get_info(boundary_height).await.is_none(),
+                    "the boundary is not finalized"
+                );
+
+                let outgoing_round = Round::new(Epoch::zero(), boundary_round.view().next());
+                let outgoing_context = Ctx {
+                    round: outgoing_round,
+                    leader: outgoing,
+                    parent: (boundary_round.view(), digest),
+                };
+                assert!(
+                    wrapper
+                        .verify(outgoing_context, digest)
+                        .await
+                        .await
+                        .unwrap(),
+                    "{kind:?}: the outgoing boundary re-proposal must verify"
+                );
+
+                let round = Round::new(Epoch::zero(), outgoing_round.view().next());
+                let held_context = Ctx {
+                    round,
+                    leader: incoming,
+                    parent: (outgoing_round.view(), digest),
+                };
+                assert_eq!(
+                    wrapper.prepare(held_context.clone()).await.await.unwrap(),
+                    Handoff::Stage(digest),
+                    "{kind:?}: prepare must reuse the boundary payload"
+                );
+                assert!(matches!(
+                    wrapper.broadcast(digest, Plan::Prepare { round }),
+                    Feedback::Ok
+                ));
+                wait_until(
+                    &context,
+                    Duration::from_secs(5),
+                    "early boundary send",
+                    || !buffer.sends().is_empty(),
+                )
+                .await;
+                assert_eq!(buffer.sends().len(), 1);
+                assert!(
+                    marshal.get_verified(round).await.is_none(),
+                    "the held candidate must not be stored"
+                );
+
+                // After the outgoing view is nullified, the incoming leader proposes on the
+                // certified predecessor. Both parent contexts name the boundary block.
+                let replacement_context = Ctx {
+                    parent: (boundary_round.view(), digest),
+                    ..held_context.clone()
+                };
+                assert_ne!(held_context.parent, replacement_context.parent);
+                assert_eq!(
+                    wrapper.propose(replacement_context).await.await.unwrap(),
+                    digest,
+                    "{kind:?}: the replacement must reuse the same payload"
+                );
+                assert!(
+                    marshal.get_verified(round).await.is_none(),
+                    "restaging must not store the replacement before lock-in"
+                );
+                assert!(matches!(
+                    wrapper.broadcast(digest, Plan::Propose { round }),
+                    Feedback::Ok
+                ));
+
+                let notarization = StandardHarness::make_notarization(
+                    Proposal::new(round, boundary_round.view(), digest),
+                    &schemes,
+                    QUORUM,
+                );
+                StandardHarness::report_notarization(&mut marshal, notarization).await;
+
+                // Certification must await the replacement stage's durability acknowledgement.
+                assert!(
+                    wrapper.certify(round, digest).await.await.unwrap(),
+                    "{kind:?}: the replacement durability gate must complete"
+                );
+                assert_eq!(
+                    marshal.get_verified(round).await.unwrap().digest(),
+                    digest,
+                    "{kind:?}: the replacement must be stored at the incoming round"
+                );
+                let sends = buffer.sends();
+                assert_eq!(
+                    sends.len(),
+                    1,
+                    "{kind:?}: replacing the parent must not resend the same boundary payload"
+                );
+                assert_eq!(sends[0].0, round);
+                assert_eq!(sends[0].1.digest(), digest);
+                assert!(matches!(sends[0].2, Recipients::All));
+            });
+        }
     }
 
     /// A proposer that relays conflicting blocks for the same round must not
