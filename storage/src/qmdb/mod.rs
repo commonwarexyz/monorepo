@@ -164,7 +164,7 @@ pub(crate) async fn validate_initialization<F, E, C, H, S>(
 where
     F: Family,
     E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    C: crate::journal::authenticated::Backing<E, Item: Floored<F>>,
     H: Hasher,
     S: commonware_parallel::Strategy,
 {
@@ -193,7 +193,7 @@ pub(crate) async fn prepare_initialization<F, E, C, H, S>(
 where
     F: Family,
     E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    C: crate::journal::authenticated::Backing<E, Item: Floored<F>>,
     H: Hasher,
     S: commonware_parallel::Strategy,
 {
@@ -221,7 +221,7 @@ pub(crate) async fn init_journal<F, E, C, H, S>(
 where
     F: Family,
     E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    C: crate::journal::authenticated::Backing<E, Item: Floored<F>>,
     H: Hasher,
     S: commonware_parallel::Strategy,
 {

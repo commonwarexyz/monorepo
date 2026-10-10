@@ -88,14 +88,12 @@ impl<D: Copy> Resident<D> {
         end: Position<F>,
         node: impl Fn(Position<F>) -> Option<D>,
     ) -> Result<(), merkle::Error<F>> {
-        let start_leaves = *Location::try_from(start)?;
-        let leaves = *Location::try_from(end)?;
+        let (before, after) = (born(start), born(end));
         for height in self.height..u64::BITS {
-            if 1u64 << height > leaves {
+            let (from, to) = (before[height as usize], after[height as usize]);
+            if to == 0 {
                 break;
             }
-            let root =
-                |ordinal: u64| F::subtree_root_position(Location::new(ordinal << height), height);
             let index = (height - self.height) as usize;
             if index == self.levels.len() {
                 self.levels.push(Level {
@@ -104,29 +102,16 @@ impl<D: Copy> Resident<D> {
                 });
             }
             let level = &mut self.levels[index];
-            let mut ordinal = if level.nodes.is_empty() {
-                // The subtree holding the next leaf is unborn; MMB may also delay earlier ones.
-                let mut ordinal = start_leaves >> height;
-                while ordinal > 0 && root(ordinal - 1) >= start {
-                    ordinal -= 1;
-                }
-                level.first = ordinal;
-                ordinal
-            } else {
-                level.first + level.nodes.len() as u64
-            };
-            loop {
-                let pos = root(ordinal);
-                if pos >= end {
-                    break;
-                }
-                if pos < start {
-                    return Err(merkle::Error::DataCorrupted("noncontiguous resident level"));
-                }
+            if level.nodes.is_empty() {
+                level.first = from;
+            } else if level.first + level.nodes.len() as u64 != from {
+                return Err(merkle::Error::DataCorrupted("noncontiguous resident level"));
+            }
+            for ordinal in from..to {
+                let pos = F::subtree_root_position(Location::new(ordinal << height), height);
                 level
                     .nodes
                     .push_back(node(pos).ok_or(merkle::Error::MissingNode(pos))?);
-                ordinal += 1;
             }
         }
         Ok(())
@@ -156,6 +141,20 @@ impl<D: Copy> Resident<D> {
             (len + level.nodes.len(), capacity + level.nodes.capacity())
         })
     }
+}
+
+/// The number of nodes of each height born by `size`, a size of the structure. These are the
+/// first ordinals of each height. Counting under the peaks (a peak of height `p` covers `2^(p - h)`
+/// nodes of height `h`) never places a node that is not born, which can lie past the supported
+/// range.
+fn born<F: Family>(size: Position<F>) -> [u64; u64::BITS as usize] {
+    let mut born = [0; u64::BITS as usize];
+    for (_, peak) in F::peaks(size) {
+        for h in 0..=peak {
+            born[h as usize] += 1 << (peak - h);
+        }
+    }
+    born
 }
 
 /// Digests below the resident height for one aligned region of leaves, in height-major slots:
@@ -280,7 +279,7 @@ impl<F: Family> Encoded<F> {
     }
 
     /// Hash each leaf, in push order.
-    fn hash<D: Digest, H: Hasher<F, Digest = D> + Clone>(
+    fn hash<D: Digest, H: Hasher<F, Digest = D>>(
         &self,
         strategy: &impl Strategy,
         hasher: &H,
@@ -361,7 +360,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     ) -> Result<Self, super::Error<F>>
     where
         C: ReplayEncoded,
-        H: Hasher<F, Digest = D> + Clone + Send + Sync + 'static,
+        H: Hasher<F, Digest = D> + 'static,
     {
         if !end.is_valid()
             || end < self.leaves()
@@ -423,7 +422,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         encoded: Encoded<F>,
     ) -> Result<Self, super::Error<F>>
     where
-        H: Hasher<F, Digest = D> + Clone + Send + Sync + 'static,
+        H: Hasher<F, Digest = D> + 'static,
     {
         if encoded.leaves.is_empty() {
             return Ok(self);
@@ -579,7 +578,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     ) -> Result<Vec<D>, merkle::Error<F>>
     where
         C: Contiguous<Item: EncodeShared>,
-        H: Hasher<F, Digest = D> + Clone + Send + Sync + 'static,
+        H: Hasher<F, Digest = D> + 'static,
     {
         assert!(
             positions.is_sorted_by(|a, b| a < b),
@@ -641,7 +640,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     ) -> Result<Vec<D>, merkle::Error<F>>
     where
         C: Contiguous<Item: EncodeShared>,
-        H: Hasher<F, Digest = D> + Clone + Send + Sync + 'static,
+        H: Hasher<F, Digest = D> + 'static,
     {
         let positions: Vec<_> = F::nodes_to_pin(location).collect();
         let mut sorted = positions.clone();
@@ -661,7 +660,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     ) -> Result<Option<D>, merkle::Error<F>>
     where
         C: Contiguous<Item: EncodeShared>,
-        H: Hasher<F, Digest = D> + Clone + Send + Sync + 'static,
+        H: Hasher<F, Digest = D> + 'static,
     {
         if !self.available(pos) {
             return Ok(None);
@@ -698,7 +697,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     ) -> Result<Arc<Region<D>>, merkle::Error<F>>
     where
         C: Contiguous<Item: EncodeShared>,
-        H: Hasher<F, Digest = D> + Clone + Send + Sync + 'static,
+        H: Hasher<F, Digest = D> + 'static,
     {
         let _guard = self.regions.fill_lock(index).lock().await;
         let old = self.regions.get(index);
@@ -764,6 +763,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         // also past it or pinned. A pinned parent with both children present checks them, which
         // covers regions whose root is unborn.
         let mut parents = 0;
+        let born = born(size);
         for h in 1..height {
             let (row, below) = (self.regions.row(h), self.regions.row(h - 1));
             for i in 0..width >> h {
@@ -771,10 +771,10 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 if region.get(slot).is_some() {
                     continue;
                 }
-                let pos = F::subtree_root_position(Location::new(base + (i << h)), h);
-                if pos >= size {
+                if (base >> h) + i >= born[h as usize] {
                     break;
                 }
+                let pos = F::subtree_root_position(Location::new(base + (i << h)), h);
                 let pinned = self.mem.get_node(pos);
                 if pinned.is_none() && pos < boundary {
                     continue;
@@ -834,6 +834,8 @@ mod tests {
 
     struct Operations {
         bounds: Range<u64>,
+        /// The location `reads` counts from.
+        origin: u64,
         reads: Vec<AtomicUsize>,
         /// A location whose stored operation differs from the one replayed, or `u64::MAX`.
         corrupt: AtomicU64,
@@ -841,9 +843,13 @@ mod tests {
 
     impl Operations {
         fn new(end: u64) -> Self {
+            Self::range(0..end)
+        }
+        fn range(bounds: Range<u64>) -> Self {
             Self {
-                bounds: 0..end,
-                reads: (0..end).map(|_| AtomicUsize::new(0)).collect(),
+                origin: bounds.start,
+                reads: bounds.clone().map(|_| AtomicUsize::new(0)).collect(),
+                bounds,
                 corrupt: AtomicU64::new(u64::MAX),
             }
         }
@@ -874,7 +880,7 @@ mod tests {
                 self.bounds.contains(&position),
                 "reconstructed an unavailable operation at {position}"
             );
-            self.reads[position as usize].fetch_add(1, Ordering::Relaxed);
+            self.reads[(position - self.origin) as usize].fetch_add(1, Ordering::Relaxed);
             Ok(self.item(position))
         }
         async fn read_many(&self, positions: &[u64]) -> Result<Vec<u64>, JournalError> {
@@ -1054,6 +1060,40 @@ mod tests {
     #[test]
     fn reconstructs_mmb() {
         deterministic::Runner::default().start(reconstruction::<mmb::Family>);
+    }
+
+    /// Appending up to just below the largest supported size, and rebuilding the regions there,
+    /// never places a node that is not born yet.
+    fn appends_near_maximum<F: Family>() {
+        deterministic::Runner::default().start(|context| async move {
+            let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+            let boundary = Location::<F>::new(*F::MAX_LEAVES - 40);
+            let ops = Operations::range(*boundary..*F::MAX_LEAVES - 1);
+            let pins = F::nodes_to_pin(boundary).map(|_| Sha256::fill(7)).collect();
+            let tree =
+                Tree::<F, D, _>::new(boundary, pins, &config(5, 0, 73), Metrics::new(&context))
+                    .unwrap();
+            let mut batch = tree.new_batch();
+            for loc in ops.bounds.clone() {
+                batch = batch.add(&hasher, &ops.item(loc).encode());
+            }
+            let batch = batch.merkleize(tree.mem(), &hasher);
+            let tree = tree.apply_batch(&batch).unwrap();
+            assert_eq!(*tree.leaves(), ops.bounds.end);
+            for loc in ops.bounds.clone() {
+                let pos = F::location_to_position(Location::new(loc));
+                assert!(tree.get_node(&ops, &hasher, pos).await.unwrap().is_some());
+            }
+        });
+    }
+
+    #[test]
+    fn appends_near_maximum_mmr() {
+        appends_near_maximum::<mmr::Family>();
+    }
+    #[test]
+    fn appends_near_maximum_mmb() {
+        appends_near_maximum::<mmb::Family>();
     }
 
     async fn demand_cache<F: Family>(context: deterministic::Context) {

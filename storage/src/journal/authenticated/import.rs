@@ -35,9 +35,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Import<F, E, D, S> {
             .await?
             .begin_import()
             .await?;
+        let merkle = context.child("merkle");
         Ok(Self {
             frontier,
-            metrics: Metrics::new(&context.child("merkle")),
+            metrics: Metrics::new(&merkle),
             tree: None,
         })
     }
@@ -85,7 +86,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Import<F, E, D, S> {
     ) -> Result<Local<D>, Error<F>>
     where
         C: ReplayEncoded,
-        H: Hasher<F, Digest = D> + Clone + Send + Sync + 'static,
+        H: Hasher<F, Digest = D> + 'static,
     {
         let Some(boundary) = self.frontier.boundary() else {
             return Ok(Local::Unchecked);

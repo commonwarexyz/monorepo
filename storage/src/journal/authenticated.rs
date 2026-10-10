@@ -910,7 +910,7 @@ impl<F, E, C, H, S> Recovery<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Backing<E, Item: EncodeShared>,
+    C: Backing<E>,
     H: Hasher,
     S: Strategy,
 {
@@ -974,7 +974,7 @@ impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Backing<E, Item: EncodeShared>,
+    C: Backing<E>,
     H: Hasher,
     S: Strategy,
 {
@@ -1037,11 +1037,12 @@ where
         .await?;
         let active = frontier.active_boundary()?;
         let boundary = active.map(|boundary| boundary.location);
+        let merkle_context = context.child("merkle");
         let merkle = Tree::new(
             boundary.unwrap_or(Location::new(0)),
             active.map_or_else(Vec::new, |boundary| boundary.digests.clone()),
             &merkle_cfg,
-            Metrics::new(&context.child("merkle")),
+            Metrics::new(&merkle_context),
         )?;
 
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;

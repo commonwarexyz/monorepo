@@ -27,7 +27,6 @@ where
     C: Mutable<Item = Operation<F, K, V>>
         + sync::Journal<F, Context = E, Op = Operation<F, K, V>>
         + crate::journal::authenticated::ReplayEncoded,
-    C::Item: EncodeShared,
     C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
