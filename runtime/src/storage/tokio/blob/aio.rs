@@ -1,30 +1,33 @@
-//! Linux native AIO: submit a batch of `O_DIRECT` reads from one thread and reap completions
-//! as they arrive. Unlike a thread per read, the device sees the whole batch at once and the
-//! submitting thread pays only a few microseconds per read.
+//! Linux native AIO: submit one ring's worth of `O_DIRECT` reads from one thread and reap
+//! completions as they arrive. Unlike a thread per read, the device sees them all at once and
+//! the submitting thread pays only a few microseconds per read.
 
 use super::*;
 use crate::{BLOB_PAGE_SIZE, BufMut as _, IoBufMut};
 use commonware_utils::NZUsize;
 use std::os::unix::fs::OpenOptionsExt as _;
 
-/// Reads one blocking task submits as a single batch in [`crate::Blob::read_many`].
+/// Reads an AIO context holds at once (`io_setup`'s `nr_events`, the analog of an io_uring
+/// ring's entries), and so the reads one blocking task submits through one context in
+/// [`crate::Blob::read_many`].
 ///
-/// A submission is one device queue's worth of reads: NVMe queues hold 256 to 1024 commands,
-/// and a queue depth of 256 saturates the devices this runtime targets. Larger batches split
-/// into that many reads per submitting task, so submission cost spreads across tasks while
-/// each task keeps a full queue in flight.
-pub(super) const SUBMISSION: usize = 256;
+/// One ring is one device queue's worth of reads: NVMe queues hold 256 to 1024 commands, and
+/// a queue depth of 256 saturates the devices this runtime targets. A larger `read_many`
+/// splits into that many reads per task, so issue cost spreads across tasks while each task
+/// keeps a full queue in flight.
+pub(super) const RING_SIZE: usize = 256;
 
-/// Reads issued per `io_submit` call before the completions that have landed are reaped.
+/// Reads issued per `io_submit` call (the analog of SQEs per `io_uring_enter`) before the
+/// completions that have landed are reaped.
 ///
-/// The kernel spends about 2 us issuing each direct read, so a whole submission takes
-/// longer to issue than one read takes to complete. Reaping between slices lets the
-/// earliest completions reach the stream while the rest of the submission is still being
-/// issued, at the cost of one non-blocking `io_getevents` per slice. Slices much smaller
-/// than this pay more in per-call overhead than they return.
-const SLICE: usize = 32;
+/// The kernel spends about 2 us issuing each direct read, so filling a whole ring takes
+/// longer than one read takes to complete. Reaping between calls lets the earliest
+/// completions reach the stream while the rest of the ring is still being issued, at the
+/// cost of one non-blocking `io_getevents` per call. Much smaller batches pay more in
+/// per-call overhead than they return.
+const SUBMIT_BATCH: usize = 32;
 
-/// A pending read: its index in the batch and the physical file range.
+/// A pending read: its index among the `read_many` call's ranges and the physical file range.
 pub(super) struct Read {
     pub(super) index: usize,
     pub(super) offset: u64,
@@ -91,7 +94,7 @@ const IOCB_CMD_PREAD: u16 = 0;
 ///
 /// Destroying a context waits for RCU grace periods (~30 ms), so one is destroyed only when
 /// a submission fails with reads in flight, because the slab must outlive them. Every
-/// pooled context charges [SUBMISSION] against the host-wide `fs.aio-max-nr` budget (65,536
+/// pooled context charges [RING_SIZE] against the host-wide `fs.aio-max-nr` budget (65,536
 /// by default, so 256 contexts) until the process exits and the kernel reclaims them. A
 /// submission that cannot obtain a context is served one blocking task per read, and other
 /// users of Linux AIO on the same host see that budget as taken.
@@ -115,7 +118,7 @@ impl Drop for Context {
 /// across a syscall.
 static CONTEXTS: Mutex<Vec<Context>> = Mutex::new(Vec::new());
 
-/// Take a pooled context or create one sized for a full submission. `None` when the kernel
+/// Take a pooled context or create one with [RING_SIZE] slots. `None` when the kernel
 /// cannot create one, for example when its outstanding-request limit (`fs.aio-max-nr`) is
 /// exhausted.
 fn take_context() -> Option<Context> {
@@ -124,7 +127,7 @@ fn take_context() -> Option<Context> {
     }
     let mut ctx: libc::c_ulong = 0;
     // SAFETY: `io_setup` writes the new context handle to the valid out pointer.
-    let r = unsafe { libc::syscall(libc::SYS_io_setup, SUBMISSION as libc::c_ulong, &mut ctx) };
+    let r = unsafe { libc::syscall(libc::SYS_io_setup, RING_SIZE as libc::c_ulong, &mut ctx) };
     (r == 0).then(|| Context(ctx))
 }
 
@@ -137,7 +140,7 @@ fn read_positioned(file: &Shared, pool: &BufferPool, read: &Read) -> Completion 
     Ok((read.index, buf.into()))
 }
 
-/// Submit every read in `batch` through `ctx`, delivering each one as it completes. A read
+/// Submit every read in `reads` through `ctx`, delivering each one as it completes. A read
 /// the kernel rejects, fails, or completes short is served by [`read_positioned`] instead.
 /// Returns `ctx` once every submitted read has completed. On error, dropping it waits for the
 /// reads still in flight.
@@ -146,11 +149,11 @@ fn submit(
     direct: &File,
     pool: &BufferPool,
     ctx: Context,
-    batch: Vec<Read>,
+    reads: Vec<Read>,
     tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
 ) -> Result<Context, Error> {
     let fd = u32::try_from(direct.as_raw_fd()).expect("an open descriptor is non-negative");
-    let n = batch.len();
+    let n = reads.len();
 
     // Every read covers the superset of its range aligned to a blob page, which is the largest
     // logical block size of supported devices and so satisfies direct I/O's alignment of
@@ -159,7 +162,7 @@ fn submit(
     let block: usize = Widen::widen(BLOB_PAGE_SIZE);
     let mut spans = Vec::with_capacity(n);
     let mut slab_len = 0usize;
-    for read in &batch {
+    for read in &reads {
         let aligned_offset = read.offset - read.offset % u64::from(BLOB_PAGE_SIZE);
         let skip = usize::try_from(read.offset - aligned_offset)
             .expect("an offset within a block fits in usize");
@@ -208,7 +211,7 @@ fn submit(
     let ptrs: Vec<*mut Iocb> = iocbs.iter_mut().map(|iocb| iocb as *mut Iocb).collect();
     let deliver = |event: &IoEvent| -> Result<(), Error> {
         let i = event.data as usize;
-        let read = &batch[i];
+        let read = &reads[i];
 
         // A superset ending past the file completes short but still covers its range. A
         // read that failed or stopped before the end of its range (for example, it was
@@ -239,10 +242,10 @@ fn submit(
     let mut accepted = 0;
     let mut completed = 0;
     while next < n {
-        let count = (n - next).min(SLICE);
+        let count = (n - next).min(SUBMIT_BATCH);
         // SAFETY: `ptrs[next..next + count]` are valid iocbs whose buffers lie in the slab,
         // which outlives every accepted request. The context holds at least `n` slots
-        // because `n <= SUBMISSION`.
+        // because `n <= RING_SIZE`.
         let r = unsafe {
             libc::syscall(
                 libc::SYS_io_submit,
@@ -252,7 +255,7 @@ fn submit(
             )
         };
         if r < 0 {
-            let _ = tx.send(Ok(read_positioned(file, pool, &batch[next])?));
+            let _ = tx.send(Ok(read_positioned(file, pool, &reads[next])?));
             next += 1;
             continue;
         }
@@ -309,15 +312,15 @@ fn reap(ctx: &Context, events: &mut [IoEvent], wait: bool) -> Result<usize, Erro
     }
 }
 
-/// Serve `batch` without native AIO: one blocking task per read, as
+/// Serve `reads` without native AIO: one blocking task per read, as
 /// [`crate::Blob::read_at`] does.
 pub(super) fn read_positioned_each(
     file: &Arc<Shared>,
     pool: &BufferPool,
-    batch: Vec<Read>,
+    reads: Vec<Read>,
     tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
 ) {
-    for read in batch {
+    for read in reads {
         let (file, pool, tx) = (file.clone(), pool.clone(), tx.clone());
         task::spawn_blocking(move || {
             let _ = tx.send(read_positioned(&file, &pool, &read));
@@ -329,19 +332,19 @@ pub(super) fn read_positioned_each(
 pub(super) fn run(
     file: &Arc<Shared>,
     pool: &BufferPool,
-    batch: Vec<Read>,
+    reads: Vec<Read>,
     tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
 ) {
     // Without a direct descriptor (the filesystem rejects direct I/O, or a transient open
     // failure) or a context (for example, the kernel's request limit is exhausted), the
     // submission is served one blocking task per read, as read_at would.
     let Some(direct) = direct(file) else {
-        return read_positioned_each(file, pool, batch, tx);
+        return read_positioned_each(file, pool, reads, tx);
     };
     let Some(ctx) = take_context() else {
-        return read_positioned_each(file, pool, batch, tx);
+        return read_positioned_each(file, pool, reads, tx);
     };
-    match submit(file, direct, pool, ctx, batch, tx) {
+    match submit(file, direct, pool, ctx, reads, tx) {
         Ok(ctx) => CONTEXTS.lock().push(ctx),
         Err(err) => {
             let _ = tx.send(Err(err));
@@ -404,7 +407,7 @@ mod tests {
         // returns an error while the first read may still be in flight. A slab released
         // before that read completes receives the file's bytes after its memory is reused.
         for _ in 0..20 {
-            let batch = vec![
+            let reads = vec![
                 Read {
                     index: 0,
                     offset: 0,
@@ -418,7 +421,7 @@ mod tests {
             ];
             let ctx = take_context().unwrap();
             let direct = direct(&blob.shared).unwrap();
-            assert!(submit(&blob.shared, direct, &pool, ctx, batch, &tx).is_err());
+            assert!(submit(&blob.shared, direct, &pool, ctx, reads, &tx).is_err());
 
             let canary = IoBufMut::zeroed_with_alignment(LEN + block, NZUsize!(block));
             std::thread::sleep(Duration::from_millis(10));
@@ -445,7 +448,7 @@ mod tests {
         // One large read keeps io_getevents waiting long enough to be interrupted.
         const LEN: usize = 64 << 20;
         let (storage, blob, directory) = direct_blob("signals", vec![0xAB; LEN]).await;
-        let batch = vec![Read {
+        let reads = vec![Read {
             index: 0,
             offset: blob.data_offset,
             len: LEN,
@@ -461,7 +464,7 @@ mod tests {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                 let ctx = take_context().unwrap();
                 let direct = direct(&shared).unwrap();
-                let result = submit(&shared, direct, &pool(), ctx, batch, &tx);
+                let result = submit(&shared, direct, &pool(), ctx, reads, &tx);
                 done.store(true, Ordering::Release);
                 (result.is_ok(), rx.try_recv().ok(), rx.try_recv().is_err())
             })
@@ -536,7 +539,7 @@ mod tests {
             (u64::from(BLOB_PAGE_SIZE) - 1, 2),
             (data.len() as u64, 1),
         ];
-        let batch = ranges
+        let reads = ranges
             .iter()
             .enumerate()
             .map(|(index, &(offset, len))| Read {
@@ -546,7 +549,7 @@ mod tests {
             })
             .collect();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        read_positioned_each(&blob.shared, &pool(), batch, &tx);
+        read_positioned_each(&blob.shared, &pool(), reads, &tx);
         drop(tx);
         let mut served = Vec::new();
         let mut failed = 0;

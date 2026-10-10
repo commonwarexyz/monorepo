@@ -529,11 +529,11 @@ impl crate::Blob for Blob {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut reads = reads.into_iter().peekable();
         while reads.peek().is_some() {
-            let batch: Vec<_> = reads.by_ref().take(aio::SUBMISSION).collect();
+            let chunk: Vec<_> = reads.by_ref().take(aio::RING_SIZE).collect();
             let file = self.shared.clone();
             let pool = self.pool.clone();
             let tx = tx.clone();
-            task::spawn_blocking(move || aio::run(&file, &pool, batch, &tx));
+            task::spawn_blocking(move || aio::run(&file, &pool, chunk, &tx));
         }
 
         // The stream ends once every range is yielded or at the first error. A submitting
@@ -1253,7 +1253,7 @@ mod tests {
             }
         }
         #[cfg(target_os = "linux")]
-        assert!(ranges.len() > aio::SUBMISSION);
+        assert!(ranges.len() > aio::RING_SIZE);
         let mut bufs: Vec<(usize, IoBufsMut)> = blob
             .read_many(&ranges, ReadOptions::DONT_CACHE)
             .try_collect()
