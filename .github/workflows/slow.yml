@@ -89,21 +89,33 @@ jobs:
           - fuzz_dir: consensus/fuzz
             partition: "4/4"
           - fuzz_dir: cryptography/fuzz
-            partition: "1/2"
+            partition: "1/4"
           - fuzz_dir: cryptography/fuzz
-            partition: "2/2"
+            partition: "2/4"
+          - fuzz_dir: cryptography/fuzz
+            partition: "3/4"
+          - fuzz_dir: cryptography/fuzz
+            partition: "4/4"
           - fuzz_dir: cryptography/curve25519/fuzz
           - fuzz_dir: math/fuzz
           - fuzz_dir: p2p/fuzz
           - fuzz_dir: runtime/fuzz
           - fuzz_dir: storage/fuzz
-            partition: "1/4"
+            partition: "1/8"
           - fuzz_dir: storage/fuzz
-            partition: "2/4"
+            partition: "2/8"
           - fuzz_dir: storage/fuzz
-            partition: "3/4"
+            partition: "3/8"
           - fuzz_dir: storage/fuzz
-            partition: "4/4"
+            partition: "4/8"
+          - fuzz_dir: storage/fuzz
+            partition: "5/8"
+          - fuzz_dir: storage/fuzz
+            partition: "6/8"
+          - fuzz_dir: storage/fuzz
+            partition: "7/8"
+          - fuzz_dir: storage/fuzz
+            partition: "8/8"
           - fuzz_dir: stream/fuzz
           - fuzz_dir: utils/fuzz
             partition: "1/2"
