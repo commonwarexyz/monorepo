@@ -63,12 +63,13 @@ struct PruneGate {
     release: oneshot::Receiver<()>,
 }
 
-/// Shared observer for a gated [`TestDb`]: parked flush releases and recorded
-/// prune targets.
+/// Shared observer for a gated [`TestDb`]: parked flush releases, recorded
+/// prune targets, and recorded eviction hints.
 #[derive(Clone, Default)]
 pub(crate) struct FlushControl {
     pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
     pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
+    pub(crate) evicted: Arc<Mutex<Vec<u64>>>,
     pub(crate) applied: Arc<AtomicUsize>,
     prune_gate: Arc<Mutex<Option<PruneGate>>>,
 }
@@ -173,6 +174,12 @@ impl<E: Send> ManagedDb<E> for TestDb {
             control.pruned.lock().push(*target);
         }
         Ok(self)
+    }
+
+    fn evict_cached_before(&mut self, target: &Self::SyncTarget) {
+        if let Some(control) = &self.control {
+            control.evicted.lock().push(*target);
+        }
     }
 
     fn sync_target(&self) -> Self::SyncTarget {

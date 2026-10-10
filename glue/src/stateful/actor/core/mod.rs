@@ -62,6 +62,9 @@ pub struct PruneConfig {
     /// needed to serve state sync requests for lagging peers. Some network topologies may benefit from
     /// a non-zero value here to provide a larger buffer for serving state sync requests during periods
     /// of instability.
+    ///
+    /// Every finalized block, the page cache may reclaim cached operations below this window. They
+    /// remain readable until pruned.
     pub retained_qmdb_blocks: usize,
 }
 
@@ -120,6 +123,9 @@ where
     /// pending acknowledgement window plus one) and the configured retained block windows beyond
     /// them. Marshal must retain at least as many blocks as QMDB (see
     /// [`PruneConfig::assert_valid`]).
+    ///
+    /// Every finalized block, the databases may release cached operations that only sync targets
+    /// older than the QMDB window need (see [`DatabaseSet::evict_cached_before`]).
     pub prune_config: Option<PruneConfig>,
 }
 

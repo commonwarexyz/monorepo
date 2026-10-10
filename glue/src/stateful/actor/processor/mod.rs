@@ -608,6 +608,16 @@ impl<T: Clone> Pruning<T> {
             qmdb_target: qmdb_target.clone(),
         })
     }
+
+    /// Returns the sync targets of the oldest finalized block in the database retention window,
+    /// or `None` until a full window has been recorded since startup.
+    ///
+    /// These are the oldest targets this node serves to state sync, and a [`Prune`] due at the
+    /// latest observed height prunes the databases to them.
+    fn retention_target(&self) -> Option<&T> {
+        let index = self.retained.len().checked_sub(self.qmdb_window)?;
+        self.retained.get(index).map(|(_, targets)| targets)
+    }
 }
 
 /// Speculative execution and finalized-state application for a running stateful actor.
@@ -878,6 +888,9 @@ where
     /// `block` and every earlier applied block. The processed anchor advances to `block` after the
     /// application's `finalized` hook returns.
     ///
+    /// Once the pruning retention window has filled, every call also passes the oldest sync
+    /// targets this node still serves to [`DatabaseSet::evict_cached_before`].
+    ///
     /// Panics if `block` does not have the next height and the processed anchor as its parent,
     /// or if an uncached block fails to execute or match its commitments.
     pub(super) async fn finalize(
@@ -965,6 +978,17 @@ where
         } else {
             None
         };
+
+        // The eviction hint takes database write locks, so it runs before the application hook
+        // like the other database mutations. A reader held during or after the hook then cannot
+        // stall finalization.
+        let prune = self
+            .pruning
+            .as_mut()
+            .and_then(|pruning| pruning.observe(height, sync_targets));
+        if let Some(target) = self.pruning.as_ref().and_then(Pruning::retention_target) {
+            self.execution.databases.evict_cached_before(target).await;
+        }
         self.app
             .finalized(
                 (context.child("finalized"), block.context()),
@@ -973,10 +997,6 @@ where
                 self.execution.databases.readers(),
             )
             .await;
-        let prune = self
-            .pruning
-            .as_mut()
-            .and_then(|pruning| pruning.observe(height, sync_targets));
         self.execution.set_processed(finalized);
         timer.observe(context);
 
@@ -1591,6 +1611,7 @@ mod tests {
         Application, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
         db::{Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
+        tests::mocks::{self, FlushControl, TestApp, TestBlock, TestDb},
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
@@ -2457,6 +2478,49 @@ mod tests {
     }
 
     #[test]
+    fn retention_target_waits_for_qmdb_window() {
+        // The 3-block QMDB window fills before the 5-block marshal window that gates pruning.
+        let config = PruneConfig {
+            maintenance_interval: NZUsize!(3),
+            retained_marshal_blocks: 3,
+            retained_qmdb_blocks: 1,
+        };
+        let mut pruning = Pruning::new(config, 1, 0);
+
+        assert_eq!(pruning.retention_target(), None);
+        assert_eq!(pruning.observe(Height::new(1), 10_u64), None);
+        assert_eq!(pruning.retention_target(), None);
+        assert_eq!(pruning.observe(Height::new(2), 20_u64), None);
+        assert_eq!(pruning.retention_target(), None);
+        assert_eq!(pruning.observe(Height::new(3), 30_u64), None);
+        assert_eq!(pruning.retention_target(), Some(&10));
+    }
+
+    #[test]
+    fn retention_target_advances_every_block_and_matches_prune() {
+        // The 2-block QMDB window starts at the previous height. Prunes are due at heights 7 and
+        // 12, and every other height still advances the retention target.
+        let config = PruneConfig {
+            maintenance_interval: NZUsize!(5),
+            retained_marshal_blocks: 1,
+            retained_qmdb_blocks: 0,
+        };
+        let mut pruning = Pruning::new(config, 1, 2);
+
+        let mut prunes = 0;
+        for height in 1..=12_u64 {
+            let prune = pruning.observe(Height::new(height), height * 10);
+            let expected = (height >= 2).then(|| (height - 1) * 10);
+            assert_eq!(pruning.retention_target(), expected.as_ref());
+            if let Some(prune) = prune {
+                assert_eq!(Some(&prune.qmdb_target), pruning.retention_target());
+                prunes += 1;
+            }
+        }
+        assert_eq!(prunes, 2);
+    }
+
+    #[test]
     fn prune_config_accepts_zero_retention() {
         PruneConfig {
             maintenance_interval: NZUsize!(1),
@@ -2496,11 +2560,73 @@ mod tests {
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            let prune = harness.finalize_with_prune(block1).await;
+            let prune = harness.finalize_with_prune(block1.clone()).await;
             assert_eq!(
                 prune, None,
                 "pruning should wait for the full retention window",
             );
+
+            // The 3-block window fills at height 3, where the prune targets block 1. Every height
+            // from then on also passes block 1's targets to the database as an eviction hint,
+            // which must leave applied state readable.
+            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+            assert_eq!(harness.finalize_with_prune(block2.clone()).await, None);
+            let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
+            let prune = harness
+                .finalize_with_prune(block3)
+                .await
+                .expect("prune should be due once the retention window fills");
+            assert_eq!(prune.barrier_height, Height::new(1));
+            assert_eq!(
+                prune.qmdb_target,
+                Target::new(block1.state_root, block1.range.clone()),
+            );
+            for height in 1..=3 {
+                assert_eq!(
+                    harness.view_at_height(Height::new(height)).await,
+                    Some(height)
+                );
+            }
+        });
+    }
+
+    /// Finalization passes the oldest sync target of the database retention window to the
+    /// databases at every height once that window fills, including heights where no prune is due.
+    #[test]
+    fn finalization_hints_retention_target_every_block() {
+        deterministic::Runner::default().start(|context| async move {
+            // The 3-block QMDB window fills at height 3, before the 5-block marshal window that
+            // gates the first prune at height 6.
+            let control = FlushControl::default();
+            let mut processor: Processor<deterministic::Context, TestApp> = Processor::new(
+                TestApp::default(),
+                Shared::new("evict_hint", TestDb::gated(control.clone())),
+                mocks::anchor(0, 0),
+                StatefulMetrics::new(&context),
+                Some(Pruning::new(
+                    PruneConfig {
+                        maintenance_interval: NZUsize!(3),
+                        retained_marshal_blocks: 3,
+                        retained_qmdb_blocks: 1,
+                    },
+                    1,
+                    0,
+                )),
+            );
+
+            // Each test block's sync target is its height.
+            let mut parent = TestBlock::new(0, 0);
+            for height in 1..=6_u8 {
+                let block = TestBlock::child(&parent, height);
+                let Applied { prune, .. } = processor.finalize(&context, &block, false).await;
+                let expected: Vec<u64> = (1..=u64::from(height).saturating_sub(2)).collect();
+                assert_eq!(*control.evicted.lock(), expected);
+                assert_eq!(
+                    prune.map(|prune| prune.qmdb_target),
+                    (height == 6).then_some(4),
+                );
+                parent = block;
+            }
         });
     }
 

@@ -564,6 +564,10 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
+    fn evict_cached_before(&mut self, target: &Self::SyncTarget) {
+        self.evict_cached_before((*target.range.start()).into());
+    }
+
     fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         CurrentSyncTarget::new(
@@ -665,6 +669,10 @@ where
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
         self.prune((*target.range.start()).into()).await
+    }
+
+    fn evict_cached_before(&mut self, target: &Self::SyncTarget) {
+        self.evict_cached_before((*target.range.start()).into());
     }
 
     fn sync_target(&self) -> Self::SyncTarget {
@@ -844,6 +852,10 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
+    fn evict_cached_before(&mut self, target: &Self::SyncTarget) {
+        self.evict_cached_before((*target.range.start()).into());
+    }
+
     fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         CurrentSyncTarget::new(
@@ -950,6 +962,10 @@ where
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
         self.prune((*target.range.start()).into()).await
+    }
+
+    fn evict_cached_before(&mut self, target: &Self::SyncTarget) {
+        self.evict_cached_before((*target.range.start()).into());
     }
 
     fn sync_target(&self) -> Self::SyncTarget {
