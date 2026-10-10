@@ -45,7 +45,7 @@
 
 use super::{
     Sealed,
-    read::{PageReader, Replay},
+    read::{Malformed, PageReader, Replay, ReplayCache},
     tip::Buffer,
     view::{Tail, View},
 };
@@ -63,7 +63,10 @@ use commonware_utils::Widen;
 use std::{
     marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tracing::warn;
 
@@ -154,6 +157,10 @@ pub struct Writer<B: Blob, Phase = Append> {
     /// A reference to the page cache that manages read caching for this blob.
     cache_ref: CacheRef,
 
+    /// Number of times recovery has shrunk the blob. A caching replay publishes the pages it reads
+    /// to the cache only while this is unchanged.
+    shrinks: Arc<AtomicU64>,
+
     /// The write buffer containing any logical bytes following the last full page boundary in the
     /// underlying blob.
     buffer: Buffer,
@@ -222,6 +229,7 @@ impl<B: Blob> Recovery<B> {
             },
             id: cache_ref.next_id(),
             cache_ref,
+            shrinks: Arc::new(AtomicU64::new(0)),
             buffer,
         })
     }
@@ -299,6 +307,9 @@ impl<B: Blob> Recovery<B> {
     /// Shrink the retained logical prefix to `target_size`. A page-boundary shrink leaves its
     /// resize for the caller's sync.
     async fn shrink(mut self, target_size: u64) -> Result<Self, Error> {
+        // Stop outstanding replays from caching pages this shrink may let appends replace.
+        self.shrinks.fetch_add(1, Ordering::Relaxed);
+
         let page_size: u64 = self.cache_ref.page_size().widen();
         let physical_page_size = page_size
             .checked_add(CHECKSUM_SIZE)
@@ -409,6 +420,47 @@ impl<B: Blob> Recovery<B> {
         }
         self.sync().await
     }
+
+    /// Like [Self::replay], but ends at the blob's longest prefix of well-formed pages instead of
+    /// failing on the first malformed page.
+    ///
+    /// The replay stops before the first page whose checksum is invalid, or after the first
+    /// logically partial page, so it covers the prefix [Self::recoverable_prefix_len] measures.
+    /// Use it to scan a blob that may have lost interior pages in a crash.
+    pub async fn replay_recoverable(
+        self,
+        buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<(Self, Replay<B>), Error> {
+        self.replay_prefix_with(u64::MAX, buffer_size, read_options, Malformed::End, None)
+            .await
+    }
+
+    /// Like [Self::replay_recoverable], but writes each full page it validates into the page
+    /// cache, for a scan whose bytes will be read again soon. Other replays leave the cache alone.
+    ///
+    /// The replay stops writing once this recovery shrinks the blob, since appends after a shrink
+    /// can replace pages the replay already read.
+    pub async fn replay_recoverable_caching(
+        self,
+        buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<(Self, Replay<B>), Error> {
+        let cache = ReplayCache {
+            cache_ref: self.cache_ref.clone(),
+            blob_id: self.id,
+            shrinks: self.shrinks.clone(),
+            start: self.shrinks.load(Ordering::Relaxed),
+        };
+        self.replay_prefix_with(
+            u64::MAX,
+            buffer_size,
+            read_options,
+            Malformed::End,
+            Some(cache),
+        )
+        .await
+    }
 }
 
 impl<B: Blob> From<Recovery<B>> for Writer<B> {
@@ -425,6 +477,7 @@ impl<B: Blob> From<Recovery<B>> for Writer<B> {
             sync_state: recovery.sync_state,
             id: recovery.id,
             cache_ref: recovery.cache_ref,
+            shrinks: recovery.shrinks,
             buffer: recovery.buffer,
         }
     }
@@ -1196,10 +1249,24 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     /// Buffered data is flushed as for [Self::replay], and the included partial tail is frozen
     /// in memory. This does not establish durability.
     pub async fn replay_prefix(
+        self,
+        max_size: u64,
+        buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<(Self, Replay<B>), Error> {
+        self.replay_prefix_with(max_size, buffer_size, read_options, Malformed::Fail, None)
+            .await
+    }
+
+    /// Shared body of the replay methods, handling malformed stored pages per `malformed` and
+    /// writing validated full pages into `cache`, if set.
+    async fn replay_prefix_with(
         mut self,
         max_size: u64,
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
+        malformed: Malformed,
+        cache: Option<ReplayCache>,
     ) -> Result<(Self, Replay<B>), Error> {
         // Flush the live tip and restrict the disk span to pages intersecting the requested prefix.
         self.flush_internal(true, false).await?;
@@ -1224,7 +1291,9 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             partial_page,
             prefetch,
             page_size,
+            cache,
             read_options,
+            malformed,
         ));
         Ok((self, replay))
     }
@@ -1732,7 +1801,7 @@ mod tests {
             (writer, _) = writer.append(&data).await.unwrap();
             writer = writer.sync().await.unwrap();
 
-            // Prefix validation uses the default options so recovery can reuse the validated pages.
+            // Prefix validation applies the supplied options to every read.
             recordings.clear();
             assert_eq!(
                 writer
@@ -1958,6 +2027,200 @@ mod tests {
                     .unwrap(),
                 20
             );
+        });
+    }
+
+    /// A recoverable replay ends where [Recovery::recoverable_prefix_len] does: before a torn
+    /// interior page, whether it starts a read batch or falls inside one, and after a stale
+    /// partial page. Seeking back re-reads the same prefix.
+    #[test_traced("DEBUG")]
+    fn test_replay_recoverable_ends_at_malformed_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            use bytes::Buf as _;
+
+            let physical_page_size = PAGE_SIZE.get() as u64 + CHECKSUM_SIZE;
+            let total = PAGE_SIZE.get() as usize * 3 + 10;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            for (name, replay_buffer) in [
+                (&b"replay_torn_batch_start"[..], NZUsize!(BUFFER_SIZE)),
+                (&b"replay_torn_mid_batch"[..], NZUsize!(4096)),
+            ] {
+                let (blob, blob_size) = context.open("test_partition", name).await.unwrap();
+                let blob = Arc::new(blob);
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+                let (writer, _) = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
+                    .await
+                    .unwrap()
+                    .append(&data)
+                    .await
+                    .unwrap();
+                writer.sync().await.unwrap();
+
+                // Tear page 1, leaving pages 0 and 2+ valid.
+                let offset = physical_page_size + 7;
+                let byte = blob
+                    .read_at(offset, 1, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce();
+                blob.write_at(
+                    offset,
+                    vec![byte.as_ref()[0] ^ 0xFF],
+                    WriteOptions::default(),
+                )
+                .await
+                .unwrap();
+                blob.sync().await.unwrap();
+
+                // Reopen the three full pages and the partial tail. An ordinary replay fails at
+                // the torn page.
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+                let size = 4 * physical_page_size;
+                let recovery = Recovery::open(blob.clone(), size, BUFFER_SIZE, cache_ref)
+                    .await
+                    .unwrap();
+                assert_eq!(recovery.size(), total as u64);
+                let (recovery, mut replay) = recovery
+                    .replay(replay_buffer, ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    replay.ensure(total).await,
+                    Err(Error::InvalidChecksum)
+                ));
+
+                // A recoverable replay yields page 0 and ends.
+                let (_, mut replay) = recovery
+                    .replay_recoverable(replay_buffer, ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap();
+                let page = PAGE_SIZE.get() as usize;
+                for _ in 0..2 {
+                    assert!(!replay.ensure(total).await.unwrap());
+                    assert!(replay.is_exhausted());
+                    assert_eq!(replay.remaining(), page);
+                    assert_eq!(replay.copy_to_bytes(page).as_ref(), &data[..page]);
+                    replay.seek_to(0).unwrap();
+                }
+            }
+
+            // Persist a partial first page and capture its physical bytes.
+            let (blob, blob_size) = context
+                .open("test_partition", b"replay_stale")
+                .await
+                .unwrap();
+            let blob = Arc::new(blob);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let total = PAGE_SIZE.get() as usize * 2;
+            (writer, _) = writer.append(&data[..20]).await.unwrap();
+            writer = writer.sync().await.unwrap();
+            let stale = blob
+                .read_at(0, physical_page_size as usize, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            let stale = stale.as_ref().to_vec();
+
+            // Extend past the first page, persist, then restore page 0 to its stale partial
+            // state as if the extension never reached disk.
+            (writer, _) = writer.append(&data[20..total]).await.unwrap();
+            writer.sync().await.unwrap();
+            blob.write_at(0, stale, WriteOptions::default())
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+
+            // The stale page's 20 bytes end the replay, before and after seeking back.
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let recovery = Recovery::open(blob, 2 * physical_page_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let (_, mut replay) = recovery
+                .replay_recoverable(NZUsize!(4096), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+
+            // A seek past the stale page's bytes, made before the scan finds them, leaves the
+            // cursor at the shorter end.
+            replay.seek_to(30).unwrap();
+            assert!(!replay.ensure(1).await.unwrap());
+            assert_eq!(replay.blob_size(), 20);
+            assert_eq!(replay.remaining(), 0);
+            assert!(replay.chunk().is_empty());
+            replay.seek_to(0).unwrap();
+            for _ in 0..2 {
+                assert!(!replay.ensure(total).await.unwrap());
+                assert_eq!(replay.remaining(), 20);
+                assert_eq!(replay.copy_to_bytes(20).as_ref(), &data[..20]);
+                replay.seek_to(0).unwrap();
+            }
+        });
+    }
+
+    /// Only a caching replay writes the full pages it validates into the page cache; plain and
+    /// recoverable replays leave it cold. A partial tail page is not page-aligned and is left
+    /// uncached.
+    #[test_traced("DEBUG")]
+    fn test_replay_recoverable_caching_populates_page_cache() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"replay_populates_cache")
+                .await
+                .unwrap();
+            let blob = Arc::new(blob);
+            let page = PAGE_SIZE.get() as usize;
+            let total = page * 2 + 10; // two full pages plus a partial tail
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let (writer, _) = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap()
+                .append(&data)
+                .await
+                .unwrap();
+            writer.sync().await.unwrap();
+
+            // Reopen with a fresh, cold cache to mirror a crash-recovery scan.
+            let physical_size = (PAGE_SIZE.get() as u64 + CHECKSUM_SIZE) * 3;
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let recovery = Recovery::open(blob, physical_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let mut probe = vec![0u8; page];
+            assert!(!recovery.try_read_sync_into(&mut probe, 0));
+
+            // Draining plain and recoverable replays leaves the cache cold.
+            let (recovery, mut replay) = recovery
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            assert!(!replay.ensure(total + 1).await.unwrap());
+            let (recovery, mut replay) = recovery
+                .replay_recoverable(NZUsize!(BUFFER_SIZE), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            assert!(!replay.ensure(total + 1).await.unwrap());
+            assert!(!recovery.try_read_sync_into(&mut probe, 0));
+            assert!(!recovery.try_read_sync_into(&mut probe, page as u64));
+
+            let (recovery, mut replay) = recovery
+                .replay_recoverable_caching(NZUsize!(BUFFER_SIZE), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            assert!(!replay.ensure(total + 1).await.unwrap());
+            assert_eq!(replay.remaining(), total);
+
+            // Both full pages are now served from cache; the partial tail is skipped.
+            assert!(recovery.try_read_sync_into(&mut probe, 0));
+            assert_eq!(probe, data[..page]);
+            assert!(recovery.try_read_sync_into(&mut probe, page as u64));
+            assert_eq!(probe, data[page..2 * page]);
+            assert!(!recovery.try_read_sync_into(&mut probe, 2 * page as u64));
         });
     }
 
@@ -5415,6 +5678,54 @@ mod tests {
                     .as_ref(),
                 model
             );
+        });
+    }
+
+    /// A caching replay outlives the recovery that created it, so its in-flight read can finish
+    /// after the recovery shrinks and rewrites the blob. Publishing that read must not restore the
+    /// old bytes over the rewritten page in the cache.
+    #[test]
+    fn test_replay_cannot_repopulate_cache_after_shrink() {
+        let cfg =
+            deterministic::Config::default().with_timeout(Some(std::time::Duration::from_secs(5)));
+        deterministic::Runner::new(cfg).start(|context| async move {
+            // Park the replay's read of the first page after it has captured the persisted bytes.
+            let page = PAGE_SIZE.get() as usize;
+            let physical = page + CHECKSUM_SIZE as usize;
+            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(8));
+            let (inner, size) = context.open("recovery-cache", b"replay").await.unwrap();
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let blob = DelayedReadBlob::new(inner, 0, physical, started_tx, release_rx);
+            let mut recovery = Recovery::open(blob, size, BUFFER_SIZE, cache.clone())
+                .await
+                .unwrap();
+            (recovery, _) = recovery.append(&vec![0xAA; 3 * page + 20]).await.unwrap();
+            recovery = recovery.sync().await.unwrap();
+            let (mut recovery, mut replay) = recovery
+                .replay_recoverable_caching(NZUsize!(1), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            let mut read = Box::pin(replay.ensure(page));
+            commonware_macros::select! {
+                _ = started_rx => {},
+                _ = read.as_mut() => panic!("read completed before release"),
+            }
+
+            // Discard and rewrite every page while the replay's read is parked.
+            recovery = recovery.truncate(0).await.unwrap();
+            (recovery, _) = recovery.append(&vec![0xBB; 3 * page + 20]).await.unwrap();
+            recovery = recovery.sync().await.unwrap();
+
+            // The replay still yields the bytes it read, but must not publish them.
+            release_tx.send(()).unwrap();
+            assert!(read.await.unwrap());
+            assert_eq!(replay.chunk(), vec![0xAA; page]);
+            let mut cached = vec![0; page];
+            assert!(recovery.try_read_sync_into(&mut cached, 0));
+            assert_eq!(cached, vec![0xBB; page]);
+            let actual = recovery.read_at(0, page).await.unwrap().coalesce();
+            assert_eq!(actual.as_ref(), vec![0xBB; page]);
         });
     }
 
