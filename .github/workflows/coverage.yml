@@ -18,13 +18,15 @@ env:
   NIGHTLY_VERSION: nightly-2026-06-21
 
 jobs:
-  Coverage:
-    name: "Coverage${{ matrix.flags && format(' (flags: \"{0}\")', matrix.flags) }} (partition: ${{ matrix.partition }}/20)"
+  # Every coverage partition of a feature set runs from one instrumented build. Partitions run
+  # cargo-llvm-cov with the same workspace, Cargo home, and target directory as the build so the
+  # report excludes the same paths.
+  Build:
+    name: "Coverage${{ matrix.flags && format(' (flags: \"{0}\")', matrix.flags) }} (build)"
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       matrix:
-        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         flags:
           - "--features commonware-runtime/iouring"
           - ""
@@ -39,7 +41,6 @@ jobs:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
         additional-components: llvm-tools-preview
         additional-cache-key: ${{ matrix.flags || 'default' }}
-        rust-cache-save: ${{ matrix.partition == 1 }}
         sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
         sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
         sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
@@ -71,8 +72,83 @@ jobs:
         name="${name// /-}"
         name="${name//\//-}"
         echo "flags=${name:-default}" >> "$GITHUB_OUTPUT"
+    - name: Build and archive tests
+      run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov nextest-archive --branch --workspace ${{ matrix.flags }} --archive-file "$RUNNER_TEMP/coverage.tar.zst"
+    - name: Upload tests
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      with:
+        name: coverage-tests-${{ steps.path-normalization.outputs.flags }}
+        path: ${{ runner.temp }}/coverage.tar.zst
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 1
+        overwrite: true
+    # Proc macros run while the tests are built, so only this job records their coverage.
+    - name: Generate build coverage report
+      run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov report --branch --lcov --output-path lcov-${{ steps.path-normalization.outputs.flags }}-build.info
+    - name: Store build coverage report
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      with:
+        name: coverage-lcov-${{ steps.path-normalization.outputs.flags }}-build
+        path: lcov-${{ steps.path-normalization.outputs.flags }}-build.info
+        retention-days: 1
+
+  Coverage:
+    name: "Coverage${{ matrix.flags && format(' (flags: \"{0}\")', matrix.flags) }} (partition: ${{ matrix.partition }}/20)"
+    needs: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+        flags:
+          - "--features commonware-runtime/iouring"
+          - ""
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
+    - name: Run setup
+      uses: ./.github/actions/setup
+      with:
+        additional-toolchain: ${{ env.NIGHTLY_VERSION }}
+        additional-components: llvm-tools-preview
+        rust-cache-enabled: false
+    - name: Remove fuzz
+      run: |
+        rm -rf broadcast/fuzz
+        rm -rf codec/fuzz
+        rm -rf coding/fuzz
+        rm -rf collector/fuzz
+        rm -rf consensus/fuzz
+        rm -rf cryptography/fuzz
+        rm -rf p2p/fuzz
+        rm -rf runtime/fuzz
+        rm -rf storage/fuzz
+        rm -rf stream/fuzz
+        rm -rf utils/fuzz
+    - name: Remove fuzz targets from Cargo.toml
+      run: |
+        sed -i.bak '/fuzz/d' Cargo.toml
+    - name: Install coverage tooling
+      uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+      with:
+        tool: cargo-llvm-cov@0.8.4,cargo-nextest@0.9.133
+    - name: Normalize flags for paths
+      id: path-normalization
+      run: |
+        name="${{ matrix.flags }}"
+        name="${name// /-}"
+        name="${name//\//-}"
+        echo "flags=${name:-default}" >> "$GITHUB_OUTPUT"
+    - name: Download tests
+      uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+      with:
+        name: coverage-tests-${{ steps.path-normalization.outputs.flags }}
+        path: ${{ runner.temp }}
     - name: Generate coverage report
-      run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov nextest --branch --workspace ${{ matrix.flags }} --lcov --output-path lcov-${{ steps.path-normalization.outputs.flags }}-${{ matrix.partition }}.info --partition hash:${{ matrix.partition }}/20 --profile all
+      run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov nextest --branch --archive-file "$RUNNER_TEMP/coverage.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" --lcov --output-path lcov-${{ steps.path-normalization.outputs.flags }}-${{ matrix.partition }}.info --partition hash:${{ matrix.partition }}/20 --profile all
     - name: Store coverage report
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
       with:
@@ -80,11 +156,20 @@ jobs:
         path: lcov-${{ steps.path-normalization.outputs.flags }}-${{ matrix.partition }}.info
         retention-days: 1
 
+  # Branch protection requires this check, and a skipped job would satisfy it, so it always runs
+  # and fails unless every coverage partition succeeded.
   Upload:
     name: Upload
     runs-on: ubuntu-latest
     needs: Coverage
+    if: always()
     steps:
+    - name: Check coverage results
+      run: |
+        if [ "${{ needs.Coverage.result }}" != "success" ]; then
+          echo "Coverage failed or was cancelled"
+          exit 1
+        fi
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Configure swap

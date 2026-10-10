@@ -432,6 +432,7 @@ impl Drop for Tasks {
 }
 
 #[cfg(test)]
+#[commonware_macros::test_group("miri")]
 pub mod tests {
     use super::*;
     use crate::{iouring::task::tests::refs, utils::extract_panic_message};
