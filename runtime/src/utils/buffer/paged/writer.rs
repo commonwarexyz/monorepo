@@ -3370,10 +3370,6 @@ mod tests {
 
     /// Verifies a large append cannot flush before pending start_sync finishes.
     #[test_traced("DEBUG")]
-    #[cfg_attr(
-        miri,
-        ignore = "Miri rejects a task that suspends holding a borrow into its own future (rust-lang/rust#125735)"
-    )]
     fn test_write_flush_waits_for_outstanding_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -3415,10 +3411,6 @@ mod tests {
 
     /// Verifies seal cannot flush buffered bytes before pending start_sync finishes.
     #[test_traced("DEBUG")]
-    #[cfg_attr(
-        miri,
-        ignore = "Miri rejects a task that suspends holding a borrow into its own future (rust-lang/rust#125735)"
-    )]
     fn test_seal_waits_for_outstanding_start_sync_before_flushing() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -3470,10 +3462,6 @@ mod tests {
 
     /// Verifies snapshot cannot flush buffered bytes before pending start_sync finishes.
     #[test_traced("DEBUG")]
-    #[cfg_attr(
-        miri,
-        ignore = "Miri rejects a task that suspends holding a borrow into its own future (rust-lang/rust#125735)"
-    )]
     fn test_snapshot_waits_for_outstanding_start_sync_before_flushing() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -3594,10 +3582,6 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    #[cfg_attr(
-        miri,
-        ignore = "Miri rejects a task that suspends holding a borrow into its own future (rust-lang/rust#125735)"
-    )]
     fn test_append_waits_for_outstanding_start_sync_before_writing() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -3641,10 +3625,6 @@ mod tests {
 
     // Recovery cannot resize the blob before a pending start_sync finishes.
     #[test_traced("DEBUG")]
-    #[cfg_attr(
-        miri,
-        ignore = "Miri rejects a task that suspends holding a borrow into its own future (rust-lang/rust#125735)"
-    )]
     fn test_recovery_truncate_shrink_waits_for_outstanding_start_sync_before_resizing() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {

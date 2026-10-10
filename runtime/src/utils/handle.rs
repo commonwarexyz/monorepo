@@ -15,6 +15,7 @@ use futures::{
 };
 use std::{
     any::Any,
+    cell::UnsafeCell,
     future::Future,
     panic::{AssertUnwindSafe, resume_unwind},
     pin::Pin,
@@ -152,6 +153,28 @@ where
     }
 }
 
+/// Holds a task future in an [`UnsafeCell`], so a shared reference to a wrapper around the future
+/// does not conflict with borrows the future holds into its own state.
+///
+/// A suspended `async` block can hold a reference into its own state across an `.await`, and
+/// [`Abortable`] checks for cancellation through `&self`, which covers the future it wraps. Safe
+/// code may create such shared references at any time (rust-lang/rust#137750), but until
+/// coroutines are built on `UnsafePinned` (rust-lang/rust#125735), Miri treats creating one as a
+/// read of the whole future that invalidates its borrows of itself, and reports undefined behavior
+/// when the resumed task uses them. Creating a shared reference does not read memory inside an
+/// `UnsafeCell`, and `UnsafeCell<F>` has the same layout as `F`.
+struct FutureCell<F>(UnsafeCell<F>);
+
+impl<F: Future> Future for FutureCell<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: The future is structurally pinned: `FutureCell` has no `Drop` impl, is `Unpin`
+        // only when `F` is, and reaches the future only through this pinned projection.
+        unsafe { self.map_unchecked_mut(|cell| cell.0.get_mut()) }.poll(cx)
+    }
+}
+
 impl<T> Handle<T>
 where
     T: Send + 'static,
@@ -195,8 +218,11 @@ where
             let _guard = guard;
 
             // Run future with panic catching and abort support
-            let result =
-                Abortable::new(AssertUnwindSafe(f).catch_unwind(), abort_registration).await;
+            let result = Abortable::new(
+                AssertUnwindSafe(FutureCell(UnsafeCell::new(f))).catch_unwind(),
+                abort_registration,
+            )
+            .await;
 
             // Handle result
             match result {
@@ -606,7 +632,7 @@ mod tests {
     use crate::{
         Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic,
         telemetry::metrics::raw::Gauge,
-        utils::{extract_panic_message, supervision::Tree},
+        utils::{extract_panic_message, reschedule, supervision::Tree},
     };
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::{FutureExt as _, future, poll, stream::AbortHandle};
@@ -1015,5 +1041,22 @@ mod tests {
         assert_eq!(task.now_or_never(), Some(()));
         assert!(!polled.load(Ordering::SeqCst));
         assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+    }
+
+    /// A task can write through a borrow of its own state after suspending (checked by Miri).
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn task_keeps_self_borrow_across_suspension() {
+        deterministic::Runner::default().start(|context| async move {
+            let handle = context.child("task").spawn(|_| async move {
+                let mut value = 0u8;
+                let borrow = &mut value;
+                *borrow += 1;
+                reschedule().await;
+                *borrow += 1;
+                value
+            });
+            assert_eq!(handle.await.unwrap(), 2);
+        });
     }
 }
