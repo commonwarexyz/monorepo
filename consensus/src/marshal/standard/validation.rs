@@ -11,6 +11,7 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, Metrics, Spawner,
     telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
@@ -205,6 +206,7 @@ where
         Arc::new(runtime_context.child("ancestor_stream")),
         [Arc::clone(&block), parent],
         ancestor_fetch_duration,
+        Sequential,
     );
     let validity_request = application
         .verify(

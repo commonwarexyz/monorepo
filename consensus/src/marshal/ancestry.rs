@@ -2,6 +2,7 @@
 
 use crate::{Block, Heightable, types::Height};
 use commonware_cryptography::{Digest, Digestible};
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
 use futures::{
     FutureExt, Stream,
@@ -277,7 +278,7 @@ impl<D: Digest> ExpectedParent<D> {
         )
     }
 
-    fn matches<B: Block<Digest = D>>(self, parent: &B) -> bool {
+    fn matches<B: Block<Digest = D>>(self, parent: &B, strategy: &impl Strategy) -> bool {
         let Self(parent_height, parent_digest) = self;
         if parent.height() != parent_height {
             debug!(
@@ -287,10 +288,11 @@ impl<D: Digest> ExpectedParent<D> {
             );
             return false;
         }
-        if parent.digest() != parent_digest {
+        let actual = parent.digest_across(strategy);
+        if actual != parent_digest {
             debug!(
                 expected = ?parent_digest,
-                actual = ?parent.digest(),
+                ?actual,
                 "ending ancestry stream: fetched parent has non-contiguous ancestry"
             );
             return false;
@@ -301,25 +303,30 @@ impl<D: Digest> ExpectedParent<D> {
 
 // Builds a parent fetch that records latency when a parent arrives. The fetch
 // returns only a parent with the expected height and digest.
-fn timed_parent_fetch<C, M>(
+fn timed_parent_fetch<C, M, T>(
     clock: &Arc<C>,
     marshal: &M,
     child: &M::Block,
     fetch_duration: &Timed,
+    strategy: &T,
 ) -> PendingFetch<M::Block>
 where
     C: Clock,
     M: BlockProvider,
+    T: Strategy,
 {
     let expected = ExpectedParent::from_child(child);
     let timer = fetch_duration.timer(clock.as_ref());
     let clock = clock.clone();
+    let strategy = strategy.clone();
     marshal
         .subscribe_parent(child)
         .map(move |parent| {
             let parent = parent?;
             timer.observe(clock.as_ref());
-            expected.matches(parent.as_ref()).then_some(parent)
+            expected
+                .matches(parent.as_ref(), &strategy)
+                .then_some(parent)
         })
         .boxed()
 }
@@ -327,17 +334,18 @@ where
 /// Yields the ancestors of a block while prefetching parents, including the
 /// height-zero genesis block if it is available.
 #[pin_project]
-pub struct AncestorStream<M: BlockProvider, C: Clock> {
+pub struct AncestorStream<M: BlockProvider, C: Clock, T: Strategy> {
     buffered: Vec<Arc<M::Block>>,
     marshal: M,
     fetch_duration: Timed,
     clock: Arc<C>,
+    strategy: T,
     pending_child: Option<Arc<M::Block>>,
     #[pin]
     pending: OptionFuture<PendingFetch<M::Block>>,
 }
 
-impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
+impl<M: BlockProvider, C: Clock, T: Strategy> AncestorStream<M, C, T> {
     /// Creates a new [AncestorStream] starting from the given ancestry.
     ///
     /// # Panics
@@ -348,6 +356,7 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
         marshal: M,
         initial: impl IntoIterator<Item = Arc<M::Block>>,
         fetch_duration: Timed,
+        strategy: T,
     ) -> Self {
         let mut buffered = initial.into_iter().collect::<Vec<_>>();
         buffered.sort_by_key(|block| block.height());
@@ -371,6 +380,7 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
             buffered,
             fetch_duration,
             clock,
+            strategy,
             pending_child: None,
             pending: None.into(),
         }
@@ -383,19 +393,21 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     }
 }
 
-impl<M, C> Clone for AncestorStream<M, C>
+impl<M, C, T> Clone for AncestorStream<M, C, T>
 where
     M: BlockProvider + Clone,
     C: Clock,
+    T: Strategy,
 {
     fn clone(&self) -> Self {
         let pending_child = self.pending_child.clone();
         let marshal = self.marshal.clone();
         let fetch_duration = self.fetch_duration.clone();
         let clock = self.clock.clone();
+        let strategy = self.strategy.clone();
         let pending = pending_child
             .as_ref()
-            .map(|child| timed_parent_fetch(&clock, &marshal, child, &fetch_duration))
+            .map(|child| timed_parent_fetch(&clock, &marshal, child, &fetch_duration, &strategy))
             .into();
 
         Self {
@@ -403,26 +415,29 @@ where
             marshal,
             fetch_duration,
             clock,
+            strategy,
             pending_child,
             pending,
         }
     }
 }
 
-impl<M, C> Ancestry<M::Block> for AncestorStream<M, C>
+impl<M, C, T> Ancestry<M::Block> for AncestorStream<M, C, T>
 where
     M: BlockProvider + Clone,
     C: Clock,
+    T: Strategy,
 {
     fn peek(&self) -> Option<&M::Block> {
         Self::peek(self)
     }
 }
 
-impl<M, C> Stream for AncestorStream<M, C>
+impl<M, C, T> Stream for AncestorStream<M, C, T>
 where
     M: BlockProvider,
     C: Clock,
+    T: Strategy,
 {
     type Item = Arc<M::Block>;
 
@@ -437,8 +452,13 @@ where
             let should_walk_parent = height > END_BOUND;
             let end_of_buffered = this.buffered.is_empty();
             if should_walk_parent && end_of_buffered {
-                let future =
-                    timed_parent_fetch(this.clock, this.marshal, &block, this.fetch_duration);
+                let future = timed_parent_fetch(
+                    this.clock,
+                    this.marshal,
+                    &block,
+                    this.fetch_duration,
+                    this.strategy,
+                );
                 *this.pending_child = Some(block.clone());
                 *this.pending.as_mut() = Some(future).into();
 
@@ -478,8 +498,13 @@ where
                 let height = block.height();
                 let should_walk_parent = height > END_BOUND;
                 if should_walk_parent {
-                    let future =
-                        timed_parent_fetch(this.clock, this.marshal, &block, this.fetch_duration);
+                    let future = timed_parent_fetch(
+                        this.clock,
+                        this.marshal,
+                        &block,
+                        this.fetch_duration,
+                        this.strategy,
+                    );
                     *this.pending_child = Some(block.clone());
                     *this.pending.as_mut() = Some(future).into();
 
@@ -516,6 +541,7 @@ mod test {
     use super::*;
     use crate::marshal::mocks::block::EmptyBlock;
     use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner as _, Supervisor as _, deterministic,
         telemetry::metrics::{
@@ -652,7 +678,7 @@ mod test {
         context: &deterministic::Context,
         marshal: M,
         initial: impl IntoIterator<Item = M::Block>,
-    ) -> AncestorStream<M, deterministic::Context>
+    ) -> AncestorStream<M, deterministic::Context, Sequential>
     where
         M: BlockProvider,
     {
@@ -663,6 +689,7 @@ mod test {
             marshal,
             initial.into_iter().map(Arc::new),
             fetch_duration,
+            Sequential,
         )
     }
 
@@ -974,7 +1001,7 @@ mod test {
     #[test]
     fn test_empty_yields_none() {
         deterministic::Runner::default().start(|context| async move {
-            let mut stream: AncestorStream<MockProvider, deterministic::Context> =
+            let mut stream: AncestorStream<MockProvider, deterministic::Context, Sequential> =
                 stream(&context, MockProvider::default(), vec![]);
             assert_eq!(stream.next().await, None);
         });

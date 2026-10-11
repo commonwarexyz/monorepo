@@ -5293,6 +5293,7 @@ where
                 Arc::new(context.child("ancestor_stream")),
                 (DigestFallback::Wait, commitment),
                 fetch_duration,
+                Sequential,
             )
             .await
             .unwrap();

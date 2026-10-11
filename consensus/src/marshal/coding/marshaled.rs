@@ -325,6 +325,7 @@ where
         let epocher = self.epocher.clone();
         let verify_duration = self.verify_duration.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
+        let strategy = self.strategy.clone();
 
         // Verification needs the full block but waits only for local delivery. Certification starts
         // recovery only when the block is not available locally. If the shard engine evicts a
@@ -443,6 +444,7 @@ where
                         Arc::new(runtime_context.child("ancestor_stream")),
                         [block.inner_shared(), parent.inner_shared()],
                         ancestor_fetch_duration,
+                        strategy,
                     );
                     let validity_request = application
                         .verify(
@@ -821,6 +823,7 @@ where
                     Arc::new(runtime_context.child("ancestor_stream")),
                     [parent.inner_shared()],
                     ancestor_fetch_duration,
+                    strategy.clone(),
                 );
                 let build_request = application
                     .propose(

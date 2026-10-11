@@ -65,6 +65,7 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, Metrics, Spawner,
     telemetry::{
@@ -352,6 +353,7 @@ where
                     Arc::new(runtime_context.child("ancestor_stream")),
                     [parent],
                     ancestor_fetch_duration,
+                    Sequential,
                 );
                 let build_request = application
                     .propose(

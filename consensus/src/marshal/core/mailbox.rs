@@ -14,6 +14,7 @@ use commonware_actor::{
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_p2p::Recipients;
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     Clock, Handle,
     telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
@@ -667,18 +668,20 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// fetched block does not match that relationship.
     ///
     /// Do not use this to wait for pending candidate proposal data.
-    pub(crate) fn ancestor_stream<I, C>(
+    pub(crate) fn ancestor_stream<I, C, T>(
         &self,
         clock: Arc<C>,
         initial: I,
         fetch_duration: Timed,
-    ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I, C>
+        strategy: T,
+    ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I, C, T>
     where
         Self: BlockProvider<Block = V::ApplicationBlock>,
         I: IntoIterator<Item = Arc<V::ApplicationBlock>>,
         C: Clock,
+        T: Strategy,
     {
-        AncestorStream::new(clock, self.clone(), initial, fetch_duration)
+        AncestorStream::new(clock, self.clone(), initial, fetch_duration, strategy)
     }
 
     /// Retrieve `(height, digest)` for a finalized block by height, digest, or latest.
@@ -873,20 +876,22 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// verify, certify, or repair from. It is not a candidate fetch path.
     ///
     /// If the starting block is not found, `None` is returned.
-    pub async fn ancestry<C>(
+    pub async fn ancestry<C, T>(
         &self,
         clock: Arc<C>,
         (fallback, start_digest): (DigestFallback, <V::Block as Digestible>::Digest),
         fetch_duration: Timed,
-    ) -> Option<impl Ancestry<V::ApplicationBlock> + use<S, V, C>>
+        strategy: T,
+    ) -> Option<impl Ancestry<V::ApplicationBlock> + use<S, V, C, T>>
     where
         Self: BlockProvider<Block = V::ApplicationBlock>,
         C: Clock,
+        T: Strategy,
     {
         let receiver = self.subscribe_by_digest(start_digest, fallback);
         receiver.await.ok().map(|block| {
             let block = V::into_shared(block);
-            self.ancestor_stream(clock, [block], fetch_duration)
+            self.ancestor_stream(clock, [block], fetch_duration, strategy)
         })
     }
 
