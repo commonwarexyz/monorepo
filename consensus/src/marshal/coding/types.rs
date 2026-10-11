@@ -379,10 +379,7 @@ impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
 /// Codec configuration for decoding a [`CodedBlock`] from the wire.
 ///
 /// Decoding fails unless the block's commitment equals the expected one. A trusted commitment
-/// supplies the coding root and defers shard generation to [`CodedBlock::shards`]. An untrusted
-/// commitment has its root recomputed on the calling thread, since the configuration cannot
-/// carry a strategy the way
-/// [`Variant::decode_block`](crate::marshal::core::Variant::decode_block) does.
+/// supplies the coding root and defers shard generation to [`CodedBlock::shards`].
 pub struct CodedBlockCfg<B: Block, C: Scheme, H: Hasher> {
     /// Codec configuration for the inner application block.
     pub inner: <B as Read>::Cfg,
