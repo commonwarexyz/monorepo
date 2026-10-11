@@ -7678,29 +7678,43 @@ mod tests {
                 "buffered shard from a leader still in a tracked set should be ingested"
             );
 
-            // A second block's shard is buffered the same way.
-            let inner = B::new(Sha256Digest::EMPTY, Height::new(2), 100);
-            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
-            let commitment = coded_block.commitment();
-            let leader_shard = coded_block
-                .shard(receiver_participant.get() as u16)
-                .expect("missing shard");
-            leader_sender.send(
-                Recipients::One(receiver_pk.clone()),
-                leader_shard.encode(),
-                true,
+            // Shards arriving from the leader while it is outside the latest set but still a
+            // tracked primary are buffered too.
+            let send_block = |height: u64| {
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(height), 100);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let shard = coded_block
+                    .shard(receiver_participant.get() as u16)
+                    .expect("missing shard");
+                (coded_block.commitment(), shard.encode())
+            };
+            let (commitment, shard_bytes) = send_block(2);
+            leader_sender.send(Recipients::One(receiver_pk.clone()), shard_bytes, true);
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+            let mut shard_sub = mailbox.subscribe_assigned_shard_verified(commitment);
+            mailbox.discovered(
+                commitment,
+                leader_pk.clone(),
+                Round::new(Epoch::zero(), View::new(2)),
             );
             context.sleep(DEFAULT_LINK.latency * 2).await;
+            assert!(
+                matches!(shard_sub.try_recv(), Ok(())),
+                "shard arriving from a leader outside the latest set but still tracked should be buffered"
+            );
 
             // Tracking another set without the leader ages set 0 out of the window, so the
             // leader leaves every tracked set and its buffer is evicted.
+            let (commitment, shard_bytes) = send_block(3);
+            leader_sender.send(Recipients::One(receiver_pk.clone()), shard_bytes, true);
+            context.sleep(DEFAULT_LINK.latency * 2).await;
             oracle.manager().track(2, remaining);
             context.sleep(Duration::from_millis(10)).await;
             let mut shard_sub = mailbox.subscribe_assigned_shard_verified(commitment);
             mailbox.discovered(
                 commitment,
                 leader_pk.clone(),
-                Round::new(Epoch::zero(), View::new(2)),
+                Round::new(Epoch::zero(), View::new(3)),
             );
             context.sleep(DEFAULT_LINK.latency * 2).await;
             assert!(
