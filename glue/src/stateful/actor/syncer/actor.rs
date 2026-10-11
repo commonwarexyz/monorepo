@@ -441,8 +441,8 @@ mod tests {
 
             let resolved = resolve(&marshal, floor, &selected, &Sequential).await;
             assert_eq!(
-                Anchor::from(resolved.as_ref()),
-                Anchor::from(&processed_block)
+                Anchor::from_block(resolved.as_ref(), &Sequential),
+                Anchor::from_block(&processed_block, &Sequential)
             );
         });
     }
@@ -560,8 +560,8 @@ mod tests {
             // Only a selection of F resolves to F. Older selections resolve to F-1.
             let resolved = resolve(&third.mailbox, third.floor, &selected, &Sequential).await;
             assert_eq!(
-                Anchor::from(resolved.as_ref()),
-                Anchor::from(&blocks[expected_height as usize]),
+                Anchor::from_block(resolved.as_ref(), &Sequential),
+                Anchor::from_block(&blocks[expected_height as usize], &Sequential),
             );
             third.abort().await;
         });
@@ -676,8 +676,8 @@ mod tests {
             )
             .await;
             assert_eq!(
-                Anchor::from(resolved.as_ref()),
-                Anchor::from(&blocks[expected_height as usize]),
+                Anchor::from_block(resolved.as_ref(), &Sequential),
+                Anchor::from_block(&blocks[expected_height as usize], &Sequential),
             );
             third.abort().await;
         });
@@ -856,7 +856,10 @@ mod tests {
             );
 
             let resolved = resolver.await.expect("floor resolution failed");
-            assert_eq!(Anchor::from(resolved.as_ref()), Anchor::from(&floor_block));
+            assert_eq!(
+                Anchor::from_block(resolved.as_ref(), &Sequential),
+                Anchor::from_block(&floor_block, &Sequential)
+            );
         });
     }
 
@@ -897,7 +900,7 @@ mod tests {
             }
 
             let newer_floor = TestBlock::new(10, 10);
-            let expected = Anchor::from(&newer_floor);
+            let expected = Anchor::from_block(&newer_floor, &Sequential);
             let newer_finalization = fixtures::finalization(&fixture, 10, Sha256::fill(10));
             assert!(
                 marshal
@@ -957,7 +960,7 @@ mod tests {
                     panic!("a superseded floor must not wait for its pruned block");
                 },
             };
-            assert_eq!(Anchor::from(resolved.as_ref()), expected);
+            assert_eq!(Anchor::from_block(resolved.as_ref(), &Sequential), expected);
         });
     }
 
@@ -1058,7 +1061,7 @@ mod tests {
                     panic!("a superseded floor must not wait for its pruned block");
                 },
             };
-            assert_eq!(Anchor::from(resolved.as_ref()), Anchor::from(&newer_block));
+            assert_eq!(Anchor::from_block(resolved.as_ref(), &Sequential), Anchor::from_block(&newer_block, &Sequential));
         });
     }
 

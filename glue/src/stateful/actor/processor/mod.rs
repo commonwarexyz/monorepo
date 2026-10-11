@@ -3174,7 +3174,7 @@ mod tests {
             let execution = harness.processor.execution.clone();
             let replays = harness.processor.replays.clone();
 
-            execution.set_finalizing(Anchor::from(&winner));
+            execution.set_finalizing(Anchor::from_block(&winner, &Sequential));
             let claim = execution.claim_winner(&replays, winner.digest());
             assert!(
                 matches!(claim, ReplayClaim::Owner(_)),

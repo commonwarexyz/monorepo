@@ -90,7 +90,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, reschedule};
 use commonware_storage::qmdb::sync::{self, Request, Source, source};
 use commonware_utils::{
@@ -635,17 +635,6 @@ pub struct Anchor<D: Digest> {
     pub round: Round,
     /// Digest of the block.
     pub digest: D,
-}
-
-impl<B, D> From<&B> for Anchor<D>
-where
-    B: CertifiableBlock<Digest = D>,
-    B::Context: Epochable + Viewable,
-    D: Digest,
-{
-    fn from(block: &B) -> Self {
-        Self::from_block(block, &Sequential)
-    }
 }
 
 impl<D: Digest> Anchor<D> {
