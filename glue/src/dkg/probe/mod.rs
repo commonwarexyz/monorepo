@@ -1521,8 +1521,9 @@ mod tests {
                 panic!("expected block response");
             };
             assert_eq!(epoch, Epoch::new(1));
-            let block = wire::read_block::<mocks::TestMarshalVariant>(body, commitment, &())
-                .expect("boundary block decoded");
+            let block =
+                wire::read_block::<mocks::TestMarshalVariant>(body, commitment, &(), &Sequential)
+                    .expect("boundary block decoded");
 
             assert_eq!(block.digest(), harness.boundary.digest());
             assert_eq!(block.height(), Height::new(1));

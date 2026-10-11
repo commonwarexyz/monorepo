@@ -9,7 +9,7 @@ use commonware_consensus::{
     simplex::{scheme::Scheme, types::Finalization},
     types::Epoch,
 };
-use commonware_parallel::Sequential;
+use commonware_parallel::Strategy;
 
 /// First byte of a DKG probe message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -241,6 +241,7 @@ pub(crate) fn read_block<V>(
     reader: impl Buf,
     commitment: V::Commitment,
     block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
+    strategy: &impl Strategy,
 ) -> Result<V::Block, Error>
 where
     V: Variant,
@@ -249,7 +250,7 @@ where
         reader,
         block_codec_config,
         ExpectedCommitment::Trusted(commitment),
-        &Sequential,
+        strategy,
     )
 }
 

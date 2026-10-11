@@ -463,20 +463,22 @@ where
         }
 
         let commitment = candidate.finalization.proposal.payload;
-        let block = match wire::read_block::<V>(body, commitment, &self.block_codec_config) {
-            Ok(block) => block,
-            Err(err) => {
-                commonware_p2p::block!(
-                    self.blocker,
-                    peer,
-                    ?err,
-                    "invalid bootstrap boundary block"
-                );
-                Self::request_next_block(&mut pending, boundary_sender);
-                self.pending = Some(pending);
-                return true;
-            }
-        };
+        let block =
+            match wire::read_block::<V>(body, commitment, &self.block_codec_config, &self.strategy)
+            {
+                Ok(block) => block,
+                Err(err) => {
+                    commonware_p2p::block!(
+                        self.blocker,
+                        peer,
+                        ?err,
+                        "invalid bootstrap boundary block"
+                    );
+                    Self::request_next_block(&mut pending, boundary_sender);
+                    self.pending = Some(pending);
+                    return true;
+                }
+            };
 
         let Some(artifact) = Self::artifact_from_block(&pending, candidate.finalization, block)
         else {
@@ -824,8 +826,9 @@ mod tests {
                 mocks::TestMarshalVariant,
             >(block_message, &fixture.schemes[0]);
             assert_eq!(epoch, Epoch::zero());
-            let decoded = wire::read_block::<mocks::TestMarshalVariant>(body, commitment, &())
-                .expect("standard block authenticated");
+            let decoded =
+                wire::read_block::<mocks::TestMarshalVariant>(body, commitment, &(), &Sequential)
+                    .expect("standard block authenticated");
 
             assert_eq!(decoded.as_ref(), &block);
         });
@@ -876,7 +879,7 @@ mod tests {
             );
             assert_eq!(epoch, Epoch::zero());
             let commitment = finalization.proposal.payload;
-            let decoded = wire::read_block::<TestCodingVariant>(body, commitment, &())
+            let decoded = wire::read_block::<TestCodingVariant>(body, commitment, &(), &Sequential)
                 .expect("coding block authenticated");
 
             assert_eq!(decoded.height(), Height::new(1));
@@ -938,7 +941,7 @@ mod tests {
             >(block_message, &verifier);
             assert_eq!(epoch, Epoch::zero());
             let commitment = finalization.proposal.payload;
-            let decoded = wire::read_block::<TestCodingVariant>(body, commitment, &())
+            let decoded = wire::read_block::<TestCodingVariant>(body, commitment, &(), &Sequential)
                 .expect("coding block authenticated");
 
             assert_eq!(decoded.height(), Height::new(1));

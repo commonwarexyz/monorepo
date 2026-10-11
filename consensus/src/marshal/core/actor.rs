@@ -1560,7 +1560,8 @@ where
                 // block, so only the height and digest are checked here. The working block is then
                 // rebuilt from the finalized commitment.
                 let commitment = finalization.proposal.payload;
-                if block.height() != height || block.digest() != V::commitment_to_inner(commitment)
+                if block.height() != height
+                    || block.digest_across(&self.strategy) != V::commitment_to_inner(commitment)
                 {
                     response.send_lossy(false);
                     return self;
@@ -2021,7 +2022,7 @@ where
 
         self.get_finalized_block(height)
             .await
-            .map(|block| (block.height(), block.digest()))
+            .map(|block| (block.height(), block.digest_across(&self.strategy)))
     }
 
     /// Add a finalized block, and optionally a finalization, to the archive.
@@ -2234,7 +2235,7 @@ where
                 let commitment = finalization.proposal.payload;
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     // If found, persist the block.
-                    let digest = block.digest();
+                    let digest = block.digest_across(&self.strategy);
                     let stored;
                     (self, stored) = self
                         .store_finalization(

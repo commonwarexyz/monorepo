@@ -361,6 +361,10 @@ impl<B: Block, C: Scheme, H: Hasher> Digestible for CodedBlock<B, C, H> {
     fn digest(&self) -> Self::Digest {
         self.inner.digest()
     }
+
+    fn digest_across(&self, strategy: &impl Strategy) -> Self::Digest {
+        self.inner.digest_across(strategy)
+    }
 }
 
 impl<B: Block, C: Scheme, H: Hasher> Write for CodedBlock<B, C, H> {
@@ -529,6 +533,10 @@ impl<B: Block, C: Scheme, H: Hasher> Digestible for StoredCodedBlock<B, C, H> {
 
     fn digest(&self) -> Self::Digest {
         self.inner.digest()
+    }
+
+    fn digest_across(&self, strategy: &impl Strategy) -> Self::Digest {
+        self.inner.digest_across(strategy)
     }
 }
 
