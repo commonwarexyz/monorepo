@@ -35,6 +35,7 @@
 //!     my_application,
 //!     marshal_mailbox,
 //!     epocher,
+//!     strategy,
 //! );
 //! ```
 //!
@@ -65,7 +66,7 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
-use commonware_parallel::Sequential;
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     Clock, Metrics, Spawner,
     telemetry::{
@@ -131,13 +132,14 @@ where
 /// This wrapper requires only [`crate::Block`] for `B`, not
 /// [`crate::CertifiableBlock`]. It is designed for applications that cannot
 /// recover consensus context directly from block payloads.
-pub struct Inline<E, S, A, B, ES>
+pub struct Inline<E, S, A, B, ES, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: Block,
     ES: Epocher,
+    T: Strategy,
 {
     context: Arc<E>,
     application: A,
@@ -148,15 +150,17 @@ where
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
     ancestor_fetch_duration: Timed,
+    strategy: T,
 }
 
-impl<E, S, A, B, ES> Clone for Inline<E, S, A, B, ES>
+impl<E, S, A, B, ES, T> Clone for Inline<E, S, A, B, ES, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: Block,
     ES: Epocher,
+    T: Strategy,
 {
     fn clone(&self) -> Self {
         Self {
@@ -168,11 +172,12 @@ where
             build_duration: self.build_duration.clone(),
             proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
             ancestor_fetch_duration: self.ancestor_fetch_duration.clone(),
+            strategy: self.strategy.clone(),
         }
     }
 }
 
-impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
+impl<E, S, A, B, ES, T> Inline<E, S, A, B, ES, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -185,11 +190,18 @@ where
         >,
     B: Block,
     ES: Epocher,
+    T: Strategy,
 {
     /// Creates a new inline-verification wrapper.
     ///
     /// Registers a `build_duration` histogram for proposal latency.
-    pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
+    pub fn new(
+        context: E,
+        application: A,
+        marshal: Mailbox<S, Standard<B>>,
+        epocher: ES,
+        strategy: T,
+    ) -> Self {
         let build_histogram = context.histogram(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",
@@ -218,11 +230,12 @@ where
             build_duration,
             proposal_parent_fetch_duration,
             ancestor_fetch_duration,
+            strategy,
         }
     }
 }
 
-impl<E, S, A, B, ES> Automaton for Inline<E, S, A, B, ES>
+impl<E, S, A, B, ES, T> Automaton for Inline<E, S, A, B, ES, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -235,6 +248,7 @@ where
         >,
     B: Block,
     ES: Epocher,
+    T: Strategy,
 {
     type Digest = B::Digest;
     type Context = Context<Self::Digest, S::PublicKey>;
@@ -260,6 +274,7 @@ where
         let build_duration = self.build_duration.clone();
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
+        let strategy = self.strategy.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -336,7 +351,7 @@ where
                     .last(consensus_context.epoch())
                     .expect("current epoch should exist");
                 if parent.height() == last_in_epoch {
-                    let digest = parent.digest();
+                    let digest = parent.digest_across(&strategy);
                     gates
                         .stage(
                             consensus_context.round,
@@ -353,7 +368,7 @@ where
                     Arc::new(runtime_context.child("ancestor_stream")),
                     [parent],
                     ancestor_fetch_duration,
-                    Sequential,
+                    strategy.clone(),
                 );
                 let build_request = application
                     .propose(
@@ -391,7 +406,7 @@ where
                 };
                 build_timer.observe(&runtime_context);
 
-                let digest = built_block.digest();
+                let digest = built_block.digest_across(&strategy);
                 gates
                     .stage(
                         consensus_context.round,
@@ -443,6 +458,7 @@ where
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
+        let strategy = self.strategy.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let runtime_context = self
@@ -543,6 +559,7 @@ where
                         block.as_ref(),
                         parent_request,
                         &mut tx,
+                        &strategy,
                     )
                     .await
                     {
@@ -562,6 +579,7 @@ where
                         &marshal,
                         &mut tx,
                         ancestor_fetch_duration,
+                        &strategy,
                     )
                     .await;
                     if let Some(valid) = valid {
@@ -580,7 +598,7 @@ where
 /// Inline certification consumes a registered certification gate when present, and
 /// falls back to a round-bound fetch/persist path when the gate is missing (after
 /// an unclean restart) or cannot speak for the notarized proposal.
-impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
+impl<E, S, A, B, ES, T> CertifiableAutomaton for Inline<E, S, A, B, ES, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -593,6 +611,7 @@ where
         >,
     B: Block,
     ES: Epocher,
+    T: Strategy,
 {
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
@@ -670,13 +689,14 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Relay for Inline<E, S, A, B, ES>
+impl<E, S, A, B, ES, T> Relay for Inline<E, S, A, B, ES, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block,
     ES: Epocher,
+    T: Strategy,
 {
     type Digest = B::Digest;
     type PublicKey = S::PublicKey;
@@ -687,7 +707,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Reporter for Inline<E, S, A, B, ES>
+impl<E, S, A, B, ES, T> Reporter for Inline<E, S, A, B, ES, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -695,6 +715,7 @@ where
         + Reporter<Activity = Update<B>>,
     B: Block,
     ES: Epocher,
+    T: Strategy,
 {
     type Activity = A::Activity;
 
@@ -729,6 +750,7 @@ mod tests {
         sha256::Sha256,
     };
     use commonware_macros::{select, test_traced};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, channel::fallible::OneshotExt};
     use rand::Rng;
@@ -754,9 +776,9 @@ mod tests {
         fn assert_certifiable<T: CertifiableAutomaton>() {}
         fn assert_relay<T: Relay>() {}
 
-        assert_automaton::<Inline<E, S, A, B, ES>>();
-        assert_certifiable::<Inline<E, S, A, B, ES>>();
-        assert_relay::<Inline<E, S, A, B, ES>>();
+        assert_automaton::<Inline<E, S, A, B, ES, Sequential>>();
+        assert_certifiable::<Inline<E, S, A, B, ES, Sequential>>();
+        assert_relay::<Inline<E, S, A, B, ES, Sequential>>();
     }
 
     #[test_traced("INFO")]
@@ -792,6 +814,7 @@ mod tests {
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
+                Sequential,
             );
 
             // Seed the parent and child blocks in marshal so verify can fetch locally.
@@ -873,6 +896,7 @@ mod tests {
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
+                Sequential,
             );
 
             // Seed the parent and child blocks in marshal without starting a verify task.
@@ -943,7 +967,7 @@ mod tests {
             let mut inline = Inline::new(context.child("inline"),
                 mock_app,
                 marshal.clone(),
-                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                FixedEpocher::new(BLOCKS_PER_EPOCH), Sequential,
             );
 
             let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
@@ -1032,6 +1056,7 @@ mod tests {
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
+                Sequential,
             );
 
             // A non-boundary block notarized at view 2 and available locally.
@@ -1130,6 +1155,7 @@ mod tests {
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
+                Sequential,
             );
 
             let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
@@ -1252,6 +1278,7 @@ mod tests {
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
+                Sequential,
             );
 
             let digest = inline
@@ -1334,6 +1361,7 @@ mod tests {
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
+                Sequential,
             );
 
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -1410,7 +1438,7 @@ mod tests {
                 context.child("inline"),
                 mock_app,
                 marshal.clone(),
-                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                FixedEpocher::new(BLOCKS_PER_EPOCH), Sequential,
             );
 
             let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
@@ -1556,6 +1584,7 @@ mod tests {
                 mock_app,
                 post_marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
+                Sequential,
             );
 
             let digest_rx = inline.propose(ctx).await;
@@ -1605,7 +1634,7 @@ mod tests {
                 context.child("inline"),
                 mock_app,
                 marshal.clone(),
-                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                FixedEpocher::new(BLOCKS_PER_EPOCH), Sequential,
             );
 
             let leader = participants[1].clone();

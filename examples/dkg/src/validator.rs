@@ -350,6 +350,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         ),
         marshal.clone(),
         FixedEpocher::new(BLOCKS_PER_EPOCH),
+        Sequential,
     );
     let (orchestrator_actor, orchestrator_mailbox) = orchestrator::Actor::new(
         context.child("orchestrator"),

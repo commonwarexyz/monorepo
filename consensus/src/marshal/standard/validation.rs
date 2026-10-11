@@ -11,7 +11,7 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
-use commonware_parallel::Sequential;
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     Clock, Metrics, Spawner,
     telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
@@ -35,14 +35,16 @@ pub(crate) fn validate_block<B>(
     block: &B,
     parent: &B,
     parent_digest: B::Digest,
+    strategy: &impl Strategy,
 ) -> Result<(), Error>
 where
     B: Block,
 {
-    if block.parent() != parent.digest() {
+    let actual_parent_digest = parent.digest_across(strategy);
+    if block.parent() != actual_parent_digest {
         return Err(Error::ParentDigest);
     }
-    if parent.digest() != parent_digest {
+    if actual_parent_digest != parent_digest {
         return Err(Error::ExpectedParentDigest);
     }
     if !has_contiguous_height(parent.height(), block.height()) {
@@ -136,6 +138,7 @@ pub(super) async fn await_and_validate_parent<B, T>(
     block: &B,
     parent_request: oneshot::Receiver<Arc<B>>,
     tx: &mut oneshot::Sender<T>,
+    strategy: &impl Strategy,
 ) -> Option<ParentCheck<Arc<B>>>
 where
     B: Block,
@@ -163,7 +166,7 @@ where
     };
 
     // Validate parent linkage and contiguous child height before application logic.
-    if let Err(err) = validate_block(block, &parent, parent_commitment) {
+    if let Err(err) = validate_block(block, &parent, parent_commitment, strategy) {
         debug!(
             ?err,
             expected_parent = %parent.digest(),
@@ -194,6 +197,7 @@ pub(super) async fn run_app_verify<E, S, A, B, T>(
     marshal: &Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<T>,
     ancestor_fetch_duration: Timed,
+    strategy: &impl Strategy,
 ) -> Option<bool>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -206,7 +210,7 @@ where
         Arc::new(runtime_context.child("ancestor_stream")),
         [Arc::clone(&block), parent],
         ancestor_fetch_duration,
-        Sequential,
+        strategy.clone(),
     );
     let validity_request = application
         .verify(
@@ -240,6 +244,7 @@ mod tests {
     use bytes::BufMut;
     use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
     use commonware_cryptography::{Digestible, Hasher, Sha256, sha256::Digest as Sha256Digest};
+    use commonware_parallel::Sequential;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct TestBlock {
@@ -315,7 +320,10 @@ mod tests {
     #[test]
     fn test_validate_block_ok() {
         let (parent, block) = baseline_blocks();
-        assert_eq!(validate_block(&block, &parent, parent.digest()), Ok(()));
+        assert_eq!(
+            validate_block(&block, &parent, parent.digest(), &Sequential),
+            Ok(())
+        );
     }
 
     #[test]
@@ -323,7 +331,7 @@ mod tests {
         let (parent, mut block) = baseline_blocks();
         block.parent = Sha256::hash(&[b"wrong_parent"]);
         assert_eq!(
-            validate_block(&block, &parent, parent.digest()),
+            validate_block(&block, &parent, parent.digest(), &Sequential),
             Err(Error::ParentDigest)
         );
     }
@@ -332,7 +340,12 @@ mod tests {
     fn test_validate_block_expected_parent_digest_error() {
         let (parent, block) = baseline_blocks();
         assert_eq!(
-            validate_block(&block, &parent, Sha256::hash(&[b"wrong_expected_parent"])),
+            validate_block(
+                &block,
+                &parent,
+                Sha256::hash(&[b"wrong_expected_parent"]),
+                &Sequential
+            ),
             Err(Error::ExpectedParentDigest)
         );
     }
@@ -342,7 +355,7 @@ mod tests {
         let (parent, mut block) = baseline_blocks();
         block.height = Height::new(9);
         assert_eq!(
-            validate_block(&block, &parent, parent.digest()),
+            validate_block(&block, &parent, parent.digest(), &Sequential),
             Err(Error::Height)
         );
     }

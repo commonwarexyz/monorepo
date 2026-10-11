@@ -2120,8 +2120,8 @@ mod tests {
 
     type Runtime = deterministic::Context;
     type App = MockVerifyingApp<B, S>;
-    type InlineWrapper = Inline<Runtime, S, App, B, FixedEpocher>;
-    type DeferredWrapper = Deferred<Runtime, S, App, B, FixedEpocher>;
+    type InlineWrapper = Inline<Runtime, S, App, B, FixedEpocher, Sequential>;
+    type DeferredWrapper = Deferred<Runtime, S, App, B, FixedEpocher, Sequential>;
 
     #[derive(Clone)]
     enum Wrapper {
@@ -2142,12 +2142,14 @@ mod tests {
                     app,
                     marshal,
                     FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    Sequential,
                 )),
                 WrapperKind::Deferred => Self::Deferred(Deferred::new(
                     context,
                     app,
                     marshal,
                     FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    Sequential,
                 )),
             }
         }

@@ -1224,6 +1224,7 @@ impl EngineDefinition for ReshareEngine {
             ),
             marshal.clone(),
             FixedEpocher::new(EPOCH_LENGTH),
+            Sequential,
         );
 
         let (orchestrator_actor, orchestrator_mailbox) = orchestrator::Actor::new(

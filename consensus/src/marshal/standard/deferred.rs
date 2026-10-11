@@ -35,6 +35,7 @@
 //!     my_application,
 //!     marshal_mailbox,
 //!     epocher,
+//!     strategy,
 //! );
 //! ```
 //!
@@ -96,7 +97,7 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::select;
-use commonware_parallel::Sequential;
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     Clock, Metrics, Spawner,
     telemetry::{
@@ -141,13 +142,14 @@ use tracing::{Instrument as _, debug, info_span};
 ///
 /// _This embedded context is trustworthy because the notarizing quorum (which contains at least f+1 honest
 /// validators) verified that the block's context matched the consensus context before voting._
-pub struct Deferred<E, S, A, B, ES>
+pub struct Deferred<E, S, A, B, ES, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: CertifiableBlock,
     ES: Epocher,
+    T: Strategy,
 {
     context: Arc<E>,
     application: A,
@@ -158,15 +160,17 @@ where
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
     ancestor_fetch_duration: Timed,
+    strategy: T,
 }
 
-impl<E, S, A, B, ES> Clone for Deferred<E, S, A, B, ES>
+impl<E, S, A, B, ES, T> Clone for Deferred<E, S, A, B, ES, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: CertifiableBlock,
     ES: Epocher,
+    T: Strategy,
 {
     fn clone(&self) -> Self {
         Self {
@@ -178,11 +182,12 @@ where
             build_duration: self.build_duration.clone(),
             proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
             ancestor_fetch_duration: self.ancestor_fetch_duration.clone(),
+            strategy: self.strategy.clone(),
         }
     }
 }
 
-impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>
+impl<E, S, A, B, ES, T> Deferred<E, S, A, B, ES, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -195,9 +200,16 @@ where
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
+    T: Strategy,
 {
     /// Creates a new [`Deferred`] wrapper.
-    pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
+    pub fn new(
+        context: E,
+        application: A,
+        marshal: Mailbox<S, Standard<B>>,
+        epocher: ES,
+        strategy: T,
+    ) -> Self {
         let build_histogram = context.histogram(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",
@@ -227,6 +239,7 @@ where
             build_duration,
             proposal_parent_fetch_duration,
             ancestor_fetch_duration,
+            strategy,
         }
     }
 
@@ -254,6 +267,7 @@ where
         let mut application = self.application.clone();
         let (mut tx, rx) = oneshot::channel();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
+        let strategy = self.strategy.clone();
         let runtime_context = self
             .context
             .child("deferred_verify")
@@ -280,6 +294,7 @@ where
                         block.as_ref(),
                         parent_request,
                         &mut tx,
+                        &strategy,
                     )
                     .await
                     {
@@ -296,6 +311,7 @@ where
                         &marshal,
                         &mut tx,
                         ancestor_fetch_duration,
+                        &strategy,
                     )
                     .await
                 };
@@ -462,7 +478,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Automaton for Deferred<E, S, A, B, ES>
+impl<E, S, A, B, ES, T> Automaton for Deferred<E, S, A, B, ES, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -475,6 +491,7 @@ where
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
+    T: Strategy,
 {
     type Digest = B::Digest;
     type Context = Context<Self::Digest, S::PublicKey>;
@@ -507,6 +524,7 @@ where
         let build_duration = self.build_duration.clone();
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
+        let strategy = self.strategy.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -541,7 +559,7 @@ where
                     .expect("current epoch should exist");
                 if let Some(block) = marshal.get_verified(consensus_context.round).await {
                     let block_context = block.context();
-                    let digest = block.digest();
+                    let digest = block.digest_across(&strategy);
                     let reproposal =
                         digest == consensus_context.parent.1 && block.height() == last_in_epoch;
                     if !reproposal && block_context != consensus_context {
@@ -615,7 +633,7 @@ where
                 // re-propose it as to not produce any blocks that will be cut out
                 // by the epoch transition.
                 if parent.height() == last_in_epoch {
-                    let digest = parent.digest();
+                    let digest = parent.digest_across(&strategy);
                     gates
                         .stage(
                             consensus_context.round,
@@ -632,7 +650,7 @@ where
                     Arc::new(runtime_context.child("ancestor_stream")),
                     [parent],
                     ancestor_fetch_duration,
-                    Sequential,
+                    strategy.clone(),
                 );
                 let build_request = application
                     .propose(
@@ -670,7 +688,7 @@ where
                 };
                 build_timer.observe(&runtime_context);
 
-                let digest = built_block.digest();
+                let digest = built_block.digest_across(&strategy);
                 gates
                     .stage(
                         consensus_context.round,
@@ -836,7 +854,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> CertifiableAutomaton for Deferred<E, S, A, B, ES>
+impl<E, S, A, B, ES, T> CertifiableAutomaton for Deferred<E, S, A, B, ES, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -849,6 +867,7 @@ where
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
+    T: Strategy,
 {
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
@@ -865,13 +884,14 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Relay for Deferred<E, S, A, B, ES>
+impl<E, S, A, B, ES, T> Relay for Deferred<E, S, A, B, ES, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
+    T: Strategy,
 {
     type Digest = B::Digest;
     type PublicKey = S::PublicKey;
@@ -882,7 +902,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Reporter for Deferred<E, S, A, B, ES>
+impl<E, S, A, B, ES, T> Reporter for Deferred<E, S, A, B, ES, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -890,6 +910,7 @@ where
         + Reporter<Activity = Update<B>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
+    T: Strategy,
 {
     type Activity = A::Activity;
 
@@ -925,6 +946,7 @@ mod tests {
         sha256::Sha256,
     };
     use commonware_macros::{select, test_traced};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, channel::fallible::OneshotExt};
     use std::time::Duration;
@@ -964,6 +986,7 @@ mod tests {
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
+                Sequential,
             );
 
             // Create parent block at height 1
@@ -1099,6 +1122,7 @@ mod tests {
                 mock_app,
                 marshal.clone(),
                 limited_epocher,
+                Sequential,
             );
 
             // Create a parent block at height 19 (last block in epoch 0, which is supported)
@@ -1199,6 +1223,7 @@ mod tests {
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
+                Sequential,
             );
 
             // Create parent block at height 1 so the commitment is well-formed.
@@ -1289,6 +1314,7 @@ mod tests {
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
+                Sequential,
             );
 
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -1365,7 +1391,7 @@ mod tests {
                 context.child("deferred"),
                 mock_app,
                 marshal.clone(),
-                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                FixedEpocher::new(BLOCKS_PER_EPOCH), Sequential,
             );
 
             // Seed parent and child via the buffer (in-memory only) so
@@ -1490,6 +1516,7 @@ mod tests {
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
+                Sequential,
             );
 
             let digest_rx = marshaled.propose(ctx).await;
@@ -1586,7 +1613,7 @@ mod tests {
                 context.child("deferred"),
                 mock_app,
                 marshal.clone(),
-                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                FixedEpocher::new(BLOCKS_PER_EPOCH), Sequential,
             );
 
             let digest_rx = marshaled.propose(ctx).await;
@@ -1673,6 +1700,7 @@ mod tests {
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
+                Sequential,
             );
 
             let digest_rx = marshaled.propose(new_ctx).await;
@@ -1743,6 +1771,7 @@ mod tests {
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
+                Sequential,
             );
 
             let digest = marshaled
@@ -1798,7 +1827,14 @@ mod tests {
     /// context names the certified view-1 block as parent, which this
     /// validator's parent selection accepts (view 1 certified, view 2 nullified).
     struct EquivocationFixture {
-        marshaled: Deferred<deterministic::Context, S, MockVerifyingApp<B, S>, B, FixedEpocher>,
+        marshaled: Deferred<
+            deterministic::Context,
+            S,
+            MockVerifyingApp<B, S>,
+            B,
+            FixedEpocher,
+            Sequential,
+        >,
         round: Round,
         digest: <B as Digestible>::Digest,
         embedded_ctx: Ctx,
@@ -1887,6 +1923,7 @@ mod tests {
             app,
             marshal,
             FixedEpocher::new(BLOCKS_PER_EPOCH),
+            Sequential,
         );
         context.sleep(Duration::from_millis(10)).await;
 

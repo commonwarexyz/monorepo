@@ -685,6 +685,7 @@ impl EngineDefinition for MultiDbEngine {
             stateful_mailbox.clone(),
             marshal_mailbox.clone(),
             FixedEpocher::new(EPOCH_LENGTH),
+            Sequential,
         );
 
         // Marshal reporter: stateful mailbox, wrapped by monitor.

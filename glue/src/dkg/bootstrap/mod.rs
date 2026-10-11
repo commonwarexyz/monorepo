@@ -618,6 +618,7 @@ where
             app,
             marshal_mailbox.clone(),
             FixedEpocher::new(self.config.blocks_per_epoch),
+            self.config.strategy.clone(),
         );
         let simplex = simplex::Engine::new(
             context.child("simplex"),

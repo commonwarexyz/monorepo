@@ -1238,6 +1238,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
             stateful_mailbox,
             marshal,
             FixedEpocher::new(EPOCH_LENGTH),
+            Sequential,
         );
         let mut certifications = Vec::with_capacity(blocks.len());
         for index in [5, 1, 4, 0, 3, 2] {
@@ -1570,6 +1571,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             stateful_mailbox.clone(),
             marshal,
             FixedEpocher::new(EPOCH_LENGTH),
+            Sequential,
         );
 
         // Cache the batches that will be finalized so the held descendant
@@ -1833,6 +1835,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             stateful_mailbox,
             marshal,
             FixedEpocher::new(EPOCH_LENGTH),
+            Sequential,
         );
 
         // Keep the first four batches available so block 5 reaches application
