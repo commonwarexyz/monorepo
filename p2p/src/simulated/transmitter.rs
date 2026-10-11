@@ -6,7 +6,7 @@ use commonware_utils::{BigRationalExt, SystemTimeExt, time::SYSTEM_TIME_PRECISIO
 use num_rational::BigRational;
 use num_traits::Zero;
 use std::{
-    collections::{BTreeMap, VecDeque, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
     time::{Duration, SystemTime},
 };
 use tracing::trace;
@@ -117,6 +117,8 @@ pub struct State<P: PublicKey> {
     next_transmission_ready: Option<SystemTime>,
     expected_sequences: BTreeMap<(P, P), u128>,
     buffered: BTreeMap<(P, P), BTreeMap<u128, Buffered>>,
+    finished: BTreeSet<u64>,
+    finishing: bool,
 }
 
 impl<P: PublicKey> State<P> {
@@ -134,6 +136,8 @@ impl<P: PublicKey> State<P> {
             next_transmission_ready: None,
             expected_sequences: BTreeMap::new(),
             buffered: BTreeMap::new(),
+            finished: BTreeSet::new(),
+            finishing: false,
         }
     }
 
@@ -442,10 +446,20 @@ impl<P: PublicKey> State<P> {
     }
 
     /// Finalizes completed flows and opportunistically starts follow-on work.
+    ///
+    /// Completed flows are finalized in ascending flow id, including flows that complete while
+    /// follow-on work is started. Starting follow-on work rebalances, which can call back into
+    /// `finish`; such a call only records its flows, and the outermost call finalizes them, so the
+    /// call depth stays constant however many flows complete at one instant.
     fn finish(&mut self, completed: Vec<u64>, now: SystemTime) -> Vec<Completion<P>> {
-        let mut outcomes = Vec::new();
+        self.finished.extend(completed);
+        if self.finishing {
+            return Vec::new();
+        }
+        self.finishing = true;
 
-        for flow_id in completed {
+        let mut outcomes = Vec::new();
+        while let Some(flow_id) = self.finished.pop_first() {
             // Skip any flows that have already been removed
             let Some(meta) = self.all_flows.remove(&flow_id) else {
                 continue;
@@ -482,6 +496,7 @@ impl<P: PublicKey> State<P> {
 
             outcomes.extend(self.launch(origin, recipient, now));
         }
+        self.finishing = false;
         self.schedule(now);
 
         outcomes
@@ -705,6 +720,89 @@ mod tests {
 
     fn key(seed: u64) -> ed25519::PublicKey {
         ed25519::PrivateKey::from_seed(seed).public_key()
+    }
+
+    #[test]
+    fn completions_at_one_instant_finish_in_flow_order() {
+        // Lifting a cap completes every in-flight transfer at once, and each completion starts its
+        // pair's next message, which also completes at once. Completions are reported in ascending
+        // flow id: a follow-on flow comes after every earlier flow that completed at that instant.
+        let mut state = State::new();
+        let now = UNIX_EPOCH;
+        let origin = key(1);
+        let (b, c) = (key(2), key(3));
+        assert!(state.limit(now, &origin, Some(1_000), None).is_empty());
+        for (recipient, len) in [(&b, 100), (&b, 0), (&b, 50), (&c, 100), (&c, 50)] {
+            let completions = state.enqueue(
+                now,
+                origin.clone(),
+                recipient.clone(),
+                CHANNEL,
+                IoBuf::from(vec![0u8; len]),
+                Duration::ZERO,
+                true,
+            );
+            assert!(completions.is_empty());
+        }
+
+        let completions = state.limit(now, &origin, None, None);
+        let order: Vec<_> = completions
+            .iter()
+            .map(|c| (c.recipient.clone(), c.message.len()))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (b.clone(), 100),
+                (c.clone(), 100),
+                (b.clone(), 0),
+                (c, 50),
+                (b, 50),
+            ]
+        );
+    }
+
+    #[test]
+    fn simultaneous_completions_with_queued_followers() {
+        // One capped origin sends one message to each of `FLOWS` recipients, with a second message
+        // queued behind each. The first messages share the cap equally and finish at the same
+        // instant, so finishing each one launches its pair's follower while the others are still
+        // pending. Run on a thread with a small stack so that work proportional to `FLOWS` on the
+        // stack shows up as an overflow.
+        const FLOWS: u64 = 400;
+        const STACK: usize = 128 * 1024;
+        let delivered = std::thread::Builder::new()
+            .stack_size(STACK)
+            .spawn(|| {
+                let mut state = State::new();
+                let now = UNIX_EPOCH;
+                let origin = key(0);
+                assert!(state.limit(now, &origin, Some(1_000_000), None).is_empty());
+                for i in 1..=FLOWS {
+                    let recipient = key(i);
+                    for _ in 0..2 {
+                        let completions = state.enqueue(
+                            now,
+                            origin.clone(),
+                            recipient.clone(),
+                            CHANNEL,
+                            IoBuf::from(vec![0u8; 100]),
+                            Duration::ZERO,
+                            true,
+                        );
+                        assert!(completions.is_empty());
+                    }
+                }
+                let mut delivered = 0;
+                while let Some(next) = state.next() {
+                    delivered += state.advance(next).len();
+                }
+                delivered
+            })
+            .expect("spawn")
+            .join()
+            .expect("no panic");
+        assert_eq!(delivered, 2 * FLOWS as usize);
     }
 
     #[test]
