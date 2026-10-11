@@ -1207,7 +1207,9 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     ///
     /// Pages read from storage must have valid checksums covering their retained bytes.
     /// Buffered data is flushed as for [Self::replay], and the included partial tail is frozen
-    /// in memory. This does not establish durability.
+    /// in memory. This does not establish durability. Pages are read `buffer_size / 2` bytes at
+    /// a time with the next read in flight while the previous one is decoded, as for
+    /// [`Sealed::replay`].
     pub async fn replay_prefix(
         mut self,
         max_size: u64,
@@ -3844,17 +3846,17 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Every refill uses the replay's read options, including the refill after crossing a
-            // page boundary.
+            // The first fill reads page 0 and starts page 1 in flight, both with the replay's
+            // read options, so crossing the page boundary needs no further read.
             assert!(replay.ensure(1).await.unwrap());
             replay.advance(page_size);
             assert!(replay.ensure(1).await.unwrap());
+            assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE; 2]);
 
-            // Seeking discards buffered pages but preserves the read options for the next refill.
+            // Seeking discards the page in flight and reads both pages again with the same options.
             replay.seek_to(0).unwrap();
             assert!(replay.ensure(1).await.unwrap());
-
-            assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE; 3]);
+            assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE; 4]);
         });
     }
 

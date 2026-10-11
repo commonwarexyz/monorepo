@@ -176,7 +176,9 @@ impl<B: Blob> Sealed<B> {
     ///
     /// Sealed values have no write buffer to flush, so unlike [`super::Writer::replay`] this method
     /// is not async. Replay validates full pages read from storage and uses the frozen partial
-    /// page. Every underlying blob read uses `read_options`, including refills after seeking.
+    /// page. Pages are read `buffer_size / 2` bytes at a time, with the next read in flight while
+    /// the previous one is decoded. Every underlying blob read uses `read_options`, including
+    /// refills after seeking.
     pub fn replay(
         &self,
         buffer_size: NonZeroUsize,

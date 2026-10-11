@@ -380,7 +380,10 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// snapshot collisions without re-reading the log; `None` disables it.
     pub init_cache: Option<NonZeroUsize>,
 
-    /// Size (in bytes) of the read buffer used to replay the log during init.
+    /// Size (in bytes) of the read buffer used to replay the log during init: half is decoded
+    /// while the other half is read, so each read is half this size. Halves of at least 128 KiB
+    /// are read with direct I/O under `DONT_CACHE` on Linux; smaller halves rely on kernel
+    /// readahead.
     pub init_buffer: NonZeroUsize,
 
     /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]): `()`
