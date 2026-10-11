@@ -3708,8 +3708,8 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_replay_and_writable_tip_request_dont_cache() {
-        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(3);
+    fn test_replay_read_options_reach_history_and_tip() {
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(6);
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -3720,7 +3720,8 @@ mod tests {
                 .await
                 .expect("failed to initialize journal");
 
-            for i in 0..5 {
+            // The tip blob holds three items: two full pages and a partial page.
+            for i in 0..9 {
                 (journal, _) = journal
                     .append(&test_digest(i))
                     .await
@@ -3754,29 +3755,56 @@ mod tests {
                 );
             }
 
-            // Writable-tip misses request DONT_CACHE through CacheRef ownership.
+            // A synced writable tip has no unwritten full page, so it is replayed like sealed
+            // history: its full pages arrive in one read that carries the caller's policy.
             page_cache.clear();
             recordings.clear();
             {
                 let stream = journal
-                    .replay(3, NZUsize!(56), ReadOptions::DONT_CACHE)
+                    .replay(6, NZUsize!(2048), ReadOptions::default())
                     .await
                     .expect("failed to replay writable tip");
+                pin_mut!(stream);
+                for i in 6..9 {
+                    let (position, item) = stream
+                        .next()
+                        .await
+                        .expect("missing writable replay item")
+                        .expect("failed to replay writable item");
+                    assert_eq!(position, i);
+                    assert_eq!(item, test_digest(i));
+                }
+                assert!(stream.next().await.is_none());
+                assert_eq!(recordings.snapshot().reads, vec![ReadOptions::default()]);
+            }
+
+            // Once the tip buffers an unwritten full page (without filling the blob, which would
+            // seal it), replay goes through the page cache, which faults each missing page with
+            // DONT_CACHE regardless of the caller's policy.
+            for i in 9..11 {
+                (journal, _) = journal
+                    .append(&test_digest(i))
+                    .await
+                    .expect("failed to append");
+            }
+            page_cache.clear();
+            recordings.clear();
+            {
+                let stream = journal
+                    .replay(6, NZUsize!(2048), ReadOptions::default())
+                    .await
+                    .expect("failed to replay buffered tip");
                 pin_mut!(stream);
                 let (position, item) = stream
                     .next()
                     .await
-                    .expect("missing writable replay item")
-                    .expect("failed to replay writable item");
-                assert_eq!(position, 3);
-                assert_eq!(item, test_digest(3));
-
-                let reads = recordings.snapshot().reads;
-                assert!(!reads.is_empty());
-                assert!(
-                    reads
-                        .iter()
-                        .all(|options| *options == ReadOptions::DONT_CACHE)
+                    .expect("missing buffered replay item")
+                    .expect("failed to replay buffered item");
+                assert_eq!(position, 6);
+                assert_eq!(item, test_digest(6));
+                assert_eq!(
+                    recordings.snapshot().reads,
+                    vec![ReadOptions::DONT_CACHE, ReadOptions::DONT_CACHE]
                 );
             }
 

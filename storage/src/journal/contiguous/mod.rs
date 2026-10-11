@@ -192,9 +192,10 @@ pub trait Contiguous: Send + Sync {
     /// Return a stream of the items in `range`, in position order. `range` must fall within
     /// `bounds()`. An empty range within `bounds()` yields an empty stream.
     ///
-    /// `buffer` controls the replay byte budget for each chunk. Every backing blob read from
-    /// sealed history uses `read_options`. Backing reads from the live writable tip instead use
-    /// [ReadOptions::DONT_CACHE] on page-cache misses because the cache retains the fetched pages.
+    /// `buffer` controls the replay byte budget for each chunk. Every backing blob read uses
+    /// `read_options`, except while the live writable tip holds an unwritten full page: its
+    /// backing reads then go through the page cache, which uses [ReadOptions::DONT_CACHE] on
+    /// misses because it retains the fetched pages.
     ///
     /// # Errors
     ///

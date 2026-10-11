@@ -3948,7 +3948,9 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_replay_and_writable_tip_request_dont_cache() {
+    fn test_replay_read_options_reach_history_and_tip() {
+        const PAGE_SIZE: NonZeroU16 = NZU16!(40);
+
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
@@ -3966,7 +3968,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            for item in 0..39 {
+            // The tip section holds fifteen 9-byte frames: three full pages and a partial page.
+            for item in 0..35 {
                 (journal, _) = journal.append(&item).await.unwrap();
             }
             journal = journal.sync().await.unwrap();
@@ -3991,23 +3994,41 @@ mod tests {
                 );
             }
 
-            // Writable-tip misses request DONT_CACHE through CacheRef ownership.
+            // A synced writable tip has no unwritten full page, so it is replayed like sealed
+            // history: its full pages arrive in one read that carries the caller's policy.
             page_cache.clear();
             {
                 let stream = journal
-                    .replay(20, NZUsize!(32), ReadOptions::DONT_CACHE)
+                    .replay(20, NZUsize!(2048), ReadOptions::default())
+                    .await
+                    .unwrap();
+                recordings.clear();
+                futures::pin_mut!(stream);
+                for item in 20..35 {
+                    assert_eq!(stream.next().await.unwrap().unwrap(), (item, item));
+                }
+                assert!(stream.next().await.is_none());
+                assert_eq!(recordings.snapshot().reads, vec![ReadOptions::default()]);
+            }
+
+            // Once the tip buffers an unwritten full page (without filling the section, which
+            // would seal it), replay goes through the page cache, which faults each missing page
+            // with DONT_CACHE regardless of the caller's policy.
+            for item in 35..39 {
+                (journal, _) = journal.append(&item).await.unwrap();
+            }
+            page_cache.clear();
+            {
+                let stream = journal
+                    .replay(20, NZUsize!(2048), ReadOptions::default())
                     .await
                     .unwrap();
                 recordings.clear();
                 futures::pin_mut!(stream);
                 assert_eq!(stream.next().await.unwrap().unwrap(), (20, 20));
-
-                let reads = recordings.snapshot().reads;
-                assert!(!reads.is_empty());
-                assert!(
-                    reads
-                        .iter()
-                        .all(|options| *options == ReadOptions::DONT_CACHE)
+                assert_eq!(
+                    recordings.snapshot().reads,
+                    vec![ReadOptions::DONT_CACHE; 3]
                 );
             }
 
