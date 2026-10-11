@@ -172,10 +172,10 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// Size (in bytes) of the read buffer used to replay the log during init: half is decoded
-    /// while the other half is read, so each read is half this size. Halves of at least 128 KiB
-    /// are read with direct I/O under `DONT_CACHE` on Linux; smaller halves rely on kernel
-    /// readahead.
+    /// Size (in bytes) of the read buffer used to replay the log during init: the log is read in
+    /// batches of a quarter of this size, with three batches in flight while one is decoded.
+    /// Batches of at least 128 KiB are read with direct I/O under `DONT_CACHE` on Linux; smaller
+    /// batches rely on kernel readahead.
     pub init_buffer: NonZeroUsize,
 }
 

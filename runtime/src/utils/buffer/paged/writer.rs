@@ -1207,8 +1207,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     ///
     /// Pages read from storage must have valid checksums covering their retained bytes.
     /// Buffered data is flushed as for [Self::replay], and the included partial tail is frozen
-    /// in memory. This does not establish durability. Pages are read `buffer_size / 2` bytes at
-    /// a time with the next read in flight while the previous one is decoded, as for
+    /// in memory. This does not establish durability. Pages are read in batches of a quarter of
+    /// `buffer_size` with up to three batches in flight while one is decoded, as for
     /// [`Sealed::replay`].
     pub async fn replay_prefix(
         mut self,
