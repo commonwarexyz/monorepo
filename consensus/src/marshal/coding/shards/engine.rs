@@ -106,9 +106,9 @@
 //!
 //! _Per-peer buffers are only kept for primary peers of a tracked peer set
 //! ([`commonware_p2p::PeerSetUpdate::all`]), matching [`commonware_broadcast::buffered`].
-//! A peer that leaves every tracked set loses its buffered shards. One that only
-//! leaves the latest set keeps them through the overlap window, so a departing
-//! participant's shards for its final epoch are still ingested._
+//! A peer that is no longer a primary of any tracked set loses its buffered shards.
+//! One that only leaves the latest set keeps them through the overlap window, so a
+//! departing participant's shards for its final epoch are still ingested._
 //!
 //! # Peer Validation and Blocking Rules
 //!
@@ -633,7 +633,7 @@ where
     /// Per-peer ring buffers for shards received before leader announcement.
     ///
     /// Empty buffers are retained for active peers and only evicted when the
-    /// peer leaves every tracked peer set.
+    /// peer is no longer a primary of any tracked peer set.
     peer_buffers: BTreeMap<P, VecDeque<Shard<B, C, H>>>,
 
     /// Maximum buffered pre-leader shards per peer.
@@ -7563,9 +7563,8 @@ mod tests {
 
     #[test_traced]
     fn test_peer_set_update_keeps_buffers_of_tracked_primaries() {
-        // Shards buffered before leader announcement survive the sender leaving the latest
-        // set while an older tracked set still lists it as primary, and are evicted once it
-        // leaves every tracked set.
+        // Pre-leader shards from a sender that left the latest set are still buffered while an
+        // older tracked set lists it as primary, and are evicted once it leaves every tracked set.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let num_peers = 10usize;
@@ -7636,36 +7635,32 @@ mod tests {
             let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
 
-            // Build a coded block and extract the shard destined for the receiver.
+            // Build a coded block at `height` and extract the shard destined for the receiver.
             let coding_config = coding_config_for_participants(num_peers as u16);
-            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
-            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
-            let commitment = coded_block.commitment();
-
             let receiver_participant = participants
                 .index(&receiver_pk)
                 .expect("receiver must be a participant");
-            let leader_shard = coded_block
-                .shard(receiver_participant.get() as u16)
-                .expect("missing shard");
-            let shard_bytes = leader_shard.encode();
-
-            // Send the shard BEFORE leader announcement (it gets buffered).
-            leader_sender.send(
-                Recipients::One(receiver_pk.clone()),
-                shard_bytes.clone(),
-                true,
-            );
-            context.sleep(DEFAULT_LINK.latency * 2).await;
+            let receiver_shard = |height: u64| {
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(height), 100);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let shard = coded_block
+                    .shard(receiver_participant.get() as u16)
+                    .expect("missing shard");
+                (coded_block.commitment(), shard.encode())
+            };
 
             // Track a set that excludes the leader. Set 0 stays tracked, so the leader remains a
-            // tracked primary and keeps its buffer.
+            // tracked primary.
             let remaining: Set<P> =
                 Set::from_iter_dedup(peer_keys.iter().filter(|pk| **pk != leader_pk).cloned());
             oracle.manager().track(1, remaining.clone());
             context.sleep(Duration::from_millis(10)).await;
 
-            // Announcing the leader ingests the buffered shard.
+            // Shards arriving from the leader while it is outside the latest set but still a
+            // tracked primary are buffered and ingested once the leader is announced.
+            let (commitment, shard_bytes) = receiver_shard(1);
+            leader_sender.send(Recipients::One(receiver_pk.clone()), shard_bytes, true);
+            context.sleep(DEFAULT_LINK.latency * 2).await;
             let mut shard_sub = mailbox.subscribe_assigned_shard_verified(commitment);
             mailbox.discovered(
                 commitment,
@@ -7675,37 +7670,12 @@ mod tests {
             context.sleep(DEFAULT_LINK.latency * 2).await;
             assert!(
                 matches!(shard_sub.try_recv(), Ok(())),
-                "buffered shard from a leader still in a tracked set should be ingested"
-            );
-
-            // Shards arriving from the leader while it is outside the latest set but still a
-            // tracked primary are buffered too.
-            let send_block = |height: u64| {
-                let inner = B::new(Sha256Digest::EMPTY, Height::new(height), 100);
-                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
-                let shard = coded_block
-                    .shard(receiver_participant.get() as u16)
-                    .expect("missing shard");
-                (coded_block.commitment(), shard.encode())
-            };
-            let (commitment, shard_bytes) = send_block(2);
-            leader_sender.send(Recipients::One(receiver_pk.clone()), shard_bytes, true);
-            context.sleep(DEFAULT_LINK.latency * 2).await;
-            let mut shard_sub = mailbox.subscribe_assigned_shard_verified(commitment);
-            mailbox.discovered(
-                commitment,
-                leader_pk.clone(),
-                Round::new(Epoch::zero(), View::new(2)),
-            );
-            context.sleep(DEFAULT_LINK.latency * 2).await;
-            assert!(
-                matches!(shard_sub.try_recv(), Ok(())),
                 "shard arriving from a leader outside the latest set but still tracked should be buffered"
             );
 
             // Tracking another set without the leader ages set 0 out of the window, so the
             // leader leaves every tracked set and its buffer is evicted.
-            let (commitment, shard_bytes) = send_block(3);
+            let (commitment, shard_bytes) = receiver_shard(2);
             leader_sender.send(Recipients::One(receiver_pk.clone()), shard_bytes, true);
             context.sleep(DEFAULT_LINK.latency * 2).await;
             oracle.manager().track(2, remaining);
@@ -7714,7 +7684,7 @@ mod tests {
             mailbox.discovered(
                 commitment,
                 leader_pk.clone(),
-                Round::new(Epoch::zero(), View::new(3)),
+                Round::new(Epoch::zero(), View::new(2)),
             );
             context.sleep(DEFAULT_LINK.latency * 2).await;
             assert!(

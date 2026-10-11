@@ -19,9 +19,9 @@
 //! # Peer Management
 //!
 //! Only primary peers of a tracked peer set (`all.primary`, see [commonware_p2p::Provider]) may
-//! buffer messages. When a peer leaves every tracked set, its buffered messages are evicted unless
-//! buffered by any other primary peer. A peer that only leaves the latest set keeps its messages
-//! through the overlap window.
+//! buffer messages. When a peer is no longer a primary of any tracked set, its buffered messages
+//! are evicted unless buffered by any other primary peer. A peer that only leaves the latest set
+//! keeps its messages through the overlap window.
 
 mod config;
 pub use config::Config;
