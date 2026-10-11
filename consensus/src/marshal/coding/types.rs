@@ -254,8 +254,8 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
 }
 
 impl<B: CertifiableBlock, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
-    /// Builds a [`CodedBlock`] from a decoded block and coding configuration and binds it to
-    /// `expected`: on success, its commitment equals the expected one.
+    /// Builds a [`CodedBlock`] from a decoded block and coding configuration, failing unless the
+    /// result's commitment equals the one in `expected`.
     ///
     /// [`ExpectedCommitment::Untrusted`] recomputes the coding root across `strategy`.
     pub(crate) fn from_decoded(
@@ -378,11 +378,11 @@ impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
 
 /// Codec configuration for decoding a [`CodedBlock`] from the wire.
 ///
-/// Decoding binds the block to the expected commitment. [`ExpectedCommitment::Untrusted`]
-/// recomputes the coding root; [`ExpectedCommitment::Trusted`] reuses it and defers shard
-/// generation to [`CodedBlock::shards`]. A codec read recomputes the root sequentially, while
-/// [`Variant::decode_block`](crate::marshal::core::Variant::decode_block) recomputes it
-/// across a [`Strategy`].
+/// Decoding fails unless the block's commitment equals the expected one. A trusted commitment
+/// supplies the coding root and defers shard generation to [`CodedBlock::shards`]. An untrusted
+/// commitment has its root recomputed on the calling thread, since the configuration cannot
+/// carry a strategy the way
+/// [`Variant::decode_block`](crate::marshal::core::Variant::decode_block) does.
 pub struct CodedBlockCfg<B: Block, C: Scheme, H: Hasher> {
     /// Codec configuration for the inner application block.
     pub inner: <B as Read>::Cfg,
