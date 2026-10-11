@@ -174,6 +174,9 @@ impl<D: Digest> Write for Chunk<D> {
 
 impl<D: Digest> Read for Chunk<D> {
     /// The coding config and the maximum number of data bytes.
+    ///
+    /// The admitted width is the canonical width of that much data under the config. It is widest
+    /// for one minimum shard, where a chunk spans the whole data and its length prefix.
     type Cfg = (Config, usize);
 
     fn read_cfg(

@@ -365,11 +365,10 @@ where
     /// The maximum encoded size of a block.
     ///
     /// Peers are blocked for sending a shard wider than the coding scheme produces for a block of
-    /// this size under the coding config the shard claims. That config is untrusted until consensus
-    /// confirms its commitment. With Reed-Solomon a claim can only narrow that bound: the widest
-    /// claim is one minimum shard, which spans the whole block and its coding config, so this value
-    /// bounds every shard at about one block of this size. Larger blocks are neither reconstructed
-    /// nor broadcast. Every node must use the same value.
+    /// this size under the config the shard's commitment claims. That config is untrusted until
+    /// consensus confirms the commitment, so a shard may be as wide as the scheme's widest shard
+    /// for such a block: under a one-shard config, at least the whole block. Larger blocks are
+    /// neither reconstructed nor broadcast. Every node must use the same value.
     pub max_block_size: NonZeroUsize,
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.
@@ -390,11 +389,9 @@ where
     /// [`Mailbox::discovered`] or reports a notarization via
     /// [`Mailbox::notarized`].
     ///
-    /// The shard buffers hold at most `peer_buffer_size` shards per `latest.primary` peer, each at
-    /// most about one `max_block_size` block, so each peer's buffer holds at most about
-    /// `peer_buffer_size * max_block_size` bytes. An honest peer sends each recipient about one
-    /// shard per block, so a few slots cover the blocks in flight before consensus signals their
-    /// commitments.
+    /// The shard buffers hold at most `peer_buffer_size` shards per `latest.primary` peer, each up
+    /// to the scheme's widest shard for a `max_block_size` block. An honest peer sends each
+    /// recipient about one shard per block.
     pub peer_buffer_size: NonZeroUsize,
 
     /// The maximum number of commitment records retained.
@@ -409,9 +406,8 @@ where
     ///
     /// The background receiver decodes incoming network messages in a separate
     /// task and forwards them to the engine over a mailbox with this
-    /// capacity. Each decoded shard is at most about one `max_block_size`
-    /// block, so the channel holds at most about
-    /// `background_channel_capacity * max_block_size` bytes.
+    /// capacity. Each decoded shard is up to the scheme's widest shard for a
+    /// `max_block_size` block.
     pub background_channel_capacity: NonZeroUsize,
 
     /// Provider for peer set information. Pre-leader shards are buffered per
