@@ -1348,7 +1348,7 @@ where
         round: Round,
         block: Arc<CodedBlock<B, C, H>>,
     ) -> Result<Arc<CodedBlock<B, C, H>>, Epoch> {
-        let commitment = block.commitment();
+        let commitment = block.commitment_across(&self.strategy);
         let cached = if let Some(record) = self.records.get_mut(&commitment) {
             record.observe(round)?;
             let newly_cached = record.block().is_none();
@@ -1381,7 +1381,7 @@ where
         round: Round,
         block: Arc<CodedBlock<B, C, H>>,
     ) {
-        let commitment = block.commitment();
+        let commitment = block.commitment_across(&self.strategy);
 
         if let Some(record) = self.records.get(&commitment)
             && let Err(existing_epoch) = record.validate_epoch(round)
@@ -1590,7 +1590,7 @@ where
 
     /// Notifies and cleans up any subscriptions for a reconstructed block.
     fn notify_block_subscribers(&mut self, block: Arc<CodedBlock<B, C, H>>) {
-        let commitment = block.commitment();
+        let commitment = block.commitment_across(&self.strategy);
         let digest = block.digest();
 
         // Notify by-commitment subscribers.

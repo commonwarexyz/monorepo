@@ -212,9 +212,13 @@ where
                     Height::zero(),
                     "genesis anchor must be at height zero"
                 );
-                finalized_blocks =
-                    Self::ensure_genesis_anchor(finalized_blocks, anchor, last_processed_height)
-                        .await;
+                finalized_blocks = Self::ensure_genesis_anchor(
+                    finalized_blocks,
+                    anchor,
+                    last_processed_height,
+                    &config.strategy,
+                )
+                .await;
                 None
             }
             Start::Floor(finalization) => Some(finalization),
@@ -275,9 +279,10 @@ where
         mut finalized_blocks: FB,
         anchor: V::Block,
         last_processed_height: Option<Height>,
+        strategy: &T,
     ) -> FB {
         let anchor_height = anchor.height();
-        let anchor_commitment = V::commitment(&anchor);
+        let anchor_commitment = V::commitment_across(&anchor, strategy);
         match finalized_blocks
             .get(ArchiveID::Index(anchor_height.get()))
             .await
@@ -290,7 +295,7 @@ where
                     "stored genesis block height mismatch"
                 );
                 assert!(
-                    V::commitment(&stored) == anchor_commitment,
+                    V::commitment_across(&stored, strategy) == anchor_commitment,
                     "stored genesis block does not match configured anchor"
                 );
             }
@@ -1293,9 +1298,10 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> (Box<Self>, bool) {
+        let commitment = V::commitment_across(&block, &self.strategy);
         self.block_subscriptions.notify(block.clone());
 
-        let Some(finalization) = self.floor.take_matching(V::commitment(&block)) else {
+        let Some(finalization) = self.floor.take_matching(commitment) else {
             return (self, false);
         };
 

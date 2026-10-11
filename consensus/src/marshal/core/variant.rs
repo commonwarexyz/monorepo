@@ -62,6 +62,11 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// `commitment_to_inner(commitment(block)) == block.digest()`.
     fn commitment(block: &Self::Block) -> Self::Commitment;
 
+    /// Computes the consensus commitment for a block, splitting any work across `strategy`.
+    fn commitment_across(block: &Self::Block, _strategy: &impl Strategy) -> Self::Commitment {
+        Self::commitment(block)
+    }
+
     /// Computes the consensus commitment for a stored block.
     ///
     /// The stored representation carries enough information to derive the

@@ -69,6 +69,10 @@ where
         block.commitment()
     }
 
+    fn commitment_across(block: &Self::Block, strategy: &impl Strategy) -> Self::Commitment {
+        block.commitment_across(strategy)
+    }
+
     fn stored_commitment(block: &Self::StoredBlock) -> Self::Commitment {
         block.commitment()
     }

@@ -424,6 +424,7 @@ where
                         &consensus_context,
                         commitment,
                         parent_commitment,
+                        &strategy,
                     ) {
                         debug!(
                             ?err,
@@ -741,7 +742,7 @@ where
                     .expect("current epoch should exist");
                 if let Some(block) = marshal.get_verified(consensus_context.round).await {
                     let block_context = block.context();
-                    let commitment = block.commitment();
+                    let commitment = block.commitment_across(&strategy);
                     let reproposal =
                         commitment == consensus_context.parent.1 && block.height() == last_in_epoch;
                     if !reproposal && block_context != consensus_context {
@@ -810,7 +811,7 @@ where
                 // re-propose it as to not produce any blocks that will be cut out
                 // by the epoch transition.
                 if parent.height() == last_in_epoch {
-                    let commitment = parent.commitment();
+                    let commitment = parent.commitment_across(&strategy);
                     let round = consensus_context.round;
 
                     gates
@@ -865,7 +866,7 @@ where
                 let coded_block = CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy);
                 erasure_timer.observe(&runtime_context);
 
-                let commitment = coded_block.commitment();
+                let commitment = coded_block.commitment_across(&strategy);
                 let round = consensus_context.round;
 
                 gates

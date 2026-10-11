@@ -8,7 +8,7 @@ use crate::{
 use commonware_codec::{BufsMut, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digestible, Hasher};
-use commonware_parallel::Strategy;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{Faults, N3f1, NZU16};
 use std::{
     marker::PhantomData,
@@ -300,7 +300,7 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         };
 
         // Binds the components not checked above: a recomputed root and the context digest.
-        if block.commitment() != commitment {
+        if block.commitment_across(strategy) != commitment {
             return Err(commonware_codec::Error::Invalid(
                 "CodedBlock",
                 "commitment mismatch",
@@ -346,8 +346,12 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> Committable for CodedBlock<B, C,
     type Commitment = Commitment<B, C, H>;
 
     fn commitment(&self) -> Self::Commitment {
+        self.commitment_across(&Sequential)
+    }
+
+    fn commitment_across(&self, strategy: &impl Strategy) -> Self::Commitment {
         Commitment::<B, C, H>::from((
-            self.digest(),
+            self.digest_across(strategy),
             self.commitment,
             hash_context::<H, _>(&self.inner.context()),
             self.config,

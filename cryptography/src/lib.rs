@@ -317,6 +317,11 @@ commonware_macros::stability_scope!(BETA {
         /// relation between digest and commitment and a one-to-many relation
         /// between commitment and digest.
         fn commitment(&self) -> Self::Commitment;
+
+        /// Returns the object's commitment, splitting any work in computing it across `strategy`.
+        fn commitment_across(&self, _strategy: &impl Strategy) -> Self::Commitment {
+            self.commitment()
+        }
     }
 
     pub type DigestOf<H> = <H as Hasher>::Digest;
