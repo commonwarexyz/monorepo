@@ -1761,8 +1761,8 @@ mod tests {
             seed(&context, &cfg, 1..=1).await;
 
             // Initialization needs only the terminal page used to open Writer. Recovery belongs to
-            // replay, whose 112-byte budget of four 28-byte physical pages is read one page at a
-            // time with three in flight.
+            // replay, whose 112-byte budget is read half at a time: two 28-byte physical pages
+            // per read.
             recordings.clear();
             let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
                 .await

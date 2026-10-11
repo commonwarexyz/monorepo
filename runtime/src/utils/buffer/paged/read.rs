@@ -36,10 +36,19 @@ const DIRECT_BATCH_BYTES: usize = 128 << 10;
 /// Most batches kept in flight ahead of the decoder.
 ///
 /// A read costs a blocking-thread or AIO round trip whose latency a fast decoder does not cover
-/// while it works on one batch, so several are read ahead. A batch is `1 / (MAX_READ_AHEAD + 1)`
-/// of the replay buffer, so the batches in flight and the one being decoded together fill the
-/// buffer. A buffer too small for that many pages reads ahead fewer, down to one page at a time.
+/// while it works on one batch, so several are read ahead. A batch is `1 / (read_ahead + 1)` of
+/// the replay buffer, so the batches in flight and the one being decoded together fill the
+/// buffer.
 const MAX_READ_AHEAD: usize = 3;
+
+/// Smallest batch worth reading ahead.
+///
+/// Each read also costs a fixed amount of issue and completion work, which a batch below this
+/// size does not amortize: splitting a small buffer into more batches costs more in reads than
+/// the extra batches in flight return. A buffer reads ahead only as many batches as keep each
+/// one at least this large, down to one batch of half the buffer, so buffers of four times this
+/// size and up read ahead [`MAX_READ_AHEAD`] batches.
+const MIN_READ_AHEAD_BATCH_BYTES: usize = 64 << 10;
 
 /// The physical bytes of one batch.
 type Batch = BoxFuture<'static, Result<IoBufsMut, Error>>;
@@ -91,7 +100,10 @@ impl Inflight {
 /// Pages are read in batches of `batch_pages` pages. Up to `read_ahead` batches after the one
 /// being decoded are kept in flight so the device works while the decoder does; they and the
 /// batch being decoded together fill the replay buffer, and an item straddling two batches keeps
-/// the earlier one as well. Batches of at least [`DIRECT_BATCH_BYTES`] are read through
+/// the earlier one as well. The depth follows the buffer: [`MAX_READ_AHEAD`] batches for buffers
+/// of at least `(MAX_READ_AHEAD + 1) * MIN_READ_AHEAD_BATCH_BYTES`, fewer for smaller ones so
+/// each batch stays at least [`MIN_READ_AHEAD_BATCH_BYTES`], and one of half the buffer below
+/// twice that. Batches of at least [`DIRECT_BATCH_BYTES`] are read through
 /// [`Blob::read_many`] and smaller ones through [`Blob::read_at`]. A batch is validated when it
 /// is handed to the decoder, so a bad page fails the fill that reaches it, and a failed read
 /// fails the fill that reaches its batch. A failed or dropped fill leaves the decoder's position
@@ -164,7 +176,10 @@ impl<B: Blob> PageReader<B> {
             physical_blob_size -= Widen::widen(physical_page_size);
         }
 
-        let read_ahead = buffer_pages.saturating_sub(1).clamp(1, MAX_READ_AHEAD);
+        let read_ahead = (buffer_pages * physical_page_size / MIN_READ_AHEAD_BATCH_BYTES)
+            .saturating_sub(1)
+            .min(buffer_pages.saturating_sub(1))
+            .clamp(1, MAX_READ_AHEAD);
         Self {
             blob,
             physical_page_size,
@@ -279,16 +294,18 @@ impl<B: Blob> PageReader<B> {
         }
 
         // Take the first batch read ahead when it is the one the decoder needs, and read from
-        // the decoder's position otherwise: a fill that failed or was dropped leaves that
-        // position behind the batch it took, while the batches after it stay queued. Then top
-        // the queue up before waiting so the device works through the wait and the decode.
+        // the decoder's position otherwise, starting that read before any other: a fill that
+        // failed or was dropped leaves that position behind the batch it took, while the
+        // batches after it stay queued. Then top the queue up before waiting so the device
+        // works through the wait and the decode.
         let batch = match self.inflight.front() {
             Some(front) if front.page == self.blob_page => {
                 self.inflight.pop_front().expect("front exists")
             }
             _ => self
                 .issue(self.blob_page)?
-                .expect("pages remain to be issued"),
+                .expect("pages remain to be issued")
+                .start(),
         };
         self.top_up(batch.page + Widen::widen(batch.pages))?;
         let physical_buf = Bytes::from(batch.wait().await?.coalesce().freeze());
@@ -736,13 +753,16 @@ mod tests {
         }
     }
 
-    /// Pages and batches of the pipelining tests: 64-byte pages, a replay buffer of 64 pages,
-    /// so batches of 16 pages with three read ahead, and a blob of five batches plus a partial
-    /// page. The read sequences below assume that depth.
+    /// Pages and batches of the pipelining tests: 64-byte pages and a replay buffer of 4096
+    /// pages, large enough to read three batches of 1024 pages ahead, over a blob of five
+    /// batches plus a partial page. The read sequences below assume that depth.
     const _: () = assert!(MAX_READ_AHEAD == 3);
     const PIPE_PAGE_SIZE: NonZeroU16 = NZU16!(64);
     const PIPE_PHYSICAL_PAGE: usize = 64 + Checksum::SIZE;
-    const PIPE_BUFFER_PAGES: usize = 64;
+    const PIPE_BUFFER_PAGES: usize = 4096;
+    const _: () = assert!(
+        PIPE_BUFFER_PAGES * PIPE_PHYSICAL_PAGE >= (MAX_READ_AHEAD + 1) * MIN_READ_AHEAD_BATCH_BYTES
+    );
     const PIPE_BUFFER_BYTES: usize = PIPE_BUFFER_PAGES * PIPE_PHYSICAL_PAGE;
     const PIPE_BATCH_PAGES: usize = PIPE_BUFFER_PAGES / (MAX_READ_AHEAD + 1);
     const PIPE_BATCH_BYTES: usize = PIPE_BATCH_PAGES * PIPE_PHYSICAL_PAGE;
