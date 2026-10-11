@@ -387,9 +387,12 @@ where
     /// peer in a fixed-size ring to bound memory under Byzantine spam. These
     /// shards are only ingested when consensus provides a leader via
     /// [`Mailbox::discovered`] or reports a notarization via
-    /// [`Mailbox::notarized`]. Buffered shards are never spilled to disk, so size this for the
-    /// shards that can arrive before those signals under network asynchrony: a node far from most
-    /// of the network with too few slots falls back to the resolver for most blocks.
+    /// [`Mailbox::notarized`].
+    ///
+    /// Shards wait here in memory, never on disk, until consensus signals their commitment. Size
+    /// the ring for the number of blocks a node can trail its peers by, which is larger for a
+    /// distant or slow node: a ring that is too small evicts shards before they are needed, and
+    /// the node then fetches those blocks from the resolver instead of reconstructing them.
     ///
     /// The shard buffers hold at most `peer_buffer_size` shards per `latest.primary` peer, each up
     /// to the scheme's widest shard for a `max_block_size` block. An honest peer sends each
