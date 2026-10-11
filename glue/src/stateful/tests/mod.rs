@@ -1224,6 +1224,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
                     update_channel_size: NZUsize!(1),
                 },
                 prune_config: None,
+                strategy: Sequential,
             },
         );
         let stateful_actor = stateful.start();
@@ -1372,6 +1373,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
                     update_channel_size: NZUsize!(1),
                 },
                 prune_config: None,
+                strategy: Sequential,
             },
         );
         let stateful_actor = stateful.start();
@@ -1557,6 +1559,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                     update_channel_size: NZUsize!(1),
                 },
                 prune_config: None,
+                strategy: Sequential,
             },
         );
         let stateful_actor = stateful.start();
@@ -1821,6 +1824,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                     retained_marshal_blocks: 2,
                     retained_qmdb_blocks: 0,
                 }),
+                strategy: Sequential,
             },
         );
         let stateful_actor = stateful.start();

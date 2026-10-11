@@ -21,6 +21,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::{select, select_loop};
+use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Spawner, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::{
@@ -56,13 +57,14 @@ pub(super) struct PendingFinalization<B> {
 }
 
 /// Serves application requests while coordinating state sync and its handoff.
-pub(super) struct Syncing<E, A, S, V, R>
+pub(super) struct Syncing<E, A, S, V, R, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
+    T: Strategy,
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
@@ -87,6 +89,8 @@ where
 
     /// Resolvers used for state sync fetching and post-bootstrap serving.
     pub(super) resolvers: R,
+    /// Strategy for computing block digests and commitments.
+    pub(super) strategy: T,
 
     /// Receives the converged [`Artifact`] from the syncer.
     pub(super) completion: oneshot::Receiver<Artifact<E, A>>,
@@ -100,7 +104,7 @@ where
     pub(super) metrics: StatefulMetrics,
 }
 
-impl<E, A, S, V, R> Syncing<E, A, S, V, R>
+impl<E, A, S, V, R, T> Syncing<E, A, S, V, R, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
@@ -108,6 +112,7 @@ where
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    T: Strategy,
 {
     pub async fn run(mut self) {
         select_loop! {
@@ -126,7 +131,11 @@ where
                 break;
             } => {
                 let handoffs =
-                    classify(artifact.anchor, mem::take(&mut self.pending_finalizations));
+                    classify(
+                        artifact.anchor,
+                        mem::take(&mut self.pending_finalizations),
+                        &self.strategy,
+                    );
                 self.transition(artifact, handoffs).await;
                 return;
             },
@@ -224,12 +233,16 @@ where
         let artifact = select! {
             _ = self.context.stopped() => return (self, None),
             artifact = self.syncer.retarget(
-                Anchor::from(newest.as_ref()),
+                Anchor::from_block(newest.as_ref(), &self.strategy),
                 A::sync_targets(newest.as_ref()),
             ) => artifact,
         };
         if let Some(artifact) = artifact {
-            let handoffs = classify(artifact.anchor, mem::take(&mut self.pending_finalizations));
+            let handoffs = classify(
+                artifact.anchor,
+                mem::take(&mut self.pending_finalizations),
+                &self.strategy,
+            );
             return (self, Some((artifact, handoffs)));
         }
 
@@ -255,6 +268,7 @@ where
             artifact.anchor,
             self.metrics.clone(),
             self.pruning,
+            self.strategy.clone(),
         );
 
         let mut pending_prune = None;
@@ -334,6 +348,7 @@ where
 fn classify<B>(
     anchor: Anchor<<B as Digestible>::Digest>,
     mut finalized: VecDeque<PendingFinalization<Arc<B>>>,
+    strategy: &impl Strategy,
 ) -> VecDeque<FinalizedHandoff<Arc<B>>>
 where
     B: CertifiableBlock,
@@ -356,7 +371,7 @@ where
         }
         if block.height() == anchor.height {
             assert_eq!(
-                block.digest(),
+                block.digest_across(strategy),
                 anchor.digest,
                 "finalized block at sync anchor height must match sync anchor digest",
             );
@@ -366,7 +381,7 @@ where
 
         if block.height() == previous.height {
             assert_eq!(
-                block.digest(),
+                block.digest_across(strategy),
                 previous.digest,
                 "duplicate finalized block must match its original digest"
             );
@@ -376,7 +391,7 @@ where
                 previous.height.next(),
                 "finalized block skips unapplied heights",
             );
-            previous = Anchor::from(block.as_ref());
+            previous = Anchor::from_block(block.as_ref(), strategy);
         }
         handoffs.push_back(FinalizedHandoff::Apply(block, acknowledgement));
     }
@@ -419,6 +434,7 @@ mod tests {
         Digestible as _,
         sha256::{Digest as Sha256Digest, Sha256},
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
         Supervisor as _, deterministic,
@@ -452,7 +468,7 @@ mod tests {
     where
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
     {
-        syncing: Syncing<E, TestApp, TestScheme, TestVariant, NoopResolver>,
+        syncing: Syncing<E, TestApp, TestScheme, TestVariant, NoopResolver, Sequential>,
     }
 
     impl TestHarness<deterministic::Context> {
@@ -471,7 +487,7 @@ mod tests {
             marshal: MarshalMailbox<TestScheme, TestVariant>,
         ) -> (
             Self,
-            StatefulMailbox<deterministic::Context, TestApp>,
+            StatefulMailbox<deterministic::Context, TestApp, Sequential>,
             actor_mailbox::Receiver<syncer::mailbox::Message<deterministic::Context, TestApp>>,
             oneshot::Sender<Artifact<deterministic::Context, TestApp>>,
         ) {
@@ -546,7 +562,7 @@ mod tests {
             marshal: MarshalMailbox<TestScheme, TestVariant>,
         ) -> (
             Self,
-            StatefulMailbox<E, TestApp>,
+            StatefulMailbox<E, TestApp, Sequential>,
             actor_mailbox::Receiver<syncer::mailbox::Message<E, TestApp>>,
             oneshot::Sender<Artifact<E, TestApp>>,
         ) {
@@ -572,11 +588,12 @@ mod tests {
                     pending_finalizations: VecDeque::new(),
                     pruning: None,
                     metrics: StatefulMetrics::new(&context),
+                    strategy: Sequential,
                 },
             };
             (
                 harness,
-                StatefulMailbox::new(mailbox_sender),
+                StatefulMailbox::new(mailbox_sender, Sequential),
                 syncer_receiver,
                 sender,
             )
@@ -611,7 +628,9 @@ mod tests {
 
     #[test]
     fn handoff_classification_orders_mixed_terminal_sequence() {
-        assert!(classify::<TestBlock>(anchor(u64::MAX - 2, 9), VecDeque::new()).is_empty());
+        assert!(
+            classify::<TestBlock>(anchor(u64::MAX - 2, 9), VecDeque::new(), &Sequential).is_empty()
+        );
 
         let mut finalized = VecDeque::new();
         for (height, digest) in [
@@ -624,7 +643,7 @@ mod tests {
         ] {
             finalized.push_back(pending(TestBlock::new(height, digest)));
         }
-        let mut handoffs = classify(anchor(u64::MAX - 2, 9), finalized);
+        let mut handoffs = classify(anchor(u64::MAX - 2, 9), finalized, &Sequential);
         assert!(matches!(
             handoffs.pop_front(),
             Some(FinalizedHandoff::Covered(block, _))
@@ -651,6 +670,7 @@ mod tests {
         let _ = classify(
             anchor(7, 9),
             VecDeque::from([pending(TestBlock::new(7, 10))]),
+            &Sequential,
         );
     }
 
@@ -663,6 +683,7 @@ mod tests {
                 pending(TestBlock::new(8, 10)),
                 pending(TestBlock::new(8, 11)),
             ]),
+            &Sequential,
         );
     }
 
@@ -672,6 +693,7 @@ mod tests {
         let _ = classify(
             anchor(7, 9),
             VecDeque::from([pending(TestBlock::new(9, 10))]),
+            &Sequential,
         );
     }
 
@@ -680,6 +702,7 @@ mod tests {
         let handoffs = classify(
             anchor(7, 9),
             VecDeque::from([pending(TestBlock::new(6, 8))]),
+            &Sequential,
         );
         assert!(matches!(
             handoffs.front(),
@@ -875,7 +898,7 @@ mod tests {
             let fixture =
                 scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_SYNCING_LIVE_FLOOR", 1);
             let (sender, mut reports) = actor_mailbox::new(context.child("reports"), NZUsize!(8));
-            let reporter = StatefulMailbox::<_, TestApp>::new(sender);
+            let reporter = StatefulMailbox::<_, TestApp, Sequential>::new(sender, Sequential);
             let marshal = fixtures::marshal_fixture_with_reporter(
                 context.child("marshal"),
                 "syncing-live-floor",

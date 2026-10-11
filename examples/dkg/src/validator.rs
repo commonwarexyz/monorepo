@@ -337,6 +337,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             resolvers: qmdb_sync_resolver,
             sync_config: types::sync_config(),
             prune_config: None,
+            strategy: Sequential,
         },
     );
 

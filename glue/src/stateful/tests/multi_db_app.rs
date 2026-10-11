@@ -664,6 +664,7 @@ impl EngineDefinition for MultiDbEngine {
                     retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
+                strategy: Sequential,
             },
         );
 

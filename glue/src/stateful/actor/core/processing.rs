@@ -20,6 +20,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{
     Acknowledgement as _, acknowledgement::Exact, channel::fallible::OneshotExt,
@@ -205,12 +206,13 @@ fn requeue<E, A>(
 }
 
 /// Serves proposals, verifications, and finalizations against the live database set.
-pub(super) struct Processing<E, A, S, V>
+pub(super) struct Processing<E, A, S, V, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
+    T: Strategy,
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
@@ -221,19 +223,20 @@ where
     /// Marshal mailbox used for lazy block lookup.
     pub(super) marshal: MarshalMailbox<S, V>,
     /// The processing state of the actor.
-    pub(super) processor: Processor<E, A>,
+    pub(super) processor: Processor<E, A, T>,
 
     /// Verification requests deferred until processing starts.
     pub(super) deferred_verifications: Vec<VerificationRequest<E, A>>,
 }
 
-impl<E, A, S, V> Processing<E, A, S, V>
+impl<E, A, S, V, T> Processing<E, A, S, V, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    T: Strategy,
 {
     /// Serves requests until the mailbox closes or the actor stops.
     ///
@@ -522,6 +525,7 @@ mod tests {
     };
     use commonware_cryptography::Digestible as _;
     use commonware_macros::select;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock as _, ContextCell, Error as RuntimeError, Handle, Name, Runner as _, Spawner as _,
         Supervisor as _, deterministic,
@@ -839,7 +843,7 @@ mod tests {
         prefix: &str,
         app: GatedApp,
     ) -> (
-        Mailbox<deterministic::Context, GatedApp>,
+        Mailbox<deterministic::Context, GatedApp, Sequential>,
         Box<dyn std::any::Any>,
         Handle<()>,
     ) {
@@ -861,6 +865,7 @@ mod tests {
             anchor(0, 0),
             StatefulMetrics::new(context),
             None,
+            Sequential,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
@@ -872,7 +877,7 @@ mod tests {
             deferred_verifications: Vec::new(),
         };
         let actor = context.child("loop").spawn(move |_| processing.run());
-        (Mailbox::new(sender), marshal.guards, actor)
+        (Mailbox::new(sender, Sequential), marshal.guards, actor)
     }
 
     /// Spawn a [`Processing`] loop over a gated [`TestDb`], returning its
@@ -883,7 +888,7 @@ mod tests {
         prefix: &str,
         prune_config: Option<PruneConfig>,
     ) -> (
-        Mailbox<deterministic::Context, GatedApp>,
+        Mailbox<deterministic::Context, GatedApp, Sequential>,
         FlushControl,
         Box<dyn std::any::Any>,
         Handle<()>,
@@ -897,7 +902,7 @@ mod tests {
         prune_config: Option<PruneConfig>,
         verify_gates: VecDeque<ApplicationGate>,
     ) -> (
-        Mailbox<deterministic::Context, GatedApp>,
+        Mailbox<deterministic::Context, GatedApp, Sequential>,
         FlushControl,
         Box<dyn std::any::Any>,
         Handle<()>,
@@ -930,6 +935,7 @@ mod tests {
             anchor(0, 0),
             StatefulMetrics::new(context),
             pruning,
+            Sequential,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
@@ -941,7 +947,12 @@ mod tests {
             deferred_verifications: Vec::new(),
         };
         let actor = context.child("loop").spawn(move |_| processing.run());
-        (Mailbox::new(sender), control, marshal.guards, actor)
+        (
+            Mailbox::new(sender, Sequential),
+            control,
+            marshal.guards,
+            actor,
+        )
     }
 
     async fn spawn_read_gated_processing(
@@ -950,7 +961,7 @@ mod tests {
         verify_gate: ApplicationGate,
         prune_config: Option<PruneConfig>,
     ) -> (
-        Mailbox<deterministic::Context, ReadGatedApp>,
+        Mailbox<deterministic::Context, ReadGatedApp, Sequential>,
         FlushControl,
         Box<dyn std::any::Any>,
         Handle<()>,
@@ -982,6 +993,7 @@ mod tests {
             anchor(0, 0),
             StatefulMetrics::new(context),
             pruning,
+            Sequential,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
@@ -993,7 +1005,12 @@ mod tests {
             deferred_verifications: Vec::new(),
         };
         let actor = context.child("loop").spawn(move |_| processing.run());
-        (Mailbox::new(sender), control, marshal.guards, actor)
+        (
+            Mailbox::new(sender, Sequential),
+            control,
+            marshal.guards,
+            actor,
+        )
     }
 
     #[test]
@@ -1269,9 +1286,10 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, Sequential);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -1353,9 +1371,10 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, Sequential);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -1874,9 +1893,10 @@ mod tests {
                 anchor(1, 1),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, Sequential);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -1956,9 +1976,10 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, Sequential);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2009,12 +2030,13 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
 
             // Defer a verification as the syncing actor does before its
             // database set is ready.
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, Sequential);
             let genesis = TestBlock::new(0, 0);
             let block = TestBlock::child(&genesis, 1);
             let deferred = context.child("deferred").spawn(move |task_context| {
@@ -2099,9 +2121,10 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, Sequential);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2199,9 +2222,10 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, Sequential);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2294,9 +2318,10 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, Sequential);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2402,9 +2427,10 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, Sequential);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2529,9 +2555,10 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 Some(pruning),
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, Sequential);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2658,9 +2685,10 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 Some(pruning),
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, Sequential);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2897,9 +2925,10 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(2));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, Sequential);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -3038,7 +3067,7 @@ mod tests {
                 .map(|block| block.height())
                 .collect();
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mailbox = Mailbox::<_, GatedApp>::new(sender);
+            let mailbox = Mailbox::<_, GatedApp, Sequential>::new(sender, Sequential);
 
             // The fanout observer keeps Marshal behind the durable application anchor.
             let observer = fixtures::FixtureReporter::new(false);
@@ -3071,6 +3100,7 @@ mod tests {
                     anchor(0, 0),
                     StatefulMetrics::new(&context),
                     None,
+                    Sequential,
                 ),
                 deferred_verifications: Vec::new(),
             };
@@ -3229,7 +3259,7 @@ mod tests {
 
             // Marshal delivers finalized blocks to processing anchored at genesis.
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mailbox = Mailbox::<_, GatedApp>::new(sender);
+            let mailbox = Mailbox::<_, GatedApp, Sequential>::new(sender, Sequential);
             let marshal = fixtures::marshal_fixture_with_reporter(
                 context.child("marshal"),
                 "live-floor-skip",
@@ -3254,6 +3284,7 @@ mod tests {
                     anchor(0, 0),
                     StatefulMetrics::new(&context),
                     None,
+                    Sequential,
                 ),
                 deferred_verifications: Vec::new(),
             };

@@ -24,6 +24,7 @@ use commonware_consensus::{
     simplex::types::Finalization,
 };
 use commonware_cryptography::certificate::Scheme;
+use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::channel::oneshot;
@@ -80,12 +81,13 @@ impl PruneConfig {
 }
 
 /// Configuration for constructing a [`Stateful`] application.
-pub struct Config<E, A, S, V, R>
+pub struct Config<E, A, S, V, R, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
+    T: Strategy,
 {
     /// The inner application that drives state transitions.
     pub application: A,
@@ -121,18 +123,22 @@ where
     /// them. Marshal must retain at least as many blocks as QMDB (see
     /// [`PruneConfig::assert_valid`]).
     pub prune_config: Option<PruneConfig>,
+
+    /// Strategy for computing block digests and commitments.
+    pub strategy: T,
 }
 
 /// Actor that maintains speculative and finalized state for an [`Application`].
 ///
 /// Consensus and marshal reach it through its [`Mailbox`]. See the [module docs](crate::stateful)
 /// for the protocol.
-pub struct Stateful<E, A, S, V, R>
+pub struct Stateful<E, A, S, V, R, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
+    T: Strategy,
 {
     /// Runtime context.
     context: ContextCell<E>,
@@ -155,9 +161,11 @@ where
 
     /// Pruning schedule from [`Config::prune_config`], with a random phase.
     pruning: Option<Pruning<SyncTargets<A, E>>>,
+    /// Strategy for computing block digests and commitments.
+    strategy: T,
 }
 
-impl<E, A, S, V, R> Stateful<E, A, S, V, R>
+impl<E, A, S, V, R, T> Stateful<E, A, S, V, R, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
@@ -166,6 +174,7 @@ where
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    T: Strategy,
 {
     /// Creates a [`Stateful`] actor and its [`Mailbox`].
     ///
@@ -174,7 +183,7 @@ where
     /// # Panics
     ///
     /// Panics if [`Config::prune_config`] fails [`PruneConfig::assert_valid`].
-    pub fn new(mut context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
+    pub fn new(mut context: E, config: Config<E, A, S, V, R, T>) -> (Self, Mailbox<E, A, T>) {
         let pruning = config.prune_config.map(|prune_config| {
             Pruning::random(
                 prune_config,
@@ -196,8 +205,9 @@ where
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
                 pruning,
+                strategy: config.strategy.clone(),
             },
-            Mailbox::new(sender),
+            Mailbox::new(sender, config.strategy),
         )
     }
 
@@ -231,6 +241,7 @@ where
             finalization,
             marshal: (marshal.clone(), floor),
             completion: sender,
+            strategy: self.strategy.clone(),
         });
         let syncing = Syncing {
             context: self.context,
@@ -247,6 +258,7 @@ where
             pending_finalizations: Default::default(),
             pruning: self.pruning,
             metrics,
+            strategy: self.strategy,
         };
         let _ = join!(syncer.start(), syncing.run());
     }
@@ -259,6 +271,7 @@ where
             &marshal,
             self.db_config,
             self.plan.completed(),
+            &self.strategy,
         )
         .await;
 
@@ -268,7 +281,14 @@ where
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
-        let processor = Processor::new(self.application, databases, anchor, metrics, self.pruning);
+        let processor = Processor::new(
+            self.application,
+            databases,
+            anchor,
+            metrics,
+            self.pruning,
+            self.strategy,
+        );
         Processing {
             context: self.context,
             mailbox: self.mailbox,
@@ -300,6 +320,7 @@ mod tests {
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
         Acknowledgement as _, NZU64, NZUsize,
@@ -409,6 +430,7 @@ mod tests {
                         update_channel_size: NZUsize!(1),
                     },
                     prune_config: None,
+                    strategy: Sequential,
                 },
             );
             let handle = stateful.start();
@@ -467,6 +489,7 @@ mod tests {
                         update_channel_size: NZUsize!(1),
                     },
                     prune_config: None,
+                    strategy: Sequential,
                 },
             );
             let actor = stateful.start();

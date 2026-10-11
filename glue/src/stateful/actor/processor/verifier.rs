@@ -15,6 +15,7 @@ use commonware_consensus::{
     },
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use rand_core::Rng;
 use std::sync::Arc;
@@ -55,20 +56,22 @@ where
 }
 
 /// Executes one verification request against the processor's shared speculative state.
-pub(in crate::stateful::actor) struct Verifier<E, A>
+pub(in crate::stateful::actor) struct Verifier<E, A, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
+    T: Strategy,
 {
     pub(super) app: A,
-    pub(super) execution: Execution<E, A>,
+    pub(super) execution: Execution<E, A, T>,
     pub(super) replays: ReplayFlights<BlockDigest<A, E>>,
 }
 
-impl<E, A> Clone for Verifier<E, A>
+impl<E, A, T> Clone for Verifier<E, A, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
+    T: Strategy,
 {
     fn clone(&self) -> Self {
         Self {
@@ -79,10 +82,11 @@ where
     }
 }
 
-impl<E, A> Verifier<E, A>
+impl<E, A, T> Verifier<E, A, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
+    T: Strategy,
 {
     /// Verifies the first block of `ancestry` on its parent's state.
     ///
@@ -128,7 +132,7 @@ where
                 return None;
             }
         };
-        let block_digest = block.digest();
+        let block_digest = block.digest_across(&self.execution.strategy);
 
         // A replayed state is not a verdict, so only locally built or verified blocks skip
         // execution.
@@ -199,9 +203,17 @@ where
         V: MarshalVariant<ApplicationBlock = A::Block>,
         MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
     {
-        let block_digest = block.digest();
+        let block_digest = block.digest_across(&self.execution.strategy);
         let processed = self.execution.processed();
-        match is_already_processed(processed, marshal, block, verification).await {
+        match is_already_processed(
+            processed,
+            marshal,
+            block,
+            verification,
+            &self.execution.strategy,
+        )
+        .await
+        {
             Ok(true) => ProcessedBlock::Accepted,
             Ok(false) if block.height() <= processed.height => ProcessedBlock::Rejected,
             Ok(false) => ProcessedBlock::Continue,
@@ -260,7 +272,7 @@ where
                 return Err(PrepareFailure::Cancelled);
             }
         };
-        let digest = block.digest();
+        let digest = block.digest_across(&self.execution.strategy);
         let batches = match self
             .execution
             .prepare_batches(
@@ -323,7 +335,7 @@ where
         ancestry: impl Ancestry<A::Block>,
         verification: &mut Verification,
     ) -> Option<bool> {
-        let block_digest = block.digest();
+        let block_digest = block.digest_across(&self.execution.strategy);
         let round = consensus_context.round();
 
         // Restore the candidate and parent taken from `ancestry`, so the application receives the

@@ -15,6 +15,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
+use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell};
 use commonware_storage::Context;
 use commonware_utils::{
@@ -27,13 +28,14 @@ use rand_core::Rng;
 use tracing::debug;
 
 /// Configuration for [`Syncer`].
-pub struct Config<E, A, R, S, V>
+pub struct Config<E, A, R, S, V, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
+    T: Strategy,
 {
     /// Runtime context.
     pub context: E,
@@ -55,17 +57,21 @@ where
 
     /// Delivers the converged [`Artifact`] to [`Stateful`](crate::stateful::Stateful).
     pub completion: oneshot::Sender<Artifact<E, A>>,
+
+    /// Strategy for computing block digests and commitments.
+    pub strategy: T,
 }
 
 /// Runs state sync from the block returned by [`resolve`], accepts target updates, and publishes
 /// the converged [`Artifact`] to [`Stateful`](crate::stateful::Stateful).
-pub struct Syncer<E, A, R, S, V>
+pub struct Syncer<E, A, R, S, V, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
+    T: Strategy,
 {
     /// Runtime context.
     context: ContextCell<E>,
@@ -84,9 +90,10 @@ where
     /// Marshal mailbox and the durable floor returned during initialization.
     marshal: (MarshalMailbox<S, V>, Floor),
     completion: Option<oneshot::Sender<Artifact<E, A>>>,
+    strategy: T,
 }
 
-impl<E, A, R, S, V> Syncer<E, A, R, S, V>
+impl<E, A, R, S, V, T> Syncer<E, A, R, S, V, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
@@ -94,8 +101,9 @@ where
     R: Send + Sync + 'static,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
+    T: Strategy,
 {
-    pub fn new(config: Config<E, A, R, S, V>) -> (Self, Mailbox<E, A>) {
+    pub fn new(config: Config<E, A, R, S, V, T>) -> (Self, Mailbox<E, A>) {
         let (sender, receiver) = actor_mailbox::new(config.context.child("mailbox"), NZUsize!(1));
         let mailbox = Mailbox::new(sender);
         (
@@ -109,6 +117,7 @@ where
                 finalization: config.finalization,
                 marshal: config.marshal,
                 completion: Some(config.completion),
+                strategy: config.strategy,
             },
             mailbox,
         )
@@ -120,7 +129,7 @@ where
 
     async fn run(mut self) {
         let (marshal, floor) = &self.marshal;
-        let block = resolve(marshal, *floor, &self.finalization).await;
+        let block = resolve(marshal, *floor, &self.finalization, &self.strategy).await;
 
         let (tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
         let mut tip_updates_tx = Some(tip_updates_tx);
@@ -128,7 +137,7 @@ where
             self.context.child("state_sync"),
             self.db_config,
             self.resolvers,
-            Anchor::from(block.as_ref()),
+            Anchor::from_block(block.as_ref(), &self.strategy),
             A::sync_targets(block.as_ref()),
             tip_updates_rx,
             self.sync_config,
@@ -239,6 +248,7 @@ mod tests {
         Digestible as _, ed25519,
         sha256::{Digest as Sha256Digest, Sha256},
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock as _, Runner as _, Spawner as _, Supervisor as _, deterministic, reschedule,
     };
@@ -429,7 +439,7 @@ mod tests {
             }
             assert!(marshal.get_finalization(Height::new(1)).await.is_none());
 
-            let resolved = resolve(&marshal, floor, &selected).await;
+            let resolved = resolve(&marshal, floor, &selected, &Sequential).await;
             assert_eq!(
                 Anchor::from(resolved.as_ref()),
                 Anchor::from(&processed_block)
@@ -548,7 +558,7 @@ mod tests {
             };
 
             // Only a selection of F resolves to F. Older selections resolve to F-1.
-            let resolved = resolve(&third.mailbox, third.floor, &selected).await;
+            let resolved = resolve(&third.mailbox, third.floor, &selected, &Sequential).await;
             assert_eq!(
                 Anchor::from(resolved.as_ref()),
                 Anchor::from(&blocks[expected_height as usize]),
@@ -658,7 +668,13 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
-            let resolved = resolve(&marshal, third.floor, &finalized(selected_height)).await;
+            let resolved = resolve(
+                &marshal,
+                third.floor,
+                &finalized(selected_height),
+                &Sequential,
+            )
+            .await;
             assert_eq!(
                 Anchor::from(resolved.as_ref()),
                 Anchor::from(&blocks[expected_height as usize]),
@@ -707,6 +723,7 @@ mod tests {
                 &marshal,
                 2,
                 plan.completed(),
+                &Sequential,
             )
             .await;
 
@@ -777,6 +794,7 @@ mod tests {
                         update_channel_size: NZUsize!(1),
                     },
                     prune_config: None,
+                    strategy: Sequential,
                 },
             );
             let actor = stateful.start();
@@ -826,7 +844,9 @@ mod tests {
 
             let resolver = context.child("resolve").spawn({
                 let marshal = marshal.clone();
-                move |_| async move { resolve(&marshal, floor, &selected_finalization).await }
+                move |_| async move {
+                    resolve(&marshal, floor, &selected_finalization, &Sequential).await
+                }
             });
             context.sleep(Duration::from_millis(1)).await;
             assert!(
@@ -932,7 +952,7 @@ mod tests {
             );
 
             let resolved = commonware_macros::select! {
-                resolved = resolve(&marshal, floor, &selected_finalization) => resolved,
+                resolved = resolve(&marshal, floor, &selected_finalization, &Sequential) => resolved,
                 _ = context.sleep(Duration::from_millis(100)) => {
                     panic!("a superseded floor must not wait for its pruned block");
                 },
@@ -1033,7 +1053,7 @@ mod tests {
             );
 
             let resolved = commonware_macros::select! {
-                resolved = resolve(&marshal, floor, &selected_finalization) => resolved,
+                resolved = resolve(&marshal, floor, &selected_finalization, &Sequential) => resolved,
                 _ = context.sleep(Duration::from_millis(100)) => {
                     panic!("a superseded floor must not wait for its pruned block");
                 },
@@ -1066,7 +1086,7 @@ mod tests {
 
             let (sender, receiver) = oneshot::channel();
             let (syncer, mailbox) =
-                Syncer::<_, WedgeApp, (), TestScheme, TestVariant>::new(Config {
+                Syncer::<_, WedgeApp, (), TestScheme, TestVariant, Sequential>::new(Config {
                     context: context.child("syncer"),
                     db_config: 0,
                     sync_config: SyncEngineConfig {
@@ -1079,6 +1099,7 @@ mod tests {
                     finalization,
                     marshal: (marshal, floor),
                     completion: sender,
+                    strategy: Sequential,
                 });
             let actor = syncer.start();
 

@@ -33,6 +33,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::select;
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     Clock, Metrics, Spawner,
     telemetry::{metrics::GaugeExt, traces::TracedExt as _},
@@ -261,26 +262,30 @@ where
 }
 
 /// Databases, speculative state, and metrics shared by the processor and its verifiers.
-struct Execution<E, A>
+struct Execution<E, A, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
+    T: Strategy,
 {
     databases: A::Databases,
     state: Arc<Mutex<ExecutionState<A, E>>>,
     metrics: StatefulMetrics,
+    strategy: T,
 }
 
-impl<E, A> Clone for Execution<E, A>
+impl<E, A, T> Clone for Execution<E, A, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
+    T: Strategy,
 {
     fn clone(&self) -> Self {
         Self {
             databases: self.databases.clone(),
             state: self.state.clone(),
             metrics: self.metrics.clone(),
+            strategy: self.strategy.clone(),
         }
     }
 }
@@ -611,21 +616,23 @@ impl<T: Clone> Pruning<T> {
 }
 
 /// Speculative execution and finalized-state application for a running stateful actor.
-pub(super) struct Processor<E, A>
+pub(super) struct Processor<E, A, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
+    T: Strategy,
 {
     app: A,
-    execution: Execution<E, A>,
+    execution: Execution<E, A, T>,
     replays: ReplayFlights<BlockDigest<A, E>>,
     pruning: Option<Pruning<SyncTargets<A, E>>>,
 }
 
-impl<E, A> Processor<E, A>
+impl<E, A, T> Processor<E, A, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
+    T: Strategy,
 {
     /// Creates a processor whose `databases` hold the applied state of `processed`.
     pub(super) fn new(
@@ -634,6 +641,7 @@ where
         processed: Anchor<BlockDigest<A, E>>,
         metrics: StatefulMetrics,
         pruning: Option<Pruning<SyncTargets<A, E>>>,
+        strategy: T,
     ) -> Self {
         Self {
             app,
@@ -645,6 +653,7 @@ where
                     finalizing: None,
                 })),
                 metrics,
+                strategy,
             },
             replays: ReplayFlights::default(),
             pruning,
@@ -652,7 +661,7 @@ where
     }
 
     /// Returns a verifier that shares this processor's speculative state.
-    pub(super) fn verifier(&self) -> Verifier<E, A> {
+    pub(super) fn verifier(&self) -> Verifier<E, A, T> {
         Verifier {
             app: self.app.clone(),
             execution: self.execution.clone(),
@@ -667,7 +676,7 @@ where
 
     /// Snapshots the cached state that remains valid once `block` is finalized.
     pub(super) fn boundary(&self, block: &A::Block) -> FinalizationBoundary<BlockDigest<A, E>> {
-        let digest = block.digest();
+        let digest = block.digest_across(&self.execution.strategy);
         let round = block.context().round();
         let state = self.execution.state.lock();
         FinalizationBoundary {
@@ -734,7 +743,7 @@ where
                 return;
             }
         };
-        let parent_digest = parent.digest();
+        let parent_digest = parent.digest_across(&self.execution.strategy);
         let ancestry = marshal_ancestry::with_prefix([Arc::clone(&parent)], ancestry);
 
         let round = consensus_context.round();
@@ -792,7 +801,7 @@ where
         );
         assert!(
             self.cache_pending(
-                block.digest(),
+                block.digest_across(&self.execution.strategy),
                 PendingEntry {
                     round,
                     parent: parent_digest,
@@ -812,7 +821,7 @@ where
         name = "stateful.processor.prepare_batches",
         level = "info",
         skip_all,
-        fields(parent = %parent.digest())
+        fields(parent = %parent.digest_across(&self.execution.strategy))
     )]
     async fn prepare_batches<S, V, C>(
         &mut self,
@@ -864,7 +873,7 @@ where
         let processed = self.execution.processed();
         if block.height() == processed.height {
             assert_eq!(
-                block.digest(),
+                block.digest_across(&self.execution.strategy),
                 processed.digest,
                 "received conflicting finalized block at processed height",
             );
@@ -886,7 +895,7 @@ where
         block: &A::Block,
         start_barrier: bool,
     ) -> Applied<SyncTargets<A, E>> {
-        let finalized = Anchor::from(block);
+        let finalized = Anchor::from_block(block, &self.execution.strategy);
         let (height, digest) = (finalized.height, finalized.digest);
         let processed = self.execution.processed();
         assert_eq!(
@@ -988,10 +997,11 @@ where
     }
 }
 
-impl<E, A> Execution<E, A>
+impl<E, A, T> Execution<E, A, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
+    T: Strategy,
 {
     fn processed(&self) -> Anchor<BlockDigest<A, E>> {
         self.state.lock().processed
@@ -1262,7 +1272,7 @@ where
     where
         C: Cancellation,
     {
-        let (digest, parent_digest) = (block.digest(), block.parent());
+        let (digest, parent_digest) = (block.digest_across(&self.strategy), block.parent());
         let consensus_context = block.context();
         let round = consensus_context.round();
 
@@ -1328,7 +1338,11 @@ where
     where
         C: Cancellation,
     {
-        let (digest, parent, round) = (block.digest(), block.parent(), block.context().round());
+        let (digest, parent, round) = (
+            block.digest_across(&self.strategy),
+            block.parent(),
+            block.context().round(),
+        );
         loop {
             match self.claim_replay(tracking.flights, digest) {
                 ReplayClaim::Ready => return Ok(()),
@@ -1391,7 +1405,7 @@ where
         MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
         C: Cancellation,
     {
-        let parent_digest = parent.digest();
+        let parent_digest = parent.digest_across(&self.strategy);
         let known = {
             let state = self.state.lock();
             state.processed.digest == parent_digest || state.pending.contains_key(&parent_digest)
@@ -1428,7 +1442,7 @@ where
         C: Cancellation,
     {
         let timer = self.metrics.rebuild_pending_duration.timer(context);
-        let target_digest = target.digest();
+        let target_digest = target.digest_across(&self.strategy);
 
         let mut replay_path = Vec::new();
         let mut cursor = target;
@@ -1436,8 +1450,10 @@ where
             let (known, processed) = {
                 let state = self.state.lock();
                 (
-                    cursor.digest() == state.processed.digest
-                        || state.pending.contains_key(&cursor.digest()),
+                    cursor.digest_across(&self.strategy) == state.processed.digest
+                        || state
+                            .pending
+                            .contains_key(&cursor.digest_across(&self.strategy)),
                     state.processed,
                 )
             };
@@ -1449,7 +1465,7 @@ where
             if cursor_height <= processed.height {
                 warn!(
                     ?target_digest,
-                    cursor = ?cursor.digest(),
+                    cursor = ?cursor.digest_across(&self.strategy),
                     current_height = cursor_height.get(),
                     last_processed_height = processed.height.get(),
                     last_processed = ?processed.digest,
@@ -1467,17 +1483,19 @@ where
             let Some(parent) = parent else {
                 debug!(
                     ?target_digest,
-                    cursor = ?cursor.digest(),
+                    cursor = ?cursor.digest_across(&self.strategy),
                     "ancestor subscription ended before delivery"
                 );
                 return Err(PrepareBatchesError::Incomplete);
             };
 
-            if parent.digest() != cursor.parent() || parent.height().next() != cursor_height {
+            if parent.digest_across(&self.strategy) != cursor.parent()
+                || parent.height().next() != cursor_height
+            {
                 warn!(
                     ?target_digest,
-                    cursor = ?cursor.digest(),
-                    parent = ?parent.digest(),
+                    cursor = ?cursor.digest_across(&self.strategy),
+                    parent = ?parent.digest_across(&self.strategy),
                     cursor_height = cursor_height.get(),
                     parent_height = parent.height().get(),
                     expected_parent = ?cursor.parent(),
@@ -1516,13 +1534,14 @@ where
     name = "stateful.processor.is_already_processed",
     level = "info",
     skip_all,
-    fields(height = block.height().traced(), digest = %block.digest())
+    fields(height = block.height().traced(), digest = %block.digest_across(strategy))
 )]
 async fn is_already_processed<S, V, C>(
     processed: Anchor<<V::ApplicationBlock as Digestible>::Digest>,
     marshal: MarshalMailbox<S, V>,
     block: &V::ApplicationBlock,
     cancellation: &mut C,
+    strategy: &impl Strategy,
 ) -> Result<bool, PrepareBatchesError>
 where
     S: Scheme,
@@ -1534,7 +1553,7 @@ where
         return Ok(false);
     }
     if target_height == processed.height {
-        return Ok(block.digest() == processed.digest);
+        return Ok(block.digest_across(strategy) == processed.digest);
     }
 
     let Some(canonical) = await_or_cancel(
@@ -1554,7 +1573,7 @@ where
         return Err(PrepareBatchesError::Incomplete);
     };
 
-    Ok(canonical.digest() == block.digest())
+    Ok(canonical.digest_across(strategy) == block.digest_across(strategy))
 }
 
 /// Returns the next item of `stream`: `None` if `cancellation` fires first, and `Some(None)` if
@@ -2139,7 +2158,7 @@ mod tests {
 
     struct Harness {
         context_cell: ContextCell<deterministic::Context>,
-        processor: Processor<deterministic::Context, ExecutionApp>,
+        processor: Processor<deterministic::Context, ExecutionApp, Sequential>,
         provider: MapProvider,
         db_config: any::FixedConfig<TwoCap, Sequential>,
     }
@@ -2186,6 +2205,7 @@ mod tests {
                     },
                     metrics,
                     None,
+                    Sequential,
                 ),
                 provider,
                 db_config: config,
@@ -2491,6 +2511,7 @@ mod tests {
                     1,
                     0,
                 )),
+                Sequential,
             );
 
             let genesis = Block::genesis();

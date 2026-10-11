@@ -13,6 +13,7 @@ use commonware_consensus::{
     },
 };
 use commonware_cryptography::Digestible;
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::{
     acknowledgement::Exact,
@@ -180,35 +181,40 @@ where
 /// Implements the consensus [`Application`](commonware_consensus::Application) and receives
 /// finalized blocks from marshal as a [`Reporter`]. If the actor stops before responding,
 /// `propose` returns `None` and `verify` panics.
-pub struct Mailbox<E, A>
+pub struct Mailbox<E, A, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
+    T: Strategy,
 {
     sender: Sender<Message<E, A>>,
     retry_mailbox: RetryMailbox<E, A>,
+    strategy: T,
 }
 
-impl<E, A> Clone for Mailbox<E, A>
+impl<E, A, T> Clone for Mailbox<E, A, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
+    T: Strategy,
 {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
             retry_mailbox: self.retry_mailbox.clone(),
+            strategy: self.strategy.clone(),
         }
     }
 }
 
-impl<E, A> Mailbox<E, A>
+impl<E, A, T> Mailbox<E, A, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
+    T: Strategy,
 {
     /// Creates a mailbox from the send half of the actor's message channel.
-    pub(super) fn new(sender: Sender<Message<E, A>>) -> Self {
+    pub(super) fn new(sender: Sender<Message<E, A>>, strategy: T) -> Self {
         let retry_sender = sender.clone();
         let retry_mailbox = Arc::new(move |message| {
             let _ = retry_sender.enqueue(message);
@@ -216,6 +222,7 @@ where
         Self {
             sender,
             retry_mailbox,
+            strategy,
         }
     }
 
@@ -242,10 +249,11 @@ where
     }
 }
 
-impl<E, A> ConsensusApplication<E> for Mailbox<E, A>
+impl<E, A, T> ConsensusApplication<E> for Mailbox<E, A, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
+    T: Strategy,
 {
     type SigningScheme = A::SigningScheme;
     type Context = A::Context;
@@ -303,10 +311,11 @@ where
     }
 }
 
-impl<E, A> Reporter for Mailbox<E, A>
+impl<E, A, T> Reporter for Mailbox<E, A, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
+    T: Strategy,
 {
     type Activity = Update<A::Block>;
 
@@ -319,7 +328,7 @@ where
                     "stateful.mailbox.finalized",
                     epoch = context.epoch().traced(),
                     view = context.view().traced(),
-                    digest = %block.digest()
+                    digest = %block.digest_across(&self.strategy)
                 );
                 Message::Finalized {
                     span,

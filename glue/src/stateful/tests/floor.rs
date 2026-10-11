@@ -154,6 +154,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                         update_channel_size: NZUsize!(1),
                     },
                     prune_config: None,
+                    strategy: Sequential,
                 },
             );
 

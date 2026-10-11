@@ -14,6 +14,7 @@ use commonware_consensus::{
     types::Height,
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
+use commonware_parallel::Strategy;
 use commonware_runtime::{BufMut, Clock, Metrics, Spawner};
 use commonware_storage::Context;
 use rand_core::Rng;
@@ -141,6 +142,7 @@ pub(crate) async fn resolve<S, V>(
     marshal: &MarshalMailbox<S, V>,
     floor: Floor,
     finalization: &Finalization<S, V::Commitment>,
+    strategy: &impl Strategy,
 ) -> Arc<V::ApplicationBlock>
 where
     S: Scheme,
@@ -159,7 +161,7 @@ where
         // application hooks. A `Processed::Absent` anchor already holds the floor.
         if let Processed::Block(height) = processed
             && let Some(block) = marshal.get_block(Identifier::Height(height.next())).await
-            && V::commitment(&block) == finalization.proposal.payload
+            && V::commitment_across(&block, strategy) == finalization.proposal.payload
         {
             V::into_shared(block)
         } else {
@@ -199,6 +201,7 @@ pub(crate) async fn open<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     completed: Option<Height>,
+    strategy: &impl Strategy,
 ) -> Artifact<E, A>
 where
     E: Rng + Spawner + Context,
@@ -229,7 +232,7 @@ where
     let databases = A::Databases::init(context, db_config, Some(processed_targets)).await;
     Artifact {
         databases,
-        anchor: Anchor::from(block.as_ref()),
+        anchor: Anchor::from_block(block.as_ref(), strategy),
     }
 }
 

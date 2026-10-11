@@ -1211,6 +1211,7 @@ impl EngineDefinition for ReshareEngine {
                     update_channel_size: NZUsize!(256),
                 },
                 prune_config: None,
+                strategy: Sequential,
             },
         );
 

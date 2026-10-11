@@ -547,6 +547,7 @@ impl EngineDefinition for SingleDbEngine {
                     retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
+                strategy: Sequential,
             },
         );
 
