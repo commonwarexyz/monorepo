@@ -694,8 +694,9 @@ impl<'a, B: RBlob> Replay<'a, B> {
         })
     }
 
-    /// Return the buffered bytes of the current page as a view sharing the batch allocation,
-    /// without advancing, or `None` while replaying a live view, whose buffer is not paged.
+    /// Return the buffered bytes of the current page as a view sharing the allocation backing
+    /// that page, without advancing, or `None` while replaying a live view, whose buffer is not
+    /// paged.
     ///
     /// Decoding many fixed-size items from the view and advancing past them afterwards costs
     /// one page lookup instead of one per item, and retained byte fields share the allocation

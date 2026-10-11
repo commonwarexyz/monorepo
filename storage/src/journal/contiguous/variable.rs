@@ -228,7 +228,7 @@ struct ReplayState<'a, B: RBlob, V: Codec> {
     codec_config: V::Cfg,
     /// Whether frame payloads are compressed.
     compressed: bool,
-    /// Number of items in the previous batch, which sizes the next batch's allocation.
+    /// Number of items in this blob's previous batch, which sizes the next batch's allocation.
     capacity: usize,
     _marker: PhantomData<V>,
 }

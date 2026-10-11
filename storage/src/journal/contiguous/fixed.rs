@@ -308,15 +308,21 @@ impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState
         };
 
         // Decode whole items a page at a time: taking the page's buffered bytes once costs one
-        // page lookup per page instead of one per item, and the view shares the batch allocation
+        // page lookup per page instead of one per item, and the view shares the page's allocation
         // like a per-item read would. An item that straddles a page boundary, or any item while
         // replaying a live view, goes through the general path. Stop this blob on error because
         // decoding may have consumed only part of a record.
         let mut items = Vec::with_capacity(count);
         while items.len() < count {
-            let whole = match self.replay.chunk_bytes() {
-                Some(mut page) if page.len() >= A::SIZE => {
-                    let n = (page.len() / A::SIZE).min(count - items.len());
+            let in_page = self.replay.chunk().len() / A::SIZE;
+            let page = if in_page == 0 {
+                None
+            } else {
+                self.replay.chunk_bytes()
+            };
+            match page {
+                Some(mut page) => {
+                    let n = in_page.min(count - items.len());
                     for _ in 0..n {
                         match A::read(&mut page) {
                             Ok(item) => items.push(item),
@@ -327,18 +333,14 @@ impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState
                         }
                     }
                     self.replay.advance(n * A::SIZE);
-                    n
                 }
-                _ => 0,
-            };
-            if whole == 0 {
-                match self.replay.read::<A>() {
+                None => match self.replay.read::<A>() {
                     Ok(item) => items.push(item),
                     Err(err) => {
                         let decoded = self.fail(start, items, Error::Codec(err));
                         return Some((decoded, self));
                     }
-                }
+                },
             }
         }
         self.pos = next_pos;
@@ -4040,51 +4042,57 @@ mod tests {
         });
     }
 
-    /// A codec error inside a page ends the batch stream after the items decoded before it:
-    /// the page is decoded in bulk from its buffered bytes, and the failing item is reported
-    /// without the items after it.
+    /// A codec error ends the batch stream after the items decoded before it, whether the failing
+    /// item is decoded in bulk from the first page, through the per-item path because it straddles
+    /// a page boundary, or in bulk from a later page.
     #[test_traced]
     fn test_fixed_journal_replay_batches_stop_at_codec_error() {
-        const INVALID: u64 = 37;
+        const ITEMS: u64 = 100;
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Write single bytes that decode as `bool` except at `INVALID`, which holds 2.
-            let cfg = test_cfg(&context, NZU64!(1000));
-            let mut journal = Journal::<_, u8>::init(context.child("writer"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0u64..100 {
-                let byte = if i == INVALID { 2 } else { (i % 2) as u8 };
-                (journal, _) = journal.append(&byte).await.unwrap();
-            }
-            let journal = journal.sync().await.unwrap();
-            drop(journal);
+            // Three-byte items on 40-byte logical pages: items 0..13 fill page 0, item 13 straddles
+            // pages 0 and 1, and item 20 lies inside page 1.
+            for invalid in [5u64, 13, 20] {
+                let mut cfg = test_cfg(&context, NZU64!(1000));
+                cfg.partition = format!("codec-error-{invalid}");
 
-            // Replay the same bytes as `bool`: one batch of the valid prefix, then the error.
-            let journal = Journal::<_, bool>::init(context.child("reader"), cfg)
-                .await
-                .unwrap();
-            {
-                let stream = journal
-                    .replay_batches(0..100, NZUsize!(2048), ReadOptions::default())
+                // Write byte triples that decode as `[bool; 3]` except at `invalid`.
+                let mut journal =
+                    Journal::<_, [u8; 3]>::init(context.child("writer"), cfg.clone())
+                        .await
+                        .unwrap();
+                for i in 0..ITEMS {
+                    let item = if i == invalid { [0, 2, 0] } else { [0, 1, 0] };
+                    (journal, _) = journal.append(&item).await.unwrap();
+                }
+                let journal = journal.sync().await.unwrap();
+                drop(journal);
+
+                // Replay the same bytes as `[bool; 3]`: one batch of the valid prefix, then
+                // the error.
+                let journal = Journal::<_, [bool; 3]>::init(context.child("reader"), cfg)
                     .await
                     .unwrap();
-                pin_mut!(stream);
-                let (start, items) = stream.next().await.unwrap().unwrap();
-                assert_eq!(start, 0);
-                assert_eq!(items.len(), INVALID as usize);
-                for (i, item) in items.iter().enumerate() {
-                    assert_eq!(*item, i % 2 == 1);
+                {
+                    let stream = journal
+                        .replay_batches(0..ITEMS, NZUsize!(2048), ReadOptions::default())
+                        .await
+                        .unwrap();
+                    pin_mut!(stream);
+                    let (start, items) = stream.next().await.unwrap().unwrap();
+                    assert_eq!(start, 0, "invalid item {invalid}");
+                    assert_eq!(items.len(), invalid as usize, "invalid item {invalid}");
+                    assert!(items.iter().all(|item| *item == [false, true, false]));
+                    assert!(matches!(
+                        stream.next().await.unwrap(),
+                        Err(Error::Codec(_))
+                    ));
+                    assert!(stream.next().await.is_none());
                 }
-                assert!(matches!(
-                    stream.next().await.unwrap(),
-                    Err(Error::Codec(_))
-                ));
-                assert!(stream.next().await.is_none());
-            }
 
-            journal.destroy().await.unwrap();
+                journal.destroy().await.unwrap();
+            }
         });
     }
 

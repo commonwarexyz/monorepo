@@ -7,6 +7,7 @@ use futures::{StreamExt as _, future::BoxFuture, task::noop_waker_ref};
 use std::{
     collections::VecDeque,
     num::NonZeroU16,
+    ops::Range,
     sync::Arc,
     task::{Context, Poll},
 };
@@ -382,18 +383,23 @@ impl ReplayBuf {
         }
     }
 
-    /// Returns the current chunk as a view sharing its batch allocation, without advancing.
-    fn chunk_bytes(&self) -> Bytes {
-        let Some(buf) = self.buffers.front() else {
-            return Bytes::new();
-        };
+    /// Returns the front buffer and the physical range of the current page's unread logical
+    /// bytes, or `None` when no page is readable.
+    fn chunk_range(&self) -> Option<(&BufferState, Range<usize>)> {
+        let buf = self.buffers.front()?;
         if self.current_page >= buf.num_pages {
-            return Bytes::new();
+            return None;
         }
         let page_len = Self::page_len(buf, self.current_page, self.page_size);
-        let physical_start = self.current_page * self.physical_page_size + self.offset_in_page;
-        let physical_end = self.current_page * self.physical_page_size + page_len;
-        buf.buffer.slice(physical_start..physical_end)
+        let page_start = self.current_page * self.physical_page_size;
+        Some((buf, page_start + self.offset_in_page..page_start + page_len))
+    }
+
+    /// Returns the current chunk as a view sharing the allocation backing its page, without
+    /// advancing.
+    fn chunk_bytes(&self) -> Bytes {
+        self.chunk_range()
+            .map_or_else(Bytes::new, |(buf, range)| buf.buffer.slice(range))
     }
 }
 
@@ -405,10 +411,10 @@ impl bytes::Buf for ReplayBuf {
         if len == 0 {
             return Bytes::new();
         }
-        if len <= self.chunk().len() {
-            let buffer = &self.buffers.front().expect("readable buffer").buffer;
-            let start = self.current_page * self.physical_page_size + self.offset_in_page;
-            let bytes = buffer.slice(start..start + len);
+        if let Some((buf, range)) = self.chunk_range()
+            && len <= range.len()
+        {
+            let bytes = buf.buffer.slice(range.start..range.start + len);
             self.advance(len);
             return bytes;
         }
@@ -453,16 +459,8 @@ impl bytes::Buf for ReplayBuf {
     }
 
     fn chunk(&self) -> &[u8] {
-        let Some(buf) = self.buffers.front() else {
-            return &[];
-        };
-        if self.current_page >= buf.num_pages {
-            return &[];
-        }
-        let page_len = Self::page_len(buf, self.current_page, self.page_size);
-        let physical_start = self.current_page * self.physical_page_size + self.offset_in_page;
-        let physical_end = self.current_page * self.physical_page_size + page_len;
-        &buf.buffer.as_ref()[physical_start..physical_end]
+        self.chunk_range()
+            .map_or(&[], |(buf, range)| &buf.buffer.as_ref()[range])
     }
 
     fn advance(&mut self, mut cnt: usize) {
@@ -580,13 +578,13 @@ impl<B: Blob> Replay<B> {
         Ok(())
     }
 
-    /// Returns the bytes [`bytes::Buf::chunk`] would return as a view sharing the batch
-    /// allocation, without advancing.
+    /// Returns the bytes [`bytes::Buf::chunk`] would return as a view sharing the allocation
+    /// backing the current page, without advancing.
     ///
     /// The view ends at the current page's logical end. A decoder can take it once, decode many
     /// fields from it, and then [`bytes::Buf::advance`] past what it consumed, which costs one
-    /// page lookup instead of one per field. Byte fields retained from the view share the
-    /// allocation exactly as fields read through this replay do.
+    /// page lookup instead of one per field. Byte fields retained from the view keep that
+    /// allocation alive exactly as fields read through this replay do.
     pub fn chunk_bytes(&self) -> Bytes {
         self.buffer.chunk_bytes()
     }
