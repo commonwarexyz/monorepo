@@ -4065,22 +4065,24 @@ mod tests {
             let journal = Journal::<_, bool>::init(context.child("reader"), cfg)
                 .await
                 .unwrap();
-            let stream = journal
-                .replay_batches(0..100, NZUsize!(2048), ReadOptions::default())
-                .await
-                .unwrap();
-            pin_mut!(stream);
-            let (start, items) = stream.next().await.unwrap().unwrap();
-            assert_eq!(start, 0);
-            assert_eq!(items.len(), INVALID as usize);
-            for (i, item) in items.iter().enumerate() {
-                assert_eq!(*item, i % 2 == 1);
+            {
+                let stream = journal
+                    .replay_batches(0..100, NZUsize!(2048), ReadOptions::default())
+                    .await
+                    .unwrap();
+                pin_mut!(stream);
+                let (start, items) = stream.next().await.unwrap().unwrap();
+                assert_eq!(start, 0);
+                assert_eq!(items.len(), INVALID as usize);
+                for (i, item) in items.iter().enumerate() {
+                    assert_eq!(*item, i % 2 == 1);
+                }
+                assert!(matches!(
+                    stream.next().await.unwrap(),
+                    Err(Error::Codec(_))
+                ));
+                assert!(stream.next().await.is_none());
             }
-            assert!(matches!(
-                stream.next().await.unwrap(),
-                Err(Error::Codec(_))
-            ));
-            assert!(stream.next().await.is_none());
 
             journal.destroy().await.unwrap();
         });
