@@ -231,20 +231,6 @@ impl ConsensusBlock for Block {
     }
 }
 
-// The cached digest is derived from the other fields, so equality ignores it.
-impl PartialEq for Block {
-    fn eq(&self, other: &Self) -> bool {
-        self.context == other.context
-            && self.parent == other.parent
-            && self.height == other.height
-            && self.state_root == other.state_root
-            && self.range == other.range
-            && self.payload == other.payload
-    }
-}
-
-impl Eq for Block {}
-
 impl CertifiableBlock for Block {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
 
