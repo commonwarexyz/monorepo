@@ -389,7 +389,7 @@ where
     /// [`Mailbox::discovered`] or reports a notarization via
     /// [`Mailbox::notarized`].
     ///
-    /// Shards wait here in memory, never on disk, until consensus signals their commitment: at most
+    /// Shards wait here in memory until consensus signals their commitment: at most
     /// `peer_buffer_size` per `latest.primary` peer, each up to the scheme's widest shard for a
     /// `max_block_size` block. An honest peer sends each recipient about one shard per block, so
     /// size the ring for the number of blocks a node can trail its peers by, which is larger for a
