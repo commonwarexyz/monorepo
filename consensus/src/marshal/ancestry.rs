@@ -288,11 +288,11 @@ impl<D: Digest> ExpectedParent<D> {
             );
             return false;
         }
-        let actual = parent.digest_across(strategy);
-        if actual != parent_digest {
+        let computed_parent_digest = parent.digest_across(strategy);
+        if computed_parent_digest != parent_digest {
             debug!(
                 expected = ?parent_digest,
-                ?actual,
+                actual = ?computed_parent_digest,
                 "ending ancestry stream: fetched parent has non-contiguous ancestry"
             );
             return false;

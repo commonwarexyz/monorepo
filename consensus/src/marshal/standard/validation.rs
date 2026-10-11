@@ -40,11 +40,11 @@ pub(crate) fn validate_block<B>(
 where
     B: Block,
 {
-    let actual_parent_digest = parent.digest_across(strategy);
-    if block.parent() != actual_parent_digest {
+    let computed_parent_digest = parent.digest_across(strategy);
+    if block.parent() != computed_parent_digest {
         return Err(Error::ParentDigest);
     }
-    if actual_parent_digest != parent_digest {
+    if computed_parent_digest != parent_digest {
         return Err(Error::ExpectedParentDigest);
     }
     if !has_contiguous_height(parent.height(), block.height()) {
