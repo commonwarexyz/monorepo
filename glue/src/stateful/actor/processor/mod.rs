@@ -19,7 +19,11 @@
 
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
-    actor::{BlockDigest, SyncTargets, core::Verification, metrics::Metrics as StatefulMetrics},
+    actor::{
+        BlockDigest, SyncTargets,
+        core::{Proposal, Verification},
+        metrics::Metrics as StatefulMetrics,
+    },
     db::{Anchor, Barrier, DatabaseSet},
 };
 use commonware_consensus::{
@@ -486,6 +490,16 @@ impl Cancellation for Verification {
     }
 }
 
+impl<E, A> Cancellation for Proposal<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    async fn cancelled(&mut self) {
+        self.wait_for_cancellation().await;
+    }
+}
+
 /// Result of applying a newly finalized block.
 pub(super) struct Applied<T> {
     /// Barrier covering the block, present only when the caller requested one.
@@ -704,15 +718,17 @@ where
         self.execution.update_pending_metric();
     }
 
-    /// Builds a proposal on the first block of `ancestry` and sends it on `response`.
+    /// Builds a proposal on the first block of `ancestry` and answers `proposal`.
     ///
-    /// Sends `None` if `ancestry` is empty, if the parent's ancestry is invalid or incomplete,
-    /// or if the application declines to propose. An ancestor subscription ends only once the
-    /// provider can no longer obtain the block (see [`BlockProvider::subscribe_parent`]), so an
-    /// incomplete ancestry declines at once rather than holding the actor until consensus
-    /// abandons the request. Returns without sending if `response` closes first. A proposed
-    /// block's state is cached as verified. Replaying the parent's uncached ancestry is shared
-    /// with concurrent verifications of the same blocks.
+    /// A proposal on a parent that has not yet certified answers the block under the application's
+    /// decision, or [`Handoff::Wait`](commonware_consensus::Handoff::Wait) if `ancestry` is empty,
+    /// if the parent's ancestry is invalid or incomplete, or if the application declines. An
+    /// ordinary proposal answers the block, or `None` in the same cases. An ancestor
+    /// subscription ends only once the provider can no longer obtain the block (see
+    /// [`BlockProvider::subscribe_parent`]), so an incomplete ancestry declines at once rather
+    /// than holding the actor until consensus abandons the request. Returns without answering if
+    /// `proposal` is cancelled first. A built block's state is cached as verified. Replaying the
+    /// parent's uncached ancestry is shared with concurrent verifications of the same blocks.
     ///
     /// Panics if the application proposes state that does not match the block's commitments.
     pub(super) async fn propose<S, V>(
@@ -722,7 +738,7 @@ where
         (runtime_context, consensus_context): (E, A::Context),
         mut ancestry: impl Ancestry<A::Block>,
         input: Input<A::Input, A::Provider>,
-        mut response: oneshot::Sender<Option<A::Block>>,
+        mut proposal: Proposal<E, A>,
     ) where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
@@ -730,10 +746,10 @@ where
     {
         let timer = self.execution.metrics.propose_duration.timer(context);
 
-        let parent = match fetch_ancestor(&mut response, &mut ancestry).await {
+        let parent = match fetch_ancestor(&mut proposal, &mut ancestry).await {
             Some(Some(parent)) => parent,
             Some(None) => {
-                response.send_lossy(None);
+                proposal.decline();
                 return;
             }
             None => {
@@ -746,12 +762,12 @@ where
 
         let round = consensus_context.round();
         let batches = match self
-            .prepare_batches(context, marshal, parent, &mut response)
+            .prepare_batches(context, marshal, parent, &mut proposal)
             .await
         {
             Ok(batches) => batches,
             Err(PrepareBatchesError::Invalid) => {
-                response.send_lossy(None);
+                proposal.decline();
                 return;
             }
             Err(PrepareBatchesError::Incomplete) => {
@@ -759,7 +775,7 @@ where
                     ?parent_digest,
                     "proposal declined: incomplete ancestry during prepare_batches"
                 );
-                response.send_lossy(None);
+                proposal.decline();
                 return;
             }
             Err(PrepareBatchesError::Cancelled) => {
@@ -771,28 +787,61 @@ where
             }
         };
 
-        let proposed = match await_or_cancel(
-            &mut response,
-            self.app.propose(
-                (runtime_context, consensus_context),
-                ancestry,
-                batches,
-                input,
-            ),
-        )
-        .await
-        {
-            Some(result) => result,
-            None => {
-                debug!(?parent_digest, "proposal request cancelled during propose");
-                return;
+        // A handoff builds through the application's prepare and answers its decision, and an
+        // ordinary proposal builds through propose and answers the block. Both cache the built
+        // block's state as verified before answering and time only a build that yields a block.
+        let application_context = (runtime_context, consensus_context);
+        match proposal {
+            Proposal::Prepare(mut response) => {
+                let Some(prepared) = await_or_cancel(
+                    &mut response,
+                    self.app
+                        .prepare(application_context, ancestry, batches, input),
+                )
+                .await
+                else {
+                    debug!(?parent_digest, "proposal request cancelled during prepare");
+                    return;
+                };
+                let prepared =
+                    prepared.map(|proposed| self.cache_proposed(round, parent_digest, proposed));
+                if !prepared.is_wait() {
+                    timer.observe(context);
+                }
+                response.send_lossy(prepared);
             }
-        };
+            Proposal::Propose(mut response) => {
+                let Some(proposed) = await_or_cancel(
+                    &mut response,
+                    self.app
+                        .propose(application_context, ancestry, batches, input),
+                )
+                .await
+                else {
+                    debug!(?parent_digest, "proposal request cancelled during propose");
+                    return;
+                };
+                let block =
+                    proposed.map(|proposed| self.cache_proposed(round, parent_digest, proposed));
+                if block.is_some() {
+                    timer.observe(context);
+                }
+                response.send_lossy(block);
+            }
+        }
+    }
 
-        let Some(Proposed { block, merkleized }) = proposed else {
-            response.send_lossy(None);
-            return;
-        };
+    /// Caches the state of a block the application built on `parent` as verified and returns
+    /// the block.
+    ///
+    /// Panics if the state does not match the block's commitments, or if `parent` is no longer
+    /// compatible: only a finalization could discard it, and none runs during a build.
+    fn cache_proposed(
+        &mut self,
+        round: Round,
+        parent: BlockDigest<A, E>,
+        Proposed { block, merkleized }: Proposed<A, E>,
+    ) -> A::Block {
         assert!(
             A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)),
             "proposed state must match block commitments",
@@ -802,7 +851,7 @@ where
                 block.digest(),
                 PendingEntry {
                     round,
-                    parent: parent_digest,
+                    parent,
                     merkleized,
                     verified: true,
                 },
@@ -810,8 +859,7 @@ where
             "proposal parent must remain compatible until the proposal completes",
         );
         self.execution.update_pending_metric();
-        timer.observe(context);
-        response.send_lossy(Some(block));
+        block
     }
 
     /// Ensures parent state exists, then prepares unmerkleized batches for execution.

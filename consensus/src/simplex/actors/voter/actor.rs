@@ -104,21 +104,21 @@ impl<'a, V: Viewable, F: Future + Unpin> Future for Waiter<'a, V, F> {
 
 /// Unified response from a regular or handoff proposal request.
 enum ProposalResponse<D> {
+    /// The response to a handoff request.
+    Prepared(Handoff<D>),
     /// An ordinary candidate.
     Proposed(D),
     /// A held candidate released by parent certification. It was relayed when held, so only
     /// the [`Plan::Propose`] broadcast and the vote remain.
     Released(D),
-    /// A response from a handoff request.
-    Handoff(Handoff<D>),
 }
 
 /// Lifecycle of the pending proposal slot.
 enum ProposalState<D> {
-    /// The automaton has not answered an ordinary request yet.
-    Regular(oneshot::Receiver<D>),
-    /// The automaton has not answered a handoff request yet.
-    Handoff(oneshot::Receiver<Handoff<D>>),
+    /// The automaton is answering a handoff request.
+    Preparing(oneshot::Receiver<Handoff<D>>),
+    /// The automaton is answering an ordinary proposal request.
+    Proposing(oneshot::Receiver<D>),
     /// A handoff without a pending build: the application responded with [`Handoff::Wait`],
     /// or we cancelled its build (see [`State::pending_handoff_abandonment`]). Once the exact
     /// parent certifies or finalizes, an ordinary request for the same context follows, unless
@@ -135,7 +135,10 @@ enum ProposalState<D> {
     Closed,
 }
 
+/// The proposal request in flight for the current or an optimistic future view, if any.
 type PendingProposal<D, P> = Option<Request<ProposalRequest<D, P>, ProposalState<D>>>;
+
+/// The verification request in flight for the current or an optimistic future view, if any.
 type PendingVerification<D, P> = Option<Request<Context<D, P>, oneshot::Receiver<bool>>>;
 
 /// Actor responsible for driving participation in the consensus protocol.
@@ -447,12 +450,12 @@ impl<
                 "requested proposal from automaton"
             );
             match &request {
-                ProposalRequest::Handoff(_) => {
+                ProposalRequest::Prepare(_) => {
                     self.record_handoff_event(HandoffEventKind::Requested);
-                    ProposalState::Handoff(self.automaton.prepare(context).await)
+                    ProposalState::Preparing(self.automaton.prepare(context).await)
                 }
-                ProposalRequest::Regular(_) => {
-                    ProposalState::Regular(self.automaton.propose(context).await)
+                ProposalRequest::Propose(_) => {
+                    ProposalState::Proposing(self.automaton.propose(context).await)
                 }
             }
         }
@@ -537,8 +540,8 @@ impl<
         // Cancel a pending handoff build once State::pending_handoff_abandonment reports a reason.
         // Dropping the receiver cancels the build, and the request then waits (see
         // [`ProposalState::Waiting`]).
-        if let Some(Request(ProposalRequest::Handoff(context), _, state)) = pending_propose.as_mut()
-            && matches!(state, ProposalState::Handoff(_))
+        if let Some(Request(ProposalRequest::Prepare(context), _, state)) = pending_propose.as_mut()
+            && matches!(state, ProposalState::Preparing(_))
             && let Some(reason) = self.state.pending_handoff_abandonment(context)
         {
             self.record_handoff_abandoned(reason);
@@ -1265,11 +1268,11 @@ impl<
                 );
                 let propose_wait = async {
                     let proposed = match pending_propose.as_mut() {
-                        Some(Request(_, _, ProposalState::Regular(receiver))) => {
-                            receiver.await.map(ProposalResponse::Proposed)
+                        Some(Request(_, _, ProposalState::Preparing(receiver))) => {
+                            receiver.await.map(ProposalResponse::Prepared)
                         }
-                        Some(Request(_, _, ProposalState::Handoff(receiver))) => {
-                            receiver.await.map(ProposalResponse::Handoff)
+                        Some(Request(_, _, ProposalState::Proposing(receiver))) => {
+                            receiver.await.map(ProposalResponse::Proposed)
                         }
                         Some(Request(_, _, ProposalState::Held(payload))) if ready => {
                             Ok(ProposalResponse::Released(*payload))
@@ -1316,12 +1319,12 @@ impl<
                 let (proposed, released) = match proposed {
                     Ok(ProposalResponse::Proposed(payload)) => (Ok(payload), false),
                     Ok(ProposalResponse::Released(payload)) => (Ok(payload), true),
-                    Ok(ProposalResponse::Handoff(Handoff::Wait)) => {
+                    Ok(ProposalResponse::Prepared(Handoff::Wait)) => {
                         self.record_handoff_event(HandoffEventKind::WaitReturned);
                         pending_propose = Some(Request(request, span, ProposalState::Waiting));
                         continue;
                     }
-                    Ok(ProposalResponse::Handoff(Handoff::Stage(payload)))
+                    Ok(ProposalResponse::Prepared(Handoff::Stage(payload)))
                         if !self.state.proposal_parent_certified(request.context()) =>
                     {
                         // Relay the held candidate now so its distribution overlaps parent
@@ -1338,7 +1341,7 @@ impl<
                         pending_propose = Some(Request(request, span, ProposalState::Held(payload)));
                         continue;
                     }
-                    Ok(ProposalResponse::Handoff(Handoff::Vote(payload) | Handoff::Stage(payload))) => {
+                    Ok(ProposalResponse::Prepared(Handoff::Vote(payload) | Handoff::Stage(payload))) => {
                         self.record_handoff_event(HandoffEventKind::CandidateReturned);
                         (Ok(payload), false)
                     }

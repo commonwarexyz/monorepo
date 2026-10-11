@@ -3989,6 +3989,7 @@ mod tests {
             );
             let built_elector: RoundRobinElector<ed25519::Scheme> =
                 elector.clone().build(schemes[0].participants());
+
             // Views 1 and 2 form term 1. View 3 starts term 2.
             let outgoing_idx = built_elector.elect(Round::new(epoch, View::new(1)), ());
             let outgoing = participants[usize::from(outgoing_idx)].clone();
@@ -4870,6 +4871,7 @@ mod tests {
 
             let release = fixture.block_certification(certified).await;
             fixture.wait_for_replacement(&context).await;
+
             // The ordinary mock response is available after its 1ms build latency.
             context.sleep(SETTLE).await;
             assert_eq!(fixture.requests_for(View::new(3)), 2);
@@ -5362,6 +5364,7 @@ mod tests {
             fixture.finish_certification(certified).await;
             wait_for_handoff_abandoned(&context, "AncestrySuperseded").await;
             assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.candidate.digest);
+
             // The nullified tip leaves certified ancestry, so the replacement
             // is an ordinary request rather than a second handoff.
             let deadline = context.current() + Duration::from_secs(1);

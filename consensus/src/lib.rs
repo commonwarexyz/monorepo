@@ -375,7 +375,7 @@ stability_scope!(ALPHA {
     pub mod aggregation;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::ancestry::{Ancestry, Parent};
+    use crate::marshal::ancestry::Ancestry;
     use commonware_cryptography::certificate::Scheme;
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand_core::Rng;
@@ -401,33 +401,13 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// that need no input set this to `()`.
         type Input: Send;
 
-        /// Build a new block on top of the provided parent ancestry. If the build job fails,
-        /// or the proposer's slot should be skipped, the implementor should return [None].
-        ///
-        /// `input` is the per-proposal input for this build.
-        ///
-        /// This future may be cancelled before it completes. Implementations must be
-        /// cancellation-safe.
-        fn propose(
-            &mut self,
-            context: (E, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
-            input: Self::Input,
-        ) -> impl Future<Output = Option<Self::Block>> + Send;
-
         /// Build a block on a parent that has not yet certified, or decline with
         /// [`Handoff::Wait`].
         ///
         /// The marshal calls this in place of [`Self::propose`] for a term-start proposal whose
-        /// parent is uncertified. The parent is not fetched in advance: ask `parent` for its
-        /// ancestry to build, and return [`Handoff::Wait`] without touching it to decline at no
-        /// cost. The default declines.
-        ///
-        /// Asking for the ancestry runs the marshal's proposal checks. The ancestry is absent when
-        /// they find the epoch boundary block or a parent the marshal cannot build on. The marshal
-        /// then answers consensus itself and discards whatever this method returns. A block
-        /// returned without asking for the ancestry is discarded too, so the checks always run
-        /// before the marshal keeps a prepared block.
+        /// parent is uncertified, with the same fetched `ancestry` and after the same checks. It
+        /// re-proposes the epoch boundary block and skips a parent it cannot build on without
+        /// calling this method. The default declines.
         ///
         /// With [`Handoff::Vote`] or [`Handoff::Stage`], the marshal keeps the returned block for
         /// relay as it would a proposal. With [`Handoff::Wait`], consensus waits for parent
@@ -457,23 +437,32 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.
         ///
-        /// Its first poll runs on the consensus task, so ask for the ancestry before doing any
-        /// work.
-        ///
         /// If readiness is uncertain, return [`Handoff::Wait`].
         ///
         /// A wrapper around another application must forward this method, since the default
-        /// would otherwise replace the inner application's choice with [`Handoff::Wait`]. A
-        /// resolved ancestry is itself a [`Parent`], so a wrapper that needs the parent first can
-        /// pass the ancestry on.
+        /// would otherwise replace the inner application's choice with [`Handoff::Wait`].
         fn prepare(
             &mut self,
             _context: (E, Self::Context),
-            _parent: impl Parent<Self::Block>,
+            _ancestry: impl Ancestry<Self::Block>,
             _input: Self::Input,
         ) -> impl Future<Output = Handoff<Self::Block>> + Send {
             async { Handoff::Wait }
         }
+
+        /// Build a new block on top of the provided parent ancestry. If the build job fails,
+        /// or the proposer's slot should be skipped, the implementor should return [None].
+        ///
+        /// `input` is the per-proposal input for this build.
+        ///
+        /// This future may be cancelled before it completes. Implementations must be
+        /// cancellation-safe.
+        fn propose(
+            &mut self,
+            context: (E, Self::Context),
+            ancestry: impl Ancestry<Self::Block>,
+            input: Self::Input,
+        ) -> impl Future<Output = Option<Self::Block>> + Send;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.
         ///

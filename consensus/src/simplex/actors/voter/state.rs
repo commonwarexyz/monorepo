@@ -85,29 +85,30 @@ impl ParentPayloadError {
 
 /// A proposal opportunity selected by the consensus state machine.
 pub(super) enum ProposalRequest<D: Digest, P: PublicKey> {
-    /// An ordinary proposal on certified or intra-term ancestry.
-    Regular(Context<D, P>),
-    /// A term-start proposal on the outgoing term's uncertified final view.
-    Handoff(Context<D, P>),
+    /// A term-start proposal on the outgoing term's uncertified final view, requested through
+    /// `prepare`.
+    Prepare(Context<D, P>),
+    /// A proposal on certified or intra-term ancestry, requested through `propose`.
+    Propose(Context<D, P>),
 }
 
 impl<D: Digest, P: PublicKey> ProposalRequest<D, P> {
     /// Returns whether this request prepares a pipelined handoff.
     pub(super) const fn is_handoff(&self) -> bool {
-        matches!(self, Self::Handoff(_))
+        matches!(self, Self::Prepare(_))
     }
 
     /// Returns the proposal context.
     pub(super) const fn context(&self) -> &Context<D, P> {
         match self {
-            Self::Regular(context) | Self::Handoff(context) => context,
+            Self::Prepare(context) | Self::Propose(context) => context,
         }
     }
 
     /// Consumes the request and returns its proposal context.
     pub(super) fn into_context(self) -> Context<D, P> {
         match self {
-            Self::Regular(context) | Self::Handoff(context) => context,
+            Self::Prepare(context) | Self::Propose(context) => context,
         }
     }
 }
@@ -1016,9 +1017,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 parent: (parent_view, parent_payload),
             };
             return Some(if is_handoff {
-                ProposalRequest::Handoff(context)
+                ProposalRequest::Prepare(context)
             } else {
-                ProposalRequest::Regular(context)
+                ProposalRequest::Propose(context)
             });
         }
         None
@@ -2162,26 +2163,6 @@ mod tests {
         );
         state.set_genesis(test_genesis());
         (fixture, state)
-    }
-
-    /// Like [setup_state_with], with the five-view terms, two optimistic views,
-    /// view retention, and skip budget shared by the pipelined-handoff tests.
-    fn setup_state_with_handoff(
-        context: &mut deterministic::Context,
-        validators: usize,
-        signer: usize,
-        epoch: u64,
-    ) -> (Fixture<ed25519::Scheme>, TestState) {
-        setup_state_with(
-            context,
-            validators,
-            signer,
-            epoch,
-            10,
-            TermLength::new(NZU32!(5)),
-            ViewDelta::new(2),
-            4,
-        )
     }
 
     /// Proposes `payload` at view 1 (on top of genesis) and broadcasts our
@@ -7163,7 +7144,16 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            ) = setup_state_with(
+                &mut context,
+                4,
+                3,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
             // Voting for the outgoing tip stamps the incoming term's leader.
@@ -7214,7 +7204,16 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 1, 0, 9);
+            ) = setup_state_with(
+                &mut context,
+                1,
+                0,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
             let (tip, child) = notarize_single_participant_handoff(&mut state, &verifier, &schemes);
 
             // Only the parent may cross the application certification barrier first.
@@ -7240,7 +7239,16 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 1, 0, 9);
+            ) = setup_state_with(
+                &mut context,
+                1,
+                0,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
             certify_view_4(&mut state, &verifier, &schemes);
 
             // The journal holds an early vote issued before the restart.
@@ -7317,7 +7325,16 @@ mod tests {
                         schemes, verifier, ..
                     },
                     mut state,
-                ) = setup_state_with_handoff(&mut context, 4, signer, 9);
+                ) = setup_state_with(
+                    &mut context,
+                    4,
+                    signer,
+                    9,
+                    10,
+                    TermLength::new(NZU32!(5)),
+                    ViewDelta::new(2),
+                    4,
+                );
                 assert_eq!(
                     state.handoff_leader(View::new(6)),
                     Some(Participant::new(3))
@@ -7366,7 +7383,16 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 1, 0, 9);
+            ) = setup_state_with(
+                &mut context,
+                1,
+                0,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
             notarize_single_participant_handoff(&mut state, &verifier, &schemes);
 
             // A finalize vote requires the certified parent even when the
@@ -7388,7 +7414,16 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            ) = setup_state_with(
+                &mut context,
+                4,
+                3,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
 
             // Restore the certified anchor that precedes the outgoing vote in
             // the journal.
@@ -7435,7 +7470,16 @@ mod tests {
                     ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            ) = setup_state_with(
+                &mut context,
+                4,
+                3,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
 
             let certified = certify_view_4(&mut state, &verifier, &schemes);
             let tip = fetch_proposal(5, 4, 65);
@@ -7468,6 +7512,7 @@ mod tests {
                 leader: participants[3].clone(),
                 parent: (View::new(4), certified.payload),
             };
+
             // The occupied slot ignores the conflicting proposal.
             state.proposed(&alternate, Sha256Digest::from([67u8; 32]));
             assert_eq!(
@@ -7489,7 +7534,16 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            ) = setup_state_with(
+                &mut context,
+                4,
+                3,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
             let ctx = state
@@ -7622,7 +7676,16 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 0, 9);
+            ) = setup_state_with(
+                &mut context,
+                4,
+                0,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
 
             // Enter the outgoing term without reconstructing any of its rounds.
             let nullification =
@@ -7657,7 +7720,16 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            ) = setup_state_with(
+                &mut context,
+                4,
+                3,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
             let (certified, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
             let tip_notarization = build_notarization(&verifier, &schemes, &tip);
@@ -7671,7 +7743,7 @@ mod tests {
             let request = state
                 .try_propose()
                 .expect("term-start proposal should use the certified fallback");
-            assert!(matches!(request, ProposalRequest::Regular(_)));
+            assert!(matches!(request, ProposalRequest::Propose(_)));
             let ctx = request.into_context();
             assert_eq!(ctx.parent, (View::new(4), certified.payload));
 
@@ -7699,7 +7771,16 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            ) = setup_state_with(
+                &mut context,
+                4,
+                3,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
             let (certified, _) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
             let initial = state
@@ -7723,7 +7804,7 @@ mod tests {
             let retry = state
                 .try_propose()
                 .expect("superseded handoff should retry on certified ancestry");
-            assert!(matches!(retry, ProposalRequest::Regular(_)));
+            assert!(matches!(retry, ProposalRequest::Propose(_)));
             let retry = retry.into_context();
             assert_eq!(retry.round.view(), View::new(6));
             assert_eq!(retry.parent, (View::new(4), certified.payload));
@@ -7752,7 +7833,16 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            ) = setup_state_with(
+                &mut context,
+                4,
+                3,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
 
             // Enter the local signer's term at view 6 on certified view-4 ancestry, then
             // propose and vote for the term start, which the peers notarize.
@@ -7776,7 +7866,7 @@ mod tests {
             let request = state
                 .try_propose()
                 .expect("next view should be proposed on the notarized term start");
-            assert!(matches!(request, ProposalRequest::Regular(_)));
+            assert!(matches!(request, ProposalRequest::Propose(_)));
             let ctx = request.into_context();
             assert_eq!(ctx.round.view(), View::new(7));
             assert_eq!(ctx.parent, (View::new(6), term_start.payload));
@@ -7805,7 +7895,16 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            ) = setup_state_with(
+                &mut context,
+                4,
+                3,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
             let ctx = state
@@ -7832,7 +7931,16 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            ) = setup_state_with(
+                &mut context,
+                4,
+                3,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
             prepare_term_boundary(&mut state, &verifier, &schemes);
 
             let ctx = state
@@ -7857,7 +7965,16 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9);
+            ) = setup_state_with(
+                &mut context,
+                4,
+                3,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
             let proposal_context = state
@@ -7901,7 +8018,16 @@ mod tests {
                     ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 1, 9);
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
             // Only the incoming leader elects itself before the tip's certificate

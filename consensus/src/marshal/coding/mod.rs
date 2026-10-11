@@ -103,7 +103,7 @@ mod tests {
     use commonware_coding::{Config as CodingConfig, ReedSolomon, Scheme as _};
     use commonware_cryptography::{
         Committable, Digestible, Hasher,
-        certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
+        certificate::{ConstantProvider, Verifier as _, mocks::Fixture},
         sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
@@ -118,35 +118,8 @@ mod tests {
     use commonware_utils::{
         NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
     };
-    use futures::{FutureExt as _, StreamExt};
-    use std::{
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-        time::Duration,
-    };
-
-    #[derive(Clone)]
-    struct CountingProvider<P> {
-        inner: P,
-        lookups: Arc<AtomicUsize>,
-    }
-
-    impl<P: Provider> Provider for CountingProvider<P> {
-        type Scope = P::Scope;
-        type Scheme = P::Scheme;
-
-        fn scoped(&self, scope: Self::Scope) -> Option<Scoped<Self::Scheme>> {
-            self.lookups.fetch_add(1, Ordering::SeqCst);
-            self.inner.scoped(scope)
-        }
-
-        fn scheme(&self, scope: Self::Scope) -> Option<Arc<Self::Scheme>> {
-            self.lookups.fetch_add(1, Ordering::SeqCst);
-            self.inner.scheme(scope)
-        }
-    }
+    use futures::StreamExt;
+    use std::{sync::Arc, time::Duration};
 
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
@@ -4521,8 +4494,9 @@ mod tests {
         })
     }
 
+    /// The default prepare declines after the marshal's checks fetch the parent.
     #[test_traced("WARN")]
-    fn test_coding_default_prepare_no_lookup() {
+    fn test_coding_default_prepare_declines() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -4544,15 +4518,11 @@ mod tests {
                 provider.clone(),
             )
             .await;
-            let lookups = Arc::new(AtomicUsize::new(0));
             let cfg = MarshaledConfig {
                 application: WalkingVerifyingApp::default(),
                 marshal,
                 shards,
-                scheme_provider: CountingProvider {
-                    inner: provider,
-                    lookups: lookups.clone(),
-                },
+                scheme_provider: provider,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
             };
@@ -4563,23 +4533,12 @@ mod tests {
                 leader: participants[0].clone(),
                 parent: (View::zero(), genesis.commitment()),
             };
-
-            // Only provider calls made by this prepare request count.
-            lookups.store(0, Ordering::SeqCst);
-            let response = marshaled
+            let decision = marshaled
                 .prepare(ctx)
-                .now_or_never()
-                .expect("default prepare must return its receiver on the first poll");
-            let decision = response
-                .now_or_never()
-                .expect("default prepare response must be ready")
-                .expect("default prepare decision missing");
-            assert_eq!(decision, Handoff::Wait);
-            assert_eq!(
-                lookups.load(Ordering::SeqCst),
-                0,
-                "default prepare must not query the scheme provider"
-            );
+                .await
+                .await
+                .expect("prepare decision missing");
+            assert_eq!(decision, Handoff::Wait, "the default prepare declines");
         });
     }
 

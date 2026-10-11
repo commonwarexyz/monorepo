@@ -4,11 +4,8 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{
-    CertifiableBlock, Epochable, Handoff,
-    marshal::ancestry::{Ancestry, Parent},
-};
-use commonware_runtime::{deterministic, reschedule};
+use crate::{CertifiableBlock, Epochable, Handoff, marshal::ancestry::Ancestry};
+use commonware_runtime::deterministic;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
@@ -27,19 +24,8 @@ pub struct MockVerifyingApp<B, S> {
     pub propose_result: Option<B>,
     /// The result returned by `verify`.
     pub verify_result: bool,
-    /// The decision `prepare` attaches to a built block. `Wait` declines without asking for
-    /// the parent.
+    /// The decision `prepare` attaches to a built block. `Wait` declines without building.
     handoff: Handoff<()>,
-    /// Whether `prepare` asks the parent handle for its ancestry before building. When false,
-    /// `prepare` returns `propose_result` under its decision without asking, and marshal must
-    /// discard it.
-    ask_parent: bool,
-    /// Whether `prepare` returns `propose_result` under its decision even when the parent
-    /// handle yields no ancestry, which marshal must discard.
-    ignore_absence: bool,
-    /// Whether `prepare` suspends once before building, so marshal drives it from a task
-    /// instead of answering it on its first poll.
-    suspend: bool,
     /// Shared by clones so that only the first proposal build waits on the gate.
     proposal_gate: Option<Arc<Mutex<Option<ProposalGate>>>>,
     /// Blocks for which `verify` returns false.
@@ -79,24 +65,6 @@ impl<B, S> MockVerifyingApp<B, S> {
         self
     }
 
-    /// Make `prepare` return `propose_result` without asking the parent handle.
-    pub const fn without_parent(mut self) -> Self {
-        self.ask_parent = false;
-        self
-    }
-
-    /// Make `prepare` return `propose_result` even when the parent handle yields no ancestry.
-    pub const fn ignoring_absence(mut self) -> Self {
-        self.ignore_absence = true;
-        self
-    }
-
-    /// Make `prepare` suspend once before building.
-    pub const fn suspending(mut self) -> Self {
-        self.suspend = true;
-        self
-    }
-
     /// Blocks the first proposal build until cancellation. Returns a receiver that
     /// signals when the build starts and one that errors when the build is cancelled.
     pub fn with_proposal_gate(mut self) -> (Self, oneshot::Receiver<()>, oneshot::Receiver<()>) {
@@ -121,9 +89,6 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
             propose_result: None,
             verify_result: true,
             handoff: Handoff::Wait,
-            ask_parent: true,
-            ignore_absence: false,
-            suspend: false,
             proposal_gate: None,
             reject: None,
             _phantom: PhantomData,
@@ -142,6 +107,21 @@ where
     type SigningScheme = S;
     type Input = ();
 
+    async fn prepare(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Handoff<Self::Block> {
+        if self.handoff.is_wait() {
+            return Handoff::Wait;
+        }
+        let decision = self.handoff;
+        self.propose(context, ancestry, input)
+            .await
+            .map_or(Handoff::Wait, |block| decision.map(|()| block))
+    }
+
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
@@ -159,41 +139,6 @@ where
             pending::<()>().await;
         }
         self.propose_result.clone()
-    }
-
-    async fn prepare(
-        &mut self,
-        context: (deterministic::Context, Self::Context),
-        parent: impl Parent<Self::Block>,
-        input: Self::Input,
-    ) -> Handoff<Self::Block> {
-        if self.handoff.is_wait() {
-            return Handoff::Wait;
-        }
-        let decision = self.handoff;
-        if self.suspend {
-            reschedule().await;
-        }
-        if !self.ask_parent {
-            let block = self
-                .propose_result
-                .clone()
-                .expect("unasked prepare needs a block");
-            return decision.map(|()| block);
-        }
-        let Some(ancestry) = parent.ancestry().await else {
-            if !self.ignore_absence {
-                return Handoff::Wait;
-            }
-            let block = self
-                .propose_result
-                .clone()
-                .expect("prepare ignoring an absent ancestry needs a block");
-            return decision.map(|()| block);
-        };
-        self.propose(context, ancestry, input)
-            .await
-            .map_or(Handoff::Wait, |block| decision.map(|()| block))
     }
 
     async fn verify(

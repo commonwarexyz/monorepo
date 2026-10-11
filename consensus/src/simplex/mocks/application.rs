@@ -28,13 +28,13 @@ use std::{
 use tracing::debug;
 
 pub enum Message<D: Digest, P: PublicKey> {
+    Prepare {
+        context: Context<D, P>,
+        response: oneshot::Sender<Handoff<D>>,
+    },
     Propose {
         context: Context<D, P>,
         response: oneshot::Sender<D>,
-    },
-    Handoff {
-        context: Context<D, P>,
-        response: oneshot::Sender<Handoff<D>>,
     },
     Verify {
         context: Context<D, P>,
@@ -96,7 +96,7 @@ impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send_lossy(Message::Handoff { context, response });
+            .send_lossy(Message::Prepare { context, response });
         receiver
     }
 
@@ -223,11 +223,11 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     /// of a leader-owned proposal).
     verify_observer: Option<VerifyObserver<H, P>>,
 
+    /// Handoff response senders held alive while `stall_proposals` is set.
+    pending_prepares: Vec<oneshot::Sender<Handoff<H::Digest>>>,
     /// Senders held alive to simulate proposals that hang indefinitely
     /// (used when `stall_proposals` is set).
     pending_proposes: Vec<oneshot::Sender<H::Digest>>,
-    /// Handoff response senders held alive while `stall_proposals` is set.
-    pending_handoffs: Vec<oneshot::Sender<Handoff<H::Digest>>>,
 
     /// Senders held alive to simulate certifications that hang indefinitely
     /// (used by [`Certifier::Pending`]).
@@ -273,8 +273,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 propose_observer: None,
                 handoff_controller: None,
                 verify_observer: None,
+                pending_prepares: Vec::new(),
                 pending_proposes: Vec::new(),
-                pending_handoffs: Vec::new(),
                 pending_certifications: Vec::new(),
             },
             Mailbox::new(sender),
@@ -289,10 +289,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.drop_proposals = drop;
     }
 
-    /// When set, `Message::Propose` requests, and `Message::Handoff` requests unless the handoff
-    /// decision is `Wait`, are held open indefinitely: the response sender is parked in
-    /// `pending_proposes` or `pending_handoffs`, keeping the oneshot alive so the caller's
-    /// `receiver` never resolves. This simulates a propose that is still in flight at the moment
+    /// When set, `Message::Prepare` requests, unless the handoff decision is `Wait`, and
+    /// `Message::Propose` requests are held open indefinitely. The response sender is parked in
+    /// `pending_prepares` or `pending_proposes`, keeping the oneshot alive so the caller's
+    /// `receiver` never resolves. This simulates a build that is still in flight at the moment
     /// the voter crashes.
     pub const fn set_stall_proposals(&mut self, stall: bool) {
         self.stall_proposals = stall;
@@ -486,21 +486,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
             },
             Some(message) = self.mailbox.recv() else break => {
                 match message {
-                    Message::Propose { context, response } => {
-                        if let Some(observer) = &self.propose_observer {
-                            observer(context.clone());
-                        }
-                        if self.stall_proposals {
-                            self.pending_proposes.push(response);
-                            continue;
-                        }
-                        if self.drop_proposals {
-                            continue;
-                        }
-                        let digest = self.propose(context).await;
-                        response.send_lossy(digest);
-                    }
-                    Message::Handoff {
+                    Message::Prepare {
                         context,
                         response,
                     } => {
@@ -513,7 +499,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                             continue;
                         }
                         if self.stall_proposals {
-                            self.pending_handoffs.push(response);
+                            self.pending_prepares.push(response);
                             continue;
                         }
                         if self.drop_proposals {
@@ -527,6 +513,20 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         } else {
                             response.send_lossy(proposal);
                         }
+                    }
+                    Message::Propose { context, response } => {
+                        if let Some(observer) = &self.propose_observer {
+                            observer(context.clone());
+                        }
+                        if self.stall_proposals {
+                            self.pending_proposes.push(response);
+                            continue;
+                        }
+                        if self.drop_proposals {
+                            continue;
+                        }
+                        let digest = self.propose(context).await;
+                        response.send_lossy(digest);
                     }
                     Message::Verify {
                         context,

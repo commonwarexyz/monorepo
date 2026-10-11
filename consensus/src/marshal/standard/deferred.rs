@@ -80,9 +80,9 @@ use crate::{
         Update,
         ancestry::Ancestry,
         application::{
+            build::{self, Resolved},
             gates::{self, GateOutcome, Gates},
-            prepare::{self, Resolved},
-            propose, relay,
+            relay,
             validation::{Stage, is_inferred_reproposal_at_certify},
         },
         core::{CommitmentFallback, DigestFallback, Mailbox},
@@ -467,8 +467,8 @@ where
     /// Runs the proposal checks for `consensus_context` and yields what the proposal path does
     /// next: re-propose the epoch boundary block, skip the view, or build on the fetched parent.
     ///
-    /// The returned future borrows nothing from `self`, so it can move into the spawned propose
-    /// task or into a prepare request's [`Parent`](crate::marshal::ancestry::Parent) handle.
+    /// The returned future borrows nothing from `self`, so it can move into the spawned prepare
+    /// or propose task.
     fn checks(
         &self,
         consensus_context: Context<B::Digest, S::PublicKey>,
@@ -585,7 +585,7 @@ where
         );
         let round = consensus_context.round;
         let (parent_view, parent_commitment) = consensus_context.parent;
-        propose::request(
+        build::propose(
             self.context.as_ref(),
             &self.application,
             self.gates.clone(),
@@ -770,12 +770,9 @@ where
 {
     /// Prepares a term-start proposal on an uncertified parent.
     ///
-    /// The application receives the parent as a [`Parent`](crate::marshal::ancestry::Parent)
-    /// handle. Asking the handle for the ancestry runs the same checks as [`Self::propose`], in the
-    /// same order. When those checks find the epoch boundary block, the marshal re-proposes it
-    /// without the application and answers [`Handoff::Stage`]. An application that declines without
-    /// asking costs no fetch, and if it also completes on its first poll, it is answered
-    /// [`Handoff::Wait`] on this task without a spawn.
+    /// Runs the same checks as [`Self::propose`], in the same order, and hands the application the
+    /// fetched ancestry. When the checks find the epoch boundary block, the marshal re-proposes it
+    /// without the application and answers [`Handoff::Stage`].
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
     async fn prepare(
@@ -784,16 +781,26 @@ where
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let checks = self.checks(consensus_context.clone());
         let span = info_span!(
-            "marshal.deferred.application.prepare",
+            "marshal.deferred.prepare.task",
             round = %consensus_context.round
         );
-        prepare::request(
+        let round = consensus_context.round;
+        let (parent_view, parent_commitment) = consensus_context.parent;
+        build::prepare(
             self.context.as_ref(),
             &self.application,
             self.gates.clone(),
             consensus_context,
             checks,
             span,
+            move || {
+                info_span!(
+                    "marshal.deferred.application.prepare",
+                    round = %round,
+                    parent_view = parent_view.traced(),
+                    parent = %parent_commitment
+                )
+            },
             |block: B, ()| (block.digest(), Arc::new(block)),
         )
     }

@@ -139,7 +139,7 @@ impl<D: Digest, B> Gates<D, B> {
         Some(staged.block.clone())
     }
 
-    /// Removes and returns the certification gate task for `(round, id)`, if present, and
+    /// Removes and returns the certification gate task for `(round, digest)`, if present, and
     /// hands the staged proposal it waits on to `persist` without broadcasting it.
     ///
     /// A staged proposal that was never locked in by a propose broadcast cannot
@@ -156,14 +156,14 @@ impl<D: Digest, B> Gates<D, B> {
     pub(crate) fn claim(
         &self,
         round: Round,
-        id: D,
+        digest: D,
         persist: impl FnOnce(Arc<B>, oneshot::Sender<Handle<()>>),
     ) -> Option<oneshot::Receiver<GateOutcome>> {
         let (gate, staged) = {
             let mut inner = self.inner.lock();
             (
-                inner.certifications.remove(&(round, id)),
-                inner.proposals.remove(&(round, id)),
+                inner.certifications.remove(&(round, digest)),
+                inner.proposals.remove(&(round, digest)),
             )
         };
         if let Some(Staged { block, ack, .. }) = staged {
@@ -189,12 +189,12 @@ impl<D: Digest, B> Gates<D, B> {
     }
 
     /// Stages `block` for its relay broadcast and completes the propose
-    /// durability handshake for `(round, id)`.
+    /// durability handshake for `(round, digest)`.
     ///
-    /// Registers a certification gate and the staged block, publishes `id` to
+    /// Registers a certification gate and the staged block, publishes `digest` to
     /// consensus through `publish`, then awaits the durable-sync handle so
     /// [`certify`](crate::CertifiableAutomaton::certify) can require durability
-    /// before the finalize vote. Both registrations happen before `id` is
+    /// before the finalize vote. Both registrations happen before `digest` is
     /// published so the relay broadcast and `certify` always find them.
     ///
     /// The handle arrives once marshal persists the staged block, which happens
@@ -209,7 +209,7 @@ impl<D: Digest, B> Gates<D, B> {
     pub(crate) async fn stage(
         &self,
         round: Round,
-        id: D,
+        digest: D,
         block: Arc<B>,
         publish: impl FnOnce(D),
         name: &'static str,
@@ -218,19 +218,19 @@ impl<D: Digest, B> Gates<D, B> {
         let (ack, persist) = oneshot::channel();
         {
             let mut inner = self.inner.lock();
-            inner.certifications.insert((round, id), durable_rx);
+            inner.certifications.insert((round, digest), durable_rx);
 
-            // An id names one block, so a block staged again for the round, such as a
+            // A digest names one block, so a block staged again for the round, such as a
             // re-proposed epoch boundary block, stays sent if a prepare broadcast sent it.
             let sent = inner
                 .proposals
-                .get(&(round, id))
+                .get(&(round, digest))
                 .is_some_and(|staged| staged.sent);
             inner
                 .proposals
-                .insert((round, id), Staged { block, ack, sent });
+                .insert((round, digest), Staged { block, ack, sent });
         }
-        publish(id);
+        publish(digest);
         let Ok(handle) = persist.await else {
             return;
         };
@@ -238,7 +238,7 @@ impl<D: Digest, B> Gates<D, B> {
             return;
         }
         durable_tx.send_lossy(GateOutcome::Ready(true));
-        debug!(?round, ?id, name, "block durable");
+        debug!(?round, ?digest, name, "block durable");
     }
 }
 
@@ -286,7 +286,7 @@ pub(crate) async fn drive<D, F>(
     mut tx: oneshot::Sender<bool>,
     task: oneshot::Receiver<GateOutcome>,
     round: Round,
-    id: D,
+    digest: D,
     fallback: F,
 ) where
     D: Digest,
@@ -309,7 +309,7 @@ pub(crate) async fn drive<D, F>(
         Ok(GateOutcome::Recover) | Err(_) => {
             debug!(
                 ?round,
-                ?id,
+                ?digest,
                 "certification gate requires recovery, falling back to embedded context"
             );
             let fallback = fallback();
@@ -567,8 +567,8 @@ mod tests {
                             round(1),
                             digest,
                             Arc::new(7),
-                            |id| {
-                                tx.send_lossy(id);
+                            |digest| {
+                                tx.send_lossy(digest);
                             },
                             "test",
                         )
@@ -576,8 +576,8 @@ mod tests {
                 }
             });
 
-            // The id is published only after the gate and staged block are registered.
-            assert_eq!(rx.await.expect("id published"), digest);
+            // The digest is published only after the gate and staged block are registered.
+            assert_eq!(rx.await.expect("digest published"), digest);
             let gate = gates.take(round(1), digest).expect("gate registered");
             let Staged { block, ack, sent } =
                 gates.take_staged(round(1), digest).expect("block staged");
@@ -612,15 +612,15 @@ mod tests {
                             round(1),
                             digest,
                             Arc::new(7),
-                            |id| {
-                                tx.send_lossy(id);
+                            |digest| {
+                                tx.send_lossy(digest);
                             },
                             "test",
                         )
                         .await;
                 }
             });
-            assert_eq!(rx.await.expect("id published"), digest);
+            assert_eq!(rx.await.expect("digest published"), digest);
 
             // The second stage registers while the claimed proposal is persisted and then
             // stays pending, so only the first stage can resolve a gate.
@@ -665,15 +665,15 @@ mod tests {
                                 round(1),
                                 digest,
                                 Arc::new(7),
-                                |id| {
-                                    tx.send_lossy(id);
+                                |digest| {
+                                    tx.send_lossy(digest);
                                 },
                                 "test",
                             )
                             .await;
                     }
                 });
-                assert_eq!(rx.await.expect("id published"), digest);
+                assert_eq!(rx.await.expect("digest published"), digest);
                 if send {
                     assert!(
                         gates
@@ -720,15 +720,15 @@ mod tests {
                                 round(view),
                                 digest,
                                 Arc::new(7),
-                                |id| {
-                                    tx.send_lossy(id);
+                                |digest| {
+                                    tx.send_lossy(digest);
                                 },
                                 "test",
                             )
                             .await;
                     }
                 });
-                assert_eq!(rx.await.expect("id published"), digest);
+                assert_eq!(rx.await.expect("digest published"), digest);
             }
 
             assert!(
@@ -761,15 +761,15 @@ mod tests {
                             round(1),
                             digest,
                             Arc::new(7),
-                            |id| {
-                                tx.send_lossy(id);
+                            |digest| {
+                                tx.send_lossy(digest);
                             },
                             "test",
                         )
                         .await;
                 }
             });
-            assert_eq!(rx.await.expect("id published"), digest);
+            assert_eq!(rx.await.expect("digest published"), digest);
 
             // Pruning drops the staged ack, leaving the gate unresolved.
             let gate = gates.take(round(1), digest).expect("gate registered");

@@ -341,8 +341,20 @@ impl<
         TestBlock::new(0, 0)
     }
 
-    fn prepare(&self, _context: &Self::Context) -> Handoff<()> {
-        self.handoff
+    async fn prepare(
+        &mut self,
+        context: (E, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        input: Input<Self::Input, Self::Provider>,
+    ) -> Handoff<Proposed<Self, E>> {
+        let decision = self.handoff;
+        if decision.is_wait() {
+            return Handoff::Wait;
+        }
+        self.propose(context, ancestry, batches, input)
+            .await
+            .map_or(Handoff::Wait, |proposed| decision.map(|()| proposed))
     }
 
     async fn propose(

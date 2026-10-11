@@ -7,11 +7,12 @@
 //!
 //! # Overview
 //!
-//! Upon `propose` or `verify` of a block with parent `p`:
+//! Upon `prepare`, `propose`, or `verify` of a block with parent `p`:
 //!
 //! * Fork batches from the pending state of `p`, or from the databases if `p` is the applied tip.
 //!   Recover missing parent state through [lazy recovery](#lazy-recovery).
-//! * Call [`Application::propose`] or [`Application::verify`] with those batches.
+//! * Call [`Application::prepare`], [`Application::propose`], or [`Application::verify`] with
+//!   those batches.
 //! * Keep the result as pending state if it matches the block's
 //!   [`sync_targets`](Application::sync_targets). A mismatched proposal panics, and a mismatched
 //!   verification votes `false`.
@@ -192,23 +193,22 @@ where
     /// Returns the block used to initialize the consensus engine in the first epoch.
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
 
-    /// Decide whether to prepare a proposal on a parent that has not yet been certified.
+    /// Builds a block on top of the provided parent ancestry before the parent certifies, or
+    /// declines with [`Handoff::Wait`].
     ///
-    /// With [`Handoff::Vote`] or [`Handoff::Stage`], [`Stateful`] fetches the parent, builds
-    /// the block through [`propose`](Self::propose), and attaches the decision to the block. If no
-    /// block is built, the request declines with [`Handoff::Wait`].
-    ///
-    /// See [`commonware_consensus::Application::prepare`] for the contract, including the trust
-    /// an early vote places in the outgoing leader. If readiness is uncertain, return
-    /// [`Handoff::Wait`], which costs no work: consensus requests an ordinary proposal once the
-    /// parent certifies, unless it has voted to nullify the view.
-    ///
-    /// [`Stateful`] calls this method on a clone of the application, outside the processing
-    /// actor and without database batches. Metadata used only for this decision may live outside
-    /// the batches, since the decision does not affect execution, but the application must share
-    /// it across clones. The call can run on the consensus task, so decide without blocking.
-    fn prepare(&self, _context: &Self::Context) -> Handoff<()> {
-        Handoff::Wait
+    /// Like [`propose`](Self::propose), including its requirements on the merkleized state and
+    /// on cancellation. With [`Handoff::Vote`] or [`Handoff::Stage`], the block's state is cached
+    /// as verified and the block reaches consensus under that decision. See
+    /// [`commonware_consensus::Application::prepare`] for the contract, including the trust an
+    /// early vote places in the outgoing leader. The default declines.
+    fn prepare(
+        &mut self,
+        _context: (E, Self::Context),
+        _ancestry: impl Ancestry<Self::Block>,
+        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _input: Input<Self::Input, Self::Provider>,
+    ) -> impl Future<Output = Handoff<Proposed<Self, E>>> + Send {
+        async { Handoff::Wait }
     }
 
     /// Builds a block on top of the provided parent ancestry.

@@ -137,12 +137,12 @@ where
                 Message::Propose {
                     span,
                     context: (_, context),
-                    response,
+                    proposal,
                     ..
                 } => {
                     span.in_scope(|| {
                         debug!(epoch = %context.epoch(), view = %context.view(), "proposal rejected: state sync in progress");
-                        response.send_lossy(None);
+                        proposal.decline();
                     });
                 }
                 Message::Verify(request) => {
@@ -576,7 +576,7 @@ mod tests {
             };
             (
                 harness,
-                StatefulMailbox::new(mailbox_sender, TestApp::default()),
+                StatefulMailbox::new(mailbox_sender),
                 syncer_receiver,
                 sender,
             )
@@ -875,7 +875,7 @@ mod tests {
             let fixture =
                 scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_SYNCING_LIVE_FLOOR", 1);
             let (sender, mut reports) = actor_mailbox::new(context.child("reports"), NZUsize!(8));
-            let reporter = StatefulMailbox::<_, TestApp>::new(sender, TestApp::default());
+            let reporter = StatefulMailbox::<_, TestApp>::new(sender);
             let marshal = fixtures::marshal_fixture_with_reporter(
                 context.child("marshal"),
                 "syncing-live-floor",

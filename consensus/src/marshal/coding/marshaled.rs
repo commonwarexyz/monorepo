@@ -86,9 +86,9 @@ use crate::{
         Update,
         ancestry::Ancestry,
         application::{
+            build::{self, Resolved},
             gates::{self, GateOutcome, Gates},
-            prepare::{self, Resolved},
-            propose, relay,
+            relay,
             validation::{
                 Stage, is_block_in_expected_epoch, is_inferred_reproposal_at_certify,
                 is_valid_reproposal_at_verify,
@@ -658,8 +658,8 @@ where
     /// attest to, so it draws no peer fetch. Local reconstruction or the parent's certification,
     /// which acquires the block from peers, delivers it.
     ///
-    /// The returned future borrows nothing from `self`, so it can move into the spawned propose
-    /// task or into a prepare request's [`Parent`](crate::marshal::ancestry::Parent) handle.
+    /// The returned future borrows nothing from `self`, so it can move into the spawned prepare
+    /// or propose task.
     fn checks(
         &self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
@@ -797,7 +797,7 @@ where
             round = %consensus_context.round
         );
         let round = consensus_context.round;
-        propose::request(
+        build::propose(
             self.context.as_ref(),
             &self.application,
             self.gates.clone(),
@@ -1063,32 +1063,42 @@ where
 {
     /// Prepares a term-start proposal on an uncertified parent.
     ///
-    /// The application receives the parent as a [`Parent`](crate::marshal::ancestry::Parent)
-    /// handle. Asking the handle for the ancestry runs the same checks as [`Self::propose`], in the
-    /// same order, except that a parent missing locally is awaited rather than fetched. When those
-    /// checks find the epoch boundary block, the marshal re-proposes it without the application and
-    /// answers [`Handoff::Stage`]. An application that declines without asking costs no lookup or
-    /// fetch, and if it also completes on its first poll, it is answered [`Handoff::Wait`] on this
-    /// task without a spawn. A round without a scheme answers [`Handoff::Wait`] as well.
+    /// Runs the same checks as [`Self::propose`], in the same order, except that a parent missing
+    /// locally is awaited rather than fetched, and hands the application the fetched ancestry.
+    /// When the checks find the epoch boundary block, the marshal re-proposes it without the
+    /// application and answers [`Handoff::Stage`]. A round without a scheme answers
+    /// [`Handoff::Wait`].
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
     async fn prepare(
         &mut self,
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
-        let round = consensus_context.round;
         let strategy = self.strategy.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
         let clock = self.context.clone();
+        let (parent_view, parent_commitment) = consensus_context.parent;
         let checks = self.checks(consensus_context.clone(), core::CommitmentFallback::Wait);
-        let span = info_span!("marshal.coding.application.prepare", round = %round);
-        prepare::request(
+        let span = info_span!(
+            "marshal.coding.prepare.task",
+            round = %consensus_context.round
+        );
+        let round = consensus_context.round;
+        build::prepare(
             self.context.as_ref(),
             &self.application,
             self.gates.clone(),
             consensus_context,
             checks,
             span,
+            move || {
+                info_span!(
+                    "marshal.coding.application.prepare",
+                    round = %round,
+                    parent_view = parent_view.traced(),
+                    parent = %parent_commitment
+                )
+            },
             move |block: B, coding_config| {
                 let erasure_timer = erasure_encode_duration.timer(&*clock);
                 let coded_block = CodedBlock::<B, C, H>::new(block, coding_config, &strategy);

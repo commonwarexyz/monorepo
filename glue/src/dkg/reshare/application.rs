@@ -6,7 +6,7 @@ use crate::dkg::{
 };
 use commonware_consensus::{
     Application as ConsensusApplication, CertifiableBlock, Handoff,
-    marshal::ancestry::{Ancestry, Parent},
+    marshal::ancestry::Ancestry,
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
@@ -172,6 +172,64 @@ where
     type Block = A::Block;
     type Input = I;
 
+    /// Prepares a term-start block on an uncertified parent unless this node's dealer log is
+    /// due at that height or the block is the epoch's final block.
+    ///
+    /// The payload depends on the parent's height, so it is selected before the inner
+    /// application is asked, and an inner application that declines still costs that selection
+    /// (a dealer-log request from the midpoint on).
+    ///
+    /// The final block is left to [`Self::propose`] without asking the inner application. Its
+    /// epoch info is derived from the parent's ancestry, and deriving it on an uncertified parent
+    /// can start a ceremony verification that a replacement parent or the ordinary proposal
+    /// would then wait behind. The ordinary proposal at that height requests it once the parent
+    /// certifies.
+    ///
+    /// A height that would carry this node's dealer log is left to [`Self::propose`] without
+    /// asking the inner application, and the reservation is released. Consensus can discard a
+    /// prepared block without notice, as when its parent fails to certify or consensus cancels the
+    /// request, and a reservation kept for it would withhold the log from later proposals until
+    /// finalization reaches that height.
+    #[tracing::instrument(
+        name = "dkg.reshare.application.prepare",
+        level = "info",
+        skip_all,
+        fields(
+            height = field::Empty,
+            phase = field::Empty,
+            has_payload = field::Empty
+        )
+    )]
+    async fn prepare(
+        &mut self,
+        context: (E, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Handoff<Self::Block> {
+        if ancestry
+            .peek()
+            .is_none_or(|parent| self.final_block(parent.height().next()))
+        {
+            return Handoff::Wait;
+        }
+        let Some((payload, log_reservation)) = self.payload(ancestry.clone()).await else {
+            return Handoff::Wait;
+        };
+        if log_reservation.is_some() {
+            return Handoff::Wait;
+        }
+        self.inner
+            .prepare(
+                context,
+                ancestry,
+                Input {
+                    upstream: input,
+                    payload,
+                },
+            )
+            .await
+    }
+
     #[tracing::instrument(
         name = "dkg.reshare.application.propose",
         level = "info",
@@ -206,68 +264,6 @@ where
             reservation.included();
         }
         proposed
-    }
-
-    /// Prepares a term-start block on an uncertified parent unless this node's dealer log is
-    /// due at that height or the block is the epoch's final block.
-    ///
-    /// The payload depends on the parent's height, so the parent is fetched before the inner
-    /// application is asked. The inner application then receives the fetched ancestry as its
-    /// parent, and an inner application that declines still costs the fetch and the payload
-    /// selection (a dealer-log request from the midpoint on).
-    ///
-    /// The final block is left to [`Self::propose`] without asking the inner application. Its
-    /// epoch info is derived from the parent's ancestry, and deriving it on an uncertified parent
-    /// can start a ceremony verification that a replacement parent or the ordinary proposal
-    /// would then wait behind. The ordinary proposal at that height requests it once the parent
-    /// certifies.
-    ///
-    /// A height that would carry this node's dealer log is left to [`Self::propose`] without
-    /// asking the inner application, and the reservation is released. Consensus can discard a
-    /// prepared block without notice, as when its parent fails to certify or consensus cancels the
-    /// request, and a reservation kept for it would withhold the log from later proposals until
-    /// finalization reaches that height.
-    #[tracing::instrument(
-        name = "dkg.reshare.application.prepare",
-        level = "info",
-        skip_all,
-        fields(
-            height = field::Empty,
-            phase = field::Empty,
-            has_payload = field::Empty
-        )
-    )]
-    async fn prepare(
-        &mut self,
-        context: (E, Self::Context),
-        parent: impl Parent<Self::Block>,
-        input: Self::Input,
-    ) -> Handoff<Self::Block> {
-        let Some(ancestry) = parent.ancestry().await else {
-            return Handoff::Wait;
-        };
-        if ancestry
-            .peek()
-            .is_none_or(|parent| self.final_block(parent.height().next()))
-        {
-            return Handoff::Wait;
-        }
-        let Some((payload, log_reservation)) = self.payload(ancestry.clone()).await else {
-            return Handoff::Wait;
-        };
-        if log_reservation.is_some() {
-            return Handoff::Wait;
-        }
-        self.inner
-            .prepare(
-                context,
-                ancestry,
-                Input {
-                    upstream: input,
-                    payload,
-                },
-            )
-            .await
     }
 
     #[tracing::instrument(
@@ -450,6 +446,21 @@ mod tests {
         type Block = TestBlock;
         type Input = Input<(), TestBlsVariant, PrivateKey>;
 
+        async fn prepare(
+            &mut self,
+            context: (E, Self::Context),
+            ancestry: impl Ancestry<Self::Block>,
+            input: Self::Input,
+        ) -> Handoff<Self::Block> {
+            if self.handoff.is_wait() {
+                return Handoff::Wait;
+            }
+            let decision = self.handoff;
+            self.propose(context, ancestry, input)
+                .await
+                .map_or(Handoff::Wait, |block| decision.map(|()| block))
+        }
+
         async fn propose(
             &mut self,
             (_, context): (E, Self::Context),
@@ -478,24 +489,6 @@ mod tests {
                 }
                 None => block,
             })
-        }
-
-        async fn prepare(
-            &mut self,
-            context: (E, Self::Context),
-            parent: impl Parent<Self::Block>,
-            input: Self::Input,
-        ) -> Handoff<Self::Block> {
-            if self.handoff.is_wait() {
-                return Handoff::Wait;
-            }
-            let Some(ancestry) = parent.ancestry().await else {
-                return Handoff::Wait;
-            };
-            let decision = self.handoff;
-            self.propose(context, ancestry, input)
-                .await
-                .map_or(Handoff::Wait, |block| decision.map(|()| block))
         }
 
         async fn verify(&mut self, _: (E, Self::Context), _: impl Ancestry<Self::Block>) -> bool {
