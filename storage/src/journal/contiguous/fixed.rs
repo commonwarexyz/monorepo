@@ -262,7 +262,7 @@ struct FixedReplayState<'a, B: RBlob, A> {
 
 impl<B: RBlob, A> FixedReplayState<'_, B, A> {
     /// End this blob's replay with `error` after the `items` decoded before it.
-    fn fail(&mut self, start: u64, items: Vec<A>, error: Error) -> Decoded<A> {
+    const fn fail(&mut self, start: u64, items: Vec<A>, error: Error) -> Decoded<A> {
         self.pos = self.end_pos;
         Decoded {
             start,
@@ -3964,6 +3964,54 @@ mod tests {
                     assert_eq!(i as u64, *pos - START_POS);
                 }
             }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `replay_batches` tiles a range in position order without crossing blob boundaries, through
+    /// sealed blobs and the unsynced tail, at budgets of one item, part of a blob, and the whole
+    /// journal.
+    #[test_traced]
+    fn test_fixed_journal_replay_batches() {
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, ITEMS_PER_BLOB);
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            // Fill ten blobs and part of the eleventh.
+            let total = ITEMS_PER_BLOB.get() * 10 + 3;
+            for i in 0u64..total {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            for buffer in [Digest::SIZE, 100, 2048] {
+                for range in [0..total, 12..40, 20..21, 30..30, 70..total] {
+                    crate::journal::contiguous::tests::check_replay_batches(
+                        &journal,
+                        range,
+                        buffer,
+                        ITEMS_PER_BLOB.get(),
+                        test_digest,
+                    )
+                    .await;
+                }
+            }
+
+            // A synced tail is replayed through its sealed pages.
+            let journal = journal.sync().await.unwrap();
+            crate::journal::contiguous::tests::check_replay_batches(
+                &journal,
+                65..total,
+                100,
+                ITEMS_PER_BLOB.get(),
+                test_digest,
+            )
+            .await;
 
             journal.destroy().await.unwrap();
         });

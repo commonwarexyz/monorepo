@@ -357,12 +357,17 @@ where
 }
 
 /// Drain `journal.replay_batches(range)` with `buffer`, checking that the batches tile `range` in
-/// position order, hold the expected values, and never cross a blob boundary (items_per_blob = 10).
-async fn check_replay_batches<J: Contiguous<Item = u64>>(
+/// position order, hold `expected(position)`, and never cross a boundary between blobs of
+/// `items_per_blob` items.
+pub(super) async fn check_replay_batches<J>(
     journal: &J,
     range: std::ops::Range<u64>,
     buffer: usize,
-) {
+    items_per_blob: u64,
+    expected: impl Fn(u64) -> J::Item,
+) where
+    J: Contiguous<Item: PartialEq + std::fmt::Debug>,
+{
     let stream = journal
         .replay_batches(range.clone(), NZUsize!(buffer), ReadOptions::default())
         .await
@@ -377,12 +382,12 @@ async fn check_replay_batches<J: Contiguous<Item = u64>>(
         let end = start + items.len() as u64;
         assert!(end <= range.end, "range {range:?} buffer {buffer}");
         assert_eq!(
-            start / 10,
-            (end - 1) / 10,
+            start / items_per_blob,
+            (end - 1) / items_per_blob,
             "batch {start}..{end} crossed a blob boundary"
         );
         for (i, item) in items.into_iter().enumerate() {
-            assert_eq!(item, (start + i as u64) * 10);
+            assert_eq!(item, expected(start + i as u64));
         }
         next = end;
     }
@@ -406,7 +411,7 @@ where
     // A one-item budget, a budget below one blob, and a budget above the whole journal.
     for buffer in [9usize, 40, 4096] {
         for range in [0..37u64, 7..25, 13..14, 20..20, 30..37] {
-            check_replay_batches(&journal, range, buffer).await;
+            check_replay_batches(&journal, range, buffer, 10, |pos| pos * 10).await;
         }
     }
 
@@ -455,7 +460,7 @@ where
 
     // After pruning, batches start at the retained boundary and a pruned start is rejected.
     let (journal, _) = journal.prune(10).await.unwrap();
-    check_replay_batches(&journal, 10..37, 40).await;
+    check_replay_batches(&journal, 10..37, 40, 10, |pos| pos * 10).await;
     let res = journal
         .replay_batches(5..20, NZUsize!(40), ReadOptions::default())
         .await

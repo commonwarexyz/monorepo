@@ -233,7 +233,7 @@ struct ReplayState<'a, B: RBlob, V: Codec> {
 
 impl<B: RBlob, V: Codec> ReplayState<'_, B, V> {
     /// End this blob's replay with `error` after the `items` decoded before it.
-    fn fail(&mut self, start: u64, items: Vec<V>, error: Error) -> Decoded<V> {
+    const fn fail(&mut self, start: u64, items: Vec<V>, error: Error) -> Decoded<V> {
         self.pos = self.end_pos;
         Decoded {
             start,

@@ -186,6 +186,9 @@ where
     })
 }
 
+/// A replay batch: the position of its first item and the items that follow it contiguously.
+pub type ReplayBatch<T> = (u64, Vec<T>);
+
 /// A read-only, position-based view of a contiguous journal.
 ///
 /// Maintains a monotonically increasing position counter where each appended item receives a unique
@@ -248,7 +251,7 @@ pub trait Contiguous: Send + Sync {
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> impl Future<
-        Output = Result<impl Stream<Item = Result<(u64, Vec<Self::Item>), Error>> + Send, Error>,
+        Output = Result<impl Stream<Item = Result<ReplayBatch<Self::Item>, Error>> + Send, Error>,
     > + Send;
 
     /// Return a stream of the items in `range`, in position order.

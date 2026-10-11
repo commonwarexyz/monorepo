@@ -141,7 +141,10 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        journal::{Error as JournalError, contiguous::Contiguous},
+        journal::{
+            Error as JournalError,
+            contiguous::{Contiguous, ReplayBatch},
+        },
         merkle::{
             Location as GenericLocation,
             mmr::{self, Location},
@@ -1072,7 +1075,7 @@ pub(crate) mod test {
             read_options: ReadOptions,
         ) -> impl Future<
             Output = Result<
-                impl Stream<Item = Result<(u64, Vec<Self::Item>), JournalError>> + Send,
+                impl Stream<Item = Result<ReplayBatch<Self::Item>, JournalError>> + Send,
                 JournalError,
             >,
         > + Send {
