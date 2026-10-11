@@ -282,9 +282,6 @@ commonware_macros::stability_scope!(BETA {
         fn digest(&self) -> Self::Digest;
 
         /// Returns the object's digest, splitting any work in computing it across `strategy`.
-        ///
-        /// Returns the same digest as [`Digestible::digest`], which the default implementation
-        /// calls.
         fn digest_across(&self, _strategy: &impl Strategy) -> Self::Digest {
             self.digest()
         }
