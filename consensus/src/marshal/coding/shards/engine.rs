@@ -389,14 +389,12 @@ where
     /// [`Mailbox::discovered`] or reports a notarization via
     /// [`Mailbox::notarized`].
     ///
-    /// Shards wait here in memory, never on disk, until consensus signals their commitment. Size
-    /// the ring for the number of blocks a node can trail its peers by, which is larger for a
-    /// distant or slow node: a ring that is too small evicts shards before they are needed, and
-    /// the node then fetches those blocks from the resolver instead of reconstructing them.
-    ///
-    /// The shard buffers hold at most `peer_buffer_size` shards per `latest.primary` peer, each up
-    /// to the scheme's widest shard for a `max_block_size` block. An honest peer sends each
-    /// recipient about one shard per block.
+    /// Shards wait here in memory, never on disk, until consensus signals their commitment: at most
+    /// `peer_buffer_size` per `latest.primary` peer, each up to the scheme's widest shard for a
+    /// `max_block_size` block. An honest peer sends each recipient about one shard per block, so
+    /// size the ring for the number of blocks a node can trail its peers by, which is larger for a
+    /// distant or slow node. A ring that is too small evicts shards before they are needed, and the
+    /// node then fetches those blocks from the resolver instead of reconstructing them.
     pub peer_buffer_size: NonZeroUsize,
 
     /// The maximum number of commitment records retained.
