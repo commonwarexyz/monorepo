@@ -31,7 +31,7 @@ use commonware_glue::{
     dkg::{self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock, types::Payload},
     stateful::db::{Shared, SyncEngineConfig},
 };
-use commonware_parallel::Sequential;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{BufMut, Quota, buffer::paged::CacheRef};
 use commonware_storage::{
     Context as StorageContext,
@@ -57,7 +57,7 @@ use std::{
     fs, io,
     num::{NonZeroU32, NonZeroU64},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 use tracing::info;
 
@@ -113,7 +113,7 @@ pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
 /// Chain block carrying the QMDB state root and an optional reshare payload.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Block {
     pub(crate) context: Context<sha256::Digest, ed25519::PublicKey>,
     pub(crate) parent: sha256::Digest,
@@ -122,34 +122,32 @@ pub struct Block {
     pub(crate) range: NonEmptyRange<Location>,
     pub(crate) payload: Option<Payload<MinSig, ed25519::PrivateKey>>,
 
-    /// The SHA-256 digest of the block's encoding, computed when the block is built or decoded.
-    digest: sha256::Digest,
+    /// The SHA-256 digest of the block's encoding, computed at most once.
+    digest: OnceLock<sha256::Digest>,
 }
 
 impl Block {
-    /// Construct a block, computing its digest.
-    pub(crate) fn new(
+    /// Construct a block.
+    pub(crate) const fn new(
         context: Context<sha256::Digest, ed25519::PublicKey>,
         parent: sha256::Digest,
         height: Height,
         target: Target<mmr::Family, sha256::Digest>,
         payload: Option<Payload<MinSig, ed25519::PrivateKey>>,
     ) -> Self {
-        let mut block = Self {
+        Self {
             context,
             parent,
             height,
             state_root: target.root,
             range: target.range,
             payload,
-            digest: sha256::Digest::EMPTY,
-        };
-        block.digest = Sha256::hash(&[&block.encode()]);
-        block
+            digest: OnceLock::new(),
+        }
     }
 
     /// Construct the genesis block from the epoch-0 info and initial QMDB sync target.
-    pub fn genesis(
+    pub const fn genesis(
         leader: ed25519::PublicKey,
         info: dkg::types::EpochInfo<MinSig, ed25519::PublicKey>,
         target: Target<mmr::Family, sha256::Digest>,
@@ -211,7 +209,13 @@ impl Digestible for Block {
     type Digest = sha256::Digest;
 
     fn digest(&self) -> sha256::Digest {
-        self.digest
+        self.digest_across(&Sequential)
+    }
+
+    fn digest_across(&self, strategy: &impl Strategy) -> sha256::Digest {
+        *self
+            .digest
+            .get_or_init(|| Sha256::hash_across(&[&self.encode()], strategy))
     }
 }
 
@@ -226,6 +230,20 @@ impl ConsensusBlock for Block {
         self.parent
     }
 }
+
+// The cached digest is derived from the other fields, so equality ignores it.
+impl PartialEq for Block {
+    fn eq(&self, other: &Self) -> bool {
+        self.context == other.context
+            && self.parent == other.parent
+            && self.height == other.height
+            && self.state_root == other.state_root
+            && self.range == other.range
+            && self.payload == other.payload
+    }
+}
+
+impl Eq for Block {}
 
 impl CertifiableBlock for Block {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;

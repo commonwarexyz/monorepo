@@ -275,7 +275,7 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
                 "config mismatch",
             ));
         }
-        if inner.digest() != commitment.block() {
+        if inner.digest_across(strategy) != commitment.block() {
             return Err(commonware_codec::Error::Invalid(
                 "CodedBlock",
                 "block digest mismatch",

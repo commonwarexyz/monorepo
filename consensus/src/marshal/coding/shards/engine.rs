@@ -316,7 +316,7 @@ where
         return Err(Error::Oversized);
     }
     let (inner, config): (B, CodingConfig) = Decode::decode_cfg(blob, &(cfg.clone(), ()))?;
-    match validate_reconstruction(&inner, config, commitment) {
+    match validate_reconstruction(&inner, config, commitment, strategy) {
         Ok(()) => Ok(inner),
         Err(InvariantError::BlockDigest) => Err(Error::DigestMismatch),
         Err(InvariantError::CodingConfig) => {

@@ -44,7 +44,7 @@ use commonware_cryptography::{
     sha256::{self, Digest as Sha256Digest},
 };
 use commonware_p2p::{Blocker, Receiver, Sender};
-use commonware_parallel::Strategy;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{
     BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
     buffer::paged::CacheRef, spawn_cell,
@@ -61,6 +61,7 @@ use rand_core::{CryptoRng, Rng};
 use std::{
     marker::PhantomData,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -154,36 +155,34 @@ pub struct Completion<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
 }
 
 /// Block type used by the one-shot DKG chain.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     context: Context<sha256::Digest, ed25519::PublicKey>,
     parent: sha256::Digest,
     height: Height,
     payload: Option<Payload<V, ed25519::PrivateKey, D>>,
 
-    /// The SHA-256 digest of the block's encoding, computed when the block is built or decoded.
-    digest: sha256::Digest,
+    /// The SHA-256 digest of the block's encoding, computed at most once.
+    digest: OnceLock<sha256::Digest>,
 }
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
-    fn new(
+    const fn new(
         context: Context<sha256::Digest, ed25519::PublicKey>,
         parent: sha256::Digest,
         height: Height,
         payload: Option<Payload<V, ed25519::PrivateKey, D>>,
     ) -> Self {
-        let mut block = Self {
+        Self {
             context,
             parent,
             height,
             payload,
-            digest: Sha256Digest::EMPTY,
-        };
-        block.digest = Sha256::hash(&[&block.encode()]);
-        block
+            digest: OnceLock::new(),
+        }
     }
 
-    fn genesis(leader: ed25519::PublicKey) -> Self {
+    const fn genesis(leader: ed25519::PublicKey) -> Self {
         Self::new(
             Context {
                 round: Round::new(Epoch::zero(), View::zero()),
@@ -240,7 +239,13 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Digestible for Block<V, D> {
     type Digest = sha256::Digest;
 
     fn digest(&self) -> sha256::Digest {
-        self.digest
+        self.digest_across(&Sequential)
+    }
+
+    fn digest_across(&self, strategy: &impl Strategy) -> sha256::Digest {
+        *self
+            .digest
+            .get_or_init(|| Sha256::hash_across(&[&self.encode()], strategy))
     }
 }
 
@@ -255,6 +260,18 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ConsensusBlock for Block<V, D
         self.parent
     }
 }
+
+// The cached digest is derived from the other fields, so equality ignores it.
+impl<V: Variant, D: Directory<ed25519::PublicKey>> PartialEq for Block<V, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.context == other.context
+            && self.parent == other.parent
+            && self.height == other.height
+            && self.payload == other.payload
+    }
+}
+
+impl<V: Variant, D: Directory<ed25519::PublicKey>> Eq for Block<V, D> {}
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> CertifiableBlock for Block<V, D> {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;

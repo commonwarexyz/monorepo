@@ -65,12 +65,12 @@ where
         buf: impl Input,
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         expected: ExpectedCommitment<Self::Commitment>,
-        _strategy: &impl Strategy,
+        strategy: &impl Strategy,
     ) -> Result<Self::Block, CodecError> {
         let (ExpectedCommitment::Trusted(digest) | ExpectedCommitment::Untrusted(digest)) =
             expected;
         let block = Self::Block::decode_cfg(buf, block_cfg)?;
-        if block.digest() != digest {
+        if block.digest_across(strategy) != digest {
             return Err(CodecError::Invalid("Block", "digest mismatch"));
         }
         Ok(block)

@@ -67,9 +67,9 @@ stability_scope!(BETA {
     /// the same block.
     ///
     /// [`Digestible::digest`] may be called many times for each block, so a block should compute
-    /// its digest once, when it is built or decoded, and return the stored value. A block whose
-    /// digest is expensive can compute it across a [`Strategy`](commonware_parallel::Strategy)
-    /// taken from its codec configuration.
+    /// its digest at most once and return the stored value. A block whose digest is expensive can
+    /// compute it lazily and let [`Digestible::digest_across`] run that computation across a
+    /// strategy.
     pub trait Block: Heightable + Codec + Digestible {
         /// Get the parent block's digest.
         fn parent(&self) -> Self::Digest;

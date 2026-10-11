@@ -280,6 +280,14 @@ commonware_macros::stability_scope!(BETA {
         /// If many objects with [Digest]s are related (map to some higher-level
         /// group [Digest]), you should also implement [Committable].
         fn digest(&self) -> Self::Digest;
+
+        /// Returns the object's digest, splitting any work in computing it across `strategy`.
+        ///
+        /// Returns the same digest as [`Digestible::digest`], which the default implementation
+        /// calls.
+        fn digest_across(&self, _strategy: &impl Strategy) -> Self::Digest {
+            self.digest()
+        }
     }
 
     impl<T: Digestible> Digestible for Arc<T> {
@@ -287,6 +295,10 @@ commonware_macros::stability_scope!(BETA {
 
         fn digest(&self) -> Self::Digest {
             self.as_ref().digest()
+        }
+
+        fn digest_across(&self, strategy: &impl Strategy) -> Self::Digest {
+            self.as_ref().digest_across(strategy)
         }
     }
 
