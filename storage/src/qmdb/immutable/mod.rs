@@ -128,13 +128,19 @@ where
     // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
     // the init cache, not the OS cache, decides which probes hit.
     let stream = log
-        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::DONT_CACHE)
+        .replay_batches(
+            *inactivity_floor_loc..log.bounds().end,
+            init_buffer,
+            ReadOptions::DONT_CACHE,
+        )
         .await?;
     pin_mut!(stream);
-    while let Some(result) = stream.next().await {
-        let (loc, op) = result?;
-        if let Operation::Set(key, _) = op {
-            snapshot.insert(&key, Location::new(loc));
+    while let Some(batch) = stream.next().await {
+        let (start, ops) = batch?;
+        for (i, op) in ops.into_iter().enumerate() {
+            if let Operation::Set(key, _) = op {
+                snapshot.insert(&key, Location::new(start + i as u64));
+            }
         }
     }
     Ok(())

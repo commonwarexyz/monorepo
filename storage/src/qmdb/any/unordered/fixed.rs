@@ -1065,18 +1065,18 @@ pub(crate) mod test {
             positions.iter().map(|_| None).collect()
         }
 
-        fn replay_range(
+        fn replay_batches(
             &self,
             range: Range<u64>,
             buffer: NonZeroUsize,
             read_options: ReadOptions,
         ) -> impl Future<
             Output = Result<
-                impl Stream<Item = Result<(u64, Self::Item), JournalError>> + Send,
+                impl Stream<Item = Result<(u64, Vec<Self::Item>), JournalError>> + Send,
                 JournalError,
             >,
         > + Send {
-            self.0.replay_range(range, buffer, read_options)
+            self.0.replay_batches(range, buffer, read_options)
         }
     }
 

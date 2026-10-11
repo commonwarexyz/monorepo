@@ -49,6 +49,7 @@ where
     test_replay_from_middle(&indexed_factory).await;
     test_replay_from_unsealed_tail(&indexed_factory).await;
     test_replay_with_small_buffer(&indexed_factory).await;
+    test_replay_batches(&indexed_factory).await;
     test_prune_retains_size(&indexed_factory).await;
     test_through_trait(&indexed_factory).await;
     test_replay_after_prune(&indexed_factory).await;
@@ -351,6 +352,115 @@ where
             assert_eq!(*value, (i as u64) * 10);
         }
     }
+
+    journal.destroy().await.unwrap();
+}
+
+/// Drain `journal.replay_batches(range)` with `buffer`, checking that the batches tile `range` in
+/// position order, hold the expected values, and never cross a blob boundary (items_per_blob = 10).
+async fn check_replay_batches<J: Contiguous<Item = u64>>(
+    journal: &J,
+    range: std::ops::Range<u64>,
+    buffer: usize,
+) {
+    let stream = journal
+        .replay_batches(range.clone(), NZUsize!(buffer), ReadOptions::default())
+        .await
+        .unwrap();
+    futures::pin_mut!(stream);
+
+    let mut next = range.start;
+    while let Some(batch) = stream.next().await {
+        let (start, items) = batch.unwrap();
+        assert_eq!(start, next, "range {range:?} buffer {buffer}");
+        assert!(!items.is_empty(), "range {range:?} buffer {buffer}");
+        let end = start + items.len() as u64;
+        assert!(end <= range.end, "range {range:?} buffer {buffer}");
+        assert_eq!(
+            start / 10,
+            (end - 1) / 10,
+            "batch {start}..{end} crossed a blob boundary"
+        );
+        for (i, item) in items.into_iter().enumerate() {
+            assert_eq!(item, (start + i as u64) * 10);
+        }
+        next = end;
+    }
+    assert_eq!(next, range.end, "range {range:?} buffer {buffer}");
+}
+
+/// Test that batch replay tiles a range contiguously, agrees with the item stream, stops at blob
+/// boundaries, and rejects the same ranges as item replay.
+async fn test_replay_batches<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: Mutable<Item = u64>,
+{
+    let mut journal = factory("replay-batches".into()).await.unwrap();
+
+    // Three sealed blobs and a partial tail.
+    for i in 0..37u64 {
+        (journal, _) = journal.append(&(i * 10)).await.unwrap();
+    }
+
+    // A one-item budget, a budget below one blob, and a budget above the whole journal.
+    for buffer in [9usize, 40, 4096] {
+        for range in [0..37u64, 7..25, 13..14, 20..20, 30..37] {
+            check_replay_batches(&journal, range, buffer).await;
+        }
+    }
+
+    // Flattening the batches is the item stream.
+    {
+        let batches = journal
+            .replay_batches(3..33, NZUsize!(40), ReadOptions::default())
+            .await
+            .unwrap();
+        futures::pin_mut!(batches);
+        let mut flattened = Vec::new();
+        while let Some(batch) = batches.next().await {
+            let (start, items) = batch.unwrap();
+            flattened.extend(
+                items
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, item)| (start + i as u64, item)),
+            );
+        }
+
+        let stream = journal
+            .replay_range(3..33, NZUsize!(40), ReadOptions::default())
+            .await
+            .unwrap();
+        futures::pin_mut!(stream);
+        let mut items = Vec::new();
+        while let Some(result) = stream.next().await {
+            items.push(result.unwrap());
+        }
+        assert_eq!(flattened, items);
+    }
+
+    // The range checks match item replay.
+    let res = journal
+        .replay_batches(0..38, NZUsize!(40), ReadOptions::default())
+        .await
+        .map(|_| ());
+    assert!(matches!(res, Err(Error::ItemOutOfRange(38))));
+    #[allow(clippy::reversed_empty_ranges)]
+    let res = journal
+        .replay_batches(10..5, NZUsize!(40), ReadOptions::default())
+        .await
+        .map(|_| ());
+    assert!(matches!(res, Err(Error::ItemOutOfRange(10))));
+
+    // After pruning, batches start at the retained boundary and a pruned start is rejected.
+    let (journal, _) = journal.prune(10).await.unwrap();
+    check_replay_batches(&journal, 10..37, 40).await;
+    let res = journal
+        .replay_batches(5..20, NZUsize!(40), ReadOptions::default())
+        .await
+        .map(|_| ());
+    assert!(matches!(res, Err(Error::ItemPruned(5))));
 
     journal.destroy().await.unwrap();
 }

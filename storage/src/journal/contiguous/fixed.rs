@@ -134,6 +134,7 @@
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
 use super::{
+    Decoded,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
 };
@@ -184,7 +185,7 @@ fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Resul
     Ok(pruning_boundary.max(start))
 }
 
-/// Build a replay stream over the retained blob range.
+/// Build a replay batch stream over the retained blob range.
 ///
 /// The stream is split into one state per blob so replay can start at a mid-blob pruning boundary,
 /// stop at the journal's logical end, and avoid reading across blob files. `buffer` is a byte
@@ -196,7 +197,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     range: Range<u64>,
     buffer: NonZeroUsize,
     read_options: ReadOptions,
-) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send + use<'a, B, A>, Error> {
+) -> Result<impl Stream<Item = Result<(u64, Vec<A>), Error>> + Send + use<'a, B, A>, Error> {
     if range.start > range.end || range.end > bounds.end {
         return Err(Error::ItemOutOfRange(if range.start > range.end {
             range.start
@@ -259,32 +260,40 @@ struct FixedReplayState<'a, B: RBlob, A> {
     _marker: PhantomData<A>,
 }
 
+impl<B: RBlob, A> FixedReplayState<'_, B, A> {
+    /// End this blob's replay with `error` after the `items` decoded before it.
+    fn fail(&mut self, start: u64, items: Vec<A>, error: Error) -> Decoded<A> {
+        self.pos = self.end_pos;
+        Decoded {
+            start,
+            items,
+            error: Some(error),
+        }
+    }
+}
+
 impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState<'_, B, A> {
     type Item = A;
 
     /// Decode the next batch of fixed-size items from this blob.
-    async fn next_batch(mut self) -> Option<(Vec<Result<(u64, A), Error>>, Self)> {
+    async fn next_batch(mut self) -> Option<(Decoded<A>, Self)> {
         if self.pos == self.end_pos {
             return None;
         }
 
         // Require at least one whole item so a short blob is reported as corruption at the
         // current position. Additional already-buffered items are decoded below.
-        let mut batch = Vec::new();
+        let start = self.pos;
         match self.replay.ensure(A::SIZE).await {
             Ok(true) => {}
             Ok(false) => {
-                batch.push(Err(Error::Corruption(format!(
-                    "blob ended before position {}",
-                    self.pos
-                ))));
-                self.pos = self.end_pos;
-                return Some((batch, self));
+                let error = Error::Corruption(format!("blob ended before position {start}"));
+                let decoded = self.fail(start, Vec::new(), error);
+                return Some((decoded, self));
             }
             Err(err) => {
-                batch.push(Err(err));
-                self.pos = self.end_pos;
-                return Some((batch, self));
+                let decoded = self.fail(start, Vec::new(), err);
+                return Some((decoded, self));
             }
         }
 
@@ -294,26 +303,30 @@ impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState
         let remaining = self.end_pos - self.pos;
         let count = available.min(self.items_per_batch as u64).min(remaining) as usize;
         let Some(next_pos) = self.pos.checked_add(count as u64) else {
-            batch.push(Err(Error::OffsetOverflow));
-            self.pos = self.end_pos;
-            return Some((batch, self));
+            let decoded = self.fail(start, Vec::new(), Error::OffsetOverflow);
+            return Some((decoded, self));
         };
-        batch.reserve(count);
 
         // Stop this blob on error because decoding may have consumed only part of a record.
-        let base = self.pos;
-        for i in 0..count {
+        let mut items = Vec::with_capacity(count);
+        for _ in 0..count {
             match self.replay.read::<A>() {
-                Ok(item) => batch.push(Ok((base + i as u64, item))),
+                Ok(item) => items.push(item),
                 Err(err) => {
-                    batch.push(Err(Error::Codec(err)));
-                    self.pos = self.end_pos;
-                    return Some((batch, self));
+                    let decoded = self.fail(start, items, Error::Codec(err));
+                    return Some((decoded, self));
                 }
             }
         }
         self.pos = next_pos;
-        Some((batch, self))
+        Some((
+            Decoded {
+                start,
+                items,
+                error: None,
+            },
+            self,
+        ))
     }
 }
 
@@ -1987,12 +2000,12 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         self.probe_items(positions)
     }
 
-    async fn replay_range(
+    async fn replay_batches(
         &self,
         range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, Vec<A>), Error>> + Send, Error> {
         replay_stream(
             &self.blobs,
             self.bounds.clone(),
@@ -2027,12 +2040,12 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         self.0.reader().probe_items(positions)
     }
 
-    async fn replay_range(
+    async fn replay_batches(
         &self,
         range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, Vec<A>), Error>> + Send, Error> {
         let blobs = self.0.blobs.reader();
         replay_stream(
             &blobs,

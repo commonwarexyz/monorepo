@@ -14,7 +14,7 @@
 #[commonware_macros::stability(ALPHA)]
 use super::checkpoint::Checkpoint;
 use super::{
-    Contiguous, Many, Mutable, blob_first_position,
+    Contiguous, Decoded, Many, Mutable, blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     fixed,
     metrics::Metrics,
@@ -231,39 +231,54 @@ struct ReplayState<'a, B: RBlob, V: Codec> {
     _marker: PhantomData<V>,
 }
 
+impl<B: RBlob, V: Codec> ReplayState<'_, B, V> {
+    /// End this blob's replay with `error` after the `items` decoded before it.
+    fn fail(&mut self, start: u64, items: Vec<V>, error: Error) -> Decoded<V> {
+        self.pos = self.end_pos;
+        Decoded {
+            start,
+            items,
+            error: Some(error),
+        }
+    }
+}
+
 impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V> {
     type Item = V;
 
     /// Decode the next batch of varint-framed items from this blob.
-    async fn next_batch(mut self) -> Option<(Vec<Result<(u64, V), Error>>, Self)> {
+    async fn next_batch(mut self) -> Option<(Decoded<V>, Self)> {
         if self.pos == self.end_pos {
             return None;
         }
 
-        let mut batch = Vec::new();
+        let start = self.pos;
+        let mut items = Vec::new();
         let mut consumed = 0u64;
         loop {
             if self.pos == self.end_pos {
-                return (!batch.is_empty()).then_some((batch, self));
+                break;
             }
 
             // A short read before a frame header is corruption for replay: bounds and offsets say
-            // this item exists, so EOF here means the data blob is shorter than expected.
-            match self.replay.ensure(MAX_U32_VARINT_SIZE).await {
-                Ok(true) => {}
-                Ok(false) if self.replay.remaining() == 0 => {
-                    batch.push(Err(Error::Corruption(format!(
-                        "data blob {} ended before position {}",
-                        self.blob, self.pos
-                    ))));
-                    self.pos = self.end_pos;
-                    return Some((batch, self));
-                }
-                Ok(false) => {}
-                Err(err) => {
-                    batch.push(Err(err));
-                    self.pos = self.end_pos;
-                    return Some((batch, self));
+            // this item exists, so EOF here means the data blob is shorter than expected. Skip the
+            // refill when the header is already buffered.
+            if self.replay.remaining() < MAX_U32_VARINT_SIZE {
+                match self.replay.ensure(MAX_U32_VARINT_SIZE).await {
+                    Ok(true) => {}
+                    Ok(false) if self.replay.remaining() == 0 => {
+                        let error = Error::Corruption(format!(
+                            "data blob {} ended before position {}",
+                            self.blob, self.pos
+                        ));
+                        let decoded = self.fail(start, items, error);
+                        return Some((decoded, self));
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        let decoded = self.fail(start, items, err);
+                        return Some((decoded, self));
+                    }
                 }
             }
 
@@ -272,33 +287,36 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
             let (item_size, varint_len) = match self.replay.read_length() {
                 Ok(result) => result,
                 Err(err) => {
-                    if self.replay.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
-                        batch.push(Err(Error::Corruption(format!(
+                    let error = if self.replay.is_exhausted()
+                        || before_remaining < MAX_U32_VARINT_SIZE
+                    {
+                        Error::Corruption(format!(
                             "incomplete frame header in data blob {} at offset {}",
                             self.blob, self.offset
-                        ))));
+                        ))
                     } else {
-                        batch.push(Err(err));
-                    }
-                    self.pos = self.end_pos;
-                    return Some((batch, self));
+                        err
+                    };
+                    let decoded = self.fail(start, items, error);
+                    return Some((decoded, self));
                 }
             };
 
-            match self.replay.ensure(item_size).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    batch.push(Err(Error::Corruption(format!(
-                        "incomplete frame in data blob {} at offset {}",
-                        self.blob, self.offset
-                    ))));
-                    self.pos = self.end_pos;
-                    return Some((batch, self));
-                }
-                Err(err) => {
-                    batch.push(Err(err));
-                    self.pos = self.end_pos;
-                    return Some((batch, self));
+            if self.replay.remaining() < item_size {
+                match self.replay.ensure(item_size).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let error = Error::Corruption(format!(
+                            "incomplete frame in data blob {} at offset {}",
+                            self.blob, self.offset
+                        ));
+                        let decoded = self.fail(start, items, error);
+                        return Some((decoded, self));
+                    }
+                    Err(err) => {
+                        let decoded = self.fail(start, items, err);
+                        return Some((decoded, self));
+                    }
                 }
             }
 
@@ -307,9 +325,8 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
                 .checked_add(varint_len as u64)
                 .and_then(|offset| offset.checked_add(item_size as u64));
             let Some(next_offset) = next_offset else {
-                batch.push(Err(Error::OffsetOverflow));
-                self.pos = self.end_pos;
-                return Some((batch, self));
+                let decoded = self.fail(start, items, Error::OffsetOverflow);
+                return Some((decoded, self));
             };
             let item_len = next_offset - self.offset;
 
@@ -319,40 +336,42 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
                 .decode::<V>(item_size, &self.codec_config, self.compressed)
             {
                 Ok(item) => {
-                    let pos = self.pos;
                     let Some(next_pos) = self.pos.checked_add(1) else {
-                        batch.push(Err(Error::OffsetOverflow));
-                        self.pos = self.end_pos;
-                        return Some((batch, self));
+                        let decoded = self.fail(start, items, Error::OffsetOverflow);
+                        return Some((decoded, self));
                     };
                     self.pos = next_pos;
                     self.offset = next_offset;
                     consumed = match consumed.checked_add(item_len) {
                         Some(consumed) => consumed,
                         None => {
-                            batch.push(Err(Error::OffsetOverflow));
-                            self.pos = self.end_pos;
-                            return Some((batch, self));
+                            let decoded = self.fail(start, items, Error::OffsetOverflow);
+                            return Some((decoded, self));
                         }
                     };
-                    batch.push(Ok((pos, item)));
+                    items.push(item);
                 }
                 Err(err) => {
-                    batch.push(Err(err));
-                    self.pos = self.end_pos;
-                    return Some((batch, self));
+                    let decoded = self.fail(start, items, err);
+                    return Some((decoded, self));
                 }
             }
 
             // Yield once the replay byte budget is reached. If fewer than MAX_U32_VARINT_SIZE
             // bytes remain, yield as well so the next poll can refill before decoding a header.
-            if consumed >= self.budget {
-                return Some((batch, self));
-            }
-            if self.replay.remaining() < MAX_U32_VARINT_SIZE {
-                return Some((batch, self));
+            if consumed >= self.budget || self.replay.remaining() < MAX_U32_VARINT_SIZE {
+                break;
             }
         }
+
+        Some((
+            Decoded {
+                start,
+                items,
+                error: None,
+            },
+            self,
+        ))
     }
 }
 
@@ -1068,12 +1087,12 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         items
     }
 
-    async fn replay_range(
+    async fn replay_batches(
         &self,
         range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, Vec<V>), Error>> + Send, Error> {
         let states = self.replay_states(range, buffer, read_options).await?;
 
         Ok(super::replay_stream_from_states(states))
@@ -2573,12 +2592,12 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         self.0.reader().try_read_many_sync(positions)
     }
 
-    async fn replay_range(
+    async fn replay_batches(
         &self,
         range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, Vec<V>), Error>> + Send, Error> {
         let reader = self.0.reader();
         let states = reader.replay_states(range, buffer, read_options).await?;
 
@@ -5665,14 +5684,22 @@ mod tests {
                     });
                 }
 
+                // The intact first blob is yielded in full, the corrupt second blob ends the
+                // stream, and the intact third blob is never reached.
                 let stream = crate::journal::contiguous::replay_stream_from_states(states);
                 futures::pin_mut!(stream);
 
-                for i in 0..10u64 {
-                    let (pos, item) = stream.next().await.unwrap().unwrap();
-                    assert_eq!(pos, i);
-                    assert_eq!(item, i * 100);
+                let mut next = 0u64;
+                while next < 10 {
+                    let (start, items) = stream.next().await.unwrap().unwrap();
+                    assert_eq!(start, next);
+                    assert!(!items.is_empty());
+                    for (i, item) in items.iter().enumerate() {
+                        assert_eq!(*item, (start + i as u64) * 100);
+                    }
+                    next = start + items.len() as u64;
                 }
+                assert_eq!(next, 10);
                 assert!(matches!(
                     stream.next().await.unwrap(),
                     Err(Error::Corruption(_))

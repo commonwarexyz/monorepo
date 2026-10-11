@@ -1042,6 +1042,16 @@ where
         self.journal.try_read_many_sync(positions)
     }
 
+    async fn replay_batches(
+        &self,
+        range: Range<u64>,
+        buffer: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<impl Stream<Item = Result<(u64, Vec<C::Item>), JournalError>> + Send, JournalError>
+    {
+        self.journal.replay_batches(range, buffer, read_options).await
+    }
+
     async fn replay_range(
         &self,
         range: Range<u64>,

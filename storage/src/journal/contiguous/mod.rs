@@ -13,7 +13,7 @@
 
 use super::Error;
 use commonware_runtime::{Handle, ReadOptions};
-use futures::{Stream, StreamExt as _, stream};
+use futures::{Stream, StreamExt as _, future, stream};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 
 mod blobs;
@@ -76,17 +76,26 @@ const fn blob_end_position(blob: u64, items_per_blob: u64, end: u64) -> u64 {
     (blob + 1) * items_per_blob
 }
 
-/// A decoded batch yielded by [ReplayBatchState::next_batch] paired with the advanced state, or
-/// `None` once the state is exhausted.
-type ReplayBatch<S> = Option<(Vec<Result<(u64, <S as ReplayBatchState>::Item), Error>>, S)>;
+/// Items decoded by one [ReplayBatchState::next_batch] call.
+struct Decoded<T> {
+    /// Position of the first item in `items`.
+    start: u64,
+    /// Items at `start..start + items.len()`.
+    items: Vec<T>,
+    /// The error that ended this blob's replay after `items`, if any.
+    error: Option<Error>,
+}
 
 /// Per-blob replay state that yields decoded item batches.
 trait ReplayBatchState: Sized {
     /// The decoded item type.
     type Item;
 
-    /// Decode the next batch from this blob state.
-    fn next_batch(self) -> impl Future<Output = ReplayBatch<Self>> + Send;
+    /// Decode the next batch from this blob state, or return `None` once it is exhausted.
+    ///
+    /// A returned batch carries the position of its first item and the items that follow it
+    /// contiguously. An error ends the blob: the state yields nothing after it.
+    fn next_batch(self) -> impl Future<Output = Option<(Decoded<Self::Item>, Self)>> + Send;
 }
 
 /// Stream driver over per-blob replay states.
@@ -95,7 +104,9 @@ struct ReplayStreamState<S: ReplayBatchState> {
     states: std::vec::IntoIter<S>,
     /// State currently being drained.
     current: Option<S>,
-    /// Set after the first error so the stream terminates cleanly.
+    /// Error to yield after the batch decoded before it.
+    pending: Option<Error>,
+    /// Set after an error is yielded so the stream terminates cleanly.
     done: bool,
 }
 
@@ -103,9 +114,13 @@ impl<S: ReplayBatchState + Send> ReplayStreamState<S>
 where
     S::Item: Send,
 {
-    /// Yield the next decoded batch.
-    async fn next(mut self) -> Option<(Vec<Result<(u64, S::Item), Error>>, Self)> {
+    /// Yield the next decoded batch as `(start, items)`, or the error that ends the stream.
+    async fn next(mut self) -> Option<(Result<(u64, Vec<S::Item>), Error>, Self)> {
         loop {
+            if let Some(err) = self.pending.take() {
+                self.done = true;
+                return Some((Err(err), self));
+            }
             if self.done {
                 return None;
             }
@@ -116,14 +131,15 @@ where
             };
 
             match state.next_batch().await {
-                Some((batch, state)) => {
-                    if batch.iter().any(Result::is_err) {
-                        self.done = true;
-                        self.current = None;
-                    } else {
-                        self.current = Some(state);
+                Some((decoded, state)) => {
+                    // A failed blob is dropped: later blobs are never read after an error.
+                    match decoded.error {
+                        Some(err) => self.pending = Some(err),
+                        None => self.current = Some(state),
                     }
-                    return Some((batch, self));
+                    if !decoded.items.is_empty() {
+                        return Some((Ok((decoded.start, decoded.items)), self));
+                    }
                 }
                 None => {
                     self.current = None;
@@ -133,10 +149,10 @@ where
     }
 }
 
-/// Build a stream from per-blob replay states.
+/// Build a batch stream from per-blob replay states.
 fn replay_stream_from_states<S>(
     states: Vec<S>,
-) -> impl Stream<Item = Result<(u64, S::Item), Error>> + Send
+) -> impl Stream<Item = Result<(u64, Vec<S::Item>), Error>> + Send
 where
     S: ReplayBatchState + Send,
     S::Item: Send,
@@ -145,11 +161,29 @@ where
         ReplayStreamState {
             states: states.into_iter(),
             current: None,
+            pending: None,
             done: false,
         },
         ReplayStreamState::next,
     )
-    .flat_map(stream::iter)
+}
+
+/// Flatten a batch stream into one `(position, item)` entry per item.
+fn flatten_batches<T, S>(batches: S) -> impl Stream<Item = Result<(u64, T), Error>> + Send
+where
+    T: Send,
+    S: Stream<Item = Result<(u64, Vec<T>), Error>> + Send,
+{
+    batches.flat_map(|batch| match batch {
+        Ok((start, items)) => stream::iter(
+            items
+                .into_iter()
+                .enumerate()
+                .map(move |(i, item)| Ok((start + i as u64, item))),
+        )
+        .left_stream(),
+        Err(err) => stream::once(future::ready(Err(err))).right_stream(),
+    })
 }
 
 /// A read-only, position-based view of a contiguous journal.
@@ -189,8 +223,14 @@ pub trait Contiguous: Send + Sync {
     /// async read paths are the sole error authority for declined positions.
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>>;
 
-    /// Return a stream of the items in `range`, in position order. `range` must fall within
-    /// `bounds()`. An empty range within `bounds()` yields an empty stream.
+    /// Return a stream of the items in `range` as decoded batches, in position order. `range`
+    /// must fall within `bounds()`. An empty range within `bounds()` yields an empty stream.
+    ///
+    /// Each batch is `(start, items)`: `items[i]` is the item at position `start + i`, every
+    /// batch holds at least one item, and consecutive batches are contiguous. A batch never
+    /// crosses a backing blob boundary, and its encoded size exceeds `buffer` by less than one
+    /// item, so a consumer that holds one batch at a time keeps bounded memory. An error ends the
+    /// stream: every item before the failure has been yielded.
     ///
     /// `buffer` controls the replay byte budget for each chunk. Every backing blob read uses
     /// `read_options`, except while the live writable tip holds an unwritten full page: its
@@ -202,6 +242,20 @@ pub trait Contiguous: Send + Sync {
     /// Returns [Error::ItemPruned] if `range.start` precedes `bounds().start`, or
     /// [Error::ItemOutOfRange] if `range.end` exceeds `bounds().end` or the range is inverted
     /// (`start > end`).
+    fn replay_batches(
+        &self,
+        range: Range<u64>,
+        buffer: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> impl Future<
+        Output = Result<impl Stream<Item = Result<(u64, Vec<Self::Item>), Error>> + Send, Error>,
+    > + Send;
+
+    /// Return a stream of the items in `range`, in position order.
+    ///
+    /// This flattens [`replay_batches`](Self::replay_batches), which has the `range`, `buffer`,
+    /// `read_options`, and error contract. Consumers that process many items should prefer the
+    /// batch stream: it costs one poll per batch instead of one per item.
     fn replay_range(
         &self,
         range: Range<u64>,
@@ -209,11 +263,16 @@ pub trait Contiguous: Send + Sync {
         read_options: ReadOptions,
     ) -> impl Future<
         Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
-    > + Send;
+    > + Send {
+        async move {
+            let batches = self.replay_batches(range, buffer, read_options).await?;
+            Ok(flatten_batches(batches))
+        }
+    }
 
     /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
     ///
-    /// See [`replay_range`](Self::replay_range) for the `buffer` and `read_options` contract.
+    /// See [`replay_batches`](Self::replay_batches) for the `buffer` and `read_options` contract.
     fn replay(
         &self,
         start_pos: u64,
