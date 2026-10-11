@@ -228,6 +228,8 @@ struct ReplayState<'a, B: RBlob, V: Codec> {
     codec_config: V::Cfg,
     /// Whether frame payloads are compressed.
     compressed: bool,
+    /// Number of items in the previous batch, which sizes the next batch's allocation.
+    capacity: usize,
     _marker: PhantomData<V>,
 }
 
@@ -253,7 +255,7 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
         }
 
         let start = self.pos;
-        let mut items = Vec::new();
+        let mut items = Vec::with_capacity(self.capacity);
         let mut consumed = 0u64;
         loop {
             if self.pos == self.end_pos {
@@ -364,6 +366,7 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
             }
         }
 
+        self.capacity = items.len();
         Some((
             Decoded {
                 start,
@@ -705,6 +708,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                     offset,
                     codec_config: self.codec_config.clone(),
                     compressed: self.compressed,
+                    capacity: 0,
                     _marker: PhantomData,
                 });
             }
@@ -5680,6 +5684,7 @@ mod tests {
                         offset: 0,
                         codec_config: (),
                         compressed: false,
+                        capacity: 0,
                         _marker: PhantomData,
                     });
                 }

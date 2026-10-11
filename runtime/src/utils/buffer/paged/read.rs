@@ -381,6 +381,20 @@ impl ReplayBuf {
             page_size
         }
     }
+
+    /// Returns the current chunk as a view sharing its batch allocation, without advancing.
+    fn chunk_bytes(&self) -> Bytes {
+        let Some(buf) = self.buffers.front() else {
+            return Bytes::new();
+        };
+        if self.current_page >= buf.num_pages {
+            return Bytes::new();
+        }
+        let page_len = Self::page_len(buf, self.current_page, self.page_size);
+        let physical_start = self.current_page * self.physical_page_size + self.offset_in_page;
+        let physical_end = self.current_page * self.physical_page_size + page_len;
+        buf.buffer.slice(physical_start..physical_end)
+    }
 }
 
 impl Buf for ReplayBuf {}
@@ -564,6 +578,17 @@ impl<B: Blob> Replay<B> {
         self.buffer.offset_in_page = (offset % page_size) as usize;
 
         Ok(())
+    }
+
+    /// Returns the bytes [`bytes::Buf::chunk`] would return as a view sharing the batch
+    /// allocation, without advancing.
+    ///
+    /// The view ends at the current page's logical end. A decoder can take it once, decode many
+    /// fields from it, and then [`bytes::Buf::advance`] past what it consumed, which costs one
+    /// page lookup instead of one per field. Byte fields retained from the view share the
+    /// allocation exactly as fields read through this replay do.
+    pub fn chunk_bytes(&self) -> Bytes {
+        self.buffer.chunk_bytes()
     }
 }
 
@@ -963,6 +988,41 @@ mod tests {
         let last = replay.copy_to_bytes(2);
         assert_eq!(last.as_ref(), b"gh");
         assert!(range.contains(&last.as_ptr()));
+        assert_eq!(replay.remaining(), 0);
+    }
+
+    #[test]
+    fn test_replay_buf_chunk_bytes_views_the_current_page() {
+        let source = bytes::Bytes::from_static(b"abcd............efgh............ij..............");
+        let range = source.as_ptr_range();
+        let mut replay = ReplayBuf::new(16, 4);
+        assert!(replay.chunk_bytes().is_empty());
+        replay.push(
+            BufferState {
+                buffer: source,
+                num_pages: 3,
+                last_page_len: 2,
+            },
+            10,
+        );
+
+        // The view is the chunk, shares the batch allocation, and does not advance.
+        let page = replay.chunk_bytes();
+        assert_eq!(page.as_ref(), b"abcd");
+        assert_eq!(page.as_ref(), replay.chunk());
+        assert!(range.contains(&page.as_ptr()));
+        assert_eq!(replay.remaining(), 10);
+
+        // Advancing within the page shortens the view; crossing into the next page moves it,
+        // and the view never spans a checksum.
+        replay.advance(3);
+        assert_eq!(replay.chunk_bytes().as_ref(), b"d");
+        replay.advance(1);
+        assert_eq!(replay.chunk_bytes().as_ref(), b"efgh");
+        replay.advance(4);
+        assert_eq!(replay.chunk_bytes().as_ref(), b"ij");
+        replay.advance(2);
+        assert!(replay.chunk_bytes().is_empty());
         assert_eq!(replay.remaining(), 0);
     }
 
