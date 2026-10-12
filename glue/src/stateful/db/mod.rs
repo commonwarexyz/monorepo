@@ -224,6 +224,40 @@ impl<DB> Reader<DB> {
     }
 }
 
+impl<DB: Prefetch> Reader<DB> {
+    /// Reads the storage that later reads of the committed `keys` need into the page cache.
+    ///
+    /// The read lock is held only while the keys resolve to their storage, not while storage is
+    /// read, so prefetching never holds up a batch being applied. Warming is best effort: absent
+    /// keys are skipped and failures are ignored. See [`Prefetch`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the database was lost by an earlier failed or interrupted mutation.
+    pub async fn prefetch(&self, keys: &[&DB::Key]) {
+        let warm = self.read().await.prefetch(keys);
+        warm.await;
+    }
+}
+
+/// A database that can warm its page cache for the committed state of known keys.
+///
+/// Prefetched pages compete for the page cache with every other read of the databases sharing
+/// it, and pages that are not read soon after they are warmed are evicted first. Size the page
+/// cache to hold what is prefetched ahead of execution, or the warmed pages are evicted before
+/// execution reads them.
+pub trait Prefetch {
+    /// The key type.
+    type Key;
+
+    /// Resolves `keys` to the storage holding their committed state and returns a future that
+    /// reads it into the page cache.
+    ///
+    /// The future borrows nothing from the database and may be dropped at any point. Warming is
+    /// best effort: absent keys are skipped and failures are ignored.
+    fn prefetch(&self, keys: &[&Self::Key]) -> impl Future<Output = ()> + Send + 'static;
+}
+
 /// Shared read access to a [`Shared`] database.
 pub struct ReadGuard<'a, DB>(AsyncRwLockReadGuard<'a, DB>);
 
@@ -1995,8 +2029,8 @@ mod tests {
     use super::{
         Anchor, AttachableResolver, AttachableResolverSet, Barrier, BatchContext,
         CoordinatorAction, CoordinatorState, DatabaseSet, InitError, MAX_CHANNEL_DRAIN_PER_TICK,
-        ManagedDb, Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate,
-        drain_single_tip_updates,
+        ManagedDb, Prefetch, Reader, Shared, StateSyncDb, StateSyncSet, SyncEngineConfig,
+        TipUpdate, drain_single_tip_updates,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
@@ -2605,6 +2639,50 @@ mod tests {
     struct BlockingApplyDb {
         started: Option<oneshot::Sender<()>>,
         release: Option<oneshot::Receiver<()>>,
+    }
+
+    /// A database whose prefetch waits for storage until released.
+    struct GatedPrefetchDb {
+        release: commonware_utils::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl Prefetch for GatedPrefetchDb {
+        type Key = u64;
+
+        fn prefetch(&self, _: &[&u64]) -> impl Future<Output = ()> + Send + 'static {
+            let release = self.release.lock().take();
+            async move {
+                if let Some(release) = release {
+                    let _ = release.await;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reader_prefetch_releases_its_read_lock_before_waiting_for_storage() {
+        deterministic::Runner::default().start(|_context| async move {
+            let (release, released) = oneshot::channel();
+            let database = Shared::new(
+                "test",
+                GatedPrefetchDb {
+                    release: commonware_utils::sync::Mutex::new(Some(released)),
+                },
+            );
+            let reader = Reader(database.clone());
+            let prefetch = reader.prefetch(&[&7]);
+            pin_mut!(prefetch);
+            assert!(prefetch.as_mut().now_or_never().is_none());
+
+            // A mutation takes the database while the prefetch waits for storage.
+            let (slot, taken) = database
+                .write()
+                .now_or_never()
+                .expect("prefetch must not hold the read lock while it waits for storage");
+            slot.put(taken);
+            release.send(()).unwrap();
+            prefetch.await;
+        });
     }
 
     impl BlockingApplyDb {

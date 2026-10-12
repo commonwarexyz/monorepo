@@ -31,6 +31,27 @@
 //! are handed to the application as they arrive and are never stored; the executor stores only
 //! the executed chain and its applied cursor.
 //!
+//! # Preparation
+//!
+//! Inputs execute one at a time, in order, so an input often waits for earlier ones to be ordered
+//! and executed. [`Execute::prepare`] lets the application use that wait, for example to read the
+//! storage an input will touch into a cache. The executor prepares an input, on a task of its
+//! own, at most once per run:
+//!
+//! - as soon as marshal reports it final, before it is ordered (see [`Reported::Final`]); or
+//! - otherwise, when marshal delivers it in order behind inputs that have not executed.
+//!
+//! It does not prepare an input that starts executing as soon as it arrives, one marshal reports
+//! after it started executing, one that marshal may redeliver at or below the applied cursor,
+//! which is acknowledged without executing, or any input while the chain has no base. A
+//! preparation still running once its input finishes executing, or is acknowledged without
+//! executing, is aborted.
+//!
+//! Preparation never delays execution, delivery, or acknowledgements: final inputs arrive on an
+//! ingress of their own, which the executor serves only when it has nothing else to do, and each
+//! costs it one spawn. Nothing about preparation is persisted: after a restart, the inputs marshal
+//! reports final again are prepared again.
+//!
 //! # Checkpoints
 //!
 //! [`Checkpoints`] connects the executed chain to [`aggregation`], which certifies the digest of
@@ -69,6 +90,7 @@
 //! [`Finalized`]: commonware_consensus::marshal::Finalized
 //! [`Ledger`]: commonware_consensus::marshal::Ledger
 //! [`Linear`]: commonware_consensus::marshal::Linear
+//! [`Reported::Final`]: commonware_consensus::marshal::Reported::Final
 
 use commonware_consensus::{Block, ancestry::Ancestry, types::Height};
 use commonware_cryptography::{Digest, Digestible};
@@ -192,4 +214,24 @@ where
         ancestry: impl Ancestry<Self::Block>,
         input: Arc<Self::Input>,
     ) -> impl Future<Output = Self::Block> + Send;
+
+    /// Starts work that speeds up a later [`execute`](Self::execute) of `input`, such as
+    /// reading the storage it will touch into a cache, while earlier inputs are still being
+    /// ordered or executed.
+    ///
+    /// The executor calls this on its own clone of the application, on a task of its own, for
+    /// inputs that have not executed in the current run (see the
+    /// [module documentation](self#preparation)). Preparation is only a hint: it may run late,
+    /// concurrently with the execution of `input` or of other inputs, more than once across
+    /// restarts, or not at all, and it may be aborted at any await point, as it is once `input`
+    /// finishes executing. Execution never waits for it, so it must not affect any execution's
+    /// result. A preparation whose work is CPU-heavy should run it on a
+    /// [`shared`](commonware_runtime::Spawner::shared) task.
+    ///
+    /// All work belongs in the returned future, which runs on the preparation's own task.
+    ///
+    /// The default does nothing.
+    fn prepare(self, _context: E, _input: Arc<Self::Input>) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 }
