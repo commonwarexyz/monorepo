@@ -13,7 +13,7 @@ use crate::stateful::{
         processor::{Processor, Pruning},
         syncer::{self, Artifact, SyncPlan},
     },
-    db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
+    db::{Anchor, AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::{
@@ -161,7 +161,7 @@ impl<E, A, S, V, R> Stateful<E, A, S, V, R>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
-    A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
+    A::Databases: StateSyncSet<E, R, Anchor<BlockDigest<A, E>>>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,

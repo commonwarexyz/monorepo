@@ -31,7 +31,7 @@ pub struct Config<E, A, R, S, V>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
-    A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
+    A::Databases: StateSyncSet<E, R, Anchor<BlockDigest<A, E>>>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
@@ -63,7 +63,7 @@ pub struct Syncer<E, A, R, S, V>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
-    A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
+    A::Databases: StateSyncSet<E, R, Anchor<BlockDigest<A, E>>>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
@@ -90,7 +90,7 @@ impl<E, A, R, S, V> Syncer<E, A, R, S, V>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
-    A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
+    A::Databases: StateSyncSet<E, R, Anchor<BlockDigest<A, E>>>,
     R: Send + Sync + 'static,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -309,7 +309,7 @@ mod tests {
         }
     }
 
-    impl StateSyncSet<deterministic::Context, (), Sha256Digest> for WedgeSet {
+    impl StateSyncSet<deterministic::Context, (), Anchor<Sha256Digest>> for WedgeSet {
         type Error = Infallible;
 
         async fn sync(
@@ -318,7 +318,7 @@ mod tests {
             _resolvers: (),
             anchor: Anchor<Sha256Digest>,
             _targets: Self::SyncTargets,
-            tip_updates: ring::Receiver<TipUpdate<Sha256Digest, Self::SyncTargets>>,
+            tip_updates: ring::Receiver<TipUpdate<Anchor<Sha256Digest>, Self::SyncTargets>>,
             _sync_config: SyncEngineConfig,
         ) -> Result<(Self, Anchor<Sha256Digest>), Self::Error> {
             // Hold the ring receiver without draining it. The deterministic clock advances
