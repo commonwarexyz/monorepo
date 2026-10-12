@@ -103,11 +103,12 @@ fn state_sync_skips_inclusion_prefix(
 pub(super) fn startup<B: Block>(
     processed: Option<(Processed, B)>,
     floor: Option<B>,
+    strategy: &impl Strategy,
 ) -> Option<FinalizedTip<B::Digest>> {
     let processed = processed.map(|(processed, block)| match processed {
         Processed::Block(height) => FinalizedTip {
             height,
-            digest: block.digest(),
+            digest: block.digest_across(strategy),
         },
         Processed::Absent(height) => FinalizedTip {
             height,
@@ -379,6 +380,7 @@ mod tests {
         },
         ed25519::{PrivateKey, PublicKey},
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_utils::{N3f1, NZU64, ordered::Set, test_rng};
 
@@ -397,8 +399,12 @@ mod tests {
                 let anchor = processed.anchor().get() as usize;
                 (processed, blocks[anchor].clone())
             });
-            startup(processed, floor.map(|floor| blocks[floor].clone()))
-                .map(|tip| (tip.height, tip.digest))
+            startup(
+                processed,
+                floor.map(|floor| blocks[floor].clone()),
+                &Sequential,
+            )
+            .map(|tip| (tip.height, tip.digest))
         };
         let covered = |index: usize| Some((Height::new(index as u64), blocks[index].digest()));
         let stored = |height| Some(Processed::Block(Height::new(height)));

@@ -220,7 +220,7 @@ where
         .instrument(info_span!(
             "marshal.standard.application.verify",
             round = %context.round,
-            digest = %block.digest(),
+            digest = %block.digest_across(strategy),
             parent_view = parent_view.traced(),
             parent = %parent_commitment
         ));

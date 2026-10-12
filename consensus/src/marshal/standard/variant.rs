@@ -48,6 +48,13 @@ where
         block.digest()
     }
 
+    fn stored_commitment_across(
+        block: &Self::StoredBlock,
+        strategy: &impl Strategy,
+    ) -> Self::Commitment {
+        block.digest_across(strategy)
+    }
+
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest {
         // Trivial left-inverse: digest == commitment in this variant.
         commitment

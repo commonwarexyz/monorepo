@@ -14,11 +14,12 @@ use commonware_cryptography::{
 use commonware_p2p::simulated::Oracle;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Supervisor as _, deterministic};
-use commonware_utils::{NZU32, NZUsize, ordered::Set};
+use commonware_utils::{NZU32, NZUsize, acknowledgement::Exact, ordered::Set};
 use std::num::NonZeroU64;
 
 /// Mailbox paired with [`mocks::TestReshareActor`].
-pub(super) type TestMailbox = Mailbox<mocks::TestBlock, mocks::TestBlsVariant, mocks::TestSigner>;
+pub(super) type TestMailbox =
+    Mailbox<mocks::TestBlock, mocks::TestBlsVariant, mocks::TestSigner, Exact, Sequential>;
 
 /// Builds an unstarted actor with deterministic storage, networking, and marshal fixtures.
 pub(super) async fn new_actor(

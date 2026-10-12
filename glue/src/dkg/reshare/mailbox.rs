@@ -16,6 +16,7 @@ use commonware_consensus::{
     types::Height,
 };
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
+use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::oneshot, sequence::Unit};
 use std::{collections::VecDeque, sync::Arc};
@@ -200,26 +201,30 @@ where
 ///
 /// [`Actor`]: super::Actor
 #[derive(Clone)]
-pub struct Mailbox<B, V, C, A = Exact>
+pub struct Mailbox<B, V, C, A, T>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
+    T: Strategy,
 {
     sender: ActorSender<Message<B, V, C, A>>,
+    strategy: T,
 }
 
-impl<B, V, C, A> Mailbox<B, V, C, A>
+impl<B, V, C, A, T> Mailbox<B, V, C, A, T>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
+    T: Strategy,
 {
-    /// Creates a mailbox that sends to the actor behind `sender`.
-    pub const fn new(sender: ActorSender<Message<B, V, C, A>>) -> Self {
-        Self { sender }
+    /// Creates a mailbox that sends to the actor behind `sender` and computes block digests across
+    /// `strategy`.
+    pub const fn new(sender: ActorSender<Message<B, V, C, A>>, strategy: T) -> Self {
+        Self { sender, strategy }
     }
 
     /// Requests this node's dealer log for the block being proposed at `height`.
@@ -289,12 +294,13 @@ where
     }
 }
 
-impl<B, V, C, A> Reporter for Mailbox<B, V, C, A>
+impl<B, V, C, A, T> Reporter for Mailbox<B, V, C, A, T>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
+    T: Strategy,
 {
     type Activity = Update<B, A>;
 
@@ -305,7 +311,7 @@ where
         let span = info_span!(
             "dkg.reshare.mailbox.finalized",
             height = block.height().traced(),
-            digest = %block.digest()
+            digest = %block.digest_across(&self.strategy)
         );
         self.sender.enqueue(Message::Finalized {
             span,
@@ -321,6 +327,7 @@ mod tests {
     use crate::dkg::tests::mocks::{self, TestBlock, TestBlsVariant};
     use commonware_actor::mailbox;
     use commonware_cryptography::{Digestible as _, ed25519::PrivateKey};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, deterministic};
     use commonware_utils::{NZUsize, channel::oneshot};
     use futures::{FutureExt as _, StreamExt as _};
@@ -361,7 +368,10 @@ mod tests {
             let (sender, receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
             drop(receiver);
 
-            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
+            let mut mailbox =
+                Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact, Sequential>::new(
+                    sender, Sequential,
+                );
 
             assert!(mailbox.next_log(Height::new(1)).await.is_none());
         });
@@ -372,7 +382,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
+            let mut mailbox =
+                Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact, Sequential>::new(
+                    sender, Sequential,
+                );
             let parent = Arc::new(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
             let (release, gate) = oneshot::channel();
             let ancestry = DelayedAncestry {
@@ -414,7 +427,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
+            let mut mailbox =
+                Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact, Sequential>::new(
+                    sender, Sequential,
+                );
             let parent = Arc::new(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
             let (release, gate) = oneshot::channel();
             let ancestry = DelayedAncestry {

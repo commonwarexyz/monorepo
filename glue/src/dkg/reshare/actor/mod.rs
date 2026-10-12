@@ -250,7 +250,7 @@ where
     pub fn new(
         context: E,
         config: Config<C, M, X, P, SS, T, S, MV, R>,
-    ) -> (Self, Mailbox<B, V, C, A>) {
+    ) -> (Self, Mailbox<B, V, C, A, T>) {
         let epocher = FixedEpocher::new(config.blocks_per_epoch);
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         let metrics = ReshareMetrics::new(&context);
@@ -263,7 +263,7 @@ where
                 blocker: config.blocker,
                 participants_provider: config.participants_provider,
                 secret_store: Some(config.secret_store),
-                strategy: config.strategy,
+                strategy: config.strategy.clone(),
                 registrar: config.registrar,
                 marshal: config.marshal,
                 state_sync: config.state_sync,
@@ -283,7 +283,7 @@ where
                 mode: Mode::Reshare,
                 tip: None,
             },
-            Mailbox::new(sender),
+            Mailbox::new(sender, config.strategy),
         )
     }
 
@@ -291,7 +291,7 @@ where
         context: E,
         config: Config<C, M, X, P, SS, T, S, MV, R>,
         dkg: DkgConfig<V, C::PublicKey, B::Directory>,
-    ) -> (Self, Mailbox<B, V, C, A>) {
+    ) -> (Self, Mailbox<B, V, C, A, T>) {
         let (mut actor, mailbox) = Self::new(context, config);
         actor.mode = Mode::Dkg {
             participants: dkg.participants,
@@ -376,7 +376,7 @@ where
             (None, None)
         };
 
-        self.tip = startup(anchor, floor);
+        self.tip = startup(anchor, floor, &self.strategy);
 
         if matches!(self.mode, Mode::Dkg { .. }) {
             self.run_dkg(&mut store, &mut dealing_mux).await;

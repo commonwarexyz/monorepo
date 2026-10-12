@@ -1514,7 +1514,8 @@ mod tests {
     type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
     type TestArtifacts = ArtifactCache<TestBlsVariant, PrivateKey, Unit>;
     type TestRequests = ArtifactRequests<TestBlock, TestBlsVariant, PrivateKey>;
-    type TestInclusionMailbox = crate::dkg::reshare::Mailbox<TestBlock, TestBlsVariant, PrivateKey>;
+    type TestInclusionMailbox =
+        crate::dkg::reshare::Mailbox<TestBlock, TestBlsVariant, PrivateKey, Exact, Sequential>;
     type TestInclusionStore =
         Store<deterministic::Context, MemorySecretStore, TestBlsVariant, PublicKey>;
 

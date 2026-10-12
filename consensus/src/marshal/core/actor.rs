@@ -227,6 +227,7 @@ where
             &finalizations_by_height,
             &finalized_blocks,
             last_processed_height,
+            &config.strategy,
         )
         .await;
         let last_processed = match last_processed_height {
@@ -811,7 +812,7 @@ where
                     (self, stored) = self
                         .update_processed_round_floor(height, round, buffer, application, resolver)
                         .await
-                        .store_finalization(height, digest, &block, Some(finalization), application)
+                        .store_finalization(height, &block, Some(finalization), application)
                         .await;
                     if stored {
                         self.staged.insert(height, block);
@@ -1518,7 +1519,7 @@ where
                         .any(|annotation| matches!(annotation, Annotation::Finalized(_)))
                 {
                     (self, _) = self
-                        .store_finalization(height, digest, &block, finalization, application)
+                        .store_finalization(height, &block, finalization, application)
                         .await;
                 } else if annotations.iter().any(|annotation| {
                     matches!(
@@ -1713,7 +1714,6 @@ where
                     let block = V::from_application_block(block, finalization.proposal.payload);
                     let round = finalization.round();
                     let height = block.height();
-                    let digest = block.digest();
                     debug!(?round, %height, "received finalization");
 
                     // The floor-anchor path fully handles this finalization
@@ -1729,7 +1729,7 @@ where
                     (self, _) = self
                         .update_processed_round_floor(height, round, buffer, application, resolver)
                         .await
-                        .store_finalization(height, digest, &block, Some(finalization), application)
+                        .store_finalization(height, &block, Some(finalization), application)
                         .await;
                 }
                 PendingVerification::Notarized {
@@ -1803,13 +1803,7 @@ where
                         // SAFETY: `digest` identifies a unique `commitment`, so this
                         // cached finalization payload must match `V::commitment(&block)`.
                         (self, _) = self
-                            .store_finalization(
-                                height,
-                                digest,
-                                &block,
-                                Some(finalization),
-                                application,
-                            )
+                            .store_finalization(height, &block, Some(finalization), application)
                             .await;
                     }
                 }
@@ -2058,11 +2052,11 @@ where
     async fn store_finalization(
         mut self: Box<Self>,
         height: Height,
-        digest: <V::Block as Digestible>::Digest,
         block: &V::Block,
         finalization: Option<Finalization<P::Scheme, V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> (Box<Self>, bool) {
+        let digest = block.digest_across(&self.strategy);
         // Blocks below the last processed height are not useful to us, so we ignore them (this
         // has the nice byproduct of ensuring we don't call a backing store with a block below the
         // pruning boundary)
@@ -2164,16 +2158,18 @@ where
         let digest = V::commitment_to_inner(commitment);
         if let Some(block) = self
             .cache
-            .find_block_matching(digest, |stored| V::stored_commitment(stored) == commitment)
+            .find_block_matching(digest, |stored| {
+                V::stored_commitment_across(stored, &self.strategy) == commitment
+            })
             .await
         {
             return Some(block.into());
         }
 
         match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
-            Ok(Some(stored)) => {
-                (V::stored_commitment(&stored) == commitment).then(|| stored.into())
-            }
+            Ok(Some(stored)) => (V::stored_commitment_across(&stored, &self.strategy)
+                == commitment)
+                .then(|| stored.into()),
             Ok(None) => None,
             Err(e) => panic!("failed to get block: {e}"),
         }
@@ -2252,16 +2248,9 @@ where
                 let commitment = finalization.proposal.payload;
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     // If found, persist the block.
-                    let digest = block.digest_across(&self.strategy);
                     let stored;
                     (self, stored) = self
-                        .store_finalization(
-                            last_finalized,
-                            digest,
-                            &block,
-                            Some(finalization),
-                            application,
-                        )
+                        .store_finalization(last_finalized, &block, Some(finalization), application)
                         .await;
                     wrote |= stored;
                 } else {
@@ -2310,13 +2299,7 @@ where
                     let next = (block.height(), block.parent(), V::parent_commitment(&block));
                     let stored;
                     (self, stored) = self
-                        .store_finalization(
-                            next.0,
-                            parent_digest,
-                            &block,
-                            finalization,
-                            application,
-                        )
+                        .store_finalization(next.0, &block, finalization, application)
                         .await;
                     wrote |= stored;
                     debug!(height = %next.0, "repaired block");
@@ -2396,6 +2379,7 @@ where
         finalizations_by_height: &FC,
         finalized_blocks: &FB,
         height: Option<Height>,
+        strategy: &T,
     ) -> Round {
         let processed_round = height.and_then(|height| {
             finalizations_by_height
@@ -2432,7 +2416,7 @@ where
             return processed_round;
         };
         assert!(
-            V::stored_commitment(&block) == finalization.proposal.payload,
+            V::stored_commitment_across(&block, strategy) == finalization.proposal.payload,
             "successor block does not match stored finalization"
         );
         processed_round.max(finalization.round())

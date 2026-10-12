@@ -10,8 +10,9 @@ use commonware_consensus::{
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
-use commonware_utils::sequence::Unit;
+use commonware_utils::{acknowledgement::Exact, sequence::Unit};
 use rand_core::Rng;
 use std::{future, num::NonZeroU64};
 use tracing::{debug, field};
@@ -49,28 +50,34 @@ pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = U
 /// The inner application may be one adapted through
 /// [`stateful`](crate::stateful). [`Application`] forwards its own input to the
 /// inner application as [`Input::upstream`].
-pub struct Application<A, B, V, C>
+pub struct Application<A, B, V, C, T>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
+    T: Strategy,
 {
     inner: A,
-    reshare: Mailbox<B, V, C>,
+    reshare: Mailbox<B, V, C, Exact, T>,
     epocher: FixedEpocher,
 }
 
-impl<A, B, V, C> Application<A, B, V, C>
+impl<A, B, V, C, T> Application<A, B, V, C, T>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
+    T: Strategy,
 {
     /// Wraps `inner`, using `reshare` to fetch reshare payloads.
     ///
     /// `blocks_per_epoch` must equal the actor's
     /// [`Config::blocks_per_epoch`](crate::dkg::reshare::Config::blocks_per_epoch).
-    pub const fn new(inner: A, reshare: Mailbox<B, V, C>, blocks_per_epoch: NonZeroU64) -> Self {
+    pub const fn new(
+        inner: A,
+        reshare: Mailbox<B, V, C, Exact, T>,
+        blocks_per_epoch: NonZeroU64,
+    ) -> Self {
         Self {
             inner,
             reshare,
@@ -89,12 +96,13 @@ where
     }
 }
 
-impl<A, B, V, C> Clone for Application<A, B, V, C>
+impl<A, B, V, C, T> Clone for Application<A, B, V, C, T>
 where
     A: Clone,
     B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
+    T: Strategy,
 {
     fn clone(&self) -> Self {
         Self {
@@ -105,7 +113,7 @@ where
     }
 }
 
-impl<A, E, B, V, C, I> ConsensusApplication<E> for Application<A, B, V, C>
+impl<A, E, B, V, C, I, T> ConsensusApplication<E> for Application<A, B, V, C, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: ConsensusApplication<E, Block = B, Input = Input<I, V, C, B::Directory>>,
@@ -114,6 +122,7 @@ where
     V: Variant,
     C: Signer,
     I: Send,
+    T: Strategy,
 {
     type SigningScheme = A::SigningScheme;
     type Context = A::Context;
@@ -349,6 +358,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         sha256::Sha256,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
         Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, ordered::Set,
@@ -364,7 +374,7 @@ mod tests {
 
     type TestPayload = Payload<TestBlsVariant, PrivateKey>;
     type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
-    type TestWrapper = Application<RecordingApp, TestBlock, TestBlsVariant, PrivateKey>;
+    type TestWrapper = Application<RecordingApp, TestBlock, TestBlsVariant, PrivateKey, Sequential>;
 
     impl CertifiableBlock for TestBlock {
         type Context = TestContext;
@@ -510,7 +520,7 @@ mod tests {
             let _ = reply.send(response);
         });
 
-        Application::new(inner, Mailbox::new(sender), NZU64!(2))
+        Application::new(inner, Mailbox::new(sender, Sequential), NZU64!(2))
     }
 
     fn log_wrapper(
@@ -559,7 +569,7 @@ mod tests {
         });
 
         (
-            Application::new(inner, Mailbox::new(sender), NZU64!(4)),
+            Application::new(inner, Mailbox::new(sender, Sequential), NZU64!(4)),
             release_rx,
         )
     }
@@ -731,7 +741,8 @@ mod tests {
                         }
                     }
                 });
-                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
+                let mut app =
+                    Application::new(inner.clone(), Mailbox::new(sender, Sequential), NZU64!(2));
 
                 let prepared = app
                     .prepare(
@@ -815,7 +826,8 @@ mod tests {
             let (sender, mut receiver) = mailbox::new::<
                 Message<TestBlock, TestBlsVariant, PrivateKey>,
             >(context.child("mailbox"), NZUsize!(4));
-            let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(4));
+            let mut app =
+                Application::new(inner.clone(), Mailbox::new(sender, Sequential), NZU64!(4));
 
             let mut propose = Box::pin(app.propose(
                 (context.child("app"), block_context(&parent, 2)),
@@ -1003,7 +1015,8 @@ mod tests {
                 >(
                     context.child("mailbox"), NZUsize!(1)
                 );
-                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
+                let mut app =
+                    Application::new(inner.clone(), Mailbox::new(sender, Sequential), NZU64!(2));
                 let mut verify = Box::pin(app.verify(
                     (context.child("app"), block_context(&parent, 1)),
                     ancestry::from_iter([tip, parent]),
@@ -1121,7 +1134,7 @@ mod tests {
             let (sender, _receiver) = mailbox::new::<
                 Message<TestBlock, TestBlsVariant, PrivateKey>,
             >(context.child("mailbox"), NZUsize!(1));
-            let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(6));
+            let mut app = Application::new(inner.clone(), Mailbox::new(sender, Sequential), NZU64!(6));
             let mut parent = mocks::child(&mocks::genesis_block(leader().public_key()));
 
             // Each candidate extends the previous one and carries epoch info.
@@ -1162,7 +1175,7 @@ mod tests {
             let (sender, _receiver) = mailbox::new::<
                 Message<TestBlock, TestBlsVariant, PrivateKey>,
             >(context.child("mailbox"), NZUsize!(1));
-            let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(6));
+            let mut app = Application::new(inner.clone(), Mailbox::new(sender, Sequential), NZU64!(6));
             let mut parent = mocks::child(&mocks::genesis_block(leader().public_key()));
 
             // Build one signed dealer log for the epoch.
