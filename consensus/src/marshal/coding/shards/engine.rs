@@ -398,10 +398,6 @@ where
     /// size the ring for the number of blocks a node can trail its peers by, which is larger for a
     /// distant or slow node. A ring that is too small evicts shards before they are needed, and the
     /// node then fetches those blocks from the resolver instead of reconstructing them.
-    /// `max_block_size` block. An honest peer sends each recipient about one shard per block, so
-    /// size the ring for the number of blocks a node can trail its peers by, which is larger for a
-    /// distant or slow node. A ring that is too small evicts shards before they are needed, and the
-    /// node then fetches those blocks from the resolver instead of reconstructing them.
     pub peer_buffer_size: NonZeroUsize,
 
     /// The maximum number of commitment records retained.
