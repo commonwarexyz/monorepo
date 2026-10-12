@@ -155,6 +155,19 @@ impl<B: Blob> Sealed<B> {
         self.view().read_many_into(buf, offsets, item_size).await
     }
 
+    /// Read the pages covering the `(offset, len)` byte ranges (ascending by offset) into the page
+    /// cache ahead of their first read, returning how many pages were read from the blob.
+    ///
+    /// Covered pages stay cached until their first read while the cache has room for them
+    /// alongside the pages read in the meantime (see
+    /// [commonware_utils::cache::Cache::get_or_insert_mut_expected]). A page failing validation
+    /// is not cached, and the first error is returned after the other pages are cached. Dropping
+    /// the future leaves the cache consistent.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn warm(&self, ranges: &[(u64, u64)]) -> Result<usize, Error> {
+        self.view().warm(ranges).await
+    }
+
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
     /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
     pub fn try_read_many_sync_into(

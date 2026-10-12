@@ -189,6 +189,15 @@ pub trait Contiguous: Send + Sync {
     /// async read paths are the sole error authority for declined positions.
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>>;
 
+    /// Return a future that reads the storage backing `positions` (strictly increasing) into
+    /// the page cache.
+    ///
+    /// The future does not borrow the journal, so it can run alongside any journal operation, and
+    /// it can be dropped at any point. Prefetching is best effort: positions outside `bounds()`
+    /// are skipped and failures are logged.
+    #[commonware_macros::stability(ALPHA)]
+    fn prefetch(&self, positions: &[u64]) -> impl Future<Output = ()> + Send + 'static + use<Self>;
+
     /// Return a stream of the items in `range`, in position order. `range` must fall within
     /// `bounds()`. An empty range within `bounds()` yields an empty stream.
     ///
