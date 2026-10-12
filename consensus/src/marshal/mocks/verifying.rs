@@ -4,13 +4,13 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{CertifiableBlock, Epochable, marshal::ancestry::Ancestry};
+use crate::{CertifiableBlock, Epochable, Handoff, marshal::ancestry::Ancestry};
 use commonware_runtime::deterministic;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use std::{marker::PhantomData, sync::Arc};
+use std::{future::pending, marker::PhantomData, sync::Arc};
 
 /// A mock application that implements `Application` for testing.
 ///
@@ -24,6 +24,10 @@ pub struct MockVerifyingApp<B, S> {
     pub propose_result: Option<B>,
     /// The result returned by `verify`.
     pub verify_result: bool,
+    /// The decision `prepare` attaches to a built block. `Wait` declines without building.
+    handoff: Handoff<()>,
+    /// Shared by clones so that only the first proposal build waits on the gate.
+    proposal_gate: Arc<Mutex<Option<ProposalGate>>>,
     /// Blocks for which `verify` returns false.
     pub reject: Option<fn(&B) -> bool>,
     _phantom: PhantomData<S>,
@@ -32,21 +36,14 @@ pub struct MockVerifyingApp<B, S> {
 impl<B, S> MockVerifyingApp<B, S> {
     /// Create a new mock verifying application.
     pub fn new() -> Self {
-        Self {
-            propose_result: None,
-            verify_result: true,
-            reject: None,
-            _phantom: PhantomData,
-        }
+        Self::default()
     }
 
     /// Create a new mock verifying application with a fixed verify result.
     pub fn with_verify_result(verify_result: bool) -> Self {
         Self {
-            propose_result: None,
             verify_result,
-            reject: None,
-            _phantom: PhantomData,
+            ..Self::default()
         }
     }
 
@@ -61,6 +58,26 @@ impl<B, S> MockVerifyingApp<B, S> {
         self.reject = Some(reject);
         self
     }
+
+    /// Configure the decision `prepare` attaches to a built block.
+    pub const fn with_handoff(mut self, handoff: Handoff<()>) -> Self {
+        self.handoff = handoff;
+        self
+    }
+
+    /// Blocks the first proposal build until cancellation. Returns a receiver that
+    /// signals when the build starts and one that errors when the build is cancelled.
+    pub fn with_proposal_gate(mut self) -> (Self, oneshot::Receiver<()>, oneshot::Receiver<()>) {
+        let (started, started_rx) = oneshot::channel();
+        let (dropped, dropped_rx) = oneshot::channel();
+        self.proposal_gate = Arc::new(Mutex::new(Some(ProposalGate { started, dropped })));
+        (self, started_rx, dropped_rx)
+    }
+}
+
+struct ProposalGate {
+    started: oneshot::Sender<()>,
+    dropped: oneshot::Sender<()>,
 }
 
 impl<B, S> Default for MockVerifyingApp<B, S> {
@@ -68,6 +85,8 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
         Self {
             propose_result: None,
             verify_result: true,
+            handoff: Handoff::Wait,
+            proposal_gate: Arc::default(),
             reject: None,
             _phantom: PhantomData,
         }
@@ -85,12 +104,34 @@ where
     type SigningScheme = S;
     type Input = ();
 
+    async fn prepare(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Handoff<Self::Block> {
+        if self.handoff.is_wait() {
+            return Handoff::Wait;
+        }
+        let decision = self.handoff;
+        self.propose(context, ancestry, input)
+            .await
+            .map_or(Handoff::Wait, |block| decision.map(|()| block))
+    }
+
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
     ) -> Option<Self::Block> {
+        let gate = self.proposal_gate.lock().take();
+        if let Some(gate) = gate {
+            // Cancelling this future drops the sender, which errors the receiver.
+            let _dropped = gate.dropped;
+            gate.started.send_lossy(());
+            pending::<()>().await;
+        }
         self.propose_result.clone()
     }
 
