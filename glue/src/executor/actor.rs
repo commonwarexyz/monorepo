@@ -337,8 +337,11 @@ where
                 error!(%height, "executed block diverges from the one honest validators signed");
                 return Err(Halt::Diverged(height));
             }
-            Message::Target { response, .. } => {
+            Message::Target { response, .. } | Message::AwaitsFloor { response } => {
                 response.send_lossy(false);
+            }
+            Message::ResumedAfter { response, .. } | Message::HasBase { response } => {
+                response.send_lossy(true);
             }
         }
         Ok(())
@@ -364,7 +367,7 @@ where
                     let Some(message) = message else {
                         return Ok(false);
                     };
-                    self.handle_syncing(message).await?;
+                    self.handle_syncing(message, next).await?;
                 },
                 progress = next_progress(&mut self.syncing) => match progress {
                     Progress::Recorded(height) => self.recorded(height),
@@ -376,8 +379,13 @@ where
         Ok(true)
     }
 
-    /// Handles a request while the chain has no base.
-    async fn handle_syncing(&mut self, message: Message<X::Block>) -> Result<(), Halt> {
+    /// Handles a request while the chain has no base. `next` is the index of the input after the
+    /// newest one marshal delivered, once it delivered one.
+    async fn handle_syncing(
+        &mut self,
+        message: Message<X::Block>,
+        next: Option<Height>,
+    ) -> Result<(), Halt> {
         match message {
             Message::Block { response, .. } => {
                 response.send_lossy(None);
@@ -401,6 +409,17 @@ where
             Message::Target { block, response } => {
                 self.offer(block).await;
                 response.send_lossy(true);
+            }
+            Message::AwaitsFloor { response } => {
+                response.send_lossy(self.syncing.is_none());
+            }
+            Message::ResumedAfter { index, response } => {
+                response.send_lossy(
+                    next.is_some_and(|next| next.get() > index.get().saturating_add(1)),
+                );
+            }
+            Message::HasBase { response } => {
+                response.send_lossy(false);
             }
         }
         Ok(())

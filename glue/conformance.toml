@@ -50,6 +50,14 @@ hash = "bf578ec5eef98628bccee30a763d3d4da47c0d8e2a4f1f29ac13b0ec8dd75706"
 n_cases = 8192
 hash = "89d51bef0703a3cc6ac96ae71daa453113fd55e70febcd765d0791cc7d8c612c"
 
+["commonware_glue::executor::probe::tests::conformance::CodecConformance<wire::Message<ed25519::Scheme,Executed,Floor>>"]
+n_cases = 128
+hash = "16d71c6500aa10eb4a65593143a160ce8b453bbb885f2359a07def5f8faf2ecf"
+
+["commonware_glue::executor::probe::tests::conformance::CodecConformance<wire::Tag>"]
+n_cases = 65536
+hash = "7cf90e43e614a55614d95269547add3d92c25b31040e8f3cce3761bd74986458"
+
 ["commonware_glue::stateful::actor::syncer::tests::conformance::CodecConformance<SyncState<TestScheme,Sha256Digest>>"]
 n_cases = 65536
 hash = "334bc977cfa11a849de1b135da67dd6b2103608838a8a5fa2093b401ea161a78"

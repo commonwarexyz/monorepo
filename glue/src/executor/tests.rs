@@ -955,8 +955,10 @@ fn checkpoint_start_executes_after_the_synced_block() {
         assert!(mailbox.block_at(Height::zero()).await.is_none());
 
         // Inputs at or below the synced block are acknowledged without executing them.
+        assert!(mailbox.awaits_floor().await);
         let base = certified(3, 2, 100);
         mailbox.sync_to(Arc::clone(&base)).await;
+        assert!(!mailbox.awaits_floor().await);
         until_acknowledged(&context, &mut waiters[1]).await;
         assert!(acknowledged(&mut waiters[0]));
         assert_eq!(*parts.adder.synced.lock(), vec![3]);
@@ -972,6 +974,29 @@ fn checkpoint_start_executes_after_the_synced_block() {
         // A checkpoint below the base can no longer be answered, and the base answers its own.
         assert!(below.await.is_err());
         assert_eq!(at.await.unwrap(), base.digest());
+    });
+}
+
+#[test]
+fn checkpoint_start_reports_whether_marshal_resumed_after_its_floor() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (_executor, mut inbox, mailbox) = parts.start(&context).await;
+        assert!(!mailbox.resumed_after(OutputIndex::new(1)).await);
+
+        let _first = report(&mut inbox, &[(2, 1)]);
+        context.sleep(Duration::from_millis(10)).await;
+        assert!(mailbox.resumed_after(OutputIndex::new(1)).await);
+        assert!(!mailbox.resumed_after(OutputIndex::new(2)).await);
+
+        // A newer floor supersedes the inputs delivered after the old one.
+        let _second = report(&mut inbox, &[(5, 4)]);
+        context.sleep(Duration::from_millis(10)).await;
+        assert!(!mailbox.resumed_after(OutputIndex::new(5)).await);
+        assert!(mailbox.resumed_after(OutputIndex::new(4)).await);
     });
 }
 
@@ -992,9 +1017,11 @@ fn sync_follows_newer_targets_and_resumes_after_a_crash() {
         executor.abort();
         let _ = executor.await;
 
-        // The persisted target restarts the sync, and only newer targets reach it.
+        // The persisted target restarts the sync, which keeps marshal's floor, and only newer
+        // targets reach it.
         let restarted_context = context.child("restarted");
         let (_executor, mut inbox, mailbox) = parts.start(&restarted_context).await;
+        assert!(!mailbox.awaits_floor().await);
         until(&context, || *parts.adder.synced.lock() == vec![3, 3]).await;
         assert!(mailbox.sync_to(certified(2, 1, 50)).await);
         assert!(mailbox.sync_to(certified(3, 2, 100)).await);
