@@ -384,7 +384,7 @@ where
     /// Performs complete verification inline.
     ///
     /// This method:
-    /// 1. Acquires the candidate block
+    /// 1. Waits for the candidate block to arrive locally (certification fetches it from peers)
     /// 2. Enforces epoch/re-proposal rules
     /// 3. Fetches and validates the parent relationship
     /// 4. Runs application verification with the candidate, parent, and block range

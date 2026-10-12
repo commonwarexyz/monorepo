@@ -113,7 +113,7 @@ mod tests {
         Clock, Metrics, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
         utils::reschedule,
     };
-    use commonware_storage::archive::immutable;
+    use commonware_storage::archive::{Archive as _, immutable};
     use commonware_utils::{
         NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
     };
@@ -3902,6 +3902,71 @@ mod tests {
                 "finalization should fetch the block by commitment"
             );
             assert!(mailbox.get_block(Height::new(1)).await.is_some());
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_certificate_only_repair_recomputes_shards() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (candidate_context, candidate) = missing_candidate(participants[0].clone());
+            let commitment = candidate.commitment();
+            let partition = "certificate-only-repair";
+            let provider = ConstantProvider::new(schemes[0].clone());
+
+            // Persist the finalization without its block, as a crash between the two archive
+            // puts leaves it.
+            let config = test_config(&context.child("seed_config"), partition, provider.clone());
+            let finalization = CodingHarness::make_finalization(
+                Proposal::new(candidate_context.round, View::zero(), commitment),
+                &schemes,
+                QUORUM,
+            );
+            let (finalizations, blocks) =
+                immutable_finalized_stores(&context.child("seed"), partition, &config).await;
+            drop(blocks);
+            let finalizations = finalizations
+                .put(1, candidate.digest(), &finalization)
+                .await
+                .unwrap();
+            drop(finalizations.sync().await.unwrap());
+            drop(config);
+
+            // Startup repair requests the block by commitment. The archived certificate alone
+            // does not make the delivery trusted, so the body is recoded.
+            let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("reopened"),
+                partition,
+                provider,
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+            let acquisition = mailbox.acquire(commitment);
+            let _ = mailbox.get_processed().await;
+            let fetch = resolver
+                .fetches()
+                .into_iter()
+                .find(|fetch| {
+                    fetch.key == handler::Key::Block(commitment)
+                        && fetch.subscriber == handler::Annotation::Height(Height::new(1))
+                })
+                .expect("startup repair fetch");
+            assert!(resolver.deliver(fetch, candidate.encode()).await);
+            let delivered = acquisition.await.expect("acquisition dropped");
+            assert_eq!(delivered.commitment(), commitment);
+            assert!(
+                delivered.shard(0).is_some(),
+                "certificate-only repair should recompute shards"
+            );
+            assert_eq!(
+                mailbox.get_block(Height::new(1)).await.unwrap().commitment(),
+                commitment
+            );
         });
     }
 

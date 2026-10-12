@@ -89,7 +89,8 @@ where
 
     /// Maximum combined number of speculative fetches and prefetched bodies.
     ///
-    /// Also bounds the number of resolver messages handled in one batch. Sources from
+    /// Also bounds the finalized heights requested in one forward gap-repair pass and the
+    /// number of resolver messages handled in one batch. Sources from
     /// [`Mailbox::blocks`](super::core::Mailbox::blocks) give each range an additional
     /// window of this size for pending acquisitions and buffered bodies.
     /// Direct acquisitions are not limited by the shared capacity; each stays active until
