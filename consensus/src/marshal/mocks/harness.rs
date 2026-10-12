@@ -252,8 +252,7 @@ impl<H: TestHarness> ValidatorSetup<H> {
     /// later setup can reopen the same partition.
     pub async fn crash(self) {
         self.actor_handle.abort();
-        let Self { actor_handle, .. } = self;
-        let _ = actor_handle.await;
+        let _ = self.actor_handle.await;
     }
 }
 

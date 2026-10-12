@@ -71,23 +71,15 @@ impl Verification {
 }
 
 /// Response channel for a proposal request, by request kind.
-pub(in crate::stateful::actor) enum Proposal<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
+pub(in crate::stateful::actor) enum Proposal<B> {
     /// A proposal on a parent that has not yet certified: the block under the application's
     /// decision, or [`Handoff::Wait`] if none is built.
-    Prepare(oneshot::Sender<Handoff<A::Block>>),
-    /// An ordinary proposal on a certified parent: the block, or `None` if none is built.
-    Propose(oneshot::Sender<Option<A::Block>>),
+    Prepare(oneshot::Sender<Handoff<B>>),
+    /// An ordinary proposal: the block, or `None` if none is built.
+    Propose(oneshot::Sender<Option<B>>),
 }
 
-impl<E, A> Proposal<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
+impl<B> Proposal<B> {
     pub(in crate::stateful::actor) async fn wait_for_cancellation(&mut self) {
         match self {
             Self::Prepare(response) => response.closed().await,
@@ -127,7 +119,7 @@ where
         context: (E, A::Context),
         ancestry: BoxedAncestry<A::Block>,
         upstream: A::Input,
-        proposal: Proposal<E, A>,
+        proposal: Proposal<A::Block>,
     },
 
     /// A request to verify a block.

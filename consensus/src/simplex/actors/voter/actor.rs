@@ -102,7 +102,7 @@ impl<'a, V: Viewable, F: Future + Unpin> Future for Waiter<'a, V, F> {
     }
 }
 
-/// Unified response from a regular or handoff proposal request.
+/// Unified response from a prepare or propose request.
 enum ProposalResponse<D> {
     /// The response to a handoff request.
     Prepared(Handoff<D>),
@@ -135,7 +135,7 @@ enum ProposalState<D> {
     Closed,
 }
 
-/// The proposal request in flight for the current or an optimistic future view, if any.
+/// The proposal request pending or retained for the current or a future view, if any.
 type PendingProposal<D, P> = Option<Request<ProposalRequest<D, P>, ProposalState<D>>>;
 
 /// The verification request in flight for the current or an optimistic future view, if any.
@@ -206,6 +206,8 @@ impl<
         let finalization_latency =
             context.histogram("finalization_latency", "finalization latency", LATENCY);
 
+        // A certificate that is ready before this node enters its view has no entry time, so
+        // the from-entry histograms take no sample for it.
         let notarization_latency_from_view_entry = context.histogram(
             "notarization_latency_from_view_entry",
             "leader seconds from first local view entry to local notarization certificate readiness",
@@ -560,7 +562,7 @@ impl<
         // parent is consumed before its evidence is durable.
         if let Some(Request(request, _, state)) = pending_propose.as_ref()
             && matches!(state, ProposalState::Waiting | ProposalState::Closed)
-            && self.state.proposal_parent_certified(request.context())
+            && self.state.parent_certified(request.context().parent)
         {
             let view = request.view();
             if matches!(state, ProposalState::Closed) {
@@ -770,9 +772,6 @@ impl<
         // will not broadcast it. Proposals for the current or optimistic
         // future views are kept.
         if context.view() < self.state.current_view() {
-            if is_handoff {
-                self.record_handoff_abandoned(HandoffAbandonedReason::ViewExit);
-            }
             debug!(round = ?context.round, current = ?self.state.current_view(), "dropping requested proposal");
             return None;
         }
@@ -802,7 +801,7 @@ impl<
             },
         );
         if is_handoff {
-            let certified = self.state.proposal_parent_certified(&context);
+            let certified = self.state.parent_certified(context.parent);
             if !released {
                 self.record_handoff_event(if certified {
                     HandoffEventKind::RelayedAfterCertification
@@ -1264,7 +1263,7 @@ impl<
                 let ready = matches!(
                     pending_propose.as_ref(),
                     Some(Request(request, _, ProposalState::Held(_)))
-                        if self.state.proposal_parent_certified(request.context())
+                        if self.state.parent_certified(request.context().parent)
                 );
                 let propose_wait = async {
                     let proposed = match pending_propose.as_mut() {
@@ -1317,19 +1316,17 @@ impl<
                 // slot until its parent resolves. The captured request and build latch
                 // remain active until then.
                 let (proposed, released) = match proposed {
-                    Ok(ProposalResponse::Proposed(payload)) => (Ok(payload), false),
-                    Ok(ProposalResponse::Released(payload)) => (Ok(payload), true),
                     Ok(ProposalResponse::Prepared(Handoff::Wait)) => {
                         self.record_handoff_event(HandoffEventKind::WaitReturned);
                         pending_propose = Some(Request(request, span, ProposalState::Waiting));
                         continue;
                     }
                     Ok(ProposalResponse::Prepared(Handoff::Stage(payload)))
-                        if !self.state.proposal_parent_certified(request.context()) =>
+                        if !self.state.parent_certified(request.context().parent) =>
                     {
                         // Relay the held candidate now so its distribution overlaps parent
-                        // certification. The relay names no proposal (see [Plan::Prepare]);
-                        // the proposal broadcast and the vote wait for the parent.
+                        // certification. The relay names no proposal (see [Plan::Prepare]).
+                        // The proposal broadcast and the vote wait for the parent.
                         self.record_handoff_event(HandoffEventKind::CandidateReturned);
                         let _ = self.relay.broadcast(
                             payload,
@@ -1345,6 +1342,8 @@ impl<
                         self.record_handoff_event(HandoffEventKind::CandidateReturned);
                         (Ok(payload), false)
                     }
+                    Ok(ProposalResponse::Proposed(payload)) => (Ok(payload), false),
+                    Ok(ProposalResponse::Released(payload)) => (Ok(payload), true),
                     Err(_) if request.is_handoff() => {
                         pending_propose = Some(Request(request, span, ProposalState::Closed));
                         continue;

@@ -978,6 +978,76 @@ mod tests {
         });
     }
 
+    /// Registers a certification gate at view 5 of epoch 0 and at `notarized`, has the wrapper
+    /// report a notarization at `notarized`, and returns whether the gate at view 5 of epoch 0
+    /// remains.
+    fn epoch_zero_gate_remains(notarized: Round) -> bool {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let me = participants[0].clone();
+            let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-epoch-gates",
+                provider.clone(),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+            let shards =
+                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
+                    .await;
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new(),
+                marshal,
+                shards,
+                scheme_provider: provider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            let (_, candidate) = missing_candidate(me);
+            let commitment = candidate.commitment();
+            let earlier_round = Round::new(Epoch::zero(), View::new(5));
+            for round in [earlier_round, notarized] {
+                let (_, gate) = oneshot::channel();
+                marshaled.gates().insert(round, commitment, gate);
+            }
+            let proposal = Proposal::new(notarized, View::zero(), commitment);
+            let notarization = CodingHarness::make_notarization(proposal, &schemes, QUORUM);
+            marshaled.report(Activity::Notarization(notarization));
+
+            // Certification of the notarized round follows its notarization, so the report
+            // must keep its gate.
+            assert!(
+                marshaled.gates().take(notarized, commitment).is_some(),
+                "the notarized round must keep its gate"
+            );
+            marshaled.gates().take(earlier_round, commitment).is_some()
+        })
+    }
+
+    /// An activity of a later epoch shows that the engine of every earlier epoch was retired,
+    /// so reporting it releases the gates of earlier epochs without waiting for a finalization.
+    #[test_traced("WARN")]
+    fn test_coding_later_epoch_activity_releases_earlier_epoch() {
+        let notarized = Round::new(Epoch::new(1), View::new(1));
+        assert!(!epoch_zero_gate_remains(notarized));
+    }
+
+    /// Within an epoch only a finalization prunes, so a notarization at a later view keeps the
+    /// gates of earlier views.
+    #[test_traced("WARN")]
+    fn test_coding_same_epoch_activity_keeps_gates() {
+        let notarized = Round::new(Epoch::zero(), View::new(7));
+        assert!(epoch_zero_gate_remains(notarized));
+    }
+
     /// Pending verification must own a transiently buffered block before certification waits
     /// on its gate. Otherwise a cache hit can suppress the round-bound fetch before the
     /// verifier installs its local subscription, and eviction leaves certification pending
@@ -4539,6 +4609,12 @@ mod tests {
                 .await
                 .expect("prepare decision missing");
             assert_eq!(decision, Handoff::Wait, "the default prepare declines");
+            assert!(
+                context
+                    .encode()
+                    .contains("declining_parent_fetch_duration_count 1"),
+                "a declining prepare still fetches the parent"
+            );
         });
     }
 
@@ -5455,7 +5531,7 @@ mod tests {
     /// afterwards checks storage itself, since the in-memory cache that serves
     /// a block right after it is sent does not survive the restart.
     #[test_traced("WARN")]
-    fn test_propose_rebuilds_despite_verified_block_on_restart() {
+    fn test_prepare_rebuilds_despite_verified_block_on_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let Fixture {

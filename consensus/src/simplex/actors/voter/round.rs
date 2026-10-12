@@ -867,8 +867,9 @@ mod tests {
         assert!(!round.request(requested.next()));
     }
 
-    /// The latency sample anchors at our own proposal when we built one,
+    /// The start sample anchors at our own proposal when we built one,
     /// falls back to view entry, and is absent for rounds we never started.
+    /// The entry sample anchors only at view entry and is absent before it.
     /// First entry wins across repeated [Round::mark_entered] calls.
     #[test]
     fn elapsed_since_start_anchors_at_proposal_then_entry() {

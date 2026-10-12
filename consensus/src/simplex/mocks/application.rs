@@ -133,7 +133,7 @@ pub fn genesis<H: Hasher>(epoch: Epoch) -> H::Digest {
 
 type Latency = (f64, f64);
 
-/// Callback that receives the context of each ordinary or handoff proposal request.
+/// Callback that receives the context of each handoff or ordinary proposal request.
 type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Send + 'static>;
 
 /// Callback that receives a built handoff proposal's round, the proposal, and its response sender.
@@ -209,7 +209,7 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
 
     verified: HashSet<H::Digest>,
 
-    /// Invoked for every ordinary and handoff proposal request. Tests use it to
+    /// Invoked for every handoff and ordinary proposal request. Tests use it to
     /// count requests per view and detect spurious local-leader requests after
     /// replay.
     propose_observer: Option<ProposeObserver<H, P>>,

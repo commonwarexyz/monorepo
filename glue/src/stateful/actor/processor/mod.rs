@@ -4,15 +4,14 @@
 //! of unfinalized blocks by block digest. The _processed anchor_ is the last finalized block whose
 //! finalization has completed.
 //!
-//! - Propose and verify: batches are forked from the parent's cached state, or from the applied
-//!   databases when the parent is the processed anchor, and passed to the [`Application`]. The
-//!   result is cached only if it matches the block's commitments.
+//! - Prepare, propose, and verify: batches are forked from the parent's cached state, or from the
+//!   applied databases when the parent is the processed anchor, and passed to the
+//!   [`Application`]. The result is cached only if it matches the block's commitments.
 //! - Recovery: when a parent's state is not cached (for example after a restart), its missing
 //!   ancestors are replayed in height order with [`Application::apply`], starting above the
 //!   nearest cached ancestor or the processed anchor. A replayed state is cached only if it matches
 //!   its block's commitments, and it is never treated as a verification verdict. Concurrent
-//!   verifications that need the same missing ancestor share one replay of it. Proposals replay
-//!   independently.
+//!   verifications and proposals that need the same missing ancestor share one replay of it.
 //! - Finalization: the finalized block's state is applied to the databases, and cached state that
 //!   does not descend from it is discarded. The caller coordinates durability, so one database
 //!   barrier can cover several finalizations.
@@ -490,11 +489,7 @@ impl Cancellation for Verification {
     }
 }
 
-impl<E, A> Cancellation for Proposal<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
+impl<B: Send> Cancellation for Proposal<B> {
     async fn cancelled(&mut self) {
         self.wait_for_cancellation().await;
     }
@@ -738,7 +733,7 @@ where
         (runtime_context, consensus_context): (E, A::Context),
         mut ancestry: impl Ancestry<A::Block>,
         input: Input<A::Input, A::Provider>,
-        mut proposal: Proposal<E, A>,
+        mut proposal: Proposal<A::Block>,
     ) where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,

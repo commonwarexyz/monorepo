@@ -27,7 +27,9 @@
 //! # Usage
 //!
 //! Wrap your [`Application`] implementation with [`Deferred::new`] and provide it to your
-//! consensus engine for the [`Automaton`] and [`Relay`]. The wrapper handles all epoch logic transparently.
+//! consensus engine for the [`Automaton`], [`Relay`], and [`Reporter`]. As the reporter, the
+//! wrapper forwards consensus activity to marshal and releases the state it keeps for each round
+//! once consensus finalizes that round. The wrapper handles all epoch logic transparently.
 //!
 //! ```rust,ignore
 //! let application = Deferred::new(
@@ -77,7 +79,6 @@ use crate::{
     Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff, Relay,
     Reporter,
     marshal::{
-        Update,
         ancestry::Ancestry,
         application::{
             build::{self, Resolved},
@@ -94,7 +95,10 @@ use crate::{
             },
         },
     },
-    simplex::{Plan, types::Context},
+    simplex::{
+        Plan,
+        types::{Activity, Context},
+    },
     types::{Epocher, Round, View},
 };
 use commonware_actor::Feedback;
@@ -209,7 +213,7 @@ where
         let build_duration = Timed::new(build_histogram);
         let parent_fetch_histogram = context.histogram(
             "parent_fetch_duration",
-            "Histogram of time taken to fetch a parent block in propose, in seconds",
+            "Histogram of time taken to fetch a parent block in proposal, in seconds",
             Buckets::LOCAL,
         );
         let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
@@ -465,7 +469,8 @@ where
     }
 
     /// Runs the proposal checks for `consensus_context` and yields what the proposal path does
-    /// next: re-propose the epoch boundary block, skip the view, or build on the fetched parent.
+    /// next: re-propose the epoch boundary block, decline a parent the marshal cannot build on,
+    /// or build on the fetched parent.
     ///
     /// The returned future borrows nothing from `self`, so it can move into the spawned prepare
     /// or propose task.
@@ -837,24 +842,30 @@ where
     }
 }
 
+/// The wrapper is the consensus engine's reporter, as it is its automaton and relay: it forwards
+/// every activity to marshal and first releases the state it keeps per round (certification
+/// gates, staged proposals, and sent marks). A finalization releases its round and the rounds
+/// below it. Any activity of a later epoch releases every earlier epoch, whose engine has been
+/// retired, which covers finalized progress that marshal imported while no engine reported it.
+/// The voter reports from the same task that requests the lock-in broadcast and certification,
+/// so pruning is ordered with both.
 impl<E, S, A, B, ES> Reporter for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>
-        + Reporter<Activity = Update<B>>,
+    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
-    type Activity = A::Activity;
+    type Activity = Activity<S, B::Digest>;
 
-    /// Relays a report to the underlying [`Application`] and cleans up old certification gate tasks.
-    fn report(&mut self, update: Self::Activity) -> Feedback {
-        // Clean up certification gate tasks for rounds <= the finalized round.
-        if let Update::Tip(round, _, _) = &update {
-            self.gates.retain_after(round);
-        }
-        self.application.report(update)
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        let retired = match &activity {
+            Activity::Finalization(finalization) => finalization.round(),
+            activity => Round::new(activity.epoch(), View::zero()),
+        };
+        self.gates.retain_after(&retired);
+        self.marshal.report(activity)
     }
 }
 
@@ -863,12 +874,16 @@ mod tests {
     use super::Deferred;
     use crate::{
         Automaton, CertifiableAutomaton, Relay,
-        marshal::mocks::{
-            harness::{
-                B, BLOCKS_PER_EPOCH, Ctx, NAMESPACE, NUM_VALIDATORS, S, StandardHarness,
-                TestHarness, V, default_leader, make_raw_block, setup_network_with_participants,
+        marshal::{
+            application::gates::Gates,
+            mocks::{
+                harness::{
+                    B, BLOCKS_PER_EPOCH, Ctx, D, NAMESPACE, NUM_VALIDATORS, S, StandardHarness,
+                    TestHarness, V, default_leader, make_raw_block,
+                    setup_network_with_participants,
+                },
+                verifying::{GatedVerifyingApp, MockVerifyingApp},
             },
-            verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
         simplex::{Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf},
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
@@ -1814,5 +1829,13 @@ mod tests {
                 },
             }
         });
+    }
+
+    impl Deferred<deterministic::Context, S, MockVerifyingApp<B, S>, B, FixedEpocher> {
+        /// Exposes the gates this wrapper prunes to the wrapper tests shared by the standard
+        /// variants.
+        pub(in crate::marshal::standard) const fn gates(&self) -> &Gates<D, B> {
+            &self.gates
+        }
     }
 }

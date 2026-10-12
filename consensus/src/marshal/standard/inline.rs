@@ -29,6 +29,11 @@
 //!
 //! # Usage
 //!
+//! Wrap your [`Application`] implementation with [`Inline::new`] and provide it to your
+//! consensus engine for the [`Automaton`], [`Relay`], and [`Reporter`]. As the reporter, the
+//! wrapper forwards consensus activity to marshal and releases the state it keeps for each round
+//! once consensus finalizes that round.
+//!
 //! ```rust,ignore
 //! let application = Inline::new(
 //!     context,
@@ -48,7 +53,6 @@
 use crate::{
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Handoff, Relay, Reporter,
     marshal::{
-        Update,
         ancestry::Ancestry,
         application::{
             build::{self, Resolved},
@@ -64,8 +68,11 @@ use crate::{
             },
         },
     },
-    simplex::{Plan, types::Context},
-    types::{Epocher, Round},
+    simplex::{
+        Plan,
+        types::{Activity, Context},
+    },
+    types::{Epocher, Round, View},
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::certificate::Scheme;
@@ -202,7 +209,7 @@ where
         let build_duration = Timed::new(build_histogram);
         let parent_fetch_histogram = context.histogram(
             "parent_fetch_duration",
-            "Histogram of time taken to fetch a parent block in propose, in seconds",
+            "Histogram of time taken to fetch a parent block in proposal, in seconds",
             Buckets::LOCAL,
         );
         let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
@@ -226,7 +233,8 @@ where
     }
 
     /// Runs the proposal checks for `consensus_context` and yields what the proposal path does
-    /// next: re-propose the epoch boundary block, skip the view, or build on the fetched parent.
+    /// next: re-propose the epoch boundary block, decline a parent the marshal cannot build on,
+    /// or build on the fetched parent.
     ///
     /// The returned future borrows nothing from `self`, so it can move into the spawned prepare
     /// or propose task.
@@ -566,12 +574,12 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        // `propose`/`verify` register an in-flight certification gate whose result resolves
-        // once the block's sync handle completes. Awaiting it here is the durability barrier
-        // for the finalize vote, and it lets the sync overlap consensus voting
-        // instead of freezing certify with a fresh fsync. A proposal still staged here was
-        // verified before the vote. Only its durable-sync handle is deferred, delivered
-        // through the staged ack.
+        // `prepare`, `propose`, and `verify` register an in-flight certification gate whose
+        // result resolves once the block's sync handle completes. Awaiting it here is the
+        // durability barrier for the finalize vote, and it lets the sync overlap consensus voting
+        // instead of freezing certify with a fresh fsync. A proposal still staged here is this
+        // node's own proposal, so `verified_deferred` stores it and defers only its durable-sync
+        // handle, which it delivers through the staged ack.
         let task = self.gates.claim(round, digest, |block, ack| {
             self.marshal.verified_deferred(round, block, ack)
         });
@@ -658,23 +666,30 @@ where
     }
 }
 
+/// The wrapper is the consensus engine's reporter, as it is its automaton and relay: it forwards
+/// every activity to marshal and first releases the state it keeps per round (certification
+/// gates, staged proposals, and sent marks). A finalization releases its round and the rounds
+/// below it. Any activity of a later epoch releases every earlier epoch, whose engine has been
+/// retired, which covers finalized progress that marshal imported while no engine reported it.
+/// The voter reports from the same task that requests the lock-in broadcast and certification,
+/// so pruning is ordered with both.
 impl<E, S, A, B, ES> Reporter for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>
-        + Reporter<Activity = Update<B>>,
+    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block,
     ES: Epocher,
 {
-    type Activity = A::Activity;
+    type Activity = Activity<S, B::Digest>;
 
-    /// Forwards consensus activity to the wrapped application reporter.
-    fn report(&mut self, update: Self::Activity) -> Feedback {
-        if let Update::Tip(tip_round, _, _) = &update {
-            self.gates.retain_after(tip_round);
-        }
-        self.application.report(update)
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        let retired = match &activity {
+            Activity::Finalization(finalization) => finalization.round(),
+            activity => Round::new(activity.epoch(), View::zero()),
+        };
+        self.gates.retain_after(&retired);
+        self.marshal.report(activity)
     }
 }
 
@@ -683,12 +698,16 @@ mod tests {
     use super::Inline;
     use crate::{
         Application, Automaton, Block, CertifiableAutomaton, Relay,
-        marshal::mocks::{
-            harness::{
-                B, BLOCKS_PER_EPOCH, Ctx, NAMESPACE, NUM_VALIDATORS, S, StandardHarness,
-                TestHarness, V, default_leader, make_raw_block, setup_network_with_participants,
+        marshal::{
+            application::gates::Gates,
+            mocks::{
+                harness::{
+                    B, BLOCKS_PER_EPOCH, Ctx, D, NAMESPACE, NUM_VALIDATORS, S, StandardHarness,
+                    TestHarness, V, default_leader, make_raw_block,
+                    setup_network_with_participants,
+                },
+                verifying::{GatedVerifyingApp, MockVerifyingApp},
             },
-            verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
         simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
         types::{Epoch, FixedEpocher, Height, Round, View},
@@ -1559,5 +1578,13 @@ mod tests {
                 },
             }
         });
+    }
+
+    impl Inline<deterministic::Context, S, MockVerifyingApp<B, S>, B, FixedEpocher> {
+        /// Exposes the gates this wrapper prunes to the wrapper tests shared by the standard
+        /// variants.
+        pub(in crate::marshal::standard) const fn gates(&self) -> &Gates<D, B> {
+            &self.gates
+        }
     }
 }

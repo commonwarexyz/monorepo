@@ -27,7 +27,7 @@ pub struct MockVerifyingApp<B, S> {
     /// The decision `prepare` attaches to a built block. `Wait` declines without building.
     handoff: Handoff<()>,
     /// Shared by clones so that only the first proposal build waits on the gate.
-    proposal_gate: Option<Arc<Mutex<Option<ProposalGate>>>>,
+    proposal_gate: Arc<Mutex<Option<ProposalGate>>>,
     /// Blocks for which `verify` returns false.
     pub reject: Option<fn(&B) -> bool>,
     _phantom: PhantomData<S>,
@@ -70,10 +70,7 @@ impl<B, S> MockVerifyingApp<B, S> {
     pub fn with_proposal_gate(mut self) -> (Self, oneshot::Receiver<()>, oneshot::Receiver<()>) {
         let (started, started_rx) = oneshot::channel();
         let (dropped, dropped_rx) = oneshot::channel();
-        self.proposal_gate = Some(Arc::new(Mutex::new(Some(ProposalGate {
-            started,
-            dropped,
-        }))));
+        self.proposal_gate = Arc::new(Mutex::new(Some(ProposalGate { started, dropped })));
         (self, started_rx, dropped_rx)
     }
 }
@@ -89,7 +86,7 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
             propose_result: None,
             verify_result: true,
             handoff: Handoff::Wait,
-            proposal_gate: None,
+            proposal_gate: Arc::default(),
             reject: None,
             _phantom: PhantomData,
         }
@@ -128,10 +125,7 @@ where
         _ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
     ) -> Option<Self::Block> {
-        let gate = self
-            .proposal_gate
-            .as_ref()
-            .and_then(|gate| gate.lock().take());
+        let gate = self.proposal_gate.lock().take();
         if let Some(gate) = gate {
             // Cancelling this future drops the sender, which errors the receiver.
             let _dropped = gate.dropped;

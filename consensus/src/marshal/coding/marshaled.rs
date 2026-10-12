@@ -35,7 +35,9 @@
 //! # Usage
 //!
 //! Wrap your [`Application`] implementation with [`Marshaled::new`] and provide it to your
-//! consensus engine for the [`Automaton`] and [`Relay`]. The wrapper handles all epoch logic transparently.
+//! consensus engine for the [`Automaton`], [`Relay`], and [`Reporter`]. As the reporter, the
+//! wrapper forwards consensus activity to marshal and releases the state it keeps for each round
+//! once consensus finalizes that round. The wrapper handles all epoch logic transparently.
 //!
 //! ```rust,ignore
 //! let cfg = MarshaledConfig {
@@ -83,7 +85,6 @@ use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
     Heightable, Relay, Reporter,
     marshal::{
-        Update,
         ancestry::Ancestry,
         application::{
             build::{self, Resolved},
@@ -101,7 +102,11 @@ use crate::{
         },
         core,
     },
-    simplex::{Plan, scheme::Scheme, types::Context},
+    simplex::{
+        Plan,
+        scheme::Scheme,
+        types::{Activity, Context},
+    },
     types::{Epoch, Epocher, Round, View, coding::Commitment},
 };
 use commonware_actor::Feedback;
@@ -651,7 +656,8 @@ where
     }
 
     /// Runs the proposal checks for `consensus_context` and yields what the proposal path does
-    /// next: re-propose the epoch boundary block, skip the view, or build on the fetched parent.
+    /// next: re-propose the epoch boundary block, decline a parent the marshal cannot build on,
+    /// or build on the fetched parent.
     ///
     /// `parent_fallback` decides how a parent missing locally is acquired. A propose request
     /// fetches it by round. A prepare request builds on a parent that only our own shard vote may
@@ -1064,7 +1070,7 @@ where
     /// Prepares a term-start proposal on an uncertified parent.
     ///
     /// Runs the same checks as [`Self::propose`], in the same order, except that a parent missing
-    /// locally is awaited rather than fetched, and hands the application the fetched ancestry.
+    /// locally is awaited rather than fetched, and hands the application the parent's ancestry.
     /// When the checks find the epoch boundary block, the marshal re-proposes it without the
     /// application and answers [`Handoff::Stage`]. A round without a scheme answers
     /// [`Handoff::Wait`].
@@ -1143,7 +1149,7 @@ where
     type Plan = Plan<Self::PublicKey>;
 
     fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) -> Feedback {
-        // Coding variant does not support targeted forwarding; peers reconstruct
+        // Coding variant does not support targeted forwarding. Peers reconstruct
         // blocks from erasure-coded shards.
         if matches!(plan, Plan::Forward { .. }) {
             return Feedback::Ok;
@@ -1152,6 +1158,13 @@ where
     }
 }
 
+/// The wrapper is the consensus engine's reporter, as it is its automaton and relay: it forwards
+/// every activity to marshal and first releases the state it keeps per round (certification
+/// gates, staged proposals, and sent marks). A finalization releases its round and the rounds
+/// below it. Any activity of a later epoch releases every earlier epoch, whose engine has been
+/// retired, which covers finalized progress that marshal imported while no engine reported it.
+/// The voter reports from the same task that requests the lock-in broadcast and certification,
+/// so pruning is ordered with both.
 impl<E, A, B, C, H, Z, S, ES> Reporter for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
@@ -1159,7 +1172,7 @@ where
             E,
             Block = B,
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
-        > + Reporter<Activity = Update<B>>,
+        >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
@@ -1167,14 +1180,57 @@ where
     S: Strategy,
     ES: Epocher,
 {
-    type Activity = A::Activity;
+    type Activity = Activity<Z::Scheme, Commitment<B, C, H>>;
 
-    /// Relays a report to the underlying [`Application`] and cleans up old certification gate data.
-    fn report(&mut self, update: Self::Activity) -> Feedback {
-        // Clean up certification gate tasks and contexts for rounds <= the finalized round.
-        if let Update::Tip(round, _, _) = &update {
-            self.gates.retain_after(round);
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        let retired = match &activity {
+            Activity::Finalization(finalization) => finalization.round(),
+            activity => Round::new(activity.epoch(), View::zero()),
+        };
+        self.gates.retain_after(&retired);
+        self.marshal.report(activity)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Marshaled;
+    use crate::{
+        marshal::{
+            application::gates::Gates,
+            coding::types::CodedBlock,
+            mocks::{
+                harness::{CodingB, P, S},
+                verifying::MockVerifyingApp,
+            },
+        },
+        types::{FixedEpocher, coding::Commitment},
+    };
+    use commonware_coding::ReedSolomon;
+    use commonware_cryptography::sha256::Sha256;
+    use commonware_parallel::Sequential;
+    use commonware_runtime::deterministic;
+
+    type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
+    type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
+
+    impl
+        Marshaled<
+            deterministic::Context,
+            MockVerifyingApp<CodingB, S>,
+            CodingB,
+            ReedSolomon<Sha256>,
+            Sha256,
+            P,
+            Sequential,
+            FixedEpocher,
+        >
+    {
+        /// Exposes the gates this wrapper prunes to the tests of the coding variant.
+        pub(in crate::marshal::coding) const fn gates(
+            &self,
+        ) -> &Gates<TestCommitment, TestCodedBlock> {
+            &self.gates
         }
-        self.application.report(update)
     }
 }

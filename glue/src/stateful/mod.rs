@@ -17,6 +17,10 @@
 //!   [`sync_targets`](Application::sync_targets). A mismatched proposal panics, and a mismatched
 //!   verification votes `false`.
 //!
+//! Batches are forked, and missing parent state recovered, before [`Application::prepare`] is
+//! called, even when it keeps its default decline. An uncached parent can be replayed while its
+//! own verification is still pending, and the replayed state does not replace that verification.
+//!
 //! Upon finalization of block `b`:
 //!
 //! * Reject verifications on competing branches and restart those that cannot continue across
@@ -126,7 +130,7 @@ pub mod probe;
 #[cfg(test)]
 mod tests;
 
-/// The output of a successful [`Application::propose`] call.
+/// The output of a successful [`Application::prepare`] or [`Application::propose`] call.
 pub struct Proposed<A: Application<E>, E: Rng + Spawner + Metrics + Clock> {
     /// The block built by the application.
     pub block: A::Block,
@@ -135,7 +139,7 @@ pub struct Proposed<A: Application<E>, E: Rng + Spawner + Metrics + Clock> {
     pub merkleized: <A::Databases as DatabaseSet<E>>::Merkleized,
 }
 
-/// Per-proposal input passed to [`Application::propose`].
+/// Per-proposal input passed to [`Application::prepare`] and [`Application::propose`].
 pub struct Input<Upstream, Provider> {
     /// Input passed to [`Stateful`] by its caller.
     pub upstream: Upstream,
@@ -178,8 +182,8 @@ where
     /// Supplies data for proposals, such as transactions from a mempool. Must be cheap to clone.
     type Provider: Send + Clone;
 
-    /// Per-proposal input from the caller of [`Stateful`], passed to [`propose`](Self::propose)
-    /// with the [`Provider`](Self::Provider) as an [`Input`].
+    /// Per-proposal input from the caller of [`Stateful`], passed to [`prepare`](Self::prepare)
+    /// and [`propose`](Self::propose) with the [`Provider`](Self::Provider) as an [`Input`].
     ///
     /// Use `()` when callers supply no input.
     type Input: Send;

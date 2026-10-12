@@ -93,8 +93,8 @@ mod tests {
             elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{
-                Certificate, Finalization, Notarization, Notarize, Nullification, Nullify,
-                Proposal, Vote,
+                Activity, Certificate, Finalization, Notarization, Notarize, Nullification,
+                Nullify, Proposal, Vote,
             },
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
@@ -2162,6 +2162,13 @@ mod tests {
             }
         }
 
+        const fn gates(&self) -> &Gates<D, B> {
+            match self {
+                Self::Inline(inline) => inline.gates(),
+                Self::Deferred(deferred) => deferred.gates(),
+            }
+        }
+
         async fn propose(&mut self, context: Ctx) -> oneshot::Receiver<D> {
             match self {
                 Self::Inline(inline) => inline.propose(context).await,
@@ -2226,6 +2233,17 @@ mod tests {
             match self {
                 Self::Inline(inline) => inline.broadcast(digest, plan),
                 Self::Deferred(deferred) => deferred.broadcast(digest, plan),
+            }
+        }
+    }
+
+    impl Reporter for Wrapper {
+        type Activity = Activity<S, D>;
+
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
+            match self {
+                Self::Inline(inline) => inline.report(activity),
+                Self::Deferred(deferred) => deferred.report(activity),
             }
         }
     }
@@ -2494,8 +2512,8 @@ mod tests {
                     elector: RoundRobin::<Sha256>::default(),
                     blocker: oracle.control(victim.clone()),
                     automaton: wrapper.clone(),
-                    relay: wrapper,
-                    reporter: marshal,
+                    relay: wrapper.clone(),
+                    reporter: wrapper,
                     strategy: Sequential,
                     partition: format!("scripted-equivocation-{kind:?}"),
                     mailbox_size: NZUsize!(128),
@@ -2608,6 +2626,280 @@ mod tests {
     #[test_traced("WARN")]
     fn test_deferred_scripted_byzantine_parent_equivocation() {
         scripted_byzantine_parent_equivocation(WrapperKind::Deferred);
+    }
+
+    /// Verifies a block below a round that consensus then finalizes, and returns a `kind`
+    /// wrapper's certification of that block, requested after the finalization report prunes
+    /// the block's gate.
+    ///
+    /// The block is an ancestor of the finalized block, or with `fork` a block at a later view
+    /// on a branch the finalization did not choose.
+    fn certify_below_finalized_round(kind: WrapperKind, fork: bool) -> bool {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let reporter = setup.application;
+
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+            let mut wrapper = Wrapper::new(
+                kind,
+                context.child("wrapper"),
+                MockVerifyingApp::new(),
+                marshal.clone(),
+            );
+
+            // genesis <- parent(v1) <- a(v5) <- c(v10). The target is a itself, or with `fork`
+            // a sibling of a at view 6.
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent = B::new::<Sha256>(
+                Ctx {
+                    round: parent_round,
+                    leader: default_leader(),
+                    parent: (View::zero(), genesis.digest()),
+                },
+                genesis.digest(),
+                Height::new(1),
+                100,
+            );
+            let parent_digest = parent.digest();
+            assert!(marshal.verified(parent_round, parent).await);
+
+            let (target_view, target_timestamp) = if fork { (6, 350) } else { (5, 200) };
+            let target_round = Round::new(Epoch::zero(), View::new(target_view));
+            let target_ctx = Ctx {
+                round: target_round,
+                leader: me.clone(),
+                parent: (View::new(1), parent_digest),
+            };
+            let target = B::new::<Sha256>(
+                target_ctx.clone(),
+                parent_digest,
+                Height::new(2),
+                target_timestamp,
+            );
+            let target_digest = target.digest();
+            assert!(marshal.verified(target_round, target.clone()).await);
+
+            // The finalized chain runs through block a at view 5.
+            let a_round = Round::new(Epoch::zero(), View::new(5));
+            let (a_digest, a_block) = if fork {
+                let a = B::new::<Sha256>(
+                    Ctx {
+                        round: a_round,
+                        leader: me.clone(),
+                        parent: (View::new(1), parent_digest),
+                    },
+                    parent_digest,
+                    Height::new(2),
+                    200,
+                );
+                (a.digest(), a)
+            } else {
+                (target_digest, target.clone())
+            };
+            assert!(marshal.verified(a_round, a_block).await);
+            let c_round = Round::new(Epoch::zero(), View::new(10));
+            let c = B::new::<Sha256>(
+                Ctx {
+                    round: c_round,
+                    leader: me.clone(),
+                    parent: (View::new(5), a_digest),
+                },
+                a_digest,
+                Height::new(3),
+                300,
+            );
+            let c_digest = c.digest();
+            assert!(marshal.verified(c_round, c).await);
+
+            // Verification stages the certification gate for the target.
+            assert!(
+                wrapper
+                    .verify(target_ctx, target_digest)
+                    .await
+                    .await
+                    .unwrap()
+            );
+
+            // Consensus reports the finalization of c to the wrapper, which prunes the target's
+            // gate and forwards the report to marshal.
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(c_round, View::new(5), c_digest),
+                &schemes,
+                QUORUM,
+            );
+            wrapper.report(Activity::Finalization(finalization));
+            assert!(
+                wrapper.gates().take(target_round, target_digest).is_none(),
+                "{kind:?}: the finalization report must prune the gate at or below its round"
+            );
+
+            // Certification after the prune finds no gate, once marshal has finalized c.
+            while reporter.tip() != Some((Height::new(3), c_digest)) {
+                reschedule().await;
+            }
+            wrapper
+                .certify(target_round, target_digest)
+                .await
+                .await
+                .expect("certify result")
+        })
+    }
+
+    /// A finalization report prunes the wrapper's certification gates at or below the finalized
+    /// round. Certifying an ancestor of the finalized block afterwards finds no gate and must
+    /// still resolve true by recovering and persisting the block.
+    #[test_traced("INFO")]
+    fn test_inline_certify_ancestor_below_finalized_round_after_prune() {
+        assert!(
+            certify_below_finalized_round(WrapperKind::Inline, false),
+            "certify of an ancestor below the finalized round must still resolve true"
+        );
+    }
+
+    /// A finalization report prunes the wrapper's certification gates at or below the finalized
+    /// round. Certifying an ancestor of the finalized block afterwards finds no gate and must
+    /// still resolve true by verifying the block against its embedded context.
+    #[test_traced("INFO")]
+    fn test_deferred_certify_ancestor_below_finalized_round_after_prune() {
+        assert!(
+            certify_below_finalized_round(WrapperKind::Deferred, false),
+            "certify of an ancestor below the finalized round must still resolve true"
+        );
+    }
+
+    /// A block on a branch the finalization did not choose stays available locally, so
+    /// certifying it after the finalization report prunes its gate still resolves true.
+    #[test_traced("INFO")]
+    fn test_inline_certify_fork_below_finalized_round_after_prune() {
+        assert!(certify_below_finalized_round(WrapperKind::Inline, true));
+    }
+
+    /// A block on a branch the finalization did not choose stays available locally, so
+    /// certifying it after the finalization report prunes its gate still resolves true.
+    #[test_traced("INFO")]
+    fn test_deferred_certify_fork_below_finalized_round_after_prune() {
+        assert!(certify_below_finalized_round(WrapperKind::Deferred, true));
+    }
+
+    /// Stages a proposal, which also registers its certification gate, at view 5 of epoch 0
+    /// and at `notarized`, has a `kind` wrapper report a notarization at `notarized`, and
+    /// returns whether the proposal and gate at view 5 of epoch 0 remain.
+    fn epoch_zero_entries_remain(kind: WrapperKind, notarized: Round) -> bool {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let setup = StandardHarness::setup_validator(
+                context.child("validator"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let mut wrapper = Wrapper::new(
+                kind,
+                context.child("wrapper"),
+                MockVerifyingApp::new(),
+                setup.mailbox,
+            );
+
+            let earlier_round = Round::new(Epoch::zero(), View::new(5));
+            let earlier = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
+            let earlier_digest = earlier.digest();
+            stage_block(&context, wrapper.gates(), earlier_round, earlier).await;
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(2), 200);
+            let digest = block.digest();
+            stage_block(&context, wrapper.gates(), notarized, block).await;
+
+            let notarization = StandardHarness::make_notarization(
+                Proposal::new(notarized, View::zero(), digest),
+                &schemes,
+                QUORUM,
+            );
+            wrapper.report(Activity::Notarization(notarization));
+
+            // Certification of the notarized round follows its notarization, so the report
+            // must keep both of its entries.
+            let gates = wrapper.gates();
+            assert!(
+                gates.take(notarized, digest).is_some(),
+                "{kind:?}: the notarized round must keep its gate"
+            );
+            assert!(
+                gates.take_staged(notarized, digest).is_some(),
+                "{kind:?}: the notarized round must keep its proposal"
+            );
+            let gate = gates.take(earlier_round, earlier_digest).is_some();
+            let staged = gates.take_staged(earlier_round, earlier_digest).is_some();
+            assert_eq!(
+                gate, staged,
+                "{kind:?}: a report must keep or release a round's gate and proposal together"
+            );
+            gate
+        })
+    }
+
+    /// An activity of a later epoch shows that the engine of every earlier epoch was retired,
+    /// so reporting it releases the gates and proposals of earlier epochs without waiting for
+    /// a finalization.
+    #[test_traced("WARN")]
+    fn test_inline_later_epoch_activity_releases_earlier_epoch() {
+        let notarized = Round::new(Epoch::new(1), View::new(1));
+        assert!(!epoch_zero_entries_remain(WrapperKind::Inline, notarized));
+    }
+
+    /// An activity of a later epoch shows that the engine of every earlier epoch was retired,
+    /// so reporting it releases the gates and proposals of earlier epochs without waiting for
+    /// a finalization.
+    #[test_traced("WARN")]
+    fn test_deferred_later_epoch_activity_releases_earlier_epoch() {
+        let notarized = Round::new(Epoch::new(1), View::new(1));
+        assert!(!epoch_zero_entries_remain(WrapperKind::Deferred, notarized));
+    }
+
+    /// Within an epoch only a finalization prunes, so a notarization at a later view keeps
+    /// the gates and proposals of earlier views.
+    #[test_traced("WARN")]
+    fn test_inline_same_epoch_activity_keeps_gates() {
+        let notarized = Round::new(Epoch::zero(), View::new(7));
+        assert!(epoch_zero_entries_remain(WrapperKind::Inline, notarized));
+    }
+
+    /// Within an epoch only a finalization prunes, so a notarization at a later view keeps
+    /// the gates and proposals of earlier views.
+    #[test_traced("WARN")]
+    fn test_deferred_same_epoch_activity_keeps_gates() {
+        let notarized = Round::new(Epoch::zero(), View::new(7));
+        assert!(epoch_zero_entries_remain(WrapperKind::Deferred, notarized));
     }
 
     #[test_traced("WARN")]
@@ -10537,10 +10829,9 @@ mod tests {
             // The early relay sends the candidate and keeps it staged, unstored.
             let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Prepare { round });
             assert!(matches!(feedback, Feedback::Ok));
-            wait_until(&context, Duration::from_secs(5), "early send", || {
-                !buffer.sends.lock().is_empty()
-            })
-            .await;
+            while buffer.sends().is_empty() {
+                reschedule().await;
+            }
             assert_eq!(buffer.sends().len(), 1, "early relay must send once");
             assert!(
                 mailbox.get_verified(round).await.is_none(),
@@ -10684,13 +10975,9 @@ mod tests {
                     wrapper.broadcast(digest, Plan::Prepare { round }),
                     Feedback::Ok
                 ));
-                wait_until(
-                    &context,
-                    Duration::from_secs(5),
-                    "early boundary send",
-                    || !buffer.sends().is_empty(),
-                )
-                .await;
+                while buffer.sends().is_empty() {
+                    reschedule().await;
+                }
                 assert_eq!(buffer.sends().len(), 1);
                 assert!(
                     marshal.get_verified(round).await.is_none(),
@@ -11041,13 +11328,15 @@ mod tests {
         });
     }
 
-    /// Which of the two concurrent steps completes first.
+    /// The outcome of the concurrent handoff build and parent certification.
     #[derive(Clone, Copy, Debug)]
-    enum First {
+    enum Pipeline {
         /// The parent certifies while the handoff build is still running.
         Certification,
         /// The handoff build completes while the parent is still uncertified.
         Build,
+        /// The completed handoff is abandoned and a replacement finalizes.
+        Abandon,
     }
 
     /// The victim's application. Its first verification (the parent's) and its single handoff
@@ -11122,9 +11411,9 @@ mod tests {
         Vote::decode(message).unwrap()
     }
 
-    /// A handoff build that outlives or precedes its parent's certification is
-    /// voted for after that certification and is never rebuilt.
-    fn retained_pipeline_handoff(first: First) {
+    /// A held handoff votes only after parent certification and releases its staging
+    /// resources after a replacement finalizes.
+    fn pipeline_handoff(outcome: Pipeline) {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
             // Only the victim runs marshal and consensus. The peer supplies votes and certificates.
             let Fixture {
@@ -11140,11 +11429,14 @@ mod tests {
                 participants.clone(),
             )
             .await;
-            let setup = StandardHarness::setup_validator(
+            let reporter = Application::<B>::default();
+            let setup = StandardHarness::setup_validator_with(
                 context.child("marshal"),
                 &mut oracle,
                 victim.clone(),
                 ConstantProvider::new(schemes[3].clone()),
+                NZUsize!(1),
+                reporter.clone(),
             )
             .await;
             let mut marshal = setup.mailbox;
@@ -11248,10 +11540,10 @@ mod tests {
                     elector: RoundRobin::<Sha256>::default(),
                     blocker: oracle.control(victim.clone()),
                     automaton: wrapper.clone(),
-                    relay: wrapper,
-                    reporter: marshal.clone(),
+                    relay: wrapper.clone(),
+                    reporter: wrapper.clone(),
                     strategy: Sequential,
-                    partition: format!("retained-pipeline-{first:?}"),
+                    partition: format!("pipeline-{outcome:?}"),
                     mailbox_size: NZUsize!(128),
                     epoch: Epoch::zero(),
                     floor: simplex::config::Floor::Finalized(floor_finalization),
@@ -11271,7 +11563,7 @@ mod tests {
                     track_historical_votes: false,
                 },
             );
-            let _engine = engine.start(vote_network, certificate_network, resolver_network);
+            let engine = engine.start(vote_network, certificate_network, resolver_network);
 
             // Start parent verification before delivering its notarization.
             let parent = Proposal::new(parent_round, View::new(1), parent_digest);
@@ -11291,8 +11583,105 @@ mod tests {
             let built_context = build_rx.await.expect("handoff build should start");
             assert_eq!(built_context, expected_context);
 
-            match first {
-                First::Certification => {
+            match outcome {
+                Pipeline::Abandon => {
+                    build_release_tx.send_lossy(());
+                    completed_rx.await.unwrap();
+
+                    // This block exists in the buffer only after the real early relay runs.
+                    let relayed = setup.extra.subscribe(digest).await.unwrap();
+                    assert_eq!(relayed.digest(), digest);
+                    drop(relayed);
+                    assert!(marshal.get_verified(round).await.is_none());
+                    assert_eq!(
+                        commonware_runtime::telemetry::metrics::count_running_tasks(
+                            &context,
+                            "wrapper_prepare",
+                        ),
+                        1,
+                    );
+
+                    // The other three validators can time out view 3 while this node still
+                    // verifies view 2. No validator has voted for the held candidate.
+                    let nullifies: Vec<_> = schemes[..QUORUM as usize]
+                        .iter()
+                        .map(|scheme| Nullify::sign::<D>(scheme, round).unwrap())
+                        .collect();
+                    let nullification = Nullification::from_nullifies(
+                        &schemes[0],
+                        non_empty![@&nullifies],
+                        &Sequential,
+                    )
+                    .unwrap();
+                    certificate_sender.send(
+                        Recipients::One(victim.clone()),
+                        Certificate::<S, D>::Nullification(nullification).encode(),
+                        true,
+                    );
+                    while !context.encode().lines().any(|line| {
+                        line.contains("handoff_abandoned_total{")
+                            && line.contains("reason=\"ViewExit\"")
+                            && line
+                                .rsplit(' ')
+                                .next()
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .is_some_and(|count| count > 0)
+                    }) {
+                        reschedule().await;
+                    }
+
+                    // The replacement extends the same valid parent at view 4. Its quorum
+                    // excludes this node, whose application verification is still pending.
+                    let replacement_round = Round::new(Epoch::zero(), View::new(4));
+                    let replacement = B::new::<Sha256>(
+                        Ctx {
+                            round: replacement_round,
+                            leader: participants[0].clone(),
+                            parent: (View::new(2), parent_digest),
+                        },
+                        parent_digest,
+                        Height::new(3),
+                        400,
+                    );
+                    let replacement_digest = replacement.digest();
+                    assert!(
+                        setup
+                            .extra
+                            .broadcast(Recipients::Some(vec![]), replacement)
+                            .accepted()
+                    );
+                    let finalization = StandardHarness::make_finalization(
+                        Proposal::new(replacement_round, View::new(2), replacement_digest),
+                        &schemes,
+                        QUORUM,
+                    );
+                    certificate_sender.send(
+                        Recipients::One(victim.clone()),
+                        Certificate::<S, D>::Finalization(finalization).encode(),
+                        true,
+                    );
+                    while reporter.tip() != Some((Height::new(3), replacement_digest)) {
+                        reschedule().await;
+                    }
+                    assert!(marshal.get_verified(round).await.is_none());
+                    assert_eq!(prepares.load(Ordering::SeqCst), 1);
+
+                    // Match the orchestrator's engine retirement while its wrapper remains
+                    // alive. The wrapper context belongs to the enclosing validator task.
+                    verify_release_tx.send_lossy(());
+                    engine.abort();
+                    let _ = engine.await;
+
+                    while commonware_runtime::telemetry::metrics::count_running_tasks(
+                        &context,
+                        "wrapper_prepare",
+                    ) != 0
+                    {
+                        reschedule().await;
+                    }
+                    return;
+                }
+                Pipeline::Certification => {
                     verify_release_tx.send_lossy(());
                     loop {
                         if let Vote::Finalize(vote) = next_vote(&mut vote_receiver, &victim).await
@@ -11304,7 +11693,7 @@ mod tests {
                     build_release_tx.send_lossy(());
                     completed_rx.await.unwrap();
                 }
-                First::Build => {
+                Pipeline::Build => {
                     build_release_tx.send_lossy(());
                     completed_rx.await.unwrap();
 
@@ -11366,11 +11755,16 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_pipelined_handoff_retains_completed_build_until_parent_certification() {
-        retained_pipeline_handoff(First::Build);
+        pipeline_handoff(Pipeline::Build);
     }
 
     #[test_traced("WARN")]
     fn test_pipelined_handoff_retains_build_across_parent_certification() {
-        retained_pipeline_handoff(First::Certification);
+        pipeline_handoff(Pipeline::Certification);
+    }
+
+    #[test_traced("WARN")]
+    fn test_pipelined_handoff_releases_abandoned_build_after_finalization() {
+        pipeline_handoff(Pipeline::Abandon);
     }
 }

@@ -232,7 +232,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// [`Automaton::propose`].
         ///
         /// With [`Handoff::Wait`], consensus issues an ordinary [`Automaton::propose`] for the same
-        /// context once the parent certifies, unless it has already voted to nullify this view.
+        /// context once the parent certifies, unless it has already voted to nullify this view or
+        /// has left it.
         ///
         /// Consensus requests the relay of a [`Handoff::Stage`] candidate as soon as it arrives.
         ///
@@ -241,7 +242,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// A replacement parent can supersede the request's parent before it certifies. Consensus
         /// then drops the request and can request a proposal on the replacement, unless it has
-        /// voted to nullify this view.
+        /// voted to nullify this view or has left it.
         ///
         /// Return the receiver promptly and do any work behind it. Parent certification does not
         /// cancel this request, and while the response is pending, consensus requests no other
@@ -397,22 +398,23 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// The block type produced by the application's builder.
         type Block: Block;
 
-        /// Per-proposal input handed to [`propose`](Self::propose). Applications
-        /// that need no input set this to `()`.
+        /// Per-proposal input handed to [`prepare`](Self::prepare) and
+        /// [`propose`](Self::propose). Applications that need no input set this to `()`.
         type Input: Send;
 
         /// Build a block on a parent that has not yet certified, or decline with
         /// [`Handoff::Wait`].
         ///
         /// The marshal calls this in place of [`Self::propose`] for a term-start proposal whose
-        /// parent is uncertified, with the same fetched `ancestry` and after the same checks. It
-        /// re-proposes the epoch boundary block and skips a parent it cannot build on without
-        /// calling this method. The default declines.
+        /// parent is uncertified, with the same `ancestry` and after the same checks. It
+        /// re-proposes the epoch boundary block and declines a parent it cannot build on with
+        /// [`Handoff::Wait`], in both cases without calling this method. The default declines.
         ///
         /// With [`Handoff::Vote`] or [`Handoff::Stage`], the marshal keeps the returned block for
         /// relay as it would a proposal. With [`Handoff::Wait`], consensus waits for parent
-        /// certification before requesting [`Self::propose`] for the same context. The decision is
-        /// final for the request.
+        /// certification before requesting [`Self::propose`] for the same context, unless it has
+        /// voted to nullify the context's view or has left it. The decision is final for the
+        /// request.
         ///
         /// With deferred or coded verification, a prepared build can start before this node
         /// has verified the parent's contents. The parent may later fail certification,
@@ -421,9 +423,9 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Parent certification does not cancel a prepared build. Consensus cancels it once the
         /// parent can no longer be built on before it certifies, as after a nullification in the
         /// parent's term, or once it votes to nullify the view it is waiting in, at or below the
-        /// parent. Unless it has voted to nullify the proposal's view, it then requests an ordinary
-        /// proposal for the same context if the parent certifies, or can request a proposal on a
-        /// replacement parent once one is selectable.
+        /// parent. Unless it has voted to nullify the proposal's view or has left it, it then
+        /// requests an ordinary proposal for the same context if the parent certifies, or can
+        /// request a proposal on a replacement parent once one is selectable.
         ///
         /// [`Handoff::Vote`] trusts the outgoing consensus leader not to equivocate and to
         /// complete its term (see [`Handoff::Vote`]). The context names the parent by view and

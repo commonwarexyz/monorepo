@@ -203,7 +203,7 @@ where
 
     /// Spawns the actor and returns its handle.
     ///
-    /// With a persisted floor, the actor runs state sync first: proposals return `None` and
+    /// With a persisted floor, the actor runs state sync first: proposals decline and
     /// verifications wait until it completes. Otherwise it recovers from marshal before handling
     /// any message. See [Startup](crate::stateful#startup).
     pub fn start(mut self) -> Handle<()> {
@@ -418,35 +418,10 @@ mod tests {
         (mailbox, stateful.start(), marshal.guards)
     }
 
-    /// A build that yields no block declines.
+    /// An application that answers [`Handoff::Wait`] declines, even when it would build an
+    /// ordinary proposal.
     #[test]
-    fn mailbox_prepare_declines_without_block() {
-        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let (mut mailbox, handle, _guards) =
-                stateful_with(&context, TestApp::with_handoff(Handoff::Vote(()))).await;
-            let block = TestBlock::new(1, 1);
-            let genesis = TestBlock::new(0, 0);
-            assert_eq!(
-                mailbox
-                    .prepare(
-                        (context.child("vote"), block.context()),
-                        ancestry::from_iter([Arc::new(genesis)]),
-                        (),
-                    )
-                    .await
-                    .map(|_| ()),
-                Handoff::Wait,
-                "a build that yields no block declines"
-            );
-            handle.abort();
-            let _ = handle.await;
-        });
-    }
-
-    /// The default [`Application::prepare`](crate::stateful::Application::prepare) declines,
-    /// even for an application that would build an ordinary proposal.
-    #[test]
-    fn mailbox_prepare_declines_by_default() {
+    fn mailbox_prepare_declines_on_wait() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let child = TestBlock::child(&genesis, 1);
@@ -455,14 +430,14 @@ mod tests {
             assert_eq!(
                 mailbox
                     .prepare(
-                        (context.child("default"), child.context()),
+                        (context.child("wait"), child.context()),
                         ancestry::from_iter([Arc::new(genesis)]),
                         (),
                     )
                     .await
                     .map(|_| ()),
                 Handoff::Wait,
-                "the default decision declines"
+                "a Wait decision declines"
             );
             handle.abort();
             let _ = handle.await;

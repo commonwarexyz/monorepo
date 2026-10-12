@@ -1,7 +1,7 @@
 use crate::dkg::{
     ReshareBlock,
     network::Directory,
-    reshare::{EpochInfoResponse, LogReservation, Mailbox},
+    reshare::{EpochInfoResponse, Mailbox},
     types::Payload,
 };
 use commonware_consensus::{
@@ -87,58 +87,6 @@ where
     fn phase(&self, height: Height) -> Option<EpochPhase> {
         self.epocher.containing(height).map(|info| info.phase())
     }
-
-    /// Selects the reshare payload for the block that extends `ancestry`, with the dealer-log
-    /// reservation it was taken from.
-    ///
-    /// Returns `None` when no block may be proposed on this ancestry: the parent is missing, or
-    /// the final block's epoch info is not available. Records the height, phase, and payload
-    /// presence on the current span.
-    async fn payload(
-        &mut self,
-        ancestry: impl Ancestry<B>,
-    ) -> Option<(
-        Option<Payload<V, C, B::Directory>>,
-        Option<LogReservation<B, V, C>>,
-    )> {
-        let Some(parent) = ancestry.peek() else {
-            debug!("proposal rejected: missing parent ancestry");
-            return None;
-        };
-        let height = parent.height().next();
-        let phase = self.phase(height);
-        let span = tracing::Span::current();
-        span.record("height", height.traced());
-        span.record("phase", field::debug(phase));
-
-        let (payload, log_reservation) = if self.final_block(height) {
-            match self.reshare.epoch_info(ancestry).await {
-                EpochInfoResponse::Available(payload) => (payload, None),
-                EpochInfoResponse::Pending => {
-                    debug!("proposal skipped: final block epoch info is not ready");
-                    return None;
-                }
-                EpochInfoResponse::Following => {
-                    debug!("proposal skipped: follower has no final block epoch info");
-                    return None;
-                }
-                EpochInfoResponse::Unavailable => {
-                    debug!("proposal skipped: final block epoch info is unavailable");
-                    return None;
-                }
-            }
-        } else if matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late)) {
-            let mut reservation = self.reshare.next_log(height).await;
-            let payload = reservation
-                .as_mut()
-                .and_then(|reservation| reservation.take_payload());
-            (payload, reservation)
-        } else {
-            (None, None)
-        };
-        span.record("has_payload", payload.is_some());
-        Some((payload, log_reservation))
-    }
 }
 
 impl<A, B, V, C> Clone for Application<A, B, V, C>
@@ -175,9 +123,10 @@ where
     /// Prepares a term-start block on an uncertified parent unless this node's dealer log is
     /// due at that height or the block is the epoch's final block.
     ///
-    /// The payload depends on the parent's height, so it is selected before the inner
-    /// application is asked, and an inner application that declines still costs that selection
-    /// (a dealer-log request from the midpoint on).
+    /// Whether the dealer log is due depends on the parent's height, so it is checked before the
+    /// inner application is asked, and an inner application that declines still costs that check
+    /// (a dealer-log request from the midpoint on). A forwarded request carries no reshare
+    /// payload.
     ///
     /// The final block is left to [`Self::propose`] without asking the inner application. Its
     /// epoch info is derived from the parent's ancestry, and deriving it on an uncertified parent
@@ -194,11 +143,7 @@ where
         name = "dkg.reshare.application.prepare",
         level = "info",
         skip_all,
-        fields(
-            height = field::Empty,
-            phase = field::Empty,
-            has_payload = field::Empty
-        )
+        fields(height = field::Empty, phase = field::Empty)
     )]
     async fn prepare(
         &mut self,
@@ -206,16 +151,22 @@ where
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
     ) -> Handoff<Self::Block> {
-        if ancestry
-            .peek()
-            .is_none_or(|parent| self.final_block(parent.height().next()))
-        {
-            return Handoff::Wait;
-        }
-        let Some((payload, log_reservation)) = self.payload(ancestry.clone()).await else {
+        let Some(parent) = ancestry.peek() else {
             return Handoff::Wait;
         };
-        if log_reservation.is_some() {
+        let height = parent.height().next();
+        if self.final_block(height) {
+            return Handoff::Wait;
+        }
+        let phase = self.phase(height);
+        let span = tracing::Span::current();
+        span.record("height", height.traced());
+        span.record("phase", field::debug(phase));
+
+        // Dropping a returned reservation releases the dealer log for later proposals.
+        if matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late))
+            && self.reshare.next_log(height).await.is_some()
+        {
             return Handoff::Wait;
         }
         self.inner
@@ -224,12 +175,17 @@ where
                 ancestry,
                 Input {
                     upstream: input,
-                    payload,
+                    payload: None,
                 },
             )
             .await
     }
 
+    /// Selects the reshare payload for the block that extends `ancestry`, with the dealer-log
+    /// reservation it was taken from, and asks the inner application to build on it.
+    ///
+    /// Returns `None` without asking the inner application when the parent is missing or the
+    /// final block's epoch info is not available.
     #[tracing::instrument(
         name = "dkg.reshare.application.propose",
         level = "info",
@@ -246,7 +202,42 @@ where
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
     ) -> Option<Self::Block> {
-        let (payload, log_reservation) = self.payload(ancestry.clone()).await?;
+        let Some(parent) = ancestry.peek() else {
+            debug!("proposal rejected: missing parent ancestry");
+            return None;
+        };
+        let height = parent.height().next();
+        let phase = self.phase(height);
+        let span = tracing::Span::current();
+        span.record("height", height.traced());
+        span.record("phase", field::debug(phase));
+
+        let (payload, log_reservation) = if self.final_block(height) {
+            match self.reshare.epoch_info(ancestry.clone()).await {
+                EpochInfoResponse::Available(payload) => (payload, None),
+                EpochInfoResponse::Pending => {
+                    debug!("proposal skipped: final block epoch info is not ready");
+                    return None;
+                }
+                EpochInfoResponse::Following => {
+                    debug!("proposal skipped: follower has no final block epoch info");
+                    return None;
+                }
+                EpochInfoResponse::Unavailable => {
+                    debug!("proposal skipped: final block epoch info is unavailable");
+                    return None;
+                }
+            }
+        } else if matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late)) {
+            let mut reservation = self.reshare.next_log(height).await;
+            let payload = reservation
+                .as_mut()
+                .and_then(|reservation| reservation.take_payload());
+            (payload, reservation)
+        } else {
+            (None, None)
+        };
+        span.record("has_payload", payload.is_some());
         let proposed = self
             .inner
             .propose(
@@ -397,7 +388,6 @@ mod tests {
         proposal_entered: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         verify_count: Arc<Mutex<usize>>,
         verify_result: bool,
-        /// The decision `prepare` attaches to a built block; `Wait` builds nothing.
         handoff: Handoff<()>,
     }
 

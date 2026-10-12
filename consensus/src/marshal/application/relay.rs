@@ -45,7 +45,7 @@ where
             marshal.prepared(round, block, Recipients::All)
         }
         Plan::Propose { round } => {
-            let Some(Staged { block, ack, sent }) = gates.take_staged(round, commitment) else {
+            let Some((Staged { block, ack }, sent)) = gates.take_staged(round, commitment) else {
                 debug!(%round, %commitment, "no staged proposal to relay");
                 return Feedback::Ok;
             };

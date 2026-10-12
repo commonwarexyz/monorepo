@@ -930,9 +930,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// The actor hands the block to the network before ingesting and persisting
     /// it, so the storage write never delays propagation. `ack` receives the
     /// durable-sync handle once the write's sync has started. The propose path
-    /// stages the block (and `ack`) at propose time and calls this when consensus
-    /// requests the broadcast via [`crate::Relay::broadcast`], awaiting durability
-    /// only at certification so the sync overlaps consensus voting.
+    /// stages the block (and `ack`) when a prepare or propose build completes and
+    /// calls this when consensus requests the broadcast via
+    /// [`crate::Relay::broadcast`], awaiting durability only at certification so
+    /// the sync overlaps consensus voting.
+    /// A block already sent through [`Self::prepared`] is persisted through
+    /// [`Self::verified_deferred`] instead.
     ///
     /// A dropped `ack` (the mailbox is closed) abandons the handshake.
     pub fn proposed(
@@ -973,9 +976,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Notifies the actor that a block should be durably persisted at `round`,
     /// delivering its durable-sync handle through `ack` without awaiting it.
     ///
-    /// Takes a sender rather than returning a receiver so certification can
-    /// deliver the handle into a handshake staged at propose time. A dropped
-    /// `ack` (the mailbox is closed) abandons the handshake.
+    /// Takes a sender rather than returning a receiver so certification or the
+    /// lock-in broadcast can deliver the handle into a handshake staged by a
+    /// prepare or propose build. A dropped `ack` (the mailbox is closed) abandons
+    /// the handshake.
     pub fn verified_deferred(
         &self,
         round: Round,

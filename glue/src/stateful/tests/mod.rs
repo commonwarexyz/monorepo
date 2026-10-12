@@ -1799,13 +1799,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             );
         }
 
-        let finalized_tip = &blocks[2];
-        let _ = deferred.report(marshal::Update::Tip(
-            finalized_tip.context.round,
-            finalized_tip.height,
-            finalized_tip.digest(),
-        ));
-        let mut reporter = deferred;
+        let mut reporter = stateful_mailbox;
         let mut finalizations = Vec::with_capacity(3);
         let (acknowledgement, waiter) = Exact::handle();
         let _ = reporter.report(marshal::Update::Block(
@@ -2252,7 +2246,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
 
         let mut deferred = Deferred::new(
             context.child("deferred"),
-            stateful_mailbox,
+            stateful_mailbox.clone(),
             marshal,
             FixedEpocher::new(EPOCH_LENGTH),
         );
@@ -2268,13 +2262,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             );
         }
 
-        let finalized_tip = &blocks[3];
-        let _ = deferred.report(marshal::Update::Tip(
-            finalized_tip.context.round,
-            finalized_tip.height,
-            finalized_tip.digest(),
-        ));
-        let mut reporter = deferred;
+        let mut reporter = stateful_mailbox;
         for block in &blocks[..3] {
             let (acknowledgement, waiter) = Exact::handle();
             let _ = reporter.report(marshal::Update::Block(
@@ -2305,7 +2293,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
         );
 
         let block = &blocks[4];
-        let mut certification = reporter.certify(block.context.round, block.digest()).await;
+        let mut certification = deferred.certify(block.context.round, block.digest()).await;
         first_started
             .await
             .expect("verification should start before pruning");

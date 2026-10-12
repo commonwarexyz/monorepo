@@ -1,14 +1,14 @@
 //! The prepare and propose tasks shared by the marshal application wrappers.
 //!
 //! Each task runs the wrapper's proposal checks and then re-proposes the epoch boundary block,
-//! skips the view, or builds on the fetched ancestry through the application. A built block is
-//! sealed into its staged form and staged for the relay broadcast and certification before
-//! consensus hears of it. The tasks differ in the application method they call and in their
-//! answer: a prepare answers a [`Handoff`] and declines with [`Handoff::Wait`], and a propose
-//! answers the digest and declines by closing the receiver.
+//! declines a parent the marshal cannot build on, or builds on the fetched ancestry through the
+//! application. A built block is sealed into its staged form and staged for the relay broadcast
+//! and certification before consensus hears of it. The tasks differ in the application method
+//! they call and in their answer: a prepare answers a [`Handoff`] and declines with
+//! [`Handoff::Wait`], and a propose answers the digest and declines by closing the receiver.
 
 use crate::{
-    Application, Handoff, Roundable as _, Viewable,
+    Application, Handoff,
     marshal::{ancestry::Ancestry, application::gates::Gates},
     simplex::types::Context,
 };
@@ -33,9 +33,6 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
     Build(A, Timer, M),
 }
 
-/// The staging log name of a re-proposed epoch boundary block.
-pub(crate) const BOUNDARY_BLOCK: &str = "re-proposed boundary block";
-
 /// Answers a prepare request for `consensus_context` from a task spawned from `context` and
 /// instrumented with `span`.
 ///
@@ -47,11 +44,11 @@ pub(crate) const BOUNDARY_BLOCK: &str = "re-proposed boundary block";
 /// application's decision. The block is staged before its digest is sent. Dropping the receiver
 /// cancels the wait for the parent and the build.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare<E, A, D, S, N, Fut, M>(
+pub(crate) fn prepare<E, A, D, P, S, N, Fut, M>(
     context: &E,
     application: &A,
     gates: Gates<D, S>,
-    consensus_context: A::Context,
+    consensus_context: Context<D, P>,
     checks: Fut,
     span: Span,
     build_span: impl FnOnce() -> Span + Send + 'static,
@@ -59,9 +56,9 @@ pub(crate) fn prepare<E, A, D, S, N, Fut, M>(
 ) -> oneshot::Receiver<Handoff<D>>
 where
     E: Rng + Clock + Spawner + Metrics,
-    A: Application<E, Input = ()>,
-    A::Context: Viewable + Send + 'static,
+    A: Application<E, Context = Context<D, P>, Input = ()>,
     D: Digest,
+    P: PublicKey,
     S: Send + Sync + 'static,
     N: Ancestry<A::Block>,
     M: Send + 'static,
@@ -69,12 +66,12 @@ where
 {
     let mut application = application.clone();
     let (mut tx, rx) = oneshot::channel();
-    let round = consensus_context.round();
+    let round = consensus_context.round;
     let context = context.child("prepare").with_attribute("round", round);
     context.spawn(move |runtime_context| {
         async move {
             // Consensus abandons the request by dropping the receiver, which cancels the wait
-            // for the parent and the build so that no task outlives the request.
+            // for the parent and the build.
             let resolved = select! {
                 _ = tx.closed() => {
                     debug!(reason = "consensus dropped receiver", "skipping prepare");
@@ -95,7 +92,7 @@ where
                             |digest| {
                                 tx.send_lossy(Handoff::Stage(digest));
                             },
-                            BOUNDARY_BLOCK,
+                            "prepared boundary block",
                         )
                         .await;
                     return;
@@ -126,7 +123,7 @@ where
                 Handoff::Vote(block) => (block, Handoff::Vote(())),
                 Handoff::Stage(block) => (block, Handoff::Stage(())),
                 Handoff::Wait => {
-                    debug!(reason = "block building failed", "skipping prepare");
+                    debug!(reason = "application declined", "skipping prepare");
                     tx.send_lossy(Handoff::Wait);
                     return;
                 }
@@ -192,7 +189,7 @@ where
     context.spawn(move |runtime_context| {
         async move {
             // Consensus abandons the request by dropping the receiver, which cancels the wait
-            // for the parent and the build so that no task outlives the request.
+            // for the parent and the build.
             let resolved = select! {
                 _ = tx.closed() => {
                     debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -212,7 +209,7 @@ where
                             |digest| {
                                 tx.send_lossy(digest);
                             },
-                            BOUNDARY_BLOCK,
+                            "proposed boundary block",
                         )
                         .await;
                     return;
