@@ -1,6 +1,7 @@
 use crate::{
     EPOCH,
     block_relay::{self, Relay as BlockRelay},
+    byzantine::Counting,
     strategy::Strategy,
     types::Message,
 };
@@ -26,6 +27,9 @@ use std::{
     task::Poll,
     time::Duration,
 };
+
+/// Label the Disrupter's sends count under.
+pub const ACTOR: &str = "disrupter";
 
 const TIMEOUT: Duration = Duration::from_millis(100);
 const LATEST_PROPOSALS_MIN_LEN: u64 = 10;
@@ -143,6 +147,19 @@ where
             block_relay,
             block_relay_tag,
         }
+    }
+
+    /// Moves every sampled faulty view `by` views later, so a Disrupter started
+    /// after a target-state prefix draws its faults from the views that follow
+    /// the release. Zero keeps the sample; a strategy without a sample (every
+    /// view faulty) is unchanged.
+    pub(crate) fn shift_faulty_views(mut self, by: u64) -> Self {
+        if let Some(views) = self.faulty_views.as_mut() {
+            for view in views.iter_mut() {
+                *view = View::new(view.get().saturating_add(by));
+            }
+        }
+        self
     }
 
     /// Re-stamp a (possibly strategy-mutated) proposal with this disrupter's
@@ -304,9 +321,19 @@ where
             impl Receiver<PublicKey = S::PublicKey>,
         ),
     ) -> Handle<()> {
+        let (vote_sender, vote_receiver) = vote_network;
+        let (certificate_sender, certificate_receiver) = certificate_network;
+        let (resolver_sender, resolver_receiver) = resolver_network;
         spawn_cell!(
             self.context,
-            self.run(vote_network, certificate_network, resolver_network)
+            self.run(
+                (Counting::new(vote_sender, ACTOR), vote_receiver),
+                (
+                    Counting::new(certificate_sender, ACTOR),
+                    certificate_receiver
+                ),
+                (Counting::new(resolver_sender, ACTOR), resolver_receiver),
+            )
         )
     }
 

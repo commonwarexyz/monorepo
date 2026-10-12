@@ -487,8 +487,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assert_adversary_acted;
     use commonware_consensus::simplex::ForwardPolicy;
-    use commonware_consensus_fuzz_core::strategy::StrategyChoice;
+    use commonware_consensus_fuzz_core::{byzantine::TWIN_SECONDARY, strategy::StrategyChoice};
 
     #[test]
     fn coding_stack_selects_application_ack_depth_and_preserves_entropy() {
@@ -513,21 +514,23 @@ mod tests {
 
     #[test]
     fn coding_twins_makes_post_prefix_progress() {
-        fuzz_marshal_coding_twins::<commonware_consensus_fuzz_core::SimplexCertificateMock>(
-            MarshalTwinsInput {
-                raw_bytes: vec![0],
-                rounds: 1,
-                case_selector: 0,
-                sustained: false,
-                strategy: StrategyChoice::SmallScope {
-                    fault_rounds: 1,
-                    fault_rounds_bound: 1,
+        assert_adversary_acted(&[TWIN_SECONDARY], || {
+            fuzz_marshal_coding_twins::<commonware_consensus_fuzz_core::SimplexCertificateMock>(
+                MarshalTwinsInput {
+                    raw_bytes: vec![0],
+                    rounds: 1,
+                    case_selector: 0,
+                    sustained: false,
+                    strategy: StrategyChoice::SmallScope {
+                        fault_rounds: 1,
+                        fault_rounds_bound: 1,
+                    },
+                    trailing_blocks: 1,
+                    forwarding: ForwardPolicy::Disabled,
+                    floor: None,
                 },
-                trailing_blocks: 1,
-                forwarding: ForwardPolicy::Disabled,
-                floor: None,
-            },
-        );
+            );
+        });
     }
 
     /// Deep ancestry walks, digest lookups, and each proposer fault of the
@@ -535,18 +538,20 @@ mod tests {
     #[test]
     fn coding_twins_runs_with_lookups_and_proposer_faults() {
         for selector in [0b0111_1000, 0b1011_1000, 0b1111_1001] {
-            fuzz_marshal_coding_twins::<commonware_consensus_fuzz_core::SimplexCertificateMock>(
-                MarshalTwinsInput {
-                    raw_bytes: vec![3, 1, 4, selector],
-                    rounds: 3,
-                    case_selector: 1,
-                    sustained: false,
-                    strategy: StrategyChoice::AnyScope,
-                    trailing_blocks: 2,
-                    forwarding: ForwardPolicy::Disabled,
-                    floor: None,
-                },
-            );
+            assert_adversary_acted(&[TWIN_SECONDARY], || {
+                fuzz_marshal_coding_twins::<commonware_consensus_fuzz_core::SimplexCertificateMock>(
+                    MarshalTwinsInput {
+                        raw_bytes: vec![3, 1, 4, selector],
+                        rounds: 3,
+                        case_selector: 1,
+                        sustained: false,
+                        strategy: StrategyChoice::AnyScope,
+                        trailing_blocks: 2,
+                        forwarding: ForwardPolicy::Disabled,
+                        floor: None,
+                    },
+                );
+            });
         }
     }
 }

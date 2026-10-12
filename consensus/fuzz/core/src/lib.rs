@@ -1,5 +1,6 @@
 pub mod block_relay;
 pub mod bounds;
+pub mod byzantine;
 pub mod disrupter;
 pub mod network;
 pub mod simplex;
@@ -9,6 +10,7 @@ pub use commonware_consensus::simplex::mocks::scheme as simplex_certificate_mock
 pub mod strategy;
 mod twins_network;
 pub use twins_network::resolver_view as twins_resolver_view;
+pub mod continuation;
 pub mod types;
 pub mod utils;
 use crate::{
@@ -176,6 +178,15 @@ pub const N4F3C1: Configuration = Configuration::new(4, 3, 1);
 /// 4 nodes, 0 faulty, 4 correct (all nodes are correct)
 pub const N4F0C4: Configuration = Configuration::new(4, 0, 4);
 
+/// The link a degraded network gives every edge of its last participant.
+pub(crate) fn degraded_link() -> Link {
+    Link {
+        latency: Duration::from_millis(50),
+        jitter: Duration::from_millis(50),
+        success_rate: probability!(0.6),
+    }
+}
+
 async fn setup_degraded_network<P: CryptoPublicKey, E: Clock>(
     oracle: &mut Oracle<P, E>,
     participants: &[P],
@@ -184,11 +195,7 @@ async fn setup_degraded_network<P: CryptoPublicKey, E: Clock>(
         return;
     };
     let victim_idx = participants.len() - 1;
-    let degraded = Link {
-        latency: Duration::from_millis(50),
-        jitter: Duration::from_millis(50),
-        success_rate: probability!(0.6),
-    };
+    let degraded = degraded_link();
     for (peer_idx, peer) in participants.iter().enumerate() {
         if peer_idx == victim_idx {
             continue;
@@ -689,7 +696,8 @@ pub fn start_disrupter_with_epoch_and_relay<P: simplex::Simplex>(
         resolver_network,
         block_relay,
         None,
-    )
+        0,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -713,7 +721,8 @@ pub(crate) fn start_disrupter_with_epoch_relay_and_tag<P: simplex::Simplex>(
     ),
     block_relay: Option<Arc<block_relay::Relay<PublicKeyOf<P>>>>,
     block_relay_tag: Option<u64>,
-) {
+    view_offset: u64,
+) -> Handle<()> {
     match *strategy {
         StrategyChoice::SmallScope {
             fault_rounds,
@@ -731,7 +740,11 @@ pub(crate) fn start_disrupter_with_epoch_relay_and_tag<P: simplex::Simplex>(
                 block_relay,
                 block_relay_tag,
             );
-            disrupter.start(vote_network, certificate_network, resolver_network);
+            disrupter.shift_faulty_views(view_offset).start(
+                vote_network,
+                certificate_network,
+                resolver_network,
+            )
         }
         StrategyChoice::AnyScope => {
             let disrupter = Disrupter::new_with_epoch_relay_and_tag(
@@ -743,7 +756,11 @@ pub(crate) fn start_disrupter_with_epoch_relay_and_tag<P: simplex::Simplex>(
                 block_relay,
                 block_relay_tag,
             );
-            disrupter.start(vote_network, certificate_network, resolver_network);
+            disrupter.shift_faulty_views(view_offset).start(
+                vote_network,
+                certificate_network,
+                resolver_network,
+            )
         }
         StrategyChoice::FutureScope {
             fault_rounds,
@@ -761,7 +778,11 @@ pub(crate) fn start_disrupter_with_epoch_relay_and_tag<P: simplex::Simplex>(
                 block_relay,
                 block_relay_tag,
             );
-            disrupter.start(vote_network, certificate_network, resolver_network);
+            disrupter.shift_faulty_views(view_offset).start(
+                vote_network,
+                certificate_network,
+                resolver_network,
+            )
         }
         StrategyChoice::HeaderScope {
             fault_rounds,
@@ -781,7 +802,11 @@ pub(crate) fn start_disrupter_with_epoch_relay_and_tag<P: simplex::Simplex>(
                 block_relay,
                 block_relay_tag,
             );
-            disrupter.start(vote_network, certificate_network, resolver_network);
+            disrupter.shift_faulty_views(view_offset).start(
+                vote_network,
+                certificate_network,
+                resolver_network,
+            )
         }
         StrategyChoice::SplitHeader {
             fault_rounds,
@@ -799,7 +824,11 @@ pub(crate) fn start_disrupter_with_epoch_relay_and_tag<P: simplex::Simplex>(
                 block_relay,
                 block_relay_tag,
             );
-            disrupter.start(vote_network, certificate_network, resolver_network);
+            disrupter.shift_faulty_views(view_offset).start(
+                vote_network,
+                certificate_network,
+                resolver_network,
+            )
         }
     }
 }
@@ -1018,12 +1047,13 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_validator_engine<
+pub(crate) fn start_validator_engine<
     P,
     EC,
     Automaton,
     Relay,
     R,
+    B,
     PendingSender,
     PendingReceiver,
     RecoveredSender,
@@ -1032,9 +1062,8 @@ fn start_validator_engine<
     ResolverReceiver,
 >(
     context: &deterministic::Context,
-    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    blocker: B,
     scheme: P::Scheme,
-    validator: PublicKeyOf<P>,
     elector: EC,
     automaton: Automaton,
     relay: Relay,
@@ -1061,6 +1090,7 @@ where
             Plan = Plan<PublicKeyOf<P>>,
         >,
     R: Reporter<Activity = Activity<P::Scheme, Sha256Digest>>,
+    B: commonware_p2p::Blocker<PublicKey = PublicKeyOf<P>>,
     PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
@@ -1073,7 +1103,7 @@ where
     let (resolver_sender, resolver_receiver) = resolver;
 
     let engine_cfg = config::Config {
-        blocker: oracle.control(validator),
+        blocker,
         scheme,
         elector,
         automaton,
@@ -1328,11 +1358,10 @@ where
     let automaton = reporter.automaton(&context, application.clone());
 
     let stored_scheme = scheme.clone();
-    let engine_handle = start_validator_engine::<P, EC, _, _, _, _, _, _, _, _, _>(
+    let engine_handle = start_validator_engine::<P, EC, _, _, _, _, _, _, _, _, _, _>(
         &context,
-        oracle,
+        oracle.control(validator.clone()),
         scheme,
-        validator.clone(),
         elector,
         automaton,
         application.clone(),
@@ -1493,11 +1522,10 @@ where
     let automaton = reporter.automaton(&context, application.clone());
 
     let partition = validator.to_string();
-    let _engine_handle = start_validator_engine::<P, EC, _, _, _, _, _, _, _, _, _>(
+    let _engine_handle = start_validator_engine::<P, EC, _, _, _, _, _, _, _, _, _, _>(
         &context,
-        oracle,
+        oracle.control(validator),
         scheme,
-        validator,
         elector,
         automaton,
         application.clone(),
@@ -1892,6 +1920,27 @@ pub trait TwinsBackend<P: simplex::Simplex> {
         state: &mut Self::State,
         topology: &TwinsTopology<P, Self::Case>,
     );
+
+    /// Hands the backend the taps of a trusted continuation, indexed by participant,
+    /// for its honest replicas; returns false when it cannot run behind them.
+    fn install_taps(
+        &mut self,
+        _state: &mut Self::State,
+        _taps: Vec<Option<Arc<continuation::ReplicaTap<P>>>>,
+    ) -> bool {
+        false
+    }
+
+    /// The engine tasks the backend started for a twin pair since the last call, by
+    /// role, for the actor registry of a trusted continuation.
+    fn take_actors(&mut self, _state: &mut Self::State) -> Vec<(continuation::Role, Handle<()>)> {
+        Vec::new()
+    }
+
+    /// The link the backend set up between every pair of participants.
+    fn link(&self) -> Link {
+        default_link()
+    }
 }
 
 /// Run one Twins scenario over a stack supplied by `backend`.
@@ -1899,6 +1948,21 @@ pub async fn run_twins_with_backend<P, B>(
     context: &mut deterministic::Context,
     backend: &mut B,
     entropy: Vec<u8>,
+) where
+    P: simplex::Simplex,
+    B: TwinsBackend<P>,
+{
+    run_twins_with_backend_and_hook::<P, B>(context, backend, entropy, None).await;
+}
+
+/// [run_twins_with_backend] with an optional trusted-continuation prefix: with one,
+/// the honest replicas start behind the runner's taps, the prefix runs, and the twin
+/// pair starts at the release, before the liveness wait and the invariants.
+pub async fn run_twins_with_backend_and_hook<P, B>(
+    context: &mut deterministic::Context,
+    backend: &mut B,
+    entropy: Vec<u8>,
+    hook: Option<continuation::Hook<P>>,
 ) where
     P: simplex::Simplex,
     B: TwinsBackend<P>,
@@ -1935,112 +1999,79 @@ pub async fn run_twins_with_backend<P, B>(
         data: case.data,
     };
     backend.configure_topology(&mut setup.state, &topology, &participants);
+    let mut prefix_end =
+        View::new(topology.scenario.rounds().len() as u64 * topology.term_length.get());
+
+    let mut runner = hook.map(|hook| {
+        assert_eq!(
+            case.compromised.len(),
+            1,
+            "a trusted continuation runs one compromised identity"
+        );
+        let relay = backend
+            .disrupter_block_relay(&setup.state)
+            .expect("a trusted continuation needs the backend's block relay");
+        let link = backend.link();
+        let required = if backend.disrupter().is_some() {
+            vec![continuation::Role::Primary, continuation::Role::Disrupter]
+        } else {
+            vec![continuation::Role::Primary, continuation::Role::Secondary]
+        };
+        let runner = continuation::Runner::start(
+            hook,
+            context,
+            continuation::Topology {
+                participants: participants.to_vec(),
+                schemes: setup.schemes.clone(),
+                byzantine: case.compromised.first().copied(),
+                required,
+                term_length,
+                optimistic_views,
+                scripted_views: prefix_end.get(),
+                relay,
+                oracle: setup.oracle.clone(),
+                base_link: Box::new(move |_, _| Some(link.clone())),
+            },
+            topology.elector.clone(),
+        );
+        let taps = (0..participants.len()).map(|idx| runner.tap(idx)).collect();
+        assert!(
+            backend.install_taps(&mut setup.state, taps),
+            "the Twins backend cannot run a trusted continuation"
+        );
+        runner
+    });
 
     for idx in case.compromised {
         let validator = participants[idx].clone();
-        let node_context = context.child("validator").with_attribute("index", idx);
-        let scheme = setup.schemes[idx].clone();
-        let (vote_network, certificate_network, resolver_network) = setup
+        let channels = setup
             .registrations
             .remove(&validator)
             .expect("twin validator should be registered");
-        let (vote_sender, vote_receiver) = vote_network;
-        let (certificate_sender, certificate_receiver) = certificate_network;
-        let (resolver_sender, resolver_receiver) = resolver_network;
-
-        let (vote_sender_primary, vote_sender_secondary) =
-            vote_sender.split_with(twins_network::vote_forwarder::<P, B::Digest>(
-                participants.clone(),
-                topology.scenario.clone(),
-                term_length,
-            ));
-        let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
-            node_context.child("vote_split"),
-            twins_network::vote_router::<P, B::Digest>(
-                participants.clone(),
-                topology.scenario.clone(),
-                term_length,
-            ),
-        );
-        let (certificate_sender_primary, certificate_sender_secondary) = certificate_sender
-            .split_with(twins_network::certificate_forwarder::<P, B::Digest>(
-                participants.clone(),
-                topology.scenario.clone(),
-                term_length,
-                scheme.clone(),
-            ));
-        let (certificate_receiver_primary, certificate_receiver_secondary) = certificate_receiver
-            .split_with(
-                node_context.child("certificate_split"),
-                twins_network::certificate_router::<P, B::Digest>(
-                    participants.clone(),
-                    topology.scenario.clone(),
-                    term_length,
-                    scheme.clone(),
-                ),
-            );
-        let (resolver_sender_primary, resolver_sender_secondary) =
-            resolver_sender.split_with(twins_network::resolver_forwarder::<P, B::Digest>(
-                participants.clone(),
-                topology.scenario.clone(),
-                term_length,
-                scheme.clone(),
-            ));
-        let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-            .split_with(
-                node_context.child("resolver_split"),
-                twins_network::resolver_router::<P, B::Digest>(
-                    participants.clone(),
-                    topology.scenario.clone(),
-                    term_length,
-                    scheme.clone(),
-                ),
-            );
-
-        backend.spawn_primary(
-            node_context.child("primary"),
-            &mut setup.state,
-            &setup.oracle,
-            &participants,
-            scheme.clone(),
-            validator.clone(),
-            idx,
-            &topology,
-            (vote_sender_primary, vote_receiver_primary),
-            (certificate_sender_primary, certificate_receiver_primary),
-            (resolver_sender_primary, resolver_receiver_primary),
-        );
-        if let Some(disrupter) = backend.disrupter() {
-            start_disrupter_with_epoch_relay_and_tag::<P>(
-                node_context.child("secondary"),
-                scheme,
-                &disrupter.strategy,
-                disrupter.required_containers,
-                disrupter.epoch,
-                (vote_sender_secondary, vote_receiver_secondary),
-                (certificate_sender_secondary, certificate_receiver_secondary),
-                (resolver_sender_secondary, resolver_receiver_secondary),
-                backend.disrupter_block_relay(&setup.state),
-                backend.disrupter_block_relay_tag(),
-            );
-        } else {
-            backend.spawn_secondary(
-                node_context.child("secondary"),
-                &mut setup.state,
-                &setup.oracle,
-                &participants,
-                scheme,
-                validator,
-                idx,
-                &topology,
-                (vote_sender_secondary, vote_receiver_secondary),
-                (certificate_sender_secondary, certificate_receiver_secondary),
-                (resolver_sender_secondary, resolver_receiver_secondary),
-            );
+        match runner.as_mut() {
+            // The prefix acts as the twin; the pair starts at the release.
+            Some(runner) => runner.adopt(channels),
+            None => {
+                spawn_twin_pair::<P, B>(
+                    context,
+                    backend,
+                    &mut setup.state,
+                    &setup.oracle,
+                    &setup.schemes,
+                    &participants,
+                    &topology,
+                    idx,
+                    channels,
+                    0,
+                    None,
+                );
+            }
         }
     }
 
-    backend.finish_twins(&mut setup.state, &topology);
+    if runner.is_none() {
+        backend.finish_twins(&mut setup.state, &topology);
+    }
     for (idx, validator) in participants.iter().enumerate() {
         if topology.compromised.contains(&idx) {
             continue;
@@ -2062,12 +2093,198 @@ pub async fn run_twins_with_backend<P, B>(
         );
     }
 
-    let prefix_end =
-        View::new(topology.scenario.rounds().len() as u64 * topology.term_length.get());
+    if let Some(runner) = runner.as_mut() {
+        let (channels, release) = runner.run().await;
+        let idx = runner
+            .byzantine()
+            .expect("a Twins continuation has a compromised identity");
+        if let Some(channels) = channels
+            && let Some(disrupter) = spawn_twin_pair::<P, B>(
+                context,
+                backend,
+                &mut setup.state,
+                &setup.oracle,
+                &setup.schemes,
+                &participants,
+                &topology,
+                idx,
+                channels,
+                release.base,
+                Some(runner.registry()),
+            )
+        {
+            runner
+                .registry()
+                .register(idx, continuation::Role::Disrupter, disrupter);
+        }
+        for (role, handle) in backend.take_actors(&mut setup.state) {
+            runner.registry().register(idx, role, handle);
+        }
+        backend.finish_twins(&mut setup.state, &topology);
+        runner.check_release().await;
+        // Liveness counts finalizations past the scripted prefix and the release.
+        prefix_end = prefix_end.max(View::new(release.base));
+    }
+
     backend
         .observe_liveness(context, &mut setup.state, prefix_end)
         .await;
+    if let Some(runner) = &runner {
+        runner.check("end");
+    }
     backend.check_invariants(context, &mut setup.state, &topology);
+}
+
+/// Splits a compromised participant's channels between its twin halves and starts
+/// them: the backend's primary, then the shared Disrupter or the backend's secondary.
+/// Returns the Disrupter's task when it runs one. `view_offset` moves the
+/// Disrupter's sampled faulty views past a trusted continuation's release, and
+/// `registry` gives each half the execution marker of its role, set when the half's
+/// task first polls its vote receiver.
+#[allow(clippy::too_many_arguments)]
+fn spawn_twin_pair<P, B>(
+    context: &deterministic::Context,
+    backend: &mut B,
+    state: &mut B::State,
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    schemes: &[P::Scheme],
+    participants: &Arc<[PublicKeyOf<P>]>,
+    topology: &TwinsTopology<P, B::Case>,
+    idx: usize,
+    channels: NetworkChannels<PublicKeyOf<P>>,
+    view_offset: u64,
+    registry: Option<continuation::ActorRegistry>,
+) -> Option<Handle<()>>
+where
+    P: simplex::Simplex,
+    B: TwinsBackend<P>,
+{
+    let secondary_role = if backend.disrupter().is_some() {
+        continuation::Role::Disrupter
+    } else {
+        continuation::Role::Secondary
+    };
+    let marker = |role| registry.as_ref().map(|registry| registry.marker(idx, role));
+    let primary_marker = marker(continuation::Role::Primary);
+    let secondary_marker = marker(secondary_role);
+    let term_length = topology.term_length;
+    let validator = participants[idx].clone();
+    let node_context = context.child("validator").with_attribute("index", idx);
+    let scheme = schemes[idx].clone();
+    let (vote_network, certificate_network, resolver_network) = channels;
+    let (vote_sender, vote_receiver) = vote_network;
+    let (certificate_sender, certificate_receiver) = certificate_network;
+    let (resolver_sender, resolver_receiver) = resolver_network;
+
+    let (vote_sender_primary, vote_sender_secondary) =
+        vote_sender.split_with(byzantine::twin_secondary(
+            twins_network::vote_forwarder::<P, B::Digest>(
+                participants.clone(),
+                topology.scenario.clone(),
+                term_length,
+            ),
+            validator.clone(),
+        ));
+    let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
+        node_context.child("vote_split"),
+        twins_network::vote_router::<P, B::Digest>(
+            participants.clone(),
+            topology.scenario.clone(),
+            term_length,
+        ),
+    );
+    let (certificate_sender_primary, certificate_sender_secondary) =
+        certificate_sender.split_with(byzantine::twin_secondary(
+            twins_network::certificate_forwarder::<P, B::Digest>(
+                participants.clone(),
+                topology.scenario.clone(),
+                term_length,
+                scheme.clone(),
+            ),
+            validator.clone(),
+        ));
+    let (certificate_receiver_primary, certificate_receiver_secondary) = certificate_receiver
+        .split_with(
+            node_context.child("certificate_split"),
+            twins_network::certificate_router::<P, B::Digest>(
+                participants.clone(),
+                topology.scenario.clone(),
+                term_length,
+                scheme.clone(),
+            ),
+        );
+    let (resolver_sender_primary, resolver_sender_secondary) =
+        resolver_sender.split_with(byzantine::twin_secondary(
+            twins_network::resolver_forwarder::<P, B::Digest>(
+                participants.clone(),
+                topology.scenario.clone(),
+                term_length,
+                scheme.clone(),
+            ),
+            validator.clone(),
+        ));
+    let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver.split_with(
+        node_context.child("resolver_split"),
+        twins_network::resolver_router::<P, B::Digest>(
+            participants.clone(),
+            topology.scenario.clone(),
+            term_length,
+            scheme.clone(),
+        ),
+    );
+
+    backend.spawn_primary(
+        node_context.child("primary"),
+        state,
+        oracle,
+        participants,
+        scheme.clone(),
+        validator.clone(),
+        idx,
+        topology,
+        (
+            vote_sender_primary,
+            continuation::MarkedReceiver::new(vote_receiver_primary, primary_marker),
+        ),
+        (certificate_sender_primary, certificate_receiver_primary),
+        (resolver_sender_primary, resolver_receiver_primary),
+    );
+    if let Some(disrupter) = backend.disrupter() {
+        Some(start_disrupter_with_epoch_relay_and_tag::<P>(
+            node_context.child("secondary"),
+            scheme,
+            &disrupter.strategy,
+            disrupter.required_containers,
+            disrupter.epoch,
+            (
+                vote_sender_secondary,
+                continuation::MarkedReceiver::new(vote_receiver_secondary, secondary_marker),
+            ),
+            (certificate_sender_secondary, certificate_receiver_secondary),
+            (resolver_sender_secondary, resolver_receiver_secondary),
+            backend.disrupter_block_relay(state),
+            backend.disrupter_block_relay_tag(),
+            view_offset,
+        ))
+    } else {
+        backend.spawn_secondary(
+            node_context.child("secondary"),
+            state,
+            oracle,
+            participants,
+            scheme,
+            validator,
+            idx,
+            topology,
+            (
+                vote_sender_secondary,
+                continuation::MarkedReceiver::new(vote_receiver_secondary, secondary_marker),
+            ),
+            (certificate_sender_secondary, certificate_receiver_secondary),
+            (resolver_sender_secondary, resolver_receiver_secondary),
+        );
+        None
+    }
 }
 
 /// Selector for which a fuzz harness will dispatch to.

@@ -41,7 +41,8 @@ use commonware_consensus::{
     types::{Epoch, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
-    NetworkChannels, PublicKeyOf, disrupter::Disrupter, simplex::Simplex, strategy::AnyScope,
+    NetworkChannels, PublicKeyOf, byzantine::Counting, disrupter::Disrupter, simplex::Simplex,
+    strategy::AnyScope,
 };
 use commonware_cryptography::{Sha256, sha256::Digest as Sha256Digest};
 use commonware_runtime::{Handle, Supervisor as _, deterministic};
@@ -169,6 +170,15 @@ impl AdversaryRole {
     /// [`Honest`](Self::Honest)).
     pub(crate) fn is_byzantine(self) -> bool {
         !matches!(self, AdversaryRole::Honest)
+    }
+
+    /// Label the role's Byzantine actor counts its sends under; the Disrupter
+    /// keeps its own.
+    pub(crate) fn actor(self) -> &'static str {
+        match self {
+            AdversaryRole::Disrupter => commonware_consensus_fuzz_core::disrupter::ACTOR,
+            role => role.label(),
+        }
     }
 
     /// Short label for the decision log.
@@ -331,6 +341,8 @@ pub(crate) fn spawn_adversary<P: Simplex>(
     channels: NetworkChannels<PublicKeyOf<P>>,
 ) -> Handle<()> {
     let (vote_network, certificate_network, resolver_network) = channels;
+    let (vote_sender, vote_receiver) = vote_network;
+    let (certificate_sender, certificate_receiver) = certificate_network;
     match role {
         AdversaryRole::Honest => {
             unreachable!("spawn_adversary is only called for a byzantine role")
@@ -351,27 +363,31 @@ pub(crate) fn spawn_adversary<P: Simplex>(
                 required_containers,
                 Epoch::new(commonware_consensus_fuzz_core::EPOCH),
             );
-            disrupter.start(vote_network, certificate_network, resolver_network)
+            disrupter.start(
+                (vote_sender, vote_receiver),
+                (certificate_sender, certificate_receiver),
+                resolver_network,
+            )
         }
         AdversaryRole::Conflicter => {
             // Vote-only: drop the certificate and resolver channels so no second
             // owner holds their single-consumer mailboxes.
-            drop(certificate_network);
+            drop((certificate_sender, certificate_receiver));
             drop(resolver_network);
             let actor = conflicter::Conflicter::<_, P::Scheme, Sha256>::new(
                 context.child("adversary_conflicter"),
                 conflicter::Config { scheme },
             );
-            actor.start(vote_network)
+            actor.start((Counting::new(vote_sender, role.actor()), vote_receiver))
         }
         AdversaryRole::Nuller => {
-            drop(certificate_network);
+            drop((certificate_sender, certificate_receiver));
             drop(resolver_network);
             let actor = nuller::Nuller::<_, P::Scheme, Sha256>::new(
                 context.child("adversary_nuller"),
                 nuller::Config { scheme },
             );
-            actor.start(vote_network)
+            actor.start((Counting::new(vote_sender, role.actor()), vote_receiver))
         }
         AdversaryRole::Equivocator => {
             // Consumes vote + certificate: listens to recovered certificates and
@@ -388,21 +404,27 @@ pub(crate) fn spawn_adversary<P: Simplex>(
                     elector,
                 },
             );
-            actor.start(vote_network, certificate_network)
+            actor.start(
+                (Counting::new(vote_sender, role.actor()), vote_receiver),
+                (
+                    Counting::new(certificate_sender, role.actor()),
+                    certificate_receiver,
+                ),
+            )
         }
         AdversaryRole::Impersonator => {
             // Vote-only (like Conflicter/Nuller): drop the certificate and resolver
             // channels so no second owner holds their single-consumer mailboxes.
-            drop(certificate_network);
+            drop((certificate_sender, certificate_receiver));
             drop(resolver_network);
             let actor = impersonator::Impersonator::<_, P::Scheme, Sha256>::new(
                 context.child("adversary_impersonator"),
                 impersonator::Config { scheme },
             );
-            actor.start(vote_network)
+            actor.start((Counting::new(vote_sender, role.actor()), vote_receiver))
         }
         AdversaryRole::Outdated => {
-            drop(certificate_network);
+            drop((certificate_sender, certificate_receiver));
             drop(resolver_network);
             let actor = outdated::Outdated::<_, P::Scheme, Sha256>::new(
                 context.child("adversary_outdated"),
@@ -413,7 +435,7 @@ pub(crate) fn spawn_adversary<P: Simplex>(
                     view_delta: ViewDelta::new(1),
                 },
             );
-            actor.start(vote_network)
+            actor.start((Counting::new(vote_sender, role.actor()), vote_receiver))
         }
     }
 }

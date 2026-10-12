@@ -282,6 +282,9 @@ where
     }
 }
 
+/// Label a poisoned certificate answer counts under.
+pub const POISON_ACTOR: &str = "certificate_poison";
+
 /// Record of a poisoned certificate backfill response.
 ///
 /// [`CertificatePoisonReceiver`] fills `view` with the view whose covering
@@ -565,6 +568,7 @@ where
             return Ok((peer, message));
         };
         *poison.view.lock() = Some(view);
+        crate::byzantine::record(POISON_ACTOR);
         Ok((peer, poisoned))
     }
 }

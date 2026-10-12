@@ -32,7 +32,7 @@ use commonware_consensus::{
     simplex::types::{Notarize, Proposal, Vote},
     types::{Epoch, Height, Round, View},
 };
-use commonware_consensus_fuzz_core::{BYZANTINE_IDX, simplex::Simplex};
+use commonware_consensus_fuzz_core::{BYZANTINE_IDX, byzantine::Counting, simplex::Simplex};
 use commonware_cryptography::{Digestible as _, Sha256, sha256::Digest as Sha256Digest};
 use commonware_p2p::{
     Recipients, Sender as _,
@@ -41,6 +41,11 @@ use commonware_p2p::{
 use commonware_runtime::{Clock as _, Spawner as _, Supervisor as _, deterministic};
 use commonware_utils::NZUsize;
 use std::{sync::Arc, time::Duration};
+
+/// Label the matching notarize votes count under.
+pub(crate) const ANNOUNCE_ACTOR: &str = "block_announce";
+/// Label the block gossip counts under.
+pub(crate) const GOSSIP_ACTOR: &str = "block_gossip";
 
 /// Delay before the byzantine leader disseminates, giving honest engines time to
 /// enter the attack view. Well under the marshal engines' one-second leader
@@ -88,11 +93,12 @@ pub(crate) async fn start<P: Simplex>(
     scheme: SchemeOf<P>,
     byzantine: PublicKeyOf<P>,
     participants: Vec<PublicKeyOf<P>>,
-    mut vote_sender: Sender<PublicKeyOf<P>, deterministic::Context>,
+    vote_sender: Sender<PublicKeyOf<P>, deterministic::Context>,
     genesis: Sha256Digest,
     attack_view: View,
     fault: MarshalBroadcastFault,
 ) {
+    let mut vote_sender = Counting::new(vote_sender, ANNOUNCE_ACTOR);
     let (broadcast_sender, broadcast_receiver) = oracle
         .control(byzantine.clone())
         .register(2, TEST_QUOTA)
@@ -110,7 +116,10 @@ pub(crate) async fn start<P: Simplex>(
         },
     );
     let mailbox: commonware_broadcast::buffered::Mailbox<PublicKeyOf<P>, B<P>> = mailbox;
-    engine.start((broadcast_sender, broadcast_receiver));
+    engine.start((
+        Counting::new(broadcast_sender, GOSSIP_ACTOR),
+        broadcast_receiver,
+    ));
 
     let honest: Vec<PublicKeyOf<P>> = participants
         .iter()
@@ -135,57 +144,66 @@ pub(crate) async fn start<P: Simplex>(
         )
     };
 
-    context.spawn(move |context| async move {
-        context.sleep(DISSEMINATE_DELAY).await;
+    // The gossip engine was spawned under this context, so the disseminating
+    // task must run from a sibling: a task's exit aborts the supervision
+    // subtree of the context it was spawned from.
+    context
+        .child("disseminate")
+        .spawn(move |context| async move {
+            context.sleep(DISSEMINATE_DELAY).await;
 
-        let announce = |sender: &mut Sender<PublicKeyOf<P>, deterministic::Context>,
-                        block: &B<P>,
-                        to: Recipients<PublicKeyOf<P>>| {
-            let proposal = Proposal::new(round, parent_view, block.digest());
-            if let Some(vote) = Notarize::sign(&scheme, proposal) {
-                let message = Vote::<SchemeOf<P>, Sha256Digest>::Notarize(vote).encode();
-                let _ = sender.send(to, message, true);
-            }
-        };
-
-        match fault {
-            MarshalBroadcastFault::Omit => {
-                // Announce the block to every honest replica but never gossip it.
-                let block = build(0);
-                announce(&mut vote_sender, &block, Recipients::Some(honest.clone()));
-            }
-            MarshalBroadcastFault::Partition => {
-                // Deliver to every honest replica but the last; it backfills.
-                let block = build(0);
-                let served = if honest.len() > 1 {
-                    honest[..honest.len() - 1].to_vec()
-                } else {
-                    honest.clone()
+            let announce =
+                |sender: &mut Counting<Sender<PublicKeyOf<P>, deterministic::Context>>,
+                 block: &B<P>,
+                 to: Recipients<PublicKeyOf<P>>| {
+                    let proposal = Proposal::new(round, parent_view, block.digest());
+                    if let Some(vote) = Notarize::sign(&scheme, proposal) {
+                        let message = Vote::<SchemeOf<P>, Sha256Digest>::Notarize(vote).encode();
+                        let _ = sender.send(to, message, true);
+                    }
                 };
-                mailbox.broadcast_shared(Recipients::Some(served.clone()), Arc::new(block.clone()));
-                announce(&mut vote_sender, &block, Recipients::Some(served));
-            }
-            MarshalBroadcastFault::Equivocate => {
-                // Two conflicting blocks (distinct timestamps -> distinct
-                // digests) to disjoint honest sets, each with its own proposal.
-                let (first, rest) = honest.split_at(1.min(honest.len()));
-                let block_a = build(0);
-                let block_b = build(1);
-                if !first.is_empty() {
-                    mailbox.broadcast_shared(
-                        Recipients::Some(first.to_vec()),
-                        Arc::new(block_a.clone()),
-                    );
-                    announce(&mut vote_sender, &block_a, Recipients::Some(first.to_vec()));
+
+            match fault {
+                MarshalBroadcastFault::Omit => {
+                    // Announce the block to every honest replica but never gossip it.
+                    let block = build(0);
+                    announce(&mut vote_sender, &block, Recipients::Some(honest.clone()));
                 }
-                if !rest.is_empty() {
+                MarshalBroadcastFault::Partition => {
+                    // Deliver to every honest replica but the last; it backfills.
+                    let block = build(0);
+                    let served = if honest.len() > 1 {
+                        honest[..honest.len() - 1].to_vec()
+                    } else {
+                        honest.clone()
+                    };
                     mailbox.broadcast_shared(
-                        Recipients::Some(rest.to_vec()),
-                        Arc::new(block_b.clone()),
+                        Recipients::Some(served.clone()),
+                        Arc::new(block.clone()),
                     );
-                    announce(&mut vote_sender, &block_b, Recipients::Some(rest.to_vec()));
+                    announce(&mut vote_sender, &block, Recipients::Some(served));
+                }
+                MarshalBroadcastFault::Equivocate => {
+                    // Two conflicting blocks (distinct timestamps -> distinct
+                    // digests) to disjoint honest sets, each with its own proposal.
+                    let (first, rest) = honest.split_at(1.min(honest.len()));
+                    let block_a = build(0);
+                    let block_b = build(1);
+                    if !first.is_empty() {
+                        mailbox.broadcast_shared(
+                            Recipients::Some(first.to_vec()),
+                            Arc::new(block_a.clone()),
+                        );
+                        announce(&mut vote_sender, &block_a, Recipients::Some(first.to_vec()));
+                    }
+                    if !rest.is_empty() {
+                        mailbox.broadcast_shared(
+                            Recipients::Some(rest.to_vec()),
+                            Arc::new(block_b.clone()),
+                        );
+                        announce(&mut vote_sender, &block_b, Recipients::Some(rest.to_vec()));
+                    }
                 }
             }
-        }
-    });
+        });
 }

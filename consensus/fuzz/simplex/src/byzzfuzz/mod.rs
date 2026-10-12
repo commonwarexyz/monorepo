@@ -23,7 +23,7 @@
 
 mod fault;
 mod forwarder;
-mod injector;
+pub(crate) mod injector;
 mod intercept;
 pub mod log;
 mod mutator;

@@ -67,7 +67,7 @@ use commonware_consensus::{
     types::{Delta, Epoch, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
-    ManagedValidator, N4F1C3, PublicKeyOf, build_validator_with_reporter,
+    ManagedValidator, N4F1C3, PublicKeyOf, build_validator_with_reporter, byzantine,
     simplex::Simplex,
     simplex_audit::{RecordingReporter, summaries},
     utils::Partition,
@@ -297,16 +297,19 @@ fn spawn_twin_pair<P: Simplex>(
     let (certificate_sender, certificate_receiver) = certificate_network;
     let (resolver_sender, resolver_receiver) = resolver_network;
 
-    let (vote_sender_primary, vote_sender_secondary) =
-        vote_sender.split_with(make_vote_forwarder());
+    let (vote_sender_primary, vote_sender_secondary) = vote_sender.split_with(
+        byzantine::twin_secondary(make_vote_forwarder(), validator.clone()),
+    );
     let (vote_receiver_primary, vote_receiver_secondary) =
         vote_receiver.split_with(context.child("pending_split"), make_vote_router());
-    let (certificate_sender_primary, certificate_sender_secondary) =
-        certificate_sender.split_with(make_certificate_forwarder());
+    let (certificate_sender_primary, certificate_sender_secondary) = certificate_sender.split_with(
+        byzantine::twin_secondary(make_certificate_forwarder(), validator.clone()),
+    );
     let (certificate_receiver_primary, certificate_receiver_secondary) = certificate_receiver
         .split_with(context.child("recovered_split"), make_certificate_router());
-    let (resolver_sender_primary, resolver_sender_secondary) =
-        resolver_sender.split_with(make_resolver_forwarder());
+    let (resolver_sender_primary, resolver_sender_secondary) = resolver_sender.split_with(
+        byzantine::twin_secondary(make_resolver_forwarder(), validator.clone()),
+    );
     let (resolver_receiver_primary, resolver_receiver_secondary) =
         resolver_receiver.split_with(context.child("resolver_split"), make_resolver_router());
 

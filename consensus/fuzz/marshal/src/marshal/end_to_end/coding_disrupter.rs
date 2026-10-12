@@ -29,6 +29,7 @@ use commonware_consensus::{
 };
 use commonware_consensus_fuzz_core::{
     BYZANTINE_IDX,
+    byzantine::Counting,
     simplex::Simplex,
     strategy::{AnyScope, FutureScope, SmallScope, Strategy as _, StrategyChoice},
 };
@@ -44,6 +45,13 @@ use commonware_utils::{FuzzRng, non_empty};
 use rand::RngExt as _;
 use rand_core::Rng as _;
 use std::collections::{BTreeMap, HashSet};
+
+/// Label the consensus-channel equivocation counts under.
+pub(crate) const ACTOR: &str = "coding_disrupter";
+/// Label the shard faults, replayed and proposed, count under.
+pub(crate) const SHARDS_ACTOR: &str = "coding_shards";
+/// Label the poisoned backfill answers count under.
+pub(crate) const BACKFILL_POISON_ACTOR: &str = "coding_backfill_poison";
 
 /// Shard wire type of the coding stack.
 type ShardOf<P> = Shard<CodingB<P>, ReedSolomon<Sha256>, Sha256>;
@@ -268,7 +276,7 @@ fn unknown_commitment<P: Simplex>(commitment: &CommitmentOf<P>) -> CommitmentOf<
 /// worst blocked and never reconstructs into a block.
 async fn disrupt_shards<P: Simplex>(
     scheme: SchemeOf<P>,
-    mut sender: simulated::Sender<PublicKeyOf<P>, deterministic::Context>,
+    mut sender: impl Sender<PublicKey = PublicKeyOf<P>>,
     mut receiver: simulated::Receiver<PublicKeyOf<P>>,
     mut rng: FuzzRng,
 ) where
@@ -475,9 +483,15 @@ pub(crate) fn start_backfill_poison<P: Simplex>(
 {
     let leader = own_key::<P>(&schemes[BYZANTINE_IDX]);
     let (sender, receiver) = backfill;
-    context
-        .child("backfill_poison")
-        .spawn(move |_| poison_backfill::<P>(schemes, leader, sender, receiver, rng));
+    context.child("backfill_poison").spawn(move |_| {
+        poison_backfill::<P>(
+            schemes,
+            leader,
+            Counting::new(sender, BACKFILL_POISON_ACTOR),
+            receiver,
+            rng,
+        )
+    });
 }
 
 /// Shards of a coded block the Byzantine leader proposes for `view` under a
@@ -592,6 +606,7 @@ pub(crate) fn start<P: Simplex>(
     // the views the identity leads instead of the unreconstructable seed.
     let mut leader_faults = None;
     if let Some(((shard_sender, shard_receiver), leads)) = shards {
+        let shard_sender = Counting::new(shard_sender, SHARDS_ACTOR);
         let shard_rng = FuzzRng::new(rng.next_u64().to_le_bytes().to_vec());
         let gossip_sender = shard_sender.clone();
         let gossip_scheme = scheme.clone();
@@ -603,7 +618,8 @@ pub(crate) fn start<P: Simplex>(
         }
     }
 
-    let (mut vote_sender, mut vote_receiver) = vote_network;
+    let (vote_sender, mut vote_receiver) = vote_network;
+    let mut vote_sender = Counting::new(vote_sender, ACTOR);
     context.spawn(move |_| async move {
         let mut emitted = HashSet::new();
         let mut proposed = HashSet::new();

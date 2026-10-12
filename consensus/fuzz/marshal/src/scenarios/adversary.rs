@@ -33,7 +33,7 @@ use commonware_consensus::{
     types::{Epoch, Height, Round, View},
 };
 use commonware_consensus_fuzz_core::{
-    disrupter::Disrupter, simplex::Simplex, strategy::SmallScope,
+    byzantine::Counting, disrupter::Disrupter, simplex::Simplex, strategy::SmallScope,
 };
 use commonware_cryptography::{Digestible as _, Sha256, sha256::Digest as Sha256Digest};
 use commonware_p2p::{
@@ -45,6 +45,13 @@ use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as Res
 use commonware_runtime::{Clock as _, Spawner as _, Supervisor as _, deterministic};
 use commonware_utils::{NZUsize, iter::NonEmpty};
 use std::{sync::Arc, time::Duration};
+
+/// Label the attack-view notarize announces count under.
+pub(crate) const ANNOUNCE_ACTOR: &str = "scenario_announce";
+/// Label the attack block gossip counts under.
+pub(crate) const GOSSIP_ACTOR: &str = "scenario_block_gossip";
+/// Label the marshal backfill answers count under.
+pub(crate) const BACKFILL_ACTOR: &str = "scenario_backfill";
 
 /// Marshal backfill and block-broadcast channel ids.
 const MARSHAL_BACKFILL: u64 = 1;
@@ -162,9 +169,10 @@ async fn disseminate<P: Simplex>(
     parent_view: View,
     attack_view: View,
     attack_height: Height,
-    mut vote_sender: Sender<PublicKeyOf<P>, deterministic::Context>,
+    vote_sender: Sender<PublicKeyOf<P>, deterministic::Context>,
     fault: BlockFault,
 ) {
+    let mut vote_sender = Counting::new(vote_sender, ANNOUNCE_ACTOR);
     let (broadcast_sender, broadcast_receiver) = oracle
         .control(node.clone())
         .register(MARSHAL_BROADCAST, TEST_QUOTA)
@@ -182,7 +190,10 @@ async fn disseminate<P: Simplex>(
         },
     );
     let mailbox: commonware_broadcast::buffered::Mailbox<PublicKeyOf<P>, B<P>> = mailbox;
-    engine.start((broadcast_sender, broadcast_receiver));
+    engine.start((
+        Counting::new(broadcast_sender, GOSSIP_ACTOR),
+        broadcast_receiver,
+    ));
 
     let round = Round::new(Epoch::zero(), attack_view);
     let build = move |timestamp: u64| -> B<P> {
@@ -199,15 +210,16 @@ async fn disseminate<P: Simplex>(
         .spawn(move |context| async move {
             context.sleep(DISSEMINATE_DELAY).await;
 
-            let announce = |sender: &mut Sender<PublicKeyOf<P>, deterministic::Context>,
-                            block: &B<P>,
-                            to: Recipients<PublicKeyOf<P>>| {
-                let proposal = Proposal::new(round, parent_view, block.digest());
-                if let Some(vote) = Notarize::sign(&scheme, proposal) {
-                    let message = Vote::<SchemeOf<P>, Sha256Digest>::Notarize(vote).encode();
-                    let _ = sender.send(to, message, true);
-                }
-            };
+            let announce =
+                |sender: &mut Counting<Sender<PublicKeyOf<P>, deterministic::Context>>,
+                 block: &B<P>,
+                 to: Recipients<PublicKeyOf<P>>| {
+                    let proposal = Proposal::new(round, parent_view, block.digest());
+                    if let Some(vote) = Notarize::sign(&scheme, proposal) {
+                        let message = Vote::<SchemeOf<P>, Sha256Digest>::Notarize(vote).encode();
+                        let _ = sender.send(to, message, true);
+                    }
+                };
 
             match fault {
                 BlockFault::Omit => {
@@ -262,11 +274,12 @@ async fn serve_backfill<P: Simplex>(
     fault: BackfillFault,
 ) {
     let leader = node.clone();
-    let (mut sender, mut receiver) = oracle
+    let (sender, mut receiver) = oracle
         .control(node)
         .register(MARSHAL_BACKFILL, TEST_QUOTA)
         .await
         .expect("byzantine backfill channel registration failed");
+    let mut sender = Counting::new(sender, BACKFILL_ACTOR);
     context.child("serve_backfill").spawn(move |_| async move {
         while let Ok((peer, message)) = receiver.recv().await {
             if fault == BackfillFault::Withhold {
