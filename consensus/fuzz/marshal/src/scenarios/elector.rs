@@ -8,7 +8,7 @@
 
 use commonware_consensus::{
     simplex::{
-        elector::{Config as ElectorConfig, Elector, RoundRobin, Terms},
+        elector::{Config as ElectorConfig, Elector, RoundRobin, Scheduled, Terms},
         scheme::Scheme,
     },
     types::{Participant, Round, View},
@@ -48,14 +48,16 @@ impl<S: Scheme<Sha256Digest>> ElectorConfig<S> for ByzantineLeaderAtView {
 }
 
 impl<S: Scheme<Sha256Digest>> Elector<S> for ByzantineLeaderAtViewElector<S> {
+    type Mode = Scheduled;
+
     fn terms(&self) -> Terms {
         self.fallback.terms()
     }
 
-    fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant {
+    fn elect(&self, round: Round, _: ()) -> Participant {
         if round.view() == self.attack_view {
             return Participant::from_usize(BYZANTINE_IDX);
         }
-        self.fallback.elect(round, certificate)
+        self.fallback.elect(round, ())
     }
 }

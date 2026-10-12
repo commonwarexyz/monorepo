@@ -6,7 +6,7 @@ use crate::{BYZANTINE_IDX, Configuration};
 use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
-        elector::{Config as ElectorConfig, Elector, RoundRobin, Terms},
+        elector::{Config as ElectorConfig, Elector, Input, RoundRobin, Terms},
         scheme::Scheme,
     },
     types::{Participant, Round, TermLength, View, ViewDelta},
@@ -58,15 +58,17 @@ impl<S: Scheme<Sha256Digest>> ElectorConfig<S> for ByzantineFirstLeaderRoundRobi
 }
 
 impl<S: Scheme<Sha256Digest>> Elector<S> for ByzantineFirstLeaderElector<S> {
+    type Mode = <<RoundRobin<Sha256> as ElectorConfig<S>>::Elector as Elector<S>>::Mode;
+
     fn terms(&self) -> Terms {
         self.fallback.terms()
     }
 
-    fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant {
+    fn elect(&self, round: Round, input: Input<'_, S, Self>) -> Participant {
         if round.view().term_index(self.terms().length()) == 1 {
             return Participant::from_usize(BYZANTINE_IDX);
         }
-        self.fallback.elect(round, certificate)
+        self.fallback.elect(round, input)
     }
 }
 
@@ -328,19 +330,19 @@ mod tests {
 
         assert_eq!(
             elector
-                .elect(Round::new(Epoch::new(crate::EPOCH), View::new(1)), None)
+                .elect(Round::new(Epoch::new(crate::EPOCH), View::new(1)), ())
                 .get() as usize,
             BYZANTINE_IDX
         );
         assert_eq!(
             elector
-                .elect(Round::new(Epoch::new(crate::EPOCH), View::new(2)), None)
+                .elect(Round::new(Epoch::new(crate::EPOCH), View::new(2)), ())
                 .get() as usize,
             BYZANTINE_IDX
         );
         assert_ne!(
             elector
-                .elect(Round::new(Epoch::new(crate::EPOCH), View::new(3)), None)
+                .elect(Round::new(Epoch::new(crate::EPOCH), View::new(3)), ())
                 .get() as usize,
             BYZANTINE_IDX
         );

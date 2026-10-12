@@ -543,14 +543,17 @@ pub fn db_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequ
     }
 }
 
+/// Operations per state sync request. Validators fetch and serve the same size, since peers
+/// ignore requests larger than they serve.
+pub const SYNC_BATCH_SIZE: NonZeroU64 = NZU64!(16);
+
 /// QMDB state sync engine tuning.
 pub const fn sync_config() -> SyncEngineConfig {
     SyncEngineConfig {
-        fetch_batch_size: NZU64!(16),
+        fetch_batch_size: SYNC_BATCH_SIZE,
         apply_batch_size: NZU64!(64),
-        max_outstanding_requests: 8,
+        max_outstanding_requests: NZUsize!(8),
         update_channel_size: NZUsize!(256),
-        max_retained_roots: 8,
     }
 }
 

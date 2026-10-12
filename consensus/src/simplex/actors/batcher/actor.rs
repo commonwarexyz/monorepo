@@ -3,7 +3,7 @@ use crate::{
     Epochable, Relay, Reporter, Viewable,
     simplex::{
         Lookahead, Plan, Viewport,
-        actors::voter,
+        actors::{span::MISSING_SPAN, voter},
         config::{ForwardPolicy, SkipPolicy},
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
@@ -415,7 +415,7 @@ where
                 let view = message.view();
                 let operation = message.name();
                 let epoch = self.epoch;
-                let process_span = |parent: Span| {
+                let process_span = |parent: &Span| {
                     info_span!(
                         parent: parent,
                         "simplex.batcher.process",
@@ -432,7 +432,7 @@ where
                         finalized: new_finalized,
                         forwardable_proposal,
                     } => {
-                        let process = process_span(span.clone());
+                        let process = process_span(&span);
                         let _guard = process.entered();
                         let me = self.scheme.me();
                         let am_leader = me.is_some_and(|me| me == leader);
@@ -451,7 +451,7 @@ where
                         // Track the new current view, adopting the voter's view
                         // span so all of its work shares one trace
                         let round = self.round_for_view(&current, &mut work, current.view);
-                        round.set_span(span);
+                        round.adopt_span(span);
                         dirty_views.push(current.view);
 
                         // Revisit rounds in the admission window now that the
@@ -574,7 +574,7 @@ where
 
                 // Parent under the view's span if we already track the view (we avoid
                 // creating per-view state for certificates that fail verification)
-                let parent = round.map(|round| round.span()).unwrap_or_else(Span::none);
+                let parent = round.map_or(&MISSING_SPAN, |round| round.span());
                 let span = info_span!(
                     parent: parent,
                     "simplex.batcher.verify_certificate",
@@ -651,9 +651,8 @@ where
                         let round = Rnd::new(self.epoch, current.view);
                         let _guard = work
                             .get(&current.view)
-                            .map(|round| round.span())
-                            .unwrap_or_else(Span::none)
-                            .entered();
+                            .map_or(&MISSING_SPAN, |round| round.span())
+                            .enter();
                         voter.timeout(round, TimeoutReason::LeaderNullify);
                     }
                     dirty_views.push(view);
@@ -696,7 +695,7 @@ where
                         continue;
                     }
 
-                    let span = round.span();
+                    let span = round.span().clone();
                     self.process_view(&mut voter, view, round)
                         .instrument(span)
                         .await;

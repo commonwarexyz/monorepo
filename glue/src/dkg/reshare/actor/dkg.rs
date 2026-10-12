@@ -24,7 +24,7 @@ use commonware_utils::{Acknowledgement, ordered::Set};
 use rand_core::CryptoRng;
 use tracing::{debug, info_span, warn};
 
-impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
+impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + RuntimeStorage,
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -35,7 +35,7 @@ where
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
-    BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
+    C::PublicKey: BatchVerifier,
     S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,

@@ -58,9 +58,9 @@ use commonware_stream::{
     cups::{self, Cups},
     sake::{self, Sake},
 };
-use commonware_utils::{NZDuration, NZU64, NZUsize, sequence::Unit};
+use commonware_utils::{NZDuration, NZUsize, sequence::Unit};
 use rand_core::CryptoRng;
-use std::{marker::PhantomData, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 use tracing::error;
 
 /// Start a validator node.
@@ -265,7 +265,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             me: Some(local.clone()),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
-            max_serve_ops: NZU64!(16),
+            max_serve_ops: types::SYNC_BATCH_SIZE,
             priority_requests: false,
             priority_responses: false,
         },
@@ -321,7 +321,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
             replay_buffer: IO_BUFFER_SIZE,
             max_participants: MAX_PARTICIPANTS,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
-            batch_verifier: PhantomData::<ed25519::Batch>,
         },
     );
     let reshare_handle = reshare_actor.start(dkg_network);

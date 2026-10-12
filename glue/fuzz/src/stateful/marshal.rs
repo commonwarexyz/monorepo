@@ -16,9 +16,9 @@
 //! [`ErasedApplication`] and [`ErasedReporter`] erase those two types at the
 //! boundary between consensus and the stateful actor, so consensus is compiled
 //! once per variant and only the stateful actor and the adapter it manages
-//! vary with the backend. The erasure adds one boxed future per proposal and
-//! verification on the consensus side of the boundary; the stateful actor,
-//! which is the system under test, is reached exactly as before.
+//! vary with the backend. The erasure adds one boxed future per prepare,
+//! proposal, and verification on the consensus side of the boundary; the
+//! stateful actor, which is the system under test, is reached exactly as before.
 
 #[cfg(any(
     test,
@@ -34,13 +34,13 @@ use super::{Ctx, Digest, EPOCH_LENGTH, PublicKey, Scheme, app::Block};
 use commonware_actor::Feedback;
 use commonware_codec::Read;
 use commonware_consensus::{
-    Application as ConsensusApplication, CertifiableAutomaton, Relay, Reporter,
+    Application as ConsensusApplication, CertifiableAutomaton, Handoff, Relay, Reporter,
     marshal::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
         core::{Buffer, Mailbox as MarshalMailbox, Variant},
     },
-    simplex::Plan,
+    simplex::{Plan, types::Activity},
     types::{Epoch, View},
 };
 use commonware_cryptography::{Digest as DigestTrait, certificate::ConstantProvider};
@@ -69,9 +69,11 @@ pub(super) trait Marshal: Clone + Send + Sync + 'static {
     /// The dissemination mailbox the marshal actor reads blocks from.
     type Buffer: Buffer<Self::Variant, PublicKey = PublicKey>;
 
-    /// The wrapper Simplex drives, built over the erased stateful mailbox.
+    /// The wrapper Simplex drives as its automaton, relay, and reporter, built over the
+    /// erased stateful mailbox.
     type Automaton: CertifiableAutomaton<Context = Ctx<Self>, Digest = Self::Payload>
-        + Relay<Digest = Self::Payload, PublicKey = PublicKey, Plan = Plan<PublicKey>>;
+        + Relay<Digest = Self::Payload, PublicKey = PublicKey, Plan = Plan<PublicKey>>
+        + Reporter<Activity = Activity<Scheme, Self::Payload>>;
 
     /// What one message on the dissemination channel decodes to.
     type Wire: Read;
@@ -97,7 +99,7 @@ pub(super) trait Marshal: Clone + Send + Sync + 'static {
         channel: (impl SenderTrait<PublicKey = PublicKey>, Receiver<PublicKey>),
     ) -> Self::Buffer;
 
-    /// Wrap the erased stateful mailbox into the Simplex automaton and relay.
+    /// Wrap the erased stateful mailbox into the Simplex automaton, relay, and reporter.
     fn automaton(
         context: deterministic::Context,
         application: ErasedApplication<Self>,
@@ -144,6 +146,15 @@ impl<M: Marshal> ConsensusApplication<deterministic::Context> for ErasedApplicat
     type Block = Block<M>;
     type Input = ();
 
+    async fn prepare(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        _input: Self::Input,
+    ) -> Handoff<Self::Block> {
+        self.0.prepare(context, BoxedAncestry::new(ancestry)).await
+    }
+
     async fn propose(
         &mut self,
         context: (deterministic::Context, Self::Context),
@@ -164,6 +175,12 @@ impl<M: Marshal> ConsensusApplication<deterministic::Context> for ErasedApplicat
 
 /// Object-safe form of the consensus application.
 trait DynApplication<M: Marshal>: Send {
+    fn prepare(
+        &mut self,
+        context: (deterministic::Context, Ctx<M>),
+        ancestry: BoxedAncestry<Block<M>>,
+    ) -> BoxFuture<'static, Handoff<Block<M>>>;
+
     fn propose(
         &mut self,
         context: (deterministic::Context, Ctx<M>),
@@ -193,6 +210,15 @@ where
     // Each call runs on its own clone so the future owns everything it
     // touches. The stateful mailbox is a channel handle, so the clone is what
     // consensus would have made anyway.
+    fn prepare(
+        &mut self,
+        context: (deterministic::Context, Ctx<M>),
+        ancestry: BoxedAncestry<Block<M>>,
+    ) -> BoxFuture<'static, Handoff<Block<M>>> {
+        let mut application = self.clone();
+        Box::pin(async move { application.prepare(context, ancestry, ()).await })
+    }
+
     fn propose(
         &mut self,
         context: (deterministic::Context, Ctx<M>),

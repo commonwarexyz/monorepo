@@ -2,7 +2,7 @@
 
 use super::{RangeProof, chunk_bits};
 use crate::{
-    merkle::{Graftable, Location, storage::Storage},
+    merkle::{ElementPlan, Graftable, Location, Position, storage::Storage},
     qmdb::Error,
 };
 use bytes::{BufMut, Bytes};
@@ -29,7 +29,8 @@ pub struct Proof<F: Graftable, D: Digest, C> {
 }
 
 impl<F: Graftable, D: Digest, const N: usize> Proof<F, D, [u8; N]> {
-    /// Return an inclusion proof that incorporates activity status for the operation at `loc`.
+    /// Return an inclusion proof that incorporates activity status for the operation at `loc`,
+    /// fetching the range proof over `loc..loc + 1` with [RangeProof::new].
     ///
     /// # Errors
     ///
@@ -41,13 +42,40 @@ impl<F: Graftable, D: Digest, const N: usize> Proof<F, D, [u8; N]> {
         loc: Location<F>,
         ops_root: D,
     ) -> Result<Self, Error<F>> {
-        // Reject locations in pruned bitmap chunks
         if BitMap::<N>::to_chunk_index(*loc) < status.pruned_chunks() {
             return Err(Error::OperationPruned(loc));
         }
         let range_proof =
             RangeProof::new::<H, S, N>(status, storage, inactivity_floor, loc..loc + 1, ops_root)
                 .await?;
+        let chunk = status.get_chunk(BitMap::<N>::to_chunk_index(*loc));
+        Ok(Self {
+            loc,
+            chunk,
+            range_proof,
+        })
+    }
+
+    /// Build an inclusion proof for the operation `plan` covers from digests already in memory,
+    /// building the range proof with [RangeProof::build].
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::OperationPruned] if the location falls in a pruned bitmap chunk, and
+    /// otherwise the errors of [RangeProof::build].
+    pub fn build<H: Hasher<Digest = D>>(
+        status: &impl BitmapReadable<N>,
+        plan: ElementPlan<F>,
+        get_node: impl Fn(Position<F>) -> Option<D>,
+        inactivity_floor: Location<F>,
+        ops_root: D,
+    ) -> Result<Self, Error<F>> {
+        let loc = plan.location();
+        if BitMap::<N>::to_chunk_index(*loc) < status.pruned_chunks() {
+            return Err(Error::OperationPruned(loc));
+        }
+        let range_proof =
+            RangeProof::build::<H, N>(status, plan.into(), get_node, inactivity_floor, ops_root)?;
         let chunk = status.get_chunk(BitMap::<N>::to_chunk_index(*loc));
         Ok(Self {
             loc,

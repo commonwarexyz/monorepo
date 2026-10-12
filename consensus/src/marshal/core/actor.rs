@@ -108,14 +108,11 @@ where
     T: Strategy,
     A: Acknowledgement,
 {
-    // ---------- Context ----------
     context: ContextCell<E>,
 
-    // ---------- Message Passing ----------
     // Mailbox
     mailbox: mailbox::Receiver<Message<P::Scheme, V>>,
 
-    // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
     provider: P,
     // Epoch configuration
@@ -129,7 +126,6 @@ where
     // Strategy for parallel operations
     strategy: T,
 
-    // ---------- State ----------
     // Durable floor and floor updates not yet applied
     floor: FloorState<P::Scheme, V::Commitment>,
     // Application delivery cursor
@@ -149,7 +145,6 @@ where
     // capacity to absorb finalization bursts while earlier blocks are processed
     staged: Staged<V::Block>,
 
-    // ---------- Storage ----------
     // Prunable cache
     cache: cache::Manager<E, V, P::Scheme>,
     // Finalizations stored by height
@@ -157,7 +152,6 @@ where
     // Finalized blocks stored by height
     finalized_blocks: FB,
 
-    // ---------- Metrics ----------
     // Latest height metric
     finalized_height: Gauge,
     // Latest processed height
@@ -664,16 +658,27 @@ where
                 // To lower view latency as much as possible while preserving
                 // safety, we broadcast the block before persisting it
                 // (durability is not required until certify). A leader that
-                // crashes here may broadcast a conflicting block for the same
-                // round after restart. This is tolerated: extra block bytes
-                // cannot form a conflicting certificate (unlike votes), block
-                // storage tolerates multiple candidates per round (see
-                // [Mailbox::get_verified]), and the propose paths skip or
-                // reuse a recovered block on restart.
+                // crashes here rebuilds after restart and may broadcast a
+                // different block for the same round. This is tolerated: a
+                // block that no journaled vote names cannot be notarized, extra
+                // block bytes cannot form a conflicting certificate (unlike
+                // votes), and block storage holds multiple candidates per
+                // round (see [Mailbox::get_verified]).
                 buffer.send(round, block.clone(), recipients);
                 self = self
                     .persist_verified(round, block, ack, buffer, application, resolver)
                     .await;
+            }
+            Message::Prepared {
+                round,
+                block,
+                recipients,
+                ..
+            } => {
+                // A held candidate is only sent. A later [Message::Verified],
+                // requested by the lock-in or by certification, stores it, so
+                // an abandoned candidate costs no storage write.
+                buffer.send(round, block, recipients);
             }
             Message::Verified {
                 round, block, ack, ..
@@ -1819,8 +1824,6 @@ where
         Some((epoch, scoped))
     }
 
-    // -------------------- Application Dispatch --------------------
-
     /// Attempt to dispatch the next finalized block to the application if ready.
     ///
     /// Dispatch finalized blocks to the application until the pipeline is full
@@ -1899,8 +1902,6 @@ where
         }
         self
     }
-
-    // -------------------- Prunable Storage --------------------
 
     /// Sync both finalization archives to durable storage, blocking the actor
     /// until they are durable.
@@ -1985,8 +1986,6 @@ where
         });
         self
     }
-
-    // -------------------- Immutable Storage --------------------
 
     /// Get a finalized block from the immutable archive.
     async fn get_finalized_block(&self, height: Height) -> Option<V::Block> {
@@ -2139,8 +2138,6 @@ where
             finalization.round(),
         ))
     }
-
-    // -------------------- Mixed Storage --------------------
 
     /// Looks for a block in cache and finalized storage by digest.
     async fn find_block_in_storage(

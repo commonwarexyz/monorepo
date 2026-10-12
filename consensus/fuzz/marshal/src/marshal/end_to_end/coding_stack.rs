@@ -15,7 +15,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, Write};
 use commonware_coding::ReedSolomon;
 use commonware_consensus::{
-    Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay,
+    Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay, Reporter,
     marshal::{
         Config, Start,
         ancestry::Ancestry,
@@ -35,8 +35,9 @@ use commonware_consensus::{
     },
     simplex::{
         Engine, Floor, ForwardPolicy, Plan, SkipBudget, SkipPolicy, config,
-        elector::Config as ElectorConfig, scheme::Scheme as SimplexScheme,
-        types::Context as SimplexContext,
+        elector::Config as ElectorConfig,
+        scheme::Scheme as SimplexScheme,
+        types::{Activity, Context as SimplexContext},
     },
     types::{Delta, Epoch, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
 };
@@ -647,7 +648,7 @@ pub(crate) fn start_engine_coding_with_networks<P: Simplex, EC, A, R>(
     elector: EC,
     automaton: A,
     relay: R,
-    marshal_mailbox: Mailbox<SchemeOf<P>, CodingVariant<P>>,
+    reporter: impl Reporter<Activity = Activity<SchemeOf<P>, CommitmentOf<P>>>,
     genesis_commitment: CommitmentOf<P>,
     forwarding: ForwardPolicy,
     vote: (
@@ -676,7 +677,7 @@ pub(crate) fn start_engine_coding_with_networks<P: Simplex, EC, A, R>(
             elector,
             automaton,
             relay,
-            reporter: marshal_mailbox,
+            reporter,
             partition: format!("engine-{validator}"),
             mailbox_size: NZUsize!(1024),
             epoch: Epoch::zero(),

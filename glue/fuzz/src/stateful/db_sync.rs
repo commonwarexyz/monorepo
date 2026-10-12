@@ -668,9 +668,8 @@ async fn run<S: Shape>(
     let sync_config = SyncEngineConfig {
         fetch_batch_size: input.sync.fetch_batch_size,
         apply_batch_size: input.sync.apply_batch_size,
-        max_outstanding_requests: usize::from(input.sync.max_outstanding_requests),
+        max_outstanding_requests: NZUsize!(usize::from(input.sync.max_outstanding_requests)),
         update_channel_size: NZUsize!(usize::from(input.sync.update_channel_size)),
-        max_retained_roots: usize::from(input.sync.max_retained_roots),
     };
 
     // The serving set and its divergent twin apply the pre-sync history.
@@ -925,7 +924,6 @@ mod tests {
                 apply_batch_size: NZU64!(batch),
                 max_outstanding_requests: 2,
                 update_channel_size: 2,
-                max_retained_roots: 4,
             },
             peer: PeerControls { divergent, delayed },
             raw_bytes: tape(seed),
@@ -996,7 +994,6 @@ mod tests {
                 apply_batch_size: NZU64!(1),
                 max_outstanding_requests: 1,
                 update_channel_size: 1,
-                max_retained_roots: 1,
             },
             peer: PeerControls {
                 divergent: 0,

@@ -5,7 +5,8 @@ use crate::marshal::end_to_end::{
     invariants::{CertificationAgreementInvariant, ConsensusParentDigest, HeaderMismatchInvariant},
 };
 use commonware_consensus::{
-    Automaton, CertifiableAutomaton, simplex::types::Context as SimplexContext, types::Round,
+    Automaton, CertifiableAutomaton, Handoff, simplex::types::Context as SimplexContext,
+    types::Round,
 };
 use commonware_consensus_fuzz_core::simplex::Simplex;
 use commonware_cryptography::sha256::Digest as Sha256Digest;
@@ -126,6 +127,34 @@ where
     D: ConsensusParentDigest,
     M: CertifiableAutomaton<Context = Ctx<P, D>, Digest = D>,
 {
+    async fn prepare(
+        &mut self,
+        context: Self::Context,
+    ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+        let round = context.round;
+        let mut result = self.inner.prepare(context).await;
+        let (mut tx, rx) = oneshot::channel();
+        let certification_agreement = self.certification_agreement.clone();
+        let runtime = self.context.lock().child("prepare");
+        let validator = self.validator;
+        runtime.spawn(move |_| async move {
+            let decision = select! {
+                result = &mut result => result.ok(),
+                _ = tx.closed() => result.try_recv().ok(),
+            };
+            let Some(decision) = decision else {
+                return;
+            };
+            // A payload voted for or staged on an uncertified parent is this
+            // node's own proposal.
+            if let Handoff::Vote(digest) | Handoff::Stage(digest) = decision {
+                certification_agreement.record_proposal(validator, round, digest);
+            }
+            tx.send_lossy(decision);
+        });
+        rx
+    }
+
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
         let mut result = self.inner.certify(round, digest).await;
         let (mut tx, rx) = oneshot::channel();

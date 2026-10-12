@@ -279,10 +279,10 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
         let builder = <M as TwinsMarshal<P, A>>::create(
             self.marshal_choice,
             &context,
-            application,
+            application.clone(),
             state.validators[idx].mailbox.clone(),
         );
-        state.validators[idx].start(builder.clone());
+        state.validators[idx].start(application);
         state
             .honest
             .push((idx, state.validators[idx].application.clone()));
@@ -308,8 +308,8 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
             scheme,
             elector,
             observed,
+            builder.clone(),
             builder,
-            state.validators[idx].mailbox.clone(),
             floor,
             format!("marshal-twins-honest-{idx}"),
             self.input.forwarding,
@@ -578,21 +578,22 @@ where
             impl Receiver<PublicKey = PublicKeyOf<P>>,
         ),
     ) {
+        let primary_application = AlwaysAcceptBlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default()
+            .with_ancestry_depth(self.ancestry_depth)
+            .with_block_contexts(state.block_contexts.clone())
+            .with_reporter(DeliveryReporter::new(
+                idx,
+                state.validators[idx].application.clone(),
+                self.pending_ack_invariant_limit(),
+                self.stack_label.clone(),
+            ));
         let primary_builder = <M as TwinsMarshal<P, PrimaryApp<P>>>::create(
             self.marshal_choice,
             &context,
-            AlwaysAcceptBlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default()
-                .with_ancestry_depth(self.ancestry_depth)
-                .with_block_contexts(state.block_contexts.clone())
-                .with_reporter(DeliveryReporter::new(
-                    idx,
-                    state.validators[idx].application.clone(),
-                    self.pending_ack_invariant_limit(),
-                    self.stack_label.clone(),
-                )),
+            primary_application.clone(),
             state.validators[idx].mailbox.clone(),
         );
-        state.validators[idx].start(primary_builder.clone());
+        state.validators[idx].start(primary_application);
         state
             .primaries
             .push((idx, state.validators[idx].application.clone()));
@@ -603,8 +604,8 @@ where
             scheme,
             topology.elector.clone(),
             primary_builder.clone(),
+            primary_builder.clone(),
             primary_builder,
-            state.validators[idx].mailbox.clone(),
             state.genesis,
             "marshal-twins-primary".into(),
             self.input.forwarding,

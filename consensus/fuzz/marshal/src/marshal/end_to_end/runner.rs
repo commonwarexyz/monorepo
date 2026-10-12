@@ -5,8 +5,9 @@
 //! (`setup_network`-style helpers, the byzantine `Disrupter`, strategy
 //! sampling) with [`MarshalDisrupterInput`]. The honest validators are
 //! parametrized by the *marshal sink* instead of the reporter sink: each runs a
-//! Simplex engine whose `reporter` is a marshal mailbox, and marshal delivers
-//! ordered finalized blocks to a downstream [`Application`] sink.
+//! Simplex engine whose `reporter` is its marshal wrapper, which forwards
+//! consensus activity to marshal, and marshal delivers ordered finalized blocks
+//! to a downstream [`Application`] sink.
 //!
 //! Liveness check uses simulated-network topology changes ([`apply_partition`])
 //! rather than MITM message interception:
@@ -76,7 +77,7 @@ use commonware_consensus::{
         },
     },
     simplex::{
-        elector::{Config as _, Elector as _},
+        elector::{Config as ElectorConfig, Elector, Mode as _},
         scheme::Scheme as SimplexScheme,
     },
     types::{Epoch, Participant, Round, TermLength, View},
@@ -143,7 +144,10 @@ fn byzantine_led<P: Simplex>(
 ) -> impl Fn(View) -> bool + Send + 'static {
     let elector = P::elector(term_length, PINNED_OPTIMISTIC_VIEWS).build(scheme.participants());
     move |view| {
-        elector.elect(Round::new(Epoch::zero(), view), None)
+        let input = <<P::Elector as ElectorConfig<SchemeOf<P>>>::Elector as Elector<
+            SchemeOf<P>,
+        >>::Mode::input(None);
+        elector.elect(Round::new(Epoch::zero(), view), input)
             == Participant::from_usize(BYZANTINE_IDX)
     }
 }
@@ -530,10 +534,10 @@ fn run_standard_disrupter<P: Simplex>(
             let builder = <DeferredMarshal as TwinsMarshal<P, _>>::create(
                 MarshalChoice::Deferred,
                 &validator_ctx,
-                application,
+                application.clone(),
                 node.mailbox.clone(),
             );
-            node.start(builder.clone());
+            node.start(application);
             let observed = ObservedMarshal {
                 validator: idx,
                 probe_input: probe_input.clone(),
@@ -560,8 +564,8 @@ fn run_standard_disrupter<P: Simplex>(
                     commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS,
                 ),
                 observed,
+                builder.clone(),
                 builder,
-                node.mailbox.clone(),
                 genesis_commitment,
                 format!("marshal-liveness-{idx}"),
                 input.forwarding,
@@ -797,8 +801,8 @@ where
                     commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS,
                 ),
                 observed,
+                marshaled.clone(),
                 marshaled,
-                node.mailbox,
                 genesis_commitment,
                 input.forwarding,
                 vote,
@@ -857,16 +861,19 @@ mod tests {
     }
 
     /// The poison fires only on an input whose victim backfills a nullified
-    /// byzantine-led view, so several seeds run and the forgery must land in
-    /// at least one of them.
+    /// byzantine-led view, so seeds run until the forgery lands and it must
+    /// land in at least one of them.
     #[test]
     fn standard_certificate_poison_runs_under_certificate_mock() {
         assert_adversary_acted(&[disrupter::ACTOR, POISON_ACTOR], || {
-            for seed in 0..6u8 {
+            for seed in 0..128u8 {
                 fuzz_marshal_standard_certificate_poison::<SimplexCertificateMock>(smoke_input(
                     vec![seed],
                     8,
                 ));
+                if commonware_consensus_fuzz_core::byzantine::count(POISON_ACTOR) > 0 {
+                    break;
+                }
             }
         });
     }

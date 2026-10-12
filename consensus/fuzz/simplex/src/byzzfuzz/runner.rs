@@ -361,6 +361,7 @@ async fn setup_engines<P: Simplex>(
                 (cert_primary, cert_receiver),
                 (resolver_primary, resolver_receiver),
                 input.certify,
+                input.handoff,
                 input.reporting,
             )
         };
@@ -622,7 +623,7 @@ pub fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_consensus::{simplex::ForwardPolicy, types::TermLength};
+    use commonware_consensus::{Handoff, simplex::ForwardPolicy, types::TermLength};
     use commonware_consensus_fuzz_core::{
         BlockFilterChoice, CertifyChoice, FuzzInput, N4F0C4, ReporterWiring,
         simplex::SimplexCertificateMock, strategy::StrategyChoice, utils::Partition,
@@ -638,6 +639,7 @@ mod tests {
             term_length: TermLength::ONE,
             optimistic_views: commonware_consensus::types::ViewDelta::zero(),
             heterogeneous_optimism: false,
+            handoff: Handoff::Wait,
             degraded_network: false,
             configuration: N4F0C4,
             partition: Partition::Connected,

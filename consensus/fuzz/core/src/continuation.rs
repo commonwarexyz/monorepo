@@ -18,10 +18,10 @@ use crate::{
 use bytes::Bytes;
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    Automaton, CertifiableAutomaton, Reporter, Viewable,
+    Automaton, CertifiableAutomaton, Handoff, Reporter, Viewable,
     simplex::{
         ForwardPolicy,
-        elector::{Config as ElectorConfig, Elector, Terms},
+        elector::{Config as ElectorConfig, Elector, Input, Mode as _, Terms},
         types::{Activity, Context as SimplexContext},
     },
     types::{Epoch, Round, TermLength, View, ViewDelta},
@@ -128,6 +128,14 @@ pub use crate::simplex_audit::Completion;
 /// What an honest replica's automaton was asked and answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AutomatonEvent {
+    Prepare {
+        round: Round,
+        parent: (View, Sha256Digest),
+    },
+    Prepared {
+        round: Round,
+        decision: Completion<Handoff<Sha256Digest>>,
+    },
     Propose {
         round: Round,
         parent: (View, Sha256Digest),
@@ -890,6 +898,8 @@ where
     P: Simplex,
     E: Elector<P::Scheme>,
 {
+    type Mode = E::Mode;
+
     fn terms(&self) -> Terms {
         self.inner.terms()
     }
@@ -897,11 +907,9 @@ where
     fn elect(
         &self,
         round: Round,
-        certificate: Option<
-            &<P::Scheme as commonware_cryptography::certificate::Verifier>::Certificate,
-        >,
+        input: Input<'_, P::Scheme, Self>,
     ) -> commonware_consensus::types::Participant {
-        let leader = self.inner.elect(round, certificate);
+        let leader = self.inner.elect(round, input);
         self.tap
             .record(&self.tap.elections, (round.view(), leader.get() as usize));
         leader
@@ -1060,6 +1068,25 @@ where
             Digest = Sha256Digest,
         >,
 {
+    async fn prepare(
+        &mut self,
+        context: Self::Context,
+    ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+        let round = context.round;
+        self.tap.record(
+            &self.tap.automaton,
+            AutomatonEvent::Prepare {
+                round,
+                parent: context.parent,
+            },
+        );
+        let receiver = self.inner.prepare(context).await;
+        self.proxy(receiver, move |decision| AutomatonEvent::Prepared {
+            round,
+            decision,
+        })
+    }
+
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
         self.tap.record(
             &self.tap.automaton,
@@ -1105,6 +1132,7 @@ pub fn spawn_validator<
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
     certify: CertifyChoice,
+    handoff: Handoff<()>,
     wiring: ReporterWiring,
 ) -> R
 where
@@ -1135,6 +1163,7 @@ where
             recovered,
             resolver,
             certify,
+            handoff,
             wiring,
         );
     };
@@ -1157,6 +1186,7 @@ where
         mailbox_size,
         forwarding,
         certify,
+        handoff,
         wiring,
         reporter: reporter.clone(),
     };
@@ -1187,6 +1217,7 @@ struct Build<P: Simplex, EC, R> {
     mailbox_size: NonZeroUsize,
     forwarding: ForwardPolicy,
     certify: CertifyChoice,
+    handoff: Handoff<()>,
     wiring: ReporterWiring,
     reporter: R,
 }
@@ -1228,8 +1259,9 @@ where
             certify_latency: (10.0, 5.0),
             should_certify: self.certify.into_certifier(index),
         };
-        let (actor, application) =
+        let (mut actor, application) =
             block_relay::Application::new(self.context.child("application"), app_cfg);
+        actor.set_handoff(self.handoff);
         let app = actor.start();
         let automaton = TapAutomaton {
             inner: self.reporter.automaton(&self.context, application.clone()),
@@ -1390,7 +1422,10 @@ impl<P: Simplex> Runner<P> {
         let leader: Box<dyn Fn(View) -> usize + Send + Sync> = Box::new(move |view| {
             leaders
                 .lock()
-                .elect(Round::new(Epoch::new(EPOCH), view), None)
+                .elect(
+                    Round::new(Epoch::new(EPOCH), view),
+                    <EC::Elector as Elector<P::Scheme>>::Mode::input(None),
+                )
                 .get() as usize
         });
         let recording = Arc::new(AtomicBool::new(true));
@@ -1540,7 +1575,7 @@ impl<P: Simplex> Runner<P> {
     }
 
     /// The check at the release: first gives the actors just started up to
-    /// [RELEASE_SETTLE] of simulated time to run, so a task that executes sets its marker.
+    /// `RELEASE_SETTLE` of simulated time to run, so a task that executes sets its marker.
     pub async fn check_release(&self) -> ActorCheck {
         let mut waited = Duration::ZERO;
         while !self.registry.executed(&self.required) && waited < RELEASE_SETTLE {
@@ -1983,7 +2018,9 @@ impl<P: Simplex> PrefixContext<P> {
             .map_or_else(Vec::new, |tap| tap.automaton.lock().clone())
     }
 
-    /// The leaders honest `replica`'s voter elected, by view, stamped.
+    /// Every election honest `replica`'s voter ran, by view, stamped. The voter
+    /// also elects the next term's leader ahead of entering it, so a view can
+    /// appear early and more than once.
     pub fn elections(&self, replica: usize) -> Vec<Recorded<(View, usize)>> {
         self.shared
             .tap(replica)
@@ -2236,6 +2273,7 @@ mod tests {
     #[derive(Clone)]
     struct Silent {
         open: Arc<Mutex<Vec<oneshot::Sender<bool>>>>,
+        prepares: Arc<Mutex<Vec<oneshot::Sender<Handoff<Sha256Digest>>>>>,
     }
 
     impl Automaton for Silent {
@@ -2257,7 +2295,16 @@ mod tests {
         }
     }
 
-    impl CertifiableAutomaton for Silent {}
+    impl CertifiableAutomaton for Silent {
+        async fn prepare(
+            &mut self,
+            _context: Self::Context,
+        ) -> oneshot::Receiver<Handoff<Sha256Digest>> {
+            let (sender, receiver) = oneshot::channel();
+            self.prepares.lock().push(sender);
+            receiver
+        }
+    }
 
     #[test]
     fn the_automaton_recorder_passes_a_cancellation_on() {
@@ -2274,6 +2321,7 @@ mod tests {
             ));
             let silent = Silent {
                 open: Arc::new(Mutex::new(Vec::new())),
+                prepares: Arc::new(Mutex::new(Vec::new())),
             };
             let mut automaton = TapAutomaton {
                 inner: silent.clone(),
@@ -2313,6 +2361,63 @@ mod tests {
         });
     }
 
+    #[test]
+    fn the_automaton_recorder_passes_a_prepare_cancellation_on() {
+        type P = crate::SimplexCertificateMock;
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let (participants, _schemes) = <P as Simplex>::setup(&mut context, crate::NAMESPACE, 4);
+            let observer: Arc<dyn Observer> = Arc::new(Unobserved);
+            let tap = Arc::new(ReplicaTap::<P>::new(
+                1,
+                participants.clone().into(),
+                observer,
+                Arc::new(AtomicBool::new(true)),
+            ));
+            let silent = Silent {
+                open: Arc::new(Mutex::new(Vec::new())),
+                prepares: Arc::new(Mutex::new(Vec::new())),
+            };
+            let mut automaton = TapAutomaton {
+                inner: silent.clone(),
+                tap: tap.clone(),
+                context: Arc::new(Mutex::new(context.child("tap"))),
+            };
+            let round = Round::new(Epoch::new(EPOCH), View::new(1));
+            let request = SimplexContext {
+                round,
+                leader: participants[0].clone(),
+                parent: (View::zero(), Sha256Digest([0; 32])),
+            };
+            let receiver = automaton.prepare(request).await;
+            context.sleep(Duration::from_millis(1)).await;
+            // Consensus abandons the request: the automaton's channel closes too.
+            drop(receiver);
+            context.sleep(Duration::from_millis(1)).await;
+            assert!(
+                silent
+                    .prepares
+                    .lock()
+                    .iter()
+                    .all(oneshot::Sender::is_closed),
+                "the recorder kept the automaton's request open"
+            );
+            let events: Vec<_> = tap
+                .automaton
+                .lock()
+                .iter()
+                .map(|entry| entry.value.clone())
+                .collect();
+            assert_eq!(
+                events.last(),
+                Some(&AutomatonEvent::Prepared {
+                    round,
+                    decision: Completion::Canceled,
+                })
+            );
+        });
+    }
+
     fn test_input() -> FuzzInput {
         FuzzInput {
             raw_bytes: vec![1, 2, 3],
@@ -2320,6 +2425,7 @@ mod tests {
             term_length: TermLength::new(commonware_utils::NZU32!(5)),
             optimistic_views: ViewDelta::new(7),
             heterogeneous_optimism: false,
+            handoff: Handoff::Wait,
             degraded_network: false,
             configuration: N4F0C4,
             partition: crate::utils::Partition::Connected,
@@ -2407,6 +2513,7 @@ mod tests {
             term_length: TermLength::new(commonware_utils::NZU32!(5)),
             optimistic_views: ViewDelta::new(7),
             heterogeneous_optimism: false,
+            handoff: Handoff::Wait,
             degraded_network: false,
             configuration: N4F0C4,
             partition: crate::utils::Partition::Connected,

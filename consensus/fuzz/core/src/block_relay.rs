@@ -2,7 +2,7 @@ use bytes::Bytes;
 use commonware_actor::Feedback;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
-    Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
+    Automaton as Au, CertifiableAutomaton as CAu, Handoff, Relay as Re,
     simplex::{
         Plan,
         mocks::application::{self, Certifier},
@@ -313,6 +313,10 @@ pub struct Config<P: PublicKey> {
 }
 
 pub(crate) enum Message<P: PublicKey> {
+    Prepare {
+        context: Context<Sha256Digest, P>,
+        response: oneshot::Sender<Handoff<Sha256Digest>>,
+    },
     Propose {
         context: Context<Sha256Digest, P>,
         response: oneshot::Sender<Sha256Digest>,
@@ -371,6 +375,16 @@ impl<P: PublicKey> Au for Mailbox<P> {
 }
 
 impl<P: PublicKey> CAu for Mailbox<P> {
+    async fn prepare(
+        &mut self,
+        context: Self::Context,
+    ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send_lossy(Message::Prepare { context, response });
+        receiver
+    }
+
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         self.sender.send_lossy(Message::Certify {
@@ -411,6 +425,8 @@ pub struct Application<E: Clock + Rng + Spawner, P: PublicKey> {
     verify_latency: Normal<f64>,
     certify_latency: Normal<f64>,
     should_certify: Certifier<Sha256Digest>,
+    /// The decision attached to a handoff candidate. `Wait` builds nothing.
+    handoff: Handoff<()>,
     pending: HashMap<Sha256Digest, Bytes>,
     seen: HashMap<Sha256Digest, Bytes>,
     verified: HashSet<Sha256Digest>,
@@ -442,6 +458,7 @@ impl<E: Clock + Rng + Spawner, P: PublicKey> Application<E, P> {
                 verify_latency,
                 certify_latency,
                 should_certify: cfg.should_certify,
+                handoff: Handoff::Wait,
                 pending: HashMap::new(),
                 seen: HashMap::new(),
                 verified: HashSet::new(),
@@ -450,6 +467,11 @@ impl<E: Clock + Rng + Spawner, P: PublicKey> Application<E, P> {
             },
             Mailbox::new(sender),
         )
+    }
+
+    /// Sets the handoff decision, which defaults to `Wait`.
+    pub const fn set_handoff(&mut self, handoff: Handoff<()>) {
+        self.handoff = handoff;
     }
 
     /// A latency sample: from the override a trusted continuation set for this
@@ -509,23 +531,44 @@ impl<E: Clock + Rng + Spawner, P: PublicKey> Application<E, P> {
         true
     }
 
-    async fn certify(&mut self, round: Round, payload: Sha256Digest) -> Option<bool> {
+    async fn certify(
+        &mut self,
+        round: Round,
+        payload: Sha256Digest,
+        response: oneshot::Sender<bool>,
+    ) {
         let duration = self.sample(|app| &app.certify_latency, |latencies| latencies.certify);
         self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
         match &self.should_certify {
-            Certifier::Always => Some(true),
-            Certifier::Custom(func) => Some(func(round, payload)),
-            Certifier::Cancel | Certifier::Pending => None,
+            Certifier::Always => {
+                response.send_lossy(true);
+            }
+            Certifier::Custom(func) => {
+                response.send_lossy(func(round, payload));
+            }
+            Certifier::Controlled(controller) => controller(round, payload, response),
+            Certifier::Cancel => {}
+            Certifier::Pending => self.pending_certifications.push(response),
         }
     }
 
     fn broadcast(&mut self, payload: Sha256Digest, plan: Plan<P>) {
         let (contents, recipients) = match plan {
+            // A held candidate is sent when consensus requests `Plan::Prepare`.
+            // Its later `Plan::Propose` broadcast does not send it again,
+            // mirroring marshal's relay.
+            Plan::Prepare { .. } => {
+                let contents = self.pending.get(&payload).expect("missing payload").clone();
+                self.seen.insert(payload, contents.clone());
+                (contents, Recipients::All)
+            }
             Plan::Propose { .. } => {
                 let contents = self.pending.remove(&payload).expect("missing payload");
-                self.seen.insert(payload, contents.clone());
+                if self.seen.insert(payload, contents.clone()).is_some() {
+                    return;
+                }
                 (contents, Recipients::All)
             }
             Plan::Forward { recipients, .. } => {
@@ -565,6 +608,15 @@ impl<E: Clock + Rng + Spawner, P: PublicKey> Application<E, P> {
             },
             Some(message) = self.mailbox.recv() else break => {
                 match message {
+                    Message::Prepare { context, response } => {
+                        let decision = self.handoff;
+                        if decision.is_wait() {
+                            response.send_lossy(Handoff::Wait);
+                            continue;
+                        }
+                        let digest = self.propose(context).await;
+                        response.send_lossy(decision.map(|()| digest));
+                    }
                     Message::Propose { context, response } => {
                         let digest = self.propose(context).await;
                         response.send_lossy(digest);
@@ -599,10 +651,8 @@ impl<E: Clock + Rng + Spawner, P: PublicKey> Application<E, P> {
                                 .entry(payload)
                                 .or_default()
                                 .push((round, response));
-                        } else if let Some(certified) = self.certify(round, payload).await {
-                            response.send_lossy(certified);
-                        } else if matches!(self.should_certify, Certifier::Pending) {
-                            self.pending_certifications.push(response);
+                        } else {
+                            self.certify(round, payload, response).await;
                         }
                     }
                     Message::Broadcast { payload, plan } => {
@@ -620,11 +670,7 @@ impl<E: Clock + Rng + Spawner, P: PublicKey> Application<E, P> {
                 }
                 if let Some(waiters) = self.certification_waiters.remove(&digest) {
                     for (round, sender) in waiters {
-                        if let Some(certified) = self.certify(round, digest).await {
-                            sender.send_lossy(certified);
-                        } else if matches!(self.should_certify, Certifier::Pending) {
-                            self.pending_certifications.push(sender);
-                        }
+                        self.certify(round, digest, sender).await;
                     }
                 }
             },

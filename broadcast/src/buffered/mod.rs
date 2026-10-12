@@ -18,9 +18,10 @@
 //!
 //! # Peer Management
 //!
-//! Only peers in `latest.primary` may buffer messages (see [commonware_p2p::Provider]). When a peer
-//! is no longer in `latest.primary`, its buffered messages are evicted unless buffered by any other
-//! primary peer.
+//! Only primary peers of a tracked peer set (`all.primary`, see [commonware_p2p::Provider]) may
+//! buffer messages. When a peer is no longer a primary of any tracked set, its buffered messages
+//! are evicted unless buffered by any other primary peer. A peer that only leaves the latest set
+//! keeps its messages through the overlap window.
 
 mod config;
 pub use config::Config;
@@ -369,7 +370,7 @@ mod tests {
         }
 
         // Let each engine run until it applies the peer set from `initialize_simulation` so
-        // `latest_primary_peers` is populated before any broadcast.
+        // `primary_peers` is populated before any broadcast.
         context.sleep(A_JIFFY).await;
         mailboxes
     }
@@ -1213,7 +1214,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_peer_set_update_evicts_peers_not_in_latest_set_even_if_still_in_overlap() {
+    fn test_peer_set_update_keeps_peers_in_overlap_until_their_set_ages_out() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             // Use tracked_peer_sets=2 so old sets are retained in the window.
@@ -1311,33 +1312,43 @@ mod tests {
                 "peer B should have the message before eviction"
             );
 
-            // Track set 1 with only [B, C]. With tracked_peer_sets=2, both
-            // sets 0 and 1 are retained, so A is still in `all.primary`. Buffered caches follow
-            // `latest.primary`, though, so A's deque should be evicted immediately.
+            // Track set 1 with only [B, C]. With tracked_peer_sets=2, both sets 0 and 1 are
+            // retained, so A is still in `all.primary` and keeps its deque.
             let remaining = commonware_utils::ordered::Set::from_iter_dedup(vec![
                 peer_b.clone(),
                 peer_c.clone(),
             ]);
-            oracle.manager().track(1, remaining);
+            oracle.manager().track(1, remaining.clone());
             context.sleep(A_JIFFY).await;
 
-            assert!(
-                mailbox_b.get(msg.digest()).await.is_none(),
-                "message should be evicted: peer A is not in the latest peer set"
+            assert_eq!(
+                mailbox_b.get(msg.digest()).await.as_deref(),
+                Some(&msg),
+                "message should survive while peer A is still a primary of a tracked set"
             );
 
-            // Peer A is no longer in `latest.primary`, so A does not buffer; send still runs.
-            let fresh = TestMessage::shared(b"post-eviction-latest-test");
+            // A still buffers fresh messages through the overlap window.
+            let fresh = TestMessage::shared(b"overlap-latest-test");
             assert!(
                 mailbox_a
                     .broadcast(Recipients::All, fresh.clone())
                     .accepted()
             );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+            assert_eq!(
+                mailbox_b.get(fresh.digest()).await.as_deref(),
+                Some(&fresh),
+                "message from a peer in the overlap window should still be cached"
+            );
 
+            // Tracking another set without A ages set 0 out of the window, so A leaves every
+            // tracked set and its deque is evicted.
+            oracle.manager().track(2, remaining);
+            context.sleep(A_JIFFY).await;
             assert!(
-                mailbox_b.get(fresh.digest()).await.is_none(),
-                "message should not be rebuffered after peer A left latest.primary"
+                mailbox_b.get(msg.digest()).await.is_none()
+                    && mailbox_b.get(fresh.digest()).await.is_none(),
+                "messages should be evicted once peer A left every tracked set"
             );
         });
     }

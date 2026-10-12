@@ -24,7 +24,7 @@ use crate::{
 use arbitrary::Arbitrary;
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    CertifiableAutomaton, Monitor, Relay as ConsensusRelay, Reporter, Reporters,
+    CertifiableAutomaton, Handoff, Monitor, Relay as ConsensusRelay, Reporter, Reporters,
     simplex::{
         Engine, Floor, ForwardPolicy, Plan, SkipBudget, SkipPolicy, config,
         elector::Config as ElectorConfig,
@@ -95,6 +95,11 @@ pub const FAULT_PHASE: Duration = Duration::from_secs(30);
 pub const NAMESPACE: &[u8] = b"consensus_fuzz";
 pub const MAX_RAW_BYTES: usize = 32_768;
 pub const DEFAULT_MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
+
+/// Honest handoff decisions: wait for parent certification, relay early but hold the vote,
+/// or vote early.
+pub const HANDOFF_DECISIONS: [Handoff<()>; 3] =
+    [Handoff::Wait, Handoff::Stage(()), Handoff::Vote(())];
 
 /// Simulated-time deadline for a run, derived from the work it demands: a run
 /// traverses `prefix_views` scripted adversarial views (zero outside twins) and
@@ -348,6 +353,7 @@ impl fmt::Debug for FuzzInputDebug<'_> {
             .field("required_containers", &input.required_containers)
             .field("term_length", &input.term_length)
             .field("optimistic_views", &input.optimistic_views)
+            .field("handoff", &input.handoff)
             .field("degraded_network", &input.degraded_network)
             .field("configuration", &input.configuration)
             .field("partition", &input.partition)
@@ -384,6 +390,9 @@ pub struct FuzzInput {
     /// Sampled but not yet handed to engines: per-node lookaheads are not
     /// wired, so every engine runs `optimistic_views`.
     pub heterogeneous_optimism: bool,
+    /// Handoff decision every honest application returns for a term-start
+    /// proposal whose parent is not yet certified.
+    pub handoff: Handoff<()>,
     pub degraded_network: bool,
     pub configuration: Configuration,
     pub partition: Partition,
@@ -437,6 +446,7 @@ impl Arbitrary<'_> for FuzzInput {
         let term_length = TermLength::new(NZU32!(u.int_in_range(1..=MAX_TERM_LENGTH)?));
         let optimistic_views = ViewDelta::new(sample_optimistic_views(u, term_length)?);
         let heterogeneous_optimism = u.arbitrary()?;
+        let handoff = *u.choose(&HANDOFF_DECISIONS)?;
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -509,6 +519,7 @@ impl Arbitrary<'_> for FuzzInput {
             term_length,
             optimistic_views,
             heterogeneous_optimism,
+            handoff,
             strategy,
             mailbox_size,
             forwarding,
@@ -1011,6 +1022,7 @@ pub fn build_validator<
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
     certify: CertifyChoice,
+    handoff: Handoff<()>,
     wiring: ReporterWiring,
 ) -> ManagedValidator<P, reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>>
 where
@@ -1042,6 +1054,7 @@ where
         recovered,
         resolver,
         certify,
+        handoff,
         wiring,
     )
 }
@@ -1316,6 +1329,7 @@ pub fn build_validator_with_reporter<
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
     certify: CertifyChoice,
+    handoff: Handoff<()>,
     wiring: ReporterWiring,
 ) -> ManagedValidator<P, R>
 where
@@ -1353,7 +1367,9 @@ where
         certify_latency: (10.0, 5.0),
         should_certify: certify.into_certifier(validator_idx),
     };
-    let (actor, application) = application::Application::new(context.child("application"), app_cfg);
+    let (mut actor, application) =
+        application::Application::new(context.child("application"), app_cfg);
+    actor.set_handoff(handoff);
     let app_handle = actor.start();
     let automaton = reporter.automaton(&context, application.clone());
 
@@ -1416,6 +1432,7 @@ pub fn spawn_filtered_honest_validator<
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
     certify: CertifyChoice,
+    handoff: Handoff<()>,
     wiring: ReporterWiring,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
 where
@@ -1454,6 +1471,7 @@ where
         recovered,
         resolver,
         certify,
+        handoff,
         wiring,
     )
 }
@@ -1485,6 +1503,7 @@ pub fn spawn_filtered_validator_with_reporter<
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
     certify: CertifyChoice,
+    handoff: Handoff<()>,
     wiring: ReporterWiring,
 ) -> R
 where
@@ -1517,7 +1536,9 @@ where
         certify_latency: (10.0, 5.0),
         should_certify: certify.into_certifier(validator_idx),
     };
-    let (actor, application) = block_relay::Application::new(context.child("application"), app_cfg);
+    let (mut actor, application) =
+        block_relay::Application::new(context.child("application"), app_cfg);
+    actor.set_handoff(handoff);
     let _app_handle = actor.start();
     let automaton = reporter.automaton(&context, application.clone());
 

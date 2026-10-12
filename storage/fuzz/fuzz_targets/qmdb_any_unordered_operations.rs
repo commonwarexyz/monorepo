@@ -13,13 +13,16 @@ use commonware_storage::{
         any::{
             FixedConfig as Config,
             db::Db as AnyDb,
+            traits::DbAny as _,
             unordered::{Operation, Update},
             value::FixedEncoding,
         },
+        floor::Proportional,
         verify_proof,
     },
     translator::EightCap,
 };
+use commonware_storage_fuzz::floor::{Plan, Recorder};
 use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -49,7 +52,7 @@ type GenericDb<F> = AnyDb<
 enum QmdbOperation {
     Update { key: RawKey, value: RawValue },
     Delete { key: RawKey },
-    Commit,
+    Commit(Plan),
     OpCount,
     Root,
     Proof { start_loc: u64, max_ops: u64 },
@@ -83,16 +86,20 @@ const PAGE_CACHE_SIZE: usize = 100;
 
 async fn commit_pending<F: MerkleFamily>(
     db: GenericDb<F>,
+    plan: &Plan,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut HashMap<RawKey, Option<RawValue>>,
     pending_expected: &mut HashMap<RawKey, Option<RawValue>>,
     expected_op_count: &mut Location<F>,
 ) -> GenericDb<F> {
+    let inherited = db.inactivity_floor_loc();
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let mut policy = Recorder::new(plan, |seed| Value::new([seed; 64]));
+    let merkleized = batch.merkleize(&db, None, &mut policy).await.unwrap();
+    // The tip counts the batch's writes, the floor walk's operations, and its commit.
     let expected_end = merkleized.bounds().tip.size;
     let (db, applied) = db
         .apply_batch(merkleized)
@@ -106,6 +113,19 @@ async fn commit_pending<F: MerkleFamily>(
     *expected_op_count = expected_end;
     let db = db.commit().await.expect("commit fsync should not fail");
     committed_state.extend(pending_expected.drain());
+
+    // Check the floor walk against the post-write state, then replay its decisions into it.
+    let live = policy.check_raw(
+        committed_state
+            .iter()
+            .filter_map(|(key, value)| Some((*key, (*value)?))),
+        inherited,
+        db.inactivity_floor_loc(),
+        db.bounds().end - 1,
+    );
+    for (key, value) in committed_state.iter_mut() {
+        *value = live.get(key).copied();
+    }
     db
 }
 
@@ -157,6 +177,9 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
             let mut expected_op_count = db.bounds().end;
 
+            // Every commit walks the floor under the plan of the most recent Commit operation.
+            let mut plan = Plan::Proportional;
+
             for op in &operations {
                 db = match op {
                     QmdbOperation::Update { key, value } => {
@@ -192,9 +215,11 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         db
                     }
 
-                    QmdbOperation::Commit => {
+                    QmdbOperation::Commit(next) => {
+                        plan = next.clone();
                         commit_pending(
                             db,
+                            &plan,
                             &mut pending_writes,
                             &mut committed_state,
                             &mut pending_expected,
@@ -206,6 +231,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     QmdbOperation::Root => {
                         let db = commit_pending(
                             db,
+                            &plan,
                             &mut pending_writes,
                             &mut committed_state,
                             &mut pending_expected,
@@ -228,6 +254,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
 
                         let db = commit_pending(
                             db,
+                            &plan,
                             &mut pending_writes,
                             &mut committed_state,
                             &mut pending_expected,
@@ -312,6 +339,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             if !pending_writes.is_empty() {
                 db = commit_pending(
                     db,
+                    &plan,
                     &mut pending_writes,
                     &mut committed_state,
                     &mut pending_expected,
@@ -347,7 +375,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 }
             }
 
-            let batch = db.new_batch().merkleize(&db, None).await.unwrap();
+            let batch = db.new_batch().merkleize(&db, None, &mut Proportional).await.unwrap();
             let (db, _) = db
                 .apply_batch(batch)
                 .await
