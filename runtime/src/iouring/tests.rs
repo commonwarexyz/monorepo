@@ -1,9 +1,12 @@
-//! Runtime configuration, task placement, worker reservations, pool, and cleanup tests.
+//! Runtime configuration, task placement, worker reservations, pool, search
+//! and park, and cleanup tests, with hooks that pause a pool worker at a point
+//! of its park or at an overflow of its run queue.
 
 use super::{
     super::{
         driver::tests::fail_after_completion,
         operation::Operation,
+        pool::tests::{WakePoint, on_wake_point},
         queue::CAPACITY,
         request::{RecvRequest, Request},
         task::{Task, tests::cancelled},
@@ -50,12 +53,51 @@ thread_local! {
     static POOL_FAIL_AT: Cell<Option<(usize, bool)>> = const { Cell::new(None) };
     /// Shared services of the runner whose pool last started, to observe their release.
     static POOL_SHARED: RefCell<Weak<Shared>> = const { RefCell::new(Weak::new()) };
+    /// Pool of the runner whose pool last started, kept past the runner.
+    static POOL_KEPT: RefCell<Option<Arc<Pool>>> = const { RefCell::new(None) };
 }
 
-/// Fail pool worker `index`'s startup after the workers before it have started.
+/// Keeps a runner's pool past the runner, so that dropping it once the runner
+/// has returned or unwound runs the pool's checks of its wake word outside any
+/// unwind.
+#[derive(Clone, Default)]
+struct KeptPool(Arc<Mutex<Option<Arc<Pool>>>>);
+
+impl KeptPool {
+    /// Keep the pool of the runner `context` belongs to.
+    fn keep(&self, context: &Context) {
+        *self.0.lock() = Some(context.shared.pool.clone());
+    }
+
+    /// Check that every task cell was freed, then drop the pool, which asserts
+    /// that every worker withdrew from the idle set and returned its search
+    /// count.
+    fn check(&self) {
+        check_pool(self.0.lock().take().expect("no pool kept"));
+    }
+}
+
+/// Check that every task cell was freed, since each holds a weak reference to
+/// its pool, so no runnable was leaked, then drop the last reference to
+/// `pool`, which asserts that every worker withdrew from the idle set and
+/// returned its search count.
+fn check_pool(pool: Arc<Pool>) {
+    assert_eq!(
+        Arc::strong_count(&pool),
+        1,
+        "the runner still holds its pool"
+    );
+    assert_eq!(Arc::weak_count(&pool), 0, "a task cell was never freed");
+    drop(pool);
+}
+
+/// Fail pool worker `index`'s startup after the workers before it have
+/// started, once a test arms `POOL_FAIL_AT`, recording the runner's shared
+/// services and pool so the test can check that both are released.
 pub fn before_pool_worker(shared: &Arc<Shared>, index: usize) -> Option<impl Drop> {
     let (fail_at, launch) = POOL_FAIL_AT.get()?;
     POOL_SHARED.with(|slot| *slot.borrow_mut() = Arc::downgrade(shared));
+    POOL_KEPT.with(|slot| *slot.borrow_mut() = Some(shared.pool.clone()));
     if index != fail_at {
         return None;
     }
@@ -272,11 +314,17 @@ pub fn before_park() {
 /// A point in a pool worker's park sequence where a test hook runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParkPoint {
-    /// After the worker's last readiness check and its search of the other run
-    /// queues, before it publishes itself idle.
+    /// After a turn's service, messages and callbacks, before the worker
+    /// decides whether to go round again, for pending work or a deadline that
+    /// has passed, or to look for work before it parks. Reached on every turn.
+    AfterMessages,
+    /// After the worker's last readiness check and its search of the other
+    /// run queues, before it publishes itself idle. A worker whose search ran
+    /// and found nothing still holds its search count here.
     BeforeIdle,
-    /// After the worker publishes itself idle and finds the global queue
-    /// empty, before it waits.
+    /// After the worker publishes itself idle and its last look leaves it to
+    /// wait, finding nothing or leaving a backlog to a worker holding a count,
+    /// before it waits.
     BeforeWait,
 }
 
@@ -378,16 +426,16 @@ fn is_waiting(pool: &Pool, index: u32) -> bool {
 }
 
 /// Block until every worker of `pool` waits for a wake, published idle with
-/// no wake's claim, both before and after the scan of the waiting bits. A
-/// worker a wake claimed shows its waiting bit until it runs, and one seen
-/// waiting can resume before the scan ends, so the waiting bits alone do not
-/// show a quiet pool. A worker that parks again before the second look has
-/// polled what it took. Once nothing can wake a task or push into the pool any
-/// more, this establishes that every task's poll has returned, leaving each
-/// idle.
+/// no wake's claim and no search count held, both before and after the scan
+/// of the waiting bits. A worker a wake claimed shows its waiting bit until it
+/// runs, and one seen waiting can resume before the scan ends, so the waiting
+/// bits alone do not show a quiet pool. A worker that parks again before the
+/// second look has polled what it took. Once nothing can wake a task or push
+/// into the pool any more, this establishes that every task's poll has
+/// returned, leaving each idle.
 fn wait_until_every_worker_waits(pool: &Pool) {
     let workers = pool.workers() as u32;
-    let parked = || (0..workers).all(|index| pool.is_idle(index));
+    let parked = || (0..workers).all(|index| pool.is_idle(index)) && pool.search_count() == 0;
     let deadline = Instant::now() + TEST_TIMEOUT;
     while !(parked() && (0..workers).all(|index| is_waiting(pool, index)) && parked()) {
         assert!(Instant::now() < deadline, "a worker never waited");
@@ -552,6 +600,317 @@ impl ArcWake for WakeThenPanic {
         }
         panic!("injected pool worker callback failure");
     }
+}
+
+/// Wait in the root until every worker of `pool` waits for a wake. A thread
+/// outside the pool runs [`wait_until_every_worker_waits`], so the root's own
+/// worker parks as well.
+async fn every_worker_waits(pool: &Arc<Pool>) {
+    let (go, idle) = oneshot::channel::<()>();
+    let watcher = thread::spawn({
+        let pool = pool.clone();
+        move || {
+            wait_until_every_worker_waits(&pool);
+            go.send(()).unwrap();
+        }
+    });
+    idle.await.unwrap();
+    watcher.join().unwrap();
+}
+
+/// Idle tasks a test wakes when it chooses: each records its waker on its
+/// first poll and returns pending, then counts its second poll and completes.
+struct Recorded {
+    /// Wakers of the tasks polled once and not woken since.
+    wakers: Arc<Mutex<Vec<Waker>>>,
+    /// Number of tasks polled a second time.
+    ran: Arc<AtomicUsize>,
+    /// The tasks' handles.
+    tasks: Vec<Handle<()>>,
+}
+
+impl Recorded {
+    /// Spawn `count` recording tasks.
+    fn spawn(context: &Context, count: usize) -> Self {
+        let wakers = Arc::new(Mutex::new(Vec::new()));
+        let ran = Arc::new(AtomicUsize::new(0));
+        let tasks = (0..count)
+            .map(|_| {
+                let wakers = wakers.clone();
+                let ran = ran.clone();
+                let mut polled = false;
+                context.child("recorded").spawn(move |_| {
+                    poll_fn(move |cx| {
+                        if polled {
+                            ran.fetch_add(1, Ordering::SeqCst);
+                            return Poll::Ready(());
+                        }
+                        polled = true;
+                        wakers.lock().push(cx.waker().clone());
+                        Poll::Pending
+                    })
+                })
+            })
+            .collect();
+        Self { wakers, ran, tasks }
+    }
+
+    /// Wake every task recorded since the last wake.
+    fn wake(&self) {
+        for waker in mem::take(&mut *self.wakers.lock()) {
+            waker.wake();
+        }
+    }
+
+    /// Number of tasks polled a second time.
+    fn ran(&self) -> usize {
+        self.ran.load(Ordering::SeqCst)
+    }
+}
+
+/// A callback that wakes the recorded tasks it holds, then blocks until one
+/// of them has run, which another worker must do, and records that it
+/// finished. A search count its worker held meanwhile would keep the kick of
+/// those wakes from reaching a parked worker.
+struct WakeAndWait {
+    /// The recorded tasks' wakers.
+    wakers: Arc<Mutex<Vec<Waker>>>,
+    /// Number of recorded tasks polled a second time.
+    ran: Arc<AtomicUsize>,
+    /// Whether the callback finished.
+    done: AtomicBool,
+}
+
+impl WakeAndWait {
+    /// A callback that wakes `recorded`.
+    fn new(recorded: &Recorded) -> Arc<Self> {
+        Arc::new(Self {
+            wakers: recorded.wakers.clone(),
+            ran: recorded.ran.clone(),
+            done: AtomicBool::new(false),
+        })
+    }
+
+    /// Whether the callback finished.
+    fn is_done(&self) -> bool {
+        self.done.load(Ordering::SeqCst)
+    }
+}
+
+impl ArcWake for WakeAndWait {
+    fn wake_by_ref(this: &Arc<Self>) {
+        let wakers = mem::take(&mut *this.wakers.lock());
+        if wakers.is_empty() {
+            return;
+        }
+        for waker in wakers {
+            waker.wake();
+        }
+        spin_until(
+            || this.ran.load(Ordering::SeqCst) != 0,
+            "no other worker ran a task the callback woke",
+        );
+        this.done.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Wakes the recorded tasks it holds when dropped, then waits a bounded time
+/// for one of them to run, recording whether it did. It never panics, since
+/// it runs while its worker unwinds.
+struct WakeOnDrop {
+    /// The recorded tasks' wakers.
+    wakers: Arc<Mutex<Vec<Waker>>>,
+    /// Number of recorded tasks polled a second time.
+    ran: Arc<AtomicUsize>,
+    /// Whether a woken task ran.
+    progressed: Arc<AtomicBool>,
+}
+
+impl Drop for WakeOnDrop {
+    fn drop(&mut self) {
+        let wakers = mem::take(&mut *self.wakers.lock());
+        if wakers.is_empty() {
+            return;
+        }
+        for waker in wakers {
+            waker.wake();
+        }
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        while self.ran.load(Ordering::SeqCst) == 0 {
+            if Instant::now() >= deadline {
+                return;
+            }
+            std::hint::spin_loop();
+        }
+        self.progressed.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Run a two-worker runner whose root, once both workers wait, makes worker
+/// zero unwind from `point` of its next park, with two idle tasks its root's
+/// destructor wakes into worker zero's run queue. Returns whether another
+/// worker ran one of them before the destructor's bounded wait ended, after
+/// checking the runner's failure and the pool's wake word.
+fn root_destructor_after_an_unwind_at(point: ParkPoint) -> bool {
+    let progressed = Arc::new(AtomicBool::new(false));
+    let kept = KeptPool::default();
+    let keeper = kept.clone();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let progressed = progressed.clone();
+        Runner::new(config().with_worker_threads(2)).start(move |context| async move {
+            keeper.keep(&context);
+            let pool = context.shared.pool.clone();
+            let woken = Recorded::spawn(&context, 2);
+            let _guard = WakeOnDrop {
+                wakers: woken.wakers.clone(),
+                ran: woken.ran.clone(),
+                progressed,
+            };
+
+            // Once every worker waits, both tasks are idle and worker one is
+            // parked.
+            every_worker_waits(&pool).await;
+            on_next_park(&pool, 0, point, || panic!("injected unwind of worker zero"));
+            pending::<()>().await;
+        });
+    }));
+    let panic = result.expect_err("the injected unwind must fail the runner");
+    assert!(extract_panic_message(&*panic).contains("injected unwind of worker zero"));
+    kept.check();
+    progressed.load(Ordering::SeqCst)
+}
+
+/// Where a pool worker runs a catch-up service whose callbacks run user code
+/// while it may hold a search count.
+#[derive(Clone, Copy, Debug)]
+enum CatchUp {
+    /// Going round again with a message pending.
+    GoRound,
+    /// Going round again rather than waiting for a deadline that has passed.
+    Deadline,
+    /// Running again after the search before parking took work.
+    AfterSearch,
+}
+
+/// A worker returns its search count before the catch-up service that runs
+/// at `catch_up`, whose callbacks run user code. Worker one, holding a count
+/// and with a receive pending in its io_uring ring, gets there with a timer
+/// that a hook registers after the turn's own service and lets expire, so
+/// only the catch-up service collects it. The timer's callback wakes two idle
+/// tasks into worker one's run queue and blocks until worker two, parked, has
+/// run one of them, while the root holds worker zero. A count held across the
+/// callback would keep worker two asleep.
+fn catch_up_callback_after_the_count_returns(catch_up: CatchUp) {
+    Runner::new(config().with_worker_threads(3)).start(|context| async move {
+        let pool = context.shared.pool.clone();
+
+        // Two tasks the root wakes into its own run queue, and two the
+        // callback wakes into worker one's.
+        let backlog = Recorded::spawn(&context, 2);
+        let woken = Recorded::spawn(&context, 2);
+        let trigger = WakeAndWait::new(&woken);
+        every_worker_waits(&pool).await;
+
+        // Worker one holds a receive in its io_uring ring, so its idle turns
+        // defer kernel service, which the catch-up then runs. Once it and
+        // worker two have parked again, no count is held.
+        let (socket, peer) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let _ = spawn_elsewhere(&context, async move {
+            assert_eq!(thread::current().name(), Some("iouring-pool-1"));
+            let fd: Arc<OwnedFd> = Arc::new(socket.into());
+            let _ = Operation::register(Request::Recv(RecvRequest {
+                fd,
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+            }))
+            .await;
+        });
+        spin_until(
+            || is_waiting(&pool, 1) && is_waiting(&pool, 2) && pool.search_count() == 0,
+            "workers one and two never parked again",
+        );
+
+        // Register the timer on worker one, then wait until it has expired.
+        let timer = Arc::new(Mutex::new(None::<Pin<Box<dyn Future<Output = ()> + Send>>>));
+        let register = {
+            let context = context.child("timer");
+            let trigger = trigger.clone();
+            let timer = timer.clone();
+            move || {
+                let mut sleep = Box::pin(context.sleep(Duration::from_millis(1)));
+                let waker = waker(trigger);
+                assert!(
+                    sleep
+                        .as_mut()
+                        .poll(&mut TaskContext::from_waker(&waker))
+                        .is_pending()
+                );
+                *timer.lock() = Some(sleep);
+                let local = Local::current().unwrap();
+                let deadline = local.borrow_mut().next_deadline().unwrap();
+                spin_until(|| Instant::now() >= deadline, "the timer never expired");
+                assert!(local.borrow().deferred.is_empty());
+            }
+        };
+        match catch_up {
+            CatchUp::GoRound | CatchUp::Deadline => {
+                // The root's kick claims worker one, which resumes holding the
+                // count the kick took for it, with nothing to poll.
+                on_next_park(&pool, 1, ParkPoint::AfterMessages, {
+                    let pool = pool.clone();
+                    move || {
+                        assert_eq!(pool.search_count(), 1, "worker one holds no count");
+                        register();
+                        if let CatchUp::GoRound = catch_up {
+                            assert!(pool.mailbox(1).send(Message::WakeRoot).is_ok());
+                        }
+                    }
+                });
+                backlog.wake();
+            }
+            CatchUp::AfterSearch => {
+                // A foreign spawn claims worker one, whose search on the way
+                // back to park finds nothing and keeps its count, so the kick
+                // of the backlog the root queues meanwhile finds it held. The
+                // last look then finds the backlog and searches again.
+                let searching = Arc::new(AtomicBool::new(false));
+                on_next_park(&pool, 1, ParkPoint::BeforeIdle, {
+                    let pool = pool.clone();
+                    let searching = searching.clone();
+                    move || {
+                        spin_until(
+                            || pool.search_count() == 1 && is_waiting(&pool, 2),
+                            "worker two never parked again",
+                        );
+                        searching.store(true, Ordering::SeqCst);
+                        spin_until(
+                            || pool.ring(0).is_stealable(),
+                            "the root never queued a stealable backlog",
+                        );
+                        register();
+                    }
+                });
+                let _ = spawn_elsewhere(&context, async {});
+                spin_until(
+                    || searching.load(Ordering::SeqCst),
+                    "worker one never searched",
+                );
+                backlog.wake();
+            }
+        }
+
+        // The root stays in its poll until the callback has finished.
+        spin_until(|| trigger.is_done(), "the callback never finished");
+        for task in backlog.tasks.into_iter().chain(woken.tasks) {
+            task.await.unwrap();
+        }
+        drop(timer.lock().take());
+        drop(peer);
+    });
 }
 
 #[test]
@@ -3118,6 +3477,9 @@ fn test_shutdown_destroys_tasks_on_a_worker() {
     }
 }
 
+/// A pool whose third worker fails to launch or to start fails the runner
+/// without building its root, releases the shared services and the workers
+/// that started, and leaves no task cell and a clean wake word.
 #[test]
 fn test_partial_startup_failure_releases_all_workers() {
     for launch in [false, true] {
@@ -3135,6 +3497,7 @@ fn test_partial_startup_failure_releases_all_workers() {
             assert!(!called.get());
             assert!(POOL_SHARED.with(|slot| slot.borrow().upgrade().is_none()));
             assert!(Local::current().is_none());
+            check_pool(POOL_KEPT.with(RefCell::take).expect("no pool kept"));
         }
     }
 }
@@ -3170,12 +3533,18 @@ fn test_network_and_storage_on_multiple_workers() {
     });
 }
 
+/// A task panic on another pool worker fails the runner unless task panics
+/// are caught, and then only the task's handle sees it while the pool runs on.
+/// Either way the pool frees every task cell and leaves a clean wake word.
 #[test]
 fn test_remote_task_panic_respects_policy() {
     for catch in [false, true] {
+        let kept = KeptPool::default();
+        let keeper = kept.clone();
         let result = catch_unwind(AssertUnwindSafe(|| {
             Runner::new(config().with_worker_threads(2).with_catch_panics(catch)).start(
                 |context| async move {
+                    keeper.keep(&context);
                     let (task, _) = spawn_elsewhere(&context, async {
                         panic!("remote ordinary task failed");
                     });
@@ -3190,6 +3559,7 @@ fn test_remote_task_panic_respects_policy() {
             );
         }));
         assert_eq!(result.is_err(), !catch);
+        kept.check();
     }
 }
 
@@ -3238,6 +3608,9 @@ fn test_shutdown_drains_queued_writes_on_every_ring() {
     });
 }
 
+/// A driver failure on another pool worker interrupts the root, before its
+/// code resumes, even while task panics are caught. The pool still frees
+/// every task cell and leaves a clean wake word.
 #[test]
 fn test_remote_driver_failure_interrupts_root_even_when_task_panics_are_caught() {
     let (socket, mut peer) = UnixStream::pair().unwrap();
@@ -3252,9 +3625,12 @@ fn test_remote_driver_failure_interrupts_root_even_when_task_panics_are_caught()
         deadline: None,
     });
     let resumed = &AtomicBool::new(false);
+    let kept = KeptPool::default();
+    let keeper = kept.clone();
     let result = catch_unwind(AssertUnwindSafe(|| {
         Runner::new(config().with_worker_threads(2).with_catch_panics(true)).start(
             |context| async move {
+                keeper.keep(&context);
                 let _ = spawn_elsewhere(&context, async move {
                     let _fault = fail_after_completion(
                         Local::current().unwrap().borrow().driver.as_ref().unwrap(),
@@ -3285,6 +3661,7 @@ fn test_remote_driver_failure_interrupts_root_even_when_task_panics_are_caught()
         "the root resumed after the failure"
     );
     assert!(Local::current().is_none());
+    kept.check();
 }
 
 #[test]
@@ -3942,9 +4319,18 @@ fn test_wake_from_a_destructor_during_teardown_leaves_no_runnable() {
 /// fails the runner.
 #[test]
 fn test_pool_worker_failure_during_shutdown_fails_the_runner() {
+    let kept = KeptPool::default();
+    let keeper = kept.clone();
+
+    // The faulty task's handle outlives the runner, so the task stays pending
+    // until shutdown. It is dropped before the pool's check: an abort that
+    // races the task's poll leaves the task's waker with the handle.
+    let handle = Arc::new(Mutex::new(None));
     let result = catch_unwind(AssertUnwindSafe(|| {
+        let slot = handle.clone();
         Runner::new(config().with_worker_threads(2)).start(|context| async move {
-            let (handle, _) = spawn_elsewhere(&context, {
+            keeper.keep(&context);
+            let (faulty, _) = spawn_elsewhere(&context, {
                 let context = context.child("faulty");
                 async move {
                     let sleep = context.sleep(Duration::from_secs(3600));
@@ -3960,13 +4346,15 @@ fn test_pool_worker_failure_during_shutdown_fails_the_runner() {
                     pending::<()>().await;
                 }
             });
-            mem::forget(handle);
+            *slot.lock() = Some(faulty);
         });
     }));
     let panic = result.expect_err("a pool worker failure during shutdown must fail the runner");
     assert!(
         extract_panic_message(&*panic).contains("injected pool worker failure during shutdown")
     );
+    drop(handle.lock().take());
+    kept.check();
 }
 
 /// An unwind between the root and the runner's shutdown still stops the other
@@ -3974,9 +4362,12 @@ fn test_pool_worker_failure_during_shutdown_fails_the_runner() {
 #[test]
 fn test_unwind_before_shutdown_stops_the_pool() {
     let (done, finished) = mpsc::channel();
+    let kept = KeptPool::default();
+    let keeper = kept.clone();
     thread::spawn(move || {
         let result = catch_unwind(AssertUnwindSafe(|| {
-            Runner::new(config().with_worker_threads(2)).start(|_| {
+            Runner::new(config().with_worker_threads(2)).start(|context| {
+                keeper.keep(&context);
                 BEFORE_ABORT.with(|slot| {
                     *slot.borrow_mut() =
                         Some(Box::new(|| panic!("injected unwind before the abort")));
@@ -3994,6 +4385,37 @@ fn test_unwind_before_shutdown_stops_the_pool() {
             .unwrap_err()
             .contains("injected unwind before the abort")
     );
+    kept.check();
+}
+
+/// A worker that unwinds while published as idle, here from a hook just before
+/// it waits, withdraws its idle bit on the way out, so the runner fails with
+/// that panic and the pool's wake word is clean.
+#[test]
+fn test_unwind_while_published_restores_the_wake_word() {
+    let kept = KeptPool::default();
+    let keeper = kept.clone();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            keeper.keep(&context);
+            let pool = context.shared.pool.clone();
+
+            // Worker one's first park must have waited, or the push below could
+            // claim it before the hook and strand the task.
+            spin_until(|| is_waiting(&pool, 1), "worker one never parked");
+            on_next_park(&pool, 1, ParkPoint::BeforeWait, || {
+                panic!("injected unwind while published")
+            });
+
+            // Waking worker one sends it through its loop to that park, and its
+            // failure then interrupts the root.
+            let _ = spawn_elsewhere(&context, async {});
+            pending::<()>().await;
+        });
+    }));
+    let panic = result.expect_err("a pool worker failure must fail the runner");
+    assert!(extract_panic_message(&*panic).contains("injected unwind while published"));
+    kept.check();
 }
 
 /// A task panic published while the root's state is destroyed is not
@@ -4037,9 +4459,12 @@ fn test_task_panic_during_root_destruction_is_not_observed() {
 #[test]
 fn test_failed_pool_worker_with_queued_runnables_shuts_down() {
     for catch in [false, true] {
+        let kept = KeptPool::default();
+        let keeper = kept.clone();
         let result = catch_unwind(AssertUnwindSafe(|| {
             let cfg = config().with_worker_threads(2).with_catch_panics(catch);
             Runner::new(cfg).start(|context| async move {
+                keeper.keep(&context);
                 let armed = Arc::new(AtomicBool::new(false));
                 let (handle, _) = spawn_elsewhere(&context, {
                     let context = context.child("faulty");
@@ -4091,6 +4516,7 @@ fn test_failed_pool_worker_with_queued_runnables_shuts_down() {
         let panic = result.expect_err("a pool worker failure must fail the runner");
         assert!(extract_panic_message(&*panic).contains("injected pool worker callback failure"));
         assert!(Local::current().is_none());
+        kept.check();
     }
 }
 
@@ -4138,65 +4564,6 @@ fn test_pending_operations_gauge_returns_to_zero_across_workers() {
     });
     assert_eq!(shared.pending_operations.get(), 0);
     drop(peers);
-}
-
-/// Tasks queued behind a long poll are stolen by a worker that runs out of
-/// work: it steals half of what remains each time it runs dry, so all but a
-/// lone last one run elsewhere while the poll lasts.
-#[test]
-fn test_tasks_queued_behind_a_long_poll_are_stolen_by_a_worker_running_dry() {
-    for woken in [2, 8] {
-        Runner::new(config().with_worker_threads(2)).start(|context| async move {
-            // Worker one spins until released, so worker zero polls every task
-            // to pending first.
-            let occupied = Arc::new(AtomicBool::new(true));
-            let (_, other) = spawn_elsewhere(&context, {
-                let occupied = occupied.clone();
-                async move {
-                    while occupied.load(Ordering::Acquire) {
-                        std::hint::spin_loop();
-                    }
-                }
-            });
-            let polled = Arc::new(AtomicUsize::new(0));
-            let elsewhere = Arc::new(AtomicUsize::new(0));
-            let mut senders = Vec::new();
-            let mut tasks = Vec::new();
-            for _ in 0..woken {
-                let (sender, receiver) = oneshot::channel::<()>();
-                senders.push(sender);
-                let polled = polled.clone();
-                let elsewhere = elsewhere.clone();
-                tasks.push(context.child("queued").spawn(move |_| async move {
-                    polled.fetch_add(1, Ordering::SeqCst);
-                    receiver.await.unwrap();
-                    if thread::current().id() == other {
-                        elsewhere.fetch_add(1, Ordering::SeqCst);
-                    }
-                }));
-            }
-
-            // Only this worker polls them, and the root runs between its
-            // polls, so once every task has been polled each is idle.
-            while polled.load(Ordering::SeqCst) < woken {
-                reschedule().await;
-            }
-
-            // Wake every task into this worker's run queue, then stay in the
-            // root's poll, as a long poll would, while worker one runs dry.
-            for sender in senders {
-                sender.send(()).unwrap();
-            }
-            occupied.store(false, Ordering::Release);
-            spin_until(
-                || elsewhere.load(Ordering::SeqCst) >= woken - 1,
-                "tasks queued behind the long poll were not stolen",
-            );
-            for task in tasks {
-                task.await.unwrap();
-            }
-        });
-    }
 }
 
 /// A full run queue's overflow racing a thief and shutdown accounts for every
@@ -4314,10 +4681,379 @@ fn test_overflow_racing_a_thief_and_shutdown_accounts_for_every_runnable() {
     assert!(ran.load(Ordering::SeqCst) >= 1);
 
     // Every task cell was freed, so no runnable leaked in a run queue or a
-    // batch.
-    let pool = retained.lock().take().unwrap();
-    assert_eq!(Arc::strong_count(&pool), 1);
-    assert_eq!(Arc::weak_count(&pool), 0);
+    // batch, and dropping the pool checks its wake word.
+    check_pool(retained.lock().take().unwrap());
+}
+
+/// Tasks queued behind a long poll are stolen by a parked worker: the push
+/// that leaves the backlog stealable wakes it, and it takes half of what
+/// remains each time it runs dry, so all but a lone last one run elsewhere
+/// while the poll lasts. Waking exactly two tasks checks the kick's threshold.
+#[test]
+fn test_tasks_queued_behind_a_long_poll_wake_a_parked_worker_to_steal() {
+    for woken in [2, 8] {
+        Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            let root = thread::current().id();
+            let pool = context.shared.pool.clone();
+            let elsewhere = Arc::new(AtomicUsize::new(0));
+            let mut senders = Vec::new();
+            let mut tasks = Vec::new();
+            for _ in 0..woken {
+                let (sender, receiver) = oneshot::channel::<()>();
+                senders.push(sender);
+                let elsewhere = elsewhere.clone();
+                tasks.push(context.child("queued").spawn(move |_| async move {
+                    receiver.await.unwrap();
+                    if thread::current().id() != root {
+                        elsewhere.fetch_add(1, Ordering::SeqCst);
+                    }
+                }));
+            }
+
+            // Once both workers wait, every task's first poll has returned, so
+            // each is idle and worker one is parked.
+            every_worker_waits(&pool).await;
+
+            // Wake every task into this worker's run queue, then stay in the
+            // root's poll, as a long poll would.
+            for sender in senders {
+                sender.send(()).unwrap();
+            }
+            spin_until(
+                || elsewhere.load(Ordering::SeqCst) >= woken - 1,
+                "tasks queued behind the long poll were not stolen",
+            );
+            for task in tasks {
+                task.await.unwrap();
+            }
+        });
+    }
+}
+
+/// A worker returns its search count before it runs callbacks, which are user
+/// code. A kick claims worker one, which resumes holding the count the kick
+/// took for it, with nothing to poll and an expired timer whose callback wakes
+/// two idle tasks into its run queue and blocks until worker two, parked, has
+/// run one of them. A count held across the callback would keep worker two
+/// asleep.
+#[test]
+fn test_callback_waiting_for_a_stolen_task_makes_progress() {
+    /// Hook worker one's next wait: once the timer due at `expiry` has expired
+    /// and worker two waits, set `kick` and block until a kick claims worker
+    /// one. A wait before the timer is registered installs the hook again.
+    fn arm(pool: Arc<Pool>, kick: Arc<AtomicBool>, expiry: Arc<Mutex<Option<Instant>>>) {
+        on_next_park(&pool.clone(), 1, ParkPoint::BeforeWait, move || {
+            let Some(expiry) = *expiry.lock() else {
+                arm(pool, kick, expiry);
+                return;
+            };
+            spin_until(|| Instant::now() >= expiry, "the timer never expired");
+            spin_until(|| is_waiting(&pool, 2), "worker two never parked");
+            kick.store(true, Ordering::SeqCst);
+            spin_until(|| !pool.is_idle(1), "the kick never claimed worker one");
+        });
+    }
+
+    Runner::new(config().with_worker_threads(3)).start(|context| async move {
+        let pool = context.shared.pool.clone();
+
+        // Two tasks the callback wakes, and two the root wakes to kick.
+        let woken = Recorded::spawn(&context, 2);
+        let trigger = WakeAndWait::new(&woken);
+        let mut senders = Vec::new();
+        let mut kicked = Vec::new();
+        for _ in 0..2 {
+            let (sender, receiver) = oneshot::channel::<()>();
+            senders.push(sender);
+            kicked.push(context.child("kicked").spawn(move |_| async move {
+                receiver.await.unwrap();
+            }));
+        }
+
+        // Once every worker waits, every task is idle.
+        every_worker_waits(&pool).await;
+
+        // Worker one, about to wait once its timer is registered, lets its
+        // timer expire, waits for worker two to park, then lets the root kick
+        // and waits to be claimed.
+        let kick = Arc::new(AtomicBool::new(false));
+        let expiry = Arc::new(Mutex::new(None::<Instant>));
+        arm(pool.clone(), kick.clone(), expiry.clone());
+
+        // The lowest parked worker, worker one, starts a task that registers
+        // the timer whose callback is the trigger.
+        let (timer, _) = spawn_elsewhere(&context, {
+            let sleep = context.child("sleep");
+            let expiry = expiry.clone();
+            let trigger = trigger.clone();
+            async move {
+                assert_eq!(thread::current().name(), Some("iouring-pool-1"));
+                let sleep = sleep.sleep(Duration::from_millis(20));
+                let mut sleep = pin!(sleep);
+                let waker = waker(trigger);
+                assert!(
+                    sleep
+                        .as_mut()
+                        .poll(&mut TaskContext::from_waker(&waker))
+                        .is_pending()
+                );
+                *expiry.lock() = Some(Instant::now() + Duration::from_millis(25));
+                drop(waker);
+                pending::<()>().await;
+            }
+        });
+
+        // The root kicks from this worker's run queue, then stays in its poll
+        // until the callback has finished.
+        spin_until(|| kick.load(Ordering::SeqCst), "worker one never parked");
+        for sender in senders {
+            sender.send(()).unwrap();
+        }
+        spin_until(|| trigger.is_done(), "the callback never finished");
+        for task in woken.tasks.into_iter().chain(kicked) {
+            task.await.unwrap();
+        }
+        timer.abort();
+    });
+}
+
+/// A worker a wake claimed returns the count it inherited before it polls a
+/// task, so a kick from inside that poll reaches a parked worker. A foreign
+/// spawn claims worker one, whose task wakes two idle tasks into its run queue
+/// and blocks until another worker has run one, while the root holds worker
+/// zero.
+#[test]
+fn test_task_poll_returns_an_inherited_count() {
+    Runner::new(config().with_worker_threads(3)).start(|context| async move {
+        let pool = context.shared.pool.clone();
+        let woken = Recorded::spawn(&context, 2);
+
+        // Once every worker waits, both tasks are idle.
+        every_worker_waits(&pool).await;
+
+        // The foreign spawn claims the lowest parked worker, worker one, which
+        // polls it holding the count its wake took, unless it returned it.
+        let (_, other) = spawn_elsewhere(&context, {
+            let wakers = woken.wakers.clone();
+            let ran = woken.ran.clone();
+            async move {
+                for waker in mem::take(&mut *wakers.lock()) {
+                    waker.wake();
+                }
+                spin_until(
+                    || ran.load(Ordering::SeqCst) != 0,
+                    "no parked worker took the backlog behind the poll",
+                );
+            }
+        });
+        assert_ne!(other, thread::current().id());
+
+        // The root holds this worker until a task has run.
+        spin_until(|| woken.ran() != 0, "no task ran");
+        for task in woken.tasks {
+            task.await.unwrap();
+        }
+    });
+}
+
+/// A worker a wake claimed returns the count it inherited before it polls its
+/// root, so a kick from the root reaches a parked worker. Two foreign spawns
+/// claim worker zero, parked, and then worker one, which runs both and parks
+/// again. Worker zero then resumes with only its root to poll, which wakes two
+/// idle tasks into its run queue and blocks until another worker has run one.
+#[test]
+fn test_root_poll_returns_an_inherited_count() {
+    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let pool = context.shared.pool.clone();
+        let woken = Recorded::spawn(&context, 2);
+
+        // Once every worker waits, both tasks are idle.
+        every_worker_waits(&pool).await;
+        let root_waker = poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
+
+        // Once worker zero is published, the first foreign spawn claims it and
+        // the second claims worker one, which runs both. Once worker one has
+        // parked again, the hook makes the root ready, so worker zero resumes
+        // claimed with nothing but its root to poll.
+        let foreign_ran = Arc::new(AtomicUsize::new(0));
+        on_next_park(&pool, 0, ParkPoint::BeforeWait, {
+            let pool = pool.clone();
+            let context = context.child("foreign");
+            let foreign_ran = foreign_ran.clone();
+            move || {
+                thread::spawn({
+                    let foreign_ran = foreign_ran.clone();
+                    move || {
+                        for _ in 0..2 {
+                            let foreign_ran = foreign_ran.clone();
+                            context.child("spawned").spawn(move |_| async move {
+                                foreign_ran.fetch_add(1, Ordering::SeqCst);
+                            });
+                        }
+                    }
+                })
+                .join()
+                .unwrap();
+                assert!(!pool.is_idle(0), "the first push did not claim worker zero");
+                spin_until(
+                    || foreign_ran.load(Ordering::SeqCst) == 2,
+                    "worker one never ran the foreign spawns",
+                );
+                spin_until(|| is_waiting(&pool, 1), "worker one never parked again");
+                root_waker.wake_by_ref();
+            }
+        });
+
+        // The root waits here until the hook makes it ready.
+        let mut yielded = false;
+        poll_fn(|_| {
+            if mem::replace(&mut yielded, true) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+
+        // Wake both tasks into this worker's run queue, then stay in the
+        // root's poll until another worker has run one.
+        woken.wake();
+        spin_until(
+            || woken.ran() != 0,
+            "no parked worker took the backlog behind the root's poll",
+        );
+        for task in woken.tasks {
+            task.await.unwrap();
+        }
+    });
+}
+
+/// A worker that unwinds while published as idle withdraws its publication
+/// before it destroys its root, so a kick from the root's destructor wakes a
+/// parked worker rather than claiming the unwinding worker itself.
+#[test]
+fn test_root_destructor_after_an_unwind_while_published_wakes_a_parked_worker() {
+    assert!(
+        root_destructor_after_an_unwind_at(ParkPoint::BeforeWait),
+        "the root's destructor woke no parked worker"
+    );
+}
+
+/// A worker that unwinds while it holds the search count of a search that
+/// found nothing returns the count before it destroys its root, so a kick from
+/// the root's destructor reaches a parked worker.
+#[test]
+fn test_root_destructor_after_an_unwind_while_searching_wakes_a_parked_worker() {
+    assert!(
+        root_destructor_after_an_unwind_at(ParkPoint::BeforeIdle),
+        "the root's destructor woke no parked worker"
+    );
+}
+
+/// A worker whose last look after publishing finds a backlog another run queue
+/// gained meanwhile, while no worker holds a count, takes a count and
+/// searches, and when that search finds the backlog gone, publishes itself
+/// again rather than waiting unpublished with a count held. Worker one holds
+/// the count of its failed search before publishing until the root has queued
+/// a backlog in its own run queue, then lets the root's worker drain that
+/// backlog before the last look's search.
+#[test]
+fn test_failed_search_after_the_last_look_publishes_again() {
+    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let pool = context.shared.pool.clone();
+        let backlog = Recorded::spawn(&context, 2);
+
+        // Once every worker waits, both tasks are idle and worker one is
+        // parked.
+        every_worker_waits(&pool).await;
+
+        // Worker one, holding the count of a search that found nothing,
+        // waits before it publishes until the root's run queue holds a
+        // stealable backlog. Once its last look has taken a count to search,
+        // it lets the root's worker drain that backlog before the search.
+        let searching = Arc::new(AtomicBool::new(false));
+        let drain = Arc::new(AtomicBool::new(false));
+        let checked = Arc::new(AtomicBool::new(false));
+        on_next_park(&pool, 1, ParkPoint::BeforeIdle, {
+            let pool = pool.clone();
+            let searching = searching.clone();
+            let drain = drain.clone();
+            let ran = backlog.ran.clone();
+            move || {
+                assert_eq!(pool.search_count(), 1, "a failed search returned its count");
+                on_wake_point(WakePoint::BeforeParkSearch, move || {
+                    drain.store(true, Ordering::SeqCst);
+                    spin_until(
+                        || ran.load(Ordering::SeqCst) == 2,
+                        "the root's worker never drained its run queue",
+                    );
+                });
+                searching.store(true, Ordering::SeqCst);
+                spin_until(
+                    || pool.ring(0).is_stealable(),
+                    "the root never queued a stealable backlog",
+                );
+            }
+        });
+        on_next_park(&pool, 1, ParkPoint::BeforeWait, {
+            let pool = pool.clone();
+            let checked = checked.clone();
+            move || {
+                assert!(pool.is_idle(1), "worker one waits unpublished");
+                assert_eq!(pool.search_count(), 0, "worker one waits holding a count");
+                checked.store(true, Ordering::SeqCst);
+            }
+        });
+
+        // A foreign spawn claims worker one, the lowest parked worker, which
+        // runs it and then searches on its way back to park.
+        let (_, other) = spawn_elsewhere(&context, async {});
+        assert_ne!(other, thread::current().id());
+        spin_until(
+            || searching.load(Ordering::SeqCst),
+            "worker one never searched",
+        );
+
+        // Wake both tasks into this worker's run queue: the kick finds the
+        // count held. Once worker one has taken a count to search, this worker
+        // polls both tasks, so the search finds nothing.
+        backlog.wake();
+        spin_until(
+            || drain.load(Ordering::SeqCst),
+            "worker one never took a count to search",
+        );
+        reschedule().await;
+        assert_eq!(backlog.ran(), 2);
+        spin_until(
+            || checked.load(Ordering::SeqCst),
+            "worker one never parked again",
+        );
+        for task in backlog.tasks {
+            task.await.unwrap();
+        }
+    });
+}
+
+/// A worker going round again with a message pending returns its search count
+/// before the catch-up service's callbacks run.
+#[test]
+fn test_catch_up_callbacks_after_going_round_run_with_no_search_count() {
+    catch_up_callback_after_the_count_returns(CatchUp::GoRound);
+}
+
+/// A worker going round again rather than waiting for a deadline that has
+/// passed returns its search count before the catch-up service's callbacks
+/// run.
+#[test]
+fn test_catch_up_callbacks_after_an_expired_deadline_run_with_no_search_count() {
+    catch_up_callback_after_the_count_returns(CatchUp::Deadline);
+}
+
+/// A worker whose search before parking took work returns its search count
+/// before the catch-up service's callbacks run.
+#[test]
+fn test_catch_up_callbacks_after_a_search_finds_work_run_with_no_search_count() {
+    catch_up_callback_after_the_count_returns(CatchUp::AfterSearch);
 }
 
 /// A paged replay keeps reads in flight between fills. The task that issued them may close its

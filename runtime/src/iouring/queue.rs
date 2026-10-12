@@ -46,7 +46,9 @@
 //! stays with its owner. It claims the values with one exchange on the head,
 //! moves them into the thief's own ring, releases the claim, then publishes
 //! them with one tail store. It goes only into a ring with at least half its
-//! slots free, so the batch always fits.
+//! slots free, so the batch always fits. [`Ring::is_stealable`] is a hint about
+//! the source's backlog. The claim checks the source again, and the steal also
+//! checks the destination's room.
 //!
 //! Assumption A0: a thief does not stall between its head load and its claim
 //! exchange while the indices advance through a full `2^32` positions, after
@@ -101,6 +103,10 @@ pub const CAPACITY: usize = if cfg!(feature = "loom") { 4 } else { 256 };
 /// Half a ring: what an overflow keeps, as a position count.
 const HALF: u32 = CAPACITY as u32 / 2;
 
+/// Fewest values an unclaimed ring holds for a steal to take any, since a
+/// steal takes half rounded down.
+pub const STEALABLE: usize = 2;
+
 /// Mask that selects a position's slot.
 const MASK: usize = CAPACITY - 1;
 
@@ -139,8 +145,9 @@ pub struct Owner<T>(Arc<CachePadded<Inner<T>>>, PhantomData<Cell<()>>);
 
 /// Result of publishing a value into a ring.
 pub enum Push<'a, T> {
-    /// The value was published.
-    Pushed,
+    /// The value was published, with the length computed from the push's head
+    /// snapshot. A concurrent claim can make this an overestimate.
+    Pushed(usize),
     /// The ring was full: the newest half and the new value must be published
     /// elsewhere, in that order.
     Overflow(Overflow<'a, T>, T),
@@ -205,10 +212,21 @@ impl<T> Ring<T> {
         Owner(self.0.clone(), PhantomData)
     }
 
+    /// Whether a snapshot shows no claim and at least [`STEALABLE`] values.
+    /// Concurrent changes can make this hint stale before a steal claims them.
+    pub fn is_stealable(&self) -> bool {
+        // The head is loaded before the tail: the tail only grows, so the
+        // distance cannot wrap to a huge backlog from a tail older than the
+        // head.
+        let (steal, real) = unpack(self.0.head.load(Ordering::Acquire));
+        let tail = self.0.tail.load(Ordering::Acquire);
+        steal == real && tail.wrapping_sub(real) >= STEALABLE as u32
+    }
+
     /// Move half the unclaimed backlog, rounded down, into `into`, returning
     /// how many values moved.
     ///
-    /// Moves none when the backlog holds fewer than two values, while
+    /// Moves none when the backlog holds fewer than [`STEALABLE`] values, while
     /// another thief holds a claim, or when `into` has fewer than half its
     /// slots free. The claim is released before the values are published in
     /// `into` with one tail store. Panics if `into` belongs to this ring or
@@ -243,10 +261,10 @@ impl<T> Ring<T> {
     }
 
     /// Claim half the published backlog, rounded down, returning the first
-    /// claimed position and the count, or `None` while another claim is held or
-    /// fewer than two values are published. Every bound is checked before the
-    /// exchange, so the caller can move and release the claimed values without
-    /// further bound checks.
+    /// claimed position and the count, or `None` while another claim is held
+    /// or fewer than [`STEALABLE`] values are published. Every bound is
+    /// checked before the exchange, so the caller can move and release the
+    /// claimed values without further bound checks.
     fn claim(&self) -> Option<(u32, u32)> {
         let mut head = self.0.head.load(Ordering::Acquire);
         loop {
@@ -341,8 +359,9 @@ impl<T> Owner<T> {
                 // SAFETY: the acquired steal index excludes pending readers,
                 // and the unpublished tail slot is free (I1, I4).
                 unsafe { self.0.write(tail, value) };
-                self.0.tail.store(tail.wrapping_add(1), Ordering::Release);
-                return Push::Pushed;
+                let tail = tail.wrapping_add(1);
+                self.0.tail.store(tail, Ordering::Release);
+                return Push::Pushed(tail.wrapping_sub(real) as usize);
             }
             if steal != real {
                 return Push::Claimed(value);
@@ -592,7 +611,7 @@ mod tests {
 
     /// Push a value that must fit.
     fn push<T>(owner: &mut Owner<T>, value: T) {
-        assert!(matches!(owner.push(value), Push::Pushed));
+        assert!(matches!(owner.push(value), Push::Pushed(_)));
     }
 
     /// Pop every value the owner holds.
@@ -634,8 +653,10 @@ mod tests {
             assert!(owner.is_empty());
             assert_eq!(owner.room(), CAPACITY);
             for value in 0..CAPACITY {
-                push(&mut owner, value);
-                assert_eq!(owner.len(), value + 1);
+                match owner.push(value) {
+                    Push::Pushed(len) => assert_eq!(len, value + 1),
+                    _ => panic!("push before capacity overflowed"),
+                }
             }
             assert_eq!(owner.len(), CAPACITY);
             assert_eq!(owner.room(), 0);
@@ -684,9 +705,11 @@ mod tests {
             let ring = Ring::at(position, false);
             let mut owner = ring.owner();
             push(&mut owner, 7);
+            assert!(!ring.is_stealable());
             assert_eq!(owner.pop(), Some(7));
             let next = position.wrapping_add(1);
             assert_eq!(unpack(ring.0.head.load(Ordering::Acquire)), (next, next));
+            assert!(!ring.is_stealable());
             assert!(owner.pop().is_none());
         }
     }
@@ -735,7 +758,7 @@ mod tests {
     }
 
     /// A steal takes half the backlog rounded down, so a lone value is never
-    /// stolen.
+    /// stolen, and `is_stealable` agrees.
     #[test]
     fn test_steal_takes_half_rounded_down() {
         for available in [1usize, 2, 3, 7, 8, 255, 256] {
@@ -745,6 +768,7 @@ mod tests {
             let mut into = destination.owner();
             owner.push_batch(0..available);
             let count = available / 2;
+            assert_eq!(source.is_stealable(), count != 0);
             assert_eq!(source.steal_into(&mut into), count);
             assert_eq!(drain(&mut into), (0..count).collect::<Vec<_>>());
             assert_eq!(drain(&mut owner), (count..available).collect::<Vec<_>>());
@@ -765,6 +789,7 @@ mod tests {
         let mut seen = drain(&mut into);
         assert!(into.is_empty());
         assert_eq!(into.room(), 0);
+        assert!(!destination.is_stealable());
         assert_eq!(source.steal_into(&mut into), 0);
         assert_eq!(owner.len(), CAPACITY);
         seen.extend(destination.finish_claim(claim));
@@ -803,6 +828,7 @@ mod tests {
         owner.push_batch(0..CAPACITY);
         let claim = ring.hold_claim(HALF);
         assert!(matches!(owner.push(CAPACITY), Push::Claimed(value) if value == CAPACITY));
+        assert!(!ring.is_stealable());
         let mut seen = ring.finish_claim(claim);
         seen.extend(drain(&mut owner));
         assert_eq!(seen, (0..CAPACITY).collect::<Vec<_>>());
@@ -830,8 +856,7 @@ mod tests {
         let mut owner = ring.owner();
         owner.push_batch(0..CAPACITY - 1);
         let claim = ring.hold_claim(HALF);
-        push(&mut owner, CAPACITY - 1);
-        assert_eq!(owner.len(), CAPACITY / 2);
+        assert!(matches!(owner.push(CAPACITY - 1), Push::Pushed(len) if len == CAPACITY / 2));
         let mut seen = ring.finish_claim(claim);
         seen.extend(drain(&mut owner));
         assert_eq!(seen, (0..CAPACITY).collect::<Vec<_>>());
@@ -888,9 +913,8 @@ mod tests {
                 done_rx.recv().unwrap();
             }
         });
-        assert!(matches!(result, Push::Pushed));
+        assert!(matches!(result, Push::Pushed(len) if len == CAPACITY / 2 + 1));
         drop(result);
-        assert_eq!(owner.len(), CAPACITY / 2 + 1);
         let mut seen = thief.join().unwrap();
         seen.extend(drain(&mut owner));
         seen.sort_unstable();
@@ -1034,7 +1058,7 @@ mod tests {
         barrier.wait();
         for value in 0..total {
             match owner.push(Counted(value, drops.clone())) {
-                Push::Pushed => {}
+                Push::Pushed(_) => {}
                 Push::Claimed(value) => seen.push(value.0),
                 Push::Overflow(batch, value) => {
                     seen.extend(batch.map(|value| value.0));
@@ -1094,7 +1118,7 @@ mod loom_tests {
     /// Push `value`, collecting whatever the ring hands back into `seen`.
     fn collect_push(owner: &mut Owner<usize>, value: usize, seen: &mut Vec<usize>) {
         match owner.push(value) {
-            Push::Pushed => {}
+            Push::Pushed(_) => {}
             Push::Claimed(value) => seen.push(value),
             Push::Overflow(batch, value) => {
                 seen.extend(batch);
@@ -1209,8 +1233,8 @@ mod loom_tests {
         });
     }
 
-    /// A thief racing the owner's push and pop of a lone value takes nothing,
-    /// while the pop stores the head.
+    /// A thief racing the owner's push and pop of a lone value never sees a
+    /// stealable backlog and takes nothing, while the pop stores the head.
     #[test]
     fn test_lone_value_pop_against_a_thief() {
         let mut builder = loom::model::Builder::new();
@@ -1220,10 +1244,11 @@ mod loom_tests {
             let mut owner = ring.owner();
             let thief = thread::spawn(move || {
                 for _ in 0..2 {
+                    assert!(!ring.is_stealable());
                     assert!(steal_once(&ring).is_empty());
                 }
             });
-            assert!(matches!(owner.push(7), Push::Pushed));
+            assert!(matches!(owner.push(7), Push::Pushed(1)));
             assert_eq!(owner.pop(), Some(7));
             thief.join().unwrap();
             assert!(owner.is_empty());
@@ -1243,7 +1268,7 @@ mod loom_tests {
             let thief = thread::spawn(move || steal_once(&ring));
             let mut seen = Vec::new();
             match owner.push_with(CAPACITY, thread::yield_now) {
-                Push::Pushed => {}
+                Push::Pushed(_) => {}
                 Push::Claimed(value) => seen.push(value),
                 Push::Overflow(batch, value) => {
                     seen.extend(batch);
