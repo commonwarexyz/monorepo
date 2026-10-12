@@ -1,5 +1,6 @@
 pub mod block_relay;
 pub mod bounds;
+pub mod byzantine;
 pub mod disrupter;
 pub mod network;
 pub mod simplex;
@@ -1949,10 +1950,13 @@ pub async fn run_twins_with_backend<P, B>(
         let (resolver_sender, resolver_receiver) = resolver_network;
 
         let (vote_sender_primary, vote_sender_secondary) =
-            vote_sender.split_with(twins_network::vote_forwarder::<P, B::Digest>(
-                participants.clone(),
-                topology.scenario.clone(),
-                term_length,
+            vote_sender.split_with(byzantine::twin_secondary(
+                twins_network::vote_forwarder::<P, B::Digest>(
+                    participants.clone(),
+                    topology.scenario.clone(),
+                    term_length,
+                ),
+                validator.clone(),
             ));
         let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
             node_context.child("vote_split"),
@@ -1963,11 +1967,14 @@ pub async fn run_twins_with_backend<P, B>(
             ),
         );
         let (certificate_sender_primary, certificate_sender_secondary) = certificate_sender
-            .split_with(twins_network::certificate_forwarder::<P, B::Digest>(
-                participants.clone(),
-                topology.scenario.clone(),
-                term_length,
-                scheme.clone(),
+            .split_with(byzantine::twin_secondary(
+                twins_network::certificate_forwarder::<P, B::Digest>(
+                    participants.clone(),
+                    topology.scenario.clone(),
+                    term_length,
+                    scheme.clone(),
+                ),
+                validator.clone(),
             ));
         let (certificate_receiver_primary, certificate_receiver_secondary) = certificate_receiver
             .split_with(
@@ -1980,11 +1987,14 @@ pub async fn run_twins_with_backend<P, B>(
                 ),
             );
         let (resolver_sender_primary, resolver_sender_secondary) =
-            resolver_sender.split_with(twins_network::resolver_forwarder::<P, B::Digest>(
-                participants.clone(),
-                topology.scenario.clone(),
-                term_length,
-                scheme.clone(),
+            resolver_sender.split_with(byzantine::twin_secondary(
+                twins_network::resolver_forwarder::<P, B::Digest>(
+                    participants.clone(),
+                    topology.scenario.clone(),
+                    term_length,
+                    scheme.clone(),
+                ),
+                validator.clone(),
             ));
         let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
             .split_with(

@@ -31,13 +31,16 @@ use commonware_consensus::{
     },
     types::{Epoch, Round, View},
 };
-use commonware_consensus_fuzz_core::{EPOCH, strategy::Strategy};
+use commonware_consensus_fuzz_core::{EPOCH, byzantine::Counting, strategy::Strategy};
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_runtime::{Clock, Handle, IoBuf, Spawner};
 use commonware_utils::channel::mpsc::UnboundedReceiver;
 use rand::Rng;
 use rand_core::CryptoRng;
 use std::sync::Arc;
+
+/// Label the injector's re-signed votes count under.
+pub(crate) const ACTOR: &str = "byzzfuzz_injector";
 
 /// Re-signs votes via [`Notarize::sign`] / [`Finalize::sign`] /
 /// [`Nullify::sign`]; cert and resolver process faults are omit-only so
@@ -79,7 +82,7 @@ where
         VS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
     {
         let context = self.context.child("run");
-        context.spawn(move |_| self.run(vote_sender, intercept_rx))
+        context.spawn(move |_| self.run(Counting::new(vote_sender, ACTOR), intercept_rx))
     }
 
     async fn run<VS>(

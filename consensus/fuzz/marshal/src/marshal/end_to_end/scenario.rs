@@ -747,9 +747,55 @@ async fn apply_action<K: PublicKey, D: commonware_cryptography::Digest>(
 /// Safety invariants run inside every execution. The crash oracle is post-GST
 /// liveness measured from each correct node's height at GST.
 pub fn fuzz_marshal_standard_scenarios<P: Simplex>(input: NotarizationBlockSplitScenarioInput) {
-    let outcome = run_scenario::<P>(&input, |_| {});
+    let _ = run_checked_scenario::<P>(&input);
+}
+
+/// Runs one scenario and its safety and liveness checks, returning the outcome.
+fn run_checked_scenario<P: Simplex>(
+    input: &NotarizationBlockSplitScenarioInput,
+) -> ScenarioOutcome {
+    let outcome = run_scenario::<P>(input, |_| {});
     invariants::check_scenario_phases(&outcome);
     invariants::check_scenario_progress(&outcome);
+    outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_consensus_fuzz_core::SimplexCertificateMock;
+
+    /// The byzantine node of this target is a correct engine whose messages
+    /// the wedge withholds at its peers, so its activity is the number of
+    /// messages it sent that they withheld. The drops of messages it declines
+    /// to process do not count: they happen whether or not it sends.
+    #[test]
+    fn split_notarization_byzantine_withholds() {
+        let input = NotarizationBlockSplitScenarioInput {
+            raw_bytes: vec![0; 8],
+            template: ScenarioTemplate::SplitNotarization,
+            actions: Vec::new(),
+            byzantine_policy: ByzantinePolicy::ALL,
+            forwarding: ForwardPolicy::SilentVoters,
+        };
+        let outcome = run_checked_scenario::<SimplexCertificateMock>(&input);
+        let sent_and_withheld: usize = outcome
+            .ledger
+            .iter()
+            .filter(|(drop, _, _)| {
+                matches!(
+                    drop,
+                    WedgeDrop::ByzantineNotarizeWithhold | WedgeDrop::ByzantineNotarizationWithhold
+                )
+            })
+            .map(|(_, _, count)| count)
+            .sum();
+        assert!(
+            sent_and_withheld > 0,
+            "no message the byzantine node sent was withheld: ledger={:?}",
+            outcome.ledger
+        );
+    }
 }
 
 #[cfg(test)]

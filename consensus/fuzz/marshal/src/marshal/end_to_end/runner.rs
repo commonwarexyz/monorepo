@@ -829,30 +829,91 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assert_adversary_acted;
+    use block_disrupter::{ANNOUNCE_ACTOR, GOSSIP_ACTOR, MarshalBroadcastFault};
     use commonware_consensus::simplex::ForwardPolicy;
     use commonware_consensus_fuzz_core::{
-        SimplexCertificateMock, strategy::StrategyChoice, utils::Partition,
+        SimplexCertificateMock, SimplexCertificateMockByzantineFirstLeader, byzantine, disrupter,
+        network::POISON_ACTOR, strategy::StrategyChoice, utils::Partition,
     };
 
-    #[cfg(feature = "mocks")]
+    fn smoke_input(raw_bytes: Vec<u8>, required_containers: u64) -> MarshalDisrupterInput {
+        MarshalDisrupterInput {
+            raw_bytes,
+            required_containers,
+            term_length: TermLength::ONE,
+            degraded_network: false,
+            partition: Partition::Connected,
+            strategy: StrategyChoice::AnyScope,
+            forwarding: ForwardPolicy::Disabled,
+        }
+    }
+
+    #[test]
+    fn standard_disrupter_runs_under_certificate_mock() {
+        assert_adversary_acted(&[disrupter::ACTOR], || {
+            fuzz_marshal_standard_disrupter::<SimplexCertificateMock>(smoke_input(vec![0], 2));
+        });
+    }
+
+    /// The poison fires only on an input whose victim backfills a nullified
+    /// byzantine-led view, so several seeds run and the forgery must land in
+    /// at least one of them.
+    #[test]
+    fn standard_certificate_poison_runs_under_certificate_mock() {
+        assert_adversary_acted(&[disrupter::ACTOR, POISON_ACTOR], || {
+            for seed in 0..6u8 {
+                fuzz_marshal_standard_certificate_poison::<SimplexCertificateMock>(smoke_input(
+                    vec![seed],
+                    8,
+                ));
+            }
+        });
+    }
+
+    /// The raw bytes select the dissemination fault, so one seed per fault
+    /// runs: every fault announces the proposal, and every fault but `Omit`
+    /// gossips the block.
     #[test]
     fn block_dissemination_runs_under_byzantine_first_leader() {
-        use commonware_consensus::types::TermLength;
-        for term_length in [
-            TermLength::ONE,
-            TermLength::new(commonware_utils::NZU32!(2)),
+        let seed_for = |fault: MarshalBroadcastFault| {
+            (0u8..=255)
+                .map(|seed| vec![seed])
+                .find(|bytes| {
+                    MarshalBroadcastFault::sample(&mut FuzzRng::new(bytes.clone())) == fault
+                })
+                .expect("some seed selects every dissemination fault")
+        };
+        for fault in [
+            MarshalBroadcastFault::Omit,
+            MarshalBroadcastFault::Partition,
+            MarshalBroadcastFault::Equivocate,
         ] {
-            fuzz_marshal_standard_block_dissemination::<
-                commonware_consensus_fuzz_core::SimplexCertificateMockByzantineFirstLeader,
-            >(MarshalDisrupterInput {
-                raw_bytes: vec![],
-                required_containers: 1,
-                term_length,
-                degraded_network: true,
-                partition: Partition::Connected,
-                strategy: StrategyChoice::AnyScope,
-                forwarding: ForwardPolicy::Disabled,
-            });
+            for term_length in [
+                TermLength::ONE,
+                TermLength::new(commonware_utils::NZU32!(2)),
+            ] {
+                assert_adversary_acted(&[ANNOUNCE_ACTOR], || {
+                    fuzz_marshal_standard_block_dissemination::<
+                        SimplexCertificateMockByzantineFirstLeader,
+                    >(MarshalDisrupterInput {
+                        raw_bytes: seed_for(fault),
+                        required_containers: 1,
+                        term_length,
+                        degraded_network: true,
+                        partition: Partition::Connected,
+                        strategy: StrategyChoice::AnyScope,
+                        forwarding: ForwardPolicy::Disabled,
+                    });
+                });
+                let gossiped = byzantine::count(GOSSIP_ACTOR) > 0;
+                assert_eq!(
+                    gossiped,
+                    fault != MarshalBroadcastFault::Omit,
+                    "{fault:?} gossip: {:?}",
+                    byzantine::snapshot()
+                );
+            }
         }
     }
 
@@ -879,36 +940,46 @@ mod tests {
         });
     }
 
+    /// Equivocation on the consensus channels and shard faults on the block
+    /// channel are separate actors; both must act.
     #[test]
     fn coding_disrupter_runs_under_certificate_mock() {
-        fuzz_marshal_coding_disrupter::<SimplexCertificateMock>(MarshalDisrupterInput {
-            raw_bytes: vec![0],
-            required_containers: 1,
-            term_length: commonware_consensus::types::TermLength::ONE,
-            degraded_network: false,
-            partition: Partition::Connected,
-            strategy: StrategyChoice::SmallScope {
-                fault_rounds: 1,
-                fault_rounds_bound: 1,
+        assert_adversary_acted(
+            &[coding_disrupter::ACTOR, coding_disrupter::SHARDS_ACTOR],
+            || {
+                fuzz_marshal_coding_disrupter::<SimplexCertificateMock>(MarshalDisrupterInput {
+                    raw_bytes: vec![0],
+                    required_containers: 2,
+                    term_length: TermLength::ONE,
+                    degraded_network: false,
+                    partition: Partition::Connected,
+                    strategy: StrategyChoice::SmallScope {
+                        fault_rounds: 1,
+                        fault_rounds_bound: 1,
+                    },
+                    forwarding: ForwardPolicy::Disabled,
+                });
             },
-            forwarding: ForwardPolicy::Disabled,
-        });
+        );
     }
 
     /// Several Byzantine-led views with shard and backfill faults armed; the
-    /// honest nodes must still reach the target.
+    /// honest nodes must still reach the target, and the poisoner, which only
+    /// answers backfill requests, must have answered at least once.
     #[test]
     fn coding_block_poison_runs_under_certificate_mock() {
-        for seed in [vec![0], vec![7, 42, 199, 3, 88]] {
-            fuzz_marshal_coding_block_poison::<SimplexCertificateMock>(MarshalDisrupterInput {
-                raw_bytes: seed,
-                required_containers: 6,
-                term_length: commonware_consensus::types::TermLength::ONE,
-                degraded_network: true,
-                partition: Partition::Connected,
-                strategy: StrategyChoice::AnyScope,
-                forwarding: ForwardPolicy::Disabled,
-            });
-        }
+        assert_adversary_acted(&[coding_disrupter::BACKFILL_POISON_ACTOR], || {
+            for seed in [vec![0], vec![7, 42, 199, 3, 88]] {
+                fuzz_marshal_coding_block_poison::<SimplexCertificateMock>(MarshalDisrupterInput {
+                    raw_bytes: seed,
+                    required_containers: 6,
+                    term_length: TermLength::ONE,
+                    degraded_network: true,
+                    partition: Partition::Connected,
+                    strategy: StrategyChoice::AnyScope,
+                    forwarding: ForwardPolicy::Disabled,
+                });
+            }
+        });
     }
 }

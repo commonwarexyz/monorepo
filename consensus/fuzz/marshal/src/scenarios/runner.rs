@@ -594,8 +594,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scenarios::input::{
-        BackfillFault, BlockFault, ConsensusMutation, FaultPlan, ScenarioKind,
+    use crate::{
+        assert_adversary_acted, assert_adversary_silent,
+        scenarios::input::{BackfillFault, BlockFault, ConsensusMutation, FaultPlan, ScenarioKind},
     };
     use commonware_consensus::simplex::ForwardPolicy;
     use commonware_consensus_fuzz_core::{
@@ -612,25 +613,45 @@ mod tests {
                 backfill: BackfillFault::Poison,
                 consensus: ConsensusMutation::Corrupt,
             },
-            fault_rounds: 1,
-            fault_rounds_bound: 1,
-            required_containers: 1,
+            // A schedule the fuzzer produces: the input decoder pins
+            // `fault_rounds` to two for this bound. The disrupter acts only
+            // while its observed view is one of its sampled faulty views, so
+            // the run must be long enough to reach one; a one-container run
+            // ends before the inline variant reaches a faulty view.
+            fault_rounds: 2,
+            fault_rounds_bound: 7,
+            required_containers: 7,
             degraded_network: false,
             partition: Partition::Connected,
             forwarding: ForwardPolicy::Disabled,
         }
     }
 
-    /// Run one scenario configuration under one Standard variant.
+    /// Run one scenario configuration under one Standard variant. In the
+    /// adversarial configuration the Simplex disrupter must act and the
+    /// dissemination disrupter must both announce and gossip; nothing may act
+    /// in the honest one.
     fn run_one(scenario: ScenarioKind, config: Configuration, marshal: MarshalChoice) {
         let input = input(scenario, config);
-        match marshal {
+        let run = || match marshal {
             MarshalChoice::Deferred => {
                 fuzz_marshal_scenario_prefix_deferred::<SimplexCertificateMock>(input)
             }
             MarshalChoice::Inline => {
                 fuzz_marshal_scenario_prefix_inline::<SimplexCertificateMock>(input)
             }
+        };
+        if config.faults > 0 {
+            assert_adversary_acted(
+                &[
+                    commonware_consensus_fuzz_core::disrupter::ACTOR,
+                    adversary::ANNOUNCE_ACTOR,
+                    adversary::GOSSIP_ACTOR,
+                ],
+                run,
+            );
+        } else {
+            assert_adversary_silent(run);
         }
     }
 

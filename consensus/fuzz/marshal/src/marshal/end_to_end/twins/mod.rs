@@ -879,6 +879,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assert_adversary_acted;
+    use commonware_consensus_fuzz_core::byzantine::TWIN_SECONDARY;
 
     #[test]
     fn general_stack_samples_tight_and_deep_ack_windows() {
@@ -953,15 +955,55 @@ mod tests {
             floor: Some(FloorStart { slot: 1, height: 3 }),
         };
         let (selection, entropy) = select_general_stack(&input.raw_bytes);
-        let floor_node = fuzz_marshal_twins_with::<
-            SimplexCertificateMock,
-            SelectedBlockBuilderApp<Ctx<SimplexCertificateMock>, SchemeOf<SimplexCertificateMock>>,
-            SelectedMarshal,
-        >(input, CasePolicy::General, selection, entropy);
+        let mut floor_node = None;
+        assert_adversary_acted(&[TWIN_SECONDARY], || {
+            floor_node = fuzz_marshal_twins_with::<
+                SimplexCertificateMock,
+                SelectedBlockBuilderApp<
+                    Ctx<SimplexCertificateMock>,
+                    SchemeOf<SimplexCertificateMock>,
+                >,
+                SelectedMarshal,
+            >(input, CasePolicy::General, selection, entropy);
+        });
         assert_eq!(
             floor_node.map(|(_, height)| height),
             Some(Height::new(3)),
             "floor node must anchor at the sampled height, not fall back to genesis",
         );
+    }
+
+    fn twins_input(rounds: u8) -> MarshalTwinsInput {
+        MarshalTwinsInput {
+            raw_bytes: vec![0, 0, 0, 0],
+            rounds,
+            case_selector: 0,
+            sustained: false,
+            strategy: StrategyChoice::AnyScope,
+            trailing_blocks: 1,
+            forwarding: commonware_consensus::simplex::ForwardPolicy::Disabled,
+            floor: None,
+        }
+    }
+
+    #[test]
+    fn standard_twins_secondary_acts() {
+        assert_adversary_acted(&[TWIN_SECONDARY], || {
+            fuzz_marshal_standard_twins(twins_input(2));
+        });
+    }
+
+    #[test]
+    fn standard_deferred_split_header_twins_secondary_acts() {
+        assert_adversary_acted(&[TWIN_SECONDARY], || {
+            fuzz_marshal_standard_deferred_cert_mock_twins_split_header(twins_input(4));
+        });
+    }
+
+    #[test]
+    fn standard_inline_split_header_twins_secondary_acts() {
+        assert_adversary_acted(&[TWIN_SECONDARY], || {
+            fuzz_marshal_standard_inline_cert_mock_twins_split_header(twins_input(4));
+        });
     }
 }

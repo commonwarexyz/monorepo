@@ -1,6 +1,7 @@
 use crate::{
     EPOCH,
     block_relay::{self, Relay as BlockRelay},
+    byzantine::Counting,
     strategy::Strategy,
     types::Message,
 };
@@ -26,6 +27,9 @@ use std::{
     task::Poll,
     time::Duration,
 };
+
+/// Label the Disrupter's sends count under.
+pub const ACTOR: &str = "disrupter";
 
 const TIMEOUT: Duration = Duration::from_millis(100);
 const LATEST_PROPOSALS_MIN_LEN: u64 = 10;
@@ -304,9 +308,19 @@ where
             impl Receiver<PublicKey = S::PublicKey>,
         ),
     ) -> Handle<()> {
+        let (vote_sender, vote_receiver) = vote_network;
+        let (certificate_sender, certificate_receiver) = certificate_network;
+        let (resolver_sender, resolver_receiver) = resolver_network;
         spawn_cell!(
             self.context,
-            self.run(vote_network, certificate_network, resolver_network)
+            self.run(
+                (Counting::new(vote_sender, ACTOR), vote_receiver),
+                (
+                    Counting::new(certificate_sender, ACTOR),
+                    certificate_receiver
+                ),
+                (Counting::new(resolver_sender, ACTOR), resolver_receiver),
+            )
         )
     }
 

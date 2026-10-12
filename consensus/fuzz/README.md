@@ -202,6 +202,23 @@ cargo test -p commonware-consensus-fuzz-simplex test_
 cargo test -p commonware-consensus-fuzz-marshal
 ```
 
+### Adversary Smoke Tests
+
+Every Byzantine actor counts its actions under its own label through
+`commonware_consensus_fuzz_core::byzantine`: a message the simulated network
+accepted from the actor's sender, a twin secondary message the split forwarder
+addressed to a node other than the twin, or a receiver-side forgery such as the
+certificate poison. The counts never gate a fuzz run. Each target with a
+Byzantine actor has a smoke test that runs one fixed input and requires the actor
+the target exists for to have acted, so a change that silences it (a twin
+secondary the split routes to nobody, a gossip engine that dies before it sends)
+fails there even while another actor of the same run keeps sending. Honest
+configurations must count nothing.
+```bash
+cargo test -p commonware-consensus-fuzz-simplex adversary_smoke
+cargo test -p commonware-consensus-fuzz-marshal
+```
+
 ### Property-Based Tests
 
 Run proptest-based tests that explore many seeds:

@@ -2509,4 +2509,241 @@ mod tests {
             fuzz::<SimplexCertificateMock, TwinsMutator, CodeCoverage>(input);
         }
     }
+
+    /// One smoke run per fuzz target with a Byzantine actor: under a fixed
+    /// input the actor the target exists for must act, so a regression that
+    /// mutes it (a twin secondary the split routes to nobody, an actor never
+    /// spawned) fails here even while another actor keeps sending. Honest
+    /// configurations must count nothing. Targets without a Byzantine actor
+    /// (chaos, notarize omission) appear only among the silent runs.
+    mod adversary_smoke {
+        use super::*;
+        use crate::{
+            byzzfuzz::injector,
+            mallory::{adversary::AdversaryRole, schedule},
+        };
+        use commonware_consensus_fuzz_core::{byzantine, disrupter};
+
+        const SMOKE_CONTAINERS: u64 = 2;
+
+        fn assert_acted(actor: &'static str, run: impl FnOnce()) {
+            byzantine::reset();
+            run();
+            assert!(
+                byzantine::count(actor) > 0,
+                "{actor} took no action: {:?}",
+                byzantine::snapshot()
+            );
+        }
+
+        fn assert_silent(run: impl FnOnce()) {
+            byzantine::reset();
+            run();
+            assert_eq!(
+                byzantine::total(),
+                0,
+                "an honest run counted Byzantine actions: {:?}",
+                byzantine::snapshot()
+            );
+        }
+
+        fn smoke_input(seed: u64) -> FuzzInput {
+            test_input(seed, SMOKE_CONTAINERS, TermLength::ONE)
+        }
+
+        /// The Mallory schedule prefix: the role byte, `NoFault` at every
+        /// step, then runtime entropy.
+        fn mallory_input(role: AdversaryRole) -> FuzzInput {
+            let mut input = smoke_input(SEED);
+            let mut raw_bytes = vec![schedule::encode_role(role)];
+            raw_bytes.extend([0u8; schedule::SCHEDULE_STEPS]);
+            raw_bytes.extend(input.raw_bytes.iter());
+            input.raw_bytes = raw_bytes;
+            input
+        }
+
+        macro_rules! smoke {
+            ($name:ident, $actor:expr, $p:ty, $mode:ty, $coverage:ty) => {
+                #[test]
+                fn $name() {
+                    assert_acted($actor, || fuzz::<$p, $mode, $coverage>(smoke_input(SEED)));
+                }
+            };
+        }
+
+        smoke!(
+            simplex_cert_mock,
+            disrupter::ACTOR,
+            SimplexCertificateMock,
+            Standard,
+            CodeCoverage
+        );
+        smoke!(
+            simplex_cert_mock_state_cov,
+            disrupter::ACTOR,
+            SimplexCertificateMock,
+            Standard,
+            StateCoverage
+        );
+        smoke!(
+            simplex_cert_mock_hb,
+            disrupter::ACTOR,
+            SimplexCertificateMock,
+            Standard,
+            HappensBeforeCoverage
+        );
+        smoke!(
+            simplex_cert_mock_hb_state_cov,
+            disrupter::ACTOR,
+            SimplexCertificateMock,
+            Standard,
+            HappensBeforeStateCoverage
+        );
+        smoke!(
+            simplex_cert_mock_byzantine_first_leader,
+            disrupter::ACTOR,
+            SimplexCertificateMockByzantineFirstLeader,
+            Standard,
+            CodeCoverage
+        );
+        smoke!(
+            simplex_cert_mock_faulty_net,
+            disrupter::ACTOR,
+            SimplexCertificateMock,
+            FaultyNet,
+            CodeCoverage
+        );
+        smoke!(
+            simplex_cert_mock_twins_mutator,
+            byzantine::TWIN_SECONDARY,
+            SimplexCertificateMock,
+            TwinsMutator,
+            CodeCoverage
+        );
+        smoke!(
+            simplex_cert_mock_twins_mutator_hb,
+            byzantine::TWIN_SECONDARY,
+            SimplexCertificateMock,
+            TwinsMutator,
+            HappensBeforeCoverage
+        );
+        smoke!(
+            simplex_cert_mock_twins_mutator_state_cov,
+            byzantine::TWIN_SECONDARY,
+            SimplexCertificateMock,
+            TwinsMutator,
+            StateCoverage
+        );
+        smoke!(
+            simplex_cert_mock_shuffled_twins_mutator,
+            byzantine::TWIN_SECONDARY,
+            SimplexCertificateMockCustomRoundRobin,
+            TwinsMutator,
+            CodeCoverage
+        );
+        smoke!(
+            simplex_cert_mock_twins_campaign,
+            byzantine::TWIN_SECONDARY,
+            SimplexCertificateMock,
+            TwinsCampaign,
+            CodeCoverage
+        );
+        smoke!(
+            simplex_cert_mock_twins_campaign_hb,
+            byzantine::TWIN_SECONDARY,
+            SimplexCertificateMock,
+            TwinsCampaign,
+            HappensBeforeCoverage
+        );
+        smoke!(
+            simplex_cert_mock_twins_campaign_state_cov,
+            byzantine::TWIN_SECONDARY,
+            SimplexCertificateMock,
+            TwinsCampaign,
+            StateCoverage
+        );
+        smoke!(
+            simplex_cert_mock_chaos_twins,
+            byzantine::TWIN_SECONDARY,
+            SimplexCertificateMock,
+            ChaosTwins,
+            CodeCoverage
+        );
+
+        #[test]
+        fn simplex_cert_mock_audit() {
+            let mut input = smoke_input(SEED);
+            // A leading byte that is not a multiple of four keeps the audit
+            // target from replacing the Disrupter with a correct engine.
+            input.raw_bytes[0] = 1;
+            assert_acted(disrupter::ACTOR, || {
+                fuzz_audit::<SimplexCertificateMock>(input)
+            });
+        }
+
+        #[test]
+        fn simplex_cert_mock_twins_mutator_audit() {
+            assert_acted(byzantine::TWIN_SECONDARY, || {
+                fuzz_twins_audit::<SimplexCertificateMock, TwinsMutator>(smoke_input(SEED))
+            });
+        }
+
+        #[test]
+        fn simplex_cert_mock_twins_campaign_audit() {
+            assert_acted(byzantine::TWIN_SECONDARY, || {
+                fuzz_twins_audit::<SimplexCertificateMock, TwinsCampaign>(smoke_input(SEED))
+            });
+        }
+
+        /// The ByzzFuzz adversary is its sampled process-fault schedule, so a
+        /// mutated vote is injected only on inputs whose schedule reaches one.
+        #[test]
+        fn simplex_cert_mock_byzzfuzz() {
+            assert_acted(injector::ACTOR, || {
+                for seed in 0..8u64 {
+                    fuzz::<SimplexCertificateMock, Byzzfuzz, CodeCoverage>(smoke_input(seed));
+                }
+            });
+        }
+
+        /// Every Byzantine profile acts under the same all-`NoFault` schedule.
+        #[test]
+        fn simplex_cert_mock_mallory() {
+            for role in [
+                AdversaryRole::Disrupter,
+                AdversaryRole::Conflicter,
+                AdversaryRole::Nuller,
+                AdversaryRole::Equivocator,
+                AdversaryRole::Impersonator,
+                AdversaryRole::Outdated,
+            ] {
+                assert_acted(role.actor(), || {
+                    fuzz::<SimplexCertificateMock, MalloryContainer, CodeCoverage>(mallory_input(
+                        role,
+                    ))
+                });
+            }
+        }
+
+        #[test]
+        fn honest_runs_count_nothing() {
+            let mut honest = smoke_input(SEED);
+            honest.configuration = N4F0C4;
+            assert_silent(|| {
+                fuzz::<SimplexCertificateMock, Standard, CodeCoverage>(honest.clone())
+            });
+            assert_silent(|| {
+                fuzz::<SimplexCertificateMock, FaultyNet, CodeCoverage>(honest.clone())
+            });
+            assert_silent(|| fuzz_audit_notarize_omission::<SimplexCertificateMock>(honest));
+            assert_silent(|| {
+                fuzz::<SimplexCertificateMock, Chaos, CodeCoverage>(smoke_input(SEED))
+            });
+            assert_silent(|| {
+                fuzz::<SimplexCertificateMock, MalloryContainer, CodeCoverage>(mallory_input(
+                    AdversaryRole::Honest,
+                ))
+            });
+        }
+    }
 }
