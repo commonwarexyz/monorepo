@@ -548,6 +548,10 @@ where
                 return Resolved::Skip;
             }
 
+            // The application builds on the parent's digest, so it is computed across the
+            // strategy here.
+            let parent_digest = parent.digest_across(&strategy);
+
             // Special case: If the parent block is the last block in the epoch,
             // re-propose it so as not to produce any blocks that will be cut out
             // by the epoch transition.
@@ -555,7 +559,7 @@ where
                 .last(consensus_context.epoch())
                 .expect("current epoch should exist");
             if parent.height() == last_in_epoch {
-                return Resolved::Reuse(parent.digest_across(&strategy), parent);
+                return Resolved::Reuse(parent_digest, parent);
             }
 
             let ancestor_stream = marshal.ancestor_stream(

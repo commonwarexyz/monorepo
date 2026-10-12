@@ -290,12 +290,16 @@ where
             };
             parent_timer.observe(&*context);
 
+            // The application builds on the parent's digest, so it is computed across the
+            // strategy here.
+            let parent_digest = parent.digest_across(&strategy);
+
             // At epoch boundary, re-propose the parent block.
             let last_in_epoch = epocher
                 .last(consensus_context.epoch())
                 .expect("current epoch should exist");
             if parent.height() == last_in_epoch {
-                return Resolved::Reuse(parent.digest_across(&strategy), parent);
+                return Resolved::Reuse(parent_digest, parent);
             }
 
             let ancestor_stream = marshal.ancestor_stream(

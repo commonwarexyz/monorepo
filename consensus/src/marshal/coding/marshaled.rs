@@ -729,6 +729,10 @@ where
                 return Resolved::Skip;
             }
 
+            // The application builds on the parent's digest, which the commitment binds, so it
+            // is computed across the strategy here.
+            let commitment = parent.commitment_across(&strategy);
+
             // Special case: If the parent block is the last block in the epoch,
             // re-propose it so as not to produce any blocks that will be cut out
             // by the epoch transition.
@@ -736,7 +740,7 @@ where
                 .last(consensus_context.epoch())
                 .expect("current epoch should exist");
             if parent.height() == last_in_epoch {
-                return Resolved::Reuse(parent.commitment_across(&strategy), parent);
+                return Resolved::Reuse(commitment, parent);
             }
 
             let ancestor_stream = marshal.ancestor_stream(
