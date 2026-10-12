@@ -64,7 +64,7 @@
 //! runnable stays on its spawning worker when that worker has nothing else
 //! queued or is its pool's only worker. A runnable queued on a worker can still
 //! move before it runs: an overflow of that worker's run queue sends it to the
-//! global queue.
+//! global queue, and another worker can steal it.
 
 use super::{
     mailbox::{Mailbox, Message},
@@ -1065,7 +1065,8 @@ impl Wake for RootWaker {
 }
 
 /// One pool worker's run queue: the [`Owner`] of a bounded [`Ring`] in the
-/// pool, which only that worker pushes into and pops from.
+/// pool, which only that worker pushes into and pops from, and which the
+/// pool's other workers steal from.
 ///
 /// [`Ring`]: super::queue::Ring
 pub struct Ready {
@@ -1093,14 +1094,14 @@ impl Ready {
         self.ring.push_batch(runnables);
     }
 
-    /// Take the oldest runnable.
+    /// Take the oldest runnable not claimed by a thief.
     #[inline]
     #[must_use]
     pub fn pop(&mut self) -> Option<Runnable> {
         self.ring.pop()
     }
 
-    /// Number of runnables queued.
+    /// Runnables queued and not claimed by a thief.
     pub fn len(&self) -> usize {
         self.ring.len()
     }
@@ -1111,12 +1112,18 @@ impl Ready {
         self.ring.room()
     }
 
-    /// Whether no runnable is queued.
+    /// Whether no unclaimed runnable is queued.
     pub fn is_empty(&self) -> bool {
         self.ring.is_empty()
     }
 
-    /// Discard every runnable at teardown.
+    /// The run queue's owner, for a steal into it.
+    pub const fn ring(&mut self) -> &mut Owner<Runnable> {
+        &mut self.ring
+    }
+
+    /// Discard every unclaimed runnable at teardown. One under a thief's claim
+    /// is left to the thief.
     ///
     /// The task set is closed, so teardown clears each runnable's task or
     /// already has. Releasing these references runs no user code.
@@ -2036,6 +2043,7 @@ mod loom_tests {
         AfterPending, AfterPoll, Mailbox, Panics, Pool, REF_ONE, REFS, Ready, Runnable, State,
         Task, Tasks,
     };
+    use crate::iouring::pool::Searcher;
     use loom::{
         sync::{
             Arc,
@@ -2130,9 +2138,10 @@ mod loom_tests {
 
     /// Run pool worker `index` until `tasks` tasks have completed: take from
     /// its run queue, then a share of the global queue, as `Worker::drive`
-    /// does, and park as a pool worker does when both are empty. A spinning
-    /// worker ends its spin on a wake signal and consumes it. The worker that
-    /// completes the last task wakes every worker, so none waits forever.
+    /// does, and when both are empty steal from the other run queues, then park
+    /// as a pool worker does. A spinning worker ends its spin on a wake signal
+    /// and consumes it. The worker that completes the last task wakes every
+    /// worker, so none waits forever.
     fn work(
         pool: &Pool,
         set: &Tasks,
@@ -2142,6 +2151,7 @@ mod loom_tests {
         spin: bool,
     ) {
         let mut ready = Ready::new(pool.ring(index).owner());
+        let mut searcher = Searcher::new(pool, index);
         loop {
             if completed.load(Ordering::Acquire) == tasks {
                 // Anything left is a stale runnable of a completed task.
@@ -2155,6 +2165,11 @@ mod loom_tests {
                         pool.mailbox(worker).waker.wake();
                     }
                 }
+                continue;
+            }
+
+            // Steal on the way to park, into this worker's own run queue.
+            if searcher.search(&mut ready) {
                 continue;
             }
 

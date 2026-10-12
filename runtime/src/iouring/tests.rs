@@ -4,6 +4,7 @@ use super::{
     super::{
         driver::tests::fail_after_completion,
         operation::Operation,
+        queue::CAPACITY,
         request::{RecvRequest, Request},
         task::{Task, tests::cancelled},
         tasks::tests::AFTER_INSERT,
@@ -271,8 +272,8 @@ pub fn before_park() {
 /// A point in a pool worker's park sequence where a test hook runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParkPoint {
-    /// After the worker's last readiness check, before it publishes itself
-    /// idle.
+    /// After the worker's last readiness check and its search of the other run
+    /// queues, before it publishes itself idle.
     BeforeIdle,
     /// After the worker publishes itself idle and finds the global queue
     /// empty, before it waits.
@@ -324,6 +325,84 @@ thread_local! {
     /// Callback run once by this thread's runner after the pool has closed and
     /// before the supervision tree is aborted.
     static BEFORE_ABORT: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+/// A callback for a pool's next run queue overflow, keyed by the pool's
+/// address.
+type OverflowHook = (usize, Box<dyn FnOnce() + Send>);
+
+/// Whether an overflow hook was ever installed, so overflows otherwise skip
+/// the lock.
+static OVERFLOW_HOOKS_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Callbacks each run once by the worker whose run queue overflows next.
+static OVERFLOW_HOOKS: Mutex<Vec<OverflowHook>> = Mutex::new(Vec::new());
+
+/// Run `hook` when a run queue of `pool` next overflows, after it hands
+/// over its newest half and before the batch reaches the global queue. The
+/// hook runs on the overflowing worker's thread once the hook list is
+/// unlocked, but while that worker's local state is borrowed, so it must not
+/// reach that state.
+fn on_next_overflow(pool: &Pool, hook: impl FnOnce() + Send + 'static) {
+    OVERFLOW_HOOKS
+        .lock()
+        .push((ptr::from_ref(pool).addr(), Box::new(hook)));
+    OVERFLOW_HOOKS_ARMED.store(true, Ordering::Release);
+}
+
+/// Remove the hook installed for this pool's next overflow, if any, and run it
+/// once the hook list is unlocked.
+pub fn before_overflow(pool: &Pool) {
+    if !OVERFLOW_HOOKS_ARMED.load(Ordering::Acquire) {
+        return;
+    }
+    let key = ptr::from_ref(pool).addr();
+    let hook = {
+        let mut hooks = OVERFLOW_HOOKS.lock();
+        hooks
+            .iter()
+            .position(|hook| hook.0 == key)
+            .map(|at| hooks.swap_remove(at).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+/// Whether worker `index` of `pool` is published idle and waits for a wake,
+/// on its futex or in its io_uring wait.
+fn is_waiting(pool: &Pool, index: u32) -> bool {
+    // The two waiting bits of the wake state.
+    const WAITING: u32 = 0b11;
+    pool.is_idle(index) && state_bits(&pool.mailbox(index).waker) & WAITING != 0
+}
+
+/// Block until every worker of `pool` waits for a wake, published idle with
+/// no wake's claim, both before and after the scan of the waiting bits. A
+/// worker a wake claimed shows its waiting bit until it runs, and one seen
+/// waiting can resume before the scan ends, so the waiting bits alone do not
+/// show a quiet pool. A worker that parks again before the second look has
+/// polled what it took. Once nothing can wake a task or push into the pool any
+/// more, this establishes that every task's poll has returned, leaving each
+/// idle.
+fn wait_until_every_worker_waits(pool: &Pool) {
+    let workers = pool.workers() as u32;
+    let parked = || (0..workers).all(|index| pool.is_idle(index));
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    while !(parked() && (0..workers).all(|index| is_waiting(pool, index)) && parked()) {
+        assert!(Instant::now() < deadline, "a worker never waited");
+        thread::yield_now();
+    }
+}
+
+/// Spin on the calling thread until `done` holds, failing with `what` after
+/// the test's timeout.
+fn spin_until(done: impl Fn() -> bool, what: &str) {
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    while !done() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::hint::spin_loop();
+    }
 }
 
 /// Run the callback a test installed for the window before the abort.
@@ -2940,6 +3019,7 @@ fn test_tasks_spread_across_workers_and_complete() {
 
 /// A wake of an idle task queues it on the waker's worker, so a pair started
 /// on two workers converges onto the first waker's worker and stays there.
+/// A lone queued runnable is not stolen, so the idle worker takes neither end.
 #[test]
 fn test_chatty_pair_converges_onto_one_worker() {
     Runner::new(config().with_worker_threads(2)).start(|context| async move {
@@ -3337,7 +3417,8 @@ fn test_operation_and_sleep_follow_their_task_to_another_worker() {
 }
 
 /// A wake on a pool worker queues the woken task on that worker, even while
-/// another worker is parked and could take it from the global queue.
+/// another worker is parked and could take it from the global queue. A lone
+/// queued runnable is not stolen, so it waits there for the waker's poll.
 #[test]
 fn test_wake_on_a_pool_worker_keeps_the_task_there() {
     Runner::new(config().with_worker_threads(3)).start(|context| async move {
@@ -3934,10 +4015,15 @@ fn test_failed_pool_worker_with_queued_runnables_shuts_down() {
         let result = catch_unwind(AssertUnwindSafe(|| {
             let cfg = config().with_worker_threads(2).with_catch_panics(catch);
             Runner::new(cfg).start(|context| async move {
+                let armed = Arc::new(AtomicBool::new(false));
                 let (handle, _) = spawn_elsewhere(&context, {
                     let context = context.child("faulty");
+                    let armed = armed.clone();
                     async move {
-                        // Task A goes idle on this worker, leaving its waker.
+                        // Task A goes idle, leaving its waker. The root holds
+                        // worker zero until the timer below is registered, so
+                        // only this worker polls A, and A's poll has returned
+                        // once this task sees its waker.
                         let trigger = Arc::new(WakeThenPanic(Mutex::new(None)));
                         let a = context.child("a").spawn({
                             let trigger = trigger.clone();
@@ -3948,11 +4034,14 @@ fn test_failed_pool_worker_with_queued_runnables_shuts_down() {
                                 })
                             }
                         });
-                        reschedule().await;
-                        assert!(trigger.0.lock().is_some(), "a was not polled here");
+                        let deadline = Instant::now() + TEST_TIMEOUT;
+                        while trigger.0.lock().is_none() {
+                            assert!(Instant::now() < deadline, "a was never polled");
+                            reschedule().await;
+                        }
 
-                        // The timer's callback wakes A into this worker's run
-                        // queue, then fails the worker.
+                        // The timer's callback wakes A into the run queue of
+                        // the worker holding the timer, then fails that worker.
                         let sleep = context.sleep(Duration::from_millis(20));
                         let mut sleep = pin!(sleep);
                         let waker = waker(trigger);
@@ -3962,9 +4051,14 @@ fn test_failed_pool_worker_with_queued_runnables_shuts_down() {
                                 .poll(&mut TaskContext::from_waker(&waker))
                                 .is_pending()
                         );
+                        armed.store(true, Ordering::SeqCst);
                         let _ = a.await;
                     }
                 });
+                spin_until(
+                    || armed.load(Ordering::SeqCst),
+                    "the faulty task never registered its timer",
+                );
                 let _ = handle.await;
                 pending::<()>().await;
             });
@@ -4019,6 +4113,186 @@ fn test_pending_operations_gauge_returns_to_zero_across_workers() {
     });
     assert_eq!(shared.pending_operations.get(), 0);
     drop(peers);
+}
+
+/// Tasks queued behind a long poll are stolen by a worker that runs out of
+/// work: it steals half of what remains each time it runs dry, so all but a
+/// lone last one run elsewhere while the poll lasts.
+#[test]
+fn test_tasks_queued_behind_a_long_poll_are_stolen_by_a_worker_running_dry() {
+    for woken in [2, 8] {
+        Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            // Worker one spins until released, so worker zero polls every task
+            // to pending first.
+            let occupied = Arc::new(AtomicBool::new(true));
+            let (_, other) = spawn_elsewhere(&context, {
+                let occupied = occupied.clone();
+                async move {
+                    while occupied.load(Ordering::Acquire) {
+                        std::hint::spin_loop();
+                    }
+                }
+            });
+            let polled = Arc::new(AtomicUsize::new(0));
+            let elsewhere = Arc::new(AtomicUsize::new(0));
+            let mut senders = Vec::new();
+            let mut tasks = Vec::new();
+            for _ in 0..woken {
+                let (sender, receiver) = oneshot::channel::<()>();
+                senders.push(sender);
+                let polled = polled.clone();
+                let elsewhere = elsewhere.clone();
+                tasks.push(context.child("queued").spawn(move |_| async move {
+                    polled.fetch_add(1, Ordering::SeqCst);
+                    receiver.await.unwrap();
+                    if thread::current().id() == other {
+                        elsewhere.fetch_add(1, Ordering::SeqCst);
+                    }
+                }));
+            }
+
+            // Only this worker polls them, and the root runs between its
+            // polls, so once every task has been polled each is idle.
+            while polled.load(Ordering::SeqCst) < woken {
+                reschedule().await;
+            }
+
+            // Wake every task into this worker's run queue, then stay in the
+            // root's poll, as a long poll would, while worker one runs dry.
+            for sender in senders {
+                sender.send(()).unwrap();
+            }
+            occupied.store(false, Ordering::Release);
+            spin_until(
+                || elsewhere.load(Ordering::SeqCst) >= woken - 1,
+                "tasks queued behind the long poll were not stolen",
+            );
+            for task in tasks {
+                task.await.unwrap();
+            }
+        });
+    }
+}
+
+/// A full run queue's overflow racing a thief and shutdown accounts for every
+/// runnable once. All three workers are busy while one wakes a run queue's
+/// capacity and one more idle tasks into its run queue, so the last push
+/// overflows. Before the batch reaches the global queue, another worker steals
+/// from the half the run queue kept and polls what it took, and the pool
+/// closes, so the global queue refuses the batch and its runnables are
+/// discarded. Every future is dropped once, and every task cell is freed.
+#[test]
+fn test_overflow_racing_a_thief_and_shutdown_accounts_for_every_runnable() {
+    const TASKS: usize = CAPACITY + 1;
+    let drops = Arc::new(AtomicUsize::new(0));
+    let polled = Arc::new(AtomicUsize::new(0));
+    let ran = Arc::new(AtomicUsize::new(0));
+    let retained = Arc::new(Mutex::new(None));
+    let watcher = Arc::new(Mutex::new(None));
+    Runner::new(config().with_worker_threads(3)).start(|context| {
+        let drops = drops.clone();
+        let polled = polled.clone();
+        let ran = ran.clone();
+        let retained = retained.clone();
+        let watcher = watcher.clone();
+        async move {
+            let pool = context.shared.pool.clone();
+            *retained.lock() = Some(pool.clone());
+            let mut senders = Vec::new();
+            for _ in 0..TASKS {
+                let (sender, receiver) = oneshot::channel::<()>();
+                senders.push(sender);
+                let guard = DropCount(drops.clone());
+                let polled = polled.clone();
+                let ran = ran.clone();
+                context.child("queued").spawn(move |_| async move {
+                    let _guard = guard;
+                    polled.fetch_add(1, Ordering::SeqCst);
+                    if receiver.await.is_ok() {
+                        ran.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+
+            // Once every task has been polled and then every worker waits,
+            // every task is idle: no runnable of theirs is left, and a worker
+            // seen waiting afterwards has finished its poll. The root then
+            // holds worker zero until the overflow releases it, a spinning
+            // task holds worker one, and the driver runs on worker two.
+            let (go, idle) = oneshot::channel::<()>();
+            let spinning = Arc::new(AtomicBool::new(false));
+            let release_root = Arc::new(AtomicBool::new(false));
+            *watcher.lock() = Some(thread::spawn({
+                let spinning = spinning.clone();
+                let release_root = release_root.clone();
+                let ran = ran.clone();
+                let spinner = context.child("spinner");
+                let driver = context.child("driver");
+                move || {
+                    spin_until(
+                        || polled.load(Ordering::SeqCst) == TASKS,
+                        "a task was never polled",
+                    );
+                    wait_until_every_worker_waits(&pool);
+                    go.send(()).unwrap();
+                    spin_until(|| spinning.load(Ordering::SeqCst), "the root never resumed");
+
+                    let release_spinner = Arc::new(AtomicBool::new(false));
+                    let spinner_started = Arc::new(AtomicBool::new(false));
+                    spinner.spawn({
+                        let release_spinner = release_spinner.clone();
+                        let spinner_started = spinner_started.clone();
+                        move |_| async move {
+                            spinner_started.store(true, Ordering::SeqCst);
+                            while !release_spinner.load(Ordering::SeqCst) {
+                                std::hint::spin_loop();
+                            }
+                        }
+                    });
+                    spin_until(
+                        || spinner_started.load(Ordering::SeqCst),
+                        "the spinning task never started",
+                    );
+
+                    // The overflow lets the spinning worker steal from the kept
+                    // half and poll what it took, then lets the pool close
+                    // before the batch reaches the global queue.
+                    on_next_overflow(&pool, {
+                        let pool = pool.clone();
+                        move || {
+                            release_spinner.store(true, Ordering::SeqCst);
+                            spin_until(
+                                || ran.load(Ordering::SeqCst) >= 1,
+                                "no thief polled the kept half",
+                            );
+                            release_root.store(true, Ordering::SeqCst);
+                            spin_until(|| pool.is_closed(), "the pool never closed");
+                        }
+                    });
+                    driver.spawn(move |_| async move {
+                        for sender in senders {
+                            let _ = sender.send(());
+                        }
+                    });
+                }
+            }));
+            idle.await.unwrap();
+            spinning.store(true, Ordering::SeqCst);
+            spin_until(
+                || release_root.load(Ordering::SeqCst),
+                "the overflow never released the root",
+            );
+        }
+    });
+    watcher.lock().take().unwrap().join().unwrap();
+    assert_eq!(drops.load(Ordering::SeqCst), TASKS);
+    assert!(ran.load(Ordering::SeqCst) >= 1);
+
+    // Every task cell was freed, so no runnable leaked in a run queue or a
+    // batch.
+    let pool = retained.lock().take().unwrap();
+    assert_eq!(Arc::strong_count(&pool), 1);
+    assert_eq!(Arc::weak_count(&pool), 0);
 }
 
 /// A paged replay keeps reads in flight between fills. The task that issued them may close its
