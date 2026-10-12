@@ -5808,6 +5808,8 @@ TRUNCATION_RUN = """\
 [statelens-reach] TS-9999 handoff lost mark=1048581 next=-
 [statelens-reach] TS-9999 phase continuation
 [statelens-reach] TS-9999 reach 1/2 control=0
+[statelens-reach] TS-9999 actors release ok 0:disrupter=running
+[statelens-reach] TS-9999 actors end ok 0:disrupter=running
 [statelens-reach] TS-9999 done
 """
 TRUNCATION_CONTROL = """\
@@ -5817,6 +5819,8 @@ TRUNCATION_CONTROL = """\
 [statelens-reach] TS-9999 handoff lost mark=2 next=-
 [statelens-reach] TS-9999 phase continuation
 [statelens-reach] TS-9999 reach 0/2 control=1
+[statelens-reach] TS-9999 actors release ok 0:disrupter=running
+[statelens-reach] TS-9999 actors end ok 0:disrupter=running
 [statelens-reach] TS-9999 done
 """
 # The same replay with the helper's downgrade switched off.
@@ -5830,6 +5834,8 @@ read=1048580
 [statelens-reach] TS-9999 handoff holds mark=1048581 next=-
 [statelens-reach] TS-9999 phase continuation
 [statelens-reach] TS-9999 reach 2/2 control=0
+[statelens-reach] TS-9999 actors release ok 0:disrupter=running
+[statelens-reach] TS-9999 actors end ok 0:disrupter=running
 [statelens-reach] TS-9999 done
 """
 
@@ -5846,10 +5852,26 @@ def reach_card(history=TS4, id="TS-0004"):
     return sl.card_history(REACH_CARD.format(id=id, history=history))
 
 
-def replay_output(lines, card="TS-0004"):
-    """A replay's output: libFuzzer's lines around the helper's."""
+# The trusted runner's lines a run that ends prints before `done` (SPEC section 18.8).
+ACTORS = (
+    "release base=0 gates=- delivered=0 blocks=0 links=- latencies=- restarted=-",
+    "actors release ok 0:disrupter=running",
+    "actors end ok 0:disrupter=running",
+)
+
+
+def with_actors(lines, actors=ACTORS):
+    """`lines` with the trusted runner's lines before their `done` line, or at their end."""
+    lines = tuple(lines)
+    index = lines.index("done") if "done" in lines else len(lines)
+    return lines[:index] + tuple(actors) + lines[index:]
+
+
+def replay_output(lines, card="TS-0004", actors=ACTORS):
+    """A replay's output: libFuzzer's lines around the helper's, with the trusted runner's
+    lines before `done` (`actors=()` leaves them out)."""
     text = ["INFO: Running with entropic power schedule (0xFF, 100).", "Running: reach/empty"]
-    for line in lines:
+    for line in with_actors(lines, actors):
         text.append(line[1:] if line.startswith("!") else f"[statelens-reach] {card} {line}")
     return "\n".join(text) + "\n"
 
@@ -5903,14 +5925,21 @@ class ReachCheck(unittest.TestCase):
         self.assertEqual(
             [line["type"] for line in lines],
             ["phase", "stage", "entry", "stage", "stage", "entry", "stage", "handoff", "phase",
-             "reach", "done", "restart", "trace", "truncated", "panic", "unparsed"],
+             "reach", "release", "actors", "actors", "done", "restart", "trace", "truncated",
+             "panic", "unparsed"],
         )
         self.assertEqual(lines[2]["seq"], 5)
         self.assertEqual(lines[7]["next"], (1, 13))
         self.assertEqual(lines[9]["k"], 4)
-        self.assertEqual(lines[11]["replicas"], {"1", "2"})
-        self.assertEqual(lines[13]["seq"], 1048578)
-        self.assertEqual(lines[14]["message"], "boom at once")
+        self.assertEqual(lines[10]["detail"], ACTORS[0][len("release "):])
+        self.assertEqual(
+            (lines[11]["at"], lines[11]["ok"], lines[11]["actors"]),
+            ("release", True, [("0", "disrupter", "running")]),
+        )
+        self.assertEqual(lines[12]["at"], "end")
+        self.assertEqual(lines[14]["replicas"], {"1", "2"})
+        self.assertEqual(lines[16]["seq"], 1048578)
+        self.assertEqual(lines[17]["message"], "boom at once")
 
     def test_a_reached_card(self):
         result = self.verdict()
@@ -6382,6 +6411,69 @@ E2. R: queues certification of a view.
         result = self.verdict(exact, None, na, card)
         self.assertEqual(sl.verdict_text(result), "REACHED 2/2 (control n/a)", result["reasons"])
 
+    def test_a_replay_without_the_runner_s_actor_lines_cannot_reach(self):
+        card = reach_card()
+        control = (0, replay_output(CONTROL))
+        for actors, reason in (
+            ((), "no actors release line: the run did not go through the trusted runner"),
+            (ACTORS[:2], "no actors end line: the run did not go through the trusted runner"),
+            (
+                (ACTORS[0], "actors release failed 0:disrupter=absent", ACTORS[2]),
+                "actor check failed at the release: actors release failed 0:disrupter=absent",
+            ),
+            (
+                (ACTORS[1], "actors end failed 0:primary=running 0:secondary=finished"),
+                "actor check failed at the end: actors end failed 0:primary=running "
+                "0:secondary=finished",
+            ),
+            ((ACTORS[1], "actors end ok bogus"), "the actors end line is malformed: actors end "
+             "ok bogus"),
+            (
+                ("actors release failed 0:disrupter=unpolled", ACTORS[2]),
+                "actor check failed at the release: actors release failed 0:disrupter=unpolled",
+            ),
+        ):
+            canonical = (0, replay_output(REACHED, actors=actors))
+            result = sl.reach_verdict(card, MODULE, canonical, control)
+            self.assertEqual(sl.verdict_text(result), sl.NO_CONTINUATION, actors)
+            self.assertEqual(result["reasons"], [f"the canonical replay: {reason}"])
+            self.assertEqual(result["continuation"], ("canonical", reason))
+            feedback = sl.reach_feedback(result)
+            self.assertIn(f"{sl.NO_CONTINUATION} in the canonical replay: {reason}", feedback)
+            self.assertIn(sl.FEEDBACK_FIXES["continuation"], feedback)
+        # Every replay that ran to its end counts, the control and the largest included.
+        canonical = (0, replay_output(REACHED))
+        for name in ("control", "largest"):
+            runs = {"control": control, "largest": canonical}
+            runs[name] = (0, replay_output(CONTROL if name == "control" else REACHED, actors=()))
+            result = sl.reach_verdict(card, MODULE, canonical, runs["control"],
+                                      largest=runs["largest"])
+            self.assertEqual(result["verdict"], sl.NO_CONTINUATION)
+            self.assertEqual(result["continuation"][0], name)
+        # It is never kept: it is the last verdict of the order.
+        self.assertEqual(sl.VERDICT_ORDER[-1], sl.NO_CONTINUATION)
+
+    def test_the_largest_replay_is_judged_like_the_others(self):
+        card = reach_card()
+        canonical, control = (0, replay_output(REACHED)), (0, replay_output(CONTROL))
+        result = sl.reach_verdict(card, MODULE, canonical, control, largest=canonical)
+        self.assertEqual(sl.verdict_text(result), "REACHED 4/4", result["reasons"])
+        self.assertIn("largest", result["replays"])
+        # A deadline the continuation cannot keep under the base's largest budget.
+        timeout = REACHED[:-1] + ("!==77== ERROR: libFuzzer: timeout after 1201 seconds",)
+        result = sl.reach_verdict(card, MODULE, canonical, control,
+                                  largest=(1, replay_output(timeout)))
+        self.assertEqual(result["verdict"], sl.CRASH)
+        self.assertEqual(result["crash"]["replay"], "largest")
+        self.assertEqual(result["crash"]["kind"], "timeout")
+        self.assertNotIn("actors failed", result["annotations"])
+        # A crash after a failed actor check says so.
+        failed = (ACTORS[0], "actors release failed 0:disrupter=finished")
+        crashed = (1, replay_output(REACHED[:-1] + panicked("a.rs:1:1", "boom"), actors=failed))
+        result = sl.reach_verdict(card, MODULE, crashed, control)
+        self.assertEqual(result["verdict"], sl.CRASH)
+        self.assertIn("actors failed", result["annotations"])
+
     def test_no_report(self):
         for lines in (REACHED[:-1], swap(REACHED, "reach", None),
                       tuple(line.replace("/4 ", "/5 ") for line in REACHED)):
@@ -6662,28 +6754,34 @@ BASE_TARGET = """\
 #[cfg(feature = "mocks")]
 mod fuzz {
     use commonware_consensus_fuzz_simplex::{
-        Chaos, CodeCoverage, FuzzInput, SimplexCertificateMock, fuzz,
+        CodeCoverage, FuzzInput, SimplexCertificateMock, Standard, fuzz,
     };
     use libfuzzer_sys::fuzz_target;
 
     fuzz_target!(|input: FuzzInput| {
-        fuzz::<SimplexCertificateMock, Chaos, CodeCoverage>(input);
+        fuzz::<SimplexCertificateMock, Standard, CodeCoverage>(input);
     });
 }
 """
+# The thin target the script writes for TS-0004 on simplex_a (SPEC section 18.7).
 THIN = """\
 #![no_main]
 
+// The thin target of TS-0004 on simplex_a, written by `statelens.py synthesize` (SPEC
+// section 18.7): the base's trusted entry runs the scaffold's prefix, watched by the
+// helper. Never edit it; synthesis restores it.
 #[cfg(feature = "mocks")]
 mod fuzz {
-    use commonware_consensus_fuzz_simplex::{
-        Chaos, CodeCoverage, FuzzInput, SimplexCertificateMock, target_states::ts0004_simplex_a,
-    };
+    use commonware_consensus_fuzz_simplex::{CodeCoverage, FuzzInput, SimplexCertificateMock, Standard, fuzz_with_prefix, target_states};
     use libfuzzer_sys::fuzz_target;
 
     fuzz_target!(|input: FuzzInput| {
         commonware_consensus::simplex::statelens::reset();
-        ts0004_simplex_a::fuzz::<SimplexCertificateMock, Chaos, CodeCoverage>(input);
+        fuzz_with_prefix::<SimplexCertificateMock, Standard, CodeCoverage, _, _>(
+            input,
+            target_states::ts0004_simplex_a::prefix::<SimplexCertificateMock>(),
+            target_states::Watch,
+        );
         commonware_consensus::simplex::statelens::clear_compromised();
     });
 }
@@ -6699,8 +6797,7 @@ SCAFFOLD_MODULE = """\
 
 use commonware_consensus::simplex::statelens;
 
-pub fn fuzz<P, D, C>(input: crate::FuzzInput) {
-    statelens::set_compromised([]);
+pub fn prefix<P>(input: crate::FuzzInput) {
     let _ = input;
 }
 """
@@ -6884,7 +6981,7 @@ class HandoverLines(unittest.TestCase):
             f"/repo/consensus/fuzz/simplex/artifacts/{self.SCAFFOLD}/<crash file>",
         )
         _run, control = self.synthesis("/repo").run_lines(
-            self.SCAFFOLD, pathlib.Path("/repo/statelens/campaign/reach/empty"), True
+            self.SCAFFOLD, pathlib.Path("/repo/statelens/campaign/reach/empty"), "control"
         )
         self.assertEqual(
             control,
@@ -6892,6 +6989,11 @@ class HandoverLines(unittest.TestCase):
             f"CONSENSUS_FUZZ_LOG=1 NIGHTLY_VERSION=nightly just run {self.SCAFFOLD} "
             "/repo/statelens/campaign/reach/empty",
         )
+        # The extra replay's file replays with the base's largest progress budget.
+        _run, largest = self.synthesis("/repo").run_lines(
+            self.SCAFFOLD, pathlib.Path("/repo/statelens/campaign/reach/empty"), "largest"
+        )
+        self.assertIn("STATELENS_REACH=1 STATELENS_REACH_LARGEST=1 CONSENSUS_FUZZ_LOG=1", largest)
 
     def test_a_checkout_with_a_space_is_quoted_and_the_placeholder_is_not(self):
         run, replay = self.synthesis("/a b").run_lines(self.SCAFFOLD)
@@ -6972,6 +7074,8 @@ class Synthesize(unittest.TestCase):
             ("consensus/src/simplex/mod.rs", "pub mod types;\n"),
             ("consensus/src/simplex/voter.rs", VOTER_BASE),
             ("consensus/fuzz/core/src/simplex.rs", CORE),
+            ("consensus/fuzz/core/src/continuation.rs", "pub trait Prefix<P> {}\n"),
+            ("consensus/fuzz/simplex/src/trusted.rs", "pub fn fuzz_with_prefix<P>() {}\n"),
             ("consensus/fuzz/simplex/Cargo.toml", FUZZ_MANIFEST),
             ("consensus/fuzz/simplex/src/lib.rs", "pub mod state_cov;\n\npub fn fuzz() {}\n"),
             ("consensus/fuzz/simplex/src/chaos/twins.rs", TWINS_BASE),
@@ -7039,6 +7143,10 @@ class Synthesize(unittest.TestCase):
         # by card, directory and replay, ahead of `replays`, or None.
         self.compiles = lambda _scaffold: True
         self.replay_for = lambda _key, _tag, _name: None
+        # The trusted runner's lines every replay prints, and the replays that ran with
+        # STATELENS_REACH_LARGEST=1, by directory.
+        self.actors = ACTORS
+        self.largest = []
 
     def fake_run(self, command, log_path, cwd, stdin_text=None, echo=True, timeout=None,
                  env=None):
@@ -7088,6 +7196,9 @@ class Synthesize(unittest.TestCase):
         self.assertNotIn("STATELENS_BYZANTINE", env)
         cwd = pathlib.Path(cwd)
         name = "control" if env.get("STATELENS_REACH_CONTROL") == "1" else cwd.name
+        if env.get("STATELENS_REACH_LARGEST") == "1":
+            self.assertEqual(cwd.name, "largest")
+            self.largest.append(self.rel(cwd))
         key, tag = cwd.parts[-3], cwd.parts[-2]
         card = sl.PAIR_KEY.match(key)["card"]
         crash = cwd / "crash-da39a3ee5e6b4b0d3255bfef95601890afd80709"
@@ -7101,7 +7212,7 @@ class Synthesize(unittest.TestCase):
         if code:
             crash.write_text("")
         # libFuzzer runs a passing input twice: the second run repeats every line.
-        text = replay_output(lines, card) * (1 if code else 2)
+        text = replay_output(lines, card, self.actors) * (1 if code else 2)
         log_path.write_text(f"$ {' '.join(command)}\n{text}")
         return code, []
 
@@ -7111,13 +7222,14 @@ class Synthesize(unittest.TestCase):
         self.output = out.getvalue()
         return code
 
-    def scaffold(self, module=SCAFFOLD_MODULE, thin=THIN, base="simplex_a"):
-        """The module and thin target of the pair (TS-0004, `base`): SCAFFOLD_MODULE's and
-        THIN's, written for simplex_a, rewritten for another base."""
+    def scaffold(self, module=SCAFFOLD_MODULE, thin=None, base="simplex_a"):
+        """The module of the pair (TS-0004, `base`): SCAFFOLD_MODULE's, written for
+        simplex_a, rewritten for another base; the thin target is the script's, and `thin`
+        overwrites it."""
         module = module.replace("//! TS-0004 on simplex_a\n", f"//! TS-0004 on {base}\n", 1)
-        thin = thin.replace("ts0004_simplex_a", f"ts0004_{base}")
         self.put(f"consensus/fuzz/simplex/src/target_states/ts0004_{base}.rs", module)
-        self.put(f"consensus/fuzz/simplex/fuzz_targets/{base}_ts0004_statelens.rs", thin)
+        if thin is not None:
+            self.put(f"consensus/fuzz/simplex/fuzz_targets/{base}_ts0004_statelens.rs", thin)
 
     def write_scaffold(self, then=None):
         """An agent step that writes a valid scaffold, then makes the edit `then`."""
@@ -7229,6 +7341,138 @@ class Synthesize(unittest.TestCase):
         self.assertEqual(self.read(sl.FUZZ_MANIFEST).count("simplex_a_ts0004_statelens"), 2,
                          "one [[bin]] block, its name and its path")
 
+    def test_the_thin_target_and_the_extra_replay_are_the_script_s(self):
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize(), 0)
+        self.assertEqual(
+            self.read("consensus/fuzz/simplex/fuzz_targets/simplex_a_ts0004_statelens.rs"), THIN)
+        self.assertEqual(
+            sl.thin_target_text(self.repo, "simplex", "TS-0004", "simplex_a"), THIN)
+        self.assertIn("consensus/fuzz/simplex/fuzz_targets/simplex_a_ts0004_statelens.rs",
+                      self.prompts[0])
+        self.assertIn("trusted entry `fuzz_with_prefix::<SimplexCertificateMock, Standard, "
+                      "CodeCoverage, _, _>`; B's actors from the release: one Disrupter for "
+                      "participant 0", self.prompts[0])
+        # Every version is replayed once more with the base's largest progress budget.
+        self.assertEqual(self.largest, ["statelens/campaign/reach/TS-0004_simplex_a/attempt-0/"
+                                        "largest"])
+        report = self.report()
+        self.assertIn("## The largest replay", report)
+        self.assertIn("actors release ok 0:disrupter=running", report)
+
+    def test_a_version_whose_base_actors_did_not_run_is_never_kept(self):
+        self.actors = ()
+        self.steps = [self.write_scaffold(), self.touch_module("one")]
+        self.assertEqual(self.synthesize(), 3)
+        self.assertEqual(len(self.prompts), 3, "it is fed back; an unchanged tree ends the pair")
+        self.assertIn(f"Attempt 0: {sl.NO_CONTINUATION}", self.feedback(1))
+        self.assertIn("no actors release line: the run did not go through the trusted runner",
+                      self.feedback(1))
+        self.assertIn(sl.FEEDBACK_FIXES["continuation"], self.feedback(1))
+        self.assertEqual(self.line(), "TS-0004    NOT BUILT   no scaffold on simplex_a")
+        self.assertIn(f"- Note: every version built ended {sl.NO_CONTINUATION}", self.report())
+        self.assert_restored()
+        # A failed actor check is the same.
+        self.actors = (ACTORS[0], "actors release failed 0:disrupter=absent", ACTORS[2])
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize("--redo"), 3)
+        self.assertIn("actor check failed at the release: actors release failed "
+                      "0:disrupter=absent", self.feedback(len(self.prompts) - 1))
+
+    def test_driver_level_code_in_the_module_is_vetoed(self):
+        module = "consensus/fuzz/simplex/src/target_states/ts0004_simplex_a.rs"
+        for code, kind in (
+            ("let _ = run_twins_with_backend::<P, B>;", "a base driver or entry"),
+            ("let _ = deterministic::Runner::new(cfg);", "a runtime or the runner"),
+            ("spawn_filtered_honest_validator(x);", "an engine or validator spawn"),
+            ("let _ = Disrupter::new(x);", "a Byzantine actor"),
+            ("oracle.add_link(a, b, l);", "network setup"),
+            ("let _ = fuzz_runtime_timeout(1, 0);", "a runtime deadline"),
+            ("invariants::check(x);", "an oracle"),
+            ("let _ = target_states::Watch;", "the compromised set or the observer"),
+        ):
+            with self.subTest(kind):
+                del self.prompts[:]
+                self.builds = []
+                self.steps = [self.write_scaffold(
+                    lambda code=code: self.edit(module, "let _ = input;", code))]
+                self.assertEqual(self.synthesize("--redo"), 3)
+                self.assertIn(f"{module} holds driver-level code ({kind})", self.feedback(1))
+                self.assertEqual(self.builds, [])
+                self.assert_restored()
+        # In a comment or a string it is no code.
+        self.steps = [self.write_scaffold(lambda: self.edit(
+            module, "let _ = input;", '// run_standard_once\n    let _ = "Disrupter";'))]
+        self.assertEqual(self.synthesize("--redo"), 0)
+
+    def test_driver_level_code_in_another_scaffold_module_is_vetoed(self):
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize("--match", "TS-0004"), 0)
+        self.steps = [self.second_card(lambda: self.edit(
+            self.FIRST_MODULE, "let _ = input;", "let _ = run_standard_once;"))]
+        self.assertEqual(self.synthesize("--match", "TS-0005"), 3)
+        self.assertIn(f"{self.FIRST_MODULE} holds driver-level code (a base driver or entry)",
+                      self.feedback(2))
+        self.assertEqual(self.read(self.FIRST_MODULE), SCAFFOLD_MODULE)
+
+    def test_a_base_without_a_runner_adapter_is_refused(self):
+        chaos = BASE_TARGET.replace("Standard", "Chaos")
+        self.put("consensus/fuzz/simplex/fuzz_targets/simplex_c.rs", chaos)
+        self.put("consensus/fuzz/simplex/fuzz_targets/simplex_d.rs", BASE_TARGET.replace(
+            "fuzz::<SimplexCertificateMock, Standard, CodeCoverage>(input);",
+            "let _ = input;\n        fuzz::<SimplexCertificateMock, Standard, CodeCoverage>(x);"))
+        for base in ("simplex_c", "simplex_d"):
+            self.run_git("add", "--intent-to-add", f"consensus/fuzz/simplex/fuzz_targets/{base}.rs")
+        self.assertEqual(sl.continuation_refusal(self.repo, "simplex", "simplex_c"),
+                         "its Chaos driver has no hook point")
+        self.assertEqual(sl.continuation_refusal(self.repo, "simplex", "simplex_d"),
+                         "its fuzz_target! is not one call of an entry the trusted continuation "
+                         "hooks")
+        self.assertIsNone(sl.continuation_refusal(self.repo, "simplex", "simplex_a"))
+        self.assertEqual(sl.continuation_refusal(self.repo, "marshal", "simplex_a"),
+                         "the marshal harness has no trusted continuation yet")
+        self.assertEqual(self.synthesize("--match", "simplex_c"), 1)
+        self.assertIn("refused    simplex_c: no trusted continuation (its Chaos driver has no hook "
+                      "point); a follow-up", self.said)
+        self.assertIn("no selected base has a runner adapter of the trusted continuation",
+                      self.output + "\n".join(self.said))
+        self.assertEqual(self.prompts, [])
+        # With a supported base among them, the others are refused and the pair runs.
+        self.steps = [self.write_scaffold()]
+        self.said.clear()
+        self.assertEqual(self.synthesize("--match", "simplex_[ac]"), 0)
+        self.assertIn("refused    simplex_c: no trusted continuation (its Chaos driver has no hook "
+                      "point); a follow-up", self.said)
+        self.assertEqual(self.line(), "TS-0004    REACHED 4/4   simplex_a_ts0004_statelens")
+
+    def test_a_harness_that_predates_the_trusted_continuation_is_refused(self):
+        self.put("consensus/fuzz/simplex/src/trusted.rs", "pub fn fuzz() {}\n")
+        self.assertEqual(self.synthesize(), 2)
+        self.assertIn("the simplex fuzz harness predates the trusted continuation "
+                      "(consensus/fuzz/simplex/src/trusted.rs does not define "
+                      "`pub fn fuzz_with_prefix<...`): merge the harness with the hook API into "
+                      "this branch, then run `just clean` and a new campaign before synthesis",
+                      self.output + "\n".join(self.said))
+        self.assertEqual(self.prompts, [])
+
+    def test_a_standing_scaffold_of_the_old_contract_is_reported_not_revalidated(self):
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize("--match", "TS-0004"), 0)
+        # The scaffold as an earlier synthesis left it: an agent-written thin target.
+        thin = "consensus/fuzz/simplex/fuzz_targets/simplex_a_ts0004_statelens.rs"
+        self.put(thin, THIN.replace("fuzz_with_prefix", "fuzz_copied"))
+        self.put("statelens/target-states/simplex/TS-0005.md", state_card("TS-0005"))
+        self.steps = [self.second_card(lambda: self.accessor("TS-0005"))]
+        self.said.clear()
+        self.builds.clear()
+        self.assertEqual(self.synthesize("--rebaseline"), 0)
+        self.assertIn("warning: simplex_a_ts0004_statelens was written under the old contract "
+                      "(its thin target is not the trusted continuation's), so no pair's edits "
+                      "revalidate it; it needs a new campaign, or `--redo TS-0004` to synthesize "
+                      "it again", self.said)
+        self.assertNotIn("Revalidation", self.report("TS-0004_simplex_a"))
+        self.assertEqual(self.line("TS-0005"), "TS-0005    REACHED 4/4   " + self.SECOND)
+
     def test_an_edit_outside_the_scope_stops_synthesis_until_undone(self):
         self.steps = [self.write_scaffold(lambda: self.edit(
             "consensus/fuzz/core/src/simplex.rs", "Sha256", "Sha512"))]
@@ -7274,7 +7518,7 @@ class Synthesize(unittest.TestCase):
 
     def touch_module(self, text):
         return lambda: self.edit("consensus/fuzz/simplex/src/target_states/ts0004_simplex_a.rs",
-                                 "pub fn fuzz", f"// {text}\npub fn fuzz")
+                                 "pub fn prefix", f"// {text}\npub fn prefix")
 
     def test_a_removed_assertion_is_vetoed_in_every_attempt_that_keeps_it(self):
         # Attempt 0 removes the assertion; attempt 1 makes an unrelated edit and leaves the
@@ -7320,8 +7564,8 @@ class Synthesize(unittest.TestCase):
         self.assertEqual(self.synthesize(), 3)
         self.assertIn("guard 3: consensus/src/simplex/voter.rs lost 1 line(s) the campaign added",
                       self.feedback(1))
-        self.assertIn("guard 3: consensus/fuzz/simplex/src/chaos/twins.rs lost 1 line(s) the "
-                      "campaign added", self.feedback(2))
+        self.assertIn("guard 2: consensus/fuzz/simplex/src/chaos/twins.rs is part of the "
+                      "trusted harness", self.feedback(2))
         self.assertEqual(self.read("consensus/fuzz/simplex/src/chaos/twins.rs"), TWINS)
         self.assert_restored()
 
@@ -7352,7 +7596,14 @@ class Synthesize(unittest.TestCase):
                 "consensus/fuzz/simplex/src/lib.rs", "pub fn fuzz() {}",
                 f"pub fn fuzz() {{\n    {MARKER}\n"
                 "    commonware_consensus::simplex::statelens::unwatch();\n}"),
-             "guard 3: consensus/fuzz/simplex/src/lib.rs adds a call of unwatch"),
+             "guard 2: consensus/fuzz/simplex/src/lib.rs is part of the trusted harness"),
+            ("an edited trusted adapter", lambda: self.edit(
+                "consensus/fuzz/simplex/src/trusted.rs", "{}", "{ let _ = 1; }"),
+             "guard 2: consensus/fuzz/simplex/src/trusted.rs is part of the trusted harness"),
+            ("a new file in the fuzz package", lambda: self.put(
+                "consensus/fuzz/simplex/src/runner_copy.rs", "pub fn run() {}\n"),
+             "guard 2: consensus/fuzz/simplex/src/runner_copy.rs is part of the trusted "
+             "harness"),
             ("a ghost write", lambda: self.edit(module, "let _ = input;",
                                                 "statelens::with_ghost(|_| ());"),
              f"guard 3: {module} adds a call of with_ghost"),
@@ -7362,13 +7613,17 @@ class Synthesize(unittest.TestCase):
                 "        let _ = crate::simplex::statelens::seen("
                 '"voter.vote", None, 0, |_| true);\n'),
              "guard 3: consensus/src/simplex/voter.rs adds a call of seen"),
-            ("Shape B without set_compromised", lambda: self.edit(
-                module, "statelens::set_compromised([]);", ""),
-             "a Shape B module calls set_compromised"),
-            ("a thin target of another shape", lambda: self.edit(
+            ("set_compromised in the module", lambda: self.edit(
+                module, "let _ = input;", "statelens::set_compromised([0usize]);"),
+             f"guard 3: {module} adds a call of set_compromised"),
+            ("an edited thin target", lambda: self.edit(
                 "consensus/fuzz/simplex/fuzz_targets/simplex_a_ts0004_statelens.rs",
                 "        commonware_consensus::simplex::statelens::clear_compromised();\n", ""),
-             "its fuzz_target! must be the block of Appendix B.6"),
+             "guard 2: consensus/fuzz/simplex/fuzz_targets/simplex_a_ts0004_statelens.rs is the "
+             "script's thin target and was restored"),
+            ("a module without a prefix", lambda: self.edit(
+                module, "pub fn prefix<P>", "pub fn fuzz<P>"),
+             "the module defines `pub fn prefix<P: Simplex>() -> impl Prefix<P>`"),
             ("a type without cert_mock", lambda: self.edit(
                 module, "let _ = input;", "let _ = core::mem::size_of::<SimplexEd25519>();"),
              "the module names SimplexEd25519"),
@@ -7382,7 +7637,7 @@ class Synthesize(unittest.TestCase):
                 module, "let _ = input;", 'include!("../../../../src/simplex/voter.rs");'),
              f"guard 3: {module} adds an include macro"),
             ("a #[path] module in the fuzz package", lambda: self.edit(
-                module, "pub fn fuzz", '#[path = "../x.rs"]\nmod x;\n\npub fn fuzz'),
+                module, "pub fn prefix", '#[path = "../x.rs"]\nmod x;\n\npub fn prefix'),
              f"guard 3: {module} adds a #[path] attribute"),
         )
         for name, breach, finding in cases:
@@ -8054,12 +8309,12 @@ class Synthesize(unittest.TestCase):
 
     def test_an_unmarked_hunk_is_annotated(self):
         self.steps = [self.write_scaffold(lambda: self.edit(
-            "consensus/fuzz/simplex/src/lib.rs", "pub fn fuzz() {}",
-            "pub fn fuzz() {}\n\npub fn x() {}"))]
+            "consensus/src/simplex/voter.rs", "pub struct Voter {",
+            "pub struct Voter {\n    // read by the scaffold"))]
         self.assertEqual(self.synthesize(), 0)
         self.assertEqual(self.line(),
                          "TS-0004    REACHED 4/4 (unmarked edit)   simplex_a_ts0004_statelens")
-        self.assertIn("unmarked edit: consensus/fuzz/simplex/src/lib.rs @@", self.report())
+        self.assertIn("unmarked edit: consensus/src/simplex/voter.rs @@", self.report())
 
     def test_a_scaffold_that_never_builds_is_not_built(self):
         self.build_fails = True
@@ -8082,8 +8337,6 @@ class Synthesize(unittest.TestCase):
         def second():
             self.put("consensus/fuzz/simplex/src/target_states/ts0005_simplex_a.rs",
                      SCAFFOLD_MODULE.replace("TS-0004", "TS-0005"))
-            self.put("consensus/fuzz/simplex/fuzz_targets/simplex_a_ts0005_statelens.rs",
-                     THIN.replace("ts0004", "ts0005"))
 
         self.steps = [lambda: 1, second]
         self.assertEqual(self.synthesize(), 0)
@@ -8111,8 +8364,6 @@ class Synthesize(unittest.TestCase):
 
         def step():
             self.put(self.SECOND_MODULE, SCAFFOLD_MODULE.replace("TS-0004", "TS-0005"))
-            self.put(f"consensus/fuzz/simplex/fuzz_targets/{self.SECOND}.rs",
-                     THIN.replace("ts0004", "ts0005"))
             if then:
                 then()
         return step
@@ -8155,7 +8406,7 @@ class Synthesize(unittest.TestCase):
         reach = self.repo / "statelens/campaign/reach"
         self.assertTrue((reach / "TS-0004_simplex_a/without-TS-0005_simplex_a/canonical/replay.log").is_file())
         version = (reach / "TS-0005_simplex_a/attempt-0/version.diff").read_text()
-        self.assertIn("+pub fn fuzz<P, D, C>(input: crate::FuzzInput, extra: u8) {", version)
+        self.assertIn("+pub fn prefix<P>(input: crate::FuzzInput, extra: u8) {", version)
         # The first card's report is the one its own synthesis wrote.
         first = self.report("TS-0004_simplex_a")
         self.assertIn("- Verdict: REACHED 4/4\n", first)
@@ -9044,7 +9295,7 @@ class Synthesize(unittest.TestCase):
         for name, breach, finding in (
             ("a thin target on another base", lambda: self.put(
                 other, THIN.replace("ts0004_simplex_a", "ts0004_simplex_b")),
-             f"{other} is a thin target of this card on another base; this scaffold is "
+             f"{other} is a thin target the script owns; it was restored, and this pair's is "
              f"{self.FIRST}"),
             ("a header naming another base", lambda: self.edit(
                 self.FIRST_MODULE, "//! TS-0004 on simplex_a\n", "//! TS-0004 on simplex_b\n"),
@@ -9166,6 +9417,91 @@ class Synthesize(unittest.TestCase):
         self.assertEqual([s for s in self.said if "past the campaign base" in s],
                          [self.past_base_note(head, 1)])
         self.assertIn(f"- Base commit: {self.base}\n", self.report())
+
+    def test_rebaseline_accepts_a_merge_into_the_trusted_harness(self):
+        """An upstream fix merged into the fuzz package's crate root, which also holds the
+        script's declaration: guard 2 refuses it with the hint, --rebaseline takes it into
+        B without the declaration, and the next pair passes guard 2."""
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize(), 0)
+        lib = "consensus/fuzz/simplex/src/lib.rs"
+        self.put(lib, self.read(lib) + "// upstream fix\n")
+        self.said.clear()
+        self.assertEqual(self.synthesize("--redo"), 2)
+        self.assertIn(f"the checkout differs from the synthesis baseline: {lib}; rerun with "
+                      "--rebaseline to accept it, or use a fresh clone", "\n".join(self.said))
+        self.steps = [self.write_scaffold()]
+        self.said.clear()
+        self.assertEqual(self.synthesize("--rebaseline", "--redo"), 0)
+        self.assertIn(f"synthesis: --rebaseline accepted 1 changed path(s) ({lib})",
+                      "\n".join(self.said))
+        self.assertEqual(self.line(), "TS-0004    REACHED 4/4   simplex_a_ts0004_statelens")
+        kept = self.read(f"statelens/campaign/reach/baseline/files/{lib}")
+        self.assertIn("// upstream fix", kept)
+        self.assertNotIn("pub mod target_states;", kept)
+        self.assertIn("pub mod state_cov;\npub mod target_states;\n", self.read(lib))
+
+    def test_rebaseline_accepts_added_and_deleted_harness_files(self):
+        """An upstream merge that adds a file to the fuzz package, untracked or staged, is
+        drift --rebaseline accepts, never a file the final guard check deletes; so is one
+        that deletes a file of B."""
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize(), 0)
+        contents = "pub fn upstream_helper() {}\n"
+        for path, staged in (
+            ("consensus/fuzz/simplex/src/upstream_helper.rs", False),
+            ("consensus/fuzz/simplex/src/upstream_staged.rs", True),
+        ):
+            with self.subTest(path):
+                self.put(path, contents)
+                if staged:
+                    self.run_git("add", path)
+                self.said.clear()
+                self.assertEqual(self.synthesize(), 2)
+                self.assertIn(f"the checkout differs from the synthesis baseline: {path}; "
+                              "rerun with --rebaseline to accept it", "\n".join(self.said))
+                self.steps = [self.write_scaffold()]
+                self.said.clear()
+                self.assertEqual(self.synthesize("--rebaseline", "--redo"), 0)
+                self.assertIn(f"synthesis: --rebaseline accepted 1 changed path(s) ({path})",
+                              "\n".join(self.said))
+                self.assertEqual(self.read(path), contents)
+                self.assertEqual(
+                    self.read(f"statelens/campaign/reach/baseline/files/{path}"), contents)
+                self.assertEqual(self.line(), "TS-0004    REACHED 4/4   simplex_a_ts0004_statelens")
+        # A deletion of a file of B.
+        gone = "consensus/fuzz/simplex/src/upstream_helper.rs"
+        (self.repo / gone).unlink()
+        self.said.clear()
+        self.assertEqual(self.synthesize("--rebaseline"), 0)
+        self.assertIn(f"synthesis: --rebaseline accepted 1 changed path(s) ({gone})",
+                      "\n".join(self.said))
+        self.assertIsNone(self.read(f"statelens/campaign/reach/baseline/files/{gone}"))
+        self.assertIsNone(self.read(gone))
+        self.said.clear()
+        self.assertEqual(self.synthesize(), 0)
+        self.assertNotIn("differs from the synthesis baseline", "\n".join(self.said))
+
+    def test_rebaseline_refuses_drift_it_cannot_accept_and_restores_nothing(self):
+        """An added file that calls the runtime is not drift --rebaseline accepts: synthesis
+        stops before any pair, names the file, and leaves it and the operator's other
+        changes as they are."""
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize(), 0)
+        helper = "consensus/fuzz/simplex/src/upstream_helper.rs"
+        self.put(helper, "pub fn upstream_helper() {}\n")
+        bad = "consensus/fuzz/simplex/src/upstream_tick.rs"
+        tick = "pub fn t() {\n    commonware_consensus::simplex::statelens::tick();\n}\n"
+        self.put(bad, tick)
+        self.said.clear()
+        self.assertEqual(self.synthesize("--rebaseline"), 2)
+        said = "\n".join(self.said)
+        self.assertIn(f"the checkout differs from the synthesis baseline: {bad}; use a fresh "
+                      "clone", said)
+        self.assertNotIn("--rebaseline accepted", said)
+        self.assertEqual(self.read(helper), "pub fn upstream_helper() {}\n")
+        self.assertEqual(self.read(bad), tick)
+        self.assertIsNone(self.read(f"statelens/campaign/reach/baseline/files/{helper}"))
 
     def test_rebaseline_accepts_an_upstream_merge_and_revalidates_the_scaffolds(self):
         """The operator merged a fix into the harness outside the scope: synthesis refuses

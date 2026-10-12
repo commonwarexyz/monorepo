@@ -3,7 +3,12 @@
 You are writing a scaffold: a dedicated fuzz target that drives the History of one
 target-state card on an existing fuzz target of this repository, its base, witnesses each of
 its events with the probes a StateLens campaign installed and with harness observables, hands
-off at the target state, and lets the fuzzer and the base's oracles run on from there.
+off at the target state, and lets the fuzzer and the base's oracles run on from there. You
+write only the state-building prefix. The base's own driver runs it through a hook point,
+the trusted continuation: the driver starts the network and the honest replicas, runs your
+prefix, and at the handoff takes back every capability it lent you, reverts what you changed,
+starts the base's Byzantine actors, and runs its own fault schedule, liveness wait and oracles
+in the same runtime.
 
 ## Where you are
 
@@ -19,9 +24,11 @@ off at the target state, and lets the fuzzer and the base's oracles run on from 
   type, whose fields you read through its getters, such as `s.a()`), which a scaffold uses
   to ask which probes fired during its input. From the fuzz package it is
   `commonware_consensus::simplex::statelens`.
-- Read `{{FUZZ_PACKAGE}}/src/target_states/mod.rs`, the helper the script wrote, for the
-  exact signatures of the items this prompt names, and `{{PLAN}}`, the campaign's plan, for
-  what each probe records (its beacon table) and which invariants are bound where.
+- Read `{{CONTINUATION}}`, the hook API: `Prefix`, `Pins`, `Budget`, and `PrefixContext`,
+  the one object your prefix acts through, with its recorders; and
+  `{{FUZZ_PACKAGE}}/src/target_states/mod.rs`, the helper the script wrote, for the exact
+  signatures of the items this prompt names. Read `{{PLAN}}`, the campaign's plan, for what
+  each probe records (its beacon table) and which invariants are bound where.
 - The probe labels and `sl_implies!` invariant IDs of this campaign, with where each is,
   from one scan. Lines move as you edit, so a scaffold looks a site up at run time with
   `sites(label)` and never writes one as a literal:
@@ -39,20 +46,20 @@ written against:
 
 Write:
 
-- the module `{{MODULE}}`, which holds everything the scaffold needs: its `fuzz` entry, its
-  stages, and any recording wrapper;
-- the thin target `{{FUZZ_PACKAGE}}/fuzz_targets/{{SCAFFOLD}}.rs`, on the base
-  `{{BASE_TARGET}}` described below; exactly one thin target for this card on this base,
-  and none on another base;
-- any edit under the edit contract below that the scaffold needs elsewhere, each marked.
+- the module `{{MODULE}}`, the prefix of the scaffold `{{SCAFFOLD}}` on the base
+  `{{BASE_TARGET}}` described below: its `prefix` function, its stages and its witness code;
+- any edit under the edit contract below that the prefix needs elsewhere, each marked.
 
 The script owns the package manifest, `Cargo.lock`, `target_states/mod.rs` (the helper,
-followed by one `pub mod` line per module, yours included) and the line of the package's
-`src/lib.rs` that declares `target_states`. It adds your scaffold's `[[bin]]` block, the
+followed by one `pub mod` line per module, yours included), the line of the package's
+`src/lib.rs` that declares `target_states`, and the thin target `{{THIN}}`, which it writes
+before your attempt: the base's trusted entry with your `prefix` and the helper's observer.
+It restores the thin target if you change it, and adds your scaffold's `[[bin]]` block, the
 base's block with `name` and `path` renamed, after your attempt.
 
 The base, `{{BASE_TARGET}}`: its name, the `fuzz_target!` closure header and entry call,
-`required-features`, input type, and whether its runner is hooked:
+`required-features`, input type, its trusted entry, and the actors its driver starts for the
+compromised identity at the release:
 
 {{BASE_DETAILS}}
 
@@ -96,9 +103,11 @@ This is requirement R-TS-SYN-3, the one contract for every edit a synthesis make
 
 How it applies here:
 
-- Where: the paths the subsystem rules below name, which are the system under test and the
-  profile's fuzz package. The fuzz package reaches `consensus/fuzz/core/` only through its
-  own `src/`. Any other path is out of scope.
+- Where: the paths the subsystem rules below name: the system under test, and in the
+  profile's fuzz package only your files under `src/target_states/`, which `mod.rs` is not. Every other
+  file of the fuzz package, its drivers, the trusted adapter and the oracles, is the trusted
+  harness that runs the base's continuation; an edit to it is restored and vetoes your
+  version. Any other path is out of scope.
 - Observation code is read-only code the scaffold calls: getters, accessors, recording
   wrappers, witness helpers. It never adds a counter feature, an assertion or ghost state;
   those come only from the campaign. Synthesis never instruments.
@@ -108,15 +117,16 @@ earlier attempt made counts as if you made it now:
 
 1. Scope: a change outside those paths, other than to `Cargo.lock`, stops the synthesis and
    restores the pair's edits; the operator then needs a fresh clone.
-2. Manifests: no dependency change in any `Cargo.toml`. An edit to a file the script owns is
-   restored, and your version is not built.
+2. Manifests and the trusted harness: no dependency change in any `Cargo.toml`. An edit to a
+   file the script owns, or to the trusted harness, is restored, and your version is not
+   built.
 3. Instrumentation integrity: every `sl_probe!`, `sl_assert!` and `sl_implies!` call stays
    as it is (moving one within its file is fine); every line the campaign's instrumentation
    added stays, so no ghost update, `// [statelens]` field or runner hook is removed or
    changed; the runtime module stays byte-identical, and its declaration and the attributes
    above it stay, with no `#[path]` attribute added; no call of `with_ghost`, `with_global`,
    `record`, `note`, `violation`, `reset` or `clear_compromised` is added outside the helper
-   and the thin targets; no `set_compromised` outside `target_states/`; no `tick`, `watch` or
+   and the thin targets; no `set_compromised` outside the helper; no `tick`, `watch` or
    `unwatch` outside the helper; no call of the read side in the system under test; no `[statelens-reach]` or
    `[statelens-scaffold]` literal outside the helper; outside the helper, no print macro
    (`print!`, `println!`, `eprint!`, `eprintln!`), `stdout()` or `stderr()`, `from_raw_fd`,
@@ -124,7 +134,7 @@ earlier attempt made counts as if you made it now:
    `#[path]` attribute, also in code you copy from elsewhere; and no Rust file in a path git
    ignores, such as a module or directory named `target`, which the repository ignores. A
    breach is not built, and it stays a breach in every later attempt until you revert it.
-4. Marker: every changed hunk outside your module and thin target carries the comment
+4. Marker: every changed hunk outside your module and the thin target carries the comment
    `// [statelens] tss:{{CARD_ID}}`. An unmarked hunk is reported for review, and so is a
    hunk that changes or neighbors an `sl_*!` call or a line the campaign added.
 5. Test gate: when the kept version changed the system under test, the campaign's tests run
@@ -132,28 +142,54 @@ earlier attempt made counts as if you made it now:
    pair's edits and records GATE FAILED.
 6. Restore: a pair with no version built, or GATE FAILED, has its edits restored.
 
-## Shapes
+## The prefix
 
-Pick one and record it in the module header.
+Your module defines `pub fn prefix<P: Simplex>() -> impl Prefix<P>`, which the thin target
+calls with the base's first generic argument. `Prefix` has two methods:
+
+- `plan(&mut self, pins: &mut Pins<'_>) -> Budget`, before the runtime starts: split the
+  knobs from `pins.raw_bytes()`, pick them, pin the fields the History fixes through `pins`,
+  open the stages, and return the budget from `Stages::budget`: the sum of your stage
+  deadlines and the release delay `d`. The runner's deadline is the base's plus both.
+- `run(self: Box<Self>, cx: PrefixContext<P>) -> PrefixFuture`, after the network and the
+  honest replicas started and before anything of the base's adversary: drive `E1` to
+  `E(n-1)` through `cx`, call `Stages::handoff`, and return. Returning is the handoff: the
+  context stops working, and the runner releases, after `d`, everything you changed.
+
+A prefix never holds driver code. The script vetoes a module that starts a runtime or calls
+the runner, a base driver or entry, an engine or validator spawn, a Disrupter or a Twins
+backend, network setup or an oracle link change, a runtime deadline, an oracle or the
+liveness wait, `set_compromised` or the helper's observer. What the prefix may do is what
+`PrefixContext` offers:
+
+- topology: `participants`, `byzantine` (B, the compromised identity, when the base runs
+  one), `honest`, `term_length`, `optimistic_views`, `leader(view)` under the honest engines'
+  elector, and `scripted_views`, the end of a Twins base's scripted rounds;
+- time: `sleep` and `now`, in simulated time;
+- B, whose base actors do not run during the prefix: `scheme` (B's signer), `send` on B's own
+  vote, certificate and resolver channels, `inbox` (everything B received, stamped), and
+  `block` and `send_block` (mock blocks as B, through the base's block relay);
+- the honest replicas, through gates the runner installed on their receivers: `hold` (hold
+  every message a filter accepts), `pass`, `held` and `open`, and `hold_blocks` and
+  `pass_blocks` for blocks;
+- the runner's recorders, installed at spawn and stamped as they record: `deliveries` (what a
+  replica's engine received through its gate), `activities` (what its reporter was told),
+  `automaton` (verify and certify requested and answered), `elections` (the leaders its voter
+  elected) and `blocks` (the peers it blocked), and `blocked`, the network's blocked pairs now;
+- changes the runner reverts at the release: `set_link`, `set_latency` (a replica's
+  application latencies), `crash` and `restart` (from its journal, with its reporter).
+
+Pick one shape and record it in the module header.
 
 - Shape A, pinned input, preferred where it fits: the base input's fields fix every event
-  before `En`. `fuzz` splits and picks the knobs, opens the stages and checks the budget,
-  pins those fields, resets the fields that depend on them, calls the base's entry by path
-  with its generics, then evaluates `E1` to `E(n-1)` over the trace and the harness
-  observables, calls `Stages::handoff` with the evaluation of `En`, and last `Stages::done`.
-  The base's own schedule runs, no driver code is copied, and its oracles are untouched.
-  Register the evaluation with `Stages::on_panic`, so a crash still reports what the trace
-  shows.
-- Shape B, online prefix, where Shape A cannot express the History: `fuzz` splits and picks
-  the knobs, opens the stages and checks the budget, calls `set_compromised`, pins the
-  fields, sets the base up, drives `E1` to `E(n-1)` online, calls `Stages::handoff` with a
-  read of `En`'s witness, hands off to the base's free-running phase and oracles, and calls
-  `Stages::done` after the last oracle. Call the base's setup by path; where only a
-  monolithic driver can host the prefix, copy that driver verbatim into the module and cite
-  it as `path::item@{{BASE}}`.
+  before `En`. `plan` pins them; `run` returns at once, so the base's actors start right
+  away, and registers the evaluation of the stages with `Stages::on_panic`, which the helper
+  runs after the base's last oracle, and the panic hook on a crash: it evaluates `E1` to
+  `E(n-1)` over the trace and calls `Stages::handoff` with the evaluation of `En`.
+- Shape B, online prefix, where Shape A cannot express the History: `run` drives the events
+  online and hands off.
 
-`pub fn fuzz` takes the base's input type and the generic parameters of the base's entry, in
-order. The module opens with this header, which the script reads:
+The module opens with this header, which the script reads:
 
 ```rust
 //! {{CARD_ID}} on {{BASE_TARGET}}
@@ -165,41 +201,27 @@ order. The module opens with this header, which the script reads:
 //! Missing: <each missing capability> | none
 ```
 
-The thin target is the base's file with two changes: the `use` lines name your module
-instead of the base's entry, and the body of its one `fuzz_target!`, whose closure parameter
-stays the base's, is exactly these three statements:
-
-```rust
-    fuzz_target!(|input: <the base's input type>| {
-        commonware_consensus::simplex::statelens::reset();
-        <module>::fuzz::<the base entry's generic arguments>(input);
-        commonware_consensus::simplex::statelens::clear_compromised();
-    });
-```
-
-The first generic argument names the `cert_mock` scheme, as in the base, and the module names
-no Simplex type with another scheme.
+The module names no Simplex type with a scheme other than `cert_mock`.
 
 ## Knobs
 
 - The card's Knobs table lists them. `Knobs::split` takes the first K <= 16 bytes of the base
-  input's own `raw_bytes`, zero-padded, as the first statement of `fuzz`; `Knobs::pick`
+  input's own `raw_bytes` (`pins.raw_bytes()`), zero-padded, first in `plan`; `Knobs::pick`
   takes the next one as `domain[byte % domain.len()]`, with the source value at index 0, so
   the empty input, the canonical input, replays the source's History.
 - Each knob decodes to a valid value by construction: derive a view so that the required
   leader leads it, rather than hoping. An ordering knob indexes the orders `Order:` allows,
   the source order first.
-- Pick every knob before any engine starts, then call `Stages::new("{{CARD_ID}}", {{STAGES}})`
-  and `Stages::budget`, which takes the knobs, so none is picked later. Do both before you pin
-  a field or perform any other action: until `Stages::new` nothing watches, so `Witness::act`
-  takes position 0 and its stage has no position. The input type, the run recipe and the
-  libFuzzer flags stay the base's; there is no seed corpus.
-- Then pin the fields the History fixes, through `Witness::act` when a stage witnesses the
-  pin, and reset the fields that depend on them as the base's decoder sets them under the pin
-  (the subsystem rules name them).
-- `Knobs::split`, `Knobs::pick` and `Stages::budget` raise the only errors attributed to a
-  scaffold, before any engine starts: more than 16 knobs, more picked than split, a domain
-  with fewer than two values, a prefix budget over the runtime deadline.
+- Pick every knob in `plan`, then call `Stages::new("{{CARD_ID}}", {{STAGES}})` and
+  `Stages::budget`, which takes the knobs, so none is picked later. Until `Stages::new`
+  nothing watches, so `Witness::act` takes position 0 and its stage has no position. The
+  input type, the run recipe and the libFuzzer flags stay the base's; there is no seed corpus.
+- Pin the fields the History fixes only through `pins`, which resets the fields that depend
+  on them as the base's decoder sets them (the subsystem rules name what it offers). A pin is
+  not a stage action: a stage that needs a pinned value witnesses what the system did with it.
+- `Knobs::split` and `Knobs::pick` raise the only errors attributed to a scaffold, before the
+  runtime starts: more than 16 knobs, more picked than split, a domain with fewer than two
+  values.
 
 ## Stages and witnesses
 
@@ -209,13 +231,11 @@ witness that establishes its whole `Check` or `Holds` line, its relations to ear
 included. The kinds:
 
 - `exact`: harness observables, one per part of the line, each keyed by the bound entities:
-  a reporter map keyed by view or digest, a resolver or buffer recorder, a recording wrapper
-  in your module, a network intercept record, or a local query without side effects. A query
-  that subscribes, hints, fetches or verifies is not a witness: it would create or satisfy
-  the state it checks. A map read after the run shows presence only; an entry carries a
-  position only when a recording wrapper stamped it with `stamp` as it recorded it. A
-  recording wrapper records synchronously and forwards every call and reply unchanged and at
-  once: no await, delay, spawn, drop or reordering of its own.
+  an entry of the runner's recorders (above), which you cite with `cite(observable, key,
+  value, entry.stamp)` to carry the position the recorder took when it recorded the entry, or
+  a query of them at a moment, which you stamp with `stamp(observable, key, value)`, such as
+  the absence of an entry. A query that subscribes, hints, fetches or verifies is not a
+  witness: it would create or satisfy the state it checks.
 - `intrinsic`: one probe observation, found with `seen` and a label from the list above, at a
   site whose two values come from one receiver. It identifies the replica `me` and the
   relation among that object's fields at that instant, and no view, digest or other
@@ -277,12 +297,12 @@ replica across a restart names the incarnation.
 
 ## Handoff and recovery
 
-Handoff comes first; recovery is part of the continuation.
+Handoff comes first; recovery is the runner's.
 
-- Shape B drives `E1` to `E(n-1)` online, polling in simulated time, with a simulated-time
-  deadline per stage: passing it is a miss, never a wait. Race every await on a reply of the
-  system under test against the deadline with `commonware_macros::select!`; a dropped reply
-  is a miss.
+- Shape B drives `E1` to `E(n-1)` online, polling in simulated time with `cx.sleep`, with a
+  simulated-time deadline per stage: passing it is a miss, never a wait. Race every await on
+  a reply of the system under test against the deadline with `commonware_macros::select!`; a
+  dropped reply is a miss.
 - `Stages::handoff` takes a plain closure that reads `En`'s witness and builds it inside the
   call, with no await or yield, and no value read before the call. The helper takes a
   position, calls it, and takes the handoff mark: the handoff holds only when nothing came
@@ -293,21 +313,15 @@ Handoff comes first; recovery is part of the continuation.
   may no longer hold.
 - For a state defined by pending work or a withheld delivery, an `exact` observable shows
   the work still pending at the handoff: requested, and neither answered nor closed. Nothing
-  the prefix does may complete, cancel or abandon it: never await its reply, drop its reply
-  channel, or stop or restart its owner before the handoff.
-- The continuation starts with every fault the prefix opened still in place: a crashed
-  replica down, a partition, a held message. Release each no later than the base's first
-  heal (GST), and start the base's liveness measurement after both. Network cuts go through
-  the base's own fault input, as pinned partition fields, or are composed with the base's
-  current cut; never heal the network yourself. Release crashed replicas and held messages at
-  the handoff plus `d`, a knob in [0, the base's fault phase); a base without GST releases
-  them before its liveness wait.
-- The runtime deadline is the base's, which the subsystem rules give, plus the stage deadlines
-  plus the largest release delay, which `Stages::budget` checks; for a base without one, pass
-  `Duration::MAX`.
-- Shape A imposes no cleanup, and its handoff is implicit: `En`'s witness, read in the handoff
-  call after the run, counts only if it has a position and the trace holds a later
-  observation of an honest replica in the same runtime instance.
+  the prefix does may complete, cancel or abandon it before the handoff.
+- After `run` returns, every change the prefix made stays in place for `d`, the release
+  delay `plan` returned, a knob in [0, the base's fault phase): held messages and blocks stay
+  held, a crashed replica stays down, a link and a latency stay changed. At the release the
+  runner delivers the held messages and blocks in arrival order, restores the base's links
+  and latencies, restarts every crashed replica, starts the base's actors for B, and only then
+  the base's fault schedule, its liveness wait, re-based on the highest view finalized at the
+  release, and its oracles. You never release, restore or heal anything for the base.
+- The runtime deadline is the runner's: the base's, plus your budget's prefix and release.
 
 ## Control
 
@@ -320,26 +334,23 @@ event before `En` and every witness is `exact` or `construction`.
 
 ## Oracles
 
-The base's free-running phase and every oracle run, called by path or copied verbatim, never
-removed or weakened. In Shape A the base's oracles run inside its entry as they are, and a
-History whose continuation they would not measure takes Shape B. In Shape B, re-base the
-base's progress target on the handoff, in the measure the subsystem rules give for that base.
-`Stages::done` follows the last oracle; returning before it reads as an oracle that never ran.
-Stage checks are not oracles.
+The base's free-running phase and every oracle are the runner's, which runs them after the
+release; the prefix never calls, copies or weakens one, and never measures progress. The
+helper prints `done` after the last oracle. Stage checks are not oracles.
 
-## Fabrication and the guard
+## Fabrication and B
 
 - Events go through the network or the harness verbs. A scripted vote goes out only on its
-  signer's own channel (INV-0008). A certificate you build names an honest signer only for a
-  proposal that replica signed or would sign.
-- List every injection, such as a journal seed, a floor start, a resolver delivery or a
-  mailbox call, under `//! Injections:` with the INV ids whose ghost history it bypasses. The
-  module never writes ghost state and never calls `record`.
-- Shape B calls `commonware_consensus::simplex::statelens::set_compromised` with the indices
-  it runs as real engines under a Byzantine identity, empty if none, before any engine
-  starts; when the set is not empty, also check that every scheme's own index matches its
-  position in `participants`, as the hooked runners do. Code copied from a hooked runner
-  keeps its hook. Shape A relies on the base's hooked runner.
+  signer's own channel (INV-0008): the prefix signs only as B, with `cx.scheme()`, and sends
+  only through `cx.send`. A certificate you build names an honest signer only for a proposal
+  that replica signed or would sign, from votes B received (`cx.inbox()`).
+- List every injection, such as a resolver delivery, under `//! Injections:` with the INV ids
+  whose ghost history it bypasses. The module never writes ghost state and never calls
+  `record`.
+- B is the runner's: it publishes the compromised identity before any engine starts, keeps
+  B's channels during the prefix, and starts exactly the base's actors for B at the release,
+  whose execution it checks. A History that needs B to run an engine during the prefix, or an
+  honest identity to act as another, is a missing capability.
 
 ## Missing capabilities
 
@@ -351,8 +362,7 @@ before you call `Stages::handoff`. A human adds the capability.
 
 The prefix and witness code you write never panics on data of the system under test: no
 `unwrap`, `expect` or index that its output decides, and no harness verb that panics on its
-reply; a miss instead. Code copied verbatim from the base, and every oracle, keep their
-panics: after the handoff a miss records nothing.
+reply; a miss instead.
 
 ## Building
 
@@ -363,8 +373,8 @@ Build the scaffold with
 until it builds with no errors and no warnings. If it reports that the package has no such
 target, because the script writes the `[[bin]]` block only after your attempt, add that block
 for the build (the base's block with `name` and `path` renamed) and remove it again before you
-finish, leaving the manifest exactly as you found it. If you changed the system under test,
-also run `{{CHECK}}`.
+finish, leaving the manifest exactly as you found it. The thin target is already in place. If
+you changed the system under test, also run `{{CHECK}}`.
 
 Never run the scaffold, any fuzz target, `cargo fuzz run` or `just run`: the script's replays
 of fixed inputs are the only runs that judge a version, and a crash file any other run leaves
@@ -392,8 +402,11 @@ What each signal asks for:
   which `En` cannot hold for them, or say in your reply that the History is not causal.
 - A vacuous or missing control: name, or withhold, a later harness event before `En`; in the
   control run, drive every later event, the handoff check and the base's oracles.
-- NO REPORT: use the helper, and never return before the base's oracles.
+- NO REPORT: use the helper, call `Stages::handoff`, and return from `run` at the handoff.
 - SCAFFOLD ERROR: the reason the helper named.
+- NO CONTINUATION (the runner's actor lines are missing or failed): nothing in the module
+  starts or stops the base's actors; return from `run` at the handoff and stay within the
+  budget. A human fixes a runner adapter that still fails.
 
 Your earlier attempts' files are still in place: change them rather than start over, unless
 the feedback asks for another shape.

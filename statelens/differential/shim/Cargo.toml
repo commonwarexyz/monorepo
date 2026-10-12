@@ -12,6 +12,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+commonware-consensus-fuzz-core = { path = "../../../consensus/fuzz/core" }
 commonware-cryptography = { path = "../../../cryptography" }
 commonware-utils = { path = "../../../utils" }
 sancov = "0.1.0"

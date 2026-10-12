@@ -3936,7 +3936,12 @@ Kind: `{{KIND}}`
 You are writing a scaffold: a dedicated fuzz target that drives the History of one
 target-state card on an existing fuzz target of this repository, its base, witnesses each of
 its events with the probes a StateLens campaign installed and with harness observables, hands
-off at the target state, and lets the fuzzer and the base's oracles run on from there.
+off at the target state, and lets the fuzzer and the base's oracles run on from there. You
+write only the state-building prefix. The base's own driver runs it through a hook point,
+the trusted continuation: the driver starts the network and the honest replicas, runs your
+prefix, and at the handoff takes back every capability it lent you, reverts what you changed,
+starts the base's Byzantine actors, and runs its own fault schedule, liveness wait and oracles
+in the same runtime.
 
 ## Where you are
 
@@ -3952,9 +3957,11 @@ off at the target state, and lets the fuzzer and the base's oracles run on from 
   type, whose fields you read through its getters, such as `s.a()`), which a scaffold uses
   to ask which probes fired during its input. From the fuzz package it is
   `commonware_consensus::simplex::statelens`.
-- Read `{{FUZZ_PACKAGE}}/src/target_states/mod.rs`, the helper the script wrote, for the
-  exact signatures of the items this prompt names, and `{{PLAN}}`, the campaign's plan, for
-  what each probe records (its beacon table) and which invariants are bound where.
+- Read `{{CONTINUATION}}`, the hook API: `Prefix`, `Pins`, `Budget`, and `PrefixContext`,
+  the one object your prefix acts through, with its recorders; and
+  `{{FUZZ_PACKAGE}}/src/target_states/mod.rs`, the helper the script wrote, for the exact
+  signatures of the items this prompt names. Read `{{PLAN}}`, the campaign's plan, for what
+  each probe records (its beacon table) and which invariants are bound where.
 - The probe labels and `sl_implies!` invariant IDs of this campaign, with where each is,
   from one scan. Lines move as you edit, so a scaffold looks a site up at run time with
   `sites(label)` and never writes one as a literal:
@@ -3972,20 +3979,20 @@ written against:
 
 Write:
 
-- the module `{{MODULE}}`, which holds everything the scaffold needs: its `fuzz` entry, its
-  stages, and any recording wrapper;
-- the thin target `{{FUZZ_PACKAGE}}/fuzz_targets/{{SCAFFOLD}}.rs`, on the base
-  `{{BASE_TARGET}}` described below; exactly one thin target for this card on this base,
-  and none on another base;
-- any edit under the edit contract below that the scaffold needs elsewhere, each marked.
+- the module `{{MODULE}}`, the prefix of the scaffold `{{SCAFFOLD}}` on the base
+  `{{BASE_TARGET}}` described below: its `prefix` function, its stages and its witness code;
+- any edit under the edit contract below that the prefix needs elsewhere, each marked.
 
 The script owns the package manifest, `Cargo.lock`, `target_states/mod.rs` (the helper,
-followed by one `pub mod` line per module, yours included) and the line of the package's
-`src/lib.rs` that declares `target_states`. It adds your scaffold's `[[bin]]` block, the
+followed by one `pub mod` line per module, yours included), the line of the package's
+`src/lib.rs` that declares `target_states`, and the thin target `{{THIN}}`, which it writes
+before your attempt: the base's trusted entry with your `prefix` and the helper's observer.
+It restores the thin target if you change it, and adds your scaffold's `[[bin]]` block, the
 base's block with `name` and `path` renamed, after your attempt.
 
 The base, `{{BASE_TARGET}}`: its name, the `fuzz_target!` closure header and entry call,
-`required-features`, input type, and whether its runner is hooked:
+`required-features`, input type, its trusted entry, and the actors its driver starts for the
+compromised identity at the release:
 
 {{BASE_DETAILS}}
 
@@ -4029,9 +4036,11 @@ This is requirement R-TS-SYN-3, the one contract for every edit a synthesis make
 
 How it applies here:
 
-- Where: the paths the subsystem rules below name, which are the system under test and the
-  profile's fuzz package. The fuzz package reaches `consensus/fuzz/core/` only through its
-  own `src/`. Any other path is out of scope.
+- Where: the paths the subsystem rules below name: the system under test, and in the
+  profile's fuzz package only your files under `src/target_states/`, which `mod.rs` is not. Every other
+  file of the fuzz package, its drivers, the trusted adapter and the oracles, is the trusted
+  harness that runs the base's continuation; an edit to it is restored and vetoes your
+  version. Any other path is out of scope.
 - Observation code is read-only code the scaffold calls: getters, accessors, recording
   wrappers, witness helpers. It never adds a counter feature, an assertion or ghost state;
   those come only from the campaign. Synthesis never instruments.
@@ -4041,15 +4050,16 @@ earlier attempt made counts as if you made it now:
 
 1. Scope: a change outside those paths, other than to `Cargo.lock`, stops the synthesis and
    restores the pair's edits; the operator then needs a fresh clone.
-2. Manifests: no dependency change in any `Cargo.toml`. An edit to a file the script owns is
-   restored, and your version is not built.
+2. Manifests and the trusted harness: no dependency change in any `Cargo.toml`. An edit to a
+   file the script owns, or to the trusted harness, is restored, and your version is not
+   built.
 3. Instrumentation integrity: every `sl_probe!`, `sl_assert!` and `sl_implies!` call stays
    as it is (moving one within its file is fine); every line the campaign's instrumentation
    added stays, so no ghost update, `// [statelens]` field or runner hook is removed or
    changed; the runtime module stays byte-identical, and its declaration and the attributes
    above it stay, with no `#[path]` attribute added; no call of `with_ghost`, `with_global`,
    `record`, `note`, `violation`, `reset` or `clear_compromised` is added outside the helper
-   and the thin targets; no `set_compromised` outside `target_states/`; no `tick`, `watch` or
+   and the thin targets; no `set_compromised` outside the helper; no `tick`, `watch` or
    `unwatch` outside the helper; no call of the read side in the system under test; no `[statelens-reach]` or
    `[statelens-scaffold]` literal outside the helper; outside the helper, no print macro
    (`print!`, `println!`, `eprint!`, `eprintln!`), `stdout()` or `stderr()`, `from_raw_fd`,
@@ -4057,7 +4067,7 @@ earlier attempt made counts as if you made it now:
    `#[path]` attribute, also in code you copy from elsewhere; and no Rust file in a path git
    ignores, such as a module or directory named `target`, which the repository ignores. A
    breach is not built, and it stays a breach in every later attempt until you revert it.
-4. Marker: every changed hunk outside your module and thin target carries the comment
+4. Marker: every changed hunk outside your module and the thin target carries the comment
    `// [statelens] tss:{{CARD_ID}}`. An unmarked hunk is reported for review, and so is a
    hunk that changes or neighbors an `sl_*!` call or a line the campaign added.
 5. Test gate: when the kept version changed the system under test, the campaign's tests run
@@ -4065,28 +4075,54 @@ earlier attempt made counts as if you made it now:
    pair's edits and records GATE FAILED.
 6. Restore: a pair with no version built, or GATE FAILED, has its edits restored.
 
-## Shapes
+## The prefix
 
-Pick one and record it in the module header.
+Your module defines `pub fn prefix<P: Simplex>() -> impl Prefix<P>`, which the thin target
+calls with the base's first generic argument. `Prefix` has two methods:
+
+- `plan(&mut self, pins: &mut Pins<'_>) -> Budget`, before the runtime starts: split the
+  knobs from `pins.raw_bytes()`, pick them, pin the fields the History fixes through `pins`,
+  open the stages, and return the budget from `Stages::budget`: the sum of your stage
+  deadlines and the release delay `d`. The runner's deadline is the base's plus both.
+- `run(self: Box<Self>, cx: PrefixContext<P>) -> PrefixFuture`, after the network and the
+  honest replicas started and before anything of the base's adversary: drive `E1` to
+  `E(n-1)` through `cx`, call `Stages::handoff`, and return. Returning is the handoff: the
+  context stops working, and the runner releases, after `d`, everything you changed.
+
+A prefix never holds driver code. The script vetoes a module that starts a runtime or calls
+the runner, a base driver or entry, an engine or validator spawn, a Disrupter or a Twins
+backend, network setup or an oracle link change, a runtime deadline, an oracle or the
+liveness wait, `set_compromised` or the helper's observer. What the prefix may do is what
+`PrefixContext` offers:
+
+- topology: `participants`, `byzantine` (B, the compromised identity, when the base runs
+  one), `honest`, `term_length`, `optimistic_views`, `leader(view)` under the honest engines'
+  elector, and `scripted_views`, the end of a Twins base's scripted rounds;
+- time: `sleep` and `now`, in simulated time;
+- B, whose base actors do not run during the prefix: `scheme` (B's signer), `send` on B's own
+  vote, certificate and resolver channels, `inbox` (everything B received, stamped), and
+  `block` and `send_block` (mock blocks as B, through the base's block relay);
+- the honest replicas, through gates the runner installed on their receivers: `hold` (hold
+  every message a filter accepts), `pass`, `held` and `open`, and `hold_blocks` and
+  `pass_blocks` for blocks;
+- the runner's recorders, installed at spawn and stamped as they record: `deliveries` (what a
+  replica's engine received through its gate), `activities` (what its reporter was told),
+  `automaton` (verify and certify requested and answered), `elections` (the leaders its voter
+  elected) and `blocks` (the peers it blocked), and `blocked`, the network's blocked pairs now;
+- changes the runner reverts at the release: `set_link`, `set_latency` (a replica's
+  application latencies), `crash` and `restart` (from its journal, with its reporter).
+
+Pick one shape and record it in the module header.
 
 - Shape A, pinned input, preferred where it fits: the base input's fields fix every event
-  before `En`. `fuzz` splits and picks the knobs, opens the stages and checks the budget,
-  pins those fields, resets the fields that depend on them, calls the base's entry by path
-  with its generics, then evaluates `E1` to `E(n-1)` over the trace and the harness
-  observables, calls `Stages::handoff` with the evaluation of `En`, and last `Stages::done`.
-  The base's own schedule runs, no driver code is copied, and its oracles are untouched.
-  Register the evaluation with `Stages::on_panic`, so a crash still reports what the trace
-  shows.
-- Shape B, online prefix, where Shape A cannot express the History: `fuzz` splits and picks
-  the knobs, opens the stages and checks the budget, calls `set_compromised`, pins the
-  fields, sets the base up, drives `E1` to `E(n-1)` online, calls `Stages::handoff` with a
-  read of `En`'s witness, hands off to the base's free-running phase and oracles, and calls
-  `Stages::done` after the last oracle. Call the base's setup by path; where only a
-  monolithic driver can host the prefix, copy that driver verbatim into the module and cite
-  it as `path::item@{{BASE}}`.
+  before `En`. `plan` pins them; `run` returns at once, so the base's actors start right
+  away, and registers the evaluation of the stages with `Stages::on_panic`, which the helper
+  runs after the base's last oracle, and the panic hook on a crash: it evaluates `E1` to
+  `E(n-1)` over the trace and calls `Stages::handoff` with the evaluation of `En`.
+- Shape B, online prefix, where Shape A cannot express the History: `run` drives the events
+  online and hands off.
 
-`pub fn fuzz` takes the base's input type and the generic parameters of the base's entry, in
-order. The module opens with this header, which the script reads:
+The module opens with this header, which the script reads:
 
 ```rust
 //! {{CARD_ID}} on {{BASE_TARGET}}
@@ -4098,41 +4134,27 @@ order. The module opens with this header, which the script reads:
 //! Missing: <each missing capability> | none
 ```
 
-The thin target is the base's file with two changes: the `use` lines name your module
-instead of the base's entry, and the body of its one `fuzz_target!`, whose closure parameter
-stays the base's, is exactly these three statements:
-
-```rust
-    fuzz_target!(|input: <the base's input type>| {
-        commonware_consensus::simplex::statelens::reset();
-        <module>::fuzz::<the base entry's generic arguments>(input);
-        commonware_consensus::simplex::statelens::clear_compromised();
-    });
-```
-
-The first generic argument names the `cert_mock` scheme, as in the base, and the module names
-no Simplex type with another scheme.
+The module names no Simplex type with a scheme other than `cert_mock`.
 
 ## Knobs
 
 - The card's Knobs table lists them. `Knobs::split` takes the first K <= 16 bytes of the base
-  input's own `raw_bytes`, zero-padded, as the first statement of `fuzz`; `Knobs::pick`
+  input's own `raw_bytes` (`pins.raw_bytes()`), zero-padded, first in `plan`; `Knobs::pick`
   takes the next one as `domain[byte % domain.len()]`, with the source value at index 0, so
   the empty input, the canonical input, replays the source's History.
 - Each knob decodes to a valid value by construction: derive a view so that the required
   leader leads it, rather than hoping. An ordering knob indexes the orders `Order:` allows,
   the source order first.
-- Pick every knob before any engine starts, then call `Stages::new("{{CARD_ID}}", {{STAGES}})`
-  and `Stages::budget`, which takes the knobs, so none is picked later. Do both before you pin
-  a field or perform any other action: until `Stages::new` nothing watches, so `Witness::act`
-  takes position 0 and its stage has no position. The input type, the run recipe and the
-  libFuzzer flags stay the base's; there is no seed corpus.
-- Then pin the fields the History fixes, through `Witness::act` when a stage witnesses the
-  pin, and reset the fields that depend on them as the base's decoder sets them under the pin
-  (the subsystem rules name them).
-- `Knobs::split`, `Knobs::pick` and `Stages::budget` raise the only errors attributed to a
-  scaffold, before any engine starts: more than 16 knobs, more picked than split, a domain
-  with fewer than two values, a prefix budget over the runtime deadline.
+- Pick every knob in `plan`, then call `Stages::new("{{CARD_ID}}", {{STAGES}})` and
+  `Stages::budget`, which takes the knobs, so none is picked later. Until `Stages::new`
+  nothing watches, so `Witness::act` takes position 0 and its stage has no position. The
+  input type, the run recipe and the libFuzzer flags stay the base's; there is no seed corpus.
+- Pin the fields the History fixes only through `pins`, which resets the fields that depend
+  on them as the base's decoder sets them (the subsystem rules name what it offers). A pin is
+  not a stage action: a stage that needs a pinned value witnesses what the system did with it.
+- `Knobs::split` and `Knobs::pick` raise the only errors attributed to a scaffold, before the
+  runtime starts: more than 16 knobs, more picked than split, a domain with fewer than two
+  values.
 
 ## Stages and witnesses
 
@@ -4142,13 +4164,11 @@ witness that establishes its whole `Check` or `Holds` line, its relations to ear
 included. The kinds:
 
 - `exact`: harness observables, one per part of the line, each keyed by the bound entities:
-  a reporter map keyed by view or digest, a resolver or buffer recorder, a recording wrapper
-  in your module, a network intercept record, or a local query without side effects. A query
-  that subscribes, hints, fetches or verifies is not a witness: it would create or satisfy
-  the state it checks. A map read after the run shows presence only; an entry carries a
-  position only when a recording wrapper stamped it with `stamp` as it recorded it. A
-  recording wrapper records synchronously and forwards every call and reply unchanged and at
-  once: no await, delay, spawn, drop or reordering of its own.
+  an entry of the runner's recorders (above), which you cite with `cite(observable, key,
+  value, entry.stamp)` to carry the position the recorder took when it recorded the entry, or
+  a query of them at a moment, which you stamp with `stamp(observable, key, value)`, such as
+  the absence of an entry. A query that subscribes, hints, fetches or verifies is not a
+  witness: it would create or satisfy the state it checks.
 - `intrinsic`: one probe observation, found with `seen` and a label from the list above, at a
   site whose two values come from one receiver. It identifies the replica `me` and the
   relation among that object's fields at that instant, and no view, digest or other
@@ -4210,12 +4230,12 @@ replica across a restart names the incarnation.
 
 ## Handoff and recovery
 
-Handoff comes first; recovery is part of the continuation.
+Handoff comes first; recovery is the runner's.
 
-- Shape B drives `E1` to `E(n-1)` online, polling in simulated time, with a simulated-time
-  deadline per stage: passing it is a miss, never a wait. Race every await on a reply of the
-  system under test against the deadline with `commonware_macros::select!`; a dropped reply
-  is a miss.
+- Shape B drives `E1` to `E(n-1)` online, polling in simulated time with `cx.sleep`, with a
+  simulated-time deadline per stage: passing it is a miss, never a wait. Race every await on
+  a reply of the system under test against the deadline with `commonware_macros::select!`; a
+  dropped reply is a miss.
 - `Stages::handoff` takes a plain closure that reads `En`'s witness and builds it inside the
   call, with no await or yield, and no value read before the call. The helper takes a
   position, calls it, and takes the handoff mark: the handoff holds only when nothing came
@@ -4226,21 +4246,15 @@ Handoff comes first; recovery is part of the continuation.
   may no longer hold.
 - For a state defined by pending work or a withheld delivery, an `exact` observable shows
   the work still pending at the handoff: requested, and neither answered nor closed. Nothing
-  the prefix does may complete, cancel or abandon it: never await its reply, drop its reply
-  channel, or stop or restart its owner before the handoff.
-- The continuation starts with every fault the prefix opened still in place: a crashed
-  replica down, a partition, a held message. Release each no later than the base's first
-  heal (GST), and start the base's liveness measurement after both. Network cuts go through
-  the base's own fault input, as pinned partition fields, or are composed with the base's
-  current cut; never heal the network yourself. Release crashed replicas and held messages at
-  the handoff plus `d`, a knob in [0, the base's fault phase); a base without GST releases
-  them before its liveness wait.
-- The runtime deadline is the base's, which the subsystem rules give, plus the stage deadlines
-  plus the largest release delay, which `Stages::budget` checks; for a base without one, pass
-  `Duration::MAX`.
-- Shape A imposes no cleanup, and its handoff is implicit: `En`'s witness, read in the handoff
-  call after the run, counts only if it has a position and the trace holds a later
-  observation of an honest replica in the same runtime instance.
+  the prefix does may complete, cancel or abandon it before the handoff.
+- After `run` returns, every change the prefix made stays in place for `d`, the release
+  delay `plan` returned, a knob in [0, the base's fault phase): held messages and blocks stay
+  held, a crashed replica stays down, a link and a latency stay changed. At the release the
+  runner delivers the held messages and blocks in arrival order, restores the base's links
+  and latencies, restarts every crashed replica, starts the base's actors for B, and only then
+  the base's fault schedule, its liveness wait, re-based on the highest view finalized at the
+  release, and its oracles. You never release, restore or heal anything for the base.
+- The runtime deadline is the runner's: the base's, plus your budget's prefix and release.
 
 ## Control
 
@@ -4253,26 +4267,23 @@ event before `En` and every witness is `exact` or `construction`.
 
 ## Oracles
 
-The base's free-running phase and every oracle run, called by path or copied verbatim, never
-removed or weakened. In Shape A the base's oracles run inside its entry as they are, and a
-History whose continuation they would not measure takes Shape B. In Shape B, re-base the
-base's progress target on the handoff, in the measure the subsystem rules give for that base.
-`Stages::done` follows the last oracle; returning before it reads as an oracle that never ran.
-Stage checks are not oracles.
+The base's free-running phase and every oracle are the runner's, which runs them after the
+release; the prefix never calls, copies or weakens one, and never measures progress. The
+helper prints `done` after the last oracle. Stage checks are not oracles.
 
-## Fabrication and the guard
+## Fabrication and B
 
 - Events go through the network or the harness verbs. A scripted vote goes out only on its
-  signer's own channel (INV-0008). A certificate you build names an honest signer only for a
-  proposal that replica signed or would sign.
-- List every injection, such as a journal seed, a floor start, a resolver delivery or a
-  mailbox call, under `//! Injections:` with the INV ids whose ghost history it bypasses. The
-  module never writes ghost state and never calls `record`.
-- Shape B calls `commonware_consensus::simplex::statelens::set_compromised` with the indices
-  it runs as real engines under a Byzantine identity, empty if none, before any engine
-  starts; when the set is not empty, also check that every scheme's own index matches its
-  position in `participants`, as the hooked runners do. Code copied from a hooked runner
-  keeps its hook. Shape A relies on the base's hooked runner.
+  signer's own channel (INV-0008): the prefix signs only as B, with `cx.scheme()`, and sends
+  only through `cx.send`. A certificate you build names an honest signer only for a proposal
+  that replica signed or would sign, from votes B received (`cx.inbox()`).
+- List every injection, such as a resolver delivery, under `//! Injections:` with the INV ids
+  whose ghost history it bypasses. The module never writes ghost state and never calls
+  `record`.
+- B is the runner's: it publishes the compromised identity before any engine starts, keeps
+  B's channels during the prefix, and starts exactly the base's actors for B at the release,
+  whose execution it checks. A History that needs B to run an engine during the prefix, or an
+  honest identity to act as another, is a missing capability.
 
 ## Missing capabilities
 
@@ -4284,8 +4295,7 @@ before you call `Stages::handoff`. A human adds the capability.
 
 The prefix and witness code you write never panics on data of the system under test: no
 `unwrap`, `expect` or index that its output decides, and no harness verb that panics on its
-reply; a miss instead. Code copied verbatim from the base, and every oracle, keep their
-panics: after the handoff a miss records nothing.
+reply; a miss instead.
 
 ## Building
 
@@ -4296,8 +4306,8 @@ Build the scaffold with
 until it builds with no errors and no warnings. If it reports that the package has no such
 target, because the script writes the `[[bin]]` block only after your attempt, add that block
 for the build (the base's block with `name` and `path` renamed) and remove it again before you
-finish, leaving the manifest exactly as you found it. If you changed the system under test,
-also run `{{CHECK}}`.
+finish, leaving the manifest exactly as you found it. The thin target is already in place. If
+you changed the system under test, also run `{{CHECK}}`.
 
 Never run the scaffold, any fuzz target, `cargo fuzz run` or `just run`: the script's replays
 of fixed inputs are the only runs that judge a version, and a crash file any other run leaves
@@ -4325,8 +4335,11 @@ What each signal asks for:
   which `En` cannot hold for them, or say in your reply that the History is not causal.
 - A vacuous or missing control: name, or withhold, a later harness event before `En`; in the
   control run, drive every later event, the handoff check and the base's oracles.
-- NO REPORT: use the helper, and never return before the base's oracles.
+- NO REPORT: use the helper, call `Stages::handoff`, and return from `run` at the handoff.
 - SCAFFOLD ERROR: the reason the helper named.
+- NO CONTINUATION (the runner's actor lines are missing or failed): nothing in the module
+  starts or stops the base's actors; return from `run` at the handoff and stay within the
+  budget. A human fixes a runner adapter that still fails.
 
 Your earlier attempts' files are still in place: change them rather than start over, unless
 the feedback asks for another shape.
@@ -4347,68 +4360,44 @@ missing capabilities.
 ### Simplex (`consensus/src/simplex/`, `consensus/fuzz/simplex/`)
 
 - Paths you may change: `consensus/src/simplex/`, the system under test, whose tests the
-  script reruns when you change it, and the fuzz package `consensus/fuzz/simplex/`.
-- Bases: every `simplex_*` target but Mallory, whose custom mutator a scaffold cannot reuse.
-  Shape A fits a History that the fields of `FuzzInput` fix: the partition, the
-  configuration, the certify choice and the block filter. The Chaos, ByzzFuzz and Twins
-  schedules are drawn from the random stream that `raw_bytes` seeds, so no field pins them,
-  and a History about them takes Shape B. The `_state_cov` and `_hb` targets add coverage
-  tables, which cost throughput.
-- Dependent fields of `FuzzInput`, reset as its decoder sets them when you pin what they
-  depend on: `degraded_network` depends on `partition` and `configuration`, `certify` on
-  `configuration`, `block_filter` on `configuration` and on the fault bound drawn from
-  `required_containers`, the fault rounds of `strategy` on `required_containers`, and
-  `optimistic_views` on `term_length`.
-- Usable without an edit, because a module under `crate::target_states` sees the private
-  items of the crate root: `run_standard_once`, `run_audited_standard_once_with`,
-  `run_twins`, `MockTwinsBackend`, `configure_block_filter`, `spawn_disrupter_with_relay`
-  and `install_chaos_panic_hook`, and `chaos::runner::run`. Also the public items of
-  `consensus/fuzz/core`, among them `setup_network`, `bounded_fuzz_runtime_config`,
-  `fuzz_runtime_timeout`, `spawn_filtered_honest_validator`, `run_twins_with_backend`, which
-  is hooked, and the partition helpers `apply_partition`, `link_peers` and
-  `scheduled_partition`; and the mock reporter's maps keyed by view (`leaders`,
-  `notarizations`, `nullifies`, `nullifications`, `certifications`, `finalizations`), read
-  after the run for presence, or through a recording wrapper for order.
-- With a marked edit: `chaos::runner::{run_with, restart_durable, enact, check_safety}` and
-  the internals of `chaos::twins`; under `consensus/src/simplex/`, an accessor such as one
-  for the private fields of `mocks::twins::RoundScenario`, which only `cases` builds.
-- Known restart sites, which get a marked call of `restart` when a scaffold runs them:
-  `chaos::runner::restart_durable` (Chaos) and `chaos::twins::restart_honest`
-  (Chaos-Twins). The list is guidance, not a complete one.
-- `start_validator_engine` in `consensus/fuzz/core` is private and starts every engine from
-  `Floor::Genesis`; a History that needs another floor copies it into the module with the
-  floor as a parameter.
-- The Chaos-Twins runner's gate is the pattern for a stage: wait for a replica's own state
-  before acting, and do not act in the wrong state.
+  script reruns when you change it, and in the fuzz package `consensus/fuzz/simplex/` only
+  your module under `src/target_states/`.
+- Bases with a trusted continuation, and B at the release: the Standard family
+  (`simplex_cert_mock`, `_state_cov`, `_hb`, `_hb_state_cov`, `_faulty_net`,
+  `_byzantine_first_leader`, `_audit`), whose B is participant 0 under N4F1C3, with one
+  Disrupter from the release, and none under N4F0C4; and the Twins bases
+  (`simplex_cert_mock_twins_campaign` and `_twins_mutator`, each also `_audit`, `_hb` and
+  `_state_cov`, and `simplex_cert_mock_shuffled_twins_mutator`), whose B is the compromised
+  participant the base's Twins case picks, under N4F1C3 always, with the twin pair from the
+  release: a primary and a secondary engine for the campaign, a primary engine and a
+  Disrupter for the mutator. The script refuses every other base. The `_state_cov` and
+  `_hb` targets add coverage tables, which cost throughput.
+- Pins, through `Pins`: `term_length`, which cuts a lookahead the decoder would not draw for
+  it; `lookahead`, at most the term length plus two; and `configuration`, N4F1C3 or N4F0C4
+  (N4F1C3 only under Twins), which resets the certify choice, the degraded network and the
+  block filter as the decoder draws them. Pin N4F0C4 only for a History of four honest
+  replicas: the base then runs no Byzantine actor.
+- Leaders: the runner builds every honest engine with the base's elector, so a Twins base's
+  scripted rounds choose the leaders of the views up to `cx.scripted_views()` during the
+  prefix, and its split applies from the release. Derive a view from `cx.leader(view)` so
+  that the leader the History needs leads it, rather than assuming round robin.
+- The base's links: the Standard drivers link every pair at 10 ms (a static partition cuts
+  some pairs; a degraded network slows the last participant's), the Twins drivers at
+  500 ms +- 500 ms. Change one only with `cx.set_link`, which the release reverts. The base's
+  network faults (an adaptive partition schedule, a dropped block) and the Disrupter's
+  faulty views start at the release, re-based on the highest view finalized then.
+- Restarts: `cx.crash` and `cx.restart` stop a replica and bring it back from its journal on
+  its partition, with its reporter, behind its gate and recorders; mark each with
+  `restart(&[replica])` and bind the incarnation it began. The release restarts a replica
+  still down.
 - The fault phase of `consensus/fuzz/core` is `FAULT_PHASE`, 30 s, so a release delay is a
   knob in [0 s, 30 s).
-- Progress and deadline: `run_standard_once`, `run_audited_standard_once_with` and `run_twins`
-  run under `bounded_fuzz_runtime_config`, whose deadline is
-  `fuzz_runtime_timeout(input.required_containers, <prefix views>)`, with 0 prefix views, or
-  `twins_prefix_views(..)` for `run_twins`; the Chaos, Chaos-Twins and ByzzFuzz runners set
-  none. Each base keeps its own liveness measure, which a Shape B continuation counts from the
-  handoff, and keeps the base's condition for measuring at all: `run_standard_once` and
-  `run_audited_standard_once_with` wait only when `should_bound_standard_liveness(&input)`
-  holds, that is a `Connected` partition (`Static` and `Adaptive` fail it), a valid
-  configuration and `BlockFilterChoice::None`; otherwise they sleep `MAX_SLEEP_DURATION` and
-  assert no liveness, so FaultyNet, whose partition `fuzz` always sets to `Adaptive`, never
-  waits. Where they wait, every reporter's latest finalized view must reach
-  `input.required_containers`, so the target is the latest finalized view at the handoff plus
-  `input.required_containers`; the audited driver leaves the notarize-omission victim out of
-  that wait and instead checks after the invariants that its pending finalize recoveries drain
-  (`unresolved_finalize_recoveries`, one `MAX_SLEEP_DURATION` sleep,
-  `check_finalize_recoveries_drained`), a check the continuation keeps; the Twins campaign
-  counts `input.required_containers` finalizations of views after the Twins prefix
-  (`observe_liveness`), so count only views after the handoff as well; the Twins mutator checks
-  no liveness, so add none; Chaos, ByzzFuzz and Chaos-Twins measure from their own heal or
-  recovery, which follows the handoff, so their targets stay as they are: the larger of
-  `input.required_containers` and one view past the finalized view at the heal (Chaos: the
-  highest, `liveness_target`; ByzzFuzz: each node's own, `reach_gst_and_check_liveness`), and
-  for Chaos-Twins one view past the highest at its recovery.
-- The scheme: the thin target names `SimplexCertificateMock` or another `cert_mock`
-  instantiation of `consensus/fuzz/core`, as the base does.
+- The scheme: the module names only `cert_mock` instantiations of `consensus/fuzz/core`, such
+  as `SimplexCertificateMock`, as the base does.
 - Missing, reported as `cannot:`: journal seeding, because the package has no
-  `commonware-storage` dependency and no dependency may be added.
+  `commonware-storage` dependency and no dependency may be added; an engine under B's
+  identity during the prefix; a twin pair before the release; and an engine that starts from
+  another floor than genesis.
 ~~~
 
 ### 13.23 `prompts/subsystems/marshal-synthesize.md`
@@ -4416,55 +4405,10 @@ missing capabilities.
 ~~~markdown
 ### Marshal (`consensus/src/marshal/`, `consensus/fuzz/marshal/`)
 
-- Paths you may change: `consensus/src/simplex/` and `consensus/src/marshal/`, the system
-  under test, whose tests the script reruns when you change it, and the fuzz package
-  `consensus/fuzz/marshal/`.
-- Shape A first: `marshal_e2e_standard_deferred_cert_mock_scenarios`, whose
-  `NotarizationBlockSplitScenarioInput` fixes a scripted `template` and its pre-GST
-  `actions`, with the wedge's real Byzantine engine behind the runner's hook. The
-  `*_twins_split_header` targets draw their Twins case from the stream `raw_bytes` seeds:
-  `run_twins_with_backend` samples `twins::cases` from it and `case_selector` only indexes
-  that sample, so no field pins the case, and a History about it takes Shape B; a fixed case
-  needs a marked constructor for the private fields of `mocks::twins::Scenario` and
-  `RoundScenario`, which only `cases` builds.
-- Shape B uses, without an edit, the `pub(crate)` items of `scenarios`: the harness
-  `FuzzScenarioStandardHarness`, its verbs and `finish`, `RecordingBuffer`,
-  `ScenarioHandoff`, `RecordingResolver` and `init_injectable`; and
-  `marshal::end_to_end::twins`. With a marked visibility edit: `scenarios::runner::run`,
-  whose journal seeding before the engines start is how Simplex engines start from a
-  reconstructed state, and the private modules `scenarios::{adversary, elector, strategy}`
-  and `end_to_end::{input, runner, scenario}`.
-- The scenario-prefix runner starts no engine during its prefix, so a History whose events
-  need running engines, such as TS-0001's, takes an end-to-end base.
-- Known restart site, which gets a marked call of `restart` when a scaffold runs it: the
-  `StoreOp::Restart` arm of `marshal::store` (`marshal_actor_standard_store_cert_mock`),
-  which restarts the marshal actor. The list is guidance, not a complete one.
-- Of the scenario SPEC, `consensus/fuzz/marshal/src/scenarios/specs/SPEC.md`, rules S1, S2,
-  S4, S7, I1 to I3 and I5 apply; S3 becomes the handoff check; S5 and R9 become `cannot:`;
-  S0 and S6 do not apply, because the card and the module header cite the source, and I4
-  does not, because the edit contract allows marked edits. Add no `ScenarioKind` variant.
-- Only the victim, `Node::B`, has an injectable resolver, with one armed delivery at a time,
-  and in `N4F1C3` node 0 has no marshal. The harness verbs that panic when the system under
-  test does not answer (`await_wrapper` after 5 s, `verified` and `certified` on a write that
-  is not durable) and the polls of the existing scenario prefixes, bounded to 64 rounds, are
-  not used where a reply of the system under test decides: race the reply against the stage
-  deadline instead.
-- The fault phase is 12 s in the scenario-prefix runner and `FAULT_PHASE`, 30 s, in the
-  end-to-end disrupter runner, so a release delay is a knob below the base's. Heights stop at
-  the epoch ceiling (`BLOCKS_PER_EPOCH`): leave enough height below it after the handoff for
-  the liveness measurement.
-- Progress and deadline: no marshal base sets a runtime deadline, so `Stages::budget` takes
-  `Duration::MAX`. Each base measures finalized heights against its own baseline, which a
-  Shape B continuation counts from the handoff: the scenarios target, one block past each
-  correct node's height at GST (`check_scenario_progress`); Twins, `input.trailing_blocks`
-  blocks of views after the prefix (`wait_for_liveness`); the scenario-prefix runner, one
-  block past each honest node's height at its heal, `input.required_containers` only ending
-  the fault phase early; the disrupter and poison targets (`run_liveness_phases`),
-  `input.required_containers`, or after a fault phase that ends without it, the larger of
-  that and one block past each honest node's height at the heal; the store target checks no
-  liveness.
-- The scheme: every type argument of the thin target's call names a Simplex type with the
-  `cert_mock` certificate scheme, such as `SimplexCertificateMock`, as the base does.
+- No marshal base has a trusted continuation yet: the marshal drivers have no hook point, so
+  synthesis refuses every marshal base at selection and never renders these rules. The
+  follow-up that adds the marshal runner adapters writes them here: the bases, B and its
+  actors at the release, the pins, the restart sites and the fault phases.
 ~~~
 
 ---
@@ -4760,6 +4704,14 @@ that passes the vetoes and builds, and that the test gate does not restore (guar
 18.6.1), is fuzzed with `just fuzz <profile> --state-reaching` (section 18.9). qmdb is
 refused.
 
+A scaffold is a state-building prefix and nothing else (D69): the base target's own driver
+runs it through a hook point, the trusted continuation, which owns the startup, the release of
+everything the prefix changed, the base's Byzantine actors, its fault schedule, its liveness
+wait and its oracles, in the same runtime (section 18.7, Trusted continuation). The script
+writes each scaffold's thin target, binding the base's trusted entry to the prefix, and refuses
+a base whose driver has no hook point: every marshal base, for now, and the simplex bases other
+than the Standard family and the Twins bases.
+
 The files this chapter adds, and its changes to `runtime/statelens.rs` and the justfile, are
 reproduced verbatim elsewhere in this document: the prompts in sections 13.20 to 13.23, the
 helper template in Appendix H, the justfile in section 5.3 and the runtime in Appendix A.
@@ -4845,6 +4797,27 @@ visibility change and test crate, in the scratch worktree `SL/scripts/differenti
   TS-9006's stamp moved to E2), the whole procedure ran once more, the fuzz package's checks
   included: the same 30 rows, `differential: PASSED (+187s)`.
 
+With the trusted continuation (D69), on 2026-10-12, on the fuzzing branch
+`denis/marshal-fp-7-statelens` at `61d22ab64` with the hook API uncommitted:
+
+- `consensus/fuzz/core` and `consensus/fuzz/simplex` pass `cargo fmt --check` and `clippy
+  --all-targets --all-features -D warnings` on the CI-pinned nightly and `cargo +stable
+  nextest run` (343 tests, the per-target adversary smoke tests included), and
+  `consensus/fuzz/marshal` still builds.
+- Without a prefix the drivers run what they ran: the deterministic runtime's auditor state,
+  a digest of every event of a run, equals the one measured on the harness before the hook
+  point, for Standard runs with and without happens-before capture (connected, adaptive and
+  all-honest inputs) and for a Twins campaign and mutator run.
+- With a test prefix, the Standard, audited Standard, Twins campaign, Twins mutator and Twins
+  audit drivers print `actors release ok` and `actors end ok` with the roles of section 18.7,
+  and the base's actors send after the release; a prefix that held every message to one
+  replica, removed a link, slowed an application and crashed a replica has all four reverted
+  at the release, and the base's liveness target is met after it.
+- With the helper and the runtime materialized in a scratch worktree, a hand-written Shape B
+  prefix of TS-0004 on `simplex_cert_mock` (N4F0C4 pinned) printed `E1/4` to `E4/4 held`,
+  `handoff holds`, `reach 4/4`, `release`, `actors release ok -`, `actors end ok -` and `done`
+  on the empty input.
+
 Not verified: a synthesis with a real agent or after a real campaign, AC-24 to AC-28 as
 written (the differential test of AC-25 judges the primitives and a hand-written
 reconstruction, never an agent's output), any marshal synthesis by an agent, and whether the
@@ -4864,6 +4837,7 @@ for `design` and `paper`).
 | D65 | One stage per History event. A stage is held only through a witness record that binds every entity of its line, from an `exact`, `intrinsic` or `construction` witness, and the script recomputes the records and rejects those that do not establish the line. Positions come from the event sequence (D61), and the helper takes them itself, for a stamped entry and for an action it performs, so order checks are strict, and an incarnation is named by the position of the restart that began it. A held stage adds the feature `(site_hash("TS-NNNN"), k, 0)`. The first miss closes the scripted prefix, except in the control run, and the input continues into the base's free-running phase and every oracle. Handoff comes before recovery: the target state is witnessed at the handoff instant, by a fresh read of `En`'s witness inside the handoff call, with every fault the prefix opened still in place, and those faults are released in the continuation, no later than the base's first heal. | R-TS-SC-3, R-TS-SC-4, R-TS-FB-2 |
 | D66 | The reach check replays fixed inputs and does not fuzz: the canonical empty input, a control run that withholds one harness event, and a final canonical replay, each in individual-file mode with no corpus and no flags (a carve-out from D23 and R-P3-1). The agent builds its scaffold but never runs it: only these replays judge a version, and a crash file any other run leaves is kept as a finding candidate. Verdicts are reported only: every scaffold that passes the vetoes and builds, and that guard 5 does not restore, is fuzzed. Every failure of a replay is a finding candidate. Where it happened is diagnostic context only; the one failure attributed to the scaffold is an error the helper itself raises with `[statelens-scaffold]`, before any engine starts. | R-TS-SYN-5, R-TS-SYN-6 |
 | D67 | Up to `REPAIR_ATTEMPTS` (3) further agent attempts per pair, driven by the verdict and its stage lines. Automatic repair covers only explicitly identified scaffold errors and the outcomes that are not failures. A finding candidate stops refinement for its pair, and that version is kept and fuzzed, never replaced by one that avoids the failure; if guard 5 restores it, its failure stays a finding candidate. Otherwise the best built version is kept. This is not iterative state discovery: there is no frontier. | R-TS-SYN-7 |
+| D69 | The trusted continuation (revision of 2026-10-12, amends D63, D65 and D67). The base drivers own the continuation: an optional prefix hook, absent in ordinary fuzzing, runs a generated prefix after the network, the reporters and the honest engines exist and before the base's Byzantine actors, fault scheduler, liveness wait and oracles start, in the same runtime. The prefix acts only through a restricted context the runner revokes at the handoff, and the runner reverts every change it made at the release, starts exactly the base's actors for the compromised identity, and checks that they run, by identity and role. The script writes the thin target, vetoes driver-level code in a module, refuses a base without a runner adapter and a harness without the hook API, replays every version once more with the base's largest progress budget, and never keeps a version whose actor check failed (NO CONTINUATION). Scaffolds written before it are not migrated. | R-TS-CN-1 to R-TS-CN-4 |
 | D68 | `just fuzz simplex --state-reaching` and `just fuzz marshal --state-reaching` run the campaign (unless `--skip-campaign`), `synthesize` (unless `--skip-synthesis`), and then the scaffolds only, through the existing sequential, `--parallel` and `--tmux` branches, in the session `statelens-<profile>-reach`. `--state-targets` selects card ids (`TS-0003`) and `--fuzz-targets` candidate bases, both repeatable and both forwarded as `--match`; a pattern of the other flag's form is refused, `--state-targets` and `--skip-synthesis` need `--state-reaching`, and each selected card yields one scaffold per selected base, every candidate base without `--fuzz-targets`. `--skip-synthesis` fuzzes the scaffolds a synthesis already built for the selection, whatever their verdicts, without the synthesis preflight, so fuzzing goes on after the checkout drifted from the synthesis baseline, when an upstream fix was merged into it for example; synthesis itself still refuses such a checkout. Unknown flags are refused (amends R-P2-5). | R-TS-P3-1, R-TS-P3-2 |
 
 ### 18.3 Target-state registry
@@ -5175,7 +5149,9 @@ procedures refer to R-TS-SYN-3 rather than restate what an edit may do.
 - **Where.** The profile's editable roots (section 5.5: `consensus/src/simplex/`, and
   `consensus/src/marshal/` for `marshal`) and the profile's fuzz package
   (`consensus/fuzz/simplex/` or `consensus/fuzz/marshal/`), which reaches `consensus/fuzz/core/`
-  only through its own `src/`. Any other path is out of scope.
+  only through its own `src/`. Any other path is out of scope. In the fuzz package an edit
+  changes only the scaffolds' files under `src/target_states/` (`mod.rs` is the script's):
+  every other file of it is the trusted harness (D69), which guard 2 keeps as in `B`.
 - **Observation code** is read-only code the scaffold calls: getters, accessors, recording
   wrappers, witness helpers. It never adds a counter feature, an assertion or ghost state; those
   come only from the campaign.
@@ -5202,14 +5178,21 @@ procedures refer to R-TS-SYN-3 rather than restate what an edit may do.
      with `B`, because the operator edits cards and prompts between syntheses; every other
      path is compared with `B`.
   2. Manifests: no `Cargo.toml` under the paths above changes, so no dependency is added. The
-     package manifest, `Cargo.lock`, `target_states/mod.rs` and the declaration of
+     package manifest, `Cargo.lock`, `target_states/mod.rs`, the thin targets (Appendix B.6)
+     and the declaration of
      `target_states` in `<package>/src/lib.rs` are the script's, and are compared with the
      content the script itself last wrote there, which it stores with `B`, or with `B` where
      it wrote nothing; a `Cargo.lock` that the script's own build updated counts as the
      script's write, and the declaration is compared by its structure: its lines directly
      after the anchor, and no other `pub mod target_states;` line. Any other `Cargo.toml` is
-     compared with `B`. An agent's edits to these files are restored, with feedback, and the
-     version is not built; the declaration is restored by inserting it again.
+     compared with `B`. The trusted harness, every file of the fuzz package outside
+     `src/target_states/` other than a scaffold thin target, the script's own files and a file
+     git ignores (guard 3), is compared with `B` too, the crate root without the script's
+     declaration: its drivers, the trusted adapter, the oracles and the actor requirements are
+     what runs the base's continuation, so no pair changes them, and a file added there is
+     removed. An operator's change there, an upstream merge, is drift `--rebaseline` may
+     accept (Once per run), the crate root taken into `B` without the declaration. An agent's edits to these files are restored, with feedback, and
+     the version is not built; the declaration is restored by inserting it again.
   3. Instrumentation integrity: no `sl_probe!`, `sl_assert!` or `sl_implies!` call added,
      removed or changed, compared per file with `B` as the multiset of call texts, without
      whitespace or a trailing comma, so a call that only moves within its file, or is only
@@ -5222,8 +5205,8 @@ procedures refer to R-TS-SYN-3 rather than restate what an edit may do.
      above it, as in `B`; no call
      of `with_ghost`, `with_global`, `record`, `note`, `violation`, `reset` or
      `clear_compromised` added outside `target_states/mod.rs` and the scaffold thin targets,
-     each of the shape step 2.4 checks, under the editable roots or in the fuzz package; no
-     call of `set_compromised` added outside `target_states/`; no call of `tick`, `watch` or
+     which the script writes, under the editable roots or in the fuzz package; no call of
+     `set_compromised` added outside `target_states/mod.rs`; no call of `tick`, `watch` or
      `unwatch` added outside `target_states/mod.rs`, because a new trace would drop the
      truncation the helper checks; no call of the read side (section 9.6) added under the
      editable roots; no `[statelens-reach]` or `[statelens-scaffold]` literal, outside comments,
@@ -5298,6 +5281,15 @@ reported before the agent CLI is checked, an exception to section 12:
 - the profile's runtime module (section 5.5) exists and contains `pub fn watch(`; otherwise
   "this checkout predates the read side or was cleaned; use a fresh clone";
 - `SL/campaign/plan.md` exists;
+- the profile has runner adapters of the trusted continuation (D69): marshal has none yet, so
+  a marshal synthesis exits with code 1, "synthesis refuses every marshal base: its drivers
+  have no runner adapter of the trusted continuation yet (a follow-up)";
+- the fuzz harness has the trusted continuation's hook API (D69): for simplex,
+  `consensus/fuzz/core/src/continuation.rs` holds `pub trait Prefix<` and
+  `consensus/fuzz/simplex/src/trusted.rs` holds `pub fn fuzz_with_prefix<`; otherwise "the
+  <profile> fuzz harness predates the trusted continuation (<file> does not define
+  `<marker>...`): merge the harness with the hook API into this branch, then run `just clean`
+  and a new campaign before synthesis";
 - the agent CLI and `cargo-fuzz` are on `PATH`;
 - the selection below is not empty (otherwise exit code 1), and its cards are lint-clean;
 - `<package>/src/target_states/` does not exist unless `SL/campaign/reach/baseline/` does,
@@ -5329,6 +5321,12 @@ probe, assertion or ghost state.
   `SL/campaign/reach/TS-NNNN_<base>.md`, is skipped, printing `skipped:` and one of "TS-NNNN
   on <base> was synthesized as <scaffold>; use --redo" and "TS-NNNN on <base> was synthesized
   without a scaffold; use --redo"; the card's other pairs are synthesized as usual.
+- Synthesis, not `targets --state-reaching`, then refuses each selected pair whose base has no
+  runner adapter (section 18.7, Trusted continuation): its base's `fuzz_target!` is not one
+  call of a hooked entry (`fuzz` with a Standard, FaultyNet, TwinsMutator or TwinsCampaign
+  mode, `fuzz_audit`, or `fuzz_twins_audit` with a Twins mode), or the profile has none. It
+  prints one line per refused base, `refused    <base>: no trusted continuation (<reason>); a
+  follow-up`, and exits with code 1 when no pair is left, naming the supported entries.
 - `--redo` first reverse-applies the diff of each selected pair that has a report,
   `SL/campaign/reach/TS-NNNN_<base>.diff`, in reverse selection order, less its sections for
   the package manifest and `target_states/mod.rs`; a diff that does not apply cleanly exits
@@ -5353,8 +5351,8 @@ probe, assertion or ghost state.
   pair's name, once `git apply -R --check` accepts that diff and before it reverse-applies it,
   and every scaffold whose report records a verdict (Once per run), the card's other pairs
   included, is then, before any pair, built, logged to
-  `SL/campaign/logs/fuzz-build-<scaffold>-after-redo.log`, and replayed, canonical, control
-  and final, in `SL/campaign/reach/TS-MMMM_<b>/after-redo/`, and its report takes the new
+  `SL/campaign/logs/fuzz-build-<scaffold>-after-redo.log`, and replayed, canonical, control,
+  final and largest, in `SL/campaign/reach/TS-MMMM_<b>/after-redo/`, and its report takes the new
   verdict under `## Revalidation after --redo`, as revalidation does (Finish), with a warning
   when it stands worse. No pair is rolled back for it. A scaffold that no longer builds gets
   the verdict `NOT BUILT (no longer builds)`, with a warning; it is not revalidated again, and
@@ -5393,12 +5391,17 @@ synthesis baseline: <path>; use a fresh clone", with "rerun with --rebaseline to
 before "use" when the flag would accept the difference), so a breach an earlier synthesis left
 behind, such as an out-of-scope edit, never passes. With `--rebaseline`, an operator's change,
 an upstream merge into the checkout, is accepted when guard 2 passes and guard 3 passes once the
-operator's in-scope files are taken into `B`: those are the files of `B` in the scope that
-differ from it, are not the script's own (the manifest, `Cargo.lock`, `target_states/mod.rs`,
-the crate root with the declaration), lie in no pair's recorded diff and outside
-`target_states/`, and whose `sl_*` calls and runtime calls are as in `B` (a merged file that
-only gains a log line, which guard 3 refuses by itself, is one); guard 3 still requires every
-line the campaign's instrumentation added. The script then records in `revalidation.json` a
+operator's in-scope files are taken into `B`: those are the paths of the scope that differ
+from `B`, an edited file, a file added since `B` (untracked or staged) or a file of `B` deleted
+since, that are not the script's own (the manifest, `Cargo.lock`, `target_states/mod.rs`),
+no thin target, in no pair's recorded diff and outside `target_states/`, and whose `sl_*`
+calls and runtime calls are as in `B` (a merged file that only gains a log line, which guard 3
+refuses by itself, is one); the crate root is taken without the script's declaration, an added
+file joins `B` and a deleted one leaves it; guard 3 still requires every line the campaign's
+instrumentation added. Every reported change must be accepted: when guards 2 and 3 still fail
+once those files are taken into `B`, `B` is restored and synthesis exits with code 2 naming
+the first path still failing, before it restores anything, so an operator's file is never
+deleted or rewritten. The script then records in `revalidation.json` a
 revalidation of every standing scaffold (cause "--rebaseline accepted operator changes to
 <paths>", replays in `after-rebaseline/`), copies the old `state.json`, the accepted paths and
 the old `B` copies of the in-scope files to `SL/campaign/reach/rebaseline-<stamp>/`, writes the
@@ -5412,7 +5415,10 @@ files do not explain, is never accepted. With nothing to accept the flag prints 
 code 2. It writes `SL/campaign/reach/empty`, a file of 0 bytes. After `--redo` and before any
 pair, it reads the report of every scaffold in the package whose card exists, for revalidation
 (Finish), and keeps them in memory, each under its pair's name; a scaffold without a card or
-without a report that records a verdict is not revalidated, with a warning. It then completes
+without a report that records a verdict is not revalidated, with a warning, and neither is one
+written under the old contract, whose thin target is not the one the script writes for the
+trusted continuation: "<scaffold> was written under the old contract (...); it needs a new
+campaign, or `--redo TS-NNNN` to synthesize it again". Such a scaffold is never migrated. It then completes
 the revalidation `revalidation.json` records, this run's `--redo`'s or one an earlier synthesis
 left, after an undo or a rollback (Finish), and deletes the record; a record that cannot be
 read exits with code 2. A record that holds more than one kind, `--redo` with the last check or with a
@@ -5451,7 +5457,7 @@ version's attempt:
    whole or absent, until the pair's report is written or its edits are restored.
 2. For attempt `a` from 0 to `REPAIR_ATTEMPTS` (3):
    1. Write the package manifest as it was in `S0`, so the agent always finds it without a
-      scaffold block. Snapshot `Sa`, with the worktree state of section 6.2 step 2 and the
+      scaffold block, and the pair's thin target (Appendix B.6), which the script owns. Snapshot `Sa`, with the worktree state of section 6.2 step 2 and the
       files step 2.2 sweeps. `Sa` serves only the sweep and the stop rule of step 2.8; no
       guard is evaluated against it. Render `prompts/synthesize.md` with the placeholders
       below, and run the agent with the Phase 2 invocation (section 12); the prompt and the
@@ -5477,19 +5483,18 @@ version's attempt:
       guards 1 to 3 on the cumulative difference between the tree and `B`, and guard 4 on the
       pair's diff against `S0`.
    4. Vetoes. Each becomes feedback, and the version is not built: guard 2 or 3, against `B`,
-      so a guard 3 breach an earlier attempt made is vetoed again while it remains; no thin
-      target `<base>_tsNNNN_statelens.rs` for the pair's base, or a new thin target of the card
-      on another base, or a scaffold thin target in the package, this pair's or another's,
-      whose `fuzz_target!` body is not the three statements of Appendix B.6; no module
-      `tsNNNN_<base>.rs`, or a module whose header does not name the card, the pair's base and
-      a shape; the cryptography
+      so a guard 3 breach an earlier attempt made is vetoed again while it remains, and an
+      edit of the pair's thin target, which guard 2 restores; a scaffold thin target other
+      than the pair's that changed, appeared or went away since `S0`, which is restored; no
+      module `tsNNNN_<base>.rs`, or a module whose header does not name the card, the pair's
+      base and a shape; a module without `pub fn prefix<`; the pair's module, or another Rust
+      file under `src/target_states/` but `mod.rs` that changed since `S0`, a submodule
+      included, holding driver-level code (section 18.7, Trusted continuation), outside
+      comments and strings; the cryptography
       check of D15 (section 7.2, or section 8.4 for marshal) failing for the thin target, or,
-      for simplex, the module naming a Simplex type whose scheme is not `cert_mock`; and a
-      Shape B module that never calls `set_compromised` (the guard rule of section 18.7). The
-      Shape A half of that rule needs no veto: a Shape A module calls its base's entry, whose
-      runner keeps the hook the campaign installed (Appendices B.3 to B.5 and F), because
-      guard 3 keeps every line the campaign added. `BASE_DETAILS` tells the agent whether the
-      pair's base is hooked, from the runner its `fuzz_target!` calls.
+      for simplex, the module naming a Simplex type whose scheme is not `cert_mock`.
+      `BASE_DETAILS` gives the pair's trusted entry and the actors its driver starts for the
+      compromised identity at the release.
    5. Manifest: the script writes the package manifest as it was in `S0`, with the scaffold's
       block, the base's renamed (Appendix B.2).
    6. Build: `cargo +<fuzz toolchain> fuzz build --fuzz-dir <package> <scaffold>`, logged to
@@ -5498,7 +5503,8 @@ version's attempt:
       18.7); since the manifest has no scaffold block then, the prompt tells it to add the
       block for its build and remove it again, leaving the manifest as it found it, which
       guard 2 checks.
-   7. Reach check (section 18.8). Before the canonical replay, the script keeps the version as
+   7. Reach check (section 18.8): the canonical, control and largest replays. Before the
+      canonical replay, the script keeps the version as
       built in `attempt-<a>/`: `version.diff`, its diff against `S0`, and `version/`, a copy of
       every file it created or changed. An attempt that left a stray failure keeps the version
       it left the same way, right after the sweep. The version, every path it changed since
@@ -5510,7 +5516,10 @@ version's attempt:
 3. Finish:
    - A CRASH (finding candidate) keeps the version that failed (D67). Otherwise the best built
      version is kept: by verdict, REACHED, UNVERIFIED, PARTIAL, UNREACHED, NO REPORT, then
-     SCAFFOLD ERROR; then by the stages held; then the later attempt. The kept version is
+     SCAFFOLD ERROR; then by the stages held; then the later attempt. A NO CONTINUATION version
+     is never kept: a pair whose every built version ended NO CONTINUATION ends NOT BUILT, with
+     the note "every version built ended NO CONTINUATION: the base's actors did not run after
+     the release". The kept version is
      restored: `S0`, then every path it changed. Guards 1 to 3 are checked against `B` once
      more, right before the build for fuzzing; a guard 2 or 3 failure, which the checks of
      step 2.3 make impossible, restores `S0` and records NOT BUILT. The kept version is then
@@ -5534,7 +5543,7 @@ version's attempt:
      one, the card's other pairs included, whose card exists and whose report records a
      verdict (Once per run), is built again, logged to
      `SL/campaign/logs/fuzz-build-<scaffold>-after-TS-NNNN_<base>.log`, and replayed,
-     canonical, control and final (section 18.8), in
+     canonical, control, final and largest (section 18.8), in
      `SL/campaign/reach/TS-MMMM_<b>/after-TS-NNNN_<base>/`. A scaffold stands worse when it no longer
      builds, when it gains or loses CRASH (finding candidate), or when its verdict comes later
      in the order of the first bullet, or holds fewer stages under the same verdict (k counts
@@ -5608,9 +5617,11 @@ in section 7.3 step 3, and:
 | `CARD_ID`, `CARD` | The card's ID, and its text with its Source excerpts |
 | `STAGES` | n, the number of History events, as a bare integer |
 | `MODULE` | `<package>/src/target_states/tsNNNN_<base>.rs`, the pair's module |
-| `SCAFFOLD` | `<base>_tsNNNN_statelens`, the pair's thin target |
+| `SCAFFOLD` | `<base>_tsNNNN_statelens`, the pair's scaffold |
+| `THIN` | `<package>/fuzz_targets/<base>_tsNNNN_statelens.rs`, the thin target the script writes |
+| `CONTINUATION` | The hook API's file, `consensus/fuzz/core/src/continuation.rs` for simplex |
 | `BASE_TARGET` | The pair's base |
-| `BASE_DETAILS` | For that base: its name, the closure header and the entry call of its `fuzz_target!`, its `required-features`, its input type, and whether its runner is hooked (Appendices B.3 to B.5 and F) |
+| `BASE_DETAILS` | For that base: its name, the closure header and the entry call of its `fuzz_target!`, its `required-features`, its input type, its trusted entry and the actors its driver starts for the compromised identity at the release, or why it has none |
 | `LABELS` | Every `sl_probe!` label and `sl_implies!` ID under the editable roots, with its `path:line`, from one scan |
 | `BUILD` | The build command of step 2.6, with the scaffold's name |
 | `ATTEMPT`, `FEEDBACK` | The attempt number, and the feedback of section 18.8, or "none: first attempt" |
@@ -5624,7 +5635,8 @@ its annotations, each stage's outcome, witness kind and record, the handoff, the
 their verdicts, the crash attribution, the labels and sites read, the run and replay lines of
 its latest check, and its revalidations; `TS-NNNN_<base>.diff`, the kept version against `S0`,
 the script's own edits included, and empty when the pair's edits were restored;
-`TS-NNNN_<base>/attempt-<a>/`, the replays of each attempt (section 18.8), the files
+`TS-NNNN_<base>/attempt-<a>/`, the replays of each attempt (section 18.8: `canonical/`,
+`control/`, `largest/` and, for the kept version, `final/`), the files
 step 2.2 swept, `version.diff`, the attempt's version against `S0`, and `version/`, a copy of
 every file it created or changed, which holds what a diff cannot, such as a binary file. Both
 are written before the first replay of every version that built, and right after the sweep
@@ -5666,7 +5678,9 @@ runs, when the replay left no crash file. For a canonical
 replay the line adds that the scaffold fails on its canonical input, which libFuzzer runs
 first, so its `run` line reproduces the failure at once. For the control run the `replay`
 line also sets `STATELENS_REACH_CONTROL=1`, and the line says that the canonical input does
-not reproduce it. For a `stray failure` it names the swept file, also when the pair's
+not reproduce it; for the largest replay it sets `STATELENS_REACH_LARGEST=1`, and the line
+says that the canonical input does not reproduce it either. For a `stray failure` it names the
+swept file, also when the pair's
 verdict is not CRASH (finding candidate), because the attempt that left the file was not
 built: "a run of the agent's left <file>, a finding candidate". A `<repo>` or crash-file path
 that holds a space is quoted for the shell, so each line runs as printed.
@@ -5689,11 +5703,13 @@ editable roots were in scope already. `SL/campaign/reach/` stays, as all of `cam
 Prompt `synthesize.md` gives these rules to the agent, and its subsystem parts the simplex and
 marshal rules below; their verbatim copies are sections 13.21 to 13.23. It sends the agent to
 `target_states/mod.rs` for the exact signatures of the helper. Its sections: where the agent
-is; the task, which names the pair's module (`MODULE`), its thin target (`SCAFFOLD`) and its
-one base (`BASE_TARGET`, `BASE_DETAILS`), so the agent chooses no base; the edit contract
+is; the task, which names the pair's module (`MODULE`), its scaffold (`SCAFFOLD`), the thin
+target the script wrote (`THIN`) and its one base (`BASE_TARGET`, `BASE_DETAILS`), so the
+agent chooses no base; the edit contract
 (R-TS-SYN-3 quoted, and guards 1 to 6 restated in the agent's
-terms, since the guards' own text cites sections the agent cannot see); shapes; knobs; stages
-and witnesses; handoff and recovery; the control; oracles; fabrication and the guard; missing
+terms, since the guards' own text cites sections the agent cannot see); the prefix, its
+context and its shapes; knobs; stages and witnesses; handoff and recovery; the control;
+oracles; fabrication and B; missing
 capabilities; building (build with `BUILD`, the full command for the pair's scaffold, adding
 the scaffold's `[[bin]]` block, the base's
 with `name` and `path` renamed, for that build when cargo reports no such target and removing
@@ -5702,32 +5718,115 @@ agent's edit to the manifest; never run the scaffold or the fuzzer: the script's
 is the only replay); the feedback; the subsystem rules; and the reply (shape, the witness of
 each stage, knob layout, injections, missing capabilities).
 
+**Trusted continuation** (D69). The base's own driver owns the continuation; a scaffold
+supplies only the prefix that builds the target state. In the fuzz harness
+(`consensus/fuzz/core/src/continuation.rs`, `consensus/fuzz/simplex/src/trusted.rs`):
+
+- The hook API. `Prefix<P>` has `plan(&mut self, pins: &mut Pins) -> Budget`, called before
+  the runtime starts, and `run(self: Box<Self>, cx: PrefixContext<P>) -> PrefixFuture`.
+  `Pins` gives `raw_bytes()` for the knobs and pins `term_length` (cutting a lookahead the
+  decoder would not draw for it), `lookahead` (at most the term length plus two) and
+  `configuration` (N4F1C3 or N4F0C4, N4F1C3 only under Twins), each resetting the dependent
+  fields as the decoder sets them. `Budget` is the sum of the stage deadlines and the release
+  delay `d`. `Observer`, which only trusted code implements (the helper's `Watch`, or a
+  test's), stamps what the runner's recorders record, publishes the compromised identity,
+  reports the release and the actor checks, says `done`, and asks for the largest progress
+  budget.
+- The trusted entries `fuzz_with_prefix::<P, M, C, _, _>` (Standard, FaultyNet, TwinsMutator,
+  TwinsCampaign), `fuzz_audit_with_prefix::<P, _, _>` and
+  `fuzz_twins_audit_with_prefix::<P, M, _, _>` mirror the base entries `fuzz`, `fuzz_audit` and
+  `fuzz_twins_audit`. Each plans the prefix, applies the largest budget when the observer asks
+  for it (`required_containers` set to `MAX_REQUIRED_CONTAINERS`), passes the hook to the
+  base's own driver, `run_standard_once`, `run_audited_standard_once_with` or `run_twins` and
+  `run_twins_with_backend_and_hook`, and calls the observer's `done` after the driver
+  returns. The base entries pass no hook to the same drivers, which then run exactly what they
+  ran before (section 18.1). The audited entry samples no rejected certification, whose view
+  is an absolute early view a prefix would pass.
+- The hook point. With a hook, a driver sets up the network as the base does, starts the
+  runner, which publishes the compromised identity B through the observer before any engine
+  starts, keeps B's registered channels instead of starting B's actors, and starts the honest
+  replicas with the base's own code, behind the runner's taps: a gate on each receiver, and
+  recording wrappers on the reporter, the automaton, the elector and the blocker, with the
+  engine and application tasks retained for a crash and a restart. Adaptive partitions and the
+  block filter are not applied yet. Then the prefix runs; its return is the handoff.
+- The context, revoked at the handoff (every call does nothing after it): the participants, B,
+  the honest replicas, the term length, the lookahead, the leader of a view under the honest
+  engines' elector and the last scripted Twins view; `sleep` and `now` in simulated time; B's
+  signer, `send` on B's own vote, certificate and resolver channels, `inbox` (what B received,
+  recorded by the runner) and mock blocks as B (`block`, `send_block`); gates (`hold`, `pass`,
+  `held`, `open`) and block gates (`hold_blocks`, `pass_blocks`) on honest replicas; the
+  recorders (`deliveries`, `activities`, `automaton`, `elections`, `blocks`) and the network's
+  blocked pairs, the automaton recorder ending each request as the audit recorder does
+  (`Completion::Returned`, `Closed` or `Canceled`) and dropping the automaton's receiver when
+  consensus drops its own, so a cancellation reaches the automaton as without the recorder; and changes the runner reverts: `set_link`, `set_latency`, `crash` and
+  `restart` (journal replay on the replica's partition with its retained reporter, the taps
+  reinstalled, but not the base's happens-before capture). A recorder takes its position from
+  the observer when it records an entry; a prefix cites the entry with the helper's `cite`.
+- The release, at the handoff plus `d`: latency overrides are removed; links are restored to
+  the base's (the Standard drivers' per pair, with a static partition's cuts and a degraded
+  network's slow links; the Twins drivers' 500 ms +- 500 ms); every crashed replica restarts,
+  its dead application's relay registration dropped; only then every gate opens and delivers
+  what it held in arrival order, and the held blocks are delivered, so a restarted replica's
+  new receivers and application get what was held for it (the `release` line counts the
+  blocks the applications took); the recorders stop; B's channels come back. The highest view any honest replica finalized,
+  `base`, re-bases the base's view-indexed faults (an adaptive partition schedule, a dropped
+  block's view, the Disrupter's faulty views) and its progress targets (Standard: the latest
+  finalized view reaches `required_containers + base`; Twins campaign: views after the larger
+  of the scripted end and `base`). Then the driver applies its network faults, starts exactly
+  the base's actors for B (Standard: a Disrupter; Twins: the pair over the split routers, a
+  primary and a secondary engine, or a primary and a Disrupter), runs its fault scheduler,
+  its liveness wait and its oracles. The runtime deadline is the base's plus `Budget`.
+- The actor check. The runner registers each actor task it starts for B by identity and role
+  (`disrupter`, `primary`, `secondary`), with an execution marker per identity and role: the
+  trusted code that starts the actor wraps its vote receiver in a `MarkedReceiver`, which sets
+  the marker when the actor's own task first polls it, as any task that executes does, traffic
+  or not. It checks, at the release and after the liveness wait, that each required role has a
+  task that has not finished and whose marker is set (`unpolled` otherwise); the release check
+  first gives the actors it just started up to 100 ms of simulated time to run: the Standard family, one
+  Disrupter for participant 0 under N4F1C3 and none under N4F0C4; a Twins campaign, a primary
+  and a secondary; a Twins mutator, a primary and a Disrupter. No supported base crashes B, so
+  no scheduled crash is allowed for; network silence never fails the check. The helper prints
+  each check as an `actors` line (section 18.8).
+- Supported bases: the Standard family (`simplex_cert_mock`, `_state_cov`, `_hb`,
+  `_hb_state_cov`, `_faulty_net`, `_byzantine_first_leader`, `_audit`) and the Twins bases
+  (`simplex_cert_mock_twins_campaign` and `_twins_mutator`, each also `_audit`, `_hb` and
+  `_state_cov`, and `simplex_cert_mock_shuffled_twins_mutator`). The script recognizes them by
+  their entry (section 18.6.2, Selection) and refuses every other base.
+- Driver-level code. The script vetoes a module that holds, outside comments and strings, a
+  runtime or the runner (`deterministic::Runner`, `Runner::new|default|seeded|timed|start`,
+  `start_and_recover`, `Hook::`), a base driver or entry (`run_twins*`, `run_standard_once`,
+  `run_audited_standard_once*`, `fuzz*::<`), an engine or validator spawn (`Engine::new`,
+  `start_validator_engine`, `spawn_*validator*`, `build_validator*`,
+  `spawn_primary|secondary|honest|twin*`), a Byzantine actor (`Disrupter`,
+  `start_disrupter*`, `TwinsBackend`, `MockTwinsBackend`), network setup (`setup_network`,
+  `link_peers`, `apply_partition`, `Network::new*`, `add_link`, `remove_link`, `.register(`,
+  `.control(`), a runtime deadline (`fuzz_runtime_timeout`, `bounded_fuzz_runtime_config`,
+  `with_timeout`), an oracle (`invariants::`, `observe_liveness`, `check_invariants`,
+  `spawn_network_fault_scheduler`) or the compromised set and the observer
+  (`set_compromised`, `Watch`, `Observer`).
+
 **Shapes.** The agent picks one and records it in the module header.
 
 - **Shape A, pinned input**, preferred where it fits: the base input's fields fix every event
-  before `En`, for example the scenario `template` and `actions` of
-  `NotarizationBlockSplitScenarioInput`, or the partition, configuration and certify choice of
-  `FuzzInput`. `fuzz` splits and picks the knobs, calls `Stages::new` and `Stages::budget`,
-  pins the fields, resets the fields that depend on them, calls the base's entry by path with
-  its generics, then evaluates `E1` to `E(n-1)` over the trace and the harness observables,
-  calls `Stages::handoff` with the evaluation of `En`, and last `Stages::done`. The base's own
-  schedule runs, no driver code is copied, and its oracles are untouched.
-- **Shape B, online prefix**, where Shape A cannot express the History: `fuzz` splits and picks
-  the knobs, calls `Stages::new`, `Stages::budget` and `set_compromised`, pins the fields, sets
-  the base up, drives `E1` to `E(n-1)`, calls `Stages::handoff` with the read of `En`'s
-  witness, hands off to the base's free-running phase and oracles, and calls `Stages::done`
-  after the last oracle. The base's setup is called by path; where only a monolithic driver can
-  host the prefix, that driver is copied verbatim into the module, citing `path::item@commit`.
+  before `En`, for example the partition, configuration and certify choice of `FuzzInput`.
+  `plan` pins them through `Pins`; `run` registers the evaluation of the stages with
+  `Stages::on_panic` and returns at once, so the base's actors start right away. The helper
+  runs the evaluation after the base's last oracle (`Watch::done`), and the panic hook on a
+  crash: it evaluates `E1` to `E(n-1)` over the trace and calls `Stages::handoff` with the
+  evaluation of `En`.
+- **Shape B, online prefix**, where Shape A cannot express the History: `run` drives `E1` to
+  `E(n-1)` through the context, calls `Stages::handoff` with the read of `En`'s witness, and
+  returns.
 
 **Naming and entry.** For the pair (card, base) the module is
 `<package>/src/target_states/tsNNNN_<base>.rs` and the scaffold `<base>_tsNNNN_statelens`; its
-thin target (Appendix B.6) calls `tsNNNN_<base>::fuzz`. Both names carry the base, so the pairs
-of one card are distinct modules of one crate and distinct targets of one package. `pub fn fuzz`
-takes the base's input type and the generic parameters of the base's entry, in order. Its
-first statements split and pick the knobs, and `Stages::new` and `Stages::budget`, which takes
-the knobs, come before any engine starts and before any action a stage witnesses: while nothing
-watches, `Witness::act` takes position 0. The module opens with this header, which the script
-reads:
+thin target (Appendix B.6), which the script writes, calls the base's trusted entry with
+`tsNNNN_<base>::prefix::<P>()`. Both names carry the base, so the pairs of one card are
+distinct modules of one crate and distinct targets of one package. The module defines `pub fn
+prefix<P: Simplex>() -> impl Prefix<P>`. Its `plan` splits and picks the knobs first, then
+`Stages::new` and `Stages::budget`, which takes the knobs, before the runtime starts and
+before any action a stage witnesses: while nothing watches, `Witness::act` takes position 0.
+The module opens with this header, which the script reads:
 
 ~~~rust
 //! TS-NNNN on <base>
@@ -5740,8 +5839,7 @@ reads:
 ~~~
 
 A module without a `Control:` line has no control (section 18.8). A header that names another
-base than the pair's, like a second thin target of the card on another base, is vetoed
-(section 18.6.2 step 2.4).
+base than the pair's is vetoed (section 18.6.2 step 2.4).
 
 **Knobs** (D64). `Knobs::split` takes the first K <= 16 bytes of the base input's own
 `raw_bytes`, zero-padded, and leaves the rest, which stays non-empty if it was. Knob i is
@@ -5749,8 +5847,8 @@ base than the pair's, like a second thin target of the card on another base, is 
 canonical input, decodes to the source history. Each knob decodes to a valid value by
 construction (a view is derived so that the required leader leads it), and an ordering knob
 indexes the orders `Order:` allows, the source order first. The fields the History fixes are
-pinned, and the fields that depend on them are reset as the base's decoder sets them under the
-pin: in `FuzzInput`, `degraded_network` depends on `partition` and `configuration`, `certify`
+pinned through `Pins`, which resets the fields that depend on them as the base's decoder sets
+them under the pin: in `FuzzInput`, `degraded_network` depends on `partition` and `configuration`, `certify`
 on `configuration`, `block_filter` on `configuration` and on the fault bound drawn from
 `required_containers`, the fault rounds of `strategy` on `required_containers`, and
 `optimistic_views` on `term_length` (`consensus/fuzz/core/src/lib.rs`). The input type,
@@ -5763,7 +5861,7 @@ establishes the whole `Check` or `Holds` line, its relations to earlier events i
 
 | Kind | What it is | What it establishes |
 |---|---|---|
-| `exact` | One or more harness observables, one per part of the line, each keyed by the bound entities: a reporter map keyed by view or digest, a resolver or buffer recorder, a recording wrapper in `target_states/`, a network intercept record, or a local query without side effects | Presence of the entry. An order only when each entry carries its own position, which a recording wrapper takes through the helper's `stamp` as it records the entry; a map read after the run establishes presence only. A query that subscribes, hints, fetches or verifies is not a witness: it would create or satisfy the state it checks. A recording wrapper records synchronously and forwards every call and reply unchanged and at once: no await, delay, spawn, drop or reordering of its own. |
+| `exact` | One or more harness observables, one per part of the line, each keyed by the bound entities: an entry of the runner's recorders (deliveries through a gate, reports, automaton calls, elections, blocks, B's inbox), cited with the helper's `cite`, or a query of them at a moment, stamped with `stamp` | Presence of the entry. An order only when each entry carries its own position, which the recorder took through the observer when it recorded the entry, or the query's own; a map read after the run establishes presence only. A query that subscribes, hints, fetches or verifies is not a witness: it would create or satisfy the state it checks. The runner's recorders record synchronously and forward every call and reply unchanged. |
 | `intrinsic` | One probe observation at a site whose `a` and `b` are computed from one receiver | The replica, `me`, and the relation among that object's fields at that instant, but no view, digest or other identity. It witnesses only a line whose entities other than one replica are all existential. |
 | `construction` | A harness action the scaffold performed itself, through the helper's `Witness::act`, and that cannot fail silently, such as a pinned elector or a certificate it built | That the action happened, at the position the helper took right before performing it, and nothing a replica did with it: a line about what a replica holds, verifies or is in needs an `exact` or `intrinsic` witness. Only for an event whose actor is `harness`, never for `En`; in Shape A, only for an action performed before the base's entry is called. |
 
@@ -5847,9 +5945,9 @@ continues into the base's free-running phase and every oracle.
 
 **Incarnations.** A runtime resumed from a checkpoint and an engine restarted inside one
 runtime keep `run` (section 9.6). They are incarnation boundaries: the scaffold marks every
-restart it drives with the helper's `restart(replicas)`, and in Shape A it adds a marked call of
-it to the restart code of a base that restarts replicas, an edit under section 18.6.1; the
-subsystem rules below name the known restart sites as guidance. A relation across a boundary
+restart it drives through the context with the helper's `restart(replicas)`; no supported
+base restarts replicas of its own during a run, and the release's restarts come after the
+handoff, when nothing watches. A relation across a boundary
 holds only if the line names the incarnation the restart began: the scaffold binds that
 incarnation to `inc<s>`, `<s>` being the `seq=` that `restart` printed and returned, and a
 line that binds no entity to it is rejected (above). `restart` takes a position of its own, so
@@ -5883,54 +5981,48 @@ that no call marks it cannot see (section 18.11).
   abandon that work: the scaffold never awaits its reply, drops its reply channel, or stops or
   restarts its owner before the handoff. If `En` does not hold at handoff it is missed (`not
   held at handoff`), even if it held earlier, and the continuation still runs.
-- The continuation starts with every fault the prefix opened still in place: a crashed replica
-  down, a partition, a held message. Recovery is part of the continuation and never precedes
-  handoff. Every such fault is released no later than the base's first heal (GST), and the
-  base's liveness measurement starts after both. Network cuts go through the base's own fault
-  input, as pinned partition fields that the base installs and heals, or are composed with the
-  base's current cut; the scaffold never heals the network on its own. Crashed replicas and
-  withheld messages are released at handoff plus `d`, a knob in [0, the base's fault phase):
-  12 s in the marshal scenario-prefix runner, 30 s (`FAULT_PHASE`) in `consensus/fuzz/core`,
-  which the marshal end-to-end disrupter runner uses. A base without GST releases them before
-  its liveness wait starts.
-- The runtime deadline is the base's (`fuzz_runtime_timeout(..)` for the simplex Standard,
-  audited and Twins drivers; the Chaos and ByzzFuzz runners and every marshal base set none,
-  and a scaffold of one passes `Duration::MAX` to `Stages::budget` instead) plus the stage
-  deadlines plus the largest release delay.
-- A marshal prefix leaves enough height below the epoch ceiling (`BLOCKS_PER_EPOCH`) for the
-  liveness measurement after the handoff; the subsystem rules say so. The script cannot
-  measure that height, so it is for review of the module (section 18.11).
+- After `run` returns, every change the prefix made stays in place for `d`, the release delay
+  of its budget, a knob in [0, the base's fault phase), 30 s (`FAULT_PHASE`) for simplex: held
+  messages and blocks stay held, a crashed replica stays down, a link and a latency stay
+  changed. Recovery is the runner's and never precedes the handoff: the release (Trusted
+  continuation, above) reverts them all before the base's actors, fault schedule and liveness
+  wait start. The prefix never releases, restores or heals anything for the base.
+- The runtime deadline is the base's (`fuzz_runtime_timeout(..)` for the Standard, audited and
+  Twins drivers) plus the prefix's stage deadlines plus the release delay, which the runner
+  computes from the budget.
 - Shape A imposes no cleanup, and its handoff is implicit: `En`'s witness, read in the handoff
-  call after the run, counts only if it has a position and the trace holds a later guarded
+  call the helper's evaluation makes after the base's last oracle, counts only if it has a position and the trace holds a later guarded
   observation of an honest replica in the same `run`, which `Stages::handoff` prints as
   `next=`; otherwise `En` is `unverifiable (no continuation)`.
 
 **Control.** The module header names one withheld event, `Ek`, with k < n and `harness` as its
 actor. The scaffold reads `STATELENS_REACH_CONTROL` only through the helper's `control()`, and
 when it is set skips `Ek`'s action and records `Ek` as withheld. In the control run a miss
-does not close the prefix: the scaffold still drives every later event, the handoff check and
-the base's oracles, so `En` gets a line and the run prints its `reach` and `done` lines. Where
+does not close the prefix: the scaffold still drives every later event and the handoff check,
+and the runner the base's oracles, so `En` gets a line and the run prints its `reach` and
+`done` lines. Where
 the card has no `harness` event before `En`, the header says `Control: n/a`, which section 18.8
 accepts only when every witness is `exact` or `construction`.
 
-**Oracles.** The base's free-running phase and every oracle run, called by path or copied
-verbatim, never removed or weakened. In Shape A the base's oracles run inside its entry
-unchanged, so a History whose continuation they would not measure takes Shape B. In Shape B,
-progress targets are re-based on the handoff, in the base's own measure, which the Simplex and
-Marshal rules below give; without that the canonical run could have nothing left to do.
-`done` follows the last oracle. Stage checks and verdicts are not oracles.
+**Oracles.** The base's free-running phase and every oracle are the runner's, run after the
+release, never called, copied, removed or weakened by a module. Progress targets are re-based
+on the release in the base's own measure (Trusted continuation, above), so the canonical run
+has something left to do. The helper prints `done` after the last oracle. Stage checks and
+verdicts are not oracles.
 
-**No fabrication** (rule I5 of the scenario SPEC). Events go through the network or the harness
-verbs. A scripted vote goes out only on its signer's own channel (INV-0008). A certificate the
-scaffold builds names an honest signer only for a proposal that replica signed or would sign.
-Every injection, such as a journal seed, a floor start, a resolver delivery or a mailbox call,
-is listed in `//! Injections:` with the INV ids whose ghost history it bypasses (section 8.7).
-The module never writes ghost state and never calls `record` itself.
+**No fabrication** (rule I5 of the scenario SPEC). Events go through the network or the
+context. A scripted vote goes out only on its signer's own channel (INV-0008): a prefix signs
+only as B and sends only through `send`. A certificate the scaffold builds names an honest
+signer only for a proposal that replica signed or would sign. Every injection, such as a
+resolver delivery, is listed in `//! Injections:` with the INV ids whose ghost history it
+bypasses (section 8.7). The module never writes ghost state and never calls `record` itself.
 
-**Guard.** A Shape B scaffold calls `set_compromised` with the indices it runs as real engines
-under a Byzantine identity, empty if none, before any engine starts, with the index check of
-Appendix B.3 when the set is not empty. Code copied from a hooked runner keeps its hook. Shape
-A relies on the base's hooked runner (Appendices B.3 to B.5 and F).
+**B and the guard.** The runner, not the module, publishes the compromised identity, through
+the observer, before any engine starts; the anchored hooks of Appendices B.3 to B.5 still run
+in the drivers. B's base actors do not run during the prefix, whose context holds B's channels,
+and the runner starts exactly them at the release and checks that they run (Trusted
+continuation, above). A History that needs B to run an engine during the prefix is a missing
+capability.
 
 **Missing capabilities.** A stage that needs what the edit contract cannot give, such as a new
 dependency, a change to what the protocol does, or an item of `consensus/fuzz/core/` that is
@@ -5942,99 +6034,28 @@ the handoff lost. A human adds the capability with an ordinary commit.
 **Panics.** The prefix and witness code a scaffold adds never panics on SUT data: no `unwrap`,
 `expect` or index that SUT output decides, and no harness verb that panics on a SUT reply; a
 miss instead. The only panics it adds are the helper's scaffold errors, below; the base's
-oracles and the code copied verbatim from its driver keep theirs, since a miss after the
-handoff records nothing.
+oracles keep theirs.
 
 **Simplex** (`subsystems/simplex-synthesize.md`, section 13.22).
 
-- Bases: every `simplex_*` target but Mallory. Shape A fits a History that the fields of
-  `FuzzInput` fix (partition, configuration, certify choice, block filter). The chaos, ByzzFuzz
-  and Twins schedules are drawn from the random stream `raw_bytes` seeds, so no field pins them,
-  and a History about them takes Shape B. The `_state_cov` and `_hb` targets add coverage
-  tables, which cost throughput.
-- Usable without an edit: the crate root's private drivers of section 18.1 and
-  `chaos::runner::run`; the public items of `consensus/fuzz/core`, among them `setup_network`,
-  `bounded_fuzz_runtime_config`, `fuzz_runtime_timeout`, `spawn_filtered_honest_validator`,
-  `run_twins_with_backend` (hooked, Appendix B.3) and the partition helpers; and the mock
-  reporter's maps keyed by view (`leaders`, `notarizations`, `nullifies`, `nullifications`,
-  `certifications`, `finalizations`), read after the run for presence or through a recording
-  wrapper for order.
-- With a marked edit (section 18.6.1): `chaos::runner::{run_with, restart_durable, enact,
-  check_safety}` and the internals of `chaos::twins`; under `consensus/src/simplex/`, which the
-  test gate then reruns over, an accessor such as one for the private fields of
-  `mocks::twins::RoundScenario`, which only `cases` builds.
-- Known restart sites, which get a marked `restart` call when a scaffold runs them (section
-  18.7): `chaos::runner::restart_durable` (Chaos) and `chaos::twins::restart_honest`
-  (Chaos-Twins). The list is guidance, not a complete one.
-- `start_validator_engine` in `consensus/fuzz/core` is private and starts every engine from
-  `Floor::Genesis`; a History that needs another floor copies it into the module with the floor
-  as a parameter. The Chaos-Twins runner's gate is the pattern for a stage: wait for a replica's
-  own state before acting, and do not act in the wrong state.
-- Progress and deadline: `run_standard_once`, `run_audited_standard_once_with` and `run_twins`
-  run under `bounded_fuzz_runtime_config`, whose deadline is
-  `fuzz_runtime_timeout(input.required_containers, <prefix views>)`, with 0 prefix views, or
-  `twins_prefix_views(..)` for `run_twins`; the Chaos, Chaos-Twins and ByzzFuzz runners set
-  none. Each base keeps its own liveness measure, which a Shape B continuation counts from the
-  handoff (Oracles, above), and the base's condition for measuring at all: the standard and
-  audited drivers wait only under `should_bound_standard_liveness` (a `Connected` partition, a
-  valid configuration and `BlockFilterChoice::None`) and otherwise sleep `MAX_SLEEP_DURATION`
-  with no liveness assertion, so FaultyNet, whose partition is always `Adaptive`, never waits;
-  where they wait, the target is the latest finalized view at the handoff plus
-  `input.required_containers`; the audited driver excludes the notarize-omission victim from
-  that wait and keeps its post-invariant recovery-drain check
-  (`unresolved_finalize_recoveries`, `check_finalize_recoveries_drained`); the Twins campaign
-  counts `input.required_containers` finalizations of views after the Twins prefix
-  (`observe_liveness`), and only views after the handoff count; the Twins mutator checks no
-  liveness, and none is added; Chaos, ByzzFuzz and Chaos-Twins measure from their own heal or
-  recovery, which follows the handoff, so their targets stay: the larger of
-  `input.required_containers` and one view past the finalized view at the heal, the highest
-  node's for Chaos (`liveness_target`) and each node's own for ByzzFuzz
-  (`reach_gst_and_check_liveness`), and one view past the highest at its recovery for
-  Chaos-Twins.
+- Bases: those with a runner adapter (Trusted continuation, above), with B and its actors at
+  the release; the `_state_cov` and `_hb` targets add coverage tables, which cost throughput.
+- Pins: `term_length`, `lookahead` and `configuration`; N4F0C4 only for a History of four
+  honest replicas, since the base then runs no Byzantine actor.
+- Leaders: a Twins base's scripted rounds choose the leaders of the views up to
+  `scripted_views()` during the prefix, and its split routers apply from the release, so a
+  view is derived from `leader(view)`.
+- Links: 10 ms in the Standard drivers (a static partition cuts some pairs, a degraded network
+  slows the last participant's), 500 ms +- 500 ms in the Twins drivers; a prefix changes one
+  only with `set_link`.
 - Missing, reported as `cannot:`: journal seeding, because the package has no
-  `commonware-storage` dependency and guard 2 forbids adding one.
+  `commonware-storage` dependency and guard 2 forbids adding one; an engine under B's identity
+  during the prefix; the twin pair before the release; an engine that starts from another floor
+  than genesis.
 
-**Marshal** (`subsystems/marshal-synthesize.md`, section 13.23).
-
-- Shape A first: `marshal_e2e_standard_deferred_cert_mock_scenarios`, whose
-  `NotarizationBlockSplitScenarioInput` fixes a scripted template and its pre-GST actions, with
-  the wedge's real Byzantine engine behind the hook of Appendix F. The `*_twins_split_header`
-  targets draw their Twins case from the stream `raw_bytes` seeds (`run_twins_with_backend`
-  samples `twins::cases` from it; `case_selector` only indexes that sample), so no field pins
-  the case, and a History about it takes Shape B; a fixed case needs a marked constructor for
-  the private fields of `mocks::twins::Scenario` and `RoundScenario`.
-- Shape B uses, without an edit, the `pub(crate)` items of `scenarios` named in section 18.1
-  (the harness, its verbs and `finish`) and `marshal::end_to_end::twins`. With a marked
-  visibility edit: `scenarios::runner::run`, whose journal seeding before the engines start is
-  how Simplex engines start from a reconstructed state, and the private modules
-  `scenarios::{adversary, elector, strategy}` and `end_to_end::{input, runner, scenario}`.
-- The scenario-prefix runner starts no engine during its prefix, so a History whose events need
-  running engines, such as TS-0001's, takes an end-to-end base.
-- Known restart site, which gets a marked `restart` call when a scaffold runs it (section
-  18.7): the `StoreOp::Restart` arm of `marshal::store`
-  (`marshal_actor_standard_store_cert_mock`), which restarts the marshal actor. The list is
-  guidance, not a complete one.
-- Of the scenario SPEC (`consensus/fuzz/marshal/src/scenarios/specs/SPEC.md`), rules S1, S2,
-  S4, S7, I1 to I3 and I5 apply; S3 becomes the handoff check, S5 and R9 become `cannot:`; S0
-  and S6 do not apply, because the card and the module header cite the source, and I4 does
-  not, because R-TS-SYN-3 allows marked edits under the editable roots. No `ScenarioKind`
-  variant is added.
-- Only the victim, `Node::B`, has an injectable resolver, with one armed delivery at a time,
-  and in `N4F1C3` node 0 has no marshal. The harness verbs that panic when the SUT does not
-  answer (`await_wrapper` after 5 s, `verified` and `certified` on a write that is not durable),
-  and the polls of the existing scenario prefixes in `scenarios.rs`, bounded to 64 rounds, are
-  not used where a SUT reply decides; the scaffold races the reply against its stage deadline
-  instead.
-- Progress and deadline: no marshal base sets a runtime deadline, so `Stages::budget` takes
-  `Duration::MAX`. Each base measures finalized heights against its own baseline, which a
-  Shape B continuation counts from the handoff: the scenarios target, one block past each
-  correct node's height at GST (`check_scenario_progress`); Twins, `input.trailing_blocks`
-  blocks of views after the prefix (`wait_for_liveness`); the scenario-prefix runner, one block
-  past each honest node's height at its heal, `input.required_containers` only ending the fault
-  phase early; the disrupter and poison targets (`run_liveness_phases`),
-  `input.required_containers`, or after a fault phase that ends without it, the larger of that
-  and one block past each honest node's height at the heal; the store target checks no
-  liveness.
+**Marshal** (`subsystems/marshal-synthesize.md`, section 13.23). No marshal driver has a hook
+point yet, so synthesis refuses every marshal base at selection (section 18.6.2); the
+follow-up that adds the marshal runner adapters writes the marshal rules.
 
 **Helper template.** `SL/runtime/target_states.rs`, copied to `<package>/src/target_states/mod.rs`
 (section 18.6), calls the runtime module of the profile's crate by path, is `rustfmt`-clean, and
@@ -6049,7 +6070,8 @@ helper's own printer, or build a `Witness` or a `Stamp` field by field; the priv
 truncated)` for a later stage and for `En` with no feature, and `handoff lost`, and a handoff
 that holds without a cut, an `En` recorded `unverifiable` before the handoff, which keeps its
 reason and loses the handoff, and, with `STATELENS_REACH` unset, a miss that records no `trace`
-line and a handoff that records `next=-`; they run with
+line and a handoff that records `next=-`; and the observer's lines: a cited entry with the
+recorder's position, an `actors` line, a `release` line and `done` last; they run with
 `cargo +stable nextest run -p <package> --lib target_states::` in a checkout synthesis wrote
 `mod.rs` to. Under `cfg(test)` the helper also records each line it prints and each feature it
 adds in thread-local lists the tests read.
@@ -6060,8 +6082,10 @@ adds in thread-local lists the tests read.
 | `Knobs::pick<T: Copy>(&mut self, domain: &[T]) -> T` | The next knob: `domain[byte % domain.len()]`. It cannot return a value for an empty domain, so a domain of fewer than two values is a scaffold error. |
 | `control() -> bool` | Whether `STATELENS_REACH_CONTROL=1`, read once. |
 | `Stages::new(card: &'static str, n: u32) -> Stages` | Calls `watch()`, opens the prefix phase and prints `phase prefix`, and installs the panic hook below, once per process. Lines print only under `STATELENS_REACH=1`, read once; the work that only feeds them, the trace lines of a miss and the handoff's `next=`, runs only then. |
-| `Stages::budget(&self, knobs: Knobs, prefix: Duration, runtime: Duration)` | Called before any engine starts, and takes the knobs, so none is picked later: the stage deadlines plus the largest release delay, against the runtime deadline. |
-| `stamp(observable: &str, key: &str, value: &str) -> Stamp` | A recording wrapper's call as it records an entry: takes a `tick()`, prints `entry` with it, and returns it as an opaque `Stamp` that only `stamp` makes, with the `run` current when it was taken; `Stamp::seq()` reads its position and cannot make one. The script checks every stamp an `exact` item carries against its `entry` line anyway (section 18.8). Returns a stamp of position 0 and prints nothing while not watching. A free function, so a wrapper can call it. |
+| `Stages::budget(&self, knobs: Knobs, prefix: Duration, release: Duration) -> Budget` | Called in `plan`, before the runtime starts, and takes the knobs, so none is picked later; returns the runner's `Budget`: the stage deadlines and the release delay `d`, which the runner adds to the base's deadline. |
+| `stamp(observable: &str, key: &str, value: &str) -> Stamp` | A query the prefix makes now, such as the absence of an entry: takes a `tick()`, prints `entry` with it, and returns it as an opaque `Stamp` that only `stamp` and `cite` make, with the `run` current when it was taken; `Stamp::seq()` reads its position and cannot make one. The script checks every stamp an `exact` item carries against its `entry` line anyway (section 18.8). Returns a stamp of position 0 and prints nothing while not watching. |
+| `cite(observable: &str, key: &str, value: &str, recorded: continuation::Stamp) -> Stamp` | An entry one of the runner's recorders recorded: prints `entry` with the position the recorder took through the observer when it recorded it, and returns that position as a `Stamp`. The runner's `Stamp` is opaque too: only a recorder, or `Stamp::now` with an observer, which gives the current position, makes one, so a prefix cannot cite a position earlier than a real record. An entry recorded while nothing watched has position 0, prints nothing and gives no position. |
+| `Watch` | The runner's observer, which only the thin target passes. `position()` takes a `tick()` with the current `run`; `compromised` calls `set_compromised`; `released` prints the `release` line and `actors` an `actors` line (section 18.8); `done` runs a registered Shape A evaluation that has not handed off, then prints `done`; `largest` reads `STATELENS_REACH_LARGEST=1`, once. |
 | `Witness::exact(bind, reads: &[(observable, key, value, stamp: Option<Stamp>)])`, `Witness::intrinsic(bind, seen: Seen)` | A witness and its bindings, `bind` written `name=value@Ek,...`, and each `key` naming the entities it fixes as `name=value,...`. Each takes a `tick()` when it is built, its `read=`. An `exact` witness's position is its latest stamp's, and it has none when an item has no stamp; an `intrinsic` witness's is its observation's `seq`. |
 | `Witness::act(bind, action, perform: impl FnOnce() -> T) -> (T, Witness)`, `Witness::act_async(bind, action, perform: P) -> impl Future<Output = (T, Witness)> + use<T, F, P>`, with `P: FnOnce() -> F` and `F: Future<Output = T>` | The only way to make a `construction` witness: takes a `tick()`, the action's position and the witness's `read=`, right before it calls `perform`, which performs the action, and returns `perform`'s result with the witness, so the position is the action's and everything the action causes comes after it. `act_async` takes its tick when its future is first polled, and only then calls `perform` and awaits the future it returns, so an action that takes effect when it is called, as a mailbox method that queues its message at the call does, still comes after its position; its future borrows neither `bind` nor `action`. `action` names the verb and the entities it fixes as `verb[name=value,...]`; a bare verb is printed `verb[]`. Before `Stages::new` nothing watches: the position is 0, and the stage has none. |
 | `Stages::held(&mut self, k: u32, witness: Witness) -> bool` | Stage `k` held: prints the record with the witness's `read=`, records the stage feature, and moves `since()` forward to the stage's position + 1, or to its `read=` + 1 when it has none, never back. Stages may be recorded in any order. A call for stage n, which only `Stages::handoff` records, for a stage that already has an outcome, for an event number outside 1 to n, or once the prefix is closed does nothing and returns `false`. A witness whose `read=` is at or after the position `truncated()` returns makes the stage `unverifiable (trace truncated)` instead, with no feature. Returns `true` only when it recorded the stage held. |
@@ -6069,8 +6093,7 @@ adds in thread-local lists the tests read.
 | `Stages::open(&self) -> bool`, `Stages::since(&self) -> u64` | Whether the prefix is open; the position from which the next stage reads the trace. |
 | `restart(replicas: &[u32]) -> u64` | Takes a `tick()`, `s`, as an incarnation boundary of `replicas`, prints it, and returns `s`, which names the incarnation it began, `inc<s>`: two restarts never share it, even with no observation between them. Returns 0 and prints nothing while not watching. A free function, so a base's restart code can call it. |
 | `Stages::handoff(&mut self, read: impl FnOnce() -> Option<Witness>)` | Decides the handoff itself. It takes a `tick()`; then, when stage n has no outcome and the prefix is open, calls `read`, a plain closure that cannot await or yield; then it takes the handoff mark, a `tick()`, `mark=`, and records `En` held with the witness `read` returned, printing its record, or missed (`not held at handoff`) on `None`. Once the trace dropped an observation at or before `mark=`, `En` is `unverifiable (trace truncated)` instead, whatever `read` returned, and the handoff is lost. The handoff holds when `En` was held in this call and `mark=` is its `read=` + 1: the witness was built inside the call, after the first tick, and no observation or other event came between the read and the mark. Prints `handoff holds|lost mark=<m> next=<run>:<seq>|-`, where `next` is the first observation after `En`'s position, in the `run` of that position, of a replica that is not compromised (Shape A, section 18.7), then `phase continuation` and the `reach` line; closes the prefix and calls `unwatch()`. A second call does nothing. |
-| `Stages::on_panic(&mut self, evaluate: fn(&mut Stages))` | Shape A: the evaluation of the stages, which the panic hook runs over the trace so far, handing it a `Stages` handle so that it records the stages through the helper. |
-| `Stages::done(&mut self)` | Prints `done`. |
+| `Stages::on_panic(&mut self, evaluate: fn(&mut Stages))` | Shape A: the evaluation of the stages, which `Watch::done` runs after the base's last oracle, and the panic hook over the trace so far, handing it a `Stages` handle so that it records the stages through the helper. |
 
 **Truncation.** Once `truncated()` returns a position `s`, the helper prints `truncated seq=<s>`
 once per input, at its first event after the cut: a position it takes or a stage it records, so
@@ -6090,10 +6113,10 @@ takes the last `phase` line printed; in Shape A, whose stages are evaluated afte
 phase of one during the run is unknown.
 
 **Scaffold errors.** The helper raises a panic with the message `[statelens-scaffold] TS-NNNN
-<reason>` only in `Knobs::split`, `Knobs::pick` and `Stages::budget`, which run before any
-engine starts, so the conditions depend only on the scaffold's own code and knob bytes, never
-on SUT output: more than 16 knobs, or more knobs picked than split; an empty domain, or one
-with a single value; and a budget whose prefix exceeds the runtime deadline. These functions
+<reason>` only in `Knobs::split` and `Knobs::pick`, which run in `plan`, before the runtime
+starts, so the conditions depend only on the scaffold's own code and knob bytes, never on SUT
+output: more than 16 knobs, or more knobs picked than split; and an empty domain, or one with
+a single value. These functions
 are not `#[track_caller]`, so the panic's location is in `target_states/mod.rs`. Every other
 helper call checks without panicking, as the table says. `Knobs::split` and `Knobs::pick` run
 before `Stages::new`, so their errors print no `[statelens-reach]` line, only the message and
@@ -6102,8 +6125,9 @@ location libfuzzer-sys prints. Section 18.8 classes such a failure as SCAFFOLD E
 ### 18.8 Reach check
 
 The reach check replays fixed inputs and does not fuzz (D66). Each attempt replays the
-canonical input and then runs the control; the kept version replays the canonical input once
-more (section 18.6.2).
+canonical input, runs the control, and replays the canonical input once more with the base's
+largest progress budget, the largest replay (D69); the kept version replays the canonical
+input once more (section 18.6.2).
 
 **A replay.** The binary is the fuzz build's release output:
 `$CARGO_TARGET_DIR/<host>/release/<scaffold>` when `CARGO_TARGET_DIR` is set, a relative value
@@ -6111,10 +6135,14 @@ taken from the checkout's root, where the build runs, and otherwise
 `target/<host>/release/<scaffold>` or `<package>/target/<host>/release/<scaffold>`, both
 checked as `coverage` checks its build. It runs in individual-file mode on
 `SL/campaign/reach/empty`, with `SL/campaign/reach/TS-NNNN_<base>/attempt-<a>/<replay>/` as its
-working directory, `<replay>` being `canonical`, `control` or, for the kept version's last
-replay, `final`: libFuzzer reads no corpus and gets no flag from the script, and a crash file
-lands in that directory, beside the replay's log, `replay.log`. The environment sets
-`STATELENS_REACH=1`, and `STATELENS_REACH_CONTROL=1` for the control run only, and leaves
+working directory, `<replay>` being `canonical`, `control`, `largest` or, for the kept
+version's last replay, `final`: libFuzzer reads no corpus and gets no flag from the script, and
+a crash file lands in that directory, beside the replay's log, `replay.log`. The environment
+sets `STATELENS_REACH=1`, `STATELENS_REACH_CONTROL=1` for the control run only, and
+`STATELENS_REACH_LARGEST=1` for the largest replay only, which makes the trusted entry set
+`required_containers` to the base's largest, `MAX_REQUIRED_CONTAINERS`, after the prefix's
+pins, so a continuation that cannot finish that budget within the deadline shows up during
+synthesis; it leaves
 `STATELENS_BYZANTINE` unset, so the guard skips compromised replicas. The script kills a replay,
 with everything it started, after 1,500 s, whether or not the replay's own process still runs,
 longer than libFuzzer's default `-timeout` of 1,200 s, and classes the kill as `timeout`.
@@ -6134,6 +6162,8 @@ longer than libFuzzer's default `-timeout` of 1,200 s, and classes the kill as `
 [statelens-reach] TS-NNNN phase prefix|continuation
 [statelens-reach] TS-NNNN reach <k>/<n> control=0|1
 [statelens-reach] TS-NNNN panic <file>:<line>:<col>|-[ <first line of the message>]
+[statelens-reach] TS-NNNN release base=<h> gates=<i>[,...]|- delivered=<n> blocks=<n> links=<i>><j>[,...]|- latencies=<i>[,...]|- restarted=<i>[,...]|-
+[statelens-reach] TS-NNNN actors release|end ok|failed <identity>:<role>=<state> ...|-
 [statelens-reach] TS-NNNN done
 ~~~
 
@@ -6160,17 +6190,25 @@ witness with no read leaves its evidence empty, so two spaces come before `read=
 cannot: <capability>` is a missing capability, and `missed not held at handoff` the handoff's
 own miss. Up to 64 `trace` lines follow a miss, from the start of the missed stage. A handoff
 prints its `handoff`, `phase continuation` and `reach` lines in that order. `reach` counts the
-stages the helper recorded as held; `control=1` marks the control run. `done` follows the last
-oracle. A `panic` line names `-` when the panic has no location. The prefix
+stages the helper recorded as held; `control=1` marks the control run. The `release` and
+`actors` lines are the trusted runner's, printed through the helper's observer, never a
+scaffold's: `release` says what the release reverted and `base=` the view the base's faults
+and progress targets were re-based on; an `actors` line is one actor check (section 18.7),
+`release` right after the base's actors start and `end` after the liveness wait, each actor
+written `<identity>:<role>=<state>` with `<role>` `disrupter`, `primary` or `secondary` and
+`<state>` `running`, `unpolled` (its task has not finished but never ran: its execution marker
+is not set), `finished` or `absent`, and `-` when the base requires none; `ok` when every one
+runs. `done` follows the last oracle. A `panic` line names `-` when the panic has no location. The prefix
 `[statelens-reach]` keeps these lines apart from `[statelens][`, which section 7.9 reads, but a
 `panic` line can quote a `[statelens][INV-...]` message, so the script drops the
 `[statelens-reach]` lines before it calls `first_panic`. A line matches
 
 ~~~
-^\[statelens-reach\] (TS-\d{4,}) (?:E(\d+)/(\d+) (held|missed|unverifiable|withheld)\b ?(.*)|entry ([^\[\s]+)\[([^\]\s]*)\]=(\S+) seq=(\d+)|restart (\S+) seq=(\d+) run=(\d+)|trace (\S+)|handoff (holds|lost) mark=(\d+) next=(\d+:\d+|-)|reach (\d+)/(\d+) control=([01])|phase (prefix|continuation)|panic (\S+) ?(.*)|truncated seq=(\d+)|done)$
+^\[statelens-reach\] (TS-\d{4,}) (?:E(\d+)/(\d+) (held|missed|unverifiable|withheld)\b ?(.*)|entry ([^\[\s]+)\[([^\]\s]*)\]=(\S+) seq=(\d+)|restart (\S+) seq=(\d+) run=(\d+)|trace (\S+)|handoff (holds|lost) mark=(\d+) next=(\d+:\d+|-)|reach (\d+)/(\d+) control=([01])|phase (prefix|continuation)|panic (\S+) ?(.*)|truncated seq=(\d+)|done|actors (release|end) (ok|failed) (\S.*)|release (\S.*))$
 ~~~
 
 and the rest of a `held` line matches `^(exact|intrinsic|construction) bind=(\S+) (.*) read=(\d+)$`,
+an actor of an `actors` line `(\d+):(disrupter|primary|secondary)=(running|unpolled|finished|absent)`,
 an `exact` item `exact=([^\[\s]+)\[([^\]\s]*)\]=(\S+) seq=(\d+|-)`, an `intrinsic` observation
 `obs=(\d+):(\d+):(\d+|-):([^@\s]+)@([^\s:]+:\d+:\d+):(\d+):(\d+)`, and an action
 `action=([^\[\s]+)\[([^\]\s]*)\] seq=(\d+)`. The script recomputes every witness record from these lines
@@ -6221,7 +6259,8 @@ witness is `exact` or `construction`, and is annotated `control n/a` either way.
 without a `Control:` line has no control, annotated `control missing`. A vacuous control has
 no annotation; the report gives its reason.
 
-**Verdicts.** From the canonical run, its control and the kept version's last replay:
+**Verdicts.** From the canonical run, its control, the largest replay and the kept version's
+last replay:
 
 | Verdict | Condition |
 |---|---|
@@ -6229,17 +6268,20 @@ no annotation; the report gives its reason.
 | UNVERIFIED k/n | No stage missed, but a stage is `unverifiable` or a witness was rejected; or the control is vacuous, `weak` or missing; or `Control: n/a` where it is not accepted. `k` counts the stages held. |
 | PARTIAL k/n | A stage after `E1` is the first to miss; `k` counts the stages held before it, and the report lists the earlier stages that did not hold; `handoff lost` misses `En` |
 | UNREACHED 0/n | `E1` missed |
-| NO REPORT | The replay did not fail but printed no `reach` or no `done` line: the helper was not used, or the scaffold returned before the base's oracles; or its lines name another card or another `n` |
+| NO REPORT | The replay did not fail but printed no `reach` or no `done` line: the helper was not used, or the prefix never handed off; or its lines name another card or another `n` |
 | CRASH (finding candidate) | A replay failed, below, unless the failure is the next row's, or a run of the agent's left a crash file (`stray failure`, section 18.6.2). Any failure other than a scaffold error makes the version CRASH, even beside one. The report gives its kind, phase, location and stage lines. |
 | SCAFFOLD ERROR | The replay's first panic is the helper's `[statelens-scaffold]` error (section 18.7), at a location in `target_states/mod.rs` |
+| NO CONTINUATION | A replay that did not fail, canonical, control, largest or final, printed no `actors release` or no `actors end` line, a malformed one, or one that failed: the base's actors did not run after the release. Checked after CRASH and SCAFFOLD ERROR and before NO REPORT, and not for a replay whose lines name another card. Such a version is never kept (section 18.6.2, Finish); the reason names the replay and the line. A CRASH after a failed `actors release` line is annotated `actors failed`. |
 | NOT BUILT | No version passed the vetoes and built; as `NOT BUILT (breaks TS-MMMM_<b>)`, the kept version made the standing scaffold of TS-MMMM on `<b>`, a pair of the same card included, stand worse, and its edits were restored (section 18.6.2, Finish) |
 | GATE FAILED | The kept version's edits under the editable roots made a test of the gate fail, or no longer run, that the inventory does not record as failing, or the gate's output was unusable (guard 5); over a kept CRASH, `GATE FAILED (finding candidate in attempt-<a>/)` |
 
 The script computes `k` after rejecting witnesses; the `reach` line is the helper's count,
 before them. Verdicts are reported only. Every card with a kept version, every verdict but NOT
-BUILT and GATE FAILED, has a scaffold, and `--state-reaching` fuzzes it.
+BUILT, GATE FAILED and NO CONTINUATION, which is never kept, has a scaffold, and
+`--state-reaching` fuzzes it.
 
-**Crash attribution.** A failure of a replay, canonical, control or final, in either phase, is a
+**Crash attribution.** A failure of a replay, canonical, control, largest or final, in either
+phase, is a
 panic, a `[statelens][INV-...]` or `[statelens][BYZANTINE]` message, a harness oracle's
 failure, a sanitizer report, an out-of-memory or leak report, a runtime timeout or stall, or
 the script's kill. Every one is kept in `SL/campaign/reach/TS-NNNN_<base>/attempt-<a>/`, with its
@@ -6275,11 +6317,12 @@ ones), `weak`, `control n/a` and `control missing` (the control), `unbound label
 label the module passes to `seen` or `sites` that no `sl_probe!` or `sl_implies!` site under
 the editable roots names), `missing: <capability>` (from the header, one per item separated by
 `;`), `unmarked edit` and `edit beside instrumentation` (guard 4), `relation across restart`
-(section 18.7), `stray failure` (section 18.6.2), and `location in TS-NNNN diff`.
+(section 18.7), `stray failure` (section 18.6.2), `actors failed` (a CRASH after a failed
+actor check at the release), and `location in TS-NNNN diff`.
 
 **Feedback.** The next attempt's `FEEDBACK` holds the verdict, its stage, `truncated` and trace
-lines, the vetoes and guard findings, the build's last lines, and the verdicts of the earlier
-attempts, with what each signal asks for:
+lines, the trusted runner's `release` and `actors` lines, the vetoes and guard findings, the
+build's last lines, and the verdicts of the earlier attempts, with what each signal asks for:
 
 | Signal | What to fix |
 |---|---|
@@ -6291,8 +6334,9 @@ attempts, with what each signal asks for:
 | `unverifiable`, or `witness rejected` | A witness that binds the relation: an intrinsic site for an existential line, otherwise an exact observable keyed by the bound entities, with positions where order matters |
 | `weak`, with bound witnesses | Withhold the event without which `En` cannot hold for these entities, or report that the History is not causal |
 | A vacuous or missing control | Name, or withhold, a later harness event before `En`; in the control run, drive every later event, the handoff check and the base's oracles |
-| NO REPORT | Use the helper, and never return before the base's oracles |
+| NO REPORT | Use the helper, call `Stages::handoff`, and return from `run` at the handoff |
 | SCAFFOLD ERROR | The reason the helper named |
+| NO CONTINUATION | Nothing in the module: the runner starts the base's actors at the release. Return from `run` at the handoff and stay within the budget; if the lines still fail, the base's runner adapter is broken, which a human fixes |
 
 A miss with `cannot:` takes its own row wherever its stage is; the `E1`, middle and `En` rows
 are for the other misses. The `cannot` row does not send the agent to another base: a base
@@ -6346,7 +6390,8 @@ these. A CRASH (finding candidate) gets no feedback, because refinement stops (D
    libFuzzer arguments given after `--`, none here.
 
 The command opens one window per `simplex_cert_*` base of TS-0004, one per scaffold that
-built: every simplex base but Mallory matches, 20 at `HEAD`. `--fuzz-targets simplex_cert_mock`
+built: every simplex base with a runner adapter (section 18.7) matches, 16 at `HEAD`, and
+synthesis prints a `refused` line for each other one. `--fuzz-targets simplex_cert_mock`
 opens one, `simplex_cert_mock_ts0004`; with `--state-targets "TS-000*"` or no
 `--state-targets`, and the cards TS-0003 and TS-0004 present, every pair of both cards gets a
 window. No variant runs with `--state-reaching`, and without it nothing changes. For
@@ -6423,11 +6468,12 @@ the profile after a campaign that ended `READY` or `PANIC (tests)`.
 |---|---|---|
 | AC-22 | `just check-invariants` with TS-0001 committed. For each agent: `just extract-states --registry marshal test consensus/src/marshal/standard/mod.rs:7027`; `just extract-states --registry simplex test consensus/src/simplex/mod.rs:3260`; `just extract-states --registry simplex text "<a paragraph describing TS-0004>"`; `just extract-states --registry marshal issue https://github.com/commonwarexyz/monorepo/pull/4317`; and, with `STATELENS_KB` set, `just extract-states --registry marshal kb <finding id>`. Then the refusals: a `test` path outside the roots, `--registry qmdb`, and `just extract-invariants test <path>`. Last, a `test` extraction with `--local`. | No lint problem. Each extraction writes lint-clean cards with a pinned `source_ref`; the `issue` card is deleted as a duplicate of TS-0001. The refusals exit with code 1. The `text`, `kb` and `--local` cards are written only to `target-states.local/`, which `git status` does not list. Once TS-0002 to TS-0004 are committed (TS-0004 moved by hand), `just check-invariants` reports no problem. |
 | AC-23 | The runtime self-tests in the test gate (section 7.7), and the helper's self-tests (section 18.7) in a checkout synthesis wrote `mod.rs` to. Then a campaign whose stub instrumenter adds a call of `seen` under the editable roots. | The self-tests pass: watching; `tick` and the observations sharing one strictly increasing sequence, so that two ticks with no observation between them, and observations and ticks interleaved, get distinct, ordered positions; `mark` returning the last position without advancing; `clear_trace`, which `reset` calls, starting the sequence again, so positions are unique within one input only; `seen` finding the earliest match at or after a position, `site` and `run`, a guarded replica absent from the trace, the pairs `sl_implies!` notes, the cap, past which `truncated()` returns the position of the first dropped observation, which a later drop does not move and `watch` and `unwatch` reset, and the sequence still advances, `sites`, and the run counter of the fresh-run hook. The helper's self-tests pass: after a state change past the cap, `truncated seq=<s>` once, `unverifiable (trace truncated)` with no feature for a later stage and for `En`, and `handoff lost`; without a cut, `handoff holds`; an `En` recorded `unverifiable` before the handoff keeps its reason and loses the handoff; with `STATELENS_REACH` unset, a miss records no `trace` line and the handoff records `next=-`. The campaign stops in the scope check with exit code 2, naming the file. |
-| AC-24 | `just synthesize --profile simplex --match simplex_cert_mock_chaos_ts0003 --match simplex_cert_mock_ts0004`, which pins each card to one base, the family of PRD section 11.4, so the selection is the two pairs (TS-0003, `simplex_cert_mock_chaos`) and (TS-0004, `simplex_cert_mock`). Then one stub agent per guard of section 18.6.1: an edit outside the scope, then `just synthesize` once more, and then that edit undone with `git checkout`; a dependency added to the package manifest; an `sl_probe!` added; a two-attempt stub, each of whose attempts writes a valid module and thin target, whose first attempt removes or alters an `sl_assert!` call and whose second makes an unrelated edit and leaves that change in place, and a variant whose second attempt reverts the change; a ghost update deleted, and the `set_compromised` call of the Chaos-Twins hook (Appendix B.5) changed; a `#[path]` attribute on the runtime module's declaration; the runtime module changed; a `[statelens-reach]` literal in the module; a `statelens::watch()` call in the module; an `eprintln!` call, a `set_hook` call and an `include!` in the module; a module under a directory named `target`; a marked accessor under `consensus/src/simplex/` that keeps the test gate passing, and one that fails it; an unmarked hunk in the fuzz package; a marked `if false` around an unchanged `sl_assert!` call. Then a stub that never builds, with one pair selected, and one that exits with a non-zero code. Then, with `NEXTEST_STATUS_LEVEL=fail` and `CARGO_TERM_COLOR=always` set, the marked accessor that fails the test gate again, and one that keeps the crate building but a test of the gate from compiling; and, on a fresh checkout whose campaign `logs/test.log` was removed before the first synthesis, the passing accessor. Then three two-pair stubs, over the two pairs above: one whose second pair changes the first pair's module so that its thin target no longer builds, one whose second pair adds a marked accessor under `consensus/src/simplex/`, followed by `just synthesize --redo --match simplex_cert_mock_ts0004`, interrupted (`SIGINT`) during TS-0003's revalidation replays, and then `just synthesize --match simplex_cert_mock_ts0004` with a stub that writes only TS-0004's module and thin target, and one whose second pair writes only its own module and thin target. Then one card on two bases, `just synthesize --profile simplex --match TS-0004 --match simplex_cert_mock --match simplex_cert_mock_faulty_net`, on a checkout without TS-0004's reports, with a stub that writes a module and thin target per pair; then the same command again; then `just synthesize --redo --match simplex_cert_mock_ts0004`. | The scaffolds, `simplex_cert_mock_chaos_ts0003_statelens` and `simplex_cert_mock_ts0004_statelens`, build, and the console prints their verdicts, one `TS-NNNN` line per pair, and `run` and `replay` lines without libFuzzer arguments; TS-0004 is REACHED. No `corpus/` or `artifacts/` entry exists for them, and `git status` lists only paths section 18.6.1 allows. The stubs: exit code 2 with the pair's edits restored, and the next synthesis exits with code 2 before any pair, naming the path; the manifest restored with feedback; vetoes for the probe, the runtime module, the literal, the `watch` call, the print, the panic hook, the include and the ignored module; the two-attempt stub vetoed in every attempt with the same guard 3 feedback, the stub changing nothing after its second attempt, which ends the pair, NOT BUILT, and the `sl_assert!` call as in `B` after the pair, while its variant's second attempt builds; vetoes for the ghost update, the hook and the `#[path]` attribute; the test gate run again, passing and then GATE FAILED with the edit restored; `unmarked edit`; `edit beside instrumentation`; NOT BUILT and exit code 3, with the pair's files restored and every variant still building; and a failed attempt after which the other pair is synthesized. Under the changed nextest settings, the failing accessor is GATE FAILED naming the failing test, and the one that breaks a test's build is GATE FAILED with `(unusable output: no nextest summary line)`; `SL/campaign/reach/baseline/tests.json` lists the gate's tests; without the campaign log, the gate runs once on the tree as the campaign left it, logged to `logs/test-baseline.log`, before any pair, and the accessor passes the gate. The first two-pair stub is `NOT BUILT (breaks TS-0003_simplex_cert_mock_chaos)` with its edits restored and TS-0003's verdict and report, `TS-0003_simplex_cert_mock_chaos.md`, unchanged; the accessor's pair keeps its scaffold and TS-0003's report gains `## Revalidation after TS-0004_simplex_cert_mock`, and after the `--redo`, which removes the accessor, is interrupted with exit code 130, leaving TS-0003's verdict unchanged and `SL/campaign/reach/revalidation.json`, the next synthesis adds `## Revalidation after --redo`, before TS-0004 is synthesized again, and deletes that record; the third revalidates TS-0003 too, under `## Revalidation after TS-0004_simplex_cert_mock`; the last check builds every scaffold. The card on two bases gives two scaffolds, `simplex_cert_mock_ts0004_statelens` and `simplex_cert_mock_faulty_net_ts0004_statelens`, two reports and two diffs, `TS-0004_simplex_cert_mock.*` and `TS-0004_simplex_cert_mock_faulty_net.*`, two `pub mod` lines in `target_states/mod.rs`, a `run` line each, and the second pair revalidates the first, whose report gains `## Revalidation after TS-0004_simplex_cert_mock_faulty_net`; the second command prints two `skipped: TS-0004 on <base> was synthesized as <scaffold>; use --redo` lines, one per pair; the `--redo` of one pair moves `TS-0004_simplex_cert_mock.*` to `TS-0004_simplex_cert_mock.<stamp>.*`, leaves the other pair's thin target and `[[bin]]` block in place, and its report gains `## Revalidation after --redo`. |
-| AC-25 | The procedure of AC-24 for TS-0001 and TS-0002 on a `marshal` checkout, with `--profile marshal` and the pairs (TS-0001, `marshal_e2e_standard_deferred_cert_mock_twins_split_header`) and (TS-0002, `marshal_e2e_standard_deferred_cert_mock_poison`), the families of PRD section 11.4, selected as `--match <base>_ts0001 --match <base>_ts0002`; the card on two bases uses `marshal_e2e_standard_deferred_cert_mock_poison` and `marshal_e2e_coding_cert_mock_poison`. Then a stub scaffold of TS-0001 that builds `E7`'s witness while R's certification is outstanding, and passes it to `Stages::handoff` only after that certification has completed. Then the differential test of section 18.10.1: `SL/scripts/differential.sh` from the checkout, with `DIFFERENTIAL_SCRATCH` naming a directory with 25 GB free. | As AC-24 for the real agent. TS-0001's report shows the pending-state handoff check: `handoff holds`, with `E7` witnessed by an `exact` observable that shows R's certification still outstanding at the handoff instant. The stub's report shows `handoff lost`, with a `mark=` greater than `E7`'s `read=` + 1, and PARTIAL 6/7. The differential test prints the table of section 18.10.1 and `differential: PASSED`: the fuzz package's clippy, rustfmt and tests pass with the widened visibility, the 30 tests listed are the 30 expected, every positive test has equal digests and `REACHED n/n` with no annotation, and every negative control is caught, by the digest or by the validator's verdict of a replay that ran to its digest line (no row carries `(FAILED)`, `(NOT CAUGHT)` or `(ERROR)`); the worktree and its target directory are gone afterwards, the logs stay in `<scratch>/run.XXXXXX/logs/`, and `git status` of the checkout is as before. The test compares the settled state after `finish` of hand-written prefixes; it establishes neither state equality at the handoff mark nor anything about an agent's scaffold. |
+| AC-24 | `just synthesize --profile simplex --match simplex_cert_mock_twins_campaign_ts0003 --match simplex_cert_mock_ts0004`, which pins each card to one base, the family of PRD section 11.4, so the selection is the two pairs (TS-0003, `simplex_cert_mock_twins_campaign`) and (TS-0004, `simplex_cert_mock`). The stubs write the module only: the thin target is the script's. Then one stub agent per guard of section 18.6.1: an edit outside the scope, then `just synthesize` once more, and then that edit undone with `git checkout`; a dependency added to the package manifest; an `sl_probe!` added; a two-attempt stub, each of whose attempts writes a valid module, whose first attempt removes or alters an `sl_assert!` call and whose second makes an unrelated edit and leaves that change in place, and a variant whose second attempt reverts the change; a ghost update deleted, and the `set_compromised` call of the Chaos-Twins hook (Appendix B.5) changed; a module that calls `run_twins_with_backend` or `set_compromised`, and one without `prefix`; a `#[path]` attribute on the runtime module's declaration; the runtime module changed; a `[statelens-reach]` literal in the module; a `statelens::watch()` call in the module; an `eprintln!` call, a `set_hook` call and an `include!` in the module; a module under a directory named `target`; a marked accessor under `consensus/src/simplex/` that keeps the test gate passing, and one that fails it; an unmarked hunk in the fuzz package; a marked `if false` around an unchanged `sl_assert!` call. Then a stub that never builds, with one pair selected, and one that exits with a non-zero code. Then, with `NEXTEST_STATUS_LEVEL=fail` and `CARGO_TERM_COLOR=always` set, the marked accessor that fails the test gate again, and one that keeps the crate building but a test of the gate from compiling; and, on a fresh checkout whose campaign `logs/test.log` was removed before the first synthesis, the passing accessor. Then three two-pair stubs, over the two pairs above: one whose second pair changes the first pair's module so that its thin target no longer builds, one whose second pair adds a marked accessor under `consensus/src/simplex/`, followed by `just synthesize --redo --match simplex_cert_mock_ts0004`, interrupted (`SIGINT`) during TS-0003's revalidation replays, and then `just synthesize --match simplex_cert_mock_ts0004` with a stub that writes only TS-0004's module, and one whose second pair writes only its own module. Then one card on two bases, `just synthesize --profile simplex --match TS-0004 --match simplex_cert_mock --match simplex_cert_mock_faulty_net`, on a checkout without TS-0004's reports, with a stub that writes a module per pair; then the same command again; then `just synthesize --redo --match simplex_cert_mock_ts0004`. | The scaffolds, `simplex_cert_mock_twins_campaign_ts0003_statelens` and `simplex_cert_mock_ts0004_statelens`, build, and the console prints their verdicts, one `TS-NNNN` line per pair, and `run` and `replay` lines without libFuzzer arguments; TS-0004 is REACHED. No `corpus/` or `artifacts/` entry exists for them, and `git status` lists only paths section 18.6.1 allows. The stubs: exit code 2 with the pair's edits restored, and the next synthesis exits with code 2 before any pair, naming the path; the manifest restored with feedback; vetoes for the probe, the runtime module, the literal, the `watch` call, the print, the panic hook, the include and the ignored module; the two-attempt stub vetoed in every attempt with the same guard 3 feedback, the stub changing nothing after its second attempt, which ends the pair, NOT BUILT, and the `sl_assert!` call as in `B` after the pair, while its variant's second attempt builds; vetoes for the ghost update, the hook, the `#[path]` attribute, the driver-level code, `set_compromised` and the missing `prefix`; the test gate run again, passing and then GATE FAILED with the edit restored; `unmarked edit`; `edit beside instrumentation`; NOT BUILT and exit code 3, with the pair's files restored and every variant still building; and a failed attempt after which the other pair is synthesized. Under the changed nextest settings, the failing accessor is GATE FAILED naming the failing test, and the one that breaks a test's build is GATE FAILED with `(unusable output: no nextest summary line)`; `SL/campaign/reach/baseline/tests.json` lists the gate's tests; without the campaign log, the gate runs once on the tree as the campaign left it, logged to `logs/test-baseline.log`, before any pair, and the accessor passes the gate. The first two-pair stub is `NOT BUILT (breaks TS-0003_simplex_cert_mock_twins_campaign)` with its edits restored and TS-0003's verdict and report, `TS-0003_simplex_cert_mock_twins_campaign.md`, unchanged; the accessor's pair keeps its scaffold and TS-0003's report gains `## Revalidation after TS-0004_simplex_cert_mock`, and after the `--redo`, which removes the accessor, is interrupted with exit code 130, leaving TS-0003's verdict unchanged and `SL/campaign/reach/revalidation.json`, the next synthesis adds `## Revalidation after --redo`, before TS-0004 is synthesized again, and deletes that record; the third revalidates TS-0003 too, under `## Revalidation after TS-0004_simplex_cert_mock`; the last check builds every scaffold. The card on two bases gives two scaffolds, `simplex_cert_mock_ts0004_statelens` and `simplex_cert_mock_faulty_net_ts0004_statelens`, two reports and two diffs, `TS-0004_simplex_cert_mock.*` and `TS-0004_simplex_cert_mock_faulty_net.*`, two `pub mod` lines in `target_states/mod.rs`, a `run` line each, and the second pair revalidates the first, whose report gains `## Revalidation after TS-0004_simplex_cert_mock_faulty_net`; the second command prints two `skipped: TS-0004 on <base> was synthesized as <scaffold>; use --redo` lines, one per pair; the `--redo` of one pair moves `TS-0004_simplex_cert_mock.*` to `TS-0004_simplex_cert_mock.<stamp>.*`, leaves the other pair's thin target and `[[bin]]` block in place, and its report gains `## Revalidation after --redo`. |
+| AC-25 | Deferred until the marshal drivers have runner adapters (D69); until then synthesis refuses every marshal base, and only the differential test applies. The procedure of AC-24 for TS-0001 and TS-0002 on a `marshal` checkout, with `--profile marshal` and the pairs (TS-0001, `marshal_e2e_standard_deferred_cert_mock_twins_split_header`) and (TS-0002, `marshal_e2e_standard_deferred_cert_mock_poison`), the families of PRD section 11.4, selected as `--match <base>_ts0001 --match <base>_ts0002`; the card on two bases uses `marshal_e2e_standard_deferred_cert_mock_poison` and `marshal_e2e_coding_cert_mock_poison`. Then a stub scaffold of TS-0001 that builds `E7`'s witness while R's certification is outstanding, and passes it to `Stages::handoff` only after that certification has completed. Then the differential test of section 18.10.1: `SL/scripts/differential.sh` from the checkout, with `DIFFERENTIAL_SCRATCH` naming a directory with 25 GB free. | As AC-24 for the real agent. TS-0001's report shows the pending-state handoff check: `handoff holds`, with `E7` witnessed by an `exact` observable that shows R's certification still outstanding at the handoff instant. The stub's report shows `handoff lost`, with a `mark=` greater than `E7`'s `read=` + 1, and PARTIAL 6/7. The differential test prints the table of section 18.10.1 and `differential: PASSED`: the fuzz package's clippy, rustfmt and tests pass with the widened visibility, the 30 tests listed are the 30 expected, every positive test has equal digests and `REACHED n/n` with no annotation, and every negative control is caught, by the digest or by the validator's verdict of a replay that ran to its digest line (no row carries `(FAILED)`, `(NOT CAUGHT)` or `(ERROR)`); the worktree and its target directory are gone afterwards, the logs stay in `<scratch>/run.XXXXXX/logs/`, and `git status` of the checkout is as before. The test compares the settled state after `finish` of hand-written prefixes; it establishes neither state equality at the handoff mark nor anything about an agent's scaffold. |
 | AC-26 | Two canonical replays of each scaffold of AC-24 and AC-25. Stub scaffolds, one per witness rejection rule of section 18.7: an `as Ek` value that differs, and one that `Ek` bound to `?`; an entity missing from `bind=`; an `exact` key without an entity of the line; positions against the History's order; a foreign `run`; a relation across a `restart` line whose incarnation the line does not bind; an `intrinsic` witness with a wrong `me`, one citing two observations, and one giving a view a value; a `construction` witness for `En`, and one for an event whose actor is not `harness`. Two stubs of an ordered pair with presence-only evidence: one for the later stage, and one for the earlier stage while the later is stamped. A stub that performs two harness actions A and then B, with no probe observation between them, for events the History orders A before B, each with a `construction` witness; and one that performs B before A. A stub that restarts one replica twice with no probe observation between the restarts, and whose later line, related by an `as Ek` to a stage before both restarts, names the incarnation the first restart began while its evidence lies after the second. Stubs with a vacuous control, a `weak` control, no `Control:` line, and `Control: n/a` with an `intrinsic` witness. A stub that prints `[statelens-reach]` itself, and one that prints `[statelens-scaffold]` itself. Stubs whose prefix raises an invariant's panic, panics on a line the pair's diff added or moved, makes a sanitizer report in an accessor it added, and fails in the control run only. A stub agent that runs its scaffold and leaves a crash file. A stub with an empty knob domain. A stub with a missed stage. A stub that fills the trace to `TRACE_CAP`, changes the state past the cap, and reads in the handoff the latest observation the trace kept. A stub whose canonical replay fails, with synthesis interrupted (`SIGINT`) during the control replay. | The two replays print the same stage lines. Each rejection stub is UNVERIFIED with `witness rejected: <its rule>`, each presence-only stub UNVERIFIED with `unverifiable (no position)`, and each control stub UNVERIFIED. The two actions get distinct positions, A's smaller, and both stages hold in the first stub; the second is UNVERIFIED with `witness rejected: order`. The two restarts print distinct `seq=` values, so two incarnations, and the stub that names the first is UNVERIFIED with `witness rejected: incarnation`. The printing stubs are vetoed. Each failing stub is CRASH (finding candidate), with refinement stopped after that attempt and its crash file in `attempt-<a>/`; `just run <scaffold>` reproduces the first three, the second and third carry `location in TS-NNNN diff`, and the fourth's `replay` line sets `STATELENS_REACH_CONTROL=1`. The stray crash file is in `attempt-<a>/swept/`, and that attempt is CRASH (finding candidate) with `stray failure`. The empty domain is SCAFFOLD ERROR, and refinement continues. The missed stage prints `handoff lost`, `reach k/n` and then `done`. The truncation stub prints `truncated seq=<s>` and is UNVERIFIED with `unverifiable (trace truncated)`; the same lines with `En` held, `read=` at or after `<s>` and `handoff holds` are UNVERIFIED too. The interrupted synthesis exits with code 130 with the pair's edits restored, and `TS-NNNN_<base>/attempt-<a>/` holds the canonical crash file and log, `version.diff`, which `git apply --check` accepts on the tree before the pair, `version/`, and `interrupted.txt`, which names the pair, the control replay as the step that stopped and gives the canonical replay's `run` and `replay` lines. |
-| AC-27 | On a checkout of AC-24: `just fuzz simplex --parallel --tmux --state-reaching --state-targets TS-0004 --fuzz-targets "simplex_cert_*" --skip-campaign`; the same with `--fuzz-targets simplex_cert_mock`, with `--fuzz-targets "simplex_cert_mock_twins_*"`, with `--state-targets "TS-000*"` and with `--fuzz-targets "nothing*"`; then, on the same checkout after an edit to `consensus/fuzz/core/src/lib.rs` that still compiles (a comment line), as a merged upstream fix leaves one, the first command with `--skip-synthesis` added and the first command as it is; then `just fuzz simplex --bogus`, `just fuzz simplex --state-targets TS-0003`, `just fuzz simplex --skip-synthesis`, `just fuzz simplex --state-reaching --fuzz-targets TS-0003`, `just fuzz simplex --state-reaching --state-targets "simplex_cert_*"`, `just fuzz qmdb --state-reaching` and `just fuzz simplex_cert_mock --state-reaching`. | The first opens the session `statelens-simplex-reach` with one window per `simplex_cert_*` base of TS-0004 whose scaffold built, 20 pairs at `HEAD`, and none for a variant, each running `just run <scaffold>` with no added argument, the message saying `20 scaffold(s), one tmux window each`; `simplex_cert_mock` opens one window, `simplex_cert_mock_ts0004`; `simplex_cert_mock_twins_*` opens eight, `simplex_cert_mock_twins_campaign_ts0004` to `simplex_cert_mock_twins_mutator_state_cov_ts0004`; `TS-000*` opens one window per scaffold of TS-0003's and TS-0004's pairs; `nothing*` fails before synthesis. On the edited checkout, the command with `--skip-synthesis` runs no `synthesize` and opens the session with one window per scaffold of TS-0004 already built on a `simplex_cert_*` base, whatever its verdict, each running `just run <scaffold>`; the command without it stops before any window opens, `synthesize` exiting with code 2 (`the checkout differs from the synthesis baseline: consensus/fuzz/core/src/lib.rs; use a fresh clone`). The last seven exit with code 1, `just fuzz simplex --skip-synthesis` with `just fuzz: --skip-synthesis needs --state-reaching` and nothing listed or run. |
-| AC-28 | `just clean --yes` on a checkout of AC-24 or AC-25; then `just campaign` on a checkout that has `<package>/src/target_states/`. For a scaffold that runs a real engine under a Byzantine identity (a non-empty `set_compromised` in Shape B, or a Shape A base whose hook compromises one), a canonical replay with `STATELENS_BYZANTINE=panic`. | After `clean` every path in its scope, the fuzz packages included, matches `HEAD`, and no `target_states/` or thin target is left. The campaign exits with code 2. The replay panics with `[statelens][BYZANTINE]`; with no such scaffold, this check is recorded as not applicable. |
+| AC-27 | On a checkout of AC-24: `just fuzz simplex --parallel --tmux --state-reaching --state-targets TS-0004 --fuzz-targets "simplex_cert_*" --skip-campaign`; the same with `--fuzz-targets simplex_cert_mock`, with `--fuzz-targets "simplex_cert_mock_twins_*"`, with `--state-targets "TS-000*"` and with `--fuzz-targets "nothing*"`; then, on the same checkout after an edit to `consensus/fuzz/core/src/lib.rs` that still compiles (a comment line), as a merged upstream fix leaves one, the first command with `--skip-synthesis` added and the first command as it is; then `just fuzz simplex --bogus`, `just fuzz simplex --state-targets TS-0003`, `just fuzz simplex --skip-synthesis`, `just fuzz simplex --state-reaching --fuzz-targets TS-0003`, `just fuzz simplex --state-reaching --state-targets "simplex_cert_*"`, `just fuzz qmdb --state-reaching` and `just fuzz simplex_cert_mock --state-reaching`. | The first opens the session `statelens-simplex-reach` with one window per `simplex_cert_*` base of TS-0004 whose scaffold built, 16 pairs at `HEAD` (the bases with a runner adapter), and none for a variant, each running `just run <scaffold>` with no added argument, the message saying `20 scaffold(s), one tmux window each`; `simplex_cert_mock` opens one window, `simplex_cert_mock_ts0004`; `simplex_cert_mock_twins_*` opens eight, `simplex_cert_mock_twins_campaign_ts0004` to `simplex_cert_mock_twins_mutator_state_cov_ts0004`; `TS-000*` opens one window per scaffold of TS-0003's and TS-0004's pairs; `nothing*` fails before synthesis. On the edited checkout, the command with `--skip-synthesis` runs no `synthesize` and opens the session with one window per scaffold of TS-0004 already built on a `simplex_cert_*` base, whatever its verdict, each running `just run <scaffold>`; the command without it stops before any window opens, `synthesize` exiting with code 2 (`the checkout differs from the synthesis baseline: consensus/fuzz/core/src/lib.rs; use a fresh clone`). The last seven exit with code 1, `just fuzz simplex --skip-synthesis` with `just fuzz: --skip-synthesis needs --state-reaching` and nothing listed or run. |
+| AC-28 | `just clean --yes` on a checkout of AC-24 or AC-25; then `just campaign` on a checkout that has `<package>/src/target_states/`. For a scaffold whose base runs a real engine under a Byzantine identity (a Twins base, whose twin pair the runner starts at the release), a canonical replay with `STATELENS_BYZANTINE=panic`. | After `clean` every path in its scope, the fuzz packages included, matches `HEAD`, and no `target_states/` or thin target is left. The campaign exits with code 2. The replay panics with `[statelens][BYZANTINE]`; with no such scaffold, this check is recorded as not applicable. |
+| AC-29 | In the fuzz harness: `cargo +nightly-2026-06-21 fmt -p commonware-consensus-fuzz-core -p commonware-consensus-fuzz-simplex -- --check`, the same packages' `clippy --all-targets --all-features -- -D warnings`, and `cargo +stable nextest run -p commonware-consensus-fuzz-core -p commonware-consensus-fuzz-simplex`. In `SL/`: `just check-scripts`, whose `Synthesize` and `ReachCheck` tests cover the trusted continuation with stub agents and builds. | Everything passes. The harness tests show the drivers' ordinary runs unchanged (the auditor states of section 18.1), the base's actors running at the release and at the end for every supported driver family, a missing or finished required actor failing the check, and every change of a meddling prefix reverted at the release. The script tests show the thin target written and restored by the script, the driver-code, `set_compromised` and missing-`prefix` vetoes, the refusal of a base without a runner adapter (exit code 1) and of a harness without the hook API (exit code 2), the `actors` and `release` lines parsed, NO CONTINUATION for a replay without them or with a failed one, never kept, the largest replay with `STATELENS_REACH_LARGEST=1`, and a standing scaffold of the old contract reported and not revalidated. |
 | R-TS-NF-3 | With the same duration and flags, each scaffold and its base's variant, in the same instrumented checkout. | The exec/s values are reported side by side. |
 
 #### 18.10.1 Differential test of the primitives (AC-25)
@@ -6645,6 +6691,24 @@ digest comparison cannot see a regression of that system: only side A's referenc
 assertions (`finish` and the scenario's own `assert_eq!`s) can.
 
 ### 18.11 Known limitations
+
+- The trusted continuation (D69) re-bases the base's view-indexed faults and progress targets
+  on the release, but not a Twins base's scripted rounds: their leaders apply from view 1, also
+  during the prefix, and their split from the release, so a long prefix consumes them and the
+  twin pair then runs with every link to both halves. Offsetting the scenario would need an
+  elector the honest engines cannot be built with before the release is known.
+- A replica the prefix restarts, and one the release restarts, runs behind the runner's gate and
+  recorders but without the base's happens-before capture and node subscriber, so its trace
+  events go unattributed for the `_hb` bases.
+- The audited Standard entry samples no rejected certification under a prefix, and the actor
+  check allows no scheduled crash of B, since no supported base crashes B; a base that does
+  needs that allowance in its adapter.
+- The actor check is about execution and task lifetime, not activity: a Disrupter whose faulty
+  views all fall outside the continuation, or a twin half the split routes to nobody, passes
+  it. The harness's per-actor send counters (`byzantine.rs`) measure activity in its own tests.
+- Every marshal base, and the simplex Chaos, Chaos-Twins, ByzzFuzz and notarize-omission bases,
+  have no runner adapter yet, so synthesis refuses them; scaffolds written before the trusted
+  continuation are not migrated.
 
 - `--rebaseline` does not record an operator edit of a standing scaffold module, or of a file a
   pair's diff changed, as that pair's version, so a `--redo` of the pair stops with "the diff of
@@ -8068,40 +8132,43 @@ A variant clears the compromised set after its driver returns, as every variant 
 
 ### B.6 A scaffold's thin target
 
-The agent writes `<package>/fuzz_targets/<base>_tsNNNN_statelens.rs` (section 18.7). It is
-its base's file with two changes: the body of its `fuzz_target!` is exactly three
-statements, `reset();`, the call of the module's `fuzz` with the base entry's generic
-arguments, and `clear_compromised();`, with the runtime's path written in full; and the `use`
-lines name the module instead of the base's entry. The closure parameter is the base's, so
-the input type is too. For a scaffold of TS-0003 on `simplex_cert_mock_chaos`, the pair whose
-module is `ts0003_simplex_cert_mock_chaos`:
+The script writes `<package>/fuzz_targets/<base>_tsNNNN_statelens.rs` before every attempt
+(section 18.6.2 step 2.1), from the base's file: the one statement of its `fuzz_target!`, a
+call of a hooked entry on the closure parameter, gives the entry and its generic arguments,
+and the thin target calls the trusted entry of that entry (section 18.7, Trusted
+continuation) with the same arguments, the module's `prefix` instantiated with the first, and
+the helper's `Watch`, between the runtime's `reset` and `clear_compromised`, with the runtime's
+path written in full. The `use` line names the generic arguments, the trusted entry,
+`target_states` and the closure parameter's type. For TS-0004 on `simplex_cert_mock`:
 
 ~~~rust
 #![no_main]
 
+// The thin target of TS-0004 on simplex_cert_mock, written by `statelens.py synthesize` (SPEC
+// section 18.7): the base's trusted entry runs the scaffold's prefix, watched by the
+// helper. Never edit it; synthesis restores it.
 #[cfg(feature = "mocks")]
 mod fuzz {
-    use commonware_consensus_fuzz_simplex::{
-        Chaos, CodeCoverage, FuzzInput, SimplexCertificateMock,
-        target_states::ts0003_simplex_cert_mock_chaos,
-    };
+    use commonware_consensus_fuzz_simplex::{CodeCoverage, FuzzInput, SimplexCertificateMock, Standard, fuzz_with_prefix, target_states};
     use libfuzzer_sys::fuzz_target;
 
     fuzz_target!(|input: FuzzInput| {
         commonware_consensus::simplex::statelens::reset();
-        ts0003_simplex_cert_mock_chaos::fuzz::<SimplexCertificateMock, Chaos, CodeCoverage>(input);
+        fuzz_with_prefix::<SimplexCertificateMock, Standard, CodeCoverage, _, _>(
+            input,
+            target_states::ts0004_simplex_cert_mock::prefix::<SimplexCertificateMock>(),
+            target_states::Watch,
+        );
         commonware_consensus::simplex::statelens::clear_compromised();
     });
 }
 ~~~
 
-The script checks that the pair's thin target exists and that no new `*_ts0003_statelens.rs`
-of another base appeared, since a sibling pair's thin target is written by that pair, that its
-one `fuzz_target!` matches the opening line of B.1 with the base's closure parameter, and that
-the body is these three statements, the module's name being the pair's; after every attempt it
-checks that body in every scaffold's thin target, because guard 3 exempts only thin targets of
-this shape (section 18.6.2 step 2.4). The cryptography check
-of D15 then reads `fuzz::<SimplexCertificateMock` as it does in a variant.
+Guard 2 restores the pair's thin target to this text after an attempt that changed it, and
+step 2.4 restores any other scaffold thin target that changed, appeared or went away since
+`S0`. Guard 3 lets every scaffold thin target call `reset` and `clear_compromised`. The
+cryptography check of D15 then reads `fuzz_with_prefix::<SimplexCertificateMock` as it reads
+`fuzz::<SimplexCertificateMock` in a variant.
 
 ---
 
@@ -8277,16 +8344,25 @@ The scaffold helper template of section 18.7.
 //! scaffold module, in a checkout a campaign instrumented. It is never compiled on a
 //! committed branch.
 //!
-//! A scaffold splits and picks its knobs ([Knobs]), opens its stages
-//! ([Stages::new]) and checks its budget ([Stages::budget]) before any engine
-//! starts. It records each stage `E1` to `E(n-1)` through a [Witness]
-//! ([Stages::held]) or another outcome, and the last one, `En`, through
-//! [Stages::handoff], which decides the handoff. The helper takes every position
-//! of the event sequence itself: a witness read, an entry a recording wrapper
-//! stamps ([stamp]), an action ([Witness::act]), a restart boundary ([restart]),
-//! and the start and the mark of the handoff. It prints the lines the reach check
-//! parses, adds the feature of every held stage, and raises the only errors
-//! attributed to a scaffold, all before any engine starts.
+//! A scaffold module is a prefix of the trusted continuation
+//! (`commonware_consensus_fuzz_core::continuation`): its `prefix()` returns a `Prefix`
+//! whose `plan` splits and picks the knobs ([Knobs]), opens the stages
+//! ([Stages::new]) and returns the budget ([Stages::budget]) before the runtime
+//! starts, and whose `run` drives the History through the runner's `PrefixContext`.
+//! It records each stage `E1` to `E(n-1)` through a [Witness] ([Stages::held]) or
+//! another outcome, and the last one, `En`, through [Stages::handoff], which decides
+//! the handoff; `run` then returns, and the base's own code continues. The helper
+//! takes every position of the event sequence itself: a witness read, an entry a
+//! trusted recorder took ([cite]) or a query names ([stamp]), an action
+//! ([Witness::act]), a restart boundary ([restart]), and the start and the mark of
+//! the handoff. It prints the lines the reach check parses, adds the feature of
+//! every held stage, and raises the only errors attributed to a scaffold, all before
+//! any engine starts.
+//!
+//! [Watch] is the runner's observer, which only the thin target the script writes
+//! passes: it stamps what the runner's recorders record, publishes the compromised
+//! identity, prints the `release` line and the `actors` lines of the runner's actor
+//! check, and prints `done` after the base's last oracle.
 //!
 //! Once the trace drops an observation at its cap, what it holds from that position
 //! on is incomplete, so the helper prints a `truncated` line with the position, at
@@ -8296,15 +8372,20 @@ The scaffold helper template of section 18.7.
 //! Environment switches, each read once per process:
 //! - `STATELENS_REACH=1` prints the `[statelens-reach]` lines on stderr.
 //! - `STATELENS_REACH_CONTROL=1` makes [control] true: the control run.
+//! - `STATELENS_REACH_LARGEST=1` makes the runner run the base's largest progress
+//!   budget: the extra reach replay.
 
 // A scaffold module is a child of this one, and a child module can use every
 // private item of its parent. The helper's code is therefore in a private module of
 // its own, `imp`, whose private items no scaffold can reach, and this one
 // re-exports its API.
-pub use imp::{Knobs, Stages, Stamp, Witness, control, restart, stamp};
+pub use imp::{Knobs, Stages, Stamp, Watch, Witness, cite, control, restart, stamp};
 
 mod imp {
     use commonware_consensus::simplex::statelens::{self, Seen};
+    use commonware_consensus_fuzz_core::continuation::{
+        self as runner, ActorCheck, Observer, Release,
+    };
     use std::{cell::RefCell, fmt, future::Future, io::Write as _, sync::OnceLock, time::Duration};
 
     /// Most knobs a scaffold splits.
@@ -8324,6 +8405,15 @@ mod imp {
     fn reach() -> bool {
         static REACH: OnceLock<bool> = OnceLock::new();
         *REACH.get_or_init(|| std::env::var("STATELENS_REACH").is_ok_and(|value| value == "1"))
+    }
+
+    /// Whether `STATELENS_REACH_LARGEST=1`, read once: the extra replay, which runs the
+    /// base's largest progress budget.
+    fn largest() -> bool {
+        static LARGEST: OnceLock<bool> = OnceLock::new();
+        *LARGEST.get_or_init(|| {
+            std::env::var("STATELENS_REACH_LARGEST").is_ok_and(|value| value == "1")
+        })
     }
 
     /// Whether `STATELENS_REACH_CONTROL=1`, read once: the control run, in which the
@@ -8526,15 +8616,36 @@ mod imp {
         }
     }
 
-    /// Stamps an entry a recording wrapper records, as it records it: takes a
+    /// Stamps a query the prefix makes now, such as the absence of an entry: takes a
     /// position, prints the `entry` line with it and returns it. Returns a stamp of
     /// position 0 and prints nothing while not watching.
     ///
-    /// `observable` names what the wrapper records, `key` the entities the entry is
-    /// keyed by, `name=value,...`, and `value` the value it records.
+    /// `observable` names what the query reads, `key` the entities it is keyed by,
+    /// `name=value,...`, and `value` the value it reads.
     pub fn stamp(observable: &str, key: &str, value: &str) -> Stamp {
         let seq = position();
         let run = statelens::current_run();
+        if seq != 0 {
+            emit(
+                &card(),
+                &format!(
+                    "entry {}[{}]={} seq={seq}",
+                    field_name(observable),
+                    field_key(key),
+                    field_value(value)
+                ),
+            );
+        }
+        Stamp { seq, run }
+    }
+
+    /// Cites an entry one of the runner's recorders recorded: prints the `entry` line
+    /// with the position the recorder took when it recorded it, and returns that
+    /// position as a [Stamp] for [Witness::exact]. `observable`, `key` and `value`
+    /// describe the entry as for [stamp]. An entry recorded while nothing watched has
+    /// position 0, prints nothing, and gives no position.
+    pub fn cite(observable: &str, key: &str, value: &str, recorded: runner::Stamp) -> Stamp {
+        let (seq, run) = (recorded.seq(), recorded.run());
         if seq != 0 {
             emit(
                 &card(),
@@ -8779,19 +8890,12 @@ mod imp {
             Self { _private: () }
         }
 
-        /// Takes the knobs, so none is picked later, and checks the budget before any
-        /// engine starts: `prefix`, the stage deadlines plus the largest release
-        /// delay, exceeding `runtime`, the runtime deadline, is a scaffold error.
-        pub fn budget(&self, knobs: Knobs, prefix: Duration, runtime: Duration) {
+        /// Takes the knobs, so none is picked later, and returns the budget the prefix
+        /// asks of the runner: `prefix`, the sum of the stage deadlines, and `release`,
+        /// the release delay `d`. The runner's deadline is the base's plus both.
+        pub fn budget(&self, knobs: Knobs, prefix: Duration, release: Duration) -> runner::Budget {
             drop(knobs);
-            if prefix > runtime {
-                scaffold_error(
-                    &card(),
-                    format_args!(
-                        "budget: the prefix {prefix:?} exceeds the runtime deadline {runtime:?}"
-                    ),
-                );
-            }
+            runner::Budget { prefix, release }
         }
 
         /// Stage `k` held: prints its record, adds its feature, moves
@@ -8911,15 +9015,81 @@ mod imp {
             );
         }
 
-        /// Shape A: registers the evaluation of the stages, which the panic hook runs
-        /// over the trace so far.
+        /// Shape A: registers the evaluation of the stages, which [Watch] runs after
+        /// the base's last oracle, and the panic hook over the trace so far.
         pub fn on_panic(&mut self, evaluate: fn(&mut Self)) {
             STATE.with(|state| state.borrow_mut().evaluate = Some(evaluate));
         }
 
-        /// Prints `done`, after the last oracle.
+        /// Prints `done`. [Watch] prints it after the base's last oracle; a harness that
+        /// runs the helper without the runner, as the differential test does, calls this.
         pub fn done(&mut self) {
             emit(&card(), "done");
+        }
+    }
+
+    /// The runner's observer: the trusted half of a scaffold, which the thin target
+    /// the script writes passes to the base's trusted entry.
+    pub struct Watch;
+
+    impl Observer for Watch {
+        fn position(&self) -> (u64, u32) {
+            (position(), statelens::current_run())
+        }
+
+        fn compromised(&self, identities: &[usize]) {
+            statelens::set_compromised(identities.iter().copied());
+        }
+
+        fn actors(&self, check: &ActorCheck) {
+            emit(&card(), &format!("actors {check}"));
+        }
+
+        fn released(&self, release: &Release) {
+            let list = |items: Vec<String>| {
+                if items.is_empty() {
+                    "-".to_string()
+                } else {
+                    items.join(",")
+                }
+            };
+            let indices = |items: &[usize]| list(items.iter().map(usize::to_string).collect());
+            let links = list(
+                release
+                    .links
+                    .iter()
+                    .map(|(from, to)| format!("{from}>{to}"))
+                    .collect(),
+            );
+            emit(
+                &card(),
+                &format!(
+                    "release base={} gates={} delivered={} blocks={} links={links} \
+                     latencies={} restarted={}",
+                    release.base,
+                    indices(&release.gates),
+                    release.delivered,
+                    release.blocks,
+                    indices(&release.latencies),
+                    indices(&release.restarted)
+                ),
+            );
+        }
+
+        fn done(&self) {
+            // Shape A: the stages are evaluated over the trace of the whole run.
+            let evaluate = STATE.with(|state| {
+                let state = state.borrow();
+                state.evaluate.filter(|_| !state.handed_off)
+            });
+            if let Some(evaluate) = evaluate {
+                evaluate(&mut Stages { _private: () });
+            }
+            emit(&card(), "done");
+        }
+
+        fn largest(&self) -> bool {
+            largest()
         }
     }
 
@@ -9097,7 +9267,8 @@ mod imp {
             FEATURES.take();
             let knobs = Knobs::split(card, &mut Vec::new(), 0);
             let stages = Stages::new(card, n);
-            stages.budget(knobs, Duration::ZERO, Duration::ZERO);
+            let budget = stages.budget(knobs, Duration::ZERO, Duration::from_secs(2));
+            assert_eq!(budget.release, Duration::from_secs(2));
             stages
         }
 
@@ -9220,6 +9391,32 @@ mod imp {
             );
             assert!(find(&lines, "reach 1/2 control=0").is_some(), "{lines:#?}");
             assert_eq!(FEATURES.take(), vec![1]);
+        }
+
+        #[test]
+        fn test_the_observer_prints_cited_entries_and_actor_lines() {
+            let mut stages = open("TS-9006", 1);
+            let recorded = runner::Stamp::now(&Watch);
+            let seq = recorded.seq();
+            assert_ne!(seq, 0, "a recorder takes a position while the stages watch");
+            let cited = cite("deliver", "R=1, v=2", "notarize", recorded);
+            assert_eq!(cited.seq(), seq);
+            stages.handoff(|| Some(Witness::exact("R=1@E1", &[("deliver", "R=1", "x", Some(cited))])));
+            let check = ActorCheck {
+                at: "release",
+                actors: Vec::new(),
+            };
+            Watch.actors(&check);
+            Watch.released(&Release::default());
+            Watch.done();
+            let lines = LINES.take();
+            assert!(lines.contains(&format!("entry deliver[R=1,v=2]=notarize seq={seq}")));
+            assert!(lines.contains(&"actors release ok -".to_string()), "{lines:#?}");
+            assert!(lines.contains(
+                &"release base=0 gates=- delivered=0 blocks=0 links=- latencies=- restarted=-"
+                    .to_string()
+            ));
+            assert_eq!(lines.last().map(String::as_str), Some("done"));
         }
 
         #[test]

@@ -373,6 +373,20 @@ base, that scripts the card's history, leaves the values the history does not fi
 as knobs, and reports which events of the history it reached. qmdb is refused. SPEC.md chapter
 18 has the details.
 
+A scaffold is only the prefix that builds the state. The base's own driver runs it through a
+hook point, the trusted continuation: the driver starts the network and the honest replicas,
+runs the prefix, then takes back everything it lent it, reverts what it changed (held messages,
+links, latencies, crashed replicas), starts the base's own Byzantine actors (its Disrupter, or
+its twin pair), and runs its own fault schedule, liveness wait and oracles in the same runtime.
+So a scaffold fuzzes the base's fault model, never a copy of it. Synthesis needs a fuzz harness
+with that hook point and refuses one without it ("the simplex fuzz harness predates the trusted
+continuation ...": merge the harness, `just clean`, run a new campaign). Today the hook point
+exists for the simplex Standard family (`simplex_cert_mock`, `_state_cov`, `_hb`,
+`_hb_state_cov`, `_faulty_net`, `_byzantine_first_leader`, `_audit`) and the simplex Twins bases
+(`simplex_cert_mock_twins_campaign` and `_twins_mutator` with their `_audit`, `_hb` and
+`_state_cov` siblings, and `simplex_cert_mock_shuffled_twins_mutator`); synthesis refuses every
+other base, each marshal base included, with a `refused` line.
+
 ### Cards
 
 ```
@@ -421,8 +435,8 @@ In the checkout a campaign instrumented, once it ended `READY` or `PANIC (tests)
 ```
 just synthesize                                         # every card of the campaign's profile, on every base
 just synthesize --match TS-0003 --match TS-0004         # these cards, on every base
-just synthesize --match "simplex_cert_mock_chaos*"      # every card, on these bases only
-just synthesize --match simplex_cert_mock_chaos_ts0003  # TS-0003 on one base
+just synthesize --match "simplex_cert_mock_twins_*"     # every card, on these bases only
+just synthesize --match simplex_cert_mock_twins_campaign_ts0003  # TS-0003 on one base
 just synthesize --match TS-0003 --redo                  # undo TS-0003's scaffolds and write them again
 just synthesize --agent codex
 ```
@@ -442,21 +456,30 @@ campaign's commit. A commit that also touches anything else, `consensus/`, `runt
 manifest or `Cargo.lock`, is refused as before; so is a `HEAD` that does not descend from the
 base, or one past it by commits that change nothing.
 
-The unit of synthesis is a pair of a card and a base, one of the profile's targets: for
-simplex all but `simplex_cert_mock_mallory`, whose custom mutator a scaffold cannot reuse (20
-bases), and for marshal every target (13). A card is synthesized on every base unless `--match`
-names some: a `TS-NNNN` pattern names cards, any other pattern names bases, by any name a
-variant or scaffold of theirs has, so `simplex_cert_mock_chaos_ts0003` pins TS-0003 to one
-base and `"simplex_cert_mock_twins_*"` gives each card eight pairs. Pairs run one at a time, and
-the agent chooses no base. For each pair, the agent writes a module,
-`<package>/src/target_states/tsNNNN_<base>.rs`, and a thin target, `<base>_tsNNNN_statelens`,
-whose name carries the base. The script writes `target_states/mod.rs`, the helper through which
-a scaffold reports its stages, its declaration and the `[[bin]]` block, and builds. The
-scaffold keeps its base's input type, `run` recipe and libFuzzer flags, and has no seed corpus:
-the empty input decodes to the card's source history, and the script replays it with
-`STATELENS_REACH=1`, then once more without one harness event of the history, the control run,
-which shows that the state depends on that history. The verdict and its stage lines drive up to
-three further attempts. The agent never runs its scaffold; only these replays judge it.
+The unit of synthesis is a pair of a card and a base, one of the profile's targets with a
+hook point (16 simplex bases). A card is synthesized on every such base unless `--match` names
+some: a `TS-NNNN` pattern names cards, any other pattern names bases, by any name a variant or
+scaffold of theirs has, so `simplex_cert_mock_twins_campaign_ts0003` pins TS-0003 to one base
+and `"simplex_cert_mock_twins_*"` gives each card eight pairs. Pairs run one at a time, and the
+agent chooses no base. For each pair, the agent writes only a module,
+`<package>/src/target_states/tsNNNN_<base>.rs`: a `prefix` that acts through the runner's
+context (it signs and sends as the compromised identity on that identity's own channels, holds
+and passes messages to honest replicas, reads the runner's recorders, and changes links,
+latencies or replicas only in ways the release reverts). The script vetoes a module with
+driver-level code: a runtime, a base driver, an engine spawn, a Disrupter, network setup, a
+deadline, an oracle or `set_compromised`, and restores any edit to the rest of the fuzz
+package, the trusted harness that runs the continuation. It writes the thin target `<base>_tsNNNN_statelens`
+itself, the base's trusted entry with the prefix, and `target_states/mod.rs`, the helper
+through which a scaffold reports its stages, the declaration and the `[[bin]]` block, and
+builds. The scaffold keeps its base's input type, `run` recipe and libFuzzer flags, and has no
+seed corpus: the empty input decodes to the card's source history, and the script replays it
+with `STATELENS_REACH=1`, then once more without one harness event of the history, the control
+run, which shows that the state depends on that history, and once more with the base's
+largest progress budget (`STATELENS_REACH_LARGEST=1`), which shows that the continuation can
+finish it. The verdict and its stage lines drive up to three further attempts. The agent never
+runs its scaffold; only these replays judge it. Scaffolds written before the trusted
+continuation are not migrated: synthesis reports each as needing a new campaign or a `--redo`
+of its card.
 
 Each pair costs up to four runs of the agent with their builds and replays, a test gate when
 the kept version edited the profile's code, and, because the modules are public siblings in
@@ -540,9 +563,10 @@ finding stays reproducible after GATE FAILED restores the pair's edits.
 | `UNVERIFIED k/n` | No event was missed, but one could not be verified, a witness was rejected, or the control was vacuous, weak or missing |
 | `PARTIAL k/n` | An event after the first was missed, or the state was lost before the handoff; `k` counts the events held before it |
 | `UNREACHED 0/n` | The first event was missed: the setup is wrong, or a capability is missing (`cannot:`) |
-| `NO REPORT` | The scaffold printed no report: it did not use the helper, or returned before its base's oracles |
+| `NO REPORT` | The scaffold printed no report: it did not use the helper, or never handed off |
 | `CRASH (finding candidate)` | A replay failed: a panic, a violated invariant, a harness oracle, a sanitizer report, out of memory, a leak or a timeout; or a run of the agent left a crash file (`stray failure`) |
 | `SCAFFOLD ERROR` | The helper rejected the scaffold (`[statelens-scaffold]`) before any engine started |
+| `NO CONTINUATION` | A replay ran to its end without the runner's `actors` lines, or with a failed actor check: the base's Byzantine actors did not run after the release. Never kept |
 | `NOT BUILT` | No version passed the vetoes and built, or the kept version broke another standing scaffold (`breaks TS-MMMM_<b>`, the card's other pairs included); the pair's edits are restored |
 | `GATE FAILED` | The kept version made a test of the gate fail; its edits are restored |
 
@@ -551,8 +575,11 @@ differed), `control missing`, `missing: <capability>`, `location in TS-NNNN diff
 `stray failure` beside another verdict when a later attempt left a crash file but was not
 built; the console line then names the file.
 
-Every scaffold that builds is fuzzed, whatever its verdict: only NOT BUILT and GATE FAILED
-leave a pair without one. A verdict judges one input; how often fuzzed inputs reach the state
+Every scaffold that builds is fuzzed, whatever its verdict: only NOT BUILT, GATE FAILED and
+NO CONTINUATION, which is never kept, leave a pair without one. Each replay also shows the
+runner's `release` line (what the release reverted, and the view the base's faults were
+re-based on) and its `actors release` and `actors end` lines (each of the base's Byzantine
+actors and whether it runs). A verdict judges one input; how often fuzzed inputs reach the state
 shows only when you fuzz. A CRASH (finding candidate) stops the pair's refinement, and that
 version is kept and fuzzed as it is, never replaced by one that avoids the failure. Triage it
 like any crash (see Investigating a panic): where it failed is context only, and
@@ -567,7 +594,6 @@ just fuzz simplex --parallel --tmux --state-reaching --state-targets TS-0004 --f
 just fuzz simplex --tmux --state-reaching --state-targets TS-0003 --skip-campaign
 just fuzz simplex --tmux --state-reaching --skip-campaign --skip-synthesis --state-targets "TS-000*" --fuzz-targets simplex_cert_mock -- -max_total_time=7200
 just fuzz simplex --state-reaching --state-targets TS-0004 --fuzz-targets "simplex_cert_mock_twins_*" --invariants "simplex/INV-0001,simplex/INV-0002" -- -max_total_time=3600
-just fuzz marshal --parallel --state-reaching -- -max_total_time=600
 just run simplex_cert_mock_ts0004_statelens -- -fork=4
 ```
 
@@ -579,8 +605,8 @@ scaffold without `_statelens` (`simplex_cert_mock_ts0004`). `--state-targets` na
 (`TS-0003`) and `--fuzz-targets` names the bases the scaffolds are written on, by any name a
 variant or scaffold of theirs has; both may be repeated, and a pattern of the other flag's form
 is refused, as is `--state-targets` without `--state-reaching`. Without `--fuzz-targets` every
-base of the profile is used, so `just fuzz simplex --tmux --state-reaching` with three cards
-opens up to 60 windows. The first command above opens one window per `simplex_cert_*` base of
+base of the profile that has a hook point is used, so `just fuzz simplex --tmux
+--state-reaching` with three cards opens up to 48 windows. The first command above opens one window per `simplex_cert_*` base of
 TS-0004; the fourth synthesizes TS-0004 on each of the eight `simplex_cert_mock_twins_*` bases
 and runs the eight scaffolds in turn, each with `-max_total_time=3600`:
 `simplex_cert_mock_twins_campaign_ts0004_statelens`, its `_audit`, `_hb` and `_state_cov`

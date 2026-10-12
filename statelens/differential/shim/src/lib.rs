@@ -6,7 +6,9 @@
 //! `commonware_runtime::deterministic::STATELENS_FRESH_RUN`. The two
 //! `extern crate self as ...` lines below put this crate into its own extern
 //! prelude under both names, so those paths resolve to the modules declared
-//! here and the templates are included by `#[path]` byte-identical.
+//! here and the templates are included by `#[path]` byte-identical. The helper also
+//! implements the trusted continuation's `Observer`, which comes from the real
+//! `commonware_consensus_fuzz_core`.
 //!
 //! The `sl_probe!`, `sl_assert!` and `sl_implies!` macros expand
 //! `$crate::simplex::statelens::...` only when invoked; nothing here invokes

@@ -5,16 +5,25 @@
 //! scaffold module, in a checkout a campaign instrumented. It is never compiled on a
 //! committed branch.
 //!
-//! A scaffold splits and picks its knobs ([Knobs]), opens its stages
-//! ([Stages::new]) and checks its budget ([Stages::budget]) before any engine
-//! starts. It records each stage `E1` to `E(n-1)` through a [Witness]
-//! ([Stages::held]) or another outcome, and the last one, `En`, through
-//! [Stages::handoff], which decides the handoff. The helper takes every position
-//! of the event sequence itself: a witness read, an entry a recording wrapper
-//! stamps ([stamp]), an action ([Witness::act]), a restart boundary ([restart]),
-//! and the start and the mark of the handoff. It prints the lines the reach check
-//! parses, adds the feature of every held stage, and raises the only errors
-//! attributed to a scaffold, all before any engine starts.
+//! A scaffold module is a prefix of the trusted continuation
+//! (`commonware_consensus_fuzz_core::continuation`): its `prefix()` returns a `Prefix`
+//! whose `plan` splits and picks the knobs ([Knobs]), opens the stages
+//! ([Stages::new]) and returns the budget ([Stages::budget]) before the runtime
+//! starts, and whose `run` drives the History through the runner's `PrefixContext`.
+//! It records each stage `E1` to `E(n-1)` through a [Witness] ([Stages::held]) or
+//! another outcome, and the last one, `En`, through [Stages::handoff], which decides
+//! the handoff; `run` then returns, and the base's own code continues. The helper
+//! takes every position of the event sequence itself: a witness read, an entry a
+//! trusted recorder took ([cite]) or a query names ([stamp]), an action
+//! ([Witness::act]), a restart boundary ([restart]), and the start and the mark of
+//! the handoff. It prints the lines the reach check parses, adds the feature of
+//! every held stage, and raises the only errors attributed to a scaffold, all before
+//! any engine starts.
+//!
+//! [Watch] is the runner's observer, which only the thin target the script writes
+//! passes: it stamps what the runner's recorders record, publishes the compromised
+//! identity, prints the `release` line and the `actors` lines of the runner's actor
+//! check, and prints `done` after the base's last oracle.
 //!
 //! Once the trace drops an observation at its cap, what it holds from that position
 //! on is incomplete, so the helper prints a `truncated` line with the position, at
@@ -24,15 +33,20 @@
 //! Environment switches, each read once per process:
 //! - `STATELENS_REACH=1` prints the `[statelens-reach]` lines on stderr.
 //! - `STATELENS_REACH_CONTROL=1` makes [control] true: the control run.
+//! - `STATELENS_REACH_LARGEST=1` makes the runner run the base's largest progress
+//!   budget: the extra reach replay.
 
 // A scaffold module is a child of this one, and a child module can use every
 // private item of its parent. The helper's code is therefore in a private module of
 // its own, `imp`, whose private items no scaffold can reach, and this one
 // re-exports its API.
-pub use imp::{Knobs, Stages, Stamp, Witness, control, restart, stamp};
+pub use imp::{Knobs, Stages, Stamp, Watch, Witness, cite, control, restart, stamp};
 
 mod imp {
     use commonware_consensus::simplex::statelens::{self, Seen};
+    use commonware_consensus_fuzz_core::continuation::{
+        self as runner, ActorCheck, Observer, Release,
+    };
     use std::{cell::RefCell, fmt, future::Future, io::Write as _, sync::OnceLock, time::Duration};
 
     /// Most knobs a scaffold splits.
@@ -52,6 +66,15 @@ mod imp {
     fn reach() -> bool {
         static REACH: OnceLock<bool> = OnceLock::new();
         *REACH.get_or_init(|| std::env::var("STATELENS_REACH").is_ok_and(|value| value == "1"))
+    }
+
+    /// Whether `STATELENS_REACH_LARGEST=1`, read once: the extra replay, which runs the
+    /// base's largest progress budget.
+    fn largest() -> bool {
+        static LARGEST: OnceLock<bool> = OnceLock::new();
+        *LARGEST.get_or_init(|| {
+            std::env::var("STATELENS_REACH_LARGEST").is_ok_and(|value| value == "1")
+        })
     }
 
     /// Whether `STATELENS_REACH_CONTROL=1`, read once: the control run, in which the
@@ -254,15 +277,36 @@ mod imp {
         }
     }
 
-    /// Stamps an entry a recording wrapper records, as it records it: takes a
+    /// Stamps a query the prefix makes now, such as the absence of an entry: takes a
     /// position, prints the `entry` line with it and returns it. Returns a stamp of
     /// position 0 and prints nothing while not watching.
     ///
-    /// `observable` names what the wrapper records, `key` the entities the entry is
-    /// keyed by, `name=value,...`, and `value` the value it records.
+    /// `observable` names what the query reads, `key` the entities it is keyed by,
+    /// `name=value,...`, and `value` the value it reads.
     pub fn stamp(observable: &str, key: &str, value: &str) -> Stamp {
         let seq = position();
         let run = statelens::current_run();
+        if seq != 0 {
+            emit(
+                &card(),
+                &format!(
+                    "entry {}[{}]={} seq={seq}",
+                    field_name(observable),
+                    field_key(key),
+                    field_value(value)
+                ),
+            );
+        }
+        Stamp { seq, run }
+    }
+
+    /// Cites an entry one of the runner's recorders recorded: prints the `entry` line
+    /// with the position the recorder took when it recorded it, and returns that
+    /// position as a [Stamp] for [Witness::exact]. `observable`, `key` and `value`
+    /// describe the entry as for [stamp]. An entry recorded while nothing watched has
+    /// position 0, prints nothing, and gives no position.
+    pub fn cite(observable: &str, key: &str, value: &str, recorded: runner::Stamp) -> Stamp {
+        let (seq, run) = (recorded.seq(), recorded.run());
         if seq != 0 {
             emit(
                 &card(),
@@ -507,19 +551,12 @@ mod imp {
             Self { _private: () }
         }
 
-        /// Takes the knobs, so none is picked later, and checks the budget before any
-        /// engine starts: `prefix`, the stage deadlines plus the largest release
-        /// delay, exceeding `runtime`, the runtime deadline, is a scaffold error.
-        pub fn budget(&self, knobs: Knobs, prefix: Duration, runtime: Duration) {
+        /// Takes the knobs, so none is picked later, and returns the budget the prefix
+        /// asks of the runner: `prefix`, the sum of the stage deadlines, and `release`,
+        /// the release delay `d`. The runner's deadline is the base's plus both.
+        pub fn budget(&self, knobs: Knobs, prefix: Duration, release: Duration) -> runner::Budget {
             drop(knobs);
-            if prefix > runtime {
-                scaffold_error(
-                    &card(),
-                    format_args!(
-                        "budget: the prefix {prefix:?} exceeds the runtime deadline {runtime:?}"
-                    ),
-                );
-            }
+            runner::Budget { prefix, release }
         }
 
         /// Stage `k` held: prints its record, adds its feature, moves
@@ -639,15 +676,81 @@ mod imp {
             );
         }
 
-        /// Shape A: registers the evaluation of the stages, which the panic hook runs
-        /// over the trace so far.
+        /// Shape A: registers the evaluation of the stages, which [Watch] runs after
+        /// the base's last oracle, and the panic hook over the trace so far.
         pub fn on_panic(&mut self, evaluate: fn(&mut Self)) {
             STATE.with(|state| state.borrow_mut().evaluate = Some(evaluate));
         }
 
-        /// Prints `done`, after the last oracle.
+        /// Prints `done`. [Watch] prints it after the base's last oracle; a harness that
+        /// runs the helper without the runner, as the differential test does, calls this.
         pub fn done(&mut self) {
             emit(&card(), "done");
+        }
+    }
+
+    /// The runner's observer: the trusted half of a scaffold, which the thin target
+    /// the script writes passes to the base's trusted entry.
+    pub struct Watch;
+
+    impl Observer for Watch {
+        fn position(&self) -> (u64, u32) {
+            (position(), statelens::current_run())
+        }
+
+        fn compromised(&self, identities: &[usize]) {
+            statelens::set_compromised(identities.iter().copied());
+        }
+
+        fn actors(&self, check: &ActorCheck) {
+            emit(&card(), &format!("actors {check}"));
+        }
+
+        fn released(&self, release: &Release) {
+            let list = |items: Vec<String>| {
+                if items.is_empty() {
+                    "-".to_string()
+                } else {
+                    items.join(",")
+                }
+            };
+            let indices = |items: &[usize]| list(items.iter().map(usize::to_string).collect());
+            let links = list(
+                release
+                    .links
+                    .iter()
+                    .map(|(from, to)| format!("{from}>{to}"))
+                    .collect(),
+            );
+            emit(
+                &card(),
+                &format!(
+                    "release base={} gates={} delivered={} blocks={} links={links} \
+                     latencies={} restarted={}",
+                    release.base,
+                    indices(&release.gates),
+                    release.delivered,
+                    release.blocks,
+                    indices(&release.latencies),
+                    indices(&release.restarted)
+                ),
+            );
+        }
+
+        fn done(&self) {
+            // Shape A: the stages are evaluated over the trace of the whole run.
+            let evaluate = STATE.with(|state| {
+                let state = state.borrow();
+                state.evaluate.filter(|_| !state.handed_off)
+            });
+            if let Some(evaluate) = evaluate {
+                evaluate(&mut Stages { _private: () });
+            }
+            emit(&card(), "done");
+        }
+
+        fn largest(&self) -> bool {
+            largest()
         }
     }
 
@@ -825,7 +928,8 @@ mod imp {
             FEATURES.take();
             let knobs = Knobs::split(card, &mut Vec::new(), 0);
             let stages = Stages::new(card, n);
-            stages.budget(knobs, Duration::ZERO, Duration::ZERO);
+            let budget = stages.budget(knobs, Duration::ZERO, Duration::from_secs(2));
+            assert_eq!(budget.release, Duration::from_secs(2));
             stages
         }
 
@@ -948,6 +1052,32 @@ mod imp {
             );
             assert!(find(&lines, "reach 1/2 control=0").is_some(), "{lines:#?}");
             assert_eq!(FEATURES.take(), vec![1]);
+        }
+
+        #[test]
+        fn test_the_observer_prints_cited_entries_and_actor_lines() {
+            let mut stages = open("TS-9006", 1);
+            let recorded = runner::Stamp::now(&Watch);
+            let seq = recorded.seq();
+            assert_ne!(seq, 0, "a recorder takes a position while the stages watch");
+            let cited = cite("deliver", "R=1, v=2", "notarize", recorded);
+            assert_eq!(cited.seq(), seq);
+            stages.handoff(|| Some(Witness::exact("R=1@E1", &[("deliver", "R=1", "x", Some(cited))])));
+            let check = ActorCheck {
+                at: "release",
+                actors: Vec::new(),
+            };
+            Watch.actors(&check);
+            Watch.released(&Release::default());
+            Watch.done();
+            let lines = LINES.take();
+            assert!(lines.contains(&format!("entry deliver[R=1,v=2]=notarize seq={seq}")));
+            assert!(lines.contains(&"actors release ok -".to_string()), "{lines:#?}");
+            assert!(lines.contains(
+                &"release base=0 gates=- delivered=0 blocks=0 links=- latencies=- restarted=-"
+                    .to_string()
+            ));
+            assert_eq!(lines.last().map(String::as_str), Some("done"));
         }
 
         #[test]

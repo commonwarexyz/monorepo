@@ -5905,6 +5905,200 @@ def scaffold_bases(repo, profile):
     ]
 
 
+# SPEC section 18.7: the trusted continuation. A scaffold is a prefix the base's own
+# driver runs through a hook point; the profile's fuzz harness exposes it as a hook API,
+# found by the markers of `api`, whose absence refuses synthesis. `entries` maps each base
+# entry the harness hooks to its trusted entry and the modes, the entry's second generic
+# argument, it takes (None: every one); a base with another entry has no runner adapter,
+# and synthesis refuses it. `cfg` is the attribute of the base targets' `mod fuzz`.
+CONTINUATION = {
+    "simplex": {
+        "api": (
+            ("consensus/fuzz/core/src/continuation.rs", "pub trait Prefix<"),
+            ("consensus/fuzz/simplex/src/trusted.rs", "pub fn fuzz_with_prefix<"),
+        ),
+        "crate": "commonware_consensus_fuzz_simplex",
+        "cfg": '#[cfg(feature = "mocks")]',
+        "entries": {
+            "fuzz": (
+                "fuzz_with_prefix",
+                ("Standard", "FaultyNet", "TwinsMutator", "TwinsCampaign"),
+            ),
+            "fuzz_audit": ("fuzz_audit_with_prefix", None),
+            "fuzz_twins_audit": ("fuzz_twins_audit_with_prefix", ("TwinsMutator", "TwinsCampaign")),
+        },
+    },
+}
+# What the base's driver starts for the compromised identity B at the release, by mode
+# (the trusted runner's actor check requires exactly these, under N4F1C3).
+CONTINUATION_ACTORS = {
+    "Standard": "one Disrupter for participant 0 (none under N4F0C4)",
+    "FaultyNet": "one Disrupter for participant 0 (none under N4F0C4)",
+    "audit": "one Disrupter for participant 0 (none under N4F0C4)",
+    "TwinsCampaign": "the twin pair: a primary and a secondary engine under the case's B",
+    "TwinsMutator": "the twin pair: a primary engine and a Disrupter under the case's B",
+}
+# The one statement of a base's `fuzz_target!`: its entry, with its generic arguments, on
+# the closure parameter; whitespace is dropped first (`statements`).
+BASE_ENTRY = re.compile(
+    r"(?:[A-Za-z_][A-Za-z0-9_]*::)*([a-z_][a-z0-9_]*)::<(.+)>\(([a-z_][a-z0-9_]*),?\)"
+)
+# Guard of SPEC section 18.7: what a scaffold module never holds, because the trusted runner
+# owns it: the runtime, a base driver or entry, an engine or validator spawn, the base's
+# Byzantine actors, network setup, the runtime deadline, an oracle, and the compromised set
+# and the observer. Text checks over code without comments and strings.
+DRIVER_CODE = (
+    (
+        "a runtime or the runner",
+        re.compile(
+            r"\bdeterministic\s*::\s*Runner\b|\bRunner\s*::\s*(?:new|default|seeded|timed|start)\b"
+            r"|\bstart_and_recover\b|\bHook\s*::"
+        ),
+    ),
+    (
+        "a base driver or entry",
+        re.compile(
+            r"\brun_twins\w*|\brun_standard_once\b|\brun_audited_standard_once\w*"
+            r"|\bfuzz(?:_\w+)?\s*::\s*<"
+        ),
+    ),
+    (
+        "an engine or validator spawn",
+        re.compile(
+            r"\bEngine\s*::\s*new\b|\bstart_validator_engine\b|\bspawn_\w*validator\w*"
+            r"|\bbuild_validator\w*|\bspawn_(?:primary|secondary|honest|twin\w*)\b"
+        ),
+    ),
+    (
+        "a Byzantine actor",
+        re.compile(r"\bDisrupter\b|\bstart_disrupter\w*|\b(?:Mock)?TwinsBackend\b"),
+    ),
+    (
+        "network setup",
+        re.compile(
+            r"\bsetup_network\b|\blink_peers\b|\bapply_partition\b|\bNetwork\s*::\s*new\w*"
+            r"|\b(?:add|remove)_link\b|\.register\s*\(|\.control\s*\("
+        ),
+    ),
+    (
+        "a runtime deadline",
+        re.compile(r"\bfuzz_runtime_timeout\b|\bbounded_fuzz_runtime_config\b|\bwith_timeout\b"),
+    ),
+    (
+        "an oracle",
+        re.compile(
+            r"\binvariants\s*::|\bobserve_liveness\b|\bcheck_invariants\b"
+            r"|\bspawn_network_fault_scheduler\b"
+        ),
+    ),
+    (
+        "the compromised set or the observer",
+        re.compile(r"\bset_compromised\b|\bWatch\b|\bObserver\b"),
+    ),
+)
+
+
+def continuation_api_missing(repo, profile):
+    """Why `profile`'s fuzz harness lacks the trusted continuation's hook API, or None."""
+    settings = CONTINUATION.get(profile)
+    if settings is None:
+        return f"the {profile} fuzz harness has no trusted continuation"
+    for relative, marker in settings["api"]:
+        path = repo / relative
+        if not path.is_file() or marker not in path.read_text(errors="replace"):
+            return f"{relative} does not define `{marker}...`"
+    return None
+
+
+def base_entry(repo, profile, base):
+    """The entry of `base`'s `fuzz_target!`: (closure parameters, entry, generic
+    arguments), or None when its body is not one entry call on the closure parameter."""
+    path = repo / profile_fuzz_dir(profile) / f"{base}.rs"
+    if not path.is_file():
+        return None
+    parts = fuzz_target_parts(blank_inert(path.read_text(errors="replace")))
+    if parts is None:
+        return None
+    params, _header, body = parts
+    found = statements(body)
+    entry = BASE_ENTRY.fullmatch(found[0]) if len(found) == 1 else None
+    name = re.sub(r"\s+", "", params).split(":", 1)[0]
+    if not entry or entry.group(3) != name:
+        return None
+    return params.strip(), entry.group(1), turbofish_arguments(found[0])
+
+
+def continuation_refusal(repo, profile, base):
+    """Why `base` has no runner adapter of the trusted continuation, or None (SPEC 18.7)."""
+    settings = CONTINUATION.get(profile)
+    if settings is None:
+        return f"the {profile} harness has no trusted continuation yet"
+    entry = base_entry(repo, profile, base)
+    if entry is None:
+        return "its fuzz_target! is not one call of an entry the trusted continuation hooks"
+    _params, function, generics = entry
+    if function not in settings["entries"]:
+        return f"its entry {function} has no runner adapter"
+    modes = settings["entries"][function][1]
+    mode = generics[1] if len(generics) > 1 else None
+    if modes is not None and mode not in modes:
+        return f"its {mode} driver has no hook point"
+    return None
+
+
+def continuation_text(repo, profile, base):
+    """The trusted entry of `base` and the actors its driver starts for B, for the agent."""
+    refusal = continuation_refusal(repo, profile, base)
+    if refusal:
+        return f"no trusted continuation: {refusal}"
+    _params, function, generics = base_entry(repo, profile, base)
+    trusted = CONTINUATION[profile]["entries"][function][0]
+    mode = "audit" if function == "fuzz_audit" else generics[1]
+    return (
+        f"trusted entry `{trusted}::<{', '.join(generics)}, _, _>`; B's actors from the "
+        f"release: {CONTINUATION_ACTORS[mode]}"
+    )
+
+
+def thin_target_text(repo, profile, card, base):
+    """The thin target of the pair (`card`, `base`), as the script writes it (SPEC section
+    18.7): the base's trusted entry with the scaffold's prefix and the helper's observer,
+    between the runtime's reset and clear. None for a base without a runner adapter."""
+    if continuation_refusal(repo, profile, base):
+        return None
+    settings = CONTINUATION[profile]
+    params, function, generics = base_entry(repo, profile, base)
+    trusted = settings["entries"][function][0]
+    module = pair_module(card, base)
+    runtime = f"commonware_{PROFILES[profile]['crate']}::{PROFILES[profile]['module']}::statelens"
+    names = set(generics) | {trusted, "target_states"}
+    names |= set(re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", params.split(":", 1)[-1]))
+    imported = ", ".join(sorted(names, key=lambda name: (name[0].islower(), name)))
+    arguments = ", ".join(generics)
+    return (
+        "#![no_main]\n"
+        "\n"
+        f"// The thin target of {card} on {base}, written by `statelens.py synthesize` (SPEC\n"
+        "// section 18.7): the base's trusted entry runs the scaffold's prefix, watched by the\n"
+        "// helper. Never edit it; synthesis restores it.\n"
+        f"{settings['cfg']}\n"
+        "mod fuzz {\n"
+        f"    use {settings['crate']}::{{{imported}}};\n"
+        "    use libfuzzer_sys::fuzz_target;\n"
+        "\n"
+        f"    fuzz_target!(|{params}| {{\n"
+        f"        {runtime}::reset();\n"
+        f"        {trusted}::<{arguments}, _, _>(\n"
+        f"            {params.split(':', 1)[0].strip()},\n"
+        f"            target_states::{module}::prefix::<{generics[0]}>(),\n"
+        "            target_states::Watch,\n"
+        "        );\n"
+        f"        {runtime}::clear_compromised();\n"
+        "    });\n"
+        "}\n"
+    )
+
+
 # One selected pair (SPEC section 18.6.2): its card and the card's path, its base, its key
 # and module, its scaffold's name, that scaffold when its thin target exists, else None,
 # and why synthesis skips it, or None.
@@ -5996,8 +6190,11 @@ REACH_LINE = re.compile(
     r"^\[statelens-reach\] (TS-\d{4,}) (?:E(\d+)/(\d+) (held|missed|unverifiable|withheld)\b "
     r"?(.*)|entry ([^\[\s]+)\[([^\]\s]*)\]=(\S+) seq=(\d+)|restart (\S+) seq=(\d+) run=(\d+)|"
     r"trace (\S+)|handoff (holds|lost) mark=(\d+) next=(\d+:\d+|-)|reach (\d+)/(\d+) "
-    r"control=([01])|phase (prefix|continuation)|panic (\S+) ?(.*)|truncated seq=(\d+)|done)$"
+    r"control=([01])|phase (prefix|continuation)|panic (\S+) ?(.*)|truncated seq=(\d+)|done|"
+    r"actors (release|end) (ok|failed) (\S.*)|release (\S.*))$"
 )
+# One actor of an `actors` line, `<identity>:<role>=<state>`.
+REACH_ACTOR = re.compile(r"(\d+):(disrupter|primary|secondary)=(running|unpolled|finished|absent)")
 REACH_HELD = re.compile(r"^(exact|intrinsic|construction) bind=(\S+) (.*) read=(\d+)$")
 REACH_EXACT = re.compile(r"exact=([^\[\s]+)\[([^\]\s]*)\]=(\S+) seq=(\d+|-)")
 REACH_OBS = re.compile(r"obs=(\d+):(\d+):(\d+|-):([^@\s]+)@([^\s:]+:\d+:\d+):(\d+):(\d+)")
@@ -6023,6 +6220,9 @@ RUNTIME_FRAME = re.compile(
 SCAFFOLD_ERROR = "[statelens-scaffold] "
 DIFF_HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 CRASH = "CRASH (finding candidate)"
+# A replay that ran to its end without the trusted runner's actor lines, or with a failed
+# actor check: the base's actors did not run after the release (SPEC section 18.8).
+NO_CONTINUATION = "NO CONTINUATION"
 # The verdicts of the reach check, best first, as synthesis keeps a version (section
 # 18.6.2): a crash is always kept; NOT BUILT and GATE FAILED are not replays' verdicts.
 VERDICT_ORDER = (
@@ -6033,6 +6233,7 @@ VERDICT_ORDER = (
     "UNREACHED",
     "NO REPORT",
     "SCAFFOLD ERROR",
+    NO_CONTINUATION,
 )
 # The verdict line of a report whose card kept a scaffold: the verdict, its k and its
 # annotations (section 18.6.2, Finish, revalidation).
@@ -6070,8 +6271,13 @@ FEEDBACK_FIXES = {
         "Name, or withhold, a later harness event before En; in the control run, drive every "
         "later event, the handoff check and the base's oracles"
     ),
-    "no report": "Use the helper, and never return before the base's oracles",
+    "no report": "Use the helper, call Stages::handoff, and return from run at the handoff",
     "scaffold": "The reason the helper named",
+    "continuation": (
+        "Nothing in the module: the runner starts the base's actors at the release. Return "
+        "from run at the handoff and stay within the budget; if the lines still fail, the "
+        "base's runner adapter is broken, which a human fixes"
+    ),
 }
 
 
@@ -6079,8 +6285,9 @@ def reach_lines(text, card):
     """The `[statelens-reach]` lines of `card` in a replay's output, parsed, in order.
 
     Each is a dict with its `type` (stage, entry, restart, trace, handoff, reach, phase,
-    panic, truncated or done, or unparsed for a line of the card that matches no form), its
-    fields, and `text`, the line after the card ID. Lines of other cards are skipped.
+    panic, truncated, done, actors or release, or unparsed for a line of the card that
+    matches no form), its fields, and `text`, the line after the card ID. Lines of other
+    cards are skipped.
     """
     found = []
     prefix = f"[statelens-reach] {card} "
@@ -6140,6 +6347,17 @@ def reach_lines(text, card):
             item = {"type": "panic", "location": group(21), "message": group(22)}
         elif group(23) is not None:
             item = {"type": "truncated", "seq": int(group(23))}
+        elif group(24) is not None:
+            actors = [match.groups() for match in REACH_ACTOR.finditer(group(26))]
+            item = {
+                "type": "actors",
+                "at": group(24),
+                "ok": group(25) == "ok",
+                "actors": actors,
+                "parsed": group(26) == "-" or bool(actors),
+            }
+        elif group(27) is not None:
+            item = {"type": "release", "detail": group(27)}
         else:
             item = {"type": "done"}
         item["text"] = line[len(prefix) :]
@@ -6302,7 +6520,8 @@ def reach_replay(text, history, shape=None, control=False):
     lines after a miss; `held` and `first_miss`; `handoff`, the helper's handoff line,
     and `holds`, whether the handoff holds after the recheck; `reach`, `done`, `restarts`,
     `truncated`, the smallest position a `truncated` line names, or None without one,
-    `sites`, the `label@site` of every observation a witness cites, `annotations`; and
+    `sites`, the `label@site` of every observation a witness cites, `annotations`;
+    `actors`, the trusted runner's first `actors` line by point, release and end; and
     `problems`, which make the replay report nothing usable.
     """
     n = len(history.events)
@@ -6313,6 +6532,7 @@ def reach_replay(text, history, shape=None, control=False):
         problems.append(f"the scaffold reports as {', '.join(sorted(others))}, not {history.id}")
     handoff = reach = last = None
     done = False
+    actors = {}
     for index, line in enumerate(lines):
         kind = line["type"]
         if kind == "trace":
@@ -6352,6 +6572,8 @@ def reach_replay(text, history, shape=None, control=False):
                 problems.append(f"reach {line['k']}/{line['n']}: the card has {n} stages")
         elif kind == "done":
             done = True
+        elif kind == "actors":
+            actors.setdefault(line["at"], line)
     cut = min((line["seq"] for line in lines if line["type"] == "truncated"), default=None)
     records = {k: stage["record"] for k, stage in stages.items() if stage["record"]}
     replicas = replica_entities(history)
@@ -6517,8 +6739,26 @@ def reach_replay(text, history, shape=None, control=False):
             }
         ),
         "annotations": list(dict.fromkeys(annotations)),
+        "actors": actors,
         "problems": problems,
     }
+
+
+def continuation_problem(replay):
+    """Why a replay's actor lines show that the base's actors did not run after the release,
+    or None: both lines present, parsed, and ok (SPEC section 18.8). A replay that reports
+    as another card has none of the card's lines, which NO REPORT names."""
+    if replay["problems"]:
+        return None
+    for at in ("release", "end"):
+        line = replay["actors"].get(at)
+        if line is None:
+            return f"no actors {at} line: the run did not go through the trusted runner"
+        if not line["parsed"]:
+            return f"the actors {at} line is malformed: {line['text']}"
+        if not line["ok"]:
+            return f"actor check failed at the {at}: {line['text']}"
+    return None
 
 
 def module_header(text):
@@ -6809,22 +7049,37 @@ def control_status(history, header, canonical, control):
 
 
 def reach_verdict(
-    history, module, canonical, control=None, final=None, stray=None, diff=None, labels=None
+    history,
+    module,
+    canonical,
+    control=None,
+    final=None,
+    stray=None,
+    diff=None,
+    labels=None,
+    largest=None,
 ):
     """The verdict of a scaffold version's reach check (SPEC section 18.8).
 
-    `module` is the scaffold module's text; `canonical`, `control` and `final` are each
-    replay's (exit code, output), or None when it did not run, the code being None when
-    the script killed it. `stray` names a crash file a run of the agent's left (section
-    18.6.2), `diff` is the card's diff, and `labels` every probe label and `sl_implies!`
-    ID under the editable roots. Returns a dict: `verdict`, `k`, `n`, `annotations`,
-    `reasons`, `control` and `control_reason`, `crash` (replay_failure of the replay that
-    failed, with its `replay`), `scaffold_error`, `header` and `replays`.
+    `module` is the scaffold module's text; `canonical`, `control`, `final` and `largest`
+    (the extra replay with the base's largest progress budget) are each replay's (exit
+    code, output), or None when it did not run, the code being None when the script killed
+    it. `stray` names a crash file a run of the agent's left (section 18.6.2), `diff` is
+    the card's diff, and `labels` every probe label and `sl_implies!` ID under the editable
+    roots. Returns a dict: `verdict`, `k`, `n`, `annotations`, `reasons`, `control` and
+    `control_reason`, `crash` (replay_failure of the replay that failed, with its
+    `replay`), `scaffold_error`, `continuation` (why the base's actors did not run, with
+    the replay, or None), `header` and `replays`.
     """
     header = module_header(module or "")
     n = len(history.events)
-    replays, failures = {}, []
-    for name, replay in (("canonical", canonical), ("control", control), ("final", final)):
+    replays, failures, continuation, actors_failed = {}, [], [], []
+    for name, replay in (
+        ("canonical", canonical),
+        ("control", control),
+        ("final", final),
+        ("largest", largest),
+    ):
         if replay is None:
             continue
         code, text = replay
@@ -6832,6 +7087,12 @@ def reach_verdict(
         failure = replay_failure(code, text, history.id, n, header["shape"])
         if failure:
             failures.append(dict(failure, replay=name))
+        problem = continuation_problem(replays[name])
+        release = replays[name]["actors"].get("release")
+        if failure and release is not None and not release["ok"]:
+            actors_failed.append(name)
+        elif problem and not failure:
+            continuation.append((name, problem))
     base = replays.get("canonical")
     crashes = [failure for failure in failures if failure["scaffold"] is None]
     result = {
@@ -6842,11 +7103,15 @@ def reach_verdict(
         "replays": replays,
         "crash": crashes[0] if crashes else None,
         "scaffold_error": None,
+        "continuation": None,
         "control": None,
         "control_reason": None,
         "reasons": [],
     }
     reasons = result["reasons"]
+    # A replay that failed is judged by its failure; one that ran to its end without the
+    # base's actors running after the release can never reach (SPEC section 18.8).
+    blocked = continuation
     if crashes or stray:
         result["verdict"] = CRASH
         for failure in crashes:
@@ -6860,6 +7125,10 @@ def reach_verdict(
         result["verdict"] = "SCAFFOLD ERROR"
         result["scaffold_error"] = failures[0]["scaffold"]
         reasons.append(f"[statelens-scaffold] {failures[0]['scaffold']}")
+    elif blocked:
+        result["verdict"] = NO_CONTINUATION
+        result["continuation"] = blocked[0]
+        reasons += [f"the {name} replay: {problem}" for name, problem in blocked]
     elif base is None or base["reach"] is None or not base["done"] or base["problems"]:
         result["verdict"] = "NO REPORT"
         if base is None:
@@ -6913,6 +7182,8 @@ def reach_verdict(
         annotations += base["annotations"]
     if stray:
         annotations.append("stray failure")
+    if result["verdict"] == CRASH and actors_failed:
+        annotations.append("actors failed")
     crash = result["crash"]
     if crash and diff and location_in_diff(crash["location"], diff_added_lines(diff)):
         annotations.append(f"location in {history.id} diff")
@@ -6982,7 +7253,16 @@ def reach_feedback(result):
         return None
     card, n = result["card"], result["n"]
     out = [f"Verdict: {verdict_text(result)}"] + [f"- {reason}" for reason in result["reasons"]]
-    shown = ("stage", "trace", "truncated", "handoff", "reach", "unparsed")
+    shown = (
+        "stage",
+        "trace",
+        "truncated",
+        "handoff",
+        "reach",
+        "release",
+        "actors",
+        "unparsed",
+    )
     replays = [("canonical", result["replays"].get("canonical"))]
     if result["control"] in ("vacuous", "weak"):
         replays.append(("control", result["replays"].get("control")))
@@ -6994,6 +7274,11 @@ def reach_feedback(result):
     fixes = []
     if verdict == "SCAFFOLD ERROR":
         fixes.append((f"SCAFFOLD ERROR: {result['scaffold_error']}", FEEDBACK_FIXES["scaffold"]))
+    elif verdict == NO_CONTINUATION:
+        name, problem = result["continuation"]
+        fixes.append(
+            (f"{NO_CONTINUATION} in the {name} replay: {problem}", FEEDBACK_FIXES["continuation"])
+        )
     elif verdict == "NO REPORT":
         fixes.append(("NO REPORT", FEEDBACK_FIXES["no report"]))
     else:
@@ -8321,6 +8606,10 @@ def unreviewed_note(unreviewed):
 # SPEC section 18.6: Target-State Synthesis. A replay is killed after this many seconds,
 # longer than libFuzzer's default `-timeout` of 1,200 s (section 18.8).
 REPLAY_TIMEOUT = 1500
+# The replays of a scaffold version (section 18.8), and the switch each sets besides
+# STATELENS_REACH=1.
+REPLAYS = ("canonical", "control", "final", "largest")
+REPLAY_SWITCHES = {"control": "STATELENS_REACH_CONTROL=1", "largest": "STATELENS_REACH_LARGEST=1"}
 # Files a run of a scaffold leaves (section 18.6.2, step 2.2); all but the last are failures.
 STRAY_NAME = re.compile(r"^(?:crash|oom|timeout|leak|slow-unit)-")
 STRAY_FAILURE = re.compile(r"^(?:crash|oom|timeout|leak)-")
@@ -8626,25 +8915,6 @@ def remove_bin_blocks(text, names):
     return "\n".join(lines)
 
 
-def base_runner(profile, base, body):
-    """Whether the runner of `base` is hooked (Appendices B.3 to B.5 and F), for the agent."""
-    if profile == "marshal":
-        if base.endswith("_scenarios"):
-            return "hooked: the wedge scenario runs a real Byzantine engine (Appendix F)"
-        if "twins" in base:
-            return "hooked: the Twins runner (Appendix B.3)"
-    else:
-        if re.search(r"\bfuzz_twins_audit\b|\bTwins(?:Campaign|Mutator)\b", body):
-            return "hooked: the Twins runner (Appendix B.3)"
-        if re.search(r"\bChaosTwins\b", body):
-            return "hooked: the Chaos-Twins runner (Appendix B.5)"
-        if re.search(r"\bByzzfuzz\b", body):
-            return "hooked: the ByzzFuzz runner (Appendix B.5)"
-        if re.search(r"\bfuzz_audit\w*::<", body):
-            return "hooked: the audited Standard runner (Appendix B.5)"
-    return "not hooked: it runs no engine under a Byzantine identity, so it needs no hook"
-
-
 class Synthesis:
     """Target-State Synthesis (SPEC section 18.6), on the checkout a campaign instrumented."""
 
@@ -8722,6 +8992,8 @@ class Synthesis:
         # the strays snapshot of a running agent, stray failures, whether its version is
         # kept, and replay codes.
         self.live = None
+        # The pair in progress, whose thin target the script writes and guard 2 restores.
+        self.pair = None
         # The kept scaffolds a pair's shared edits revalidate: pair key -> its scaffold, its
         # card, base and module, its History and its report's text, read once per run and
         # kept up to date in memory.
@@ -8797,6 +9069,20 @@ class Synthesis:
             raise Abort(2, "this checkout predates the read side or was cleaned; use a fresh clone")
         if not (self.dir / "plan.md").is_file():
             raise Abort(2, f"{PLAN} is missing; use a fresh clone and run a campaign")
+        if self.profile_name not in CONTINUATION:
+            raise Abort(
+                1,
+                f"synthesis refuses every {self.profile_name} base: its drivers have no runner "
+                "adapter of the trusted continuation yet (a follow-up)",
+            )
+        missing = continuation_api_missing(self.repo, self.profile_name)
+        if missing:
+            raise Abort(
+                2,
+                f"the {self.profile_name} fuzz harness predates the trusted continuation "
+                f"({missing}): merge the harness with the hook API into this branch, then run "
+                "`just clean` and a new campaign before synthesis",
+            )
         if shutil.which("cargo-fuzz") is None:
             raise Abort(2, "cargo-fuzz is not on PATH; see the prerequisites in README.md")
 
@@ -9105,6 +9391,13 @@ class Synthesis:
                     "pair's edits revalidate it; the last check still builds it"
                 )
                 continue
+            if self.old_contract(scaffold, card_id, base):
+                say(
+                    f"warning: {scaffold} was written under the old contract (its thin target "
+                    "is not the trusted continuation's), so no pair's edits revalidate it; it "
+                    f"needs a new campaign, or `--redo {card_id}` to synthesize it again"
+                )
+                continue
             self.standing[key] = {
                 "scaffold": scaffold,
                 "card": card_id,
@@ -9113,6 +9406,16 @@ class Synthesis:
                 "history": history,
                 "report": text,
             }
+
+    def old_contract(self, scaffold, card_id, base):
+        """Whether the scaffold's thin target is not the one the script writes for the
+        trusted continuation: a scaffold synthesized before it, which is not migrated."""
+        path = self.repo / profile_fuzz_dir(self.profile_name) / f"{scaffold}.rs"
+        wanted = thin_target_text(self.repo, self.profile_name, card_id, base)
+        return wanted is None or path.read_text(errors="replace") != wanted
+
+    def thin_path(self, pair):
+        return f"{profile_fuzz_dir(self.profile_name)}/{pair.name}.rs"
 
     def write_owned(self, path, content):
         self.write(path, content)
@@ -9164,10 +9467,86 @@ class Synthesis:
             lines[found[0] + 1 : found[0] + 1] = self.declaration
         self.write(self.lib_rs, "\n".join(lines).encode())
 
-    def script_files(self, restore=False, s0=None):
-        """Guard 2: (path, finding) for every change to the script's own files and to any
-        manifest in scope; with `restore`, each is written back."""
+    def harness_path(self, path, ignored):
+        """Whether `path` belongs to the trusted harness (SPEC section 18.6.1, guard 2): a
+        file of the fuzz package outside `target_states/`, the scaffolds' (mod.rs is the
+        script's), other than a thin target, the script's own files and a file git ignores,
+        which guard 3 judges."""
+        name = path.rsplit("/", 1)[-1]
+        stem = name.rsplit(".", 1)[0]
+        if not path.startswith(self.package + "/") or path in ignored:
+            return False
+        if path in (self.manifest, self.mod_rs) or path.endswith("Cargo.toml"):
+            return False
+        if path.startswith(self.states + "/"):
+            return False
+        directory = profile_fuzz_dir(self.profile_name) + "/"
+        return not (path.startswith(directory) and SCAFFOLD_NAME.match(stem))
+
+    def without_declaration(self, content):
+        """`content` of the crate root without the script's declaration of `target_states`,
+        once, as bytes."""
+        lines = (content or b"").decode(errors="replace").split("\n")
+        size = len(self.declaration)
+        for index in range(len(lines) - size + 1):
+            if lines[index : index + size] == self.declaration:
+                del lines[index : index + size]
+                break
+        return "\n".join(lines).encode()
+
+    def trusted_harness(self, restore=False):
+        """Guard 2: (path, finding) for every change to the trusted harness against B: the
+        drivers, the trusted adapter, the oracles and every other file of the fuzz package
+        but the scaffold modules and the script's own files. With `restore`, each is written
+        back, the crate root with the script's declaration."""
         findings = []
+        ignored = set(self.ignored_sources())
+        for path in sorted(set(self.scope_files()) | self.b_files):
+            if not self.harness_path(path, ignored):
+                continue
+            target = self.repo / path
+            have = target.read_bytes() if target.is_file() else None
+            want = self.b_content(path)
+            if path == self.lib_rs and have is not None and want is not None:
+                same = self.without_declaration(have) == self.without_declaration(want)
+            else:
+                same = have == want
+            if same:
+                continue
+            findings.append(
+                (
+                    path,
+                    f"guard 2: {path} is part of the trusted harness, which runs the base's "
+                    "continuation, and was restored; a scaffold changes only its module under "
+                    "target_states/ and, under the edit contract, the system under test",
+                )
+            )
+            if restore:
+                self.write(path, want)
+                if path == self.lib_rs and self.declared:
+                    self.fix_declaration()
+        return findings
+
+    def script_files(self, restore=False, s0=None, harness=True):
+        """Guard 2: (path, finding) for every change to the script's own files, the thin
+        target of the pair in progress included, to the trusted harness unless `harness` is
+        false, and to any manifest in scope; with `restore`, each is written back."""
+        findings = self.trusted_harness(restore) if harness else []
+        if self.pair is not None:
+            path = self.thin_path(self.pair)
+            want = thin_target_text(self.repo, self.profile_name, self.pair.card, self.pair.base)
+            target = self.repo / path
+            have = target.read_text(errors="replace") if target.is_file() else None
+            if want is not None and have != want:
+                findings.append(
+                    (
+                        path,
+                        f"guard 2: {path} is the script's thin target and was restored; the "
+                        "scaffold is its module only",
+                    )
+                )
+                if restore:
+                    self.write(path, want.encode())
         for path in self.owned:
             want = self.expected(path)
             target = self.repo / path
@@ -9221,61 +9600,16 @@ class Synthesis:
             self.own()
         return findings
 
-    def thin_problems(self, path):
-        """Why a scaffold's thin target is not of the shape of Appendix B.6, if it is not."""
-        relative = self.rel(path)
-        match = SCAFFOLD_NAME.match(path.stem)
-        base, module = match["base"], f"ts{match['number']}_{match['base']}"
-        source = self.repo / profile_fuzz_dir(self.profile_name) / f"{base}.rs"
-        if not source.is_file():
-            return [f"{relative}: its base {base} is not a target of {self.package}"]
-        wanted = fuzz_target_parts(source.read_text(errors="replace"))
-        if wanted is None:
-            return [f"{relative}: the fuzz_target! of its base {base} cannot be read"]
-        text = path.read_text(errors="replace")
-        code = blank_inert(text)
-        parts = fuzz_target_parts(code)
-        shape = (
-            f"{relative}: its fuzz_target! must be the block of Appendix B.6, with the "
-            f"closure parameter of {base} ({wanted[0]}) and exactly three statements: "
-            f"{self.runtime_path}::reset(); {module}::fuzz with the generic arguments of "
-            f"{base}'s entry; {self.runtime_path}::clear_compromised();"
-        )
-        if (
-            code.count("fuzz_target!") != 1
-            or parts is None
-            or not VARIANT_START.match(
-                next(line.rstrip() for line in code.split("\n") if "fuzz_target!" in line)
-            )
-        ):
-            return [shape]
-        params, _header, body = parts
-        if re.sub(r"\s+", "", params) != re.sub(r"\s+", "", wanted[0]):
-            return [shape]
-        found = statements(body)
-        name = re.sub(r"\s+", "", params).split(":", 1)[0]
-        call = re.fullmatch(
-            rf"(?:[A-Za-z_][A-Za-z0-9_]*::)*{module}::fuzz(::<.*>)?\({re.escape(name)},?\)",
-            found[1] if len(found) == 3 else "",
-        )
-        generics = turbofish_arguments(wanted[2])
-        if (
-            len(found) != 3
-            or found[0] != f"{self.runtime_path}::reset()"
-            or found[2] != f"{self.runtime_path}::clear_compromised()"
-            or not call
-            or [re.sub(r"\s+", "", item) for item in turbofish_arguments(found[1])]
-            != [re.sub(r"\s+", "", item) for item in generics]
-        ):
-            return [shape]
-        return []
-
     def shaped_thin_targets(self):
+        """The thin targets, which may call the runtime's `reset` and `clear_compromised`:
+        the script writes each pair's, guard 2 restores it during the pair and step 2.4
+        restores any other, so one an earlier synthesis wrote, under the old contract
+        included, stays as that synthesis left it."""
         directory = self.repo / profile_fuzz_dir(self.profile_name)
         return {
             self.rel(path)
             for path in directory.glob("*_statelens.rs")
-            if SCAFFOLD_NAME.match(path.stem) and not self.thin_problems(path)
+            if SCAFFOLD_NAME.match(path.stem)
         }
 
     def integrity(self):
@@ -9306,7 +9640,7 @@ class Synthesis:
             banned = set()
             if path != self.mod_rs and path not in shaped:
                 banned |= {name for name in GHOST_WRITES if more[name]}
-            if more["set_compromised"] and not path.startswith(self.states + "/"):
+            if more["set_compromised"] and path != self.mod_rs:
                 banned.add("set_compromised")
             if path != self.mod_rs:
                 banned |= {name for name in HELPER_ONLY if more[name]}
@@ -9581,7 +9915,8 @@ class Synthesis:
             kind = params.split(":", 1)[1].strip() if ":" in params else params
             out.append(
                 f"- `{base}`: closure `{header}`, entry `{entry}`, required-features "
-                f"{features}, input type `{kind}`, {base_runner(self.profile_name, base, body)}"
+                f"{features}, input type `{kind}`; "
+                f"{continuation_text(self.repo, self.profile_name, base)}"
             )
         return "\n".join(out)
 
@@ -9617,6 +9952,8 @@ class Synthesis:
             "BASE_DETAILS": self.bases_text([pair.base]),
             "LABELS": self.labels_text(),
             "BUILD": shlex.join(self.build_command(pair.name)),
+            "THIN": self.thin_path(pair),
+            "CONTINUATION": CONTINUATION[self.profile_name]["api"][0][0],
             "ATTEMPT": str(attempt),
             "FEEDBACK": feedback,
             "SUBSYSTEM_RULES": subsystem_prompt(self.sl_dir, self.profile_name, "synthesize"),
@@ -9675,28 +10012,34 @@ class Synthesis:
         return moved, failures
 
     def scaffold_checks(self, pair, s0):
-        """Step 2.4, besides guards 2 and 3: the pair's thin target, no new thin target of
-        the card on another base, the module header, the cryptography check of D15 and the
-        guard rule. Returns (thin target, vetoes)."""
-        targets = self.repo / profile_fuzz_dir(self.profile_name)
-        own = sorted(targets.glob(f"*_{card_module(pair.card)}_statelens.rs"))
-        expected = targets / f"{pair.name}.rs"
-        vetoes, thin = [], None
-        if expected.is_file():
-            thin = expected
-        else:
+        """Step 2.4, besides guards 2 and 3: the thin targets, the script's (no other one
+        changed, added or removed), the module header, its `prefix`, no driver-level code in
+        it (SPEC section 18.7), and the cryptography check of D15. Returns (thin target,
+        vetoes)."""
+        directory = profile_fuzz_dir(self.profile_name)
+        targets = self.repo / directory
+        thin = targets / f"{pair.name}.rs"
+        vetoes = []
+        present = {
+            self.rel(path)
+            for path in targets.glob("*_statelens.rs")
+            if SCAFFOLD_NAME.match(path.stem)
+        }
+        before = {
+            path
+            for path in s0
+            if path.startswith(directory + "/") and SCAFFOLD_NAME.match(Path(path).stem)
+        }
+        for relative in sorted((present | before) - {self.rel(thin)}):
+            if s0.get(relative) == (
+                (self.repo / relative).read_bytes() if relative in present else None
+            ):
+                continue
             vetoes.append(
-                f"write the thin target {profile_fuzz_dir(self.profile_name)}/{pair.name}.rs"
+                f"{relative} is a thin target the script owns; it was restored, and this "
+                f"pair's is {pair.name}, which the script writes"
             )
-        for path in own:
-            if path != expected and self.rel(path) not in s0:
-                vetoes.append(
-                    f"{self.rel(path)} is a thin target of this card on another base; this "
-                    f"scaffold is {pair.name}"
-                )
-        for path in sorted(targets.glob("*_statelens.rs")):
-            if SCAFFOLD_NAME.match(path.stem):
-                vetoes += self.thin_problems(path)
+            self.write(relative, s0.get(relative))
         module_path = self.repo / self.states / f"{pair.module}.rs"
         if not module_path.is_file():
             vetoes.append(f"the module {self.rel(module_path)} does not exist")
@@ -9709,11 +10052,27 @@ class Synthesis:
                 f"{pair.base}`, then `//! Shape: A` or `//! Shape: B`"
             )
         code = blank_inert(text, strings=True)
-        if header["shape"] == "B" and not re.search(r"\bset_compromised\s*\(", code):
+        if not re.search(r"\bpub\s+fn\s+prefix\s*<", code):
             vetoes.append(
-                "a Shape B module calls set_compromised with the replicas it runs as real "
-                "engines under a Byzantine identity, empty if none, before any engine starts"
+                "the module defines `pub fn prefix<P: Simplex>() -> impl Prefix<P>`, which "
+                "the thin target calls"
             )
+        for path in sorted((self.repo / self.states).rglob("*.rs")):
+            relative = self.rel(path)
+            if relative == self.mod_rs or not path.is_file():
+                continue
+            content = path.read_bytes()
+            if path != module_path and s0.get(relative) == content:
+                continue
+            body = blank_inert(content.decode(errors="replace"), strings=True)
+            found = [name for name, pattern in DRIVER_CODE if pattern.search(body)]
+            if found:
+                vetoes.append(
+                    f"{relative} holds driver-level code ({', '.join(found)}): the base's "
+                    "trusted runner owns the runtime, the engines, the Byzantine actors, the "
+                    "network, the deadline, the oracles and the compromised set; a prefix acts "
+                    "only through its PrefixContext, so remove it"
+                )
         if self.profile_name == "simplex":
             for name, cert_mock in sorted(simplex_types(self.repo).items()):
                 if not cert_mock and re.search(rf"\b{re.escape(name)}\b", code):
@@ -9721,7 +10080,7 @@ class Synthesis:
                         f"the module names {name}, whose Simplex impl does not use the cert_mock "
                         "certificate scheme (D15)"
                     )
-        if thin:
+        if thin.is_file():
             try:
                 if self.profile_name == "simplex":
                     check_simplex_cert_mock(self.repo, [thin.stem])
@@ -9747,8 +10106,10 @@ class Synthesis:
                 tail = tail + [f"statelens: the build left no binary {scaffold} for {self.host}"]
         return binary, command, tail, log
 
-    def replay(self, card_id, binary, directory, control=False):
-        """One replay of the empty input (section 18.8): (exit code or None, output)."""
+    def replay(self, card_id, binary, directory, control=False, largest=False):
+        """One replay of the empty input (section 18.8): (exit code or None, output). The
+        control run sets STATELENS_REACH_CONTROL=1, the extra replay
+        STATELENS_REACH_LARGEST=1, which runs the base's largest progress budget."""
         if directory.exists():
             shutil.rmtree(directory)
         directory.mkdir(parents=True)
@@ -9757,9 +10118,12 @@ class Synthesis:
         env = dict(os.environ)
         env.pop("STATELENS_BYZANTINE", None)
         env.pop("STATELENS_REACH_CONTROL", None)
+        env.pop("STATELENS_REACH_LARGEST", None)
         env["STATELENS_REACH"] = "1"
         if control:
             env["STATELENS_REACH_CONTROL"] = "1"
+        if largest:
+            env["STATELENS_REACH_LARGEST"] = "1"
         log = directory / "replay.log"
         code, _ = run_logged(
             [str(binary), str(self.empty)],
@@ -9774,8 +10138,13 @@ class Synthesis:
     def attempt(self, pair, history, s0, attempt, feedback):
         """Steps 2.1 to 2.7 of one attempt. Returns its record."""
         module = pair.module
-        # The agent finds the manifest as in S0; step 2.5 adds the scaffold's block.
+        # The agent finds the manifest as in S0; step 2.5 adds the scaffold's block. The
+        # thin target is the script's, written before every attempt (SPEC section 18.7).
         self.write_owned(self.manifest, s0.get(self.manifest))
+        self.write(
+            self.thin_path(pair),
+            thin_target_text(self.repo, self.profile_name, pair.card, pair.base).encode(),
+        )
         sa, sa_state = self.snapshot(), worktree_state(self.repo)
         sa_strays = self.strays(card_module(pair.card))
         live = self.live
@@ -9852,6 +10221,9 @@ class Synthesis:
         live["step"] = "the control replay"
         control = self.replay(pair.card, binary, directory / "control", control=True)
         live["replays"]["control"] = control[0]
+        live["step"] = "the largest replay"
+        largest = self.replay(pair.card, binary, directory / "largest", largest=True)
+        live["replays"]["largest"] = largest[0]
         live["step"] = "the reach check"
         module_text = (self.repo / self.states / f"{module}.rs").read_text(errors="replace")
         stray = failures[0] if failures else None
@@ -9863,6 +10235,7 @@ class Synthesis:
             stray=stray,
             diff=diff,
             labels={label for label, _ in self.labels},
+            largest=largest,
         )
         if step["unmarked"]:
             result["annotations"].append("unmarked edit")
@@ -9880,6 +10253,7 @@ class Synthesis:
             "module": module_text,
             "canonical": canonical,
             "control": control,
+            "largest": largest,
             "diff": diff,
             "stray": stray,
             "unmarked": step["unmarked"],
@@ -9966,9 +10340,9 @@ class Synthesis:
                     f"The {name} replay {how}, a failure; its log and any crash file are in "
                     f"{name}/. Its run and replay lines:"
                 )
-                lines += self.run_lines(live["scaffold"], crash, name == "control")
+                lines += self.run_lines(live["scaffold"], crash, name)
             # The replay that stopped may have left its crash file before it returned.
-            for name in ("canonical", "control", "final"):
+            for name in REPLAYS:
                 if name in live["replays"] or live["step"] != f"the {name} replay":
                     continue
                 crash = self.replay_input(directory / name)
@@ -9977,7 +10351,7 @@ class Synthesis:
                         f"The {name} replay stopped after it left {crash.name}, a failure; its "
                         f"log and the crash file are in {name}/. Its run and replay lines:"
                     )
-                    lines += self.run_lines(live["scaffold"], crash, name == "control")
+                    lines += self.run_lines(live["scaffold"], crash, name)
             revalidation = live.get("revalidation")
             if revalidation and live["step"].startswith("the revalidation of "):
                 other = live["step"][len("the revalidation of ") :]
@@ -10036,6 +10410,7 @@ class Synthesis:
         self.write_mod(module)
         s0 = self.snapshot()
         self.keep_pending(pair.key, s0)
+        self.pair = pair
         self.live = {
             "pair": pair,
             "card": pair.card,
@@ -10075,6 +10450,7 @@ class Synthesis:
             raise
         finally:
             self.live = None
+            self.pair = None
         # The report is written: the pair has ended, and no restore of its edits follows. The
         # record holds nothing but this pair's, since `revalidate_owed` deleted it before any
         # pair; a synthesis killed before this line keeps the pair (`recover`) and only
@@ -10140,11 +10516,16 @@ class Synthesis:
         module = pair.module
         title = (front_matter(pair.path.read_text())[0] or {}).get("title", "")
         crashes = [version for version in versions if version["result"]["verdict"] == CRASH]
+        # A version whose base's actors did not run after the release is never kept: it
+        # fuzzes another fault model than the base's (SPEC section 18.8).
+        eligible = [
+            version for version in versions if version["result"]["verdict"] != NO_CONTINUATION
+        ]
         if crashes:
             kept = crashes[-1]
-        elif versions:
+        elif eligible:
             kept = min(
-                versions, key=lambda version: verdict_key(version["result"], version["attempt"])
+                eligible, key=lambda version: verdict_key(version["result"], version["attempt"])
             )
         else:
             kept = None
@@ -10172,7 +10553,12 @@ class Synthesis:
         live = self.live
         live["step"] = "the finish"
         if kept is None:
-            not_built()
+            not_built(
+                f"every version built ended {NO_CONTINUATION}: the base's actors did not run "
+                "after the release"
+                if versions
+                else None
+            )
         else:
             # The kept version's attempt; its version was kept before its replays.
             live.update(
@@ -10180,7 +10566,11 @@ class Synthesis:
                 before=None,
                 failures=list(strays),
                 kept=True,
-                replays={"canonical": kept["canonical"][0], "control": kept["control"][0]},
+                replays={
+                    "canonical": kept["canonical"][0],
+                    "control": kept["control"][0],
+                    "largest": kept["largest"][0],
+                },
                 scaffold=kept["scaffold"],
             )
             self.restore(s0, kept["files"])
@@ -10210,6 +10600,7 @@ class Synthesis:
                         stray=kept["stray"],
                         diff=kept["diff"],
                         labels={label for label, _ in self.labels},
+                        largest=kept["largest"],
                     )
                     if kept["unmarked"]:
                         result["annotations"].append("unmarked edit")
@@ -10478,7 +10869,7 @@ class Synthesis:
 
     def check_scaffold(self, key, tag):
         """Builds the kept scaffold of the pair `key` again and replays it, canonical,
-        control and final, in `TS-NNNN_<base>/<tag>/`, or `<tag>.<stamp>/` when that
+        control, final and largest, in `TS-NNNN_<base>/<tag>/`, or `<tag>.<stamp>/` when that
         exists, and keeps that directory in its entry. Returns (result, problem): the reach
         check's result, None when it does not build, and why it stands worse than its
         report, or None."""
@@ -10496,8 +10887,14 @@ class Synthesis:
         # For `preserve`: where an interrupted revalidation left its replays.
         self.live["revalidation"] = directory
         replays = [
-            self.replay(entry["card"], binary, directory / name, control=name == "control")
-            for name in ("canonical", "control", "final")
+            self.replay(
+                entry["card"],
+                binary,
+                directory / name,
+                control=name == "control",
+                largest=name == "largest",
+            )
+            for name in REPLAYS
         ]
         before = report_verdict(entry["report"])
         # A crash file an agent's run left stays its finding candidate (section 18.8).
@@ -10505,12 +10902,16 @@ class Synthesis:
         if before["verdict"] == CRASH and "stray failure" in before["annotations"]:
             stray = "the file its report names"
         path = self.repo / self.states / f"{entry['module']}.rs"
+        canonical, control, final, largest = replays
         result = reach_verdict(
             entry["history"],
             path.read_text(errors="replace") if path.is_file() else "",
-            *replays,
+            canonical,
+            control,
+            final,
             stray=stray,
             labels={label for label, _ in self.labels},
+            largest=largest,
         )
         if stands_worse(before, result):
             return result, (
@@ -10547,8 +10948,8 @@ class Synthesis:
                 crash_file = (
                     self.replay_input(entry["replays"] / crash["replay"]) if crash else None
                 )
-                control = bool(crash) and crash["replay"] == "control"
-                run, replay = self.run_lines(entry["scaffold"], crash_file, control)
+                name = crash["replay"] if crash else None
+                run, replay = self.run_lines(entry["scaffold"], crash_file, name)
                 text = REPORT_RUN_BLOCK.sub(
                     lambda _found: f"## Run and replay\n\n```\n{run}\n{replay}\n```",
                     text,
@@ -10563,7 +10964,7 @@ class Synthesis:
 
     def crash_line(self, outcome):
         """What the console says of a kept CRASH (finding candidate), and the replay's
-        crash file and whether it is the control's."""
+        crash file and the replay's name, or None for a stray failure."""
         result = outcome["result"]
         kept = outcome["kept"]
         directory = self.reach / outcome["pair"].key / f"attempt-{kept['attempt']}"
@@ -10573,7 +10974,7 @@ class Synthesis:
             return (
                 f"a run of the agent's left {stray}, a finding candidate",
                 self.repo / stray,
-                False,
+                None,
             )
         replay = crash["replay"]
         crash_file = self.replay_input(directory / replay)
@@ -10582,12 +10983,17 @@ class Synthesis:
                 "failed in the control replay (STATELENS_REACH_CONTROL=1); the canonical input "
                 "does not reproduce it"
             )
+        elif replay == "largest":
+            note = (
+                "failed in the largest replay (STATELENS_REACH_LARGEST=1, the base's largest "
+                "progress budget); the canonical input does not reproduce it"
+            )
         else:
             note = (
                 f"failed in the {replay} replay: the scaffold fails on its canonical input, which "
                 "libFuzzer runs first, so its run line reproduces the failure at once"
             )
-        return note, crash_file, replay == "control"
+        return note, crash_file, replay
 
     def replay_input(self, directory):
         """The crash file a replay left in `directory`; every replay runs the empty input,
@@ -10705,15 +11111,16 @@ class Synthesis:
     def handover(self, outcome, scaffold=None):
         """The `run` and `replay` lines of a scaffold (section 18.6.2, Console)."""
         scaffold = scaffold or outcome["scaffold"]
-        crash_file, control = None, False
+        crash_file, name = None, None
         result = outcome["result"] if outcome else None
         if result and result["verdict"] == CRASH:
-            _note, crash_file, control = self.crash_line(outcome)
-        return self.run_lines(scaffold, crash_file, control)
+            _note, crash_file, name = self.crash_line(outcome)
+        return self.run_lines(scaffold, crash_file, name)
 
-    def run_lines(self, scaffold, crash_file=None, control=False):
+    def run_lines(self, scaffold, crash_file=None, replay=None):
         """The `run` line of a scaffold and the `replay` line of `crash_file`, by default a
-        placeholder in its artifacts directory; `control` for a file of the control run.
+        placeholder in its artifacts directory; `replay` names the replay that left it, whose
+        switch (the control's, the largest's) the replay line sets.
         The paths are quoted for the shell, so a line runs as printed from a checkout whose
         path holds a space; the placeholder stays as it is."""
         here = f"cd {shlex.quote(str(self.repo / SL))} && "
@@ -10723,7 +11130,9 @@ class Synthesis:
             crash_file = shlex.quote(str(artifacts)) + "/<crash file>"
         else:
             crash_file = shlex.quote(str(crash_file))
-        env = ["STATELENS_REACH=1"] + (["STATELENS_REACH_CONTROL=1"] if control else [])
+        env = ["STATELENS_REACH=1"] + [
+            switch for name, switch in REPLAY_SWITCHES.items() if name == replay
+        ]
         env += [part for part in (self.profile["replay_env"], nightly) if part]
         run = f"{here}{nightly} just run {scaffold}"
         replay = f"{here}{' '.join(env)} just run {scaffold} {crash_file}"
@@ -10791,6 +11200,7 @@ class Synthesis:
         self.check_campaign()
         selection = select_scaffolds(self.repo, self.sl_dir, self.profile_name, self.patterns)
         self.check_preconditions()
+        selection = self.refuse_bases(selection)
         cards = sorted({pair.path for pair in selection.pairs})
         if lint_paths(cards, registry_files(self.sl_dir)):
             raise Abort(2, "a selected card has lint problems (above); fix them before synthesis")
@@ -10805,35 +11215,94 @@ class Synthesis:
             # Code the agent wrote also runs after its last run: replays and the test gate.
             self.seal()
 
+    def refuse_bases(self, selection):
+        """Refuses the selected pairs whose base has no runner adapter of the trusted
+        continuation (SPEC section 18.7), one line per base; none left is a usage error."""
+        refused = {}
+        for pair in selection.pairs:
+            if pair.base not in refused:
+                refused[pair.base] = continuation_refusal(self.repo, self.profile_name, pair.base)
+        for base, reason in refused.items():
+            if reason:
+                say(f"{'refused':<10} {base}: no trusted continuation ({reason}); a follow-up")
+        kept = [pair for pair in selection.pairs if not refused[pair.base]]
+        if not kept:
+            raise Abort(
+                1,
+                "no selected base has a runner adapter of the trusted continuation; the "
+                f"supported {self.profile_name} entries are "
+                + ", ".join(
+                    f"{entry} ({', '.join(modes) if modes else 'any mode'})"
+                    for entry, (_trusted, modes) in CONTINUATION[self.profile_name][
+                        "entries"
+                    ].items()
+                ),
+            )
+        return selection._replace(pairs=kept)
+
     def scope_drift(self):
-        """`--rebaseline`: the files of B in the scope the operator changed: not the script's
-        own, not a scaffold's, and not in any pair's recorded diff, whose sl_* calls and
-        runtime calls are as in B. Guard 3 still checks them, the lines the campaign's
-        instrumentation added included, once they are taken into B."""
+        """`--rebaseline`: the paths of the scope the operator changed against B, an edited,
+        an added or a deleted file: not the script's own, not a scaffold's, not a thin
+        target's and not in any pair's recorded diff, whose sl_* calls and runtime calls
+        are as in B. Guard 3 still checks them, the lines the campaign's instrumentation
+        added included, once they are taken into B."""
         paired = set()
         for diff in self.reach.glob("TS-*.diff"):
             paired |= {path for path, _ in diff_sections(diff.read_text(errors="replace"))}
+        directory = profile_fuzz_dir(self.profile_name) + "/"
         found = []
-        for path in sorted(self.b_files):
-            target = self.repo / path
+        for path in sorted(set(self.scope_files()) | self.b_files):
+            stem = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
             if (
                 path in paired
                 or path in self.owned
-                or path == self.lib_rs
                 or path.startswith(self.states + "/")
-                or not target.is_file()
+                or (path.startswith(directory) and SCAFFOLD_NAME.match(stem))
             ):
                 continue
-            now = target.read_bytes()
-            if now == self.b_data[path]:
+            target = self.repo / path
+            now = self.drifted(path) if target.is_file() else None
+            before = self.b_data.get(path)
+            if now == before:
                 continue
             if path.endswith(".rs"):
-                text, before = now.decode(errors="replace"), self.b_data[path].decode(errors="replace")
-                more = runtime_calls(text, GUARDED_CALLS) - runtime_calls(before, GUARDED_CALLS)
-                if sl_calls(text) != sl_calls(before) or +more:
+                text = (now or b"").decode(errors="replace")
+                old = (before or b"").decode(errors="replace")
+                more = runtime_calls(text, GUARDED_CALLS) - runtime_calls(old, GUARDED_CALLS)
+                if sl_calls(text) != sl_calls(old) or +more:
                     continue
             found.append(path)
         return found
+
+    def take_drift(self, inside):
+        """Takes the operator's changes `inside` into B, in memory: an edited or added file
+        with its content (`drifted`), a deleted one out of B. Returns what B held for each,
+        None for an addition, for `restore_drift` and the record of `accept_drift`."""
+        held = {path: self.b_data.get(path) for path in inside}
+        for path in inside:
+            if (self.repo / path).is_file():
+                self.b_data[path] = self.drifted(path)
+                self.b_files.add(path)
+            else:
+                self.b_data.pop(path, None)
+                self.b_files.discard(path)
+        return held
+
+    def restore_drift(self, held):
+        """Undoes `take_drift`: B holds what `held` names again."""
+        for path, content in held.items():
+            if content is None:
+                self.b_data.pop(path, None)
+                self.b_files.discard(path)
+            else:
+                self.b_data[path] = content
+                self.b_files.add(path)
+
+    def drifted(self, path):
+        """The content an operator's change gives `path` in B: the crate root without the
+        script's declaration of `target_states`, which B never holds."""
+        content = (self.repo / path).read_bytes()
+        return self.without_declaration(content) if path == self.lib_rs else content
 
     def accept_drift(self, outside, inside=(), held=None):
         """`--rebaseline` (section 18.6.2): records the paths outside the scope that differ
@@ -10851,9 +11320,16 @@ class Synthesis:
         kept.mkdir(parents=True, exist_ok=True)
         shutil.copy2(self.baseline_dir / "state.json", kept / "state.json")
         (kept / "paths.txt").write_text("".join(f"{path}\n" for path in accepted))
+        # An added file has no old copy, and a deleted one no new copy.
         for path in inside:
-            for directory, content in ((kept, held[path]), (self.baseline_dir, self.b_data[path])):
+            for directory, content in (
+                (kept, held[path]),
+                (self.baseline_dir, self.b_data.get(path)),
+            ):
                 copy = directory / "files" / path
+                if content is None:
+                    copy.unlink(missing_ok=True)
+                    continue
                 copy.parent.mkdir(parents=True, exist_ok=True)
                 copy.write_bytes(content)
         self.b_worktree = worktree_state(self.repo)
@@ -10870,26 +11346,31 @@ class Synthesis:
         self.selected = {pair.key for pair in selection.pairs}
         self.recover()
         outside = self.outside_scope()
-        guarded = [path for path, _ in self.script_files()]
-        problems = outside + guarded + [path for path, _ in self.integrity()]
+        guarded = [path for path, _ in self.script_files(harness=False)]
+        harness = [path for path, _ in self.trusted_harness()]
+        problems = outside + guarded + harness + [path for path, _ in self.integrity()]
         if problems and not guarded:
-            # The operator's drift inside the scope, taken into B for guard 3, which then
-            # judges only what it still breaks: what --rebaseline would accept.
+            # The operator's drift inside the scope, edits, additions and deletions, taken
+            # into B for guards 2 and 3, which then judge only what it still breaks. Only
+            # when nothing is left is every reported change one --rebaseline accepts;
+            # otherwise B is restored and synthesis stops before it restores anything.
             inside = self.scope_drift()
-            held = {path: self.b_data[path] for path in inside}
-            self.b_data.update((path, (self.repo / path).read_bytes()) for path in inside)
-            acceptable = not self.integrity()
+            held = self.take_drift(inside)
+            left = [path for path, _ in self.trusted_harness()]
+            left += [path for path, _ in self.integrity()]
+            acceptable = not left
             if self.rebaseline and acceptable:
                 self.accept_drift(outside, inside, held)
                 problems = []
             else:
-                self.b_data.update(held)
-                guarded = [] if acceptable else problems
+                self.restore_drift(held)
+                if not acceptable:
+                    problems = left
+                    guarded = left
         elif self.rebaseline:
             # Nothing is refused, but the operator may have changed the scope all the same.
             inside = self.scope_drift()
-            held = {path: self.b_data[path] for path in inside}
-            self.b_data.update((path, (self.repo / path).read_bytes()) for path in inside)
+            held = self.take_drift(inside)
             self.accept_drift([], inside, held)
         if problems:
             hint = "" if guarded else "rerun with --rebaseline to accept it, or "
@@ -10969,6 +11450,7 @@ def cmd_reach_verdict(args):
         module,
         replay(args.canonical, args.canonical_code),
         replay(args.control, args.control_code),
+        largest=replay(args.largest, args.largest_code),
     )
     print(verdict_text(result), flush=True)
     for reason in result["reasons"]:
@@ -11380,8 +11862,8 @@ def main(argv):
         description=(
             "Compute the reach verdict (SPEC section 18.8) of one scaffold from a card, "
             "the scaffold module and the captured output of its canonical replay and, "
-            "optionally, its control replay, as the synthesis computes it. Exit code 0 "
-            "for REACHED, 1 otherwise."
+            "optionally, its control and largest replays, as the synthesis computes it. Exit "
+            "code 0 for REACHED, 1 otherwise."
         ),
     )
     reach.add_argument("--card", required=True, help="the target-state card (TS-NNNN.md)")
@@ -11395,6 +11877,12 @@ def main(argv):
     reach.add_argument("--control", help="the control replay's output, if it ran")
     reach.add_argument(
         "--control-code", type=int, default=0, help="the control replay's exit code"
+    )
+    reach.add_argument(
+        "--largest", help="the largest replay's output (STATELENS_REACH_LARGEST=1), if it ran"
+    )
+    reach.add_argument(
+        "--largest-code", type=int, default=0, help="the largest replay's exit code"
     )
     args = parser.parse_args(argv)
 
