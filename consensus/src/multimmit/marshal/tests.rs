@@ -1,12 +1,13 @@
 //! Full-system deterministic harness and end-to-end scenarios.
 
 use crate::{
-    Epochable as _, Reporter, Viewable as _,
+    Automaton as _, Epochable as _, Heightable as _, Reporter, Viewable as _,
+    marshal::{Floors, Ledger},
     multimmit::{
         config::max_outbox_effects,
         marshal::{
-            ArchiveConfig, ArchiveMode, Config, Error as MailboxError, Floor, LqcVerifier, Mailbox,
-            MarshalProgress, OutputIndex, Relay, Retention, ServiceHandle, Start, Update,
+            ArchiveConfig, ArchiveMode, Config, Error as MailboxError, Floor, Inline, LqcVerifier,
+            Mailbox, MarshalProgress, Relay, Retention, ServiceHandle, Start, Update,
             actors::catalog, open, storage::catalog::StoredRef,
         },
         mocks::{
@@ -17,12 +18,12 @@ use crate::{
         testing::{SpanRecorder, TestBody, metric_total},
         types::{
             Activity, Anchor, Artifact, ArtifactId, BlockRef, Body, CertificateId, ChainId,
-            ChainProposal, DigestedLeader, Extension, FinalityFact, FinalityId, LeaderBlock, Lqc,
-            PathLimits, Position, TipRecord, TransactionBlock, TransactionBlockHeader, VoteBody,
-            genesis_history as protocol_genesis_history,
+            ChainProposal, Context, DigestedLeader, Extension, FinalityFact, FinalityId,
+            LeaderBlock, Lqc, PathLimits, Position, TipRecord, TransactionBlock,
+            TransactionBlockHeader, VoteBody, genesis_history as protocol_genesis_history,
         },
     },
-    types::{Height, Participant, Round, View},
+    types::{Height, OutputIndex, Participant, Round, View},
 };
 use bytes::BufMut;
 use commonware_actor::Feedback;
@@ -3282,6 +3283,214 @@ fn pruning_keeps_every_block_the_engine_may_still_verify() {
         views[3].release(&mailbox);
         mailbox.prune(OutputIndex::new(8)).await.unwrap();
         assert_eq!(held(&mailbox, &views[2..]).await, [[false, true]; 2]);
+        harness.shutdown().await;
+    });
+}
+
+#[test]
+fn ledger_prunes_to_the_floors_it_serves() {
+    runner(114).start(|context| async move {
+        let mut harness = Harness::new(context, 114, [true, true]).await;
+        harness.start(0).await;
+        let mailbox = harness.mailbox(0);
+        assert_eq!(
+            Ledger::ack_window(&mailbox),
+            harness
+                .config(&harness.context, 0)
+                .capacities
+                .max_pending_acks
+        );
+
+        // Two views each certify one block per chain, so their floors end at indices 2 and 4.
+        let first = certify(
+            &harness.committee,
+            1,
+            initial_history(&harness.committee),
+            harness.committee.config.genesis().tips(),
+            vec![vec![body(120)], vec![body(121)]],
+        );
+        first.submit(&mailbox).await;
+        first.finalize(&mailbox);
+        let history = Arc::new(
+            TipRecord::at_tips(first.history.commitment::<Sha256>(), first.tips()).unwrap(),
+        );
+        let second = certify(
+            &harness.committee,
+            2,
+            history,
+            &first.tips(),
+            vec![vec![body(122)], vec![body(123)]],
+        );
+        second.submit(&mailbox).await;
+        second.finalize(&mailbox);
+        let delivered = harness.wait_updates(0, 4).await;
+        harness
+            .wait_progress(0, |progress| progress.acknowledged == OutputIndex::new(4))
+            .await;
+
+        // Pruning below index three keeps the floor at index two and every output after it.
+        Ledger::prune(&mailbox, OutputIndex::new(3)).await.unwrap();
+        let (index, floor) = Floors::floor_at(&mailbox, OutputIndex::new(3))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(index, OutputIndex::new(2));
+        assert_eq!(floor.anchor().id::<Sha256>(), first.id());
+        for update in delivered.iter().filter(|update| update.index > index) {
+            let block = mailbox.get_block(update.block.reference()).await.unwrap();
+            assert_eq!(block.as_deref(), Some(update.block.as_ref()));
+        }
+
+        // A fresh node installs the served floor and resumes after the same index, then rejects
+        // it once installed, as stale.
+        harness.start(1).await;
+        assert_eq!(
+            Floors::install(&harness.mailbox(1), floor.clone())
+                .await
+                .unwrap(),
+            Some(index)
+        );
+        harness
+            .wait_progress(1, |progress| progress.committed == index)
+            .await;
+        assert_eq!(
+            Floors::install(&harness.mailbox(1), floor).await.unwrap(),
+            None
+        );
+        harness.shutdown().await;
+    });
+}
+
+/// A producer application that numbers its bodies by height and records the ancestry each call
+/// saw, as heights newest first.
+#[derive(Clone)]
+struct ProducerApplication {
+    ancestries: Arc<Mutex<Vec<Vec<u64>>>>,
+    /// Builds each block one height above the requested position.
+    misplace: bool,
+    /// The verdict `verify` returns.
+    admit: bool,
+}
+
+impl ProducerApplication {
+    fn new() -> Self {
+        Self {
+            ancestries: Arc::default(),
+            misplace: false,
+            admit: true,
+        }
+    }
+
+    async fn record(&self, ancestry: impl crate::ancestry::Ancestry<TestBlock>) {
+        let heights = ancestry
+            .map(|block| block.header().height().get())
+            .collect()
+            .await;
+        self.ancestries.lock().push(heights);
+    }
+
+    fn last_ancestry(&self) -> Vec<u64> {
+        self.ancestries.lock().last().cloned().unwrap()
+    }
+}
+
+impl crate::Application<deterministic::Context> for ProducerApplication {
+    type Context = Context<Sha256Digest>;
+    type Block = TestBlock;
+    type Input = ();
+
+    async fn propose(
+        &mut self,
+        (_, context): (deterministic::Context, Self::Context),
+        ancestry: impl crate::ancestry::Ancestry<Self::Block>,
+        _: Self::Input,
+    ) -> Option<Self::Block> {
+        self.record(ancestry).await;
+        let context = if self.misplace {
+            Context::new(
+                context.epoch(),
+                context.chain(),
+                context.height().next(),
+                context.parent(),
+            )
+            .unwrap()
+        } else {
+            context
+        };
+        Some(TransactionBlock::from_context(
+            context,
+            body(context.height().get()),
+        ))
+    }
+
+    async fn verify(
+        &mut self,
+        _: (deterministic::Context, Self::Context),
+        ancestry: impl crate::ancestry::Ancestry<Self::Block>,
+    ) -> bool {
+        self.record(ancestry).await;
+        self.admit
+    }
+}
+
+#[test]
+fn inline_producer_stages_its_chain_and_admits_held_blocks() {
+    runner(115).start(|context| async move {
+        let mut harness = Harness::new(context, 115, [true, true]).await;
+        harness.start(0).await;
+        let marshal = harness.mailbox(0);
+        let application = ProducerApplication::new();
+        let mut producer = Inline::new(
+            harness.context.child("producer"),
+            application.clone(),
+            marshal.clone(),
+        );
+        let genesis = harness.committee.config.genesis().tips()[0];
+        let epoch = harness.committee.config.epoch();
+        let position = |height: u64, parent| {
+            Context::new(epoch, genesis.chain(), Height::new(height), parent).unwrap()
+        };
+
+        // The chain's first block builds on the genesis tip, so its ancestry is empty.
+        let first = position(1, genesis.digest());
+        let body = producer.propose(first).await.await.unwrap();
+        let first = first.header(body);
+        assert!(application.last_ancestry().is_empty());
+        let staged = marshal
+            .get_block(first.block_ref::<Sha256>())
+            .await
+            .unwrap();
+        assert_eq!(staged.unwrap().header(), &first);
+
+        // The next block builds on the first, and verifying it sees both.
+        let second = position(2, first.digest::<Sha256>());
+        let body = producer.propose(second).await.await.unwrap();
+        assert_eq!(application.last_ancestry(), vec![1]);
+        assert!(producer.verify(second, body).await.await.unwrap());
+        assert_eq!(application.last_ancestry(), vec![2, 1]);
+
+        // The application's verdict decides admission of a held block.
+        let mut rejecting = Inline::new(
+            harness.context.child("rejecting"),
+            ProducerApplication {
+                admit: false,
+                ..ProducerApplication::new()
+            },
+            marshal.clone(),
+        );
+        assert!(!rejecting.verify(second, body).await.await.unwrap());
+
+        // A block built for another position is never staged or answered.
+        let mut misplacing = Inline::new(
+            harness.context.child("misplacing"),
+            ProducerApplication {
+                misplace: true,
+                ..ProducerApplication::new()
+            },
+            marshal,
+        );
+        let third = position(3, second.header(body).digest::<Sha256>());
+        assert!(misplacing.propose(third).await.await.is_err());
         harness.shutdown().await;
     });
 }

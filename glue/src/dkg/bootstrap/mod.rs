@@ -18,13 +18,14 @@ use commonware_broadcast::buffered;
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Application, Block as ConsensusBlock, CertifiableBlock, Heightable,
+    ancestry::Ancestry,
     simplex::{
         self, Floor,
         config::{ForwardPolicy, SkipBudget, SkipPolicy},
         elector::RoundRobin,
         marshal::{
-            self, Start, ancestry::Ancestry, core::Actor as MarshalActor,
-            resolver::p2p as marshal_resolver, standard::Deferred,
+            self, Start, core::Actor as MarshalActor, resolver::p2p as marshal_resolver,
+            standard::Deferred,
         },
         types::Context,
     },
@@ -644,7 +645,6 @@ where
     V: Variant,
     D: Directory<ed25519::PublicKey>,
 {
-    type SigningScheme = ConsensusScheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block<V, D>;
     type Input = reshare::Input<(), V, ed25519::PrivateKey, D>;

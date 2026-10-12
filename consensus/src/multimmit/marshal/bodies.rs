@@ -5,9 +5,9 @@ use super::{
     storage::catalog::StoredRef,
     types::BodyValues,
 };
-use crate::multimmit::{
-    marshal::OutputIndex,
-    types::{BlockRef, Body, ChainId, TransactionBlock},
+use crate::{
+    multimmit::types::{BlockRef, Body, ChainId, TransactionBlock},
+    types::OutputIndex,
 };
 use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
 use std::sync::Arc;

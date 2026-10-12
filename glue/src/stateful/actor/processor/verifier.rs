@@ -9,10 +9,8 @@ use crate::stateful::{
 };
 use commonware_consensus::{
     Heightable, Roundable,
-    simplex::marshal::{
-        ancestry::{self as marshal_ancestry, Ancestry, BlockProvider},
-        core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
-    },
+    ancestry::{self as marshal_ancestry, Ancestry, BlockProvider},
+    simplex::marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_runtime::{Clock, Metrics, Spawner};

@@ -117,6 +117,7 @@ mod tests {
     use super::{Config, Engine, mocks};
     use crate::{
         aggregation::scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
+        multimmit,
         types::{Epoch, EpochDelta, Height, HeightDelta},
     };
     use commonware_cryptography::{
@@ -579,6 +580,74 @@ mod tests {
     }
 
     test_for_all_fixtures!(byzantine_proposer);
+
+    /// Test that a Multimmit committee certifies with its `2f + 1` nullification key: half of a
+    /// six-validator committee keeps certifying, where `n - f` would need five.
+    #[test_traced("INFO")]
+    fn test_multimmit_checkpoints_certify_with_two_faults_plus_one() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut fixture =
+                multimmit::checkpoint::fixture::<MinPk, _>(&mut context, TEST_NAMESPACE, 6);
+            let epoch = Epoch::new(111);
+            fixture.participants.truncate(3);
+            fixture.schemes.truncate(3);
+
+            let (mut oracle, mut registrations) =
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
+            let reporters = spawn_validator_engines(
+                context.child("validator"),
+                &fixture,
+                &mut registrations,
+                &mut oracle,
+                epoch,
+                Duration::from_secs(5),
+                vec![],
+            );
+            await_reporters(
+                context.child("reporter"),
+                &reporters,
+                Height::new(100),
+                epoch,
+            )
+            .await;
+        });
+    }
+
+    /// Test that a Multimmit committee member with incorrect digests diverges alone, since one
+    /// dissenter never exceeds the committee's tolerated faults.
+    #[test_traced("INFO")]
+    fn test_multimmit_checkpoints_isolate_a_divergent_validator() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let fixture =
+                multimmit::checkpoint::fixture::<MinPk, _>(&mut context, TEST_NAMESPACE, 6);
+            let epoch = Epoch::new(111);
+
+            let (mut oracle, mut registrations) =
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
+            let reporters = spawn_validator_engines(
+                context.child("validator"),
+                &fixture,
+                &mut registrations,
+                &mut oracle,
+                epoch,
+                Duration::from_secs(5),
+                vec![0],
+            );
+            await_reporters(
+                context.child("reporter"),
+                &reporters,
+                Height::new(100),
+                epoch,
+            )
+            .await;
+            for (participant, mut reporter) in reporters {
+                let diverged = reporter.get_diverged().await;
+                assert_eq!(!diverged.is_empty(), participant == fixture.participants[0]);
+            }
+        });
+    }
 
     fn unclean_byzantine_shutdown<S, F>(fixture: F)
     where

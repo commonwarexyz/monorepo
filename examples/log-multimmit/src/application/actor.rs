@@ -385,7 +385,7 @@ mod tests {
         Automaton as _, Epochable as _, Relay as _, Reporter as _,
         multimmit::{
             Artifact,
-            marshal::{self, ArchiveConfig, LqcVerifier, OutputIndex, Start, Update},
+            marshal::{self, ArchiveConfig, LqcVerifier, Start, Update},
             mocks::{
                 Committee,
                 cluster::{QUOTA, link_all, start_network},
@@ -393,7 +393,7 @@ mod tests {
             },
             types::{Activity, BlockRef, Lqc, PathLimits},
         },
-        types::{Epoch, Height, Participant, Round, View},
+        types::{Epoch, Height, OutputIndex, Participant, Round, View},
     };
     use commonware_cryptography::{Hasher as _, bls12381::primitives::variant::MinPk, ed25519};
     use commonware_parallel::Sequential;
