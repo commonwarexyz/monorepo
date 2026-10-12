@@ -2649,3 +2649,71 @@ fn test_foreign_tls_destructor_can_wake_after_current_key_destruction() {
 
     assert!(!panicked, "ordinary wake accessed destroyed runtime TLS");
 }
+
+/// A paged replay keeps reads in flight between fills. The task that issued them may close its
+/// worker before they are observed, which discards their registrations whether they are still
+/// pending or have landed unobserved. The replay then reads those pages again on demand, so a
+/// partly consumed replay handed to another task still yields every byte.
+#[rstest::rstest]
+fn test_paged_replay_survives_the_worker_that_issued_its_reads_closing(
+    #[values(false, true)] dedicated: bool,
+    #[values(false, true)] landed: bool,
+) {
+    use crate::{
+        Clock as _, ReadOptions,
+        buffer::paged::{CHECKSUM_SIZE, CacheRef, Writer},
+    };
+    use bytes::Buf as _;
+    use commonware_utils::{NZU16, NZUsize};
+
+    Runner::new(config()).start(|context| async move {
+        // A sixteen page replay buffer over sixty-four pages splits into four page batches, so
+        // the child's first fill leaves three batches in flight on its worker.
+        const PAGE: u16 = 64;
+        let physical = PAGE as usize + CHECKSUM_SIZE as usize;
+        let buffer = 16 * physical;
+        let data: Vec<u8> = (0..64 * PAGE as usize).map(|i| (i % 251) as u8).collect();
+        let (blob, size) = context.open("partition", b"replay").await.unwrap();
+        let cache = CacheRef::from_pooler(&context, NZU16!(PAGE), NZUsize!(4));
+        let writer = Writer::new(blob, size, buffer, cache).await.unwrap();
+        let (writer, _) = writer.append(&data).await.unwrap();
+        let (sealed, sync) = writer.seal().await.unwrap();
+        sync.await.unwrap();
+
+        let child = context.child("child");
+        let child = if dedicated {
+            child.dedicated()
+        } else {
+            child.shared(true)
+        };
+        let mut replay = child
+            .spawn(move |context| async move {
+                let mut replay = sealed
+                    .replay(NZUsize!(buffer), ReadOptions::default())
+                    .unwrap();
+                assert!(replay.ensure(1).await.unwrap());
+                if landed {
+                    context.sleep(Duration::from_millis(50)).await;
+                }
+                replay
+            })
+            .await
+            .unwrap();
+
+        // Handle completion can precede worker cleanup. Wait for the worker to retire so its
+        // registrations are gone before the replay is driven again.
+        poll_fn(|cx| {
+            if context.shared.workers.state.lock().active == 0 {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+
+        assert!(replay.ensure(data.len()).await.unwrap());
+        assert_eq!(replay.copy_to_bytes(data.len()).as_ref(), data);
+        assert!(!replay.ensure(1).await.unwrap());
+    });
+}

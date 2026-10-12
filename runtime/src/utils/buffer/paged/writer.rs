@@ -1206,7 +1206,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     ///
     /// Pages read from storage must have valid checksums covering their retained bytes.
     /// Buffered data is flushed as for [Self::replay], and the included partial tail is frozen
-    /// in memory. This does not establish durability.
+    /// in memory. This does not establish durability. Pages are read in batches as for
+    /// [`Sealed::replay`], which describes what `buffer_size` bounds.
     pub async fn replay_prefix(
         mut self,
         max_size: u64,
@@ -1222,7 +1223,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         let physical_size = pages
             .checked_mul(physical_page_size)
             .ok_or(Error::OffsetOverflow)?;
-        let prefetch = (buffer_size.get() / physical_page_size as usize).max(1);
+        let buffer_pages = (buffer_size.get() / physical_page_size as usize).max(1);
 
         // Freeze the included partial tail so later rewrites cannot shorten the replay's view.
         let partial_page = (logical_size > self.buffer.offset).then(|| {
@@ -1234,7 +1235,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             physical_size,
             logical_size,
             partial_page,
-            prefetch,
+            buffer_pages,
             page_size,
             read_options,
         ));
@@ -1246,6 +1247,9 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     /// The returned replay validates checksums for stored pages and retains a frozen copy of the
     /// current partial page. CRCs are not included in the output. Every underlying blob read
     /// performed by the returned replay uses `read_options`, including refills after seeking.
+    ///
+    /// Pages are read in batches as for [`Sealed::replay`], which describes what `buffer_size`
+    /// bounds.
     ///
     /// This does not establish durability. Use [`sync`](Self::sync) if the replayed bytes must
     /// survive a crash.
@@ -3843,17 +3847,17 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Every refill uses the replay's read options, including the refill after crossing a
-            // page boundary.
+            // The first fill reads page 0 and starts page 1 in flight, both with the replay's
+            // read options, so crossing the page boundary needs no further read.
             assert!(replay.ensure(1).await.unwrap());
             replay.advance(page_size);
             assert!(replay.ensure(1).await.unwrap());
+            assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE; 2]);
 
-            // Seeking discards buffered pages but preserves the read options for the next refill.
+            // Seeking discards the buffered pages and reads both again with the same options.
             replay.seek_to(0).unwrap();
             assert!(replay.ensure(1).await.unwrap());
-
-            assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE; 3]);
+            assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE; 4]);
         });
     }
 

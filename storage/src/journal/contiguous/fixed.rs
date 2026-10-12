@@ -4118,6 +4118,89 @@ mod tests {
         });
     }
 
+    /// A page with a bad checksum inside a batch read ahead of the decoder ends the stream after
+    /// the batches before it, with one checksum error, whether the page starts its batch or sits
+    /// inside it, at buffers of 8 and 64 physical pages. Valid pages ahead of the bad one in the
+    /// same batch are not yielded, since a fill validates its whole batch.
+    #[test_traced]
+    fn test_bad_page_in_batch_read_ahead_ends_replay() {
+        const PAGE: usize = 64;
+        const ITEMS: u64 = 1280;
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let physical_page = PAGE + commonware_runtime::buffer::paged::CHECKSUM_SIZE as usize;
+            let items_per_page = PAGE / u64::SIZE;
+            for (buffer_pages, within_batch) in [(8, 0), (8, 1), (64, 0), (64, 1)] {
+                // The buffer splits into four batches. Corrupt a page of the third one.
+                let batch_pages = buffer_pages / 4;
+                let bad_page = 2 * batch_pages + within_batch;
+                let expected_items = (2 * batch_pages * items_per_page) as u64;
+                let cfg = Config {
+                    partition: format!("bad-page-{buffer_pages}-{within_batch}"),
+                    items_per_blob: NZU64!(ITEMS),
+                    page_cache: CacheRef::from_pooler(&context, NZU16!(PAGE as u16), NZUsize!(4)),
+                    write_buffer: NZUsize!(2048),
+                    replay_buffer: NZUsize!(2048),
+                };
+                let mut journal = Journal::<_, u64>::init(context.child("write"), cfg.clone())
+                    .await
+                    .unwrap();
+                for item in 0..ITEMS {
+                    (journal, _) = journal.append(&item).await.unwrap();
+                }
+                drop(journal.sync().await.unwrap());
+                corrupt_page(
+                    &context,
+                    &format!("{}-blobs", cfg.partition),
+                    &0u64.to_be_bytes(),
+                    bad_page as u64,
+                    PAGE as u64,
+                )
+                .await;
+                cfg.page_cache.clear();
+
+                let journal = Journal::<_, u64>::init(context.child("replay"), cfg)
+                    .await
+                    .unwrap();
+                let (journal, reader) = journal.snapshot().await.unwrap();
+                let stream = reader
+                    .replay(
+                        0..ITEMS,
+                        NZUsize!(buffer_pages * physical_page),
+                        ReadOptions::DONT_CACHE,
+                    )
+                    .await
+                    .unwrap();
+                pin_mut!(stream);
+                let mut next = 0u64;
+                loop {
+                    match stream.next().await.expect("checksum error before end") {
+                        Ok(batch) => {
+                            for (position, item) in batch {
+                                assert_eq!(position, next);
+                                assert_eq!(item, next);
+                                next += 1;
+                            }
+                        }
+                        Err(error) => {
+                            assert!(matches!(
+                                error,
+                                Error::Runtime(RuntimeError::InvalidChecksum)
+                            ));
+                            break;
+                        }
+                    }
+                }
+                assert_eq!(
+                    next, expected_items,
+                    "{buffer_pages} pages, page {bad_page}"
+                );
+                assert!(stream.next().await.is_none());
+                drop(journal);
+            }
+        });
+    }
+
     /// A codec error ends the batch stream after the items decoded before it, whether the failing
     /// item is decoded in bulk from the first page, through the per-item path because it straddles
     /// a page boundary, or in bulk from a later page.

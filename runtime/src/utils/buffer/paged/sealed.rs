@@ -177,6 +177,12 @@ impl<B: Blob> Sealed<B> {
     /// Sealed values have no write buffer to flush, so unlike [`super::Writer::replay`] this method
     /// is not async. Replay validates full pages read from storage and uses the frozen partial
     /// page. Every underlying blob read uses `read_options`, including refills after seeking.
+    ///
+    /// Pages are read in batches ahead of the decoder. The batches in flight together span
+    /// `buffer_size`, each rounded up to whole pages, so they exceed it by less than one page
+    /// each. It does not bound what a large fill or a retained byte field keeps alive. A seek or
+    /// a dropped replay discards the batches read ahead, and their reads finish as
+    /// [`Blob::read_many`] describes.
     pub fn replay(
         &self,
         buffer_size: NonZeroUsize,
@@ -187,7 +193,7 @@ impl<B: Blob> Sealed<B> {
         let physical_page_size = page_size
             .checked_add(CHECKSUM_SIZE)
             .ok_or(Error::OffsetOverflow)?;
-        let prefetch_pages = (buffer_size.get() / physical_page_size as usize).max(1);
+        let buffer_pages = (buffer_size.get() / physical_page_size as usize).max(1);
 
         let partial_len = self
             .inner
@@ -206,7 +212,7 @@ impl<B: Blob> Sealed<B> {
             physical_blob_size,
             logical_blob_size,
             self.inner.partial_page.clone(),
-            prefetch_pages,
+            buffer_pages,
             page_size_nz,
             read_options,
         );

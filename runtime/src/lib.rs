@@ -915,6 +915,12 @@ stability_scope!(BETA {
     /// After a crash, a write not covered by a completed [`Blob::sync`] may be torn: any
     /// subset of its bytes may be durable. Bytes outside the written range remain
     /// unchanged.
+    ///
+    /// # Progress
+    ///
+    /// A caller may leave a read's future or stream unpolled after starting it. A read must
+    /// not require another poll from its caller to advance, or to release a reservation on a
+    /// resource that other reads of the blob need.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Send + Sync + 'static {
         /// Read exactly `len` bytes at `offset` into caller-provided buffers.

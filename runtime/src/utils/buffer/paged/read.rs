@@ -1,9 +1,16 @@
 use super::Checksum;
-use crate::{Blob, Error, IoBuf, ReadOptions};
+use crate::{Blob, Error, IoBuf, IoBufsMut, ReadOptions};
 use bytes::{BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{Buf, FixedSize};
-use commonware_utils::Widen;
-use std::{collections::VecDeque, num::NonZeroU16, ops::Range, sync::Arc};
+use commonware_utils::{Widen, sync::Mutex};
+use futures::{StreamExt as _, future::BoxFuture, task::noop_waker_ref};
+use std::{
+    collections::VecDeque,
+    num::NonZeroU16,
+    ops::Range,
+    sync::Arc,
+    task::{Context, Poll},
+};
 use tracing::error;
 
 /// Buffered pages from storage or a frozen logical tail.
@@ -19,10 +26,78 @@ pub(super) struct BufferState {
     last_page_len: usize,
 }
 
+/// Batches kept in flight ahead of the one being decoded.
+///
+/// The replay buffer fixes the bytes in flight. The depth decides how many requests they are
+/// split into, which the buffer cannot. One request at a time leaves the device idle for a
+/// request latency at every batch boundary, while many small requests pay a fixed cost each.
+const MAX_READ_AHEAD: usize = 3;
+
+/// The physical bytes of one batch.
+type Batch = BoxFuture<'static, Result<IoBufsMut, Error>>;
+
+/// A batch issued ahead of the decoder.
+struct Inflight {
+    /// First page of the batch.
+    first_page: u64,
+    /// Number of pages in the batch.
+    pages: usize,
+    /// The read.
+    state: State,
+}
+
+/// Progress of an issued batch.
+enum State {
+    /// Still being read.
+    Reading(Mutex<Batch>),
+    /// Landed before the decoder reached it.
+    Landed(Result<IoBufsMut, Error>),
+}
+
+impl Inflight {
+    /// The page after the batch's last page.
+    fn end(&self) -> u64 {
+        self.first_page + Widen::widen(self.pages)
+    }
+
+    /// Poll the batch's read once so it makes whatever progress its blob makes on a first poll
+    /// while the decoder works on the batches before it. Later polls carry the decoder's own
+    /// waker.
+    fn start(mut self) -> Self {
+        if let State::Reading(batch) = &mut self.state
+            && let Poll::Ready(result) = batch
+                .get_mut()
+                .as_mut()
+                .poll(&mut Context::from_waker(noop_waker_ref()))
+        {
+            self.state = State::Landed(result);
+        }
+        self
+    }
+
+    /// Wait for the batch's bytes.
+    async fn wait(self) -> Result<IoBufsMut, Error> {
+        match self.state {
+            State::Reading(batch) => batch.into_inner().await,
+            State::Landed(result) => result,
+        }
+    }
+}
+
 /// Async I/O component that prefetches pages and validates CRCs.
 ///
-/// This handles reading batches of pages from the blob, validating their
-/// checksums, and producing `BufferState` for the sync buffering layer.
+/// Pages are read in batches of `batch_pages` pages through [`Blob::read_many`], and up to
+/// [`MAX_READ_AHEAD`] batches after the one being decoded are kept in flight so the device works
+/// while the decoder does. They are polled once when issued and then held until the decoder
+/// reaches them, as the progress contract of [`Blob`] allows. The batches in flight and the one
+/// being decoded together span the replay buffer, each rounded up to whole pages, so they
+/// exceed it by less than one page each.
+///
+/// The decoder's position advances only after a batch passes checksum validation, so a corrupt
+/// page fails the fill that reaches it and no later page is yielded. When the batch at that
+/// position is missing from the queue or its read failed, the queue is discarded and the batch
+/// is read on demand. A failed or dropped fill therefore costs the reads ahead of it and nothing
+/// else.
 pub(super) struct PageReader<B: Blob> {
     /// The underlying blob to read from.
     blob: Arc<B>,
@@ -36,10 +111,13 @@ pub(super) struct PageReader<B: Blob> {
     logical_blob_size: u64,
     /// Immutable logical bytes of the final partial page.
     partial_page: Option<Bytes>,
-    /// Next page index to read from the blob.
+    /// Next page index to hand to the decoder.
     blob_page: u64,
-    /// Number of pages to prefetch at once.
-    prefetch_count: usize,
+    /// Number of pages per batch.
+    batch_pages: usize,
+    /// The batches read ahead of the decoder, contiguous and in page order. The first starts at
+    /// `blob_page` unless a fill failed or was dropped after taking the batch before it.
+    inflight: VecDeque<Inflight>,
     /// Options applied to every blob read.
     read_options: ReadOptions,
 }
@@ -61,7 +139,7 @@ impl<B: Blob> PageReader<B> {
         mut physical_blob_size: u64,
         logical_blob_size: u64,
         partial_page: Option<IoBuf>,
-        prefetch_count: usize,
+        buffer_pages: usize,
         page_size: NonZeroU16,
         read_options: ReadOptions,
     ) -> Self {
@@ -93,9 +171,66 @@ impl<B: Blob> PageReader<B> {
             logical_blob_size,
             partial_page: partial_page.map(Bytes::from),
             blob_page: 0,
-            prefetch_count,
+            batch_pages: buffer_pages.div_ceil(MAX_READ_AHEAD + 1),
+            inflight: VecDeque::new(),
             read_options,
         }
+    }
+
+    /// Position the reader at `page`, discarding the batches read ahead.
+    fn seek_to_page(&mut self, page: u64) {
+        self.blob_page = page;
+        self.inflight.clear();
+    }
+
+    /// Issue batches after the queued ones, or after `consumed_end` when none is queued, until
+    /// [`MAX_READ_AHEAD`] are in flight or the blob ends.
+    fn top_up(&mut self, consumed_end: u64) -> Result<(), Error> {
+        let mut next = self.inflight.back().map_or(consumed_end, Inflight::end);
+        while self.inflight.len() < MAX_READ_AHEAD {
+            let Some(batch) = self.prepare_batch(next)? else {
+                break;
+            };
+            next = batch.end();
+            self.inflight.push_back(batch.start());
+        }
+        Ok(())
+    }
+
+    /// Prepare a read of up to `batch_pages` consecutive physical pages starting at `first_page`,
+    /// or `None` when no stored page remains there.
+    ///
+    /// This only constructs the read. [`Inflight::start`] polls it once so the blob begins it,
+    /// and [`Inflight::wait`] awaits its bytes.
+    fn prepare_batch(&self, first_page: u64) -> Result<Option<Inflight>, Error> {
+        let physical_page_size: u64 = Widen::widen(self.physical_page_size);
+        let start = first_page
+            .checked_mul(physical_page_size)
+            .ok_or(Error::OffsetOverflow)?;
+        if start >= self.physical_blob_size {
+            return Ok(None);
+        }
+        let pages = ((self.physical_blob_size - start) / physical_page_size)
+            .min(Widen::widen(self.batch_pages)) as usize;
+
+        let blob = self.blob.clone();
+        let read_options = self.read_options;
+        let len = pages * self.physical_page_size;
+        let batch = Box::pin(async move {
+            // Accept the batch only once its read stream has ended without an error.
+            let ranges = [(start, len)];
+            let mut reads = std::pin::pin!(blob.read_many(&ranges, read_options));
+            let (_, bufs) = reads.next().await.ok_or(Error::ReadFailed)??;
+            while let Some(result) = reads.next().await {
+                result?;
+            }
+            Ok(bufs)
+        });
+        Ok(Some(Inflight {
+            first_page,
+            pages,
+            state: State::Reading(Mutex::new(batch)),
+        }))
     }
 
     /// Returns the size of the blob.
@@ -111,6 +246,35 @@ impl<B: Blob> PageReader<B> {
     /// Returns the logical page size.
     pub(super) const fn page_size(&self) -> usize {
         self.page_size
+    }
+
+    /// Read the batch at the decoder's position, taking the one read ahead for it when its read
+    /// lands and reading on demand otherwise.
+    ///
+    /// A batch read ahead whose read failed, or a queue that does not start at the decoder's
+    /// position, is discarded before the demand read is issued and the queue topped up again.
+    /// The read ahead may have failed because whoever issued it is gone, and nothing queued may
+    /// stand between the decoder and the bytes it needs.
+    async fn read_batch(&mut self) -> Result<(usize, IoBufsMut), Error> {
+        if let Some(batch) = self
+            .inflight
+            .pop_front_if(|batch| batch.first_page == self.blob_page)
+        {
+            let pages = batch.pages;
+            self.top_up(batch.end())?;
+            if let Ok(bufs) = batch.wait().await {
+                return Ok((pages, bufs));
+            }
+        }
+
+        self.inflight.clear();
+        let batch = self
+            .prepare_batch(self.blob_page)?
+            .expect("pages remain to be issued")
+            .start();
+        let pages = batch.pages;
+        self.top_up(batch.end())?;
+        Ok((pages, batch.wait().await?))
     }
 
     /// Fills a buffer with the next batch of pages.
@@ -141,23 +305,10 @@ impl<B: Blob> PageReader<B> {
             return Ok(None); // No more data
         }
 
-        // Keep the total page count in u64 and narrow only the bounded batch.
+        let (pages_to_read, physical_buf) = self.read_batch().await?;
+        let physical_buf = Bytes::from(physical_buf.coalesce().freeze());
         let max_pages =
             (self.physical_blob_size - start_offset) / Widen::widen(self.physical_page_size);
-        let pages_to_read = max_pages.min(Widen::widen(self.prefetch_count)) as usize;
-        if pages_to_read == 0 {
-            return Ok(None);
-        }
-        let bytes_to_read = pages_to_read * self.physical_page_size;
-
-        // Read physical data
-        let physical_buf = Bytes::from(
-            self.blob
-                .read_at(start_offset, bytes_to_read, self.read_options)
-                .await?
-                .coalesce()
-                .freeze(),
-        );
 
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
@@ -452,7 +603,7 @@ impl<B: Blob> Replay<B> {
         self.exhausted = false;
 
         let page_size = self.reader.page_size as u64;
-        self.reader.blob_page = offset / page_size;
+        self.reader.seek_to_page(offset / page_size);
         self.buffer.current_page = 0;
         self.buffer.offset_in_page = (offset % page_size) as usize;
 
@@ -488,10 +639,675 @@ impl<B: Blob> bytes::Buf for Replay<B> {
 #[cfg(test)]
 mod tests {
     use super::{super::writer::Writer, *};
-    use crate::{Runner as _, Storage as _, deterministic};
+    use crate::{
+        Handle, IoBufs, Runner as _, Storage as _, WriteOptions,
+        buffer::paged::{CacheRef, Sealed},
+        deterministic,
+    };
     use bytes::Buf as _;
     use commonware_macros::test_traced;
-    use commonware_utils::{NZU16, NZUsize};
+    use commonware_utils::{NZU16, NZUsize, channel::oneshot, sync::Mutex};
+    use futures::stream;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Every read in call order. Each records whether it was a `read_many` call, which every
+    /// replay batch must be, and its ranges.
+    type Calls = Arc<Mutex<Vec<(bool, Vec<(u64, usize)>)>>>;
+
+    /// How a [GroupingBlob] serves the reads it records.
+    #[derive(Default)]
+    struct Reads {
+        /// Fail reads at or past this offset.
+        fail_from: Option<u64>,
+        /// Times each read yields after being recorded, before it completes.
+        yields: usize,
+        /// End every `read_many` stream with an error after its results.
+        trailing_error: bool,
+        /// Hold every `read_many` result until the test releases its offset through [Gates].
+        gated: bool,
+        /// Serve `read_many` only while holding one of these permits, in request order, and fail
+        /// the first read at offset 0. The counter records the attempts at that offset.
+        admission: Option<(Arc<tokio::sync::Semaphore>, Arc<AtomicUsize>)>,
+        /// Fail the first read at this offset only. The counter records the attempts there.
+        fail_once: Option<(u64, Arc<AtomicUsize>)>,
+    }
+
+    /// The offset of a read held by a [GroupingBlob] and the release that completes it.
+    type Gate = (u64, oneshot::Sender<()>);
+
+    /// Reads held by a [GroupingBlob] until released.
+    #[derive(Clone, Default)]
+    struct Gates(Arc<Mutex<Vec<Gate>>>);
+
+    impl Gates {
+        /// Release the read at `offset` that is still awaited.
+        fn release(&self, offset: u64) {
+            let mut gates = self.0.lock();
+            let i = gates
+                .iter()
+                .position(|(o, release)| *o == offset && !release.is_closed())
+                .unwrap();
+            let _ = gates.remove(i).1.send(());
+        }
+
+        /// Offsets of the held reads that are still awaited.
+        fn open(&self) -> Vec<u64> {
+            self.0
+                .lock()
+                .iter()
+                .filter(|(_, release)| !release.is_closed())
+                .map(|(offset, _)| *offset)
+                .collect()
+        }
+    }
+
+    /// Records every read and serves it as its [Reads] say.
+    struct GroupingBlob<B> {
+        inner: B,
+        calls: Calls,
+        reads: Reads,
+        gates: Gates,
+    }
+
+    impl<B> GroupingBlob<B> {
+        /// Record a read and yield `yields` times so a test can observe it before it completes.
+        async fn begin(&self, many: bool, ranges: &[(u64, usize)]) -> Result<(), Error> {
+            self.record(many, ranges)?;
+            for _ in 0..self.reads.yields {
+                crate::reschedule().await;
+            }
+            Ok(())
+        }
+
+        fn record(&self, many: bool, ranges: &[(u64, usize)]) -> Result<(), Error> {
+            self.calls.lock().push((many, ranges.to_vec()));
+            if self
+                .reads
+                .fail_once
+                .as_ref()
+                .is_some_and(|(offset, attempts)| {
+                    ranges[0].0 == *offset && attempts.fetch_add(1, Ordering::SeqCst) == 0
+                })
+            {
+                return Err(Error::ReadFailed);
+            }
+            if self
+                .reads
+                .fail_from
+                .is_some_and(|fail| ranges.iter().any(|(offset, _)| *offset >= fail))
+            {
+                return Err(Error::ReadFailed);
+            }
+            Ok(())
+        }
+    }
+
+    impl<B: Blob> Blob for GroupingBlob<B> {
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.begin(false, &[(offset, len)]).await?;
+            self.inner.read_at_buf(offset, len, bufs, options).await
+        }
+
+        async fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.begin(false, &[(offset, len)]).await?;
+            self.inner.read_at(offset, len, options).await
+        }
+
+        fn read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+            if let Some((permits, attempts)) = &self.reads.admission {
+                self.record(true, ranges).unwrap();
+                let (offset, len) = ranges[0];
+                return stream::once(async move {
+                    let _permit = permits.acquire().await.unwrap();
+                    let fail = offset == 0 && attempts.fetch_add(1, Ordering::SeqCst) == 0;
+                    crate::reschedule().await;
+                    crate::reschedule().await;
+                    if fail {
+                        Err(Error::ReadFailed)
+                    } else {
+                        self.inner
+                            .read_at(offset, len, options)
+                            .await
+                            .map(|buf| (0, buf))
+                    }
+                })
+                .left_stream();
+            }
+            self.ungated_read_many(ranges, options).right_stream()
+        }
+
+        async fn write_at(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
+        ) -> Result<(), Error> {
+            self.inner.write_at(offset, bufs, options).await
+        }
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await
+        }
+        async fn start_sync(&self) -> Handle<()> {
+            self.inner.start_sync().await
+        }
+    }
+
+    impl<B: Blob> GroupingBlob<B> {
+        fn ungated_read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+            if let Err(err) = self.record(true, ranges) {
+                return stream::iter([Err(err)]).left_stream();
+            }
+            // Yield `yields` times before the first result, as `begin` does for `read_at`.
+            let mut left = self.reads.yields;
+            let delay = stream::poll_fn(move |cx| {
+                if left == 0 {
+                    return Poll::Ready(None);
+                }
+                left -= 1;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            });
+            let trailing = self.reads.trailing_error.then_some(Err(Error::ReadFailed));
+            let gate = self.reads.gated.then(|| {
+                let (release, released) = oneshot::channel();
+                self.gates.0.lock().push((ranges[0].0, release));
+                released
+            });
+            let held = stream::once(async move {
+                if let Some(released) = gate {
+                    let _ = released.await;
+                }
+            })
+            .filter_map(|()| async { None });
+            held.chain(delay)
+                .chain(self.inner.read_many(ranges, options))
+                .chain(stream::iter(trailing))
+                .right_stream()
+        }
+    }
+
+    /// The pipelining tests use 64-byte pages and a replay buffer of 64 pages, split into
+    /// [MAX_READ_AHEAD] + 1 batches, over a blob of [PIPE_BLOB_BATCHES] batches plus a partial
+    /// page.
+    const PIPE_PAGE_SIZE: NonZeroU16 = NZU16!(64);
+    const PIPE_PHYSICAL_PAGE: usize = 64 + Checksum::SIZE;
+    const PIPE_BUFFER_PAGES: usize = 64;
+    const PIPE_BUFFER_BYTES: usize = PIPE_BUFFER_PAGES * PIPE_PHYSICAL_PAGE;
+    const PIPE_BATCH_PAGES: usize = PIPE_BUFFER_PAGES / (MAX_READ_AHEAD + 1);
+    const PIPE_BATCH_BYTES: usize = PIPE_BATCH_PAGES * PIPE_PHYSICAL_PAGE;
+    const PIPE_BATCH_LOGICAL: usize = PIPE_BATCH_PAGES * 64;
+    const PIPE_BLOB_BATCHES: usize = MAX_READ_AHEAD + 2;
+    const PIPE_BLOB_BYTES: usize = PIPE_BLOB_BATCHES * PIPE_BATCH_LOGICAL + 10;
+
+    /// Write `len` patterned bytes through a recording blob with `page_size` pages and a write
+    /// buffer of `buffer` bytes that serves reads as `reads` say, and return its sealed view, the
+    /// recorded reads, and the bytes.
+    async fn recorded_blob(
+        context: &deterministic::Context,
+        name: &[u8],
+        page_size: NonZeroU16,
+        buffer: usize,
+        len: usize,
+        reads: Reads,
+    ) -> (
+        Sealed<GroupingBlob<<deterministic::Context as crate::Storage>::Blob>>,
+        Calls,
+        Vec<u8>,
+        Gates,
+    ) {
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let gates = Gates::default();
+        let (blob, size) = context.open("pipelining", name).await.unwrap();
+        let blob = GroupingBlob {
+            inner: blob,
+            calls: calls.clone(),
+            reads,
+            gates: gates.clone(),
+        };
+        let cache = CacheRef::from_pooler(context, page_size, NZUsize!(4));
+        let writer = Writer::new(blob, size, buffer, cache).await.unwrap();
+        let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        let (writer, _) = writer.append(&data).await.unwrap();
+        let (_, sealed) = writer.snapshot().await.unwrap();
+        calls.lock().clear();
+        (sealed, calls, data, gates)
+    }
+
+    /// A [recorded_blob] of [PIPE_BLOB_BYTES] bytes with the pipelining tests' sizes.
+    async fn piped_blob(
+        context: &deterministic::Context,
+        name: &[u8],
+        reads: Reads,
+    ) -> (
+        Sealed<GroupingBlob<<deterministic::Context as crate::Storage>::Blob>>,
+        Calls,
+        Vec<u8>,
+        Gates,
+    ) {
+        recorded_blob(
+            context,
+            name,
+            PIPE_PAGE_SIZE,
+            PIPE_BUFFER_BYTES,
+            PIPE_BLOB_BYTES,
+            reads,
+        )
+        .await
+    }
+
+    /// The reads a replay of [PIPE_BLOB_BYTES] bytes issues, one `read_many` call per batch.
+    fn piped_calls(batches: std::ops::Range<usize>) -> Vec<(bool, Vec<(u64, usize)>)> {
+        batches
+            .map(|i| {
+                (
+                    true,
+                    vec![((i * PIPE_BATCH_BYTES) as u64, PIPE_BATCH_BYTES)],
+                )
+            })
+            .collect()
+    }
+
+    /// The reads the first fill of a replay issues with batches of `batch` pipelining-test pages,
+    /// one for the decoder and [MAX_READ_AHEAD] ahead of it.
+    fn first_fill_calls(batch: usize) -> Vec<(bool, Vec<(u64, usize)>)> {
+        let len = batch * PIPE_PHYSICAL_PAGE;
+        (0..=MAX_READ_AHEAD)
+            .map(|i| (true, vec![((i * len) as u64, len)]))
+            .collect()
+    }
+
+    /// Consume `expected.len()` buffered bytes, checking them against `expected`.
+    async fn take<B: Blob>(replay: &mut Replay<B>, expected: &[u8]) {
+        assert!(replay.ensure(expected.len()).await.unwrap());
+        assert_eq!(replay.copy_to_bytes(expected.len()).as_ref(), expected);
+    }
+
+    /// Holding reads in flight must not cost the replay its `Sync` bound.
+    #[test]
+    fn test_replay_is_sync() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<Replay<<deterministic::Context as crate::Storage>::Blob>>();
+    }
+
+    /// A read ahead that fails is read again on demand, so the replay sees every byte.
+    #[test]
+    fn test_failed_read_ahead_is_read_again_on_demand() {
+        deterministic::Runner::default().start(|context| async move {
+            let reads = Reads {
+                fail_once: Some((PIPE_BATCH_BYTES as u64, Arc::new(AtomicUsize::new(0)))),
+                ..Reads::default()
+            };
+            let (sealed, calls, data, _) =
+                piped_blob(&context, b"speculative-failure", reads).await;
+            let mut replay = sealed
+                .replay(NZUsize!(PIPE_BUFFER_BYTES), ReadOptions::default())
+                .unwrap();
+            take(&mut replay, &data[..PIPE_BATCH_LOGICAL]).await;
+            take(&mut replay, &data[PIPE_BATCH_LOGICAL..]).await;
+            assert!(!replay.ensure(1).await.unwrap());
+            assert_eq!(
+                calls
+                    .lock()
+                    .iter()
+                    .filter(|(_, ranges)| ranges[0].0 == PIPE_BATCH_BYTES as u64)
+                    .count(),
+                2
+            );
+        });
+    }
+
+    /// A blob whose reads take turns only while polled is outside the [`Blob`] contract, but it
+    /// models reads ahead that can no longer complete, so a retry must not wait on them.
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(2)]
+    #[case(3)]
+    #[case(4)]
+    fn test_retry_does_not_wait_on_queued_reads(
+        #[case] permits: usize,
+        #[values(false, true)] cancel: bool,
+    ) {
+        use crate::Clock as _;
+        deterministic::Runner::default().start(|context| async move {
+            let admission = Arc::new(tokio::sync::Semaphore::new(permits));
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let reads = Reads {
+                admission: Some((admission, attempts.clone())),
+                ..Reads::default()
+            };
+            let (sealed, _, data, _) = piped_blob(&context, b"permit-retry", reads).await;
+            let mut replay = sealed
+                .replay(NZUsize!(PIPE_BUFFER_BYTES), ReadOptions::default())
+                .unwrap();
+            if cancel {
+                let mut first = Box::pin(replay.ensure(1));
+                assert!(
+                    first
+                        .as_mut()
+                        .poll(&mut Context::from_waker(noop_waker_ref()))
+                        .is_pending()
+                );
+                drop(first);
+            } else {
+                assert!(matches!(replay.ensure(1).await, Err(Error::ReadFailed)));
+            }
+            assert!(attempts.load(Ordering::SeqCst) >= 1);
+            commonware_macros::select! {
+                result = replay.ensure(1) => assert!(result.unwrap()),
+                _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                    panic!("retry hung with {permits} permits, cancellation {cancel}");
+                },
+            }
+            take(&mut replay, &data[..PIPE_BATCH_LOGICAL]).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_batches_split_the_buffer() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // A buffer splits into MAX_READ_AHEAD + 1 batches, each rounded up to whole pages, so
+            // a buffer of fewer pages than batches keeps single pages in flight.
+            let full = MAX_READ_AHEAD + 1;
+            for (pages, batch) in [
+                (1, 1),
+                (full - 1, 1),
+                (full, 1),
+                (full + 1, 2),
+                (2 * full - 1, 2),
+                (2 * full + 1, 3),
+                (PIPE_BUFFER_PAGES, PIPE_BATCH_PAGES),
+            ] {
+                let (sealed, calls, _, _) = recorded_blob(
+                    &context,
+                    format!("depth-{pages}").as_bytes(),
+                    PIPE_PAGE_SIZE,
+                    pages * PIPE_PHYSICAL_PAGE,
+                    PIPE_BLOB_BYTES,
+                    Reads::default(),
+                )
+                .await;
+                let mut replay = sealed
+                    .replay(NZUsize!(pages * PIPE_PHYSICAL_PAGE), ReadOptions::default())
+                    .unwrap();
+                assert!(replay.ensure(1).await.unwrap());
+                assert_eq!(*calls.lock(), first_fill_calls(batch), "{pages} pages");
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_fill_keeps_batches_in_flight() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (sealed, calls, data, _) =
+                piped_blob(&context, b"pipeline", Reads::default()).await;
+            let mut replay = sealed
+                .replay(NZUsize!(PIPE_BUFFER_BYTES), ReadOptions::default())
+                .unwrap();
+
+            // The first fill issues the first batch and MAX_READ_AHEAD more before waiting, all
+            // of which fit within the buffer together.
+            let ahead = MAX_READ_AHEAD;
+            assert!(replay.ensure(1).await.unwrap());
+            assert_eq!(*calls.lock(), piped_calls(0..ahead + 1));
+
+            // Decoding a batch issues nothing, and reaching the next batch tops the queue up.
+            take(&mut replay, &data[..PIPE_BATCH_LOGICAL]).await;
+            assert_eq!(calls.lock().len(), ahead + 1);
+            take(
+                &mut replay,
+                &data[PIPE_BATCH_LOGICAL..2 * PIPE_BATCH_LOGICAL],
+            )
+            .await;
+            assert_eq!(*calls.lock(), piped_calls(0..ahead + 2));
+            take(
+                &mut replay,
+                &data[2 * PIPE_BATCH_LOGICAL..PIPE_BLOB_BATCHES * PIPE_BATCH_LOGICAL],
+            )
+            .await;
+            assert_eq!(*calls.lock(), piped_calls(0..PIPE_BLOB_BATCHES));
+
+            // The frozen partial page needs no read.
+            take(&mut replay, &data[PIPE_BLOB_BATCHES * PIPE_BATCH_LOGICAL..]).await;
+            assert!(!replay.ensure(1).await.unwrap());
+            assert!(replay.is_exhausted());
+        });
+    }
+
+    #[test_traced]
+    fn test_seek_discards_the_batches_in_flight() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Reads complete only when released, so the batches read ahead stay in flight until
+            // the seek discards them.
+            let reads = Reads {
+                gated: true,
+                ..Reads::default()
+            };
+            let (sealed, calls, data, gates) = piped_blob(&context, b"seek", reads).await;
+            let mut replay = sealed
+                .replay(NZUsize!(PIPE_BUFFER_BYTES), ReadOptions::default())
+                .unwrap();
+            let ahead = MAX_READ_AHEAD;
+            {
+                let mut fill = Box::pin(replay.ensure(1));
+                assert!(
+                    fill.as_mut()
+                        .poll(&mut Context::from_waker(noop_waker_ref()))
+                        .is_pending()
+                );
+                gates.release(0);
+                assert!(fill.await.unwrap());
+            }
+            assert_eq!(calls.lock().len(), ahead + 1);
+            let in_flight: Vec<u64> = (1..=ahead).map(|i| (i * PIPE_BATCH_BYTES) as u64).collect();
+            assert_eq!(gates.open(), in_flight);
+
+            // Seeking into the second-to-last batch discards the batches in flight, which
+            // nothing awaits any more, and reads from there.
+            let batch = PIPE_BLOB_BATCHES - 2;
+            let offset = batch * PIPE_BATCH_LOGICAL + 5;
+            replay.seek_to(offset as u64).unwrap();
+            assert!(gates.open().is_empty());
+            {
+                let mut fill = Box::pin(replay.ensure(1));
+                assert!(
+                    fill.as_mut()
+                        .poll(&mut Context::from_waker(noop_waker_ref()))
+                        .is_pending()
+                );
+                for i in batch..PIPE_BLOB_BATCHES {
+                    gates.release((i * PIPE_BATCH_BYTES) as u64);
+                }
+                assert!(fill.await.unwrap());
+            }
+            take(&mut replay, &data[offset..]).await;
+            assert!(!replay.ensure(1).await.unwrap());
+            assert_eq!(
+                calls.lock()[ahead + 1..],
+                piped_calls(batch..PIPE_BLOB_BATCHES)
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_failed_fill_reads_the_same_batch_again() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let fail_from = Some(PIPE_BATCH_BYTES as u64);
+            let reads = Reads {
+                fail_from,
+                ..Reads::default()
+            };
+            let (sealed, calls, data, _) = piped_blob(&context, b"retry", reads).await;
+            let mut replay = sealed
+                .replay(NZUsize!(PIPE_BUFFER_BYTES), ReadOptions::default())
+                .unwrap();
+            take(&mut replay, &data[..PIPE_BATCH_LOGICAL]).await;
+
+            // A failed speculative read is reissued on demand. Persistent errors leave the
+            // decoder's position unchanged for a subsequent fill.
+            for _ in 0..2 {
+                assert!(matches!(replay.ensure(1).await, Err(Error::ReadFailed)));
+            }
+            let ahead = MAX_READ_AHEAD;
+            let mut expected = piped_calls(0..ahead + 2);
+            expected.extend(piped_calls(1..ahead + 2));
+            expected.extend(piped_calls(1..ahead + 2));
+            assert_eq!(*calls.lock(), expected);
+        });
+    }
+
+    #[test_traced]
+    fn test_dropped_fill_reads_the_same_batch_again() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Reads yield twice before completing, once when the reader starts them and once
+            // in the fill's wait, so a fill can be dropped while it waits.
+            let reads = Reads {
+                yields: 2,
+                ..Reads::default()
+            };
+            let (sealed, calls, data, _) = piped_blob(&context, b"dropped", reads).await;
+            let mut replay = sealed
+                .replay(NZUsize!(PIPE_BUFFER_BYTES), ReadOptions::default())
+                .unwrap();
+
+            // Drop a fill while its batch is still being read.
+            {
+                let mut fill = Box::pin(replay.ensure(1));
+                assert!(
+                    fill.as_mut()
+                        .poll(&mut Context::from_waker(noop_waker_ref()))
+                        .is_pending()
+                );
+            }
+            let ahead = MAX_READ_AHEAD;
+            assert_eq!(*calls.lock(), piped_calls(0..ahead + 1));
+
+            // The next fill discards the queued reads and starts again at the decoder's
+            // position, so the decoder sees the right bytes.
+            take(&mut replay, &data[..2 * PIPE_BATCH_LOGICAL]).await;
+            let mut expected = piped_calls(0..ahead + 1);
+            expected.extend(piped_calls(0..ahead + 2));
+            assert_eq!(*calls.lock(), expected);
+        });
+    }
+
+    #[test_traced]
+    fn test_batches_landing_before_and_after_their_wait_are_served() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Reads complete only when released, so a batch read ahead can land before the
+            // decoder asks for it or while the decoder is already waiting on it.
+            let reads = Reads {
+                gated: true,
+                ..Reads::default()
+            };
+            let (sealed, calls, data, gates) = piped_blob(&context, b"gated", reads).await;
+            let mut replay = sealed
+                .replay(NZUsize!(PIPE_BUFFER_BYTES), ReadOptions::default())
+                .unwrap();
+
+            // The first fill issues the first batch and MAX_READ_AHEAD more, then waits on the
+            // first. Releasing the second before the first lands it while nobody awaits it.
+            {
+                let mut fill = Box::pin(replay.ensure(1));
+                assert!(
+                    fill.as_mut()
+                        .poll(&mut Context::from_waker(noop_waker_ref()))
+                        .is_pending()
+                );
+                assert_eq!(calls.lock().len(), MAX_READ_AHEAD + 1);
+                gates.release(PIPE_BATCH_BYTES as u64);
+                gates.release(0);
+                assert!(fill.await.unwrap());
+            }
+            take(&mut replay, &data[..PIPE_BATCH_LOGICAL]).await;
+
+            // The landed second batch is served without another read.
+            take(
+                &mut replay,
+                &data[PIPE_BATCH_LOGICAL..2 * PIPE_BATCH_LOGICAL],
+            )
+            .await;
+            assert_eq!(calls.lock().len(), MAX_READ_AHEAD + 2);
+
+            // The third is released while a fill waits on it with the decoder's waker, which
+            // the completion must wake.
+            let wakes = Arc::new(Wakes::default());
+            let waker = futures::task::waker(wakes.clone());
+            {
+                let mut fill = Box::pin(replay.ensure(1));
+                assert!(
+                    fill.as_mut()
+                        .poll(&mut Context::from_waker(&waker))
+                        .is_pending()
+                );
+                gates.release(2 * PIPE_BATCH_BYTES as u64);
+                assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+                assert!(matches!(
+                    fill.as_mut().poll(&mut Context::from_waker(&waker)),
+                    Poll::Ready(Ok(true))
+                ));
+            }
+            take(
+                &mut replay,
+                &data[2 * PIPE_BATCH_LOGICAL..3 * PIPE_BATCH_LOGICAL],
+            )
+            .await;
+        });
+    }
+
+    /// Counts the wakes a pending fill receives.
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+
+    impl futures::task::ArcWake for Wakes {
+        fn wake_by_ref(wakes: &Arc<Self>) {
+            wakes.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test_traced]
+    fn test_read_error_after_the_batch_fails_the_fill() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // A `read_many` call that yields its range and then an error has failed.
+            let reads = Reads {
+                trailing_error: true,
+                ..Reads::default()
+            };
+            let (sealed, _, _, _) = piped_blob(&context, b"late-error", reads).await;
+            let mut replay = sealed
+                .replay(NZUsize!(PIPE_BUFFER_BYTES), ReadOptions::default())
+                .unwrap();
+            assert!(matches!(replay.ensure(1).await, Err(Error::ReadFailed)));
+        });
+    }
 
     #[test]
     fn test_replay_buf_bytes_share_pages() {
@@ -643,7 +1459,7 @@ mod tests {
 
     #[test_traced("DEBUG")]
     fn test_replay_cross_buffer_boundary() {
-        // Use prefetch_count=1 to force separate BufferStates per page.
+        // Use a one-page buffer to force separate BufferStates per page.
         // This tests navigation across multiple BufferStates in the VecDeque.
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -661,9 +1477,9 @@ mod tests {
             (append, _) = append.append(&data).await.unwrap();
             append = append.sync().await.unwrap();
 
-            // Create Replay with buffer size that results in prefetch_count=1.
+            // Create Replay with a buffer that holds one page, so every batch is one page.
             // Physical page size = 103 + 12 = 115 bytes.
-            // Buffer size of 115 gives prefetch_pages = 115/115 = 1.
+            // Buffer size of 115 gives 115/115 = 1 page.
             let (_, mut replay) = append
                 .replay(NZUsize!(115), ReadOptions::default())
                 .await
@@ -690,7 +1506,7 @@ mod tests {
 
             assert_eq!(collected, data);
 
-            // With prefetch_count=1 and 4 pages, we expect at least 4 chunks
+            // With one-page batches and 4 pages, we expect at least 4 chunks
             // (one per page, though partial reads could result in more).
             assert!(
                 chunks_read >= 4,

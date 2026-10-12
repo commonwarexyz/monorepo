@@ -1750,6 +1750,50 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_segmented_fixed_replay_leaves_page_cache_cold() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let cfg = aligned_cfg(&context);
+            let page_cache = cfg.page_cache.clone();
+            let mut journal = Journal::<_, [u8; 16]>::init(context.child("storage"), cfg)
+                .await
+                .unwrap();
+
+            // Each item fills one logical page, so a synchronous probe checks each page.
+            for value in 0..2 {
+                (journal, _) = journal.append(1, &[value; 16]).await.unwrap();
+            }
+            journal = journal.sync(1).await.unwrap();
+            page_cache.clear();
+
+            let mut replay = journal
+                .replay(0, 0, NZUsize!(1024), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            for value in 0..2 {
+                assert_eq!(
+                    replay.next().await.unwrap().unwrap(),
+                    (1, u64::from(value), [value; 16])
+                );
+            }
+            assert!(replay.next().await.is_none());
+            let journal = replay.finish().unwrap();
+            for position in 0..2 {
+                assert!(journal.try_get_sync(1, position).is_none());
+            }
+
+            recordings.clear();
+            assert_eq!(journal.get(1, 0).await.unwrap(), [0; 16]);
+            assert!(!recordings.snapshot().reads.is_empty());
+            assert_eq!(journal.try_get_sync(1, 0), Some([0; 16]));
+            recordings.clear();
+            assert_eq!(journal.get(1, 0).await.unwrap(), [0; 16]);
+            assert!(recordings.snapshot().reads.is_empty());
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_segmented_fixed_clean_recovery_uses_replay_buffer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1761,7 +1805,8 @@ mod tests {
             seed(&context, &cfg, 1..=1).await;
 
             // Initialization needs only the terminal page used to open Writer. Recovery belongs to
-            // replay, whose 112-byte budget batches four 28-byte physical pages per read.
+            // replay, whose 448-byte budget holds sixteen 28-byte physical pages and reads them
+            // four pages at a time.
             recordings.clear();
             let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
                 .await
@@ -1769,7 +1814,7 @@ mod tests {
             assert_eq!(recordings.snapshot().reads.len(), 1);
 
             let mut replay = journal
-                .replay(0, 0, NZUsize!(112), ReadOptions::default())
+                .replay(0, 0, NZUsize!(448), ReadOptions::default())
                 .await
                 .expect("failed to replay");
             while let Some(item) = replay.next().await {
