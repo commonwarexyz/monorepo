@@ -3953,7 +3953,9 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_replay_and_writable_tip_request_dont_cache() {
+    fn test_replay_read_options_reach_history_and_tip() {
+        const PAGE_SIZE: NonZeroU16 = NZU16!(40);
+
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
@@ -3971,7 +3973,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            for item in 0..39 {
+            // The tip section's fifteen 9-byte frames fill three full pages and a partial page.
+            for item in 0..35 {
                 (journal, _) = journal.append(&item).await.unwrap();
             }
             journal = journal.sync().await.unwrap();
@@ -4000,27 +4003,53 @@ mod tests {
                 );
             }
 
-            // Writable-tip misses request DONT_CACHE through CacheRef ownership.
+            // A synced writable tip has no unwritten full page, so it is replayed like sealed
+            // history and its full pages arrive in one read that carries the caller's policy.
+            for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+                page_cache.clear();
+                {
+                    let stream =
+                        replay_items(&journal, 20..journal.bounds().end, NZUsize!(2048), options)
+                            .await
+                            .unwrap();
+                    recordings.clear();
+                    futures::pin_mut!(stream);
+                    for item in 20..35 {
+                        assert_eq!(stream.next().await.unwrap().unwrap(), (item, item));
+                    }
+                    assert!(stream.next().await.is_none());
+                    assert_eq!(recordings.snapshot().reads, vec![options]);
+                }
+                recordings.clear();
+                assert_eq!(journal.read(20).await.unwrap(), 20);
+                assert!(!recordings.snapshot().reads.is_empty());
+                recordings.clear();
+                assert_eq!(journal.read(20).await.unwrap(), 20);
+                assert!(recordings.snapshot().reads.is_empty());
+            }
+
+            // Once the tip buffers an unwritten full page (without filling the section, which
+            // would seal it), replay goes through the page cache, which faults each missing page
+            // with DONT_CACHE regardless of the caller's policy.
+            for item in 35..39 {
+                (journal, _) = journal.append(&item).await.unwrap();
+            }
             page_cache.clear();
             {
                 let stream = replay_items(
                     &journal,
                     20..journal.bounds().end,
-                    NZUsize!(32),
-                    ReadOptions::DONT_CACHE,
+                    NZUsize!(2048),
+                    ReadOptions::default(),
                 )
                 .await
                 .unwrap();
                 recordings.clear();
                 futures::pin_mut!(stream);
                 assert_eq!(stream.next().await.unwrap().unwrap(), (20, 20));
-
-                let reads = recordings.snapshot().reads;
-                assert!(!reads.is_empty());
-                assert!(
-                    reads
-                        .iter()
-                        .all(|options| *options == ReadOptions::DONT_CACHE)
+                assert_eq!(
+                    recordings.snapshot().reads,
+                    vec![ReadOptions::DONT_CACHE; 3]
                 );
             }
 

@@ -237,6 +237,51 @@ mod tests {
     use commonware_utils::{NZU16, NZUsize, channel::oneshot, sync::Mutex};
     use std::num::NonZeroU16;
 
+    /// Replaying sealed pages with `DONT_CACHE` admits nothing to the page cache, whether the
+    /// view was sealed or captured by `try_snapshot`.
+    #[rstest::rstest]
+    fn test_replay_with_dont_cache_leaves_cache_cold(#[values(false, true)] snapshot: bool) {
+        deterministic::Runner::default().start(|context| async move {
+            let (blob, size) = context.open("review-cold", b"blob").await.unwrap();
+            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(32));
+            let writer = Writer::new(blob, size, BUFFER_SIZE, cache.clone())
+                .await
+                .unwrap();
+            let page = PAGE_SIZE.get() as usize;
+            let total = page * 9 + 25;
+            let data: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+            let (writer, _) = writer.append(&data).await.unwrap();
+            let writer = writer.sync().await.unwrap();
+            let sealed = if snapshot {
+                writer.try_snapshot().unwrap()
+            } else {
+                let (sealed, sync) = writer.seal().await.unwrap();
+                sync.await.unwrap();
+                sealed
+            };
+            cache.clear();
+            let mut probe = vec![0; page];
+            for i in 0..9 {
+                assert!(!sealed.try_read_sync_into(&mut probe, (i * page) as u64));
+            }
+            let mut replay = sealed
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::DONT_CACHE)
+                .unwrap();
+            assert!(replay.ensure(total).await.unwrap());
+            assert_eq!(replay.copy_to_bytes(total).as_ref(), data);
+            assert!(!replay.ensure(1).await.unwrap());
+            for i in 0..9 {
+                assert!(!sealed.try_read_sync_into(&mut probe, (i * page) as u64));
+            }
+            assert_eq!(
+                sealed.read_at(0, page).await.unwrap().coalesce().as_ref(),
+                &data[..page]
+            );
+            assert!(sealed.try_read_sync_into(&mut probe, 0));
+            assert_eq!(probe, data[..page]);
+        });
+    }
+
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky page size to test alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
 

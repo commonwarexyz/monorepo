@@ -532,6 +532,18 @@ impl<B: Blob> Writer<B> {
         Ok((self, sealed))
     }
 
+    /// Capture an immutable [`Sealed`] view of the logical bytes without writing to the blob.
+    ///
+    /// This is [`Self::snapshot`] without its flush. It returns the same view when every full
+    /// page is already in the blob, and `None` while the write buffer holds a full page that has
+    /// not been written.
+    pub fn try_snapshot(&self) -> Option<Sealed<B>> {
+        if self.has_flush_work(false) {
+            return None;
+        }
+        Some(self.sealed_handle(self.id))
+    }
+
     /// Read and validate one page, returning its logical bytes and the range they cover.
     async fn read_page(
         blob: &B,
@@ -3531,6 +3543,49 @@ mod tests {
             assert_eq!(snapshot.size(), 5);
             let read = snapshot.read_at(0, 5).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), b"hello");
+        });
+    }
+
+    /// A view without I/O is available only while every full page is already written.
+    #[test_traced]
+    fn test_try_snapshot_requires_written_full_pages() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = Arc::new(SyncTrackingBlob::new());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // A partial page alone is copied into the view without a write.
+            let (writer, _) = writer.append(b"hello").await.unwrap();
+            let view = writer.try_snapshot().expect("partial page needs no write");
+            assert_eq!(view.size(), 5);
+            let read = view.read_at(0, 5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
+            let (_, writes, _, _) = blob.snapshot();
+            assert_eq!(writes, 0);
+
+            // A buffered full page must be written before a view can be taken.
+            let page = vec![b'x'; PAGE_SIZE.get() as usize];
+            let (writer, _) = writer.append(&page).await.unwrap();
+            assert!(writer.try_snapshot().is_none());
+
+            // Once written, the view covers every byte and replays the full page from the blob.
+            let (writer, snapshot) = writer.snapshot().await.unwrap();
+            let (_, writes, _, _) = blob.snapshot();
+            assert_eq!(writes, 1);
+            let view = writer.try_snapshot().expect("full pages are written");
+            assert_eq!(view.size(), snapshot.size());
+            let mut replay = view
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                .unwrap();
+            let total = 5 + page.len();
+            assert!(replay.ensure(total).await.unwrap());
+            let bytes = replay.copy_to_bytes(total);
+            assert_eq!(&bytes[..5], b"hello");
+            assert!(bytes[5..].iter().all(|byte| *byte == b'x'));
+            assert!(!replay.ensure(1).await.unwrap());
         });
     }
 

@@ -3741,8 +3741,8 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_replay_and_writable_tip_request_dont_cache() {
-        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(3);
+    fn test_replay_read_options_reach_history_and_tip() {
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(6);
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -3753,7 +3753,8 @@ mod tests {
                 .await
                 .expect("failed to initialize journal");
 
-            for i in 0..5 {
+            // The tip blob holds three items across two full pages and a partial page.
+            for i in 0..9 {
                 (journal, _) = journal
                     .append(&test_digest(i))
                     .await
@@ -3791,33 +3792,68 @@ mod tests {
                 );
             }
 
-            // Writable-tip misses request DONT_CACHE through CacheRef ownership.
+            // A synced writable tip has no unwritten full page, so it is replayed like sealed
+            // history and its full pages arrive in one read that carries the caller's policy.
+            for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+                page_cache.clear();
+                recordings.clear();
+                {
+                    let stream =
+                        replay_items(&journal, 6..journal.bounds().end, NZUsize!(2048), options)
+                            .await
+                            .expect("failed to replay writable tip");
+                    pin_mut!(stream);
+                    for i in 6..9 {
+                        let (position, item) = stream
+                            .next()
+                            .await
+                            .expect("missing writable replay item")
+                            .expect("failed to replay writable item");
+                        assert_eq!(position, i);
+                        assert_eq!(item, test_digest(i));
+                    }
+                    assert!(stream.next().await.is_none());
+                    assert_eq!(recordings.snapshot().reads, vec![options]);
+                }
+                recordings.clear();
+                assert_eq!(journal.read(6).await.unwrap(), test_digest(6));
+                assert!(!recordings.snapshot().reads.is_empty());
+                recordings.clear();
+                assert_eq!(journal.read(6).await.unwrap(), test_digest(6));
+                assert!(recordings.snapshot().reads.is_empty());
+            }
+
+            // Once the tip buffers an unwritten full page (without filling the blob, which would
+            // seal it), replay goes through the page cache, which faults each missing page with
+            // DONT_CACHE regardless of the caller's policy.
+            for i in 9..11 {
+                (journal, _) = journal
+                    .append(&test_digest(i))
+                    .await
+                    .expect("failed to append");
+            }
             page_cache.clear();
             recordings.clear();
             {
                 let stream = replay_items(
                     &journal,
-                    3..journal.bounds().end,
-                    NZUsize!(56),
-                    ReadOptions::DONT_CACHE,
+                    6..journal.bounds().end,
+                    NZUsize!(2048),
+                    ReadOptions::default(),
                 )
                 .await
-                .expect("failed to replay writable tip");
+                .expect("failed to replay buffered tip");
                 pin_mut!(stream);
                 let (position, item) = stream
                     .next()
                     .await
-                    .expect("missing writable replay item")
-                    .expect("failed to replay writable item");
-                assert_eq!(position, 3);
-                assert_eq!(item, test_digest(3));
-
-                let reads = recordings.snapshot().reads;
-                assert!(!reads.is_empty());
-                assert!(
-                    reads
-                        .iter()
-                        .all(|options| *options == ReadOptions::DONT_CACHE)
+                    .expect("missing buffered replay item")
+                    .expect("failed to replay buffered item");
+                assert_eq!(position, 6);
+                assert_eq!(item, test_digest(6));
+                assert_eq!(
+                    recordings.snapshot().reads,
+                    vec![ReadOptions::DONT_CACHE, ReadOptions::DONT_CACHE]
                 );
             }
 
@@ -4024,6 +4060,61 @@ mod tests {
             .await;
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_fixed_replay_bulk_retains_original_allocation() {
+        deterministic::Runner::default().start(|context| async move {
+            let data: Vec<u8> = (0u64..16).flat_map(u64::to_be_bytes).collect();
+            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(4));
+            let (blob, size) = context
+                .open("fixed-replay-sharing", b"synced")
+                .await
+                .unwrap();
+            let writer = Writer::new(blob, size, 256, cache.clone()).await.unwrap();
+            let (writer, _) = writer.append(&data).await.unwrap();
+            let (writer, snapshot) = writer.snapshot().await.unwrap();
+            let (blob, size) = context
+                .open("fixed-replay-sharing", b"pending")
+                .await
+                .unwrap();
+            let pending = Writer::new(blob, size, 256, cache).await.unwrap();
+            let (pending, _) = pending.append(&data).await.unwrap();
+            assert!(pending.try_snapshot().is_none());
+
+            for source in [
+                super::super::blobs::Blob::Sealed(snapshot),
+                super::super::blobs::Blob::Writer(&writer),
+                super::super::blobs::Blob::Writer(&pending),
+            ] {
+                let mut state = FixedReplayState::<_, View> {
+                    replay: source
+                        .replay_from(0, NZUsize!(256), ReadOptions::DONT_CACHE)
+                        .unwrap(),
+                    pos: 0,
+                    end_pos: 16,
+                    items_per_batch: 32,
+                    _marker: PhantomData,
+                };
+                assert!(state.replay.ensure(View::SIZE).await.unwrap());
+                let first_chunk = state.replay.chunk();
+                let source = first_chunk.as_ptr() as usize;
+                let count = first_chunk.len() / View::SIZE;
+                let batch = {
+                    let stream = super::super::replay_stream_from_states(vec![state]);
+                    pin_mut!(stream);
+                    stream.next().await.unwrap().unwrap()
+                };
+                assert!(!batch.items.is_empty());
+                for (index, item) in batch.items.iter().enumerate() {
+                    assert_eq!(item.bytes.as_ref(), &(index as u64).to_be_bytes());
+                    if index < count {
+                        assert_eq!(item.bytes.as_ptr() as usize, source + index * View::SIZE);
+                    }
+                    item.assert_shared();
+                }
+            }
         });
     }
 

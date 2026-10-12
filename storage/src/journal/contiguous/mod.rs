@@ -243,9 +243,8 @@ pub trait Contiguous: Send + Sync {
     /// crosses a backing blob boundary. A batch's items exceed `buffer` bytes as stored, framing
     /// and compression included, by less than one item.
     ///
-    /// Every backing blob read from sealed history uses `read_options`. Backing reads from the
-    /// live writable tip instead use [ReadOptions::DONT_CACHE] on page-cache misses because the
-    /// cache retains the fetched pages.
+    /// Backing reads of item data carry `read_options`, except reads served through the page
+    /// cache, which applies its own policy.
     ///
     /// # Errors
     ///
