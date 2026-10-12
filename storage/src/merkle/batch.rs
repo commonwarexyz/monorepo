@@ -100,6 +100,13 @@ use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
 use core::ops::Range;
 
+#[cfg(feature = "std")]
+std::thread_local! {
+    /// Per-thread scratch for encoding items before they are hashed, reused across batches so
+    /// steady-state leaf hashing allocates nothing.
+    static ENCODE_BUF: core::cell::RefCell<Vec<u8>> = const { core::cell::RefCell::new(Vec::new()) };
+}
+
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
 
@@ -293,16 +300,16 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         items: &[Item],
     ) -> Self {
         let first = self.leaves();
-        let digests = self.strategy().map_init_collect_vec(
-            items.iter().enumerate(),
-            Vec::new,
-            |buf, (i, item)| {
+        let digests = self
+            .strategy()
+            .map_collect_vec(items.iter().enumerate(), |(i, item)| {
                 let pos = Position::try_from(first + i as u64).expect("valid leaf location");
-                buf.clear();
-                item.write(buf);
-                hasher.leaf_digest(pos, buf.as_slice())
-            },
-        );
+                ENCODE_BUF.with_borrow_mut(|buf| {
+                    buf.clear();
+                    item.write(buf);
+                    hasher.leaf_digest(pos, buf.as_slice())
+                })
+            });
         self.add_leaf_digests(digests)
     }
 
