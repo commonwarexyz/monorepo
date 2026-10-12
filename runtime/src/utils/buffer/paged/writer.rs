@@ -1382,6 +1382,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
 }
 
 #[cfg(test)]
+#[commonware_macros::test_group("miri")]
 mod tests {
     use super::*;
     use crate::{

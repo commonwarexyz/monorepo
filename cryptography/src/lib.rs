@@ -64,6 +64,9 @@ commonware_macros::stability_scope!(ALPHA {
 
     pub mod reed_solomon;
 
+    pub mod sha512;
+    pub use crate::sha512::{CoreSha512, Sha512};
+
     pub mod zk;
 });
 commonware_macros::stability_scope!(BETA {
@@ -73,6 +76,7 @@ commonware_macros::stability_scope!(BETA {
     use commonware_math::algebra::Random;
     use commonware_parallel::Strategy;
     use commonware_utils::Array;
+    use core::num::NonZeroUsize;
     use rand_chacha::ChaCha20Rng;
     use rand_core::{CryptoRng, SeedableRng as _};
     #[cfg(feature = "std")]
@@ -173,37 +177,65 @@ commonware_macros::stability_scope!(BETA {
         fn recover_signer(&self, namespace: &[u8], msg: &[u8]) -> Option<Self::PublicKey>;
     }
 
-    /// Verifies whether all [Signature]s are correct or that some [Signature] is incorrect.
-    pub trait BatchVerifier {
-        /// The type of public keys that this verifier can accept.
-        type PublicKey: PublicKey;
+    /// A borrowed view of one signature and the message it authenticates.
+    #[derive(Clone)]
+    pub struct BatchEntry<'a, P: PublicKey> {
+        /// The namespace used during signing.
+        pub namespace: &'a [u8],
+        /// The message used during signing.
+        pub message: &'a [u8],
+        /// The signer's public key.
+        pub public_key: &'a P,
+        /// The signature to verify.
+        pub signature: &'a P::Signature,
+    }
 
-        /// Create a new batch verifier with capacity for at least `capacity` items.
-        ///
-        /// The capacity is a hint: more than `capacity` items may be added, and
-        /// implementations may ignore it.
-        fn new(capacity: usize) -> Self;
+    impl<P: PublicKey> Copy for BatchEntry<'_, P> {}
 
-        /// Append item to the batch.
+    /// A [PublicKey] that supports batch verification of [Signature]s.
+    pub trait BatchVerifier: PublicKey {
+        /// Verify all signatures projected from a slice of items.
         ///
-        /// The message should not be hashed prior to calling this function. If a particular scheme
-        /// requires a payload to be hashed before it is signed, it will be done internally.
+        /// The projection receives each item's original slice index. It must
+        /// return the same entry for a given index and item.
         ///
-        /// A namespace must be used to prevent replay attacks. It will be prepended to the message so
-        /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
-        /// a message on the network layer can't accidentally spend funds on the execution layer). See
-        /// [commonware_utils::union_unique] for details.
-        fn add(
-            &mut self,
-            namespace: &[u8],
-            message: &[u8],
-            public_key: &Self::PublicKey,
-            signature: &<Self::PublicKey as Verifier>::Signature,
-        ) -> bool;
-
-        /// Verify all items added to the batch.
+        /// Messages should not be hashed before calling this function. Any hashing
+        /// required by the signature scheme is performed internally.
         ///
-        /// Returns `false` if no items were added or any item is invalid.
+        /// Each namespace must match the one used during signing exactly. Use distinct
+        /// namespaces for distinct signing contexts to prevent replay attacks. For
+        /// example, a signature on a message in the network layer must not authorize
+        /// spending funds in the execution layer.
+        ///
+        /// Returns `false` if the slice is empty or any signature is invalid.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use commonware_cryptography::{
+        ///     BatchEntry, BatchVerifier, Signer,
+        ///     ed25519::{PrivateKey, PublicKey},
+        /// };
+        /// use commonware_math::algebra::Random;
+        /// use commonware_parallel::Sequential;
+        /// use commonware_utils::test_rng;
+        ///
+        /// let key = PrivateKey::random(test_rng());
+        /// let public_key = key.public_key();
+        /// let namespace = b"example";
+        /// let records = [(b"message".as_slice(), key.sign(namespace, b"message"))];
+        /// assert!(PublicKey::verify_batch(
+        ///     &mut test_rng(),
+        ///     &records,
+        ///     |_, (message, signature)| BatchEntry {
+        ///         namespace,
+        ///         message,
+        ///         public_key: &public_key,
+        ///         signature,
+        ///     },
+        ///     &Sequential,
+        /// ));
+        /// ```
         ///
         /// # Why Randomness?
         ///
@@ -214,7 +246,16 @@ commonware_macros::stability_scope!(BETA {
         /// (`c_1 + d` and `c_2 - d`).
         ///
         /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
-        fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool;
+        fn verify_batch<'a, R, T, F>(
+            rng: &mut R,
+            items: &'a [T],
+            project: F,
+            strategy: &impl Strategy,
+        ) -> bool
+        where
+            R: CryptoRng,
+            T: Sync,
+            F: Fn(usize, &'a T) -> BatchEntry<'a, Self> + Sync;
     }
 
     /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
@@ -293,22 +334,42 @@ commonware_macros::stability_scope!(BETA {
         /// the overhead of the streaming machinery.
         fn hash(parts: &[&[u8]]) -> Self::Digest;
 
+        /// Hash the concatenation of `parts` in a single shot, splitting the
+        /// work across `strategy` when the hash function allows it.
+        ///
+        /// Returns the same digest as [`Hasher::hash`], which the default
+        /// implementation calls.
+        fn hash_across(parts: &[&[u8]], _strategy: &impl Strategy) -> Self::Digest {
+            Self::hash(parts)
+        }
+
         /// Hash two messages, each given as a concatenation of parts, in a
-        /// single shot.
+        /// single shot, splitting the work across `strategy` when the hash
+        /// function allows it.
         ///
         /// Must be equivalent to hashing each message with [`Hasher::hash`].
-        fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest);
+        fn hash_pair(
+            left: &[&[u8]],
+            right: &[&[u8]],
+            strategy: &impl Strategy,
+        ) -> (Self::Digest, Self::Digest);
 
-        /// Hash multiple independent byte slices.
+        /// Hash multiple independent byte slices, splitting them across
+        /// `strategy`.
         ///
         /// Returns one digest per input in the same order. Inputs may be empty,
         /// differ in length, or overlap. Output position `i` is equivalent to
         /// `Self::hash(&[messages[i].as_ref()])`.
-        fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
-            messages
-                .iter()
-                .map(|message| Self::hash(&[message.as_ref()]))
-                .collect()
+        fn hash_many<M: AsRef<[u8]> + Sync>(
+            messages: &[M],
+            strategy: &impl Strategy,
+        ) -> Vec<Self::Digest> {
+            hash_batches(messages, 1, strategy, |batch| {
+                batch
+                    .iter()
+                    .map(|message| Self::hash_across(&[message.as_ref()], strategy))
+                    .collect()
+            })
         }
 
         /// Append `bytes` to the hasher's running state.
@@ -317,6 +378,48 @@ commonware_macros::stability_scope!(BETA {
         /// Consume the hasher, returning a freshly-reset hasher alongside the
         /// digest of everything written so far.
         fn finalize(self) -> (Self, Self::Digest);
+    }
+
+    /// Hash `messages` in strategy-supplied batches of whole units of `lanes` (at least one)
+    /// messages, so a kernel that hashes `lanes` messages at once finds every unit but the last
+    /// one full.
+    ///
+    /// `hash` must return one digest per message of its batch, in order. The work estimate is
+    /// the total length of the messages in bytes.
+    pub(crate) fn hash_batches<D, M>(
+        messages: &[M],
+        lanes: usize,
+        strategy: &impl Strategy,
+        hash: impl Fn(&[M]) -> Vec<D> + Sync,
+    ) -> Vec<D>
+    where
+        D: Clone + Send,
+        M: AsRef<[u8]> + Sync,
+    {
+        if messages.is_empty() {
+            return Vec::new();
+        }
+        let units = messages.len().div_ceil(lanes);
+        let bytes = messages.iter().fold(0usize, |bytes, message| {
+            bytes.saturating_add(message.as_ref().len())
+        });
+        strategy.run_batches(units, NonZeroUsize::MIN, bytes.div_ceil(units), |batches| {
+            // A serial run hashes the whole input as one batch, whose digests need no copy.
+            if batches.is_whole() {
+                return hash(messages);
+            }
+            batches
+                .map_collect_vec(
+                    |ranges| {
+                        ranges.into_iter().map(|range| {
+                            let end = range.end.saturating_mul(lanes).min(messages.len());
+                            &messages[range.start * lanes..end]
+                        })
+                    },
+                    &hash,
+                )
+                .concat()
+        })
     }
 
     /// Authenticated encryption of an ordered sequence of messages.
@@ -349,12 +452,42 @@ commonware_macros::stability_scope!(BETA {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, FixedSize};
-    use commonware_utils::test_rng;
+    use commonware_parallel::Rayon;
+    use commonware_utils::{NZUsize, test_rng};
+    use std::collections::HashSet;
 
     fn test_validate<C: PrivateKey>() {
-        let private_key = C::random(test_rng());
+        let mut rng = test_rng();
+        let private_key = C::random(&mut rng);
         let public_key = private_key.public_key();
-        assert!(C::PublicKey::decode(commonware_codec::Copying(public_key.as_ref())).is_ok());
+        let decoded = C::PublicKey::decode(commonware_codec::Copying(public_key.as_ref())).unwrap();
+        assert_eq!(public_key, decoded);
+        assert_eq!(public_key.cmp(&decoded), core::cmp::Ordering::Equal);
+
+        let other = C::random(&mut rng).public_key();
+        assert_ne!(public_key, other);
+        let mut keys = HashSet::from([public_key]);
+        assert!(!keys.insert(decoded));
+        assert!(keys.insert(other));
+    }
+
+    fn test_public_key_order<C: PrivateKey>() {
+        let mut rng = test_rng();
+        let mut keys = Vec::new();
+        for _ in 0..16 {
+            let key = C::random(&mut rng).public_key();
+            let decoded = C::PublicKey::decode(commonware_codec::Copying(key.as_ref())).unwrap();
+            keys.extend([key, decoded]);
+        }
+
+        for a in &keys {
+            for b in &keys {
+                let expected = a.as_ref().cmp(b.as_ref());
+                assert_eq!(a.cmp(b), expected);
+                assert_eq!(a.partial_cmp(b), Some(expected));
+                assert_eq!(a == b, expected.is_eq());
+            }
+        }
     }
 
     fn test_validate_invalid_public_key<C: Signer>() {
@@ -528,6 +661,11 @@ mod tests {
     }
 
     #[test]
+    fn test_secp256r1_standard_public_key_order() {
+        test_public_key_order::<secp256r1::standard::PrivateKey>();
+    }
+
+    #[test]
     fn test_secp256r1_standard_validate_invalid_public_key() {
         test_validate_invalid_public_key::<secp256r1::standard::PrivateKey>();
     }
@@ -571,6 +709,11 @@ mod tests {
     #[test]
     fn test_secp256r1_recoverable_validate() {
         test_validate::<secp256r1::recoverable::PrivateKey>();
+    }
+
+    #[test]
+    fn test_secp256r1_recoverable_public_key_order() {
+        test_public_key_order::<secp256r1::recoverable::PrivateKey>();
     }
 
     #[test]
@@ -650,5 +793,43 @@ mod tests {
     #[test]
     fn test_sha256_hasher_multiple_runs() {
         test_hasher_multiple_runs::<Sha256>();
+    }
+
+    #[test]
+    fn test_sha512_hasher_multiple_runs() {
+        test_hasher_multiple_runs::<Sha512>();
+    }
+
+    /// Shares cut the messages only between whole units of `lanes`, cover every message once,
+    /// and return their digests in input order.
+    #[test]
+    fn test_hash_batches_shares_whole_units() {
+        let strategy = Rayon::new(NZUsize!(4))
+            .unwrap()
+            .with_parallelism(NZUsize!(8))
+            .manual();
+        for lanes in [1, 2, 8, 16] {
+            for count in [0, 1, lanes + 1, 3 * lanes, 7 * lanes + 1, 9 * lanes, 100] {
+                // Each message holds its index, and its digest pairs that index with the index of
+                // the first message in its share.
+                let messages: Vec<[u8; 4]> = (0..count as u32).map(u32::to_le_bytes).collect();
+                let digests = hash_batches(&messages, lanes, &strategy, |batch| {
+                    let first = u32::from_le_bytes(batch[0]);
+                    batch
+                        .iter()
+                        .map(|message| (u32::from_le_bytes(*message), first))
+                        .collect()
+                });
+                assert!(digests.iter().map(|&(index, _)| index).eq(0..count as u32));
+
+                // Every unit but the last is whole, so every share but the last holds a multiple
+                // of `lanes` messages.
+                let shares: Vec<_> = digests.chunk_by(|a, b| a.1 == b.1).collect();
+                assert_eq!(shares.len(), count.div_ceil(lanes).min(8));
+                if let Some((_, rest)) = shares.split_last() {
+                    assert!(rest.iter().all(|share| share.len() % lanes == 0));
+                }
+            }
+        }
     }
 }

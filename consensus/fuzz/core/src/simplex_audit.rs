@@ -7,7 +7,7 @@
 
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    Automaton, CertifiableAutomaton, Monitor, Reporter as ReporterTrait,
+    Automaton, CertifiableAutomaton, Handoff, Monitor, Reporter as ReporterTrait,
     simplex::{
         elector::Config as ElectorConfig,
         mocks::reporter,
@@ -42,6 +42,13 @@ pub enum Completion<T> {
 /// An automaton interaction observed at the fuzz harness boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AutomatonEvent<D: Digest, P: PublicKey> {
+    PrepareRequested {
+        context: Context<D, P>,
+    },
+    PrepareCompleted {
+        context: Context<D, P>,
+        outcome: Completion<Handoff<D>>,
+    },
     ProposeRequested {
         context: Context<D, P>,
     },
@@ -440,6 +447,22 @@ where
     S: certificate::Scheme,
     D: Digest,
 {
+    async fn prepare(
+        &mut self,
+        context: Self::Context,
+    ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+        self.audit
+            .record(Event::Automaton(AutomatonEvent::PrepareRequested {
+                context: context.clone(),
+            }));
+        let completion_context = context.clone();
+        let receiver = self.inner.prepare(context).await;
+        self.proxy(receiver, move |outcome| AutomatonEvent::PrepareCompleted {
+            context: completion_context,
+            outcome,
+        })
+    }
+
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
         let receiver = self.inner.certify(round, payload).await;
         self.proxy(receiver, move |outcome| AutomatonEvent::CertifyCompleted {

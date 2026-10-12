@@ -10,13 +10,12 @@ use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     Signer,
     bls12381::{dkg::feldman_desmedt::Reveal, primitives::sharing::Mode},
-    ed25519,
 };
 use commonware_p2p::simulated::Oracle;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Supervisor as _, deterministic};
 use commonware_utils::{NZU32, NZUsize, ordered::Set};
-use std::{marker::PhantomData, num::NonZeroU64};
+use std::num::NonZeroU64;
 
 /// Mailbox paired with [`mocks::TestReshareActor`].
 pub(super) type TestMailbox = Mailbox<mocks::TestBlock, mocks::TestBlsVariant, mocks::TestSigner>;
@@ -65,7 +64,6 @@ pub(super) async fn new_actor(
             replay_buffer: mocks::IO_BUFFER,
             max_participants: NZU32!(16),
             blocks_per_epoch,
-            batch_verifier: PhantomData::<ed25519::Batch>,
         },
     )
 }

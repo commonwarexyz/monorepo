@@ -1,7 +1,8 @@
 use commonware_codec::{Encode, Read};
 use commonware_consensus::{
+    Handoff,
     simplex::{
-        elector::{Config as Elector, Elector as ElectorInstance},
+        elector::{Config as Elector, Elector as ElectorInstance, Mode as _},
         mocks::reporter::Reporter,
         scheme,
         scheme::Scheme,
@@ -770,7 +771,8 @@ pub fn check_certificate_leader_derivation<E, S, L>(
     for reporter in reporters {
         let mut derive = |round: Round, certificate: &_, kind: &'static str, target: u64| {
             let next = Round::new(round.epoch(), View::new(target));
-            let leader = elector.elect(next, Some(certificate));
+            let input = <L::Elector as ElectorInstance<S>>::Mode::input(Some(certificate));
+            let leader = elector.elect(next, input);
             let leader = first
                 .participants
                 .key(leader)
@@ -944,10 +946,10 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     // participates in the constancy and payload-coherence checks below, even
     // when only raw votes and no certificates were retained.
     if let Some(first) = reporters.first() {
-        let elected = elector
-            .clone()
-            .build(&first.participants)
-            .elect(Round::new(epoch, View::new(1)), None);
+        let elected = elector.clone().build(&first.participants).elect(
+            Round::new(epoch, View::new(1)),
+            <L::Elector as ElectorInstance<S>>::Mode::input(None),
+        );
         leaders.insert(
             1,
             first
@@ -2128,7 +2130,8 @@ fn check_fuzz_invariants<E, S, L>(
                 }
                 Event::Automaton(event) => {
                     match event {
-                        AutomatonEvent::ProposeRequested { context }
+                        AutomatonEvent::PrepareRequested { context }
+                        | AutomatonEvent::ProposeRequested { context }
                         | AutomatonEvent::VerifyRequested { context, .. } => {
                             context_leaders
                                 .entry(context.round)
@@ -2168,7 +2171,8 @@ fn check_fuzz_invariants<E, S, L>(
                     }
 
                     match event {
-                        AutomatonEvent::ProposeRequested { context } => {
+                        AutomatonEvent::PrepareRequested { context }
+                        | AutomatonEvent::ProposeRequested { context } => {
                             // Invariant: only_the_elected_leader_requests_a_proposal
                             // A correct node asks its application to construct a
                             // proposal only when that node is the leader named in the
@@ -2189,6 +2193,11 @@ fn check_fuzz_invariants<E, S, L>(
                         AutomatonEvent::ProposeCompleted {
                             context,
                             outcome: Completion::Returned(payload),
+                        }
+                        | AutomatonEvent::PrepareCompleted {
+                            context,
+                            outcome:
+                                Completion::Returned(Handoff::Vote(payload) | Handoff::Stage(payload)),
                         } => {
                             accepted_proposals.insert((context.round, context.parent, *payload));
                         }
@@ -2238,7 +2247,8 @@ fn check_fuzz_invariants<E, S, L>(
                     }
 
                     match event {
-                        AutomatonEvent::ProposeRequested { context }
+                        AutomatonEvent::PrepareRequested { context }
+                        | AutomatonEvent::ProposeRequested { context }
                         | AutomatonEvent::VerifyRequested { context, .. } => {
                             // Invariant: own_nullify_is_terminal_for_view_participation
                             // A correct engine never dispatches proposal
@@ -2300,7 +2310,8 @@ fn check_fuzz_invariants<E, S, L>(
                                 context.round
                             );
                         }
-                        AutomatonEvent::ProposeRequested { context } => {
+                        AutomatonEvent::PrepareRequested { context }
+                        | AutomatonEvent::ProposeRequested { context } => {
                             // Invariant: proposer_never_skips_own_certified_view
                             // A proposer's parent selection stops at the highest
                             // locally certified view, so no Certification or
@@ -2329,6 +2340,11 @@ fn check_fuzz_invariants<E, S, L>(
                         AutomatonEvent::ProposeCompleted {
                             context,
                             outcome: Completion::Returned(payload),
+                        }
+                        | AutomatonEvent::PrepareCompleted {
+                            context,
+                            outcome:
+                                Completion::Returned(Handoff::Vote(payload) | Handoff::Stage(payload)),
                         } => {
                             accepted_signed.insert((context.round, context.parent.0, *payload));
                         }
@@ -2543,7 +2559,10 @@ fn check_fuzz_invariants<E, S, L>(
         let Some(first) = reporters.first() else {
             continue;
         };
-        let elected = first.elector().elect(*round, None);
+        let elected = first.elector().elect(
+            *round,
+            <L::Elector as ElectorInstance<S>>::Mode::input(None),
+        );
         let expected = first
             .inner()
             .participants
@@ -2684,7 +2703,8 @@ where
         match activity {
             Activity::Notarize(vote) => {
                 let round = vote.proposal.round;
-                if reporter.elector().elect(round, None) == vote.signer() {
+                let input = <L::Elector as ElectorInstance<S>>::Mode::input(None);
+                if reporter.elector().elect(round, input) == vote.signer() {
                     leader_notarizes.insert(round);
                 }
             }
@@ -4723,7 +4743,7 @@ mod tests {
         let (participants, schemes) = vote_fixture();
         let mut reporter = audit_reporter(3, &participants, &schemes);
         let proposal = proposal(5, 4, 0xA);
-        let leader = reporter.elector().elect(proposal.round, None);
+        let leader = reporter.elector().elect(proposal.round, ());
 
         reporter.report(Activity::Notarize(
             Notarize::sign(&schemes[usize::from(leader)], proposal.clone()).unwrap(),

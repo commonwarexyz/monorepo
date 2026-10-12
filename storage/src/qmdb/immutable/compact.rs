@@ -13,8 +13,8 @@
 //! restores a retained applied state within its operation cap. [`Db::prune`] bounds the retained
 //! history. Initialization restores the db's in-memory state from an entry. The Merkle is rebuilt
 //! from the stored pinned nodes and operation, and the commit fields are decoded from the
-//! operation. An entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. The witness is
-//! also what lets compact nodes serve compact sync without retaining historical operations.
+//! operation. An entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. Each retained
+//! witness also serves compact sync at its size without retaining historical operations.
 //!
 //! # Inactivity floor
 //!
@@ -621,8 +621,8 @@ where
     /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness below
     /// the boundary may survive.
     ///
-    /// Pruning bounds how far back bounded initialization can reach. The current commit's witness
-    /// always survives. The prune is made durable before this method returns.
+    /// Bounded initialization and compact sync can only use witnesses that survive. The current
+    /// commit's witness always survives. The prune is made durable before this method returns.
     ///
     /// # Errors
     ///
@@ -660,7 +660,12 @@ where
     async fn serve(&self, request: Request<F>) -> source::Result<Self> {
         let response = self
             .witness
-            .compact_state(&self.commit_codec_config, request)?;
+            .compact_state::<H, S, Self::Op>(
+                self.merkle.strategy(),
+                &self.commit_codec_config,
+                request,
+            )
+            .await?;
         Ok((response, None))
     }
 }

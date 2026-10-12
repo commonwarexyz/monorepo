@@ -16,7 +16,7 @@ use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
 use commonware_utils::{
-    Participant,
+    Participant, Widen,
     iter::NonEmpty,
     ordered::{BiMap, Quorum, Set},
 };
@@ -228,7 +228,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         }
 
         // If the certificate does not meet the quorum, return false.
-        if certificate.signers.count() < self.participants.quorum::<S::Faults>() as usize {
+        if certificate.signers.count() < Widen::widen(self.participants.quorum::<S::Faults>()) {
             return false;
         }
 

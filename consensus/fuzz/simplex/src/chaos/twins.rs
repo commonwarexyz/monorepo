@@ -332,8 +332,9 @@ fn spawn_twin_pair<P: Simplex>(
             certify_latency: (10.0, 5.0),
             should_certify: application::Certifier::Always,
         };
-        let (actor, application) =
+        let (mut actor, application) =
             application::Application::new(primary_context.child("application"), app_cfg);
+        actor.set_handoff(input.handoff);
         actor.start();
         let engine_cfg = config::Config {
             blocker: oracle.control(validator.clone()),
@@ -395,8 +396,9 @@ fn spawn_twin_pair<P: Simplex>(
             certify_latency: (10.0, 5.0),
             should_certify: application::Certifier::Always,
         };
-        let (actor, application) =
+        let (mut actor, application) =
             application::Application::new(secondary_context.child("application"), app_cfg);
+        actor.set_handoff(input.handoff);
         actor.start();
         let engine_cfg = config::Config {
             blocker: oracle.control(validator.clone()),
@@ -477,6 +479,7 @@ fn build_honest<P: Simplex>(
         recovered,
         resolver,
         input.certify,
+        input.handoff,
         input.reporting,
     )
 }

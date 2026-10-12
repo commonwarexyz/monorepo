@@ -7,7 +7,7 @@ pub mod state_cov;
 mod trusted;
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    Monitor, Viewable,
+    Handoff, Monitor, Viewable,
     simplex::{
         Engine, Floor, ForwardPolicy, SkipBudget, SkipPolicy, config,
         elector::Config as ElectorConfig,
@@ -208,6 +208,7 @@ fn spawn_filtered_audited_validator<
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
     certify: CertifyChoice,
+    handoff: Handoff<()>,
     wiring: ReporterWiring,
 ) -> RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
 where
@@ -247,6 +248,7 @@ where
         recovered,
         resolver,
         certify,
+        handoff,
         wiring,
     )
 }
@@ -598,6 +600,7 @@ fn run_standard_once<P: simplex::Simplex>(
                     recovered,
                     resolver,
                     input.certify,
+                    input.handoff,
                     input.reporting,
                 )
             };
@@ -846,6 +849,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                     recovered,
                     resolver,
                     CertifyChoice::Always,
+                    input.handoff,
                     ReporterWiring::Solo,
                 );
             } else {
@@ -907,6 +911,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                     (certificate_sender, certificate_receiver),
                     (resolver_sender, resolver_receiver),
                     input.certify,
+                    input.handoff,
                     input.reporting,
                 )
             } else {
@@ -927,6 +932,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                     recovered,
                     resolver,
                     input.certify,
+                    input.handoff,
                     input.reporting,
                 )
             };
@@ -1219,11 +1225,12 @@ impl<P: simplex::Simplex> MockTwinsBackend<P> {
             certify_latency: (10.0, 5.0),
             should_certify: application::Certifier::Always,
         };
-        let (actor, application) = block_relay::Application::new_with_relay_tag(
+        let (mut actor, application) = block_relay::Application::new_with_relay_tag(
             context.child("application"),
             app_cfg,
             relay_tag,
         );
+        actor.set_handoff(self.input.handoff);
         actor.start();
         let engine = Engine::new(
             context.child("engine"),
@@ -1575,6 +1582,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
                         recovered,
                         resolver,
                         self.input.certify,
+                        self.input.handoff,
                         self.input.reporting,
                     ),
                 )
@@ -1611,6 +1619,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
                     recovered,
                     resolver,
                     self.input.certify,
+                    self.input.handoff,
                     self.input.reporting,
                 ))
             }
@@ -2327,8 +2336,9 @@ pub fn fuzz_twins_audit<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
 mod tests {
     use super::*;
     use commonware_consensus_fuzz_core::{
-        DEFAULT_MAILBOX_SIZE, FUZZ_RUNTIME_TIMEOUT_FLOOR, MAX_REQUIRED_CONTAINERS, MAX_TERM_LENGTH,
-        MIN_REQUIRED_CONTAINERS, NAMESPACE, fuzz_runtime_timeout, strategy::StrategyChoice,
+        DEFAULT_MAILBOX_SIZE, FUZZ_RUNTIME_TIMEOUT_FLOOR, HANDOFF_DECISIONS,
+        MAX_REQUIRED_CONTAINERS, MAX_TERM_LENGTH, MIN_REQUIRED_CONTAINERS, NAMESPACE,
+        fuzz_runtime_timeout, strategy::StrategyChoice,
     };
     use commonware_macros::{test_group, test_traced};
     use commonware_utils::{NZU32, non_empty};
@@ -2372,6 +2382,7 @@ mod tests {
             term_length: TermLength::ONE,
             optimistic_views: ViewDelta::zero(),
             heterogeneous_optimism: false,
+            handoff: Handoff::Wait,
             degraded_network: false,
             configuration: N4F0C4,
             partition: Partition::Connected,
@@ -2643,6 +2654,7 @@ mod tests {
             term_length,
             optimistic_views: ViewDelta::new(term_length.get()),
             heterogeneous_optimism: true,
+            handoff: Handoff::Wait,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
             mailbox_size: DEFAULT_MAILBOX_SIZE,
@@ -2689,9 +2701,11 @@ mod tests {
         (
             any::<u64>(),
             prop::sample::select(TERM_LENGTH_BOUNDARIES.as_slice()),
+            prop::sample::select(HANDOFF_DECISIONS.as_slice()),
         )
-            .prop_map(move |(seed, term_length)| {
-                test_input(seed, PROPERTY_TEST_CONTAINERS, term_length)
+            .prop_map(move |(seed, term_length, handoff)| FuzzInput {
+                handoff,
+                ..test_input(seed, PROPERTY_TEST_CONTAINERS, term_length)
             })
     }
 

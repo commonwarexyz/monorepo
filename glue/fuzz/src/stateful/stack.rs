@@ -115,9 +115,8 @@ pub(super) fn round_robin(term_length: TermLength) -> RoundRobin<Sha256> {
 pub(super) const SYNC_CONFIG: SyncEngineConfig = SyncEngineConfig {
     fetch_batch_size: NZU64!(16),
     apply_batch_size: NZU64!(64),
-    max_outstanding_requests: 8,
+    max_outstanding_requests: NZUsize!(8),
     update_channel_size: NZUsize!(256),
-    max_retained_roots: 8,
 };
 
 /// Prunable archive configuration for marshal's finalization and block stores.
@@ -432,8 +431,8 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
             elector,
             blocker: oracle.control(identity),
             automaton: automaton.clone(),
-            relay: automaton,
-            reporter: marshal_mailbox,
+            relay: automaton.clone(),
+            reporter: automaton,
             strategy: Sequential,
             partition: format!("{partition_prefix}-simplex"),
             mailbox_size: MAILBOX_SIZE,

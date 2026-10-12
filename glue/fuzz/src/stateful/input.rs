@@ -472,9 +472,6 @@ pub struct SyncControls {
     /// Capacity of the per-database target-update channels and of the tip
     /// update channel feeding the coordinator.
     pub update_channel_size: u8,
-    /// Historical roots retained for proof verification across target
-    /// updates.
-    pub max_retained_roots: u8,
 }
 
 impl Arbitrary<'_> for SyncControls {
@@ -484,7 +481,6 @@ impl Arbitrary<'_> for SyncControls {
             apply_batch_size: NZU64!(u.int_in_range(1..=MAX_SYNC_BATCH)?),
             max_outstanding_requests: u.int_in_range(1..=4)?,
             update_channel_size: u.int_in_range(1..=4)?,
-            max_retained_roots: u.int_in_range(1..=8)?,
         })
     }
 }

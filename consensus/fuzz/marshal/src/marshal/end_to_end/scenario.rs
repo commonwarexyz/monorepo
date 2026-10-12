@@ -584,10 +584,10 @@ pub fn run_scenario<P: Simplex>(
             let builder = <DeferredMarshal as TwinsMarshal<P, _>>::create(
                 MarshalChoice::Deferred,
                 &validator_ctx,
-                application,
+                application.clone(),
                 marshal_node.mailbox.clone(),
             );
-            marshal_node.start(builder.clone());
+            marshal_node.start(application);
 
             start_engine::<P, _, _, _>(
                 validator_ctx,
@@ -599,8 +599,8 @@ pub fn run_scenario<P: Simplex>(
                     commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS,
                 ),
                 builder.clone(),
+                builder.clone(),
                 builder,
-                marshal_node.mailbox.clone(),
                 genesis_commitment,
                 format!("marshal-scenario-{idx}"),
                 forwarding,

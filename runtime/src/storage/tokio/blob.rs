@@ -12,6 +12,8 @@ use commonware_utils::{
     channel::oneshot,
     sync::{Mutex, MutexGuard},
 };
+#[cfg(target_os = "linux")]
+use futures::StreamExt as _;
 #[cfg(test)]
 use std::sync::mpsc;
 use std::{
@@ -29,6 +31,9 @@ use tokio::task;
 // Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum so storage writes
 // span as few submissions as possible.
 const IOVEC_BATCH_SIZE: usize = 1024;
+
+#[cfg(target_os = "linux")]
+mod aio;
 
 /// Page-cache policy for one positioned I/O request.
 enum Cache {
@@ -81,6 +86,11 @@ struct Shared {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: AtomicBool,
+    /// Descriptor for direct I/O on the same inode, opened by the first batched read. `None`
+    /// once the filesystem has rejected direct I/O on this file. Empty until an open succeeds
+    /// or is rejected (see [aio::direct]).
+    #[cfg(target_os = "linux")]
+    direct: once_cell::sync::OnceCell<Option<File>>,
     #[cfg(test)]
     test: Hooks,
 }
@@ -96,6 +106,9 @@ struct Hooks {
     after_sync: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
     /// Pause the next start_sync worker after publishing its completion.
     after_start_sync: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
+    /// Ranges batched reads served from their direct reads rather than a positioned fallback.
+    #[cfg(target_os = "linux")]
+    direct_reads: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -268,6 +281,8 @@ impl Blob {
             key: generation.key.clone(),
             promise: OnceLock::new(),
             dont_cache_supported: AtomicBool::new(true),
+            #[cfg(target_os = "linux")]
+            direct: once_cell::sync::OnceCell::new(),
             #[cfg(test)]
             test: Hooks::default(),
         });
@@ -487,6 +502,22 @@ impl crate::Blob for Blob {
         .map_err(|_| Error::ReadFailed)?
     }
 
+    #[cfg(target_os = "linux")]
+    fn read_many(
+        &self,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+        // Reads the page cache should retain go through it, one read per blocking task.
+        if !options.contains(ReadOptions::DONT_CACHE) {
+            return crate::read_each(self, ranges, options).boxed();
+        }
+
+        // Reads it need not retain bypass it with direct I/O, submitted together so the device
+        // sees them all at once.
+        aio::read_many(&self.shared, &self.pool, self.data_offset, ranges)
+    }
+
     async fn write_at(
         &self,
         offset: u64,
@@ -673,7 +704,7 @@ mod tests {
         },
         telemetry::metrics::Registry,
     };
-    use futures::FutureExt as _;
+    use futures::{FutureExt as _, TryStreamExt as _};
     use std::{env, ops::RangeInclusive, path::PathBuf, process, sync::mpsc};
 
     fn storage_for_reopen_test(label: &str, layouts: RangeInclusive<Layout>) -> (Storage, PathBuf) {
@@ -1153,6 +1184,352 @@ mod tests {
             }
         }
         drop(file);
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_read_many_indexes_every_range() {
+        let (storage, directory) = storage_for_reopen_test("read_many", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+
+        // 64 blocks of 4096 bytes, each filled with its index.
+        const BLOCK: usize = 4096;
+        const BLOCKS: u64 = 64;
+        let data: Vec<u8> = (0..BLOCKS)
+            .flat_map(|i| std::iter::repeat_n(i as u8, BLOCK))
+            .collect();
+        blob.write_at(0, data, WriteOptions::default())
+            .await
+            .unwrap();
+
+        // Whole aligned blocks, small unaligned ranges inside and across blocks (read through an
+        // aligned superset), and an empty range, all out of offset order.
+        let mut ranges: Vec<(u64, usize)> = Vec::new();
+        for i in (0..BLOCKS).rev() {
+            ranges.push((i * BLOCK as u64, BLOCK));
+            ranges.push((i * BLOCK as u64 + 7, 10));
+            if i > 0 {
+                ranges.push((i * BLOCK as u64 - 3, 6));
+            }
+            ranges.push((i * BLOCK as u64, 0));
+            if i + 2 <= BLOCKS {
+                ranges.push((i * BLOCK as u64 + 100, 2 * BLOCK - 200));
+            }
+        }
+        let mut bufs: Vec<(usize, IoBufsMut)> = blob
+            .read_many(&ranges, ReadOptions::DONT_CACHE)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(bufs.len(), ranges.len());
+        bufs.sort_by_key(|(index, _)| *index);
+        for (i, ((offset, len), (index, bufs))) in ranges.iter().zip(bufs).enumerate() {
+            assert_eq!(index, i);
+            let expected: Vec<u8> = (*offset..*offset + *len as u64)
+                .map(|o| (o / BLOCK as u64) as u8)
+                .collect();
+            assert_eq!(bufs.coalesce().as_ref(), expected.as_slice(), "range {i}");
+        }
+
+        // A range past the end fails the batch.
+        assert!(
+            blob.read_many(
+                &[(0, BLOCK), (BLOCKS * BLOCK as u64 - 1, 2)],
+                ReadOptions::DONT_CACHE,
+            )
+            .try_collect::<Vec<_>>()
+            .await
+            .is_err()
+        );
+
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_read_many_retired_runtime_reports_error() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (storage, directory) = storage_for_reopen_test("read_many_retired", Layout::ALL);
+        let blob = runtime.block_on(async {
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"data", WriteOptions::SYNC).await.unwrap();
+            blob
+        });
+        if aio::direct(&blob.shared).is_none() {
+            drop(blob);
+            runtime.block_on(storage.remove("partition", None)).unwrap();
+            drop(storage);
+            std::fs::remove_dir_all(directory).unwrap();
+            return;
+        }
+
+        let handle = runtime.handle().clone();
+        drop(runtime);
+        let entered = handle.enter();
+        let result = futures::executor::block_on(
+            blob.read_many(&[(0, 4)], ReadOptions::DONT_CACHE)
+                .try_collect::<Vec<_>>(),
+        );
+        assert!(matches!(result, Err(Error::ReadFailed)));
+        drop(entered);
+        drop(blob);
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_read_many_at_signed_limit() {
+        let (storage, directory) =
+            storage_for_reopen_test("read_many_signed_limit", Layout::V1..=Layout::V1);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+
+        // Only some filesystems (such as tmpfs) hold a file this large and serve direct I/O.
+        let len = i64::MAX as u64 - blob.data_offset;
+        if blob.resize(len).await.is_err() || aio::direct(&blob.shared).is_none() {
+            drop(blob);
+            storage.remove("partition", None).await.unwrap();
+            drop(storage);
+            std::fs::remove_dir_all(directory).unwrap();
+            return;
+        }
+        let offset = len - 1;
+        for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+            assert_eq!(
+                blob.read_at(offset, 1, options)
+                    .await
+                    .unwrap()
+                    .coalesce()
+                    .as_ref(),
+                &[0]
+            );
+        }
+
+        // The block-aligned superset of this byte ends beyond the largest signed file offset,
+        // so the kernel rejects its direct read at submission.
+        let bufs: Vec<_> = blob
+            .read_many(&[(offset, 1)], ReadOptions::DONT_CACHE)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(bufs.len(), 1);
+        let (index, buf) = bufs.into_iter().next().unwrap();
+        assert_eq!(index, 0);
+        assert_eq!(buf.coalesce().as_ref(), &[0]);
+
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "allocates more than 4 GiB"]
+    async fn test_read_many_beyond_single_read_limit() {
+        let (storage, directory) = storage_for_reopen_test("read_many_large", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        assert!(
+            aio::direct(&blob.shared).is_some(),
+            "temporary directory must support O_DIRECT"
+        );
+
+        // Linux returns at most just under 2 GiB from one read, so the direct read of this
+        // range completes short.
+        const LEN: usize = 1 << 31;
+        blob.write_at(LEN as u64 - 1, vec![1], WriteOptions::default())
+            .await
+            .unwrap();
+        let bufs: Vec<_> = blob
+            .read_many(&[(0, LEN)], ReadOptions::DONT_CACHE)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(bufs.len(), 1);
+        let (index, buf) = bufs.into_iter().next().unwrap();
+        assert_eq!(index, 0);
+        let buf = buf.coalesce();
+        assert_eq!(buf.len(), LEN);
+        assert_eq!(buf.as_ref()[LEN - 1], 1);
+
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Ranges that are not block-aligned, under a layout whose data offset is not block-aligned
+    /// either, are served by direct reads of their aligned superset, including a superset that
+    /// ends past the unaligned end of the blob. A range past the end fails as read_at does.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_read_many_serves_unaligned_ranges_directly() {
+        const BLOCK: usize = 4096;
+        const LEN: usize = BLOCK + 1000;
+        let data: Vec<u8> = (0..LEN).map(|i| (i % 251) as u8).collect();
+        for layout in [Layout::V0, Layout::V1] {
+            let (storage, directory) = storage_for_reopen_test(
+                &format!("read_many_unaligned_{layout:?}"),
+                layout..=layout,
+            );
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            assert!(
+                aio::direct(&blob.shared).is_some(),
+                "temporary directory must support O_DIRECT"
+            );
+            blob.write_at(0, data.clone(), WriteOptions::default())
+                .await
+                .unwrap();
+
+            // Within a block, across a block boundary, up to the end, and the whole blob.
+            let ranges = [
+                (100u64, 50usize),
+                (BLOCK as u64 - 3, 6),
+                (BLOCK as u64 + 500, 500),
+                (LEN as u64 - 1, 1),
+                (0, LEN),
+            ];
+            let before = blob.shared.test.direct_reads.load(Ordering::Relaxed);
+            let bufs: Vec<(usize, IoBufsMut)> = blob
+                .read_many(&ranges, ReadOptions::DONT_CACHE)
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(
+                blob.shared.test.direct_reads.load(Ordering::Relaxed) - before,
+                ranges.len()
+            );
+            assert_eq!(bufs.len(), ranges.len());
+            for (index, bufs) in bufs {
+                let (offset, len) = ranges[index];
+                let offset = usize::try_from(offset).unwrap();
+                assert_eq!(bufs.coalesce().as_ref(), &data[offset..offset + len]);
+            }
+
+            // A range ending one byte past the end fails as read_at does.
+            let result = blob
+                .read_many(&[(LEN as u64 - 100, 101)], ReadOptions::DONT_CACHE)
+                .try_collect::<Vec<_>>()
+                .await;
+            assert!(matches!(
+                result,
+                Err(Error::Io(ref err)) if err.kind() == std::io::ErrorKind::UnexpectedEof
+            ));
+
+            drop(blob);
+            storage.remove("partition", None).await.unwrap();
+            drop(storage);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    /// A batched direct read goes through its own open file description, and the kernel writes
+    /// the range's dirty pages back before a direct read, so the batch sees every buffered write
+    /// that completed before it, synced or not.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_read_many_sees_unsynced_buffered_writes() {
+        let (storage, directory) = storage_for_reopen_test("read_many_coherent", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        assert!(
+            aio::direct(&blob.shared).is_some(),
+            "temporary directory must support O_DIRECT"
+        );
+
+        const BLOCK: usize = 4096;
+        const RANGES: [(u64, usize); 3] =
+            [(0, BLOCK), (BLOCK as u64, BLOCK), (BLOCK as u64 + 100, 300)];
+        async fn read_all(blob: &Blob) -> Vec<Vec<u8>> {
+            let before = blob.shared.test.direct_reads.load(Ordering::Relaxed);
+            let mut bufs: Vec<(usize, IoBufsMut)> = blob
+                .read_many(&RANGES, ReadOptions::DONT_CACHE)
+                .try_collect()
+                .await
+                .unwrap();
+
+            // Every range was served by its direct read rather than a positioned fallback.
+            assert_eq!(
+                blob.shared.test.direct_reads.load(Ordering::Relaxed) - before,
+                RANGES.len()
+            );
+            bufs.sort_by_key(|(index, _)| *index);
+            bufs.into_iter()
+                .map(|(_, bufs)| bufs.coalesce().as_ref().to_vec())
+                .collect()
+        }
+
+        // Two buffered, unsynced generations of the same blocks. Each batched read sees the
+        // latest one.
+        for generation in [0x11u8, 0x22] {
+            let data = vec![generation; 2 * BLOCK];
+            blob.write_at(0, data.clone(), WriteOptions::default())
+                .await
+                .unwrap();
+            let bufs = read_all(&blob).await;
+            for ((offset, len), buf) in RANGES.iter().zip(bufs) {
+                let offset = *offset as usize;
+                assert_eq!(
+                    buf,
+                    &data[offset..offset + len],
+                    "generation {generation:#x}"
+                );
+            }
+        }
+
+        // A partial buffered overwrite inside the second block is seen too.
+        blob.write_at(BLOCK as u64 + 150, vec![0x33; 100], WriteOptions::default())
+            .await
+            .unwrap();
+        let bufs = read_all(&blob).await;
+        assert_eq!(&bufs[2][..50], &[0x22; 50]);
+        assert_eq!(&bufs[2][50..150], &[0x33; 100]);
+        assert_eq!(&bufs[2][150..], &[0x22; 150]);
+
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_read_many_reports_unservable_range() {
+        let (storage, directory) = storage_for_reopen_test("read_many_unservable", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, vec![0u8; 4096], WriteOptions::default())
+            .await
+            .unwrap();
+        assert!(
+            aio::direct(&blob.shared).is_some(),
+            "temporary directory must support O_DIRECT"
+        );
+
+        // No slab can hold these batches: the first range overflows its aligned length, the
+        // second and third exceed the largest allocation (the third only once the allocation's
+        // own header is counted), and the last pair overflows the slab total. The call must
+        // yield that error rather than end without yielding the ranges.
+        for ranges in [
+            vec![(0, usize::MAX - 10)],
+            vec![(0, 1usize << (usize::BITS - 1))],
+            vec![(0, (1usize << (usize::BITS - 1)) - 4096)],
+            vec![(0, usize::MAX - 8191), (0, 8192)],
+        ] {
+            let result = blob
+                .read_many(&ranges, ReadOptions::DONT_CACHE)
+                .try_collect::<Vec<_>>()
+                .await;
+            assert!(matches!(result, Err(Error::OffsetOverflow)), "{ranges:?}");
+        }
+
         drop(blob);
         storage.remove("partition", None).await.unwrap();
         drop(storage);

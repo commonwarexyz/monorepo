@@ -1694,7 +1694,7 @@ fn test_shutdown_cancels_tasks_before_destruction() {
     enum Placement {
         /// Registered locally but never polled.
         Local,
-        /// Registered from another thread, with its first token not taken
+        /// Registered from another thread, with its first runnable not taken
         /// from the mailbox.
         Foreign,
         /// Polled once and suspended before shutdown.
@@ -1778,7 +1778,7 @@ fn test_shutdown_cancels_tasks_before_destruction() {
 }
 
 /// A foreign spawn's task joins the set before its worker takes the first
-/// token, and leaves it on completion.
+/// runnable, and leaves it on completion.
 #[test]
 fn test_foreign_spawn_joins_the_task_set_before_its_worker_runs() {
     Runner::new(config()).start(|context| async move {
@@ -1786,7 +1786,7 @@ fn test_foreign_spawn_joins_the_task_set_before_its_worker_runs() {
         assert_eq!(context.shared.tasks.live(), 1);
 
         // The root has not yielded, so the worker has not taken the first
-        // token from its mailbox, yet the set already retains the task.
+        // runnable from its mailbox, yet the set already retains the task.
         let remote = context.child("foreign");
         let handle = thread::spawn(move || remote.spawn(|_| async {}))
             .join()
@@ -1799,10 +1799,10 @@ fn test_foreign_spawn_joins_the_task_set_before_its_worker_runs() {
     });
 }
 
-/// Shutdown between a foreign registration and delivery of its first token
+/// Shutdown between a foreign registration and delivery of its first runnable
 /// clears the task without polling it.
 #[test]
-fn test_shutdown_between_registration_and_first_token_clears_the_task() {
+fn test_shutdown_between_registration_and_first_runnable_clears_the_task() {
     let drops = Arc::new(AtomicUsize::new(0));
     let polled = Arc::new(AtomicBool::new(false));
     let payload = DropCount(drops.clone());
@@ -1813,7 +1813,7 @@ fn test_shutdown_between_registration_and_first_token_clears_the_task() {
         let (inserted, inserting) = oneshot::channel();
         let publisher = thread::spawn(move || {
             // Pause this thread's registration once the set holds the task,
-            // before its first token reaches the worker.
+            // before its first runnable reaches the worker.
             AFTER_INSERT.set(Some(Box::new(move || {
                 inserted.send(()).unwrap();
                 released.recv_timeout(TEST_TIMEOUT).unwrap();
@@ -1824,7 +1824,7 @@ fn test_shutdown_between_registration_and_first_token_clears_the_task() {
             })
         });
 
-        // Shut down while the publisher holds the only token.
+        // Shut down while the publisher holds the only runnable.
         inserting.await.unwrap();
         publisher
     });
@@ -1833,7 +1833,7 @@ fn test_shutdown_between_registration_and_first_token_clears_the_task() {
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert!(!polled.load(Ordering::Relaxed));
 
-    // The worker is gone, so delivery drops the token, and the handle is
+    // The worker is gone, so delivery discards the runnable, and the handle is
     // already closed.
     release.send(()).unwrap();
     let handle = publisher.join().unwrap();
@@ -1956,9 +1956,9 @@ fn test_teardown_drops_every_future_before_clearing_timers() {
                 ready.await.unwrap();
             }
 
-            // Wake half the tasks, whose tokens stay queued since the root
-            // returns without yielding. The rest stay idle, since their
-            // senders outlive the runner.
+            // Wake half the tasks, whose runnables stay queued since the root
+            // returns without yielding. The rest stay idle, since their senders
+            // outlive the runner.
             let (woken, idle): (Vec<_>, Vec<_>) = wakes
                 .into_iter()
                 .enumerate()

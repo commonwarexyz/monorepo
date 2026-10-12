@@ -14,7 +14,7 @@ use super::{
 use commonware_actor::Feedback;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    Automaton, CertifiableAutomaton, CertifiableBlock, Relay, Reporter,
+    Automaton, CertifiableAutomaton, CertifiableBlock, Handoff, Relay, Reporter,
     marshal::{
         Config, Start, Update,
         core::{Actor, Buffer, Mailbox},
@@ -28,7 +28,7 @@ use commonware_consensus::{
     simplex::{
         Engine, Floor, Plan, SkipBudget, SkipPolicy, config,
         elector::Config as ElectorConfig,
-        types::{Context as SimplexContext, Finalization},
+        types::{Activity, Context as SimplexContext, Finalization},
     },
     types::{Delta, Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
@@ -145,11 +145,12 @@ impl<P: Simplex> TwinsBlockBuilder<P> for SelectedBlockBuilderApp<Ctx<P>, Scheme
     }
 }
 
-/// Instantiates the standard marshal wrapper used as the Simplex automaton and relay.
+/// Instantiates the standard marshal wrapper used as the Simplex automaton, relay, and
+/// reporter.
 pub trait TwinsMarshal<P: Simplex, A: TwinsBlockBuilder<P>> {
     type Wrapper: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>
         + Relay<Digest = Sha256Digest, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>
-        + Reporter<Activity = Update<B<P>>>;
+        + Reporter<Activity = Activity<SchemeOf<P>, Sha256Digest>>;
 
     fn create(
         choice: MarshalChoice,
@@ -254,6 +255,16 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>> Automaton for SelectedMarshalWrapper<P
 }
 
 impl<P: Simplex, A: TwinsBlockBuilder<P>> CertifiableAutomaton for SelectedMarshalWrapper<P, A> {
+    async fn prepare(
+        &mut self,
+        context: Self::Context,
+    ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+        match self {
+            Self::Deferred(wrapper) => wrapper.prepare(context).await,
+            Self::Inline(wrapper) => wrapper.prepare(context).await,
+        }
+    }
+
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
         match self {
             Self::Deferred(wrapper) => wrapper.certify(round, digest).await,
@@ -276,7 +287,7 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>> Relay for SelectedMarshalWrapper<P, A>
 }
 
 impl<P: Simplex, A: TwinsBlockBuilder<P>> Reporter for SelectedMarshalWrapper<P, A> {
-    type Activity = Update<B<P>>;
+    type Activity = Activity<SchemeOf<P>, Sha256Digest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match self {
@@ -637,7 +648,7 @@ pub(crate) fn start_engine<P: Simplex, EC, A, R>(
     elector: EC,
     automaton: A,
     relay: R,
-    mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
+    reporter: impl Reporter<Activity = Activity<SchemeOf<P>, Sha256Digest>>,
     genesis: Sha256Digest,
     partition: String,
     forwarding: commonware_consensus::simplex::ForwardPolicy,
@@ -666,7 +677,7 @@ pub(crate) fn start_engine<P: Simplex, EC, A, R>(
         elector,
         automaton,
         relay,
-        mailbox,
+        reporter,
         Floor::Genesis(genesis),
         partition,
         forwarding,
@@ -690,7 +701,7 @@ pub(crate) fn start_engine_with_floor<P: Simplex, EC, A, R>(
     elector: EC,
     automaton: A,
     relay: R,
-    mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
+    reporter: impl Reporter<Activity = Activity<SchemeOf<P>, Sha256Digest>>,
     floor: Floor<SchemeOf<P>, Sha256Digest>,
     partition: String,
     forwarding: commonware_consensus::simplex::ForwardPolicy,
@@ -719,7 +730,7 @@ pub(crate) fn start_engine_with_floor<P: Simplex, EC, A, R>(
             elector,
             automaton,
             relay,
-            reporter: mailbox,
+            reporter,
             partition,
             mailbox_size: NZUsize!(1024),
             epoch: Epoch::zero(),

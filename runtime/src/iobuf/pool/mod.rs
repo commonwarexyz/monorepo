@@ -1125,6 +1125,7 @@ impl BufferPool {
 }
 
 #[cfg(all(test, not(feature = "loom")))]
+#[commonware_macros::test_group("miri")]
 mod tests {
     use super::{
         class::tests::{

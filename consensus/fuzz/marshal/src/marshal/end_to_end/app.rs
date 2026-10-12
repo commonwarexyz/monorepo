@@ -5,7 +5,7 @@
 //! [`Deferred`](commonware_consensus::marshal::standard::Deferred),
 //! [`Inline`](commonware_consensus::marshal::standard::Inline), or
 //! [`Marshaled`](commonware_consensus::marshal::coding::Marshaled) wrapper) for
-//! an end-to-end engine whose `reporter` is marshal. On `propose` it reads the parent
+//! an end-to-end engine whose `reporter` is that wrapper. On `propose` it reads the parent
 //! from the supplied ancestry and emits a contiguous child block
 //! (`height = parent + 1`) that embeds the consensus context verbatim. `verify`
 //! eventually accepts, with an optional per-view delay used to exercise
@@ -20,7 +20,7 @@ use super::input::MAX_TWINS_ROUNDS;
 use commonware_actor::Feedback;
 use commonware_codec::Codec;
 use commonware_consensus::{
-    Application, Block as ConsensusBlock, CertifiableBlock, Epochable, Reporter, Viewable,
+    Application, Block as ConsensusBlock, CertifiableBlock, Epochable, Handoff, Reporter, Viewable,
     marshal::{
         Update,
         ancestry::{self, Ancestry, BoxedAncestry},
@@ -855,6 +855,18 @@ where
     type Context = C;
     type Block = B;
     type Input = ();
+
+    async fn prepare(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Handoff<Self::Block> {
+        match self {
+            Self::AlwaysAccept(application) => application.prepare(context, ancestry, input).await,
+            Self::Faulty(application) => application.prepare(context, ancestry, input).await,
+        }
+    }
 
     async fn propose(
         &mut self,

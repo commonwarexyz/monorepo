@@ -10,9 +10,13 @@ use commonware_storage::{
     qmdb::store::db::{Config, Db},
     translator::TwoCap,
 };
+use commonware_storage_fuzz::floor::{Plan, Recorder};
 use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize};
 use libfuzzer_sys::fuzz_target;
-use std::{collections::BTreeMap, num::NonZeroU16};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU16,
+};
 
 const MAX_OPERATIONS: usize = 50;
 
@@ -22,10 +26,20 @@ type StoreDb = Db<deterministic::Context, Key, Value, TwoCap>;
 
 #[derive(Debug)]
 enum Operation {
-    Update { key: [u8; 32], value_bytes: Vec<u8> },
-    Delete { key: [u8; 32] },
-    Commit { metadata_bytes: Option<Vec<u8>> },
-    Get { key: [u8; 32] },
+    Update {
+        key: [u8; 32],
+        value_bytes: Vec<u8>,
+    },
+    Delete {
+        key: [u8; 32],
+    },
+    Commit {
+        metadata_bytes: Option<Vec<u8>>,
+        plan: Plan,
+    },
+    Get {
+        key: [u8; 32],
+    },
     GetMetadata,
     Sync,
     Prune,
@@ -59,7 +73,11 @@ impl<'a> Arbitrary<'a> for Operation {
                 } else {
                     None
                 };
-                Ok(Operation::Commit { metadata_bytes })
+                let plan = u.arbitrary()?;
+                Ok(Operation::Commit {
+                    metadata_bytes,
+                    plan,
+                })
             }
             3 => {
                 let key = u.arbitrary()?;
@@ -118,6 +136,15 @@ fn test_config(
     }
 }
 
+/// Check every key the run touched against the model of committed state.
+async fn assert_matches_model(db: &StoreDb, model: &BTreeMap<Key, Value>, keys: &BTreeSet<Key>) {
+    assert_eq!(db.is_empty(), model.is_empty(), "empty-db state diverged");
+    for key in keys {
+        let got = db.get(key).await.expect("get should not fail");
+        assert_eq!(got.as_ref(), model.get(key), "db diverged from model");
+    }
+}
+
 fn fuzz(input: FuzzInput) {
     let cfg = deterministic::Config::new().with_rng(FuzzRng::new(input.raw_bytes.clone()));
     let runner = deterministic::Runner::new(cfg);
@@ -129,9 +156,14 @@ fn fuzz(input: FuzzInput) {
             .expect("Failed to init db");
         let mut restarts = 0usize;
         let mut pending: BTreeMap<Digest, Option<Vec<u8>>> = BTreeMap::new();
-        let mut committed: BTreeMap<Digest, Vec<u8>> = BTreeMap::new();
         let mut committed_metadata = None;
         let mut expected_size = db.size();
+
+        // Every applied batch commits, so the model of committed state survives restarts. It
+        // takes each batch's writes before the batch applies and the floor walk's decisions
+        // when the walk's record is checked.
+        let mut model: BTreeMap<Key, Value> = BTreeMap::new();
+        let mut keys: BTreeSet<Key> = BTreeSet::new();
 
         for op in &input.ops {
             db = match op {
@@ -145,33 +177,42 @@ fn fuzz(input: FuzzInput) {
                     db
                 }
 
-                Operation::Commit { metadata_bytes } => {
+                Operation::Commit {
+                    metadata_bytes,
+                    plan,
+                } => {
                     let mut batch = db.new_batch();
-                    let changes = std::mem::take(&mut pending);
-                    for (key, value) in &changes {
+                    for (key, value) in std::mem::take(&mut pending) {
+                        keys.insert(key);
                         batch = match value {
-                            Some(v) => batch.update(*key, v.clone()),
-                            None => batch.delete(*key),
+                            Some(v) => {
+                                model.insert(key, v.clone());
+                                batch.update(key, v)
+                            }
+                            None => {
+                                model.remove(&key);
+                                batch.delete(key)
+                            }
                         };
                     }
                     let changeset = batch.finalize(metadata_bytes.clone());
+                    let inherited = db.inactivity_floor_loc();
+                    let mut policy =
+                        Recorder::new(plan, |seed| vec![seed; usize::from(seed % 16) + 1]);
                     let (db, applied) = db
-                        .apply_batch(changeset)
+                        .apply_batch(changeset, &mut policy)
                         .await
                         .expect("Apply batch should not fail");
+                    // The range covers the batch's writes, the walk's operations, and the commit.
                     assert_eq!(applied.start, expected_size);
                     expected_size = applied.end;
+                    policy.check(
+                        &mut model,
+                        inherited,
+                        db.inactivity_floor_loc(),
+                        applied.end - 1,
+                    );
                     let db = db.commit().await.expect("Commit should not fail");
-                    for (key, value) in changes {
-                        match value {
-                            Some(value) => {
-                                committed.insert(key, value);
-                            }
-                            None => {
-                                committed.remove(&key);
-                            }
-                        }
-                    }
                     committed_metadata = metadata_bytes.clone();
                     db
                 }
@@ -181,7 +222,7 @@ fn fuzz(input: FuzzInput) {
                     let committed_value = db.get(&digest).await.expect("Get should not fail");
                     assert_eq!(
                         committed_value,
-                        committed.get(&digest).cloned(),
+                        model.get(&digest).cloned(),
                         "Store get disagreed with committed model",
                     );
 
@@ -194,7 +235,7 @@ fn fuzz(input: FuzzInput) {
                     }
                     let expected = match pending.get(&digest) {
                         Some(value) => value.clone(),
-                        None => committed.get(&digest).cloned(),
+                        None => model.get(&digest).cloned(),
                     };
                     assert_eq!(
                         batch.get(&digest).await.expect("Batch get should not fail"),
@@ -247,7 +288,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::IsEmpty => {
                     assert_eq!(
                         db.is_empty(),
-                        committed.is_empty(),
+                        model.is_empty(),
                         "Store emptiness disagreed with committed model",
                     );
                     db
@@ -255,6 +296,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::SimulateFailure => {
                     pending.clear();
+                    let floor = db.inactivity_floor_loc();
                     drop(db);
 
                     let cfg = test_config("store-fuzz-test", &context);
@@ -267,12 +309,19 @@ fn fuzz(input: FuzzInput) {
                     .expect("Failed to init db");
                     expected_size = db.size();
                     restarts += 1;
+                    assert_eq!(
+                        db.inactivity_floor_loc(),
+                        floor,
+                        "floor changed across restart"
+                    );
+                    assert_matches_model(&db, &model, &keys).await;
                     db
                 }
             };
         }
 
         let db = db.commit().await.expect("Commit should not fail");
+        assert_matches_model(&db, &model, &keys).await;
         db.destroy().await.expect("Destroy should not fail");
     });
 }

@@ -202,7 +202,7 @@ where
             let builder = <M as TwinsMarshal<P, _>>::create(
                 marshal,
                 &validator_ctx,
-                application,
+                application.clone(),
                 validator_state.mailbox.clone(),
             );
             // Wrap the real resolver so the prefix can observe exact fetches
@@ -225,7 +225,7 @@ where
                 subscriptions.clone(),
             );
             validator_state.start_with_buffer(
-                builder.clone(),
+                application,
                 (resolver_rx, resolver.clone()),
                 buffer,
             );
@@ -382,7 +382,7 @@ where
                     ByzantineLeaderAtView { attack_view },
                     node.builder.clone(),
                     node.builder.clone(),
-                    node.mailbox.clone(),
+                    node.builder.clone(),
                     floor.clone(),
                     partition,
                     input.forwarding,
@@ -399,7 +399,7 @@ where
                     RoundRobin::<Sha256>::default(),
                     node.builder.clone(),
                     node.builder.clone(),
-                    node.mailbox.clone(),
+                    node.builder.clone(),
                     floor.clone(),
                     partition,
                     input.forwarding,

@@ -246,6 +246,7 @@ async fn restart_durable<P: Simplex>(
         recovered,
         resolver,
         input.certify,
+        input.handoff,
         input.reporting,
     );
     mv.adopt(rebuilt);
@@ -481,6 +482,7 @@ fn run_with<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput, st
                 recovered,
                 resolver,
                 input.certify,
+                input.handoff,
                 input.reporting,
             ));
         }
@@ -671,7 +673,7 @@ fn run_with<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput, st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_consensus::simplex::ForwardPolicy;
+    use commonware_consensus::{Handoff, simplex::ForwardPolicy};
     use commonware_consensus_fuzz_core::{
         BlockFilterChoice, FuzzInput, ReporterWiring, simplex::SimplexCertificateMock,
         strategy::StrategyChoice,
@@ -694,6 +696,7 @@ mod tests {
             term_length: TermLength::ONE,
             optimistic_views: commonware_consensus::types::ViewDelta::zero(),
             heterogeneous_optimism: false,
+            handoff: Handoff::Wait,
             partition: Partition::Connected,
             strategy: StrategyChoice::AnyScope,
             mailbox_size: NonZeroUsize::new(1024).unwrap(),

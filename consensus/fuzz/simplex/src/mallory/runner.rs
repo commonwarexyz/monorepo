@@ -600,6 +600,7 @@ async fn restart<P: Simplex>(
             recovered,
             resolver,
             input.certify,
+            input.handoff,
             input.reporting,
         )
     });
@@ -937,6 +938,7 @@ fn run_inner<P: Simplex>(
                     recovered,
                     resolver,
                     input.certify,
+                    input.handoff,
                     input.reporting,
                 )
             };
@@ -1578,7 +1580,7 @@ fn run_inner<P: Simplex>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_consensus::{simplex::ForwardPolicy, types::TermLength};
+    use commonware_consensus::{Handoff, simplex::ForwardPolicy, types::TermLength};
     use commonware_consensus_fuzz_core::{
         BlockFilterChoice, CertifyChoice, FuzzInput, N4F0C4, ReporterWiring,
         simplex::SimplexCertificateMock, strategy::StrategyChoice, utils::Partition,
@@ -1606,6 +1608,7 @@ mod tests {
             term_length: TermLength::ONE,
             optimistic_views: commonware_consensus::types::ViewDelta::zero(),
             heterogeneous_optimism: false,
+            handoff: Handoff::Wait,
             degraded_network: false,
             configuration: N4F0C4,
             partition: Partition::Connected,

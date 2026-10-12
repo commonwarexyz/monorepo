@@ -266,6 +266,7 @@ mod tests {
         TwinsMutator, run_standard_once,
     };
     use commonware_consensus::{
+        Handoff,
         simplex::ForwardPolicy,
         types::{TermLength, ViewDelta},
     };
@@ -332,6 +333,7 @@ mod tests {
             term_length: TermLength::ONE,
             optimistic_views: ViewDelta::zero(),
             heterogeneous_optimism: false,
+            handoff: Handoff::Wait,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
             mailbox_size: DEFAULT_MAILBOX_SIZE,
@@ -640,18 +642,34 @@ mod tests {
         adaptive.partition = Partition::Adaptive(Vec::new());
         adaptive.strategy = small;
         let honest = input(11, 2, N4F0C4);
+        // Multi-view terms with an early handoff decision take main's prepare
+        // path at every term start.
+        let mut vote = input(101, 2, N4F0C4);
+        vote.term_length = TermLength::new(commonware_utils::NZU32!(3));
+        vote.handoff = Handoff::Vote(());
+        let mut stage = input(102, 2, N4F0C4);
+        stage.term_length = TermLength::new(commonware_utils::NZU32!(3));
+        stage.handoff = Handoff::Stage(());
         let standard = [
             (
                 connected,
-                "89877f44cd7110ca8dc339eb29b63edf4b7418c439ae2301134d0880ff36f12d",
+                "82ee8ef9988526d27de83be782eefa9f8045ff1c3e09044f48bac7af9ae39822",
             ),
             (
                 adaptive,
-                "db505eb7346ddc64730a3c91c6f762ac13d1422d27724c19bd204ca0d744941d",
+                "565cb02f413058a284f47487949dcc8c658a94eceafaf2032cd8bb1fbb82533d",
             ),
             (
                 honest,
-                "61b4178af1dcd77cd9ebe133902b9864e8da3fb8c1273cf4125f4db7a6a95e48",
+                "aa67df779e357a327c91290428da11bb5c376c36473e131cad3e6862deba91f8",
+            ),
+            (
+                vote,
+                "2154f9a4a549431e29b7119aa7ac2cb7cce2aa1ea73a95eaf552589615776f4f",
+            ),
+            (
+                stage,
+                "f31dd4cf9affda8bbf3c37b72276d82daf3e763fcf94cc8c44d4438896321fa7",
             ),
         ];
         for (input, expected) in standard {
@@ -673,11 +691,11 @@ mod tests {
         for (role, expected) in [
             (
                 TwinsRole::Campaign,
-                "fd498877ec3b5cca030148da94aa4024f275050924300c976449f71d9a5c0f08",
+                "0fbcd75a3fb8eb95951ab6af966a397355b50771af9634df01301066c4b0d0e5",
             ),
             (
                 TwinsRole::Mutator,
-                "95d60d83955786015d5d926472e79f2ef97e6675256071fdc65958856ccc12c9",
+                "55a975179caa8783392b5b42d779b7d236ba4503b8264e43023b711f60a68bbf",
             ),
         ] {
             let input = twins.clone();

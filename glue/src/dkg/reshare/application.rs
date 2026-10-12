@@ -5,7 +5,7 @@ use crate::dkg::{
     types::Payload,
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, CertifiableBlock,
+    Application as ConsensusApplication, CertifiableBlock, Handoff,
     marshal::ancestry::Ancestry,
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
@@ -120,6 +120,72 @@ where
     type Block = A::Block;
     type Input = I;
 
+    /// Prepares a term-start block on an uncertified parent unless this node's dealer log is
+    /// due at that height or the block is the epoch's final block.
+    ///
+    /// Whether the dealer log is due depends on the parent's height, so it is checked before the
+    /// inner application is asked, and an inner application that declines still costs that check
+    /// (a dealer-log request from the midpoint on). A forwarded request carries no reshare
+    /// payload.
+    ///
+    /// The final block is left to [`Self::propose`] without asking the inner application. Its
+    /// epoch info is derived from the parent's ancestry, and deriving it on an uncertified parent
+    /// can start a ceremony verification that a replacement parent or the ordinary proposal
+    /// would then wait behind. The ordinary proposal at that height requests it once the parent
+    /// certifies.
+    ///
+    /// A height that would carry this node's dealer log is left to [`Self::propose`] without
+    /// asking the inner application, and the reservation is released. Consensus can discard a
+    /// prepared block without notice, as when its parent fails to certify or consensus cancels the
+    /// request, and a reservation kept for it would withhold the log from later proposals until
+    /// finalization reaches that height.
+    #[tracing::instrument(
+        name = "dkg.reshare.application.prepare",
+        level = "info",
+        skip_all,
+        fields(height = field::Empty, phase = field::Empty)
+    )]
+    async fn prepare(
+        &mut self,
+        context: (E, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Handoff<Self::Block> {
+        let Some(parent) = ancestry.peek() else {
+            return Handoff::Wait;
+        };
+        let height = parent.height().next();
+        if self.final_block(height) {
+            return Handoff::Wait;
+        }
+        let phase = self.phase(height);
+        let span = tracing::Span::current();
+        span.record("height", height.traced());
+        span.record("phase", field::debug(phase));
+
+        // Dropping a returned reservation releases the dealer log for later proposals.
+        if matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late))
+            && self.reshare.next_log(height).await.is_some()
+        {
+            return Handoff::Wait;
+        }
+        self.inner
+            .prepare(
+                context,
+                ancestry,
+                Input {
+                    upstream: input,
+                    payload: None,
+                },
+            )
+            .await
+    }
+
+    /// Selects the reshare payload for the block that extends `ancestry`, with the dealer-log
+    /// reservation it was taken from, and asks the inner application to build on it.
+    ///
+    /// Returns `None` without asking the inner application when the parent is missing or the
+    /// final block's epoch info is not available.
     #[tracing::instrument(
         name = "dkg.reshare.application.propose",
         level = "info",
@@ -206,7 +272,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
-        let Some(tip) = ancestry.peek().cloned() else {
+        let Some(tip) = ancestry.peek() else {
             return self.inner.verify(context, ancestry).await;
         };
         let height = tip.height();
@@ -322,6 +388,7 @@ mod tests {
         proposal_entered: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         verify_count: Arc<Mutex<usize>>,
         verify_result: bool,
+        handoff: Handoff<()>,
     }
 
     impl RecordingApp {
@@ -332,6 +399,7 @@ mod tests {
                 proposal_entered: Arc::new(Mutex::new(None)),
                 verify_count: Arc::new(Mutex::new(0)),
                 verify_result: true,
+                handoff: Handoff::Wait,
             }
         }
 
@@ -367,6 +435,21 @@ mod tests {
         type Context = TestContext;
         type Block = TestBlock;
         type Input = Input<(), TestBlsVariant, PrivateKey>;
+
+        async fn prepare(
+            &mut self,
+            context: (E, Self::Context),
+            ancestry: impl Ancestry<Self::Block>,
+            input: Self::Input,
+        ) -> Handoff<Self::Block> {
+            if self.handoff.is_wait() {
+                return Handoff::Wait;
+            }
+            let decision = self.handoff;
+            self.propose(context, ancestry, input)
+                .await
+                .map_or(Handoff::Wait, |block| decision.map(|()| block))
+        }
 
         async fn propose(
             &mut self,
@@ -539,6 +622,148 @@ mod tests {
             genesis.height().next(),
             0,
         )
+    }
+
+    /// Consensus can abandon a prepared block without notice, so a prepare request whose
+    /// height would carry this node's dealer log declines without asking the inner application
+    /// and releases the reservation for the ordinary proposal. Otherwise the wrapper forwards
+    /// the inner application's decision.
+    #[test]
+    fn prepare_leaves_dealer_log_to_propose() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let midpoint = midpoint_parent();
+            let genesis = mocks::genesis_block(leader().public_key());
+            let payload = epoch_payload(10);
+            for decision in [Handoff::Vote(()), Handoff::Stage(()), Handoff::Wait] {
+                let inner = RecordingApp {
+                    handoff: decision,
+                    ..RecordingApp::accepting()
+                };
+                let (mut app, release_rx) = log_wrapper(&context, payload.clone(), inner.clone());
+                let prepared = app
+                    .prepare(
+                        (context.child("app"), block_context(&midpoint, 2)),
+                        ancestry::from_iter([Arc::new(midpoint.clone())]),
+                        (),
+                    )
+                    .await;
+                assert!(prepared.is_wait(), "a dealer log is left to propose");
+                assert!(
+                    inner.proposed().is_empty(),
+                    "a declined prepare builds nothing"
+                );
+                assert_eq!(
+                    release_rx.await.expect("reservation should be released"),
+                    midpoint.height().next()
+                );
+
+                // The released log is served to the ordinary proposal at the same height.
+                let proposed = app
+                    .propose(
+                        (context.child("propose"), block_context(&midpoint, 2)),
+                        ancestry::from_iter([Arc::new(midpoint.clone())]),
+                        (),
+                    )
+                    .await
+                    .expect("the ordinary proposal builds");
+                assert!(proposed.payload() == Some(payload.clone()));
+                assert!(inner.proposed() == vec![Some(payload.clone())]);
+
+                // Before the midpoint no dealer log is reserved, so the decision is forwarded.
+                let prepared = app
+                    .prepare(
+                        (context.child("early"), block_context(&genesis, 1)),
+                        ancestry::from_iter([Arc::new(genesis.clone())]),
+                        (),
+                    )
+                    .await;
+                match (decision, prepared) {
+                    (Handoff::Vote(()), Handoff::Vote(block))
+                    | (Handoff::Stage(()), Handoff::Stage(block)) => {
+                        assert!(inner.proposed() == vec![Some(payload.clone()), None]);
+                        assert!(block.payload().is_none());
+                    }
+                    (Handoff::Wait, Handoff::Wait) => {
+                        assert!(
+                            inner.proposed() == vec![Some(payload.clone())],
+                            "a declined prepare builds nothing"
+                        );
+                    }
+                    _ => panic!("the wrapper must forward the inner decision"),
+                }
+            }
+        });
+    }
+
+    /// A prepare request whose child is the epoch's final block declines without asking the
+    /// inner application or requesting epoch info, whatever the inner decision would be. The
+    /// parent is uncertified, and epoch info for it can start a ceremony verification that
+    /// later requests wait behind. The ordinary proposal on the same parent carries the epoch
+    /// info.
+    #[test]
+    fn prepare_leaves_final_block_to_propose() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = mocks::genesis_block(leader().public_key());
+            let payload = epoch_payload(7);
+            for decision in [Handoff::Vote(()), Handoff::Stage(()), Handoff::Wait] {
+                let inner = RecordingApp {
+                    handoff: decision,
+                    ..RecordingApp::accepting()
+                };
+                let (sender, mut receiver) = mailbox::new::<
+                    Message<TestBlock, TestBlsVariant, PrivateKey>,
+                >(
+                    context.child("mailbox"), NZUsize!(1)
+                );
+                let requests = Arc::new(Mutex::new(0usize));
+                context.child("fake_actor").spawn({
+                    let requests = requests.clone();
+                    let payload = payload.clone();
+                    move |_| async move {
+                        while let Some(message) = receiver.recv().await {
+                            if let Message::EpochInfo { response, .. } = message {
+                                *requests.lock() += 1;
+                                let _ = response
+                                    .send(EpochInfoResponse::Available(Some(payload.clone())));
+                            }
+                        }
+                    }
+                });
+                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
+
+                let prepared = app
+                    .prepare(
+                        (context.child("app"), block_context(&parent, 1)),
+                        ancestry::from_iter([Arc::new(parent.clone())]),
+                        (),
+                    )
+                    .await;
+                assert!(prepared.is_wait(), "the final block is left to propose");
+                assert!(
+                    inner.proposed().is_empty(),
+                    "a declined prepare builds nothing"
+                );
+                assert_eq!(
+                    *requests.lock(),
+                    0,
+                    "a declined prepare requests no epoch info"
+                );
+
+                let proposed = app
+                    .propose(
+                        (context.child("propose"), block_context(&parent, 1)),
+                        ancestry::from_iter([Arc::new(parent.clone())]),
+                        (),
+                    )
+                    .await
+                    .expect("the ordinary proposal builds");
+                assert!(proposed.payload() == Some(payload.clone()));
+                assert!(inner.proposed() == vec![Some(payload.clone())]);
+                assert_eq!(*requests.lock(), 1);
+            }
+        });
     }
 
     #[test]
