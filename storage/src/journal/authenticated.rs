@@ -1042,6 +1042,14 @@ where
         self.journal.try_read_many_sync(positions)
     }
 
+    async fn warm(&self, positions: &[u64]) -> Result<(), JournalError> {
+        self.journal.warm(positions).await
+    }
+
+    async fn warm_range(&self, range: Range<u64>) -> Result<(), JournalError> {
+        self.journal.warm_range(range).await
+    }
+
     async fn replay_range(
         &self,
         range: Range<u64>,

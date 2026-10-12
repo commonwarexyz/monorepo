@@ -1068,6 +1068,131 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         items
     }
 
+    async fn warm(&self, positions: &[u64]) -> Result<(), Error> {
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
+
+        // A frame spans its offset to its same-blob successor's offset, so resolve both. The
+        // last frame of a blob or of the journal has no successor and warms only its first page.
+        let items_per_blob = self.items_per_blob.get();
+        let positions: Vec<u64> = positions
+            .iter()
+            .copied()
+            .filter(|&position| self.validate_readable(position).is_ok())
+            .collect();
+        let mut lookups: Vec<u64> = Vec::with_capacity(positions.len() * 2);
+        for &position in &positions {
+            if lookups.last() != Some(&position) {
+                lookups.push(position);
+            }
+            let next = position + 1;
+            if next < self.bounds.end && !next.is_multiple_of(items_per_blob) {
+                lookups.push(next);
+            }
+        }
+        let mut offsets = self.offsets.probe_items(&lookups);
+        let unresolved: Vec<u64> = lookups
+            .iter()
+            .zip(&offsets)
+            .filter(|(_, offset)| offset.is_none())
+            .map(|(&position, _)| position)
+            .collect();
+        if !unresolved.is_empty() {
+            let mut fetched = self.offsets.read_many_inner(&unresolved).await?.into_iter();
+            for offset in offsets.iter_mut().filter(|offset| offset.is_none()) {
+                *offset = fetched.next();
+            }
+        }
+
+        // Touch each frame's first and last byte, which lie on the first and last pages it spans,
+        // with one batched read per blob.
+        let mut touches: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        let mut at = 0;
+        for &position in &positions {
+            while lookups[at] != position {
+                at += 1;
+            }
+            let Some(start) = offsets[at] else {
+                continue;
+            };
+            let list = touches
+                .entry(position_to_blob(position, items_per_blob))
+                .or_default();
+            list.push(start);
+            if lookups.get(at + 1) == Some(&(position + 1))
+                && let Some(end) = offsets[at + 1]
+                && end > start + 1
+            {
+                list.push(end - 1);
+            }
+        }
+        let reads = touches.into_iter().filter_map(|(blob, mut list)| {
+            let blob = self.data.get(blob)?;
+            list.sort_unstable();
+            list.dedup();
+            Some(async move {
+                let mut buf = vec![0u8; list.len()];
+                blob.read_many_into(&mut buf, &list, NonZeroUsize::MIN)
+                    .await
+            })
+        });
+        try_join_all(reads).await?;
+        Ok(())
+    }
+
+    async fn warm_range(&self, range: Range<u64>) -> Result<(), Error> {
+        let start = range.start.max(self.bounds.start);
+        let end = range.end.min(self.bounds.end);
+        if start >= end {
+            return Ok(());
+        }
+
+        // Split the range at blob boundaries and resolve each span's first and last frame offsets
+        // with one offsets read.
+        let items_per_blob = self.items_per_blob.get();
+        let mut spans = Vec::new();
+        let mut lookups = Vec::new();
+        let mut position = start;
+        while position < end {
+            let blob = position_to_blob(position, items_per_blob);
+            let last = ((blob + 1) * items_per_blob).min(end) - 1;
+            spans.push((blob, position, last));
+            lookups.push(position);
+            if last > position {
+                lookups.push(last);
+            }
+            position = last + 1;
+        }
+        let mut offsets = self.offsets.read_many_inner(&lookups).await?.into_iter();
+
+        // Read each span's bytes through the page cache, which fetches its missing pages with one
+        // batched read. The span's last frame warms only its first page.
+        let mut buf = Vec::new();
+        for (blob, first, last) in spans {
+            let first_offset = offsets.next().expect("one offset per lookup");
+            let last_offset = if last > first {
+                offsets.next().expect("one offset per lookup")
+            } else {
+                first_offset
+            };
+            let Some(blob) = self.data.get(blob) else {
+                continue;
+            };
+            let len = usize::try_from(last_offset - first_offset + 1)
+                .map_err(|_| Error::OffsetOverflow)?;
+            buf.resize(len, 0);
+            blob.read_many_into(
+                &mut buf,
+                &[first_offset],
+                NonZeroUsize::new(len).expect("a span covers at least one byte"),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn replay_range(
         &self,
         range: Range<u64>,
@@ -2571,6 +2696,14 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
 
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
         self.0.reader().try_read_many_sync(positions)
+    }
+
+    async fn warm(&self, positions: &[u64]) -> Result<(), Error> {
+        self.0.reader().warm(positions).await
+    }
+
+    async fn warm_range(&self, range: Range<u64>) -> Result<(), Error> {
+        self.0.reader().warm_range(range).await
     }
 
     async fn replay_range(
@@ -5034,6 +5167,55 @@ mod tests {
             }
             assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
             drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_warm_serves_later_sync_reads() {
+        // Warming loads the pages a frame spans, so a cold cache then serves it synchronously.
+        // 41-byte frames on 101-byte pages make frame 2 span two pages. Each blob's partial last
+        // page is served from memory, so the checks use frames on full pages.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(64));
+            let cfg = Config {
+                partition: "variable-warm".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: page_cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let items = (0..30)
+                .map(|i| FixedBytes::new([i as u8; 40]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<40>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
+            journal = journal.sync().await.unwrap();
+
+            // Positions in two sealed blobs, one spanning two pages. Frame 7 lies on pages
+            // nothing warmed. Out-of-bounds positions are skipped.
+            page_cache.clear();
+            journal.warm(&[2, 13, 40]).await.unwrap();
+            assert_eq!(journal.try_read_sync(2).as_ref(), Some(&items[2]));
+            assert_eq!(journal.try_read_sync(13).as_ref(), Some(&items[13]));
+            assert!(journal.try_read_sync(7).is_none());
+
+            // A range across a blob boundary warms every frame in it.
+            page_cache.clear();
+            journal.warm_range(5..19).await.unwrap();
+            for position in 5..19 {
+                assert_eq!(
+                    journal.try_read_sync(position).as_ref(),
+                    Some(&items[position as usize])
+                );
+            }
+            assert!(journal.try_read_sync(2).is_none());
 
             journal.destroy().await.unwrap();
         });

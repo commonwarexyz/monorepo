@@ -427,6 +427,61 @@ pub(crate) mod test {
     }
 
     #[test_traced("WARN")]
+    fn test_ordered_any_variable_prefetch_warms_reads() {
+        // Prefetching keys loads the operations reading them touches: present keys' operations
+        // and absent keys' span owners. After the cache is cleared, the reads miss without the
+        // prefetch and miss nothing after it.
+        use crate::index::Unordered as _;
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut config = create_test_config(7, &context, ());
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(PAGE_SIZE), NZUsize!(4096));
+            config.merkle_config.page_cache = page_cache.clone();
+            config.journal_config.page_cache = page_cache.clone();
+            let db = AnyTest::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let present: Vec<Digest> = (0u64..200)
+                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+                .collect();
+            let batch = present.iter().fold(db.new_batch(), |batch, key| {
+                batch.write(*key, Some(vec![7; 24]))
+            });
+            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.sync().await.unwrap();
+
+            // Absent keys whose translated buckets are empty, so their span owners lie in the
+            // previous bucket.
+            let absent: Vec<Digest> = (1000u64..)
+                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+                .filter(|key| db.snapshot.get(key).next().is_none())
+                .take(10)
+                .collect();
+            let keys: Vec<&Digest> = present.iter().step_by(17).chain(&absent).collect();
+            let misses =
+                || crate::qmdb::any::test::counter(&context, "log_journal_cache_misses_total");
+
+            page_cache.clear();
+            let before = misses();
+            for key in &keys {
+                db.get_span(key).await.unwrap();
+            }
+            assert!(misses() > before);
+
+            page_cache.clear();
+            db.prefetch(&keys).await.unwrap();
+            let before = misses();
+            for key in &keys {
+                db.get_span(key).await.unwrap();
+            }
+            assert_eq!(misses(), before);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_ordered_any_variable_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

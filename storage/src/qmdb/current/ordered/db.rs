@@ -57,6 +57,12 @@ where
         self.any.get_span(key).await
     }
 
+    /// Load into the page cache, without decoding them, the operations that reading or writing
+    /// `keys` in a batch on this database reads. See the any database's `prefetch`.
+    pub async fn prefetch(&self, keys: &[&K]) -> Result<(), Error<F>> {
+        self.any.prefetch(keys).await
+    }
+
     /// Returns the smallest active key strictly greater than `key`, or `None` if there is none.
     ///
     /// The query key need not be active. This lookup does not wrap around to the first key.

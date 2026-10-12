@@ -127,6 +127,35 @@ where
         }
     }
 
+    /// Load into the page cache, without decoding them, the operations that reading or writing
+    /// `keys` in a batch on this database reads: each key's committed operation, the operation
+    /// whose span contains each absent key, and the operations the batch's floor raise reads
+    /// first. A caller that knows its next keys early can run this alongside other work, such as
+    /// merkleizing the batch before, so the reads it warms avoid storage.
+    ///
+    /// A hint: it changes no state, and a later read of a page evicted meanwhile reads it again.
+    pub async fn prefetch(&self, keys: &[&K]) -> Result<(), crate::qmdb::Error<F>> {
+        let mut positions = Vec::with_capacity(keys.len());
+        for key in keys {
+            let start = positions.len();
+            positions.extend(self.snapshot.get(key).map(|loc| **loc));
+            if positions.len() == start
+                && let Some((candidates, _)) = self.snapshot.prev_translated_key(key)
+            {
+                positions.extend(candidates.map(|loc| **loc));
+            }
+        }
+        positions.sort_unstable();
+        positions.dedup();
+
+        // A floor raise moves about one operation per operation its batch makes inactive, which
+        // the batch's keys bound, so the next raises read within twice that past the floor.
+        let floor = *self.inactivity_floor_loc;
+        let window = floor..floor.saturating_add(2 * keys.len() as u64);
+        futures::try_join!(self.log.warm(&positions), self.log.warm_range(window))?;
+        Ok(())
+    }
+
     /// Returns the smallest active key strictly greater than `key`, or `None` if there is none.
     ///
     /// The query key need not be active. This lookup does not wrap around to the first key.

@@ -189,6 +189,22 @@ pub trait Contiguous: Send + Sync {
     /// async read paths are the sole error authority for declined positions.
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>>;
 
+    /// Load the storage pages holding the items at strictly increasing `positions` into the page
+    /// cache without decoding the items, so later reads of them can be served synchronously.
+    /// Positions outside `bounds()` are skipped.
+    ///
+    /// A hint: an implementation may load nothing.
+    fn warm(&self, positions: &[u64]) -> impl Future<Output = Result<(), Error>> + Send {
+        let _ = positions;
+        async { Ok(()) }
+    }
+
+    /// Like [`warm`](Self::warm), for every position in `range`.
+    fn warm_range(&self, range: Range<u64>) -> impl Future<Output = Result<(), Error>> + Send {
+        let _ = range;
+        async { Ok(()) }
+    }
+
     /// Return a stream of the items in `range`, in position order. `range` must fall within
     /// `bounds()`. An empty range within `bounds()` yields an empty stream.
     ///
