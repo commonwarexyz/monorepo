@@ -134,7 +134,7 @@
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
 use super::{
-    Decoded,
+    Decoded, ReplayBatch,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
 };
@@ -197,7 +197,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     range: Range<u64>,
     buffer: NonZeroUsize,
     read_options: ReadOptions,
-) -> Result<impl Stream<Item = Result<(u64, Vec<A>), Error>> + Send + use<'a, B, A>, Error> {
+) -> Result<impl Stream<Item = Result<ReplayBatch<A>, Error>> + Send + use<'a, B, A>, Error> {
     if range.start > range.end || range.end > bounds.end {
         return Err(Error::ItemOutOfRange(if range.start > range.end {
             range.start
@@ -260,18 +260,6 @@ struct FixedReplayState<'a, B: RBlob, A> {
     _marker: PhantomData<A>,
 }
 
-impl<B: RBlob, A> FixedReplayState<'_, B, A> {
-    /// End this blob's replay with `error` after the `items` decoded before it.
-    const fn fail(&mut self, start: u64, items: Vec<A>, error: Error) -> Decoded<A> {
-        self.pos = self.end_pos;
-        Decoded {
-            start,
-            items,
-            error: Some(error),
-        }
-    }
-}
-
 impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState<'_, B, A> {
     type Item = A;
 
@@ -288,11 +276,11 @@ impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState
             Ok(true) => {}
             Ok(false) => {
                 let error = Error::Corruption(format!("blob ended before position {start}"));
-                let decoded = self.fail(start, Vec::new(), error);
+                let decoded = Decoded::failed(start, Vec::new(), error);
                 return Some((decoded, self));
             }
             Err(err) => {
-                let decoded = self.fail(start, Vec::new(), err);
+                let decoded = Decoded::failed(start, Vec::new(), err);
                 return Some((decoded, self));
             }
         }
@@ -303,7 +291,7 @@ impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState
         let remaining = self.end_pos - self.pos;
         let count = available.min(self.items_per_batch as u64).min(remaining) as usize;
         let Some(next_pos) = self.pos.checked_add(count as u64) else {
-            let decoded = self.fail(start, Vec::new(), Error::OffsetOverflow);
+            let decoded = Decoded::failed(start, Vec::new(), Error::OffsetOverflow);
             return Some((decoded, self));
         };
 
@@ -314,20 +302,18 @@ impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState
         // decoding may have consumed only part of a record.
         let mut items = Vec::with_capacity(count);
         while items.len() < count {
-            let in_page = self.replay.chunk().len() / A::SIZE;
-            let page = if in_page == 0 {
-                None
-            } else {
-                self.replay.chunk_bytes()
-            };
+            let page = self
+                .replay
+                .chunk_bytes()
+                .filter(|page| page.len() >= A::SIZE);
             match page {
                 Some(mut page) => {
-                    let n = in_page.min(count - items.len());
+                    let n = (page.len() / A::SIZE).min(count - items.len());
                     for _ in 0..n {
                         match A::read(&mut page) {
                             Ok(item) => items.push(item),
                             Err(err) => {
-                                let decoded = self.fail(start, items, Error::Codec(err));
+                                let decoded = Decoded::failed(start, items, Error::Codec(err));
                                 return Some((decoded, self));
                             }
                         }
@@ -337,7 +323,7 @@ impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState
                 None => match self.replay.read::<A>() {
                     Ok(item) => items.push(item),
                     Err(err) => {
-                        let decoded = self.fail(start, items, Error::Codec(err));
+                        let decoded = Decoded::failed(start, items, Error::Codec(err));
                         return Some((decoded, self));
                     }
                 },
@@ -2030,7 +2016,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, Vec<A>), Error>> + Send, Error> {
+    ) -> Result<impl Stream<Item = Result<ReplayBatch<A>, Error>> + Send, Error> {
         replay_stream(
             &self.blobs,
             self.bounds.clone(),
@@ -2070,7 +2056,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, Vec<A>), Error>> + Send, Error> {
+    ) -> Result<impl Stream<Item = Result<ReplayBatch<A>, Error>> + Send, Error> {
         let blobs = self.0.blobs.reader();
         replay_stream(
             &blobs,
@@ -4021,6 +4007,7 @@ mod tests {
                         range,
                         buffer,
                         ITEMS_PER_BLOB.get(),
+                        Digest::SIZE,
                         test_digest,
                     )
                     .await;
@@ -4034,6 +4021,7 @@ mod tests {
                 65..total,
                 100,
                 ITEMS_PER_BLOB.get(),
+                Digest::SIZE,
                 test_digest,
             )
             .await;
@@ -4051,17 +4039,16 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Three-byte items on 40-byte logical pages: items 0..13 fill page 0, item 13 straddles
-            // pages 0 and 1, and item 20 lies inside page 1.
-            for invalid in [5u64, 13, 20] {
+            // Three-byte items on 44-byte logical pages: items 0..14 fit in page 0, item 14
+            // straddles pages 0 and 1, and item 20 lies inside page 1.
+            for invalid in [5u64, 14, 20] {
                 let mut cfg = test_cfg(&context, NZU64!(1000));
                 cfg.partition = format!("codec-error-{invalid}");
 
                 // Write byte triples that decode as `[bool; 3]` except at `invalid`.
-                let mut journal =
-                    Journal::<_, [u8; 3]>::init(context.child("writer"), cfg.clone())
-                        .await
-                        .unwrap();
+                let mut journal = Journal::<_, [u8; 3]>::init(context.child("writer"), cfg.clone())
+                    .await
+                    .unwrap();
                 for i in 0..ITEMS {
                     let item = if i == invalid { [0, 2, 0] } else { [0, 1, 0] };
                     (journal, _) = journal.append(&item).await.unwrap();
@@ -4069,8 +4056,7 @@ mod tests {
                 let journal = journal.sync().await.unwrap();
                 drop(journal);
 
-                // Replay the same bytes as `[bool; 3]`: one batch of the valid prefix, then
-                // the error.
+                // Replay the same bytes as `[bool; 3]`: the valid prefix, then the error.
                 let journal = Journal::<_, [bool; 3]>::init(context.child("reader"), cfg)
                     .await
                     .unwrap();
@@ -4080,14 +4066,19 @@ mod tests {
                         .await
                         .unwrap();
                     pin_mut!(stream);
-                    let (start, items) = stream.next().await.unwrap().unwrap();
-                    assert_eq!(start, 0, "invalid item {invalid}");
-                    assert_eq!(items.len(), invalid as usize, "invalid item {invalid}");
-                    assert!(items.iter().all(|item| *item == [false, true, false]));
-                    assert!(matches!(
-                        stream.next().await.unwrap(),
-                        Err(Error::Codec(_))
-                    ));
+                    let mut decoded = 0u64;
+                    loop {
+                        match stream.next().await.unwrap() {
+                            Ok((start, items)) => {
+                                assert_eq!(start, decoded, "invalid item {invalid}");
+                                assert!(items.iter().all(|item| *item == [false, true, false]));
+                                decoded += items.len() as u64;
+                            }
+                            Err(Error::Codec(_)) => break,
+                            Err(err) => panic!("unexpected error for item {invalid}: {err}"),
+                        }
+                    }
+                    assert_eq!(decoded, invalid, "invalid item {invalid}");
                     assert!(stream.next().await.is_none());
                 }
 

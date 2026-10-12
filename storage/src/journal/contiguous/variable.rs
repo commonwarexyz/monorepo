@@ -14,7 +14,7 @@
 #[commonware_macros::stability(ALPHA)]
 use super::checkpoint::Checkpoint;
 use super::{
-    Contiguous, Decoded, Many, Mutable, blob_first_position,
+    Contiguous, Decoded, Many, Mutable, ReplayBatch, blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     fixed,
     metrics::Metrics,
@@ -231,18 +231,6 @@ struct ReplayState<'a, B: RBlob, V: Codec> {
     _marker: PhantomData<V>,
 }
 
-impl<B: RBlob, V: Codec> ReplayState<'_, B, V> {
-    /// End this blob's replay with `error` after the `items` decoded before it.
-    const fn fail(&mut self, start: u64, items: Vec<V>, error: Error) -> Decoded<V> {
-        self.pos = self.end_pos;
-        Decoded {
-            start,
-            items,
-            error: Some(error),
-        }
-    }
-}
-
 impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V> {
     type Item = V;
 
@@ -261,8 +249,7 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
             }
 
             // A short read before a frame header is corruption for replay: bounds and offsets say
-            // this item exists, so EOF here means the data blob is shorter than expected. Skip the
-            // refill when the header is already buffered.
+            // this item exists, so EOF here means the data blob is shorter than expected.
             if self.replay.remaining() < MAX_U32_VARINT_SIZE {
                 match self.replay.ensure(MAX_U32_VARINT_SIZE).await {
                     Ok(true) => {}
@@ -271,12 +258,12 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
                             "data blob {} ended before position {}",
                             self.blob, self.pos
                         ));
-                        let decoded = self.fail(start, items, error);
+                        let decoded = Decoded::failed(start, items, error);
                         return Some((decoded, self));
                     }
                     Ok(false) => {}
                     Err(err) => {
-                        let decoded = self.fail(start, items, err);
+                        let decoded = Decoded::failed(start, items, err);
                         return Some((decoded, self));
                     }
                 }
@@ -287,17 +274,16 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
             let (item_size, varint_len) = match self.replay.read_length() {
                 Ok(result) => result,
                 Err(err) => {
-                    let error = if self.replay.is_exhausted()
-                        || before_remaining < MAX_U32_VARINT_SIZE
-                    {
-                        Error::Corruption(format!(
-                            "incomplete frame header in data blob {} at offset {}",
-                            self.blob, self.offset
-                        ))
-                    } else {
-                        err
-                    };
-                    let decoded = self.fail(start, items, error);
+                    let error =
+                        if self.replay.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
+                            Error::Corruption(format!(
+                                "incomplete frame header in data blob {} at offset {}",
+                                self.blob, self.offset
+                            ))
+                        } else {
+                            err
+                        };
+                    let decoded = Decoded::failed(start, items, error);
                     return Some((decoded, self));
                 }
             };
@@ -310,11 +296,11 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
                             "incomplete frame in data blob {} at offset {}",
                             self.blob, self.offset
                         ));
-                        let decoded = self.fail(start, items, error);
+                        let decoded = Decoded::failed(start, items, error);
                         return Some((decoded, self));
                     }
                     Err(err) => {
-                        let decoded = self.fail(start, items, err);
+                        let decoded = Decoded::failed(start, items, err);
                         return Some((decoded, self));
                     }
                 }
@@ -325,7 +311,7 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
                 .checked_add(varint_len as u64)
                 .and_then(|offset| offset.checked_add(item_size as u64));
             let Some(next_offset) = next_offset else {
-                let decoded = self.fail(start, items, Error::OffsetOverflow);
+                let decoded = Decoded::failed(start, items, Error::OffsetOverflow);
                 return Some((decoded, self));
             };
             let item_len = next_offset - self.offset;
@@ -337,7 +323,7 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
             {
                 Ok(item) => {
                     let Some(next_pos) = self.pos.checked_add(1) else {
-                        let decoded = self.fail(start, items, Error::OffsetOverflow);
+                        let decoded = Decoded::failed(start, items, Error::OffsetOverflow);
                         return Some((decoded, self));
                     };
                     self.pos = next_pos;
@@ -345,14 +331,14 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
                     consumed = match consumed.checked_add(item_len) {
                         Some(consumed) => consumed,
                         None => {
-                            let decoded = self.fail(start, items, Error::OffsetOverflow);
+                            let decoded = Decoded::failed(start, items, Error::OffsetOverflow);
                             return Some((decoded, self));
                         }
                     };
                     items.push(item);
                 }
                 Err(err) => {
-                    let decoded = self.fail(start, items, err);
+                    let decoded = Decoded::failed(start, items, err);
                     return Some((decoded, self));
                 }
             }
@@ -1092,7 +1078,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, Vec<V>), Error>> + Send, Error> {
+    ) -> Result<impl Stream<Item = Result<ReplayBatch<V>, Error>> + Send, Error> {
         let states = self.replay_states(range, buffer, read_options).await?;
 
         Ok(super::replay_stream_from_states(states))
@@ -2597,7 +2583,7 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, Vec<V>), Error>> + Send, Error> {
+    ) -> Result<impl Stream<Item = Result<ReplayBatch<V>, Error>> + Send, Error> {
         let reader = self.0.reader();
         let states = reader.replay_states(range, buffer, read_options).await?;
 

@@ -1761,8 +1761,8 @@ mod tests {
             seed(&context, &cfg, 1..=1).await;
 
             // Initialization needs only the terminal page used to open Writer. Recovery belongs to
-            // replay, whose 112-byte budget is read half at a time: two 28-byte physical pages
-            // per read.
+            // replay, whose 112-byte budget holds four 28-byte physical pages: one page per read,
+            // with three read ahead of the page being decoded.
             recordings.clear();
             let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
                 .await
@@ -1776,7 +1776,7 @@ mod tests {
             while let Some(item) = replay.next().await {
                 item.expect("failed to read replay item");
             }
-            assert_eq!(recordings.snapshot().reads.len(), 5);
+            assert_eq!(recordings.snapshot().reads.len(), 9);
             replay
                 .finish()
                 .expect("failed to finish replay")

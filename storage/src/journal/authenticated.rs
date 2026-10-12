@@ -16,7 +16,7 @@ use crate::{
     Context,
     journal::{
         Error as JournalError,
-        contiguous::{Contiguous, Many, Mutable},
+        contiguous::{Contiguous, Many, Mutable, ReplayBatch},
     },
     merkle::{
         self, Bagging, Family, Location, Position, Proof, Readable, batch, full::Merkle,
@@ -1047,18 +1047,11 @@ where
         range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, Vec<C::Item>), JournalError>> + Send, JournalError>
+    ) -> Result<impl Stream<Item = Result<ReplayBatch<C::Item>, JournalError>> + Send, JournalError>
     {
-        self.journal.replay_batches(range, buffer, read_options).await
-    }
-
-    async fn replay_range(
-        &self,
-        range: Range<u64>,
-        buffer: NonZeroUsize,
-        read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, C::Item), JournalError>> + Send, JournalError> {
-        self.journal.replay_range(range, buffer, read_options).await
+        self.journal
+            .replay_batches(range, buffer, read_options)
+            .await
     }
 }
 

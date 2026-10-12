@@ -696,11 +696,8 @@ impl<'a, B: RBlob> Replay<'a, B> {
 
     /// Return the buffered bytes of the current page as a view sharing the allocation backing
     /// that page, without advancing, or `None` while replaying a live view, whose buffer is not
-    /// paged.
-    ///
-    /// Decoding many fixed-size items from the view and advancing past them afterwards costs
-    /// one page lookup instead of one per item, and retained byte fields share the allocation
-    /// exactly as a per-item [`Self::read`] would.
+    /// paged. Byte fields retained from the view share the allocation exactly as fields read
+    /// through [`Self::read`] do.
     pub(super) fn chunk_bytes(&self) -> Option<Bytes> {
         match &self.inner {
             ReplayInner::Paged(replay) => Some(replay.chunk_bytes()),

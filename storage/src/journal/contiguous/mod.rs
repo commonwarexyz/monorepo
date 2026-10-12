@@ -86,6 +86,17 @@ struct Decoded<T> {
     error: Option<Error>,
 }
 
+impl<T> Decoded<T> {
+    /// The `items` decoded before `error` ended the blob's replay.
+    const fn failed(start: u64, items: Vec<T>, error: Error) -> Self {
+        Self {
+            start,
+            items,
+            error: Some(error),
+        }
+    }
+}
+
 /// Per-blob replay state that yields decoded item batches.
 trait ReplayBatchState: Sized {
     /// The decoded item type.
@@ -94,7 +105,7 @@ trait ReplayBatchState: Sized {
     /// Decode the next batch from this blob state, or return `None` once it is exhausted.
     ///
     /// A returned batch carries the position of its first item and the items that follow it
-    /// contiguously. An error ends the blob: the state yields nothing after it.
+    /// contiguously. An error ends the blob's replay: the state is not polled again.
     fn next_batch(self) -> impl Future<Output = Option<(Decoded<Self::Item>, Self)>> + Send;
 }
 
@@ -115,7 +126,7 @@ where
     S::Item: Send,
 {
     /// Yield the next decoded batch as `(start, items)`, or the error that ends the stream.
-    async fn next(mut self) -> Option<(Result<(u64, Vec<S::Item>), Error>, Self)> {
+    async fn next(mut self) -> Option<(Result<ReplayBatch<S::Item>, Error>, Self)> {
         loop {
             if let Some(err) = self.pending.take() {
                 self.done = true;
@@ -152,7 +163,7 @@ where
 /// Build a batch stream from per-blob replay states.
 fn replay_stream_from_states<S>(
     states: Vec<S>,
-) -> impl Stream<Item = Result<(u64, Vec<S::Item>), Error>> + Send
+) -> impl Stream<Item = Result<ReplayBatch<S::Item>, Error>> + Send
 where
     S: ReplayBatchState + Send,
     S::Item: Send,
@@ -172,7 +183,7 @@ where
 fn flatten_batches<T, S>(batches: S) -> impl Stream<Item = Result<(u64, T), Error>> + Send
 where
     T: Send,
-    S: Stream<Item = Result<(u64, Vec<T>), Error>> + Send,
+    S: Stream<Item = Result<ReplayBatch<T>, Error>> + Send,
 {
     batches.flat_map(|batch| match batch {
         Ok((start, items)) => stream::iter(
@@ -230,10 +241,9 @@ pub trait Contiguous: Send + Sync {
     /// must fall within `bounds()`. An empty range within `bounds()` yields an empty stream.
     ///
     /// Each batch is `(start, items)`: `items[i]` is the item at position `start + i`, every
-    /// batch holds at least one item, and consecutive batches are contiguous. A batch never
-    /// crosses a backing blob boundary, and its encoded size exceeds `buffer` by less than one
-    /// item, so a consumer that holds one batch at a time keeps bounded memory. An error ends the
-    /// stream: every item before the failure has been yielded.
+    /// batch holds at least one item, and consecutive batches are contiguous. A batch's encoded
+    /// size exceeds `buffer` by less than one item. An error ends the stream: every item before
+    /// the failure has been yielded.
     ///
     /// `buffer` controls the replay byte budget for each chunk. Every backing blob read uses
     /// `read_options`, except while the live writable tip holds an unwritten full page: its
