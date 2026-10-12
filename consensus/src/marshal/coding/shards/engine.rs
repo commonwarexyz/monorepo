@@ -5432,6 +5432,73 @@ mod tests {
         );
     }
 
+    /// A leader that relays a candidate before voting may abandon it and relay a replacement
+    /// for the same round. The replacement's shards reach every participant. A participant that
+    /// discovers only the replacement verifies its assigned shard and reconstructs that block,
+    /// but never the abandoned candidate.
+    #[test_traced]
+    fn test_replacement_proposal_in_same_round_reaches_peers() {
+        let fixture: Fixture<C> = Fixture {
+            num_primary_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                let abandoned = CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let replacement = CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 200),
+                    coding_config,
+                    &STRATEGY,
+                );
+                assert_ne!(abandoned.commitment(), replacement.commitment());
+                let round = Round::new(Epoch::zero(), View::new(1));
+                let leader = peers[0].public_key.clone();
+
+                // Both candidates are relayed before any participant learns the proposal.
+                peers[0].mailbox.proposed(round, abandoned.clone());
+                peers[0].mailbox.proposed(round, replacement.clone());
+                context.sleep(config.link.latency * 2).await;
+
+                // Only the replacement is ever proposed.
+                let commitment = replacement.commitment();
+                for peer in peers[1..].iter_mut() {
+                    peer.mailbox.discovered(commitment, leader.clone(), round);
+                }
+                for peer in peers.iter_mut() {
+                    peer.mailbox
+                        .subscribe_assigned_shard_verified(commitment)
+                        .await
+                        .expect("assigned shard of the replacement should verify");
+                }
+                context.sleep(config.link.latency * 2).await;
+
+                for peer in peers.iter_mut() {
+                    let reconstructed = peer
+                        .mailbox
+                        .get(commitment)
+                        .await
+                        .expect("replacement should be reconstructed");
+                    assert_eq!(reconstructed.digest(), replacement.digest());
+                }
+                for peer in peers[1..].iter_mut() {
+                    assert!(
+                        peer.mailbox.get(abandoned.commitment()).await.is_none(),
+                        "an abandoned candidate is never reconstructed"
+                    );
+                }
+                assert!(
+                    oracle.blocked().await.unwrap().is_empty(),
+                    "a replacement candidate should not block the leader"
+                );
+            },
+        );
+    }
+
     #[test_traced]
     fn test_post_leader_shards_processed_immediately() {
         // Test that shards arriving after leader announcement are processed
@@ -5656,7 +5723,7 @@ mod tests {
 
                 let peer2_pk = peers[2].public_key.clone();
 
-                // Do NOT set a leader — shards should be buffered.
+                // Do NOT set a leader. Shards should be buffered.
 
                 // Peer 1 sends the shard to peer 2 (buffered, leader unknown).
                 peers[1]
@@ -5694,7 +5761,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                // Create two different blocks — shard from block2 won't verify
+                // Create two different blocks. A shard from block2 won't verify
                 // against commitment from block1.
                 let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
@@ -5744,7 +5811,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                // Create two different blocks — shard from block2 won't verify
+                // Create two different blocks. A shard from block2 won't verify
                 // against commitment from block1.
                 let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
@@ -7368,7 +7435,7 @@ mod tests {
                     assert_eq!(reconstructed.commitment(), commitment);
                 }
 
-                // No peer should be blocked — withholding is not detectable.
+                // No peer should be blocked, since withholding is not detectable.
                 let blocked = oracle.blocked().await.unwrap();
                 assert!(
                     blocked.is_empty(),

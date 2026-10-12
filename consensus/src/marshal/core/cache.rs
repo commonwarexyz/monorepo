@@ -323,12 +323,13 @@ where
     /// Consensus must not treat presence in this cache as application validity.
     ///
     /// No certificate pins a round to a single candidate at this stage: an
-    /// equivocating leader can land one block at this view (possibly before a
-    /// crash) while consensus later verifies a different one. Candidates are
-    /// stored with multi-put semantics so a same-view collision cannot silently
-    /// drop the new block while the returned handle vouches only for the old
-    /// one. A digest already stored at this view is not duplicated, and the
-    /// covering handle reports the durability of its existing write.
+    /// equivocating leader, or a leader that restarts in its propose window,
+    /// can land one block at this view while consensus later verifies a
+    /// different one. Candidates are stored with multi-put semantics so a
+    /// same-view collision cannot silently drop the new block while the
+    /// returned handle vouches only for the old one. A digest already stored
+    /// at this view is not duplicated, and the covering handle reports the
+    /// durability of its existing write.
     pub(crate) async fn put_verified(
         mut self,
         round: Round,
@@ -560,11 +561,11 @@ where
 
     /// Get the block previously persisted in the verified archive for `round`.
     ///
-    /// The archive can hold multiple candidates at one view (an equivocating
-    /// leader can land one before a crash and another after), and this returns
-    /// the first stored. Callers must not assume it is the most recently
-    /// verified candidate: check context/digest before reuse, or look up by
-    /// digest.
+    /// The archive can hold multiple candidates at one view (a leader that
+    /// restarts in its propose window rebuilds, and an equivocating leader
+    /// proposes several), and this returns the first stored. Callers must not
+    /// assume it is the most recently verified candidate: look up by digest for
+    /// a particular one.
     pub(crate) async fn get_verified(&self, round: Round) -> Option<V::StoredBlock> {
         let cache = self.caches.get(&round.epoch())?;
         cache

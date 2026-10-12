@@ -10,11 +10,13 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox;
 use commonware_consensus::{
-    CertifiableAutomaton, Heightable, Relay,
+    CertifiableAutomaton, Heightable, Relay, Reporter,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::{
-        self, Floor, ForwardPolicy, Plan, SkipPolicy, elector::Config as Elector, scheme,
-        types::Context,
+        self, Floor, ForwardPolicy, Plan, SkipPolicy,
+        elector::Config as Elector,
+        scheme,
+        types::{Activity, Context},
     },
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
@@ -159,7 +161,7 @@ where
     /// Marshal mailbox used to report consensus output and read finalized blocks.
     pub marshal: MarshalMailbox<P::Scheme, MV>,
 
-    /// Application automaton and relay used by each epoch consensus engine.
+    /// Application automaton, relay, and reporter used by each epoch consensus engine.
     pub application: A,
 
     /// Strategy for parallel verification and signing work.
@@ -215,7 +217,7 @@ where
             Digest = MV::Commitment,
             PublicKey = <P::Scheme as Verifier>::PublicKey,
             Plan = Plan<<P::Scheme as Verifier>::PublicKey>,
-        >,
+        > + Reporter<Activity = Activity<P::Scheme, MV::Commitment>>,
     L: Elector<P::Scheme>,
     T: Strategy,
     ACK: Acknowledgement,
@@ -264,7 +266,7 @@ where
             Digest = MV::Commitment,
             PublicKey = <P::Scheme as Verifier>::PublicKey,
             Plan = Plan<<P::Scheme as Verifier>::PublicKey>,
-        >,
+        > + Reporter<Activity = Activity<P::Scheme, MV::Commitment>>,
     L: Elector<P::Scheme>,
     T: Strategy,
     ACK: Acknowledgement,
@@ -719,7 +721,7 @@ where
                 blocker: self.oracle.clone(),
                 automaton: self.application.clone(),
                 relay: self.application.clone(),
-                reporter: self.marshal.clone(),
+                reporter: self.application.clone(),
                 strategy: self.strategy.clone(),
                 partition: format!("{}_consensus_{epoch}", self.partition_prefix),
                 mailbox_size: self.simplex.mailbox_size,
