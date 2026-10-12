@@ -374,23 +374,22 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Arc<MerkleizedBatch<F, D, S>> {
+        let parent_size = self.parent.size();
+
         // Each bucket accumulates positions in push order, which for `add_leaf_digest` is
         // already ascending; the stable `sort` is cheap on such near-sorted input. The dedup
         // then collapses any duplicates that slipped past `mark_dirty`'s last-entry check.
         let mut buckets = core::mem::take(&mut self.dirty_nodes);
+        let mut additional_overwrites = 0;
         for bucket in &mut buckets {
             bucket.sort();
             bucket.dedup();
+            additional_overwrites += bucket.partition_point(|pos| *pos < parent_size);
         }
 
         // Dirty nodes below the parent's size land in `overwrites`: size it once instead of
         // rehashing as it grows.
-        let parent_size = self.parent.size();
-        let overwritten: usize = buckets
-            .iter()
-            .map(|bucket| bucket.partition_point(|pos| *pos < parent_size))
-            .sum();
-        self.overwrites.reserve(overwritten);
+        self.overwrites.reserve(additional_overwrites);
         for (height, positions) in buckets.iter().enumerate() {
             if positions.is_empty() {
                 continue;
