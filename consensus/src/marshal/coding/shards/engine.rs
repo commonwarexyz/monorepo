@@ -104,8 +104,11 @@
 //!             +----------------------+
 //! ```
 //!
-//! _Per-peer buffers are only kept for peers in `latest.primary`, matching [`commonware_broadcast::buffered`].
-//! When a peer is no longer in `latest.primary`, all its buffered shards are evicted._
+//! _Per-peer buffers are only kept for primary peers of a tracked peer set
+//! ([`commonware_p2p::PeerSetUpdate::all`]), matching [`commonware_broadcast::buffered`].
+//! A peer that is no longer a primary of any tracked set loses its buffered shards.
+//! One that only leaves the latest set keeps them through the overlap window, so a
+//! departing participant's shards for its final epoch are still ingested._
 //!
 //! # Peer Validation and Blocking Rules
 //!
@@ -365,8 +368,10 @@ where
     /// The maximum encoded size of a block.
     ///
     /// Peers are blocked for sending a shard wider than the coding scheme produces for a block of
-    /// this size under the shard's coding config. Larger blocks are neither reconstructed nor
-    /// broadcast. Every node must use the same value.
+    /// this size under the config the shard's commitment claims. That config is untrusted until
+    /// consensus confirms the commitment, so a shard may be as wide as the scheme's widest shard
+    /// for such a block: under a one-shard config, at least the whole block. Larger blocks are
+    /// neither reconstructed nor broadcast. Every node must use the same value.
     pub max_block_size: NonZeroUsize,
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.
@@ -387,10 +392,16 @@ where
     /// [`Mailbox::discovered`] or reports a notarization via
     /// [`Mailbox::notarized`].
     ///
-    /// The shard buffers hold at most `peer_buffer_size` shards per `latest.primary` peer. Each
-    /// shard is no wider than the coding scheme produces for a `max_block_size` block under the
-    /// coding config the shard claims. A config that claims one minimum shard makes a shard span
-    /// the whole coded block, so each peer buffers about `peer_buffer_size` blocks.
+    /// Shards wait here in memory until consensus signals their commitment: at most
+    /// `peer_buffer_size` per tracked primary peer, each up to the scheme's widest shard for a
+    /// `max_block_size` block. An honest peer sends each recipient about one shard per block, so
+    /// size the ring for the number of blocks a node can trail its peers by, which is larger for a
+    /// distant or slow node. A ring that is too small evicts shards before they are needed, and the
+    /// node then fetches those blocks from the resolver instead of reconstructing them.
+    /// `max_block_size` block. An honest peer sends each recipient about one shard per block, so
+    /// size the ring for the number of blocks a node can trail its peers by, which is larger for a
+    /// distant or slow node. A ring that is too small evicts shards before they are needed, and the
+    /// node then fetches those blocks from the resolver instead of reconstructing them.
     pub peer_buffer_size: NonZeroUsize,
 
     /// The maximum number of commitment records retained.
@@ -405,14 +416,15 @@ where
     ///
     /// The background receiver decodes incoming network messages in a separate
     /// task and forwards them to the engine over a mailbox with this
-    /// capacity.
+    /// capacity. Each decoded shard is up to the scheme's widest shard for a
+    /// `max_block_size` block.
     pub background_channel_capacity: NonZeroUsize,
 
     /// Provider for peer set information. Pre-leader shards are buffered per
-    /// peer only while that peer appears in the
-    /// [`commonware_p2p::PeerSetUpdate::latest`] primary set, matching
-    /// [`commonware_broadcast::buffered::Engine`]. Broadcast delivery uses the
-    /// aggregate [`commonware_p2p::PeerSetUpdate::all`] union.
+    /// peer only while that peer is a primary of some tracked peer set
+    /// ([`commonware_p2p::PeerSetUpdate::all`]), matching
+    /// [`commonware_broadcast::buffered::Engine`]. Broadcast delivery uses
+    /// the whole [`commonware_p2p::PeerSetUpdate::all`] union.
     pub peer_provider: D,
 }
 
@@ -621,7 +633,7 @@ where
     /// Per-peer ring buffers for shards received before leader announcement.
     ///
     /// Empty buffers are retained for active peers and only evicted when the
-    /// peer leaves `latest.primary`.
+    /// peer is no longer a primary of any tracked peer set.
     peer_buffers: BTreeMap<P, VecDeque<Shard<B, C, H>>>,
 
     /// Maximum buffered pre-leader shards per peer.
@@ -637,8 +649,8 @@ where
     /// ([`commonware_p2p::PeerSetUpdate::all`]).
     aggregate_peers: Set<P>,
 
-    /// Latest primary peers allowed to retain pre-leader shard buffers.
-    latest_primary_peers: Set<P>,
+    /// Primary peers of every tracked peer set, allowed to retain pre-leader shard buffers.
+    primary_peers: Set<P>,
 
     /// Capacity of the background receiver channel.
     background_channel_capacity: NonZeroUsize,
@@ -702,7 +714,7 @@ where
                 window: config.records,
                 peer_provider: config.peer_provider,
                 aggregate_peers: Set::default(),
-                latest_primary_peers: Set::default(),
+                primary_peers: Set::default(),
                 background_channel_capacity: config.background_channel_capacity,
                 assigned_shard_verified_subscriptions: BTreeMap::new(),
                 block_subscriptions: BTreeMap::new(),
@@ -768,9 +780,8 @@ where
                 debug!("peer set subscription closed");
                 return;
             } => {
-                let all_peers = update.all.union();
-                self.update_latest_primary_peers(update.latest.primary);
-                self.aggregate_peers = all_peers;
+                self.update_primary_peers(update.all.primary.clone());
+                self.aggregate_peers = update.all.union();
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("shard mailbox closed, stopping shard engine");
@@ -1175,10 +1186,10 @@ where
 
     /// Buffer a shard from a peer until a leader is known.
     fn buffer_peer_shard(&mut self, peer: P, shard: Shard<B, C, H>) {
-        if self.latest_primary_peers.position(&peer).is_none() {
+        if self.primary_peers.position(&peer).is_none() {
             debug!(
                 ?peer,
-                "pre-leader shard from peer outside latest.primary not buffered"
+                "pre-leader shard from peer outside tracked primary sets not buffered"
             );
             return;
         }
@@ -1189,10 +1200,10 @@ where
         queue.push_back(shard);
     }
 
-    fn update_latest_primary_peers(&mut self, peers: Set<P>) {
+    fn update_primary_peers(&mut self, peers: Set<P>) {
         self.peer_buffers
             .retain(|peer, _| peers.position(peer).is_some());
-        self.latest_primary_peers = peers;
+        self.primary_peers = peers;
     }
 
     /// Ingest buffered pre-leader shards for a commitment into active state.
@@ -2012,7 +2023,7 @@ mod tests {
     use commonware_parallel::{Manual, Rayon, Sequential};
     use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic, utils::reschedule};
     use commonware_utils::{
-        N3f1, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
+        N3f1, NZU16, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
         probability, sync::Mutex,
     };
     use futures::FutureExt as _;
@@ -2617,7 +2628,7 @@ mod tests {
     }
 
     /// Builds an unstarted engine on `strategy` for the participant at `index` and the sender its
-    /// handlers take. Every participant is in `latest.primary`.
+    /// handlers take. Every participant is a tracked primary.
     async fn unstarted<T: Strategy>(
         context: &deterministic::Context,
         oracle: &O,
@@ -2655,7 +2666,7 @@ mod tests {
             peer_provider: oracle.manager(),
         };
         let (mut engine, _) = ShardEngine::new(context.child("engine"), config);
-        engine.update_latest_primary_peers(participants);
+        engine.update_primary_peers(participants);
         let sender = WrappedSender::new(context.network_buffer_pool().clone(), sender);
         (engine, sender)
     }
@@ -5438,6 +5449,73 @@ mod tests {
         );
     }
 
+    /// A leader that relays a candidate before voting may abandon it and relay a replacement
+    /// for the same round. The replacement's shards reach every participant. A participant that
+    /// discovers only the replacement verifies its assigned shard and reconstructs that block,
+    /// but never the abandoned candidate.
+    #[test_traced]
+    fn test_replacement_proposal_in_same_round_reaches_peers() {
+        let fixture: Fixture<C> = Fixture {
+            num_primary_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                let abandoned = CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let replacement = CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 200),
+                    coding_config,
+                    &STRATEGY,
+                );
+                assert_ne!(abandoned.commitment(), replacement.commitment());
+                let round = Round::new(Epoch::zero(), View::new(1));
+                let leader = peers[0].public_key.clone();
+
+                // Both candidates are relayed before any participant learns the proposal.
+                peers[0].mailbox.proposed(round, abandoned.clone());
+                peers[0].mailbox.proposed(round, replacement.clone());
+                context.sleep(config.link.latency * 2).await;
+
+                // Only the replacement is ever proposed.
+                let commitment = replacement.commitment();
+                for peer in peers[1..].iter_mut() {
+                    peer.mailbox.discovered(commitment, leader.clone(), round);
+                }
+                for peer in peers.iter_mut() {
+                    peer.mailbox
+                        .subscribe_assigned_shard_verified(commitment)
+                        .await
+                        .expect("assigned shard of the replacement should verify");
+                }
+                context.sleep(config.link.latency * 2).await;
+
+                for peer in peers.iter_mut() {
+                    let reconstructed = peer
+                        .mailbox
+                        .get(commitment)
+                        .await
+                        .expect("replacement should be reconstructed");
+                    assert_eq!(reconstructed.digest(), replacement.digest());
+                }
+                for peer in peers[1..].iter_mut() {
+                    assert!(
+                        peer.mailbox.get(abandoned.commitment()).await.is_none(),
+                        "an abandoned candidate is never reconstructed"
+                    );
+                }
+                assert!(
+                    oracle.blocked().await.unwrap().is_empty(),
+                    "a replacement candidate should not block the leader"
+                );
+            },
+        );
+    }
+
     #[test_traced]
     fn test_post_leader_shards_processed_immediately() {
         // Test that shards arriving after leader announcement are processed
@@ -5662,7 +5740,7 @@ mod tests {
 
                 let peer2_pk = peers[2].public_key.clone();
 
-                // Do NOT set a leader, so shards are buffered.
+                // Do NOT set a leader. Shards should be buffered.
 
                 // Peer 1 sends the shard to peer 2 (buffered, leader unknown).
                 peers[1]
@@ -5701,7 +5779,7 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
                 // Create two different blocks. A shard from block2 won't verify
-                // against the commitment from block1.
+                // against commitment from block1.
                 let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment1 = coded_block1.commitment();
@@ -5751,7 +5829,7 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
                 // Create two different blocks. A shard from block2 won't verify
-                // against the commitment from block1.
+                // against commitment from block1.
                 let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment1 = coded_block1.commitment();
@@ -7375,7 +7453,7 @@ mod tests {
                     assert_eq!(reconstructed.commitment(), commitment);
                 }
 
-                // No peer should be blocked because withholding is not detectable.
+                // No peer should be blocked, since withholding is not detectable.
                 let blocked = oracle.blocked().await.unwrap();
                 assert!(
                     blocked.is_empty(),
@@ -7569,11 +7647,9 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_peer_set_update_evicts_peer_buffers() {
-        // Shards buffered before leader announcement should be evicted when
-        // the sender leaves latest.primary. Even if the overlap window keeps
-        // the sender connected, fresh pre-leader shards from that peer must
-        // not recreate the buffer.
+    fn test_peer_set_update_keeps_buffers_of_tracked_primaries() {
+        // Pre-leader shards from a sender that left the latest set are still buffered while an
+        // older tracked set lists it as primary, and are evicted once it leaves every tracked set.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let num_peers = 10usize;
@@ -7644,41 +7720,32 @@ mod tests {
             let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
 
-            // Build a coded block and extract the shard destined for the receiver.
+            // Build a coded block at `height` and extract the shard destined for the receiver.
             let coding_config = coding_config_for_participants(num_peers as u16);
-            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
-            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
-            let commitment = coded_block.commitment();
-
             let receiver_participant = participants
                 .index(&receiver_pk)
                 .expect("receiver must be a participant");
-            let leader_shard = coded_block
-                .shard(receiver_participant.get() as u16)
-                .expect("missing shard");
-            let shard_bytes = leader_shard.encode();
+            let receiver_shard = |height: u64| {
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(height), 100);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let shard = coded_block
+                    .shard(receiver_participant.get() as u16)
+                    .expect("missing shard");
+                (coded_block.commitment(), shard.encode())
+            };
 
-            // Send the shard BEFORE leader announcement (it gets buffered).
-            leader_sender.send(
-                Recipients::One(receiver_pk.clone()),
-                shard_bytes.clone(),
-                true,
-            );
-            context.sleep(DEFAULT_LINK.latency * 2).await;
-
-            // Now send a peer set update that excludes the leader.
+            // Track a set that excludes the leader. Set 0 stays tracked, so the leader remains a
+            // tracked primary.
             let remaining: Set<P> =
                 Set::from_iter_dedup(peer_keys.iter().filter(|pk| **pk != leader_pk).cloned());
-            oracle.manager().track(1, remaining);
+            oracle.manager().track(1, remaining.clone());
             context.sleep(Duration::from_millis(10)).await;
 
-            // The retained overlap window still lets the leader reach the receiver,
-            // but this fresh pre-leader shard must not be buffered again.
+            // Shards arriving from the leader while it is outside the latest set but still a
+            // tracked primary are buffered and ingested once the leader is announced.
+            let (commitment, shard_bytes) = receiver_shard(1);
             leader_sender.send(Recipients::One(receiver_pk.clone()), shard_bytes, true);
             context.sleep(DEFAULT_LINK.latency * 2).await;
-
-            // Announce the leader. Buffered shards from the leader should have been
-            // evicted, so the shard will NOT be ingested.
             let mut shard_sub = mailbox.subscribe_assigned_shard_verified(commitment);
             mailbox.discovered(
                 commitment,
@@ -7686,11 +7753,28 @@ mod tests {
                 Round::new(Epoch::zero(), View::new(1)),
             );
             context.sleep(DEFAULT_LINK.latency * 2).await;
+            assert!(
+                matches!(shard_sub.try_recv(), Ok(())),
+                "shard arriving from a leader outside the latest set but still tracked should be buffered"
+            );
 
-            // The shard subscription should still be pending (no shard was ingested).
+            // Tracking another set without the leader ages set 0 out of the window, so the
+            // leader leaves every tracked set and its buffer is evicted.
+            let (commitment, shard_bytes) = receiver_shard(2);
+            leader_sender.send(Recipients::One(receiver_pk.clone()), shard_bytes, true);
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+            oracle.manager().track(2, remaining);
+            context.sleep(Duration::from_millis(10)).await;
+            let mut shard_sub = mailbox.subscribe_assigned_shard_verified(commitment);
+            mailbox.discovered(
+                commitment,
+                leader_pk.clone(),
+                Round::new(Epoch::zero(), View::new(2)),
+            );
+            context.sleep(DEFAULT_LINK.latency * 2).await;
             assert!(
                 matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
-                "shard subscription should not resolve after evicted leader's buffer"
+                "shard subscription should not resolve after the leader left every tracked set"
             );
             assert!(
                 mailbox.get(commitment).await.is_none(),
@@ -7699,8 +7783,58 @@ mod tests {
         });
     }
 
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5223.
+    ///
+    /// A peer that claims one minimum shard sends more than `peer_buffer_size` of the widest
+    /// shards the receiver admits, for commitments consensus never signals. The peer's buffer
+    /// retains exactly `peer_buffer_size` of them.
     #[test_traced]
-    fn test_peer_buffer_lifetime_tracks_latest_primary() {
+    fn issue_5223_regression_peer_buffer_bound() {
+        const ONE: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(1),
+        };
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    max_peers_per_set: NZUsize!(4),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+            let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|key| key.public_key());
+            let peer = private_keys[1].public_key();
+            let (mut engine, mut sender) =
+                unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16), STRATEGY).await;
+            let slots = engine.peer_buffer_size.get();
+
+            // Each shard carries a distinct commitment to a maximum-size coded payload, decoded as
+            // the background receiver decodes it.
+            let shard = |salt: u64| {
+                let payload = vec![0u8; MAX_BLOCK_SIZE.get() + CodingConfig::SIZE];
+                let (root, shards) = C::encode(&ONE, payload.as_slice(), &STRATEGY).unwrap();
+                let block = Sha256::hash(&[salt.to_be_bytes().as_slice()]);
+                let commitment =
+                    Commitment::<B, C, H>::from((block, root, Sha256Digest::EMPTY, ONE));
+                let encoded = Shard::<B, C, H>::new(commitment, 1, shards[1].clone()).encode();
+                Shard::<B, C, H>::decode_cfg(encoded, &MAX_BLOCK_SIZE).expect("widest shard")
+            };
+            for salt in 0..2 * slots as u64 {
+                engine.handle_network_shard(&mut sender, peer.clone(), shard(salt));
+            }
+
+            let queue = engine.peer_buffers.get(&peer).expect("peer buffers shards");
+            assert_eq!(queue.len(), slots);
+        });
+    }
+
+    #[test_traced]
+    fn test_peer_buffer_lifetime_tracks_primary_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
@@ -7746,9 +7880,9 @@ mod tests {
 
             let (mut engine, _mailbox) = ShardEngine::new(context.child("engine"), config);
 
-            // Only `sender_pk` is in `latest.primary`, so only that peer may retain a pre-leader
+            // Only `sender_pk` is a tracked primary, so only that peer may retain a pre-leader
             // buffer row (`buffer_peer_shard` / `peer_buffers`).
-            engine.update_latest_primary_peers(Set::from_iter_dedup([sender_pk.clone()]));
+            engine.update_primary_peers(Set::from_iter_dedup([sender_pk.clone()]));
 
             let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(
@@ -7766,18 +7900,18 @@ mod tests {
                 "peer buffer should contain the buffered shard"
             );
 
-            // Empty primary: no peer may retain buffers; `update_latest_primary_peers` drops the
+            // Empty primary: no peer may retain buffers; `update_primary_peers` drops the
             // staged shard and the deque entry for `sender_pk`.
-            engine.update_latest_primary_peers(Set::default());
+            engine.update_primary_peers(Set::default());
             assert!(
                 !engine.peer_buffers.contains_key(&sender_pk),
-                "peer buffer should be evicted once sender leaves latest.primary"
+                "peer buffer should be evicted once sender leaves every tracked set"
             );
         });
     }
 
     #[test_traced]
-    fn test_old_epoch_buffered_shards_are_dropped_after_cutover() {
+    fn test_old_epoch_buffered_shards_survive_cutover() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let num_peers = 6usize;
@@ -7799,7 +7933,7 @@ mod tests {
             let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
 
             // Epoch 0: first five peers. Epoch 1: swap out `peer_keys[0]` for `peer_keys[5]` so the
-            // cutover changes who is in `latest.primary` while `tracked_peer_sets` retains overlap.
+            // cutover changes the latest set while `tracked_peer_sets` keeps epoch 0 tracked.
             let epoch0_set: Set<P> = Set::from_iter_dedup(peer_keys[..5].iter().cloned());
             let epoch1_set: Set<P> = Set::from_iter_dedup([
                 peer_keys[1].clone(),
@@ -7879,14 +8013,12 @@ mod tests {
             );
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
-            // Cutover to epoch 1 primaries before `Discovered`: `leader_pk` (epoch-0-only) is no
-            // longer in `latest.primary`, so overlap-buffered shards for that sender must not feed
-            // reconstruction.
+            // Cutover to epoch 1 primaries before `Discovered`: `leader_pk` (epoch-0-only) left the
+            // latest set but is still a primary of tracked set 0, so its buffered shard survives.
             oracle.manager().track(1, epoch1_set);
             context.sleep(Duration::from_millis(10)).await;
 
-            // Leader announcement for the old commitment: should not complete reconstruction from
-            // dropped pre-cutover buffers.
+            // Leader announcement for the old commitment ingests the pre-cutover shard.
             let mut shard_sub = mailbox.subscribe_assigned_shard_verified(commitment);
             mailbox.discovered(
                 commitment,
@@ -7896,12 +8028,8 @@ mod tests {
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
             assert!(
-                matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
-                "old-epoch shard subscription should stay pending after cutover"
-            );
-            assert!(
-                mailbox.get(commitment).await.is_none(),
-                "old-epoch commitment should not reconstruct from overlap-only buffered shards"
+                matches!(shard_sub.try_recv(), Ok(())),
+                "old-epoch shard from a still-tracked primary should be ingested after cutover"
             );
         });
     }

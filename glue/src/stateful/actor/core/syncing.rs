@@ -146,12 +146,12 @@ where
                 Message::Propose {
                     span,
                     context: (_, context),
-                    response,
+                    proposal,
                     ..
                 } => {
                     span.in_scope(|| {
                         debug!(epoch = %context.epoch(), view = %context.view(), "proposal rejected: state sync in progress");
-                        response.send_lossy(None);
+                        proposal.decline();
                     });
                 }
                 Message::Verify(request) => {

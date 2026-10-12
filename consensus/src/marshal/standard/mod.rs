@@ -49,7 +49,6 @@ commonware_macros::stability_scope!(ALPHA {
     mod inline;
     pub use inline::Inline;
 
-    mod relay;
     mod validation;
 });
 
@@ -58,13 +57,17 @@ pub use variant::Standard;
 
 #[cfg(test)]
 mod tests {
-    use super::{Deferred, Inline, Standard, relay};
+    use super::{Deferred, Inline, Standard};
     use crate::{
-        Automaton, CertifiableAutomaton, Heightable, Relay, Reporter,
+        Application as ConsensusApplication, Automaton, CertifiableAutomaton, Handoff, Heightable,
+        Relay, Reporter, Viewable,
         marshal::{
             Identifier, Update,
-            ancestry::BlockProvider,
-            application::gates::{GateOutcome, Gates},
+            ancestry::{Ancestry, BlockProvider},
+            application::{
+                gates::{GateOutcome, Gates},
+                relay,
+            },
             config::{Config, Start},
             core::{
                 Actor, CommitmentFallback, DigestFallback, Mailbox, Processed, cache,
@@ -90,8 +93,8 @@ mod tests {
             elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{
-                Certificate, Finalization, Notarization, Notarize, Nullification, Nullify,
-                Proposal, Vote,
+                Activity, Certificate, Finalization, Notarization, Notarize, Nullification,
+                Nullify, Proposal, Vote,
             },
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
@@ -107,11 +110,11 @@ mod tests {
         sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::{Manager as _, Receiver as _, Recipients, Sender as _};
+    use commonware_p2p::{Manager as _, Receiver, Recipients, Sender as _};
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
+        Clock, Handle, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
         deterministic, utils::reschedule,
     };
     use commonware_storage::{
@@ -2161,6 +2164,13 @@ mod tests {
             }
         }
 
+        const fn gates(&self) -> &Gates<D, B> {
+            match self {
+                Self::Inline(inline) => inline.gates(),
+                Self::Deferred(deferred) => deferred.gates(),
+            }
+        }
+
         async fn propose(&mut self, context: Ctx) -> oneshot::Receiver<D> {
             match self {
                 Self::Inline(inline) => inline.propose(context).await,
@@ -2201,6 +2211,16 @@ mod tests {
     }
 
     impl CertifiableAutomaton for Wrapper {
+        async fn prepare(
+            &mut self,
+            context: Self::Context,
+        ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+            match self {
+                Self::Inline(inline) => inline.prepare(context).await,
+                Self::Deferred(deferred) => deferred.prepare(context).await,
+            }
+        }
+
         async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
             Self::certify(self, round, digest).await
         }
@@ -2215,6 +2235,17 @@ mod tests {
             match self {
                 Self::Inline(inline) => inline.broadcast(digest, plan),
                 Self::Deferred(deferred) => deferred.broadcast(digest, plan),
+            }
+        }
+    }
+
+    impl Reporter for Wrapper {
+        type Activity = Activity<S, D>;
+
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
+            match self {
+                Self::Inline(inline) => inline.report(activity),
+                Self::Deferred(deferred) => deferred.report(activity),
             }
         }
     }
@@ -2372,7 +2403,7 @@ mod tests {
             assert_eq!(
                 schemes[1]
                     .participants()
-                    .key(elector.elect(Round::new(Epoch::zero(), View::new(3)), None)),
+                    .key(elector.elect(Round::new(Epoch::zero(), View::new(3)), ())),
                 Some(&byzantine),
             );
 
@@ -2483,8 +2514,8 @@ mod tests {
                     elector: RoundRobin::<Sha256>::default(),
                     blocker: oracle.control(victim.clone()),
                     automaton: wrapper.clone(),
-                    relay: wrapper,
-                    reporter: marshal,
+                    relay: wrapper.clone(),
+                    reporter: wrapper,
                     strategy: Sequential,
                     partition: format!("scripted-equivocation-{kind:?}"),
                     mailbox_size: NZUsize!(128),
@@ -2597,6 +2628,280 @@ mod tests {
     #[test_traced("WARN")]
     fn test_deferred_scripted_byzantine_parent_equivocation() {
         scripted_byzantine_parent_equivocation(WrapperKind::Deferred);
+    }
+
+    /// Verifies a block below a round that consensus then finalizes, and returns a `kind`
+    /// wrapper's certification of that block, requested after the finalization report prunes
+    /// the block's gate.
+    ///
+    /// The block is an ancestor of the finalized block, or with `fork` a block at a later view
+    /// on a branch the finalization did not choose.
+    fn certify_below_finalized_round(kind: WrapperKind, fork: bool) -> bool {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let reporter = setup.application;
+
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+            let mut wrapper = Wrapper::new(
+                kind,
+                context.child("wrapper"),
+                MockVerifyingApp::new(),
+                marshal.clone(),
+            );
+
+            // genesis <- parent(v1) <- a(v5) <- c(v10). The target is a itself, or with `fork`
+            // a sibling of a at view 6.
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent = B::new::<Sha256>(
+                Ctx {
+                    round: parent_round,
+                    leader: default_leader(),
+                    parent: (View::zero(), genesis.digest()),
+                },
+                genesis.digest(),
+                Height::new(1),
+                100,
+            );
+            let parent_digest = parent.digest();
+            assert!(marshal.verified(parent_round, parent).await);
+
+            let (target_view, target_timestamp) = if fork { (6, 350) } else { (5, 200) };
+            let target_round = Round::new(Epoch::zero(), View::new(target_view));
+            let target_ctx = Ctx {
+                round: target_round,
+                leader: me.clone(),
+                parent: (View::new(1), parent_digest),
+            };
+            let target = B::new::<Sha256>(
+                target_ctx.clone(),
+                parent_digest,
+                Height::new(2),
+                target_timestamp,
+            );
+            let target_digest = target.digest();
+            assert!(marshal.verified(target_round, target.clone()).await);
+
+            // The finalized chain runs through block a at view 5.
+            let a_round = Round::new(Epoch::zero(), View::new(5));
+            let (a_digest, a_block) = if fork {
+                let a = B::new::<Sha256>(
+                    Ctx {
+                        round: a_round,
+                        leader: me.clone(),
+                        parent: (View::new(1), parent_digest),
+                    },
+                    parent_digest,
+                    Height::new(2),
+                    200,
+                );
+                (a.digest(), a)
+            } else {
+                (target_digest, target.clone())
+            };
+            assert!(marshal.verified(a_round, a_block).await);
+            let c_round = Round::new(Epoch::zero(), View::new(10));
+            let c = B::new::<Sha256>(
+                Ctx {
+                    round: c_round,
+                    leader: me.clone(),
+                    parent: (View::new(5), a_digest),
+                },
+                a_digest,
+                Height::new(3),
+                300,
+            );
+            let c_digest = c.digest();
+            assert!(marshal.verified(c_round, c).await);
+
+            // Verification stages the certification gate for the target.
+            assert!(
+                wrapper
+                    .verify(target_ctx, target_digest)
+                    .await
+                    .await
+                    .unwrap()
+            );
+
+            // Consensus reports the finalization of c to the wrapper, which prunes the target's
+            // gate and forwards the report to marshal.
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(c_round, View::new(5), c_digest),
+                &schemes,
+                QUORUM,
+            );
+            wrapper.report(Activity::Finalization(finalization));
+            assert!(
+                wrapper.gates().take(target_round, target_digest).is_none(),
+                "{kind:?}: the finalization report must prune the gate at or below its round"
+            );
+
+            // Certification after the prune finds no gate, once marshal has finalized c.
+            while reporter.tip() != Some((Height::new(3), c_digest)) {
+                reschedule().await;
+            }
+            wrapper
+                .certify(target_round, target_digest)
+                .await
+                .await
+                .expect("certify result")
+        })
+    }
+
+    /// A finalization report prunes the wrapper's certification gates at or below the finalized
+    /// round. Certifying an ancestor of the finalized block afterwards finds no gate and must
+    /// still resolve true by recovering and persisting the block.
+    #[test_traced("INFO")]
+    fn test_inline_certify_ancestor_below_finalized_round_after_prune() {
+        assert!(
+            certify_below_finalized_round(WrapperKind::Inline, false),
+            "certify of an ancestor below the finalized round must still resolve true"
+        );
+    }
+
+    /// A finalization report prunes the wrapper's certification gates at or below the finalized
+    /// round. Certifying an ancestor of the finalized block afterwards finds no gate and must
+    /// still resolve true by verifying the block against its embedded context.
+    #[test_traced("INFO")]
+    fn test_deferred_certify_ancestor_below_finalized_round_after_prune() {
+        assert!(
+            certify_below_finalized_round(WrapperKind::Deferred, false),
+            "certify of an ancestor below the finalized round must still resolve true"
+        );
+    }
+
+    /// A block on a branch the finalization did not choose stays available locally, so
+    /// certifying it after the finalization report prunes its gate still resolves true.
+    #[test_traced("INFO")]
+    fn test_inline_certify_fork_below_finalized_round_after_prune() {
+        assert!(certify_below_finalized_round(WrapperKind::Inline, true));
+    }
+
+    /// A block on a branch the finalization did not choose stays available locally, so
+    /// certifying it after the finalization report prunes its gate still resolves true.
+    #[test_traced("INFO")]
+    fn test_deferred_certify_fork_below_finalized_round_after_prune() {
+        assert!(certify_below_finalized_round(WrapperKind::Deferred, true));
+    }
+
+    /// Stages a proposal, which also registers its certification gate, at view 5 of epoch 0
+    /// and at `notarized`, has a `kind` wrapper report a notarization at `notarized`, and
+    /// returns whether the proposal and gate at view 5 of epoch 0 remain.
+    fn epoch_zero_entries_remain(kind: WrapperKind, notarized: Round) -> bool {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let setup = StandardHarness::setup_validator(
+                context.child("validator"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let mut wrapper = Wrapper::new(
+                kind,
+                context.child("wrapper"),
+                MockVerifyingApp::new(),
+                setup.mailbox,
+            );
+
+            let earlier_round = Round::new(Epoch::zero(), View::new(5));
+            let earlier = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
+            let earlier_digest = earlier.digest();
+            stage_block(&context, wrapper.gates(), earlier_round, earlier).await;
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(2), 200);
+            let digest = block.digest();
+            stage_block(&context, wrapper.gates(), notarized, block).await;
+
+            let notarization = StandardHarness::make_notarization(
+                Proposal::new(notarized, View::zero(), digest),
+                &schemes,
+                QUORUM,
+            );
+            wrapper.report(Activity::Notarization(notarization));
+
+            // Certification of the notarized round follows its notarization, so the report
+            // must keep both of its entries.
+            let gates = wrapper.gates();
+            assert!(
+                gates.take(notarized, digest).is_some(),
+                "{kind:?}: the notarized round must keep its gate"
+            );
+            assert!(
+                gates.take_staged(notarized, digest).is_some(),
+                "{kind:?}: the notarized round must keep its proposal"
+            );
+            let gate = gates.take(earlier_round, earlier_digest).is_some();
+            let staged = gates.take_staged(earlier_round, earlier_digest).is_some();
+            assert_eq!(
+                gate, staged,
+                "{kind:?}: a report must keep or release a round's gate and proposal together"
+            );
+            gate
+        })
+    }
+
+    /// An activity of a later epoch shows that the engine of every earlier epoch was retired,
+    /// so reporting it releases the gates and proposals of earlier epochs without waiting for
+    /// a finalization.
+    #[test_traced("WARN")]
+    fn test_inline_later_epoch_activity_releases_earlier_epoch() {
+        let notarized = Round::new(Epoch::new(1), View::new(1));
+        assert!(!epoch_zero_entries_remain(WrapperKind::Inline, notarized));
+    }
+
+    /// An activity of a later epoch shows that the engine of every earlier epoch was retired,
+    /// so reporting it releases the gates and proposals of earlier epochs without waiting for
+    /// a finalization.
+    #[test_traced("WARN")]
+    fn test_deferred_later_epoch_activity_releases_earlier_epoch() {
+        let notarized = Round::new(Epoch::new(1), View::new(1));
+        assert!(!epoch_zero_entries_remain(WrapperKind::Deferred, notarized));
+    }
+
+    /// Within an epoch only a finalization prunes, so a notarization at a later view keeps
+    /// the gates and proposals of earlier views.
+    #[test_traced("WARN")]
+    fn test_inline_same_epoch_activity_keeps_gates() {
+        let notarized = Round::new(Epoch::zero(), View::new(7));
+        assert!(epoch_zero_entries_remain(WrapperKind::Inline, notarized));
+    }
+
+    /// Within an epoch only a finalization prunes, so a notarization at a later view keeps
+    /// the gates and proposals of earlier views.
+    #[test_traced("WARN")]
+    fn test_deferred_same_epoch_activity_keeps_gates() {
+        let notarized = Round::new(Epoch::zero(), View::new(7));
+        assert!(epoch_zero_entries_remain(WrapperKind::Deferred, notarized));
     }
 
     #[test_traced("WARN")]
@@ -3595,7 +3900,7 @@ mod tests {
                     leader: me.clone(),
                     parent: (View::zero(), genesis.digest()),
                 };
-                let proposal_rx = wrapper.propose(non_boundary_context).await;
+                let proposal_rx = wrapper.propose(non_boundary_context.clone()).await;
                 assert!(
                     proposal_rx.await.is_err(),
                     "{kind:?}: proposal should be dropped when application returns no block"
@@ -3606,6 +3911,29 @@ mod tests {
                         .contains("wrapper_under_test_build_duration_count 0"),
                     "{kind:?}: failed application builds should not be timed"
                 );
+
+                // A failed build answers Wait, so consensus can still request an ordinary
+                // proposal once the parent certifies.
+                let failing_app = MockVerifyingApp::new().with_handoff(Handoff::Stage(()));
+                let mut failing =
+                    Wrapper::new(kind, context.child("failed"), failing_app, marshal.clone());
+                let handoff_rx = failing.prepare(non_boundary_context.clone()).await;
+                assert_eq!(
+                    handoff_rx.await.expect("handoff decision missing"),
+                    Handoff::Wait,
+                    "{kind:?}: a failed handoff build must answer Wait"
+                );
+
+                // Dropping a prepare response must cancel the application's build.
+                let (gated_app, started, dropped) = MockVerifyingApp::new()
+                    .with_handoff(Handoff::Vote(()))
+                    .with_proposal_gate();
+                let mut gated =
+                    Wrapper::new(kind, context.child("cancelled"), gated_app, marshal.clone());
+                let response = gated.prepare(non_boundary_context.clone()).await;
+                started.await.expect("handoff build should start");
+                drop(response);
+                assert!(dropped.await.is_err(), "handoff build should be cancelled");
 
                 // Boundary propose should re-propose the parent block even if the app cannot build.
                 let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
@@ -3656,8 +3984,414 @@ mod tests {
                     marshal.get_verified(reproposal_round).await.is_some(),
                     "{kind:?}: re-proposed boundary block must be stored at the re-proposal round"
                 );
+
+                // A handoff takes the automatic boundary re-proposal path without asking the
+                // application. The re-proposed block carries no application decision, so it is
+                // answered Stage.
+                let pipeline_round =
+                    Round::new(Epoch::zero(), View::new(boundary_height.get() + 2));
+                let pipeline_context = Ctx {
+                    round: pipeline_round,
+                    leader: default_leader(),
+                    parent: (View::new(boundary_height.get()), boundary_digest),
+                };
+                let unwanted = B::new::<Sha256>(
+                    pipeline_context.clone(),
+                    boundary_digest,
+                    boundary_height.next(),
+                    2000,
+                );
+                let pipeline_app = MockVerifyingApp::new()
+                    .with_handoff(Handoff::Vote(()))
+                    .with_propose_result(unwanted);
+                let mut pipeline = Wrapper::new(
+                    kind,
+                    context.child("pipeline"),
+                    pipeline_app,
+                    marshal.clone(),
+                );
+                let pipeline_rx = pipeline.prepare(pipeline_context.clone()).await;
+                assert_eq!(
+                    pipeline_rx.await.expect("pipeline result missing"),
+                    Handoff::Stage(boundary_digest),
+                    "{kind:?}: a re-proposed boundary block is staged regardless of the decision"
+                );
+                let certify_rx = pipeline.certify(pipeline_round, boundary_digest).await;
+                assert!(
+                    certify_rx.await.expect("pipeline certify result missing"),
+                    "{kind:?}: pipelined boundary re-proposal must certify"
+                );
             });
         }
+    }
+
+    /// A leader that crashes between its relay broadcast and the journaling of its notarize
+    /// vote holds a verified block for the round on restart. No vote names that block, so it
+    /// cannot be notarized, and the restarted leader builds a fresh one on the recovered
+    /// context whatever the stored block's own context says. The relay persist stores the
+    /// fresh block beside the stale one, and certification resolves through it.
+    ///
+    /// Both blocks must then survive another restart. Reading them back afterwards checks
+    /// storage itself, since the in-memory cache that serves a block right after it is sent
+    /// does not survive the restart.
+    #[test_traced("WARN")]
+    fn test_propose_rebuilds_after_restart() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let mut oracle = setup_network_with_participants(
+                    context.child("network"),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let me = participants[0].clone();
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+                let round = Round::new(Epoch::zero(), View::new(2));
+
+                // Before the crash, the relay broadcast persisted a block at the round. Replay
+                // has since replaced the block's parent.
+                let setup = StandardHarness::setup_validator(
+                    context.child("validator").with_attribute("index", 0),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let stale = B::new::<Sha256>(
+                    Ctx {
+                        round,
+                        leader: me.clone(),
+                        parent: (View::new(1), Sha256::hash(&[b"replaced parent"])),
+                    },
+                    genesis.digest(),
+                    Height::new(1),
+                    100,
+                );
+                let stale_digest = stale.digest();
+                let (ack, persisted) = oneshot::channel();
+                let _ = setup.mailbox.proposed(round, stale, Recipients::All, ack);
+                let sync = persisted.await.expect("stale block sync handle missing");
+                assert!(sync.durable(round, "stale block").await);
+                setup.crash().await;
+
+                let setup = StandardHarness::setup_validator(
+                    context.child("restarted").with_attribute("index", 0),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let marshal = setup.mailbox.clone();
+                assert_eq!(
+                    marshal
+                        .get_verified(round)
+                        .await
+                        .map(|block| block.digest()),
+                    Some(stale_digest),
+                    "{kind:?}: the restarted marshal must restore the stale block"
+                );
+
+                let ctx = Ctx {
+                    round,
+                    leader: me.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let fresh = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
+                let fresh_digest = fresh.digest();
+                let app: MockVerifyingApp<B, S> =
+                    MockVerifyingApp::new().with_propose_result(fresh);
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("wrapper"), app, marshal.clone());
+                let digest = wrapper
+                    .propose(ctx)
+                    .await
+                    .await
+                    .expect("propose must return a digest");
+                assert_eq!(
+                    digest, fresh_digest,
+                    "{kind:?}: a restarted leader must build a fresh block"
+                );
+
+                let _ = wrapper.broadcast(digest, Plan::Propose { round });
+                assert!(
+                    wrapper
+                        .certify(round, digest)
+                        .await
+                        .await
+                        .expect("certify result missing"),
+                    "{kind:?}: the fresh block must certify through the relay handshake"
+                );
+                assert_eq!(
+                    marshal
+                        .get_verified(round)
+                        .await
+                        .map(|block| block.digest()),
+                    Some(stale_digest),
+                    "{kind:?}: the stale block stays stored first at the round"
+                );
+                setup.crash().await;
+
+                let setup = StandardHarness::setup_validator(
+                    context.child("recovered").with_attribute("index", 0),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                for (label, digest) in [("stale", stale_digest), ("fresh", fresh_digest)] {
+                    assert!(
+                        setup.mailbox.get_block(&digest).await.is_some(),
+                        "{kind:?}: the {label} block must be recoverable from storage"
+                    );
+                }
+                let app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+                let mut certifier =
+                    Wrapper::new(kind, context.child("certifier"), app, setup.mailbox.clone());
+                assert!(
+                    certifier
+                        .certify(round, fresh_digest)
+                        .await
+                        .await
+                        .expect("certify result missing"),
+                    "{kind:?}: the fresh block must certify from storage after a restart"
+                );
+            });
+        }
+    }
+
+    /// Returns whether the runtime spawned a task whose label contains `label`.
+    fn spawned_task(metrics: &str, label: &str) -> bool {
+        metrics
+            .lines()
+            .any(|line| line.starts_with("runtime_tasks_spawned_total{") && line.contains(label))
+    }
+
+    /// A declining application answers `Wait` after the parent is fetched. A block stored for
+    /// the round before a restart does not replace the application's build, and an application
+    /// that builds on the fetched parent is answered under its decision.
+    #[test_traced("WARN")]
+    fn test_prepare_paths() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let mut oracle = setup_network_with_participants(
+                    context.child("network"),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let me = participants[0].clone();
+                let setup = StandardHarness::setup_validator(
+                    context.child("validator").with_attribute("index", 0),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let marshal = setup.mailbox;
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+                let handoff_context = Ctx {
+                    round: Round::new(Epoch::zero(), View::new(1)),
+                    leader: me.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let child = B::new::<Sha256>(
+                    handoff_context.clone(),
+                    genesis.digest(),
+                    Height::new(1),
+                    100,
+                );
+
+                // The default declines once the parent is fetched.
+                let mut declining = Wrapper::new(
+                    kind,
+                    context.child("declining"),
+                    MockVerifyingApp::<B, S>::new(),
+                    marshal.clone(),
+                );
+                let response = declining.prepare(handoff_context.clone()).await;
+                assert_eq!(
+                    response.await.expect("prepare decision missing"),
+                    Handoff::Wait,
+                    "{kind:?}: the default prepare declines"
+                );
+                assert!(
+                    context
+                        .encode()
+                        .contains("declining_parent_fetch_duration_count 1"),
+                    "{kind:?}: a declining prepare still fetches the parent"
+                );
+
+                // A block stored for the round before a restart does not decide the view: the
+                // application builds on the parent named by the recovered context and is
+                // answered under its decision, whatever the stored block's own context says.
+                let rebuilt_round = Round::new(Epoch::zero(), View::new(2));
+                let stored = B::new::<Sha256>(
+                    Ctx {
+                        round: rebuilt_round,
+                        leader: me.clone(),
+                        parent: (View::new(1), Sha256::hash(&[b"replaced parent"])),
+                    },
+                    genesis.digest(),
+                    Height::new(1),
+                    101,
+                );
+                assert!(marshal.clone().verified(rebuilt_round, stored).await);
+                let rebuilt_context = Ctx {
+                    round: rebuilt_round,
+                    leader: me.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let rebuilt = B::new::<Sha256>(
+                    rebuilt_context.clone(),
+                    genesis.digest(),
+                    Height::new(1),
+                    102,
+                );
+                let rebuilding_app = MockVerifyingApp::new()
+                    .with_handoff(Handoff::Vote(()))
+                    .with_propose_result(rebuilt.clone());
+                let mut rebuilding = Wrapper::new(
+                    kind,
+                    context.child("rebuilding"),
+                    rebuilding_app,
+                    marshal.clone(),
+                );
+                let response = rebuilding.prepare(rebuilt_context).await;
+                assert_eq!(
+                    response.await.expect("prepare decision missing"),
+                    Handoff::Vote(rebuilt.digest()),
+                    "{kind:?}: a stored block must not replace the application's build"
+                );
+
+                for (label, decision) in [
+                    ("staging", Handoff::Stage(())),
+                    ("voting", Handoff::Vote(())),
+                ] {
+                    let building_app = MockVerifyingApp::new()
+                        .with_handoff(decision)
+                        .with_propose_result(child.clone());
+                    let mut building =
+                        Wrapper::new(kind, context.child(label), building_app, marshal.clone());
+                    let response = building.prepare(handoff_context.clone()).await;
+                    assert_eq!(
+                        response.await.expect("prepare decision missing"),
+                        decision.map(|()| child.digest()),
+                        "{kind:?}: a prepared block carries the application's {label} decision"
+                    );
+                    let metrics = context.encode();
+                    assert!(
+                        metrics.contains(&format!("{label}_parent_fetch_duration_count 1")),
+                        "{kind:?}: a prepare fetches the parent once"
+                    );
+                    assert!(
+                        metrics.contains(&format!("{label}_build_duration_count 1")),
+                        "{kind:?}: a prepared build is timed"
+                    );
+                    assert!(
+                        spawned_task(&metrics, &format!("{label}_prepare")),
+                        "{kind:?}: a prepare is driven by a task"
+                    );
+                }
+            });
+        }
+    }
+
+    /// Deferred votes on a block before checking its parent link, so a pipelined
+    /// handoff can request a build on a parent whose link was never validated. The
+    /// build may walk ancestry only through the parent that the tip's own consensus
+    /// context names, and an unlinked parent declines without asking the application.
+    #[test_traced("WARN")]
+    fn test_deferred_handoff_rejects_unvalidated_parent_link() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+
+            // Both outgoing tips carry an authentic consensus context naming genesis.
+            // Only the second also links to genesis.
+            let tip_round = Round::new(Epoch::zero(), View::new(1));
+            let tip_context = Ctx {
+                round: tip_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let forged = B::new::<Sha256>(
+                tip_context.clone(),
+                Sha256::hash(&[b"forged parent link"]),
+                Height::new(1),
+                100,
+            );
+            let linked = B::new::<Sha256>(tip_context, genesis.digest(), Height::new(1), 101);
+            for (label, tip, built) in [("forged", &forged, false), ("linked", &linked, true)] {
+                assert!(marshal.clone().verified(tip_round, tip.clone()).await);
+                let handoff_context = Ctx {
+                    round: Round::new(Epoch::zero(), View::new(2)),
+                    leader: me.clone(),
+                    parent: (View::new(1), tip.digest()),
+                };
+                let child =
+                    B::new::<Sha256>(handoff_context.clone(), tip.digest(), Height::new(2), 200);
+                let app = MockVerifyingApp::new()
+                    .with_handoff(Handoff::Stage(()))
+                    .with_propose_result(child.clone());
+                let mut deferred = Wrapper::new(
+                    WrapperKind::Deferred,
+                    context.child(label),
+                    app,
+                    marshal.clone(),
+                );
+                let response = deferred.prepare(handoff_context).await.await;
+                let expected = if built {
+                    Handoff::Stage(child.digest())
+                } else {
+                    Handoff::Wait
+                };
+                assert_eq!(
+                    response.expect("handoff decision missing"),
+                    expected,
+                    "{label}: a handoff build must require a parent linked to its context"
+                );
+            }
+        });
     }
 
     #[test_traced("WARN")]
@@ -8746,7 +9480,7 @@ mod tests {
     ///
     /// Processing a finalization requires making the finalized archives
     /// durable before the block is dispatched to the application, but the
-    /// sync itself must not serialize unrelated mailbox traffic: a proposer's
+    /// sync itself must not serialize unrelated mailbox traffic: a
     /// `get_verified` (a pure prunable-cache read) issued while the sync is in
     /// flight must be answered immediately.
     ///
@@ -9828,13 +10562,44 @@ mod tests {
         });
     }
 
-    /// A propose relay that finds no staged proposal must fall back to
-    /// forwarding the persisted block. Staging then flushing at certify (the
-    /// recovered-leader race) persists the block and resolves the
-    /// certification gate through the staged ack, so the subsequent relay
-    /// broadcast re-sends the block from storage instead of dropping it.
+    /// Stages `block` for `round` in `gates` as a prepare or propose build does, and returns
+    /// the staging task, which ends once the block is durable or its staged ack is dropped.
+    async fn stage_block(
+        context: &deterministic::Context,
+        gates: &Gates<D, B>,
+        round: Round,
+        block: B,
+    ) -> Handle<()> {
+        let digest = block.digest();
+        let (tx, rx) = oneshot::channel();
+        let stager = context.child("stager").spawn({
+            let gates = gates.clone();
+            move |_| async move {
+                gates
+                    .stage(
+                        round,
+                        digest,
+                        Arc::new(block),
+                        |digest| {
+                            tx.send_lossy(digest);
+                        },
+                        "test",
+                    )
+                    .await;
+            }
+        });
+        assert_eq!(
+            rx.await.expect("staging must publish the block digest"),
+            digest
+        );
+        stager
+    }
+
+    /// A candidate that a prepare relay sent and that certification claimed before the lock-in
+    /// goes out once. The propose relay that follows finds nothing staged and sends nothing.
     #[test_traced("WARN")]
-    fn test_standard_propose_relay_miss_forwards_persisted_block() {
+    fn test_standard_propose_relay_after_claim_sends_once() {
+        // The runner timeout is only a hang guard.
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -9849,7 +10614,7 @@ mod tests {
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.child("validator").with_attribute("index", 0),
-                &format!("relay-miss-{me}"),
+                &format!("relay-claim-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
@@ -9858,49 +10623,119 @@ mod tests {
             .await;
             let buffer = buffer.expect("buffer was provided");
 
-            // Stage the proposal as propose would, then flush it as certify
-            // does when certification wins the race against the relay.
+            // The early relay sends the candidate. Each lookup below goes through the same
+            // marshal mailbox as the relays, so it observes every send they requested.
             let gates = Gates::new();
-            let (tx, rx) = oneshot::channel();
-            context.child("stager").spawn({
-                let gates = gates.clone();
-                let block = block.clone();
-                move |_| async move {
-                    gates
-                        .stage(round, digest, Arc::new(block), tx, "test")
-                        .await;
-                }
-            });
-            assert_eq!(rx.await.expect("id published"), digest);
-            let gate = gates.take(round, digest).expect("gate registered");
-            gates.flush_unrelayed(&mailbox, round, digest);
+            stage_block(&context, &gates, round, block).await;
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            assert!(
+                mailbox.get_verified(round).await.is_none(),
+                "an early relay must not store the candidate"
+            );
+            assert_eq!(buffer.sends().len(), 1, "early relay must send once");
+
+            // Certification claims the candidate and persists it.
+            let gate = gates
+                .claim(round, digest, |block, ack| {
+                    mailbox.verified_deferred(round, block, ack)
+                })
+                .expect("gate registered");
             assert_eq!(
                 gate.await.expect("gate resolved"),
                 GateOutcome::Ready(true),
-                "certify flush must resolve the gate durably",
+                "certify must persist the staged block and resolve the gate durably",
             );
 
-            // The relay finds nothing staged and must forward the persisted
-            // block instead of dropping the broadcast.
+            // The lock-in finds nothing staged and must not send the candidate again.
             let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Propose { round });
             assert!(matches!(feedback, Feedback::Ok));
-            wait_until(&context, Duration::from_secs(5), "fallback send", || {
-                !buffer.sends.lock().is_empty()
-            })
-            .await;
+            assert!(
+                mailbox.get_verified(round).await.is_some(),
+                "certify must store the candidate"
+            );
+            assert_eq!(
+                buffer.sends().len(),
+                1,
+                "the lock-in must not send a claimed candidate again"
+            );
+        });
+    }
 
-            let sends = buffer.sends();
-            assert_eq!(sends.len(), 1, "fallback must dispatch exactly once");
-            assert_eq!(sends[0].0, round);
-            assert_eq!(sends[0].1.digest(), digest);
-            assert!(matches!(sends[0].2, Recipients::All));
+    /// Pruning a decided round discards its staged candidate together with the mark that a
+    /// prepare relay sent it. A candidate staged again for that round must not go out from
+    /// either relay, and the lock-in still persists it and completes its durability handshake.
+    #[test_traced("WARN")]
+    fn test_standard_restage_after_prune_sends_once() {
+        // The runner timeout is only a hang guard.
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
+            let digest = block.digest();
+
+            let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("validator").with_attribute("index", 0),
+                &format!("relay-restage-{me}"),
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+            )
+            .await;
+            let buffer = buffer.expect("buffer was provided");
+
+            // The early relay sends the candidate. Each lookup below goes through the same
+            // marshal mailbox as the relays, so it observes every send they requested.
+            let gates = Gates::new();
+            let stager = stage_block(&context, &gates, round, block.clone()).await;
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            assert!(
+                mailbox.get_verified(round).await.is_none(),
+                "an early relay must not store the candidate"
+            );
+            assert_eq!(buffer.sends().len(), 1, "early relay must send once");
+
+            // A finalization past the round prunes the candidate, which ends its staging.
+            gates.retain_after(&Round::new(Epoch::zero(), View::new(2)));
+            stager.await.expect("pruning must end the staging");
+
+            // The candidate is staged again for the decided round. Neither relay sends it, and
+            // the lock-in persists it through the staged ack.
+            stage_block(&context, &gates, round, block).await;
+            let gate = gates.take(round, digest).expect("gate registered");
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Propose { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            assert_eq!(
+                gate.await.expect("gate resolved"),
+                GateOutcome::Ready(true),
+                "lock-in handshake must resolve the gate durably",
+            );
+            assert!(
+                mailbox.get_verified(round).await.is_some(),
+                "lock-in must store the candidate"
+            );
+            assert_eq!(
+                buffer.sends().len(),
+                1,
+                "a candidate staged again for a decided round must not be sent again"
+            );
         });
     }
 
     /// A propose relay with a staged proposal must dispatch it through the
     /// `Proposed` message and complete the durability handshake. The block is
-    /// never persisted beforehand, so the forward fallback has nothing to
-    /// serve: only the staged-hit path can produce the send.
+    /// never persisted beforehand, so only the staged proposal can produce the
+    /// send.
     #[test_traced("WARN")]
     fn test_standard_propose_relay_sends_staged_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -9928,17 +10763,7 @@ mod tests {
 
             // Stage the proposal as propose would.
             let gates = Gates::new();
-            let (tx, rx) = oneshot::channel();
-            context.child("stager").spawn({
-                let gates = gates.clone();
-                let block = block.clone();
-                move |_| async move {
-                    gates
-                        .stage(round, digest, Arc::new(block), tx, "test")
-                        .await;
-                }
-            });
-            assert_eq!(rx.await.expect("id published"), digest);
+            stage_block(&context, &gates, round, block).await;
             let gate = gates.take(round, digest).expect("gate registered");
 
             // The relay must take the staged proposal and dispatch it.
@@ -9967,6 +10792,249 @@ mod tests {
                 "relay handshake must resolve the gate durably",
             );
         });
+    }
+
+    /// A prepare relay sends the staged candidate without storing it, so an abandoned
+    /// candidate costs no storage write. A repeated prepare relay does not send it again.
+    /// The propose relay that locks the candidate in stores it without sending it again
+    /// and completes the durability handshake.
+    #[test_traced("WARN")]
+    fn test_standard_prepare_relay_sends_once_and_propose_stores() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
+            let digest = block.digest();
+
+            let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("validator").with_attribute("index", 0),
+                &format!("relay-prepare-{me}"),
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+            )
+            .await;
+            let buffer = buffer.expect("buffer was provided");
+
+            // Stage the candidate as prepare would.
+            let gates = Gates::new();
+            stage_block(&context, &gates, round, block).await;
+            let gate = gates.take(round, digest).expect("gate registered");
+
+            // The early relay sends the candidate and keeps it staged, unstored.
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            while buffer.sends().is_empty() {
+                reschedule().await;
+            }
+            assert_eq!(buffer.sends().len(), 1, "early relay must send once");
+            assert!(
+                mailbox.get_verified(round).await.is_none(),
+                "an early relay must not store the candidate"
+            );
+            let mut gate = gate;
+            assert!(
+                gate.try_recv().is_err(),
+                "an early relay must not resolve the certification gate"
+            );
+
+            // A repeated prepare relay must not send the candidate again. The lock-in below
+            // goes through the same marshal mailbox, so its handshake orders this relay first.
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Prepare { round });
+            assert!(matches!(feedback, Feedback::Ok));
+
+            // The lock-in stores the candidate without sending it again.
+            let feedback = relay::broadcast(&gates, &mailbox, digest, Plan::Propose { round });
+            assert!(matches!(feedback, Feedback::Ok));
+            assert!(
+                gates.take_staged(round, digest).is_none(),
+                "lock-in must consume the staged candidate"
+            );
+            assert_eq!(
+                gate.await.expect("gate resolved"),
+                GateOutcome::Ready(true),
+                "lock-in handshake must resolve the gate durably",
+            );
+            assert!(
+                mailbox.get_verified(round).await.is_some(),
+                "lock-in must store the candidate"
+            );
+            let sends = buffer.sends();
+            assert_eq!(
+                sends.len(),
+                1,
+                "neither a repeated prepare relay nor the lock-in may send a relayed candidate again"
+            );
+            assert_eq!(sends[0].0, round);
+            assert_eq!(sends[0].1.digest(), digest);
+            assert!(matches!(sends[0].2, Recipients::All));
+        });
+    }
+
+    /// A boundary payload relayed before parent replacement is not sent again at lock-in.
+    #[test_traced("WARN")]
+    fn test_standard_boundary_restage_sends_once() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let outgoing = participants[0].clone();
+                let incoming = participants[1].clone();
+                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                let (mut marshal, buffer, _resolver, _actor_handle) = start_standard_actor(
+                    context.child("validator").with_attribute("index", 1),
+                    "boundary-restage",
+                    ConstantProvider::new(schemes[1].clone()),
+                    Application::<B>::manual_ack(),
+                    Some(RecordingBuffer::default()),
+                    Start::Genesis(genesis.clone().into()),
+                )
+                .await;
+                let buffer = buffer.expect("buffer was provided");
+                let mut wrapper = Wrapper::new(
+                    kind,
+                    context.child("wrapper"),
+                    MockVerifyingApp::new().with_handoff(Handoff::Stage(())),
+                    marshal.clone(),
+                );
+
+                let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+                let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
+                let mut boundary = genesis;
+                for height in 1..=boundary_height.get() {
+                    let parent = boundary.digest();
+                    let round = Round::new(Epoch::zero(), View::new(height));
+                    boundary = B::new::<Sha256>(
+                        Ctx {
+                            round,
+                            leader: outgoing.clone(),
+                            parent: (View::new(height - 1), parent),
+                        },
+                        parent,
+                        Height::new(height),
+                        height * 100,
+                    );
+                    assert!(marshal.verified(round, boundary.clone()).await);
+                }
+                let digest = boundary.digest();
+                let notarization = StandardHarness::make_notarization(
+                    Proposal::new(boundary_round, View::new(boundary_height.get() - 1), digest),
+                    &schemes,
+                    QUORUM,
+                );
+                StandardHarness::report_notarization(&mut marshal, notarization).await;
+                assert!(
+                    wrapper.certify(boundary_round, digest).await.await.unwrap(),
+                    "{kind:?}: boundary must certify"
+                );
+                assert!(
+                    marshal.get_info(boundary_height).await.is_none(),
+                    "the boundary is not finalized"
+                );
+
+                let outgoing_round = Round::new(Epoch::zero(), boundary_round.view().next());
+                let outgoing_context = Ctx {
+                    round: outgoing_round,
+                    leader: outgoing,
+                    parent: (boundary_round.view(), digest),
+                };
+                assert!(
+                    wrapper
+                        .verify(outgoing_context, digest)
+                        .await
+                        .await
+                        .unwrap(),
+                    "{kind:?}: the outgoing boundary re-proposal must verify"
+                );
+
+                let round = Round::new(Epoch::zero(), outgoing_round.view().next());
+                let held_context = Ctx {
+                    round,
+                    leader: incoming,
+                    parent: (outgoing_round.view(), digest),
+                };
+                assert_eq!(
+                    wrapper.prepare(held_context.clone()).await.await.unwrap(),
+                    Handoff::Stage(digest),
+                    "{kind:?}: prepare must reuse the boundary payload"
+                );
+                assert!(matches!(
+                    wrapper.broadcast(digest, Plan::Prepare { round }),
+                    Feedback::Ok
+                ));
+                while buffer.sends().is_empty() {
+                    reschedule().await;
+                }
+                assert_eq!(buffer.sends().len(), 1);
+                assert!(
+                    marshal.get_verified(round).await.is_none(),
+                    "the held candidate must not be stored"
+                );
+
+                // After the outgoing view is nullified, the incoming leader proposes on the
+                // certified predecessor. Both parent contexts name the boundary block.
+                let replacement_context = Ctx {
+                    parent: (boundary_round.view(), digest),
+                    ..held_context.clone()
+                };
+                assert_ne!(held_context.parent, replacement_context.parent);
+                assert_eq!(
+                    wrapper.propose(replacement_context).await.await.unwrap(),
+                    digest,
+                    "{kind:?}: the replacement must reuse the same payload"
+                );
+                assert!(
+                    marshal.get_verified(round).await.is_none(),
+                    "restaging must not store the replacement before lock-in"
+                );
+                assert!(matches!(
+                    wrapper.broadcast(digest, Plan::Propose { round }),
+                    Feedback::Ok
+                ));
+
+                let notarization = StandardHarness::make_notarization(
+                    Proposal::new(round, boundary_round.view(), digest),
+                    &schemes,
+                    QUORUM,
+                );
+                StandardHarness::report_notarization(&mut marshal, notarization).await;
+
+                // Certification must await the replacement stage's durability acknowledgement.
+                assert!(
+                    wrapper.certify(round, digest).await.await.unwrap(),
+                    "{kind:?}: the replacement durability gate must complete"
+                );
+                assert_eq!(
+                    marshal.get_verified(round).await.unwrap().digest(),
+                    digest,
+                    "{kind:?}: the replacement must be stored at the incoming round"
+                );
+                let sends = buffer.sends();
+                assert_eq!(
+                    sends.len(),
+                    1,
+                    "{kind:?}: replacing the parent must not resend the same boundary payload"
+                );
+                assert_eq!(sends[0].0, round);
+                assert_eq!(sends[0].1.digest(), digest);
+                assert!(matches!(sends[0].2, Recipients::All));
+            });
+        }
     }
 
     /// A proposer that relays conflicting blocks for the same round must not
@@ -10260,5 +11328,446 @@ mod tests {
             assert!(mailbox.get_block(Height::new(1)).await.is_some());
             assert!(mailbox.get_finalization(Height::new(1)).await.is_some());
         });
+    }
+
+    /// The outcome of the concurrent handoff build and parent certification.
+    #[derive(Clone, Copy, Debug)]
+    enum Pipeline {
+        /// The parent certifies while the handoff build is still running.
+        Certification,
+        /// The handoff build completes while the parent is still uncertified.
+        Build,
+        /// The completed handoff is abandoned and a replacement finalizes.
+        Abandon,
+    }
+
+    /// The victim's application. Its first verification (the parent's) and its single handoff
+    /// build each wait on a test-controlled gate.
+    ///
+    /// A second build request panics because the retained handoff must never be rebuilt.
+    /// `prepares` counts how often a prepare request reaches the application.
+    #[derive(Clone)]
+    struct PipelineApp {
+        verify_started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        verify_release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+        build_started: Arc<Mutex<Option<oneshot::Sender<Ctx>>>>,
+        build_release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+        build_completed: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        prepares: Arc<AtomicUsize>,
+        block: B,
+    }
+
+    impl ConsensusApplication<Runtime> for PipelineApp {
+        type Block = B;
+        type Context = Ctx;
+        type SigningScheme = S;
+        type Input = ();
+
+        async fn prepare(
+            &mut self,
+            context: (Runtime, Ctx),
+            ancestry: impl Ancestry<B>,
+            input: (),
+        ) -> Handoff<B> {
+            self.prepares.fetch_add(1, Ordering::SeqCst);
+            self.propose(context, ancestry, input)
+                .await
+                .map_or(Handoff::Wait, Handoff::Stage)
+        }
+
+        async fn propose(
+            &mut self,
+            (_, context): (Runtime, Ctx),
+            _: impl Ancestry<B>,
+            _: (),
+        ) -> Option<B> {
+            self.build_started
+                .lock()
+                .take()
+                .expect("the retained handoff must not be replaced by an ordinary build")
+                .send_lossy(context);
+            let release = self.build_release.lock().take().unwrap();
+            release.await.unwrap();
+            self.build_completed.lock().take().unwrap().send_lossy(());
+            Some(self.block.clone())
+        }
+
+        async fn verify(&mut self, _: (Runtime, Ctx), _: impl Ancestry<B>) -> bool {
+            let started = self.verify_started.lock().take();
+            if let Some(started) = started {
+                let release = self.verify_release.lock().take().unwrap();
+                started.send_lossy(());
+                release.await.unwrap();
+            }
+            true
+        }
+    }
+
+    /// Receives the next vote from `victim`.
+    async fn next_vote(
+        receiver: &mut impl Receiver<PublicKey = PublicKey>,
+        victim: &PublicKey,
+    ) -> Vote<S, D> {
+        let (sender, message) = receiver.recv().await.unwrap();
+        assert_eq!(&sender, victim);
+        Vote::decode(message).unwrap()
+    }
+
+    /// A held handoff votes only after parent certification and releases its staging
+    /// resources after a replacement finalizes.
+    fn pipeline_handoff(outcome: Pipeline) {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            // Only the victim runs marshal and consensus. The peer supplies votes and certificates.
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let victim = participants[3].clone();
+            let peer = participants[2].clone();
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let reporter = Application::<B>::default();
+            let setup = StandardHarness::setup_validator_with(
+                context.child("marshal"),
+                &mut oracle,
+                victim.clone(),
+                ConstantProvider::new(schemes[3].clone()),
+                NZUsize!(1),
+                reporter.clone(),
+            )
+            .await;
+            let mut marshal = setup.mailbox;
+
+            // Verify and finalize view 1 in marshal so the engine starts from it as its floor.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let floor_round = Round::new(Epoch::zero(), View::new(1));
+            let floor_block = B::new::<Sha256>(
+                Ctx {
+                    round: floor_round,
+                    leader: participants[1].clone(),
+                    parent: (View::zero(), genesis.digest()),
+                },
+                genesis.digest(),
+                Height::new(1),
+                100,
+            );
+            let floor_digest = floor_block.digest();
+            assert!(marshal.verified(floor_round, floor_block).await);
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(floor_round, View::zero(), floor_digest),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut marshal, floor_finalization.clone()).await;
+
+            // Cache the peer's view 2 block in the victim's buffer without sending it, so the
+            // victim can verify the parent while it remains uncertified.
+            let parent_round = Round::new(Epoch::zero(), View::new(2));
+            let parent_block = B::new::<Sha256>(
+                Ctx {
+                    round: parent_round,
+                    leader: peer.clone(),
+                    parent: (View::new(1), floor_digest),
+                },
+                floor_digest,
+                Height::new(2),
+                200,
+            );
+            let parent_digest = parent_block.digest();
+            assert!(
+                setup
+                    .extra
+                    .broadcast(Recipients::Some(vec![]), parent_block)
+                    .accepted()
+            );
+
+            // The victim leads view 3, and its handoff candidate builds on the parent.
+            let round = Round::new(Epoch::zero(), View::new(3));
+            let expected_context = Ctx {
+                round,
+                leader: victim.clone(),
+                parent: (View::new(2), parent_digest),
+            };
+            let block =
+                B::new::<Sha256>(expected_context.clone(), parent_digest, Height::new(3), 300);
+            let digest = block.digest();
+
+            // Gates that let the test pace the parent's verification and the handoff build.
+            let (verify_tx, verify_rx) = oneshot::channel();
+            let (verify_release_tx, verify_release_rx) = oneshot::channel();
+            let (build_tx, build_rx) = oneshot::channel();
+            let (build_release_tx, build_release_rx) = oneshot::channel();
+            let (completed_tx, completed_rx) = oneshot::channel();
+            let prepares = Arc::new(AtomicUsize::new(0));
+            let app = PipelineApp {
+                verify_started: Arc::new(Mutex::new(Some(verify_tx))),
+                verify_release: Arc::new(Mutex::new(Some(verify_release_rx))),
+                build_started: Arc::new(Mutex::new(Some(build_tx))),
+                build_release: Arc::new(Mutex::new(Some(build_release_rx))),
+                build_completed: Arc::new(Mutex::new(Some(completed_tx))),
+                prepares: prepares.clone(),
+                block,
+            };
+
+            // Register the victim's engine channels and the peer's matching channels, then link
+            // every participant.
+            let control = oracle.control(victim.clone());
+            let vote_network = control.register(3, TEST_QUOTA).await.unwrap();
+            let certificate_network = control.register(4, TEST_QUOTA).await.unwrap();
+            let resolver_network = control.register(5, TEST_QUOTA).await.unwrap();
+            let control = oracle.control(peer);
+            let (mut vote_sender, mut vote_receiver) =
+                control.register(3, TEST_QUOTA).await.unwrap();
+            let (mut certificate_sender, _certificate_receiver) =
+                control.register(4, TEST_QUOTA).await.unwrap();
+            let _resolver = control.register(5, TEST_QUOTA).await.unwrap();
+            setup_network_links(&mut oracle, &participants, LINK).await;
+
+            // Run the engine from the finalized floor with the gated application behind Deferred.
+            let wrapper = Deferred::new(
+                context.child("wrapper"),
+                app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                Sequential,
+            );
+            let engine = simplex::Engine::new(
+                context.child("simplex"),
+                simplex::config::Config {
+                    scheme: schemes[3].clone(),
+                    elector: RoundRobin::<Sha256>::default(),
+                    blocker: oracle.control(victim.clone()),
+                    automaton: wrapper.clone(),
+                    relay: wrapper.clone(),
+                    reporter: wrapper.clone(),
+                    strategy: Sequential,
+                    partition: format!("pipeline-{outcome:?}"),
+                    mailbox_size: NZUsize!(128),
+                    epoch: Epoch::zero(),
+                    floor: simplex::config::Floor::Finalized(floor_finalization),
+                    replay_buffer: NZUsize!(1024),
+                    write_buffer: NZUsize!(1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(15),
+                    timeout_retry: Duration::from_secs(3),
+                    view_retention: ViewDelta::new(10),
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(20),
+                        budget: SkipBudget::Participants,
+                    },
+                    fetch_timeout: Duration::from_secs(1),
+                    forward: ForwardPolicy::Disabled,
+                    track_historical_votes: false,
+                },
+            );
+            let engine = engine.start(vote_network, certificate_network, resolver_network);
+
+            // Start parent verification before delivering its notarization.
+            let parent = Proposal::new(parent_round, View::new(1), parent_digest);
+            vote_sender.send(
+                Recipients::One(victim.clone()),
+                Vote::<S, D>::Notarize(Notarize::sign(&schemes[2], parent.clone()).unwrap())
+                    .encode(),
+                true,
+            );
+            verify_rx.await.unwrap();
+            let notarization = StandardHarness::make_notarization(parent.clone(), &schemes, QUORUM);
+            certificate_sender.send(
+                Recipients::One(victim.clone()),
+                Certificate::<S, D>::Notarization(notarization).encode(),
+                true,
+            );
+            let built_context = build_rx.await.expect("handoff build should start");
+            assert_eq!(built_context, expected_context);
+
+            match outcome {
+                Pipeline::Abandon => {
+                    build_release_tx.send_lossy(());
+                    completed_rx.await.unwrap();
+
+                    // This block exists in the buffer only after the real early relay runs.
+                    let relayed = setup.extra.subscribe(digest).await.unwrap();
+                    assert_eq!(relayed.digest(), digest);
+                    drop(relayed);
+                    assert!(marshal.get_verified(round).await.is_none());
+                    assert_eq!(
+                        commonware_runtime::telemetry::metrics::count_running_tasks(
+                            &context,
+                            "wrapper_prepare",
+                        ),
+                        1,
+                    );
+
+                    // The other three validators can time out view 3 while this node still
+                    // verifies view 2. No validator has voted for the held candidate.
+                    let nullifies: Vec<_> = schemes[..QUORUM as usize]
+                        .iter()
+                        .map(|scheme| Nullify::sign::<D>(scheme, round).unwrap())
+                        .collect();
+                    let nullification = Nullification::from_nullifies(
+                        &schemes[0],
+                        non_empty![@&nullifies],
+                        &Sequential,
+                    )
+                    .unwrap();
+                    certificate_sender.send(
+                        Recipients::One(victim.clone()),
+                        Certificate::<S, D>::Nullification(nullification).encode(),
+                        true,
+                    );
+                    while !context.encode().lines().any(|line| {
+                        line.contains("handoff_abandoned_total{")
+                            && line.contains("reason=\"ViewExit\"")
+                            && line
+                                .rsplit(' ')
+                                .next()
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .is_some_and(|count| count > 0)
+                    }) {
+                        reschedule().await;
+                    }
+
+                    // The replacement extends the same valid parent at view 4. Its quorum
+                    // excludes this node, whose application verification is still pending.
+                    let replacement_round = Round::new(Epoch::zero(), View::new(4));
+                    let replacement = B::new::<Sha256>(
+                        Ctx {
+                            round: replacement_round,
+                            leader: participants[0].clone(),
+                            parent: (View::new(2), parent_digest),
+                        },
+                        parent_digest,
+                        Height::new(3),
+                        400,
+                    );
+                    let replacement_digest = replacement.digest();
+                    assert!(
+                        setup
+                            .extra
+                            .broadcast(Recipients::Some(vec![]), replacement)
+                            .accepted()
+                    );
+                    let finalization = StandardHarness::make_finalization(
+                        Proposal::new(replacement_round, View::new(2), replacement_digest),
+                        &schemes,
+                        QUORUM,
+                    );
+                    certificate_sender.send(
+                        Recipients::One(victim.clone()),
+                        Certificate::<S, D>::Finalization(finalization).encode(),
+                        true,
+                    );
+                    while reporter.tip() != Some((Height::new(3), replacement_digest)) {
+                        reschedule().await;
+                    }
+                    assert!(marshal.get_verified(round).await.is_none());
+                    assert_eq!(prepares.load(Ordering::SeqCst), 1);
+
+                    // Match the orchestrator's engine retirement while its wrapper remains
+                    // alive. The wrapper context belongs to the enclosing validator task.
+                    verify_release_tx.send_lossy(());
+                    engine.abort();
+                    let _ = engine.await;
+
+                    while commonware_runtime::telemetry::metrics::count_running_tasks(
+                        &context,
+                        "wrapper_prepare",
+                    ) != 0
+                    {
+                        reschedule().await;
+                    }
+                    return;
+                }
+                Pipeline::Certification => {
+                    verify_release_tx.send_lossy(());
+                    loop {
+                        if let Vote::Finalize(vote) = next_vote(&mut vote_receiver, &victim).await
+                            && vote.proposal == parent
+                        {
+                            break;
+                        }
+                    }
+                    build_release_tx.send_lossy(());
+                    completed_rx.await.unwrap();
+                }
+                Pipeline::Build => {
+                    build_release_tx.send_lossy(());
+                    completed_rx.await.unwrap();
+
+                    // Keep the parent uncertified for three link delays so the
+                    // peer receives any vote cast when the build completes.
+                    let quiet_until = context.current() + 3 * LINK.latency;
+                    loop {
+                        select! {
+                            vote = next_vote(&mut vote_receiver, &victim) => {
+                                assert_ne!(
+                                    vote.view(),
+                                    round.view(),
+                                    "staged handoff must not vote before parent certification"
+                                );
+                            },
+                            _ = context.sleep_until(quiet_until) => break,
+                        }
+                    }
+                    assert!(
+                        marshal.get_verified(round).await.is_none(),
+                        "the completed candidate must remain staged until its parent certifies"
+                    );
+                    verify_release_tx.send_lossy(());
+                }
+            }
+
+            assert_eq!(
+                prepares.load(Ordering::SeqCst),
+                1,
+                "one handoff request reaches the application once"
+            );
+
+            let proposal = loop {
+                if let Vote::Notarize(vote) = next_vote(&mut vote_receiver, &victim).await
+                    && vote.proposal.round == round
+                {
+                    break vote.proposal;
+                }
+            };
+            assert_eq!(proposal, Proposal::new(round, View::new(2), digest));
+            assert!(marshal.get_verified(round).await.is_some());
+            let notarization =
+                StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM);
+            certificate_sender.send(
+                Recipients::One(victim.clone()),
+                Certificate::<S, D>::Notarization(notarization).encode(),
+                true,
+            );
+            loop {
+                if let Vote::Finalize(vote) = next_vote(&mut vote_receiver, &victim).await
+                    && vote.proposal.round == round
+                {
+                    assert_eq!(vote.proposal, proposal);
+                    break;
+                }
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_pipelined_handoff_retains_completed_build_until_parent_certification() {
+        pipeline_handoff(Pipeline::Build);
+    }
+
+    #[test_traced("WARN")]
+    fn test_pipelined_handoff_retains_build_across_parent_certification() {
+        pipeline_handoff(Pipeline::Certification);
+    }
+
+    #[test_traced("WARN")]
+    fn test_pipelined_handoff_releases_abandoned_build_after_finalization() {
+        pipeline_handoff(Pipeline::Abandon);
     }
 }

@@ -620,6 +620,7 @@ where
             FixedEpocher::new(self.config.blocks_per_epoch),
             self.config.strategy.clone(),
         );
+        let floor = Floor::Genesis(genesis.digest_across(&self.config.strategy));
         let simplex = simplex::Engine::new(
             context.child("simplex"),
             simplex::Config {
@@ -627,13 +628,13 @@ where
                 elector: RoundRobin::<Sha256>::default(),
                 blocker: self.config.blocker,
                 automaton: deferred.clone(),
-                relay: deferred,
-                reporter: marshal_mailbox.clone(),
+                relay: deferred.clone(),
+                reporter: deferred,
                 strategy: self.config.strategy,
                 partition: format!("{}-simplex", self.config.partition_prefix),
                 mailbox_size: self.config.mailbox_size,
                 epoch: Epoch::zero(),
-                floor: Floor::Genesis(genesis.digest()),
+                floor,
                 replay_buffer,
                 write_buffer,
                 page_cache,

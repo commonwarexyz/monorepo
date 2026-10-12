@@ -23,7 +23,10 @@ use commonware_consensus::{
         standard::Standard,
     },
     simplex::{
-        self, ForwardPolicy, Plan, SkipPolicy, elector::RoundRobin, mocks::scheme, types::Context,
+        self, ForwardPolicy, Plan, SkipPolicy,
+        elector::RoundRobin,
+        mocks::scheme,
+        types::{Activity, Context},
     },
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
@@ -559,6 +562,14 @@ impl Relay for MockApplication {
 
     fn broadcast(&mut self, payload: Self::Digest, _plan: Self::Plan) -> Feedback {
         self.broadcasts.lock().push(payload);
+        Feedback::Ok
+    }
+}
+
+impl Reporter for MockApplication {
+    type Activity = Activity<TestScheme, TestDigest>;
+
+    fn report(&mut self, _activity: Self::Activity) -> Feedback {
         Feedback::Ok
     }
 }
