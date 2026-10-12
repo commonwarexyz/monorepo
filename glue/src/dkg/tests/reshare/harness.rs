@@ -34,17 +34,17 @@ use commonware_codec::{
 };
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
-    marshal::{
-        self,
-        ancestry::Ancestry,
-        core::{Actor as MarshalActor, CommitmentFallback, Mailbox as MarshalMailbox},
-        resolver::p2p as marshal_resolver,
-        standard::{Deferred, Standard},
-    },
     simplex::{
         self,
         config::{ForwardPolicy, SkipPolicy},
         elector::RoundRobin,
+        marshal::{
+            self,
+            ancestry::Ancestry,
+            core::{Actor as MarshalActor, CommitmentFallback, Mailbox as MarshalMailbox},
+            resolver::p2p as marshal_resolver,
+            standard::{Deferred, Standard},
+        },
         types::{Context, Finalization},
     },
     types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},

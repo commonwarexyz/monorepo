@@ -11,11 +11,13 @@ use crate::dkg::{
 };
 use commonware_consensus::{
     Block,
-    marshal::{
-        Identifier,
-        core::{Processed, Variant as MarshalVariant},
+    simplex::{
+        marshal::{
+            Identifier,
+            core::{Processed, Variant as MarshalVariant},
+        },
+        scheme::Scheme as SimplexScheme,
     },
-    simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::{
@@ -368,7 +370,7 @@ mod tests {
         tests::mocks::{self, MemorySecretStore, TestBlsVariant, child, genesis_block},
     };
     use commonware_consensus::{
-        marshal::core::Processed,
+        simplex::marshal::core::Processed,
         types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height},
     };
     use commonware_cryptography::{

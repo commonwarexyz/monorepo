@@ -7,7 +7,7 @@ use commonware_actor::{
     Feedback,
     mailbox::{Policy, Sender},
 };
-use commonware_consensus::{Reporter, marshal::Update};
+use commonware_consensus::{Reporter, simplex::marshal::Update};
 use commonware_utils::{Acknowledgement, acknowledgement::Exact};
 use std::{collections::VecDeque, sync::Arc};
 
