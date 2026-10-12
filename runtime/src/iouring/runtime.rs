@@ -60,7 +60,9 @@
 //! whichever worker takes it from the global queue. A wake during a poll first
 //! requeues the task on its poller. A queued task can still move: a push into
 //! a full run queue sends its newest half and the new runnable to the global
-//! queue.
+//! queue, or only the new runnable while a thief holds a claim. A worker with
+//! nothing to run steals half of another worker's run queue, rounded down, so
+//! a runnable queued alone stays where it is.
 //!
 //! ```text
 //! ordinary spawn:
@@ -94,10 +96,11 @@
 //! the global queue every [`Config::with_global_queue_interval`] takes and
 //! whenever its own run queue is empty. A take returns one runnable to poll
 //! next and queues the rest of its share in the run queue, no more than it has
-//! room for and no more than fill it to half. Before parking, the worker checks
-//! readiness again because polls and callbacks can have produced more work, and
-//! a pool worker publishes itself in the idle set before its last look at the
-//! global queue.
+//! room for and no more than fill it to half. A pool worker that finds both
+//! queues empty after a service pass steals from the other run queues before it
+//! parks. Before parking, the worker checks readiness again because polls and
+//! callbacks can have produced more work, and a pool worker publishes itself in
+//! the idle set before its last look at the global queue.
 //!
 //! ## Shutdown
 //!
@@ -147,7 +150,7 @@
 use super::{
     driver::Driver,
     mailbox::{Cancel, Forward, Mailbox, Message},
-    pool::{MAX_WORKERS, Pool, Threads},
+    pool::{MAX_WORKERS, Pool, Searcher, Threads},
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
@@ -1036,7 +1039,7 @@ struct Seat {
     /// task's owner.
     tasks: NonZeroU64,
     /// The owner's end of this worker's FIFO run queue, whose shared end the
-    /// pool keeps.
+    /// pool keeps for thieves.
     ready: Ready,
 }
 
@@ -1095,7 +1098,7 @@ impl Local {
         )?;
 
         // Only this worker pushes and pops, while the pool keeps the shared
-        // end.
+        // end for thieves.
         let seat = match role {
             Role::Pool(index) => Some(Seat {
                 index,
@@ -1705,7 +1708,9 @@ impl Worker {
 
         if let Role::Pool(index) = role {
             // Each task is retained for teardown or already cleared, so
-            // discarding its runnable runs no user code under this borrow.
+            // discarding its runnable runs no user code under this borrow. A
+            // thief can retain runnables it took until it reaches the barrier
+            // below.
             self.local.borrow_mut().ready_mut().discard();
 
             // Destroy futures before closing I/O so their observers can detach.
@@ -1912,6 +1917,12 @@ impl Worker {
         pool.take(ready).or_else(|| ready.pop())
     }
 
+    /// Search the other workers' run queues, moving whatever a steal takes into
+    /// this worker's own run queue. Returns whether it took anything.
+    fn search_into_ring(&self, searcher: &mut Searcher<'_>) -> bool {
+        searcher.search(self.local.borrow_mut().ready_mut())
+    }
+
     /// Drive tasks and one separately pinned root through bounded service turns.
     /// Returns the root output, or `None` with the first failure retained in the
     /// worker through root destruction. The caller then closes registration and
@@ -1935,6 +1946,7 @@ impl Worker {
             Role::Dedicated => (None, None),
         };
         let owner = shared.tasks.id();
+        let mut searcher = index.map(|index| Searcher::new(&shared.pool, index));
 
         // A pool push wakes a parked worker through the wake signal, not the
         // mailbox sequence, so the spin watches both.
@@ -2039,6 +2051,18 @@ impl Worker {
             // at this actual idle boundary after any elapsed callback time.
             let now = Instant::now();
             if deadline.is_some_and(|deadline| deadline <= now) {
+                if kernel_deferred && needs_kernel {
+                    self.service(false);
+                    self.callbacks();
+                }
+                continue;
+            }
+
+            // A worker with nothing to run steals from the other run queues
+            // before it parks, once its own service has found nothing.
+            if let Some(searcher) = &mut searcher
+                && self.search_into_ring(searcher)
+            {
                 if kernel_deferred && needs_kernel {
                     self.service(false);
                     self.callbacks();

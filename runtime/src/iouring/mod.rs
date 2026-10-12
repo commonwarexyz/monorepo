@@ -9,10 +9,11 @@
 //! with other work queued when the pool has more than one worker, go to the
 //! global queue that any worker takes from. Each worker has a bounded run
 //! queue, and a push into a full one sends the newest of its tasks to the
-//! global queue. Queued work is not stolen, so a task queued behind a long
-//! poll waits for it. Dedicated and blocking tasks each receive a supervised
-//! thread and io_uring ring. Their ordinary descendants execute on the pool.
-//! Task factories run synchronously on the thread that calls
+//! global queue. A worker with nothing to run takes half of another worker's
+//! queued tasks, rounded down, so a task queued alone behind a long poll waits
+//! for it. Dedicated and blocking tasks each receive a supervised thread and
+//! io_uring ring. Their ordinary descendants execute on the pool. Task
+//! factories run synchronously on the thread that calls
 //! [`crate::Spawner::spawn`].
 //!
 //! Sockets, blobs, and pending I/O and sleep futures can move between workers.
@@ -25,10 +26,12 @@
 //!
 //! Workers own request, timer, and result progress. Each ordinary task has at
 //! most one runnable, which a queue or poller owns, and at most one poll of
-//! that task runs at a time. A queued task can move through overflow. Each open
-//! serializes its syncs and SYNC writes across workers until their results are
-//! recorded. Forwarded results, mailboxes, the global queue, the task set, task
-//! handles, supervision, and metrics are also synchronized across threads.
+//! that task runs at a time. A queued task can move through overflow or
+//! stealing, and each run queue synchronizes its owner with the workers that
+//! steal from it. Each open serializes its syncs and SYNC writes across workers
+//! until their results are recorded. Forwarded results, mailboxes, the global
+//! queue, the task set, task handles, supervision, and metrics are also
+//! synchronized across threads.
 //!
 //! # Storage
 //!
