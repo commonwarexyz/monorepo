@@ -3,7 +3,7 @@ use crate::{Blob, Error, IoBuf, ReadOptions};
 use bytes::{BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{Buf, FixedSize};
 use commonware_utils::Widen;
-use std::{collections::VecDeque, num::NonZeroU16, sync::Arc};
+use std::{collections::VecDeque, num::NonZeroU16, ops::Range, sync::Arc};
 use tracing::error;
 
 /// Buffered pages from storage or a frozen logical tail.
@@ -270,6 +270,18 @@ impl ReplayBuf {
             page_size
         }
     }
+
+    /// Returns the front buffer and the physical range of the current page's unread logical
+    /// bytes, which is empty once the page is consumed, or `None` when no page is buffered.
+    fn chunk_range(&self) -> Option<(&BufferState, Range<usize>)> {
+        let buf = self.buffers.front()?;
+        if self.current_page >= buf.num_pages {
+            return None;
+        }
+        let page_len = Self::page_len(buf, self.current_page, self.page_size);
+        let page_start = self.current_page * self.physical_page_size;
+        Some((buf, page_start + self.offset_in_page..page_start + page_len))
+    }
 }
 
 impl Buf for ReplayBuf {}
@@ -280,10 +292,10 @@ impl bytes::Buf for ReplayBuf {
         if len == 0 {
             return Bytes::new();
         }
-        if len <= self.chunk().len() {
-            let buffer = &self.buffers.front().expect("readable buffer").buffer;
-            let start = self.current_page * self.physical_page_size + self.offset_in_page;
-            let bytes = buffer.slice(start..start + len);
+        if let Some((buf, range)) = self.chunk_range()
+            && len <= range.len()
+        {
+            let bytes = buf.buffer.slice(range.start..range.start + len);
             self.advance(len);
             return bytes;
         }
@@ -328,16 +340,8 @@ impl bytes::Buf for ReplayBuf {
     }
 
     fn chunk(&self) -> &[u8] {
-        let Some(buf) = self.buffers.front() else {
-            return &[];
-        };
-        if self.current_page >= buf.num_pages {
-            return &[];
-        }
-        let page_len = Self::page_len(buf, self.current_page, self.page_size);
-        let physical_start = self.current_page * self.physical_page_size + self.offset_in_page;
-        let physical_end = self.current_page * self.physical_page_size + page_len;
-        &buf.buffer.as_ref()[physical_start..physical_end]
+        self.chunk_range()
+            .map_or(&[], |(buf, range)| &buf.buffer.as_ref()[range])
     }
 
     fn advance(&mut self, mut cnt: usize) {
