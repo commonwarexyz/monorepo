@@ -391,8 +391,10 @@ impl<P: PublicKey> State<P> {
                             bandwidth::transfer(&meta.rate, elapsed, meta.remaining.clone());
                     }
                 }
-
                 meta.last_update = now;
+
+                // A flow whose transfer is complete leaves the map for `finish`. The rest stay
+                // tracked and take part in the allocation.
                 if meta.remaining.is_zero() {
                     return true;
                 }
@@ -418,11 +420,15 @@ impl<P: PublicKey> State<P> {
             let Entry::Occupied(mut entry) = self.all_flows.entry(flow_id) else {
                 continue;
             };
+
+            // An unlimited flow finishes at once.
             if matches!(rate, Rate::Unlimited) {
                 finished.push(entry.remove_entry());
                 continue;
             }
 
+            // A finite rate applies from `now`, and the time it needs to drain the remaining bytes
+            // is a candidate for the next bandwidth event.
             let meta = entry.get_mut();
             meta.rate = rate;
             meta.last_update = now;
