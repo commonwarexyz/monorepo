@@ -7,6 +7,7 @@ use commonware_p2p::{
     Provider, Receiver, Recipients, Sender,
     utils::codec::{WrappedSender, wrap},
 };
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{GaugeExt, status::Status},
@@ -41,12 +42,13 @@ enum InsertMessageResult {
 /// - Receiving messages from the network
 /// - Storing messages in the cache
 /// - Responding to requests from the application
-pub struct Engine<E, P, M, D>
+pub struct Engine<E, P, M, D, T>
 where
     E: BufferPooler + Clock + Spawner + Metrics,
     P: PublicKey,
     M: Digestible + Codec,
     D: Provider<PublicKey = P>,
+    T: Strategy,
 {
     ////////////////////////////////////////
     // Interfaces
@@ -58,6 +60,9 @@ where
     ////////////////////////////////////////
     /// My public key
     public_key: P,
+
+    /// Strategy for computing message digests
+    strategy: T,
 
     /// Whether messages are sent as priority
     priority: bool,
@@ -109,16 +114,17 @@ where
     metrics: metrics::Metrics<P>,
 }
 
-impl<E, P, M, D> Engine<E, P, M, D>
+impl<E, P, M, D, T> Engine<E, P, M, D, T>
 where
     E: BufferPooler + Clock + Spawner + Metrics,
     P: PublicKey,
     M: Digestible + Codec,
     D: Provider<PublicKey = P>,
+    T: Strategy,
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<P, M::Cfg, D>) -> (Self, Mailbox<P, M>) {
+    pub fn new(context: E, cfg: Config<P, M::Cfg, D, T>) -> (Self, Mailbox<P, M>) {
         let (mailbox_sender, mailbox_receiver) =
             mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
@@ -138,6 +144,7 @@ where
             counts: BTreeMap::new(),
             primary_peers: Set::default(),
             peer_provider: cfg.peer_provider,
+            strategy: cfg.strategy,
             metrics,
         };
 
@@ -241,7 +248,7 @@ where
         msg: Arc<M>,
     ) {
         // Store the message, continue even if it was already stored
-        let digest = msg.digest();
+        let digest = msg.digest_across(&self.strategy);
         let _ = self.insert_shared_message(self.public_key.clone(), digest, &msg);
 
         // Broadcast the message to the network
@@ -274,7 +281,7 @@ where
 
     /// Handles a message that was received from a peer.
     fn handle_network(&mut self, peer: P, msg: M) {
-        let digest = msg.digest();
+        let digest = msg.digest_across(&self.strategy);
         match self.insert_message(peer.clone(), digest, msg) {
             InsertMessageResult::Inserted => {
                 self.metrics.receive.inc(Status::Success);

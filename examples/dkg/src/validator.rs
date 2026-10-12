@@ -180,6 +180,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             priority: false,
             codec_config: (),
             peer_provider: oracle.clone(),
+            strategy: Sequential,
         },
     );
     let broadcast_handle = broadcast_engine.start(broadcast_network);

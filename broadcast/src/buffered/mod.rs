@@ -53,6 +53,7 @@ mod tests {
         Manager as _, Recipients, Sender as _, TrackedPeers,
         simulated::{Link, Network, Oracle, Receiver, Sender},
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock, Error, IoBuf, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
         telemetry::metrics::count_running_tasks,
@@ -362,9 +363,10 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                strategy: Sequential,
             };
             let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context, config);
+                Engine::<_, PublicKey, TestMessage, _, Sequential>::new(context, config);
             mailboxes.insert(peer.clone(), engine_mailbox);
             engine.start(network);
         }
@@ -925,9 +927,10 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                strategy: Sequential,
             };
             let (engine, mailbox) =
-                Engine::<_, PublicKey, TestMessage, _>::new(engine_context, config);
+                Engine::<_, PublicKey, TestMessage, _, Sequential>::new(engine_context, config);
             engine.start((sender, receiver));
 
             let missing = TestMessage::shared(b"never-arrives");
@@ -1013,8 +1016,10 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                strategy: Sequential,
             };
-            let (engine, engine_mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+            let (engine, engine_mailbox) =
+                Engine::<_, PublicKey, TestMessage, _, Sequential>::new(ctx, config);
             mailboxes.insert(peer.clone(), engine_mailbox);
             handles.push(engine.start(network));
         }
@@ -1162,9 +1167,12 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                strategy: Sequential,
             };
-            let (engine_b, mailbox_b) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer_b"), config_b);
+            let (engine_b, mailbox_b) = Engine::<_, PublicKey, TestMessage, _, Sequential>::new(
+                context.child("peer_b"),
+                config_b,
+            );
             engine_b.start(network_b);
 
             // Spawn remaining peer engines.
@@ -1179,8 +1187,10 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) =
+                    Engine::<_, PublicKey, TestMessage, _, Sequential>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1276,9 +1286,12 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                strategy: Sequential,
             };
-            let (engine_b, mailbox_b) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer_b"), config_b);
+            let (engine_b, mailbox_b) = Engine::<_, PublicKey, TestMessage, _, Sequential>::new(
+                context.child("peer_b"),
+                config_b,
+            );
             engine_b.start(network_b);
 
             let mut mailboxes = BTreeMap::new();
@@ -1292,8 +1305,10 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) =
+                    Engine::<_, PublicKey, TestMessage, _, Sequential>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1422,8 +1437,9 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _, Sequential>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1471,9 +1487,10 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                strategy: Sequential,
             };
             let (engine, mailbox) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer"), config);
+                Engine::<_, PublicKey, TestMessage, _, Sequential>::new(context.child("peer"), config);
 
             // Enqueue a broadcast while the engine task is not running yet (only the mailbox channel)
             let msg = TestMessage::shared(b"queued-before-start");
@@ -1551,8 +1568,10 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) =
+                    Engine::<_, PublicKey, TestMessage, _, Sequential>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1617,9 +1636,12 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                strategy: Sequential,
             };
-            let (engine_b, mailbox_b) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer_b"), config_b);
+            let (engine_b, mailbox_b) = Engine::<_, PublicKey, TestMessage, _, Sequential>::new(
+                context.child("peer_b"),
+                config_b,
+            );
             engine_b.start(network_b);
 
             // Spawn remaining peer engines.
@@ -1634,8 +1656,10 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) =
+                    Engine::<_, PublicKey, TestMessage, _, Sequential>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
