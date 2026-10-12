@@ -192,6 +192,7 @@ just campaign --agent codex            # another agent (or STATELENS_AGENT=codex
 just campaign --stop-after build       # stop after materialize, instrument or build
 just campaign --invariants INV-0001,INV-0002                              # bind only these
 just campaign --profile marshal --invariants simplex/INV-0001,marshal/INV-0024
+just campaign --bare                   # nothing bound, no agent: for Target-State Synthesis only
 ```
 
 **`just campaign` starts an agent with full access to this machine.** Run it in a fresh
@@ -257,6 +258,16 @@ does a list that selects nothing. `campaign/meta.json` records the selected ids 
 selected ones only, and `just check-plan` expects sections for those. The beacon probes are
 added as always: they are feedback, not oracles.
 
+`--bare` (simplex or marshal) binds nothing and runs no agent: it materializes the runtime
+module with its read side, the fresh-run and `set_compromised` hooks and the variants, builds
+them once (no repair) and runs the test gate, skipping the code index, the invariant, beacon
+and audit steps and the plan lint. `campaign/plan.md` says nothing is bound,
+`campaign/meta.json` records `bare: true`, and the summary's `invariants` and `coverage` lines
+say `bare`. It ends `READY` or `PANIC (tests)`, which synthesis accepts, and is for synthesizing
+target states without invariant or beacon instrumentation; synthesis then has no probe label,
+so no witness can be intrinsic. It is refused with `--invariants`, with `qmdb` (which has no
+target states) and with `--stop-after index` or `instrument`.
+
 ## Phase 3: run fuzz targets
 
 In the instrumented checkout, run the `run` commands of a `READY` summary for the targets
@@ -285,7 +296,10 @@ baseline, for example when an upstream fix was merged into it; synthesis itself 
 such a checkout, while a commit that touches only `statelens/`, a new card say, is no drift and
 needs no flag (see Synthesis). `--invariants LIST`, which you may repeat, goes to the campaign,
 which then binds only the invariants it names (see Phase 2); it is refused with
-`--skip-campaign`, which runs no campaign, and with a single target. A double-dash flag
+`--skip-campaign`, which runs no campaign, and with a single target. `--bare` goes to the
+campaign too and needs `--state-reaching`, since a bare campaign's variants carry no probe or
+invariant; `--states-reaching-only` (or `--state-reaching-only`) means `--state-reaching
+--bare`, and both are refused with `--skip-campaign` and `--invariants`. A double-dash flag
 `just fuzz` does not know is refused rather than passed to libFuzzer, whose own flags take
 one dash:
 
@@ -430,7 +444,10 @@ cp -R invariants.local target-states.local <clone>/statelens/
 
 ### Synthesis
 
-In the checkout a campaign instrumented, once it ended `READY` or `PANIC (tests)`:
+In the checkout a campaign instrumented, once it ended `READY` or `PANIC (tests)`. A bare
+campaign (`just campaign --bare`, see Phase 2) is enough: synthesis then has no probe label and
+says so in the prompt, so every witness is `exact` or `construction`, never `intrinsic`; the
+guards, the continuation and the verdicts are unchanged.
 
 ```
 just synthesize                                         # every card of the campaign's profile, on every base
@@ -594,6 +611,7 @@ just fuzz simplex --parallel --tmux --state-reaching --state-targets TS-0004 --f
 just fuzz simplex --tmux --state-reaching --state-targets TS-0003 --skip-campaign
 just fuzz simplex --tmux --state-reaching --skip-campaign --skip-synthesis --state-targets "TS-000*" --fuzz-targets simplex_cert_mock -- -max_total_time=7200
 just fuzz simplex --state-reaching --state-targets TS-0004 --fuzz-targets "simplex_cert_mock_twins_*" --invariants "simplex/INV-0001,simplex/INV-0002" -- -max_total_time=3600
+just fuzz simplex --tmux --states-reaching-only --state-targets TS-0009 --fuzz-targets simplex_cert_mock --fuzz-targets "simplex_cert_mock_twins_*"
 just run simplex_cert_mock_ts0004_statelens -- -fork=4
 ```
 
@@ -608,7 +626,10 @@ is refused, as is `--state-targets` without `--state-reaching`. Without `--fuzz-
 base of the profile that has a hook point is used, so `just fuzz simplex --tmux
 --state-reaching` with three cards opens up to 48 windows. The first command above opens one window per `simplex_cert_*` base of
 TS-0004; the fourth synthesizes TS-0004 on each of the eight `simplex_cert_mock_twins_*` bases
-and runs the eight scaffolds in turn, each with `-max_total_time=3600`:
+and runs the eight scaffolds in turn, each with `-max_total_time=3600`; the fifth runs a bare
+campaign (`--states-reaching-only` is `--state-reaching --bare`: no invariant, probe or beacon,
+see Phase 2) and synthesizes TS-0009 on `simplex_cert_mock` and the twins bases, one window
+per scaffold. The fourth's scaffolds are
 `simplex_cert_mock_twins_campaign_ts0004_statelens`, its `_audit`, `_hb` and `_state_cov`
 siblings (`simplex_cert_mock_twins_campaign_audit_ts0004_statelens` and so on), and the four
 `simplex_cert_mock_twins_mutator*_ts0004_statelens`. The recipe's messages count scaffolds
@@ -683,12 +704,12 @@ The campaign ends with these lines, leaving out those that do not apply:
 ```
 statelens: checkout   <repo>
 statelens: base       <base commit>
-statelens: agent      <agent>
+statelens: agent      <agent> | none (bare campaign)
 statelens: profile    simplex | marshal | qmdb
-statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)[; inactive in the fuzz targets: <ID>, ...]
+statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)[; inactive in the fuzz targets: <ID>, ...] | none (bare campaign)
 statelens: audit      <ID> <before> -> <after>, ... | no status change [stale: a repair changed the tree after it]
 statelens: plan       <n> commit site(s) listed, <u> not checked, <p> lint problem(s)
-statelens: coverage   UNVALIDATED: <why the counts above are not supported>
+statelens: coverage   UNVALIDATED: <why the counts above are not supported> | bare: nothing is bound (...)
 statelens: sites      <k> assertion sites, <m> probe sites, <d> deleted lines
 statelens: components <f> failed, not gated: <test>, ... | all passed
 statelens: result     READY | STOPPED after <step> | PANIC (tests) | BUILD FAILED | SETUP FAILED

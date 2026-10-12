@@ -554,7 +554,7 @@ extract-invariants *args:
 extract-states *args:
     python3 scripts/statelens.py extract --states "$@"
 
-# Instrument this checkout and build the StateLens targets: just campaign [--agent A] [--profile P] [--invariants LIST]...
+# Instrument this checkout and build the StateLens targets: just campaign [--agent A] [--profile P] [--invariants LIST]... [--bare]
 campaign *args:
     python3 scripts/statelens.py campaign "$@"
 
@@ -584,7 +584,7 @@ run target *args:
         cd ../consensus/fuzz && just run "$@" ;;
     esac
 
-# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--fuzz-targets GLOB]... [--state-targets GLOB]... [--invariants LIST]... [--skip-campaign] [--skip-synthesis] [--rebaseline] [--parallel] [--tmux] [--state-reaching] [-- -fork=8]
+# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--fuzz-targets GLOB]... [--state-targets GLOB]... [--invariants LIST]... [--skip-campaign] [--skip-synthesis] [--rebaseline] [--parallel] [--tmux] [--state-reaching] [--bare] [--states-reaching-only] [-- -fork=8]
 fuzz target *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -611,6 +611,11 @@ fuzz target *args:
     # and revalidate every scaffold (synthesize --rebaseline).
     # --invariants LIST goes to the campaign, which binds only the invariants it
     # names, so it needs a campaign and a profile.
+    # --bare goes to the campaign, which then binds nothing and runs no agent: the
+    # runtime, the hooks and the variants are what a synthesis needs. It needs
+    # --state-reaching, since a bare campaign's variants carry no probe or invariant
+    # to fuzz for, and a campaign, so --skip-campaign and --invariants refuse it.
+    # --states-reaching-only, or --state-reaching-only, is --state-reaching --bare.
     # Both pattern flags reach the listing and the synthesis as --match, whose one
     # rule they split: a TS-NNNN pattern names a card, any other a fuzz target.
     fuzz_targets() {
@@ -636,6 +641,8 @@ fuzz target *args:
     campaign=yes
     synthesis=yes
     rebaseline=()
+    bare=()
+    bare_flag=
     narrowed=no
     cards=no
     reaching=no
@@ -650,6 +657,9 @@ fuzz target *args:
         --parallel|--parallels) parallel=yes; shift ;;
         --tmux)                 parallel=yes; windows=yes; shift ;;
         --state-reaching)       reaching=yes; shift ;;
+        --bare)                 bare=(--bare); bare_flag="$1"; shift ;;
+        --states-reaching-only|--state-reaching-only)
+                                reaching=yes; bare=(--bare); bare_flag="$1"; shift ;;
         --fuzz-targets=*)       fuzz_targets "${1#--fuzz-targets=}"; shift ;;
         --fuzz-targets)         [ $# -ge 2 ] || { echo "just fuzz: --fuzz-targets needs a pattern" >&2; exit 1; }
                                 fuzz_targets "$2"; shift 2 ;;
@@ -707,6 +717,18 @@ fuzz target *args:
         echo "just fuzz: --invariants selects what a campaign binds; name simplex, marshal or qmdb" >&2
         exit 1
     fi
+    if [ "${#bare[@]}" -gt 0 ] && [ "$reaching" = no ]; then
+        echo "just fuzz: --bare needs --state-reaching; a bare campaign's variants carry no probe or invariant" >&2
+        exit 1
+    fi
+    if [ "${#bare[@]}" -gt 0 ] && [ "$campaign" = no ]; then
+        echo "just fuzz: $bare_flag runs a bare campaign; drop --skip-campaign" >&2
+        exit 1
+    fi
+    if [ "${#bare[@]}" -gt 0 ] && [ "$selected" = yes ]; then
+        echo "just fuzz: $bare_flag runs a bare campaign, which binds nothing; drop --invariants" >&2
+        exit 1
+    fi
     # The targets are listed before the campaign runs, so that a pattern naming
     # none fails at once rather than after it; with --state-reaching, so do a
     # selection of no card and a selected card with a lint problem. A read loop,
@@ -731,7 +753,7 @@ fuzz target *args:
         list
     fi
     if [ "$campaign" = yes ]; then
-        just campaign --profile "$profile" ${invariants[@]+"${invariants[@]}"}
+        just campaign --profile "$profile" ${bare[@]+"${bare[@]}"} ${invariants[@]+"${invariants[@]}"}
     fi
     if [ "$every" = no ]; then
         just run "$target" "$@"
@@ -909,19 +931,20 @@ prefixed with `statelens:`.
 | `kb` | `kb modules [--registry R]`, `kb find [--registry R] TERM...`, `kb grep [--registry R] TEXT`, `kb cites [--registry R] PATH`, `kb show [--registry R] IDENTIFIER [SECTION]` (section 5.6), and `kb search [--registry R] [--path P]... [--source S]... [--tests] [-k N] QUESTION...` (section 5.10) | 0 done, including no hits, 1 usage, an identifier out of the registry's scope, a section that is not state-bearing, a section asked of a document, or no search index, 2 no readable corpus root, for every query but `search` |
 | `search-index` | `search-index [--rebuild]`; builds or updates the index of `kb search` (section 5.10) | 0 built with the model, 2 built without it, so that `kb search` ranks by words only |
 | `lint-examples` | `lint-examples [PATH...]`; with no path it checks every `*.md` in `examples/` | 0 clean, 3 problems |
-| `lint-plan` | `lint-plan [--profile P] [PATH...]`; with no path it checks `SL/campaign/plan.md`, and with no `--profile` it takes the profile from `SL/campaign/meta.json`, else `simplex`, and expects a section only for the invariants that file lists under `invariants`, so the bare command the audit prompt gives checks what the campaign bound, a selection (section 7.1 step 4) included; `--profile` naming the campaign's profile does the same, and another profile expects every registry invariant of that profile. A section per expected invariant; a valid `Status`; the fields that status needs (section 11); a `Sites` ledger whose entries each name a source and say `checked` or `not checked`, and leave nothing unchecked when the status is `bound`; an assertion naming the invariant in the function of every entry marked `checked`; and, for every invariant the plan claims to bind, an `sl_assert!` or `sl_implies!` call in the instrumented code that names it. It judges the claims the plan makes; a commit site the ledger never names is what the audit pass (section 7.3) is for | 0 clean, 3 problems |
+| `lint-plan` | `lint-plan [--profile P] [PATH...]`; with no path it checks `SL/campaign/plan.md`, and with no `--profile` it takes the profile from `SL/campaign/meta.json`, else `simplex`, and expects a section only for the invariants that file lists under `invariants`, so the bare command the audit prompt gives checks what the campaign bound, a selection (section 7.1 step 4) included; `--profile` naming the campaign's profile does the same, and another profile expects every registry invariant of that profile. On the plan of a bare campaign (section 7.14), with no path and the campaign's profile, it prints `lint-plan: the campaign was bare and its plan binds nothing; nothing to check` and exits with code 0. A section per expected invariant; a valid `Status`; the fields that status needs (section 11); a `Sites` ledger whose entries each name a source and say `checked` or `not checked`, and leave nothing unchecked when the status is `bound`; an assertion naming the invariant in the function of every entry marked `checked`; and, for every invariant the plan claims to bind, an `sl_assert!` or `sl_implies!` call in the instrumented code that names it. It judges the claims the plan makes; a commit site the ledger never names is what the audit pass (section 7.3) is for | 0 clean, 3 problems |
 | `lint-prompts` | `lint-prompts [--write]`; compares every file in `prompts/` with its copy in section 13. `--write` refreshes the copies from the files and reports what it could not fix | 0 clean, 3 problems |
 | `code` | `code build [--subsystem S]`, and `code defs|refs|callers|callees NAME [--tests] [--all]` (section 5.7) | 0 done, 1 usage, no index, or no symbol matching NAME |
-| `coverage` | `coverage [--profile P] [TARGET...]`; replays the corpus of each StateLens target under coverage instrumentation and writes an HTML report per target plus a merged one (section 7.13). A positional name is a profile or a target, as `just fuzz` reads it; a scaffold's name is accepted like a variant's, and a profile covers its scaffolds with its variants (section 18.9). A target with no corpus is skipped | 0 done, 1 usage or an unknown target, 2 no corpus anywhere, no `llvm-tools-preview`, or a failed coverage run |
+| `coverage` | `coverage [--profile P] [TARGET...]`; replays the corpus of each StateLens target under coverage instrumentation and writes an HTML report per target plus a merged one (section 7.13); after a bare campaign (section 7.14) its summary lines end `(bare campaign, no probe)` instead of `(instrumented code)`. A positional name is a profile or a target, as `just fuzz` reads it; a scaffold's name is accepted like a variant's, and a profile covers its scaffolds with its variants (section 18.9). A target with no corpus is skipped | 0 done, 1 usage or an unknown target, 2 no corpus anywhere, no `llvm-tools-preview`, or a failed coverage run |
 | `targets` | `targets [--profile P] [--state-reaching] [--match GLOB]...`; the StateLens targets `P` builds, one per line, which is what `just fuzz <profile>` reads rather than parsing a campaign summary. `--match` keeps the targets a shell pattern names, by variant name or by the original target's, and is what `just fuzz <profile> --fuzz-targets GLOB` passes. With `--state-reaching` it lists the scaffolds of the selected pairs (card, base) instead, and a `TS-NNNN` pattern names a card; `just fuzz` forwards `--state-targets` and `--fuzz-targets` alike as `--match`, having checked each pattern's form, and with `--skip-synthesis` this listing alone names the scaffolds that run (section 18.9) | 0 done, 1 a pattern that names no target; with `--state-reaching`, 0 done, also with no scaffold yet, 1 no card and base selected or a selected card with a lint problem |
 | `synthesize` | `synthesize [--agent A] [--profile P] [--match GLOB]... [--redo]`, where `P` is `simplex` or `marshal`, by default the profile of `SL/campaign/meta.json`; writes, builds and checks one scaffold per selected card on each selected base, every candidate base with no base pattern, on a checkout a campaign of `P` instrumented, at the campaign's base commit or past it only by commits that touch only `SL/` (section 18.6.2, Preconditions) | 0 at least one scaffold exists for the selection, 1 usage or nothing selected, 2 a failed precondition, an edit outside the edit contract's scope, a missing anchor, or a `--redo` that does not apply, 3 no scaffold built |
 | `reach-verdict` | `reach-verdict --card CARD --module MODULE --canonical LOG [--canonical-code N] [--control LOG] [--control-code N]`; the reach verdict of one scaffold from replays captured outside synthesis, through the same `card_history`, `first_run` and `reach_verdict` the synthesis uses (section 18.8): prints the verdict, then the reasons, annotations and control reason one per line. `SL/scripts/differential.sh` is its caller (section 18.10.1) | 0 REACHED, 1 any other verdict |
 | `test-gate` | `test-gate [--profile P]`; runs the test gate's command (section 7.7) on the checkout as it stands, then, for a profile that has them, the component tests, which are reported and not gated. With no `--profile` it takes the profile from `SL/campaign/meta.json` | 0 gate passed, 1 no profile, 4 gate failed |
 | `ast` | `ast sites NAME [PATH...] [--writes-only] [--tests]`, `ast notes [--pattern RE] [PATH...] [--tests]`; a `PATH` is a file or a directory (section 5.8) | 0 done, including no sites, 1 usage or rust-analyzer absent |
 | `clean` | `clean [--yes]`; without `--yes` it prints what it would undo and changes nothing. Files a campaign or an instrumenter added are deleted and paths that exist in `HEAD` are restored from it, the two told apart by asking `git ls-tree` rather than by reading a status code. Status is asked with `--untracked-files=all`, so a wholly untracked directory is named as its files rather than collapsed to one entry that is not a file to delete, and a directory that is left empty is removed while nothing in it is deleted unseen. With `--yes` it checks afterwards that nothing in scope still differs from `HEAD`. The scope includes the simplex and marshal fuzz packages, where synthesis writes (section 18.6), but not the `corpus/`, `artifacts/` and `coverage/` that git ignores there; under the simplex and marshal `src/target_states/`, which synthesis writes whole and a campaign refuses, it also deletes the files git ignores, and with `--yes` it reports such a directory that remains as a difference (exit 1) | 0 done, including a preview, which is not a failure; 1 something in scope still differs from `HEAD`, so the checkout is not reusable |
-| `campaign` | `campaign [--agent A] [--profile P] [--invariants LIST]... [--stop-after STEP]`, where `P` is `simplex` (default), `marshal` or `qmdb`, and `LIST` is a comma-separated list of the invariants to bind instead of every invariant of the profile's registries, each `<registry>/INV-NNNN`, or a bare `INV-NNNN` when the profile binds one registry (section 7.1 step 4) | 0 ready (the StateLens targets are built and the test gate passed) or stopped after a step, 1 usage, 2 setup or agent failure (including a missing tool, a checkout that is not fresh, or a selection that names no invariant the profile collects), 3 build failed, 4 test gate failed; codes 5 and 6 are no longer used (D23) |
+| `campaign` | `campaign [--agent A] [--profile P] [--invariants LIST]... [--bare] [--stop-after STEP]`, where `P` is `simplex` (default), `marshal` or `qmdb`, and `LIST` is a comma-separated list of the invariants to bind instead of every invariant of the profile's registries, each `<registry>/INV-NNNN`, or a bare `INV-NNNN` when the profile binds one registry (section 7.1 step 4). `--bare` runs the bare campaign of section 7.14: materialize, build and test gate, with no agent and nothing bound; it is refused with `--invariants`, with `--profile qmdb` and with `--stop-after index` or `instrument` | 0 ready (the StateLens targets are built and the test gate passed) or stopped after a step, 1 usage, `--bare` refused included, 2 setup or agent failure (including a missing tool, a checkout that is not fresh, or a selection that names no invariant the profile collects), 3 build failed, 4 test gate failed; codes 5 and 6 are no longer used (D23) |
 
-`--stop-after` accepts `materialize`, `index`, `instrument` or `build`. It exists for
+`--stop-after` accepts `materialize`, `index`, `instrument` or `build`, and with `--bare`
+`materialize` or `build`. It exists for
 development and acceptance testing and is not a campaign parameter in the PRD sense. A
 campaign that stops this way exits with code 0 and reports the result
 `STOPPED after <step>`.
@@ -1416,7 +1439,8 @@ This chapter specifies StateLens for the Simplex subsystem: the campaign of the 
 profile, which instruments the code and generates the fuzz target (Phase 2, sections 7.1
 to 7.9), and how the operator runs the target (Phase 3, sections 7.10 to 7.12). Where a
 rule depends on the profile, it says so; chapter 8 gives what differs for marshal, and
-chapter 17 what differs for qmdb.
+chapter 17 what differs for qmdb. A bare campaign (`--bare`, section 7.14) runs only the
+materialize, build and test gate steps, for Target-State Synthesis.
 
 ### 7.1 Preconditions and setup
 
@@ -1737,9 +1761,10 @@ statelens: checkout   <repo>
 statelens: base       <base>
 statelens: agent      <agent>
 statelens: profile    <profile>
-statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)[; inactive in the fuzz targets: <ID>, ...]
+statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)[; inactive in the fuzz targets: <ID>, ...] | none (bare campaign)
 statelens: audit      <ID> <before> -> <after>, ... | no status change [stale: a repair changed the tree after it]
 statelens: plan       <n> commit site(s) listed, <u> not checked, <p> lint problem(s)
+statelens: coverage   bare: nothing is bound (no invariant, assertion, probe or beacon); the targets carry the runtime, the hooks and the variants only
 statelens: coverage   UNVALIDATED: <p> plan lint problem(s), so the code does not support the counts above; a repair changed <f> validated file(s) after the audit (<path>, ...), so the audit and the statuses describe the tree before it; run a campaign with a new audit before relying on them; no audit pass ran (STATELENS_AUDIT=0), so the statuses are the binding agent's own claims; audit batch <name> changed existing lines of <path>, ... after the verdict on <ID>, ..., which were not reviewed against them
 statelens: sites      <k> assertion sites, <m> probe sites, <d> deleted lines
 statelens: components <f> failed, not gated: <test>, ...; see campaign/logs/test-components.log | all passed
@@ -1750,6 +1775,8 @@ statelens: run        cd <repo>/statelens && NIGHTLY_VERSION=<fuzz toolchain> ju
 statelens: replay     cd <repo>/statelens && CONSENSUS_FUZZ_LOG=1 NIGHTLY_VERSION=<fuzz toolchain> just run simplex_cert_mock_twins_mutator_statelens <repo>/consensus/fuzz/simplex/artifacts/simplex_cert_mock_twins_mutator_statelens/<crash file>
 ~~~
 
+A bare campaign (section 7.14) prints `none (bare campaign)` on the `agent` and
+`invariants` lines and the first `coverage` form, and no `audit`, `plan` or `sites` line.
 The `run` and `replay` lines appear only with `READY`, one pair per StateLens variant of
 the profile. Both run through `SL/justfile`, whose `run` recipe finds the package that
 defines the target: `consensus/fuzz`'s own `run` for a consensus target, `storage/fuzz`
@@ -1859,11 +1886,70 @@ For each target with a corpus, in the instrumented checkout:
 4. With more than one target, `llvm-profdata merge -sparse` combines the profiles and the
    same reports are written again as `unified`, against every target's binary.
 
+After a bare campaign (section 7.14), which `meta.json` records as `bare: true`, nothing is
+instrumented, and the summary lines end `(bare campaign, no probe)` instead of `(instrumented
+code)`.
+
 `llvm-cov` and `llvm-profdata` come from the fuzz toolchain's own sysroot
 (`lib/rustlib/<host>/bin`), because a coverage mapping is only readable by the LLVM that
 wrote it; a missing `llvm-tools-preview` component stops the command with the `rustup`
 line that installs it. The coverage build and the reports live under the fuzz package's
 `coverage/`, which `.gitignore` already covers.
+
+### 7.14 Bare campaign
+
+`just campaign --profile <simplex|marshal> --bare` (`statelens.py campaign --bare`) prepares a
+checkout for Target-State Synthesis (chapter 18) without binding anything: no invariant,
+assertion, probe or beacon. It is for an operator who wants scaffolds for a target-state card
+on several bases and none of the invariant or beacon instrumentation.
+
+- **Refusals.** `--bare` with `--invariants` ("--bare binds nothing; drop --invariants"),
+  with `--profile qmdb` ("--bare prepares a checkout for Target-State Synthesis, which
+  refuses the qmdb profile; use simplex or marshal": qmdb has no target states, so a bare
+  qmdb campaign would serve nothing) and with `--stop-after index` or `instrument` ("--bare
+  skips the <step> step; stop after materialize or build") each exit with code 1 before
+  anything is checked or written. A bare `marshal` campaign is allowed, as `--state-reaching`
+  allows `marshal`; until marshal has runner adapters, synthesis refuses its bases (section
+  18.6.2).
+- **Preconditions** (section 7.1 step 1) are those of every campaign, except that the agent
+  CLI is not checked: a bare campaign runs no agent.
+- **Setup.** Steps 2 and 3 of section 7.1, with `meta.json` recording `bare: true`,
+  `invariants: []`, `invariants_available: 0` and `null` for `agent`, `model` and `effort`.
+  Steps 4 to 6 are replaced: no invariant is collected or linted, the knowledge base and the
+  search index are not touched, the console prints `campaign: profile <profile>, bare
+  (nothing bound), <t> target(s) at <base>`, and `SL/campaign/plan.md` is
+
+~~~markdown
+# StateLens instrumentation plan
+
+- Base commit: <base>
+- Profile: <profile>
+- Campaign: bare
+
+Nothing is bound. A bare campaign (`just campaign --bare`) binds no invariant and adds no
+assertion, probe or beacon: it materialized the runtime module with its read side, the
+fresh-run and set_compromised hooks and the StateLens variants, built them and ran the test
+gate. A synthesis on this checkout has no probe label, so no witness can be intrinsic.
+~~~
+
+- **Steps.** Materialize (section 7.2; section 8.3 for marshal) as for every campaign: the
+  runtime module with its read side, the fresh-run hook, the anchored hooks that call
+  `set_compromised`, and the variants. `SL/campaign/instrumentation.diff` is written right
+  after it (`git diff`), so synthesis's guard 3 keeps the hooks it adds. The code index
+  (section 7.2), the invariant, beacon and audit agent steps (sections 7.3 and 7.4), the plan
+  completion and lint, the scope check and the record (section 7.5) do not run. The build
+  (section 7.6) runs once, with no repair: a failure exits with code 3, `the materialized tree
+  does not build (<command>); a bare campaign runs no repair agent; see campaign/logs/`. The
+  test gate and the component tests (section 7.7) run as for every campaign.
+- **Result.** `READY`, or `PANIC (tests)` when the gate fails, both of which synthesis
+  accepts (section 18.6.2); the summary is that of section 7.9 with its bare lines. `just
+  check-plan` has nothing to check on this plan (section 5.4).
+- **Synthesis** on a bare campaign has no probe label: its `LABELS` value says so and that
+  no intrinsic witness is possible (section 18.6.2). Everything else, the guards, the trusted
+  continuation and the verdicts, is unchanged.
+
+`just fuzz <simplex|marshal> --state-reaching --bare`, or `--states-reaching-only`, passes
+`--bare` to the campaign (section 18.9).
 
 ---
 
@@ -5281,6 +5367,12 @@ reported before the agent CLI is checked, an exception to section 12:
 - the profile's runtime module (section 5.5) exists and contains `pub fn watch(`; otherwise
   "this checkout predates the read side or was cleaned; use a fresh clone";
 - `SL/campaign/plan.md` exists;
+- a bare campaign (section 7.14, `bare: true` in `meta.json`) meets these preconditions as any
+  campaign does: it materialized the runtime with its read side and the hooks, wrote
+  `plan.md`, `instrumentation.diff` and `logs/test.log`, and ended `READY` or `PANIC
+  (tests)`. Synthesis then prints `campaign   bare: no probe label or invariant, so no
+  intrinsic witness` after the `cards` line and gives the `LABELS` value of a bare campaign
+  (below); nothing else changes;
 - the profile has runner adapters of the trusted continuation (D69): marshal has none yet, so
   a marshal synthesis exits with code 1, "synthesis refuses every marshal base: its drivers
   have no runner adapter of the trusted continuation yet (a follow-up)";
@@ -5622,7 +5714,7 @@ in section 7.3 step 3, and:
 | `CONTINUATION` | The hook API's file, `consensus/fuzz/core/src/continuation.rs` for simplex |
 | `BASE_TARGET` | The pair's base |
 | `BASE_DETAILS` | For that base: its name, the closure header and the entry call of its `fuzz_target!`, its `required-features`, its input type, its trusted entry and the actors its driver starts for the compromised identity at the release, or why it has none |
-| `LABELS` | Every `sl_probe!` label and `sl_implies!` ID under the editable roots, with its `path:line`, from one scan |
+| `LABELS` | Every `sl_probe!` label and `sl_implies!` ID under the editable roots, with its `path:line`, from one scan; after a bare campaign (section 7.14), no scan, and a text that starts `none: the campaign was bare` and says that it bound no invariant and installed no probe, that `seen` finds no observation and no `intrinsic` witness is possible, and that every line is witnessed with `exact` or `construction` witnesses |
 | `BUILD` | The build command of step 2.6, with the scaffold's name |
 | `ATTEMPT`, `FEEDBACK` | The attempt number, and the feedback of section 18.8, or "none: first attempt" |
 | `SUBSYSTEM_RULES` | The content of `prompts/subsystems/<profile>-synthesize.md` |
@@ -6369,13 +6461,24 @@ these. A CRASH (finding candidate) gets no feedback, because refinement stops (D
    --invariants needs a list of ids"), the flag with `--skip-campaign` ("just fuzz:
    --invariants selects what a campaign binds; drop --skip-campaign") and the flag with a
    single target ("just fuzz: --invariants selects what a campaign binds; name simplex,
-   marshal or qmdb") each exit with code 1 before anything is listed or run.
+   marshal or qmdb") each exit with code 1 before anything is listed or run. `--bare` is
+   kept for the campaign; `--states-reaching-only`, or its singular spelling
+   `--state-reaching-only`, means `--state-reaching --bare`. `--bare` without
+   `--state-reaching` ("just fuzz: --bare needs --state-reaching; a bare campaign's variants
+   carry no probe or invariant"), either flag with `--skip-campaign` ("just fuzz: <flag> runs
+   a bare campaign; drop --skip-campaign") and either flag with `--invariants` ("just fuzz:
+   <flag> runs a bare campaign, which binds nothing; drop --invariants") each exit with code
+   1, `<flag>` being the spelling given; with a single target or `qmdb` the
+   `--state-reaching` refusals above apply. `--bare` is refused without `--state-reaching`
+   because the variants of a bare campaign carry no probe or invariant, so fuzzing them is
+   ordinary fuzzing of the original targets, which `consensus/fuzz` already does.
 2. `statelens.py targets --profile simplex --state-reaching --match TS-0004 --match
    'simplex_cert_*'` exits with code 1 when no card and base are selected or a selected card
    has a lint problem, so a bad selection fails before the campaign. Otherwise it lists the
    scaffolds of the selected pairs (card, base) that exist, if any.
-3. `just campaign --profile simplex`, followed by each `--invariants LIST` given, unless
-   `--skip-campaign`. A failed campaign stops the recipe, as it does without the flag.
+3. `just campaign --profile simplex`, followed by `--bare` when given and by each
+   `--invariants LIST` given, unless `--skip-campaign`. A failed campaign stops the recipe, as
+   it does without the flag.
 4. `statelens.py synthesize --profile simplex --match TS-0004 --match 'simplex_cert_*'`, one
    scaffold per selected pair (section 18.6.2), unless `--skip-synthesis`. A non-zero exit code
    stops the recipe: 2, among them guard 1 and a checkout that differs from `B`, or 3, no
@@ -6404,6 +6507,14 @@ eight scaffolds, `<base>_ts0004_statelens` each, for example
 `simplex_cert_mock_twins_campaign_ts0004_statelens`, run in turn, each with
 `-max_total_time=3600`; the recipe's messages count scaffolds (`8 simplex scaffold(s), in
 turn`).
+
+**`--bare` and `--states-reaching-only`.** For one card on several bases with no invariant or
+beacon instrumentation,
+`just fuzz simplex --tmux --states-reaching-only --state-targets TS-0009 --fuzz-targets simplex_cert_mock --fuzz-targets "simplex_cert_mock_twins_*"`
+makes the same calls as the same command with `--state-reaching --bare` in place of the one
+flag: step 3 runs `just campaign --profile simplex --bare`, the bare campaign of section 7.14,
+step 4 synthesizes TS-0009 on `simplex_cert_mock` and each `simplex_cert_mock_twins_*` base
+with a runner adapter, and step 6 opens one window per scaffold that built.
 
 **`--skip-synthesis`.** A synthesis refuses a checkout that differs from its baseline `B`
 (section 18.6.2, guards 1 to 3: "the checkout differs from the synthesis baseline: <path>; use a
@@ -6438,8 +6549,8 @@ reverted (section 18.11).
 **justfile.** New recipes `extract-states` (`python3 scripts/statelens.py extract --states
 "$@"`) and `synthesize` (`python3 scripts/statelens.py synthesize "$@"`). In `fuzz`, the header
 comment lists `[--fuzz-targets GLOB]...`, `[--state-targets GLOB]...`, `[--skip-synthesis]`,
-`[--state-reaching]` and `[--invariants LIST]...`, the last of which the `campaign` header also
-lists, and the flag loop, the two pattern functions, the refusals, the listing, the synthesis
+`[--state-reaching]`, `[--bare]`, `[--states-reaching-only]` and `[--invariants LIST]...`;
+the `campaign` header also lists `[--invariants LIST]...` and `[--bare]`, and the flag loop, the two pattern functions, the refusals, the listing, the synthesis
 and the second listing, both inside `if [ "$synthesis" = yes ]`, and the session name are as
 above. Section 5.3 reproduces the file.
 

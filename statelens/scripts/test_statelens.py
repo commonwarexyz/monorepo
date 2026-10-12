@@ -5174,6 +5174,190 @@ class InvariantSelection(unittest.TestCase):
                       str(caught.exception))
 
 
+class BareCampaign(unittest.TestCase):
+    """`campaign --bare` (SPEC section 7.14): materialize, build and test gate, with no agent,
+    no code index, no invariant, beacon or audit step and no plan lint; a record that says
+    nothing is bound, which a synthesis accepts; and the refusals, before anything is
+    written."""
+
+    def run_git(self, *args):
+        return subprocess.run(
+            ("git",) + args, cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout
+
+    def setUp(self):
+        self.repo = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        for relative, text in (
+            ("consensus/src/simplex/mod.rs", "pub mod types;\n"),
+            ("consensus/fuzz/core/src/continuation.rs", "pub trait Prefix<P> {}\n"),
+            ("consensus/fuzz/simplex/src/trusted.rs", "pub fn fuzz_with_prefix<P>() {}\n"),
+            ("statelens/.gitignore", "campaign/\n"),
+            ("statelens/config.env", "STATELENS_AGENT=claude\n"),
+        ):
+            (self.repo / relative).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / relative).write_text(text)
+        for args in (("init", "-q", "."), ("config", "user.email", "t@example.invalid"),
+                     ("config", "user.name", "t"), ("config", "commit.gpgsign", "false"),
+                     ("add", "-A"), ("commit", "-qm", "base")):
+            self.run_git(*args)
+        self.base = self.run_git("rev-parse", "HEAD").strip()
+        names = ("say", "repo_root", "check_agent_cli", "materialize_edits", "index_build",
+                 "kb_roots", "search_build", "lint_paths", "registry_invariants",
+                 "profile_targets", "run_logged")
+        saved = {name: getattr(sl, name) for name in names}
+        self.addCleanup(lambda: [setattr(sl, k, v) for k, v in saved.items()])
+        methods = {name: getattr(sl.Campaign, name)
+                   for name in ("code_index", "instrument", "agent_step", "check_plan")}
+        self.addCleanup(lambda: [setattr(sl.Campaign, k, v) for k, v in methods.items()])
+        which = sl.shutil.which
+        self.addCleanup(setattr, sl.shutil, "which", which)
+        sl.shutil.which = lambda tool: f"/usr/bin/{tool}"
+        self.said, self.commands, self.forbidden = [], [], []
+        sl.say = self.said.append
+        sl.repo_root = lambda: self.repo
+
+        def forbidden(name):
+            def call(*_args, **_kw):
+                self.forbidden.append(name)
+                raise AssertionError(f"a bare campaign ran {name}")
+            return call
+
+        for name in ("check_agent_cli", "index_build", "kb_roots", "search_build", "lint_paths",
+                     "registry_invariants"):
+            setattr(sl, name, forbidden(name))
+        for name in methods:
+            setattr(sl.Campaign, name, forbidden(name))
+        sl.materialize_edits = lambda _repo, _sl_dir, _profile: sl.Materialization(
+            {sl.STATELENS_RS: "pub fn watch() {}\n"},
+            {"consensus/src/simplex/mod.rs": "pub mod types;\npub mod statelens;\n"},
+            ["simplex_a_statelens"], {},
+        )
+        sl.profile_targets = lambda *_a: ["simplex_a_statelens"]
+        sl.run_logged = self.fake_run
+        self.build_code, self.gate_code = 0, 0
+
+    def fake_run(self, command, log_path, cwd, stdin_text=None, echo=True, timeout=None,
+                 env=None):
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        # The subcommand, after `cargo` and its toolchain, if any.
+        self.commands.append(" ".join([word for word in command[1:] if word[:1] != "+"][:2]))
+        if "nextest" in command:
+            code = self.gate_code
+            text = "    FAIL [   0.1s] commonware-consensus simplex::tests::t\n" if code else ""
+        else:
+            code, text = self.build_code, ""
+        log_path.write_text(text)
+        return code, []
+
+    def campaign(self, *args):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = sl.main(["campaign", "--bare"] + list(args))
+        return code, out.getvalue()
+
+    def record(self, name):
+        return (self.repo / "statelens/campaign" / name).read_text()
+
+    def test_a_bare_campaign_materializes_builds_and_tests_and_binds_nothing(self):
+        code, out = self.campaign()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.forbidden, [])
+        # The check, the fuzz build of the one variant, the gate and the component tests.
+        self.assertEqual(self.commands, ["check -p", "fuzz build", "nextest run", "nextest run"])
+        meta = json.loads(self.record("meta.json"))
+        self.assertIs(meta["bare"], True)
+        self.assertEqual((meta["invariants"], meta["invariants_available"], meta["agent"]),
+                         ([], 0, None))
+        self.assertEqual((meta["profile"], meta["base"], meta["targets"]),
+                         ("simplex", self.base, ["simplex_a_statelens"]))
+        self.assertEqual(self.record("plan.md"),
+                         sl.BARE_PLAN_TEMPLATE.format(base=self.base, profile="simplex"))
+        self.assertIn("- Campaign: bare\n\nNothing is bound.", self.record("plan.md"))
+        diff = self.record("instrumentation.diff")
+        self.assertIn("+pub mod statelens;", diff)
+        self.assertIn("+pub fn watch() {}", diff)
+        summary = self.record("summary.txt")
+        self.assertEqual(summary, out)
+        for line in ("statelens: agent      none (bare campaign)",
+                     "statelens: invariants none (bare campaign)",
+                     "statelens: coverage   bare: nothing is bound (no invariant, assertion, "
+                     "probe or beacon)",
+                     "statelens: components all passed",
+                     "statelens: result     READY",
+                     "statelens: run        "):
+            self.assertIn(line, summary)
+        for row in ("audit", "plan", "sites"):
+            self.assertNotIn(f"statelens: {row:<10} ", summary)
+        self.assertIn(f"campaign: profile simplex, bare (nothing bound), 1 target(s) at "
+                      f"{self.base[:10]}", self.said)
+        self.assertIn("build: the materialized tree builds", self.said)
+        # `coverage` labels its figures by this record, and `lint-plan` has nothing to check.
+        self.assertTrue(sl.campaign_bare(self.repo / "statelens"))
+        self.assertEqual(sl.main(["lint-plan"]), 0)
+        self.assertEqual(self.said[-1],
+                         "lint-plan: the campaign was bare and its plan binds nothing; "
+                         "nothing to check")
+        # A synthesis accepts the campaign, and its LABELS say none.
+        sl.check_agent_cli = lambda _agent: None
+        synthesis = sl.Synthesis(argparse.Namespace(
+            agent=None, match=None, redo=False, profile=None, rebaseline=False))
+        synthesis.check_campaign()
+        synthesis.check_preconditions()
+        self.assertTrue(synthesis.bare)
+        self.assertEqual(synthesis.campaign_result, "READY")
+        self.assertTrue(synthesis.labels_text().startswith("none: the campaign was bare"))
+        self.assertIn("no `intrinsic` witness is possible", synthesis.labels_text())
+        # The checkout is instrumented now, so a second campaign is refused.
+        code, out = self.campaign()
+        self.assertEqual(code, 2)
+        self.assertIn("earlier campaign or synthesis instrumented this checkout", out)
+        self.assertEqual(self.record("summary.txt"), summary)
+
+    def test_a_failed_gate_ends_panic_which_a_synthesis_accepts(self):
+        self.gate_code = 100
+        code, out = self.campaign()
+        self.assertEqual(code, 4)
+        self.assertIn("statelens: result     PANIC (tests)", out)
+        self.assertIn("statelens: coverage   bare: ", out)
+        self.assertEqual(self.forbidden, [])
+        sl.check_agent_cli = lambda _agent: None
+        synthesis = sl.Synthesis(argparse.Namespace(
+            agent=None, match=None, redo=False, profile=None, rebaseline=False))
+        synthesis.check_preconditions()
+        self.assertEqual(synthesis.campaign_result, "PANIC (tests)")
+
+    def test_a_failed_build_is_not_repaired(self):
+        self.build_code = 101
+        code, out = self.campaign()
+        self.assertEqual(code, 3)
+        self.assertEqual(self.commands, ["check -p"])
+        self.assertIn("statelens: result     BUILD FAILED", out)
+        self.assertIn("a bare campaign runs no repair agent", out)
+        self.assertEqual(self.forbidden, [])
+
+    def test_stop_after_materialize_and_the_refusals(self):
+        code, out = self.campaign("--stop-after", "materialize")
+        self.assertEqual(code, 0, out)
+        self.assertIn("statelens: result     STOPPED after materialize", out)
+        self.assertEqual(self.commands, [])
+        self.assertTrue((self.repo / "statelens/campaign/instrumentation.diff").is_file())
+        shutil.rmtree(self.repo / "statelens/campaign")
+        for args, message in (
+            (["--invariants", "INV-0001"], "error: --bare binds nothing; drop --invariants"),
+            (["--profile", "qmdb"], "error: --bare prepares a checkout for Target-State "
+                                    "Synthesis, which refuses the qmdb profile; use simplex "
+                                    "or marshal"),
+            (["--stop-after", "index"], "error: --bare skips the index step; stop after "
+                                        "materialize or build"),
+            (["--stop-after", "instrument"], "error: --bare skips the instrument step; stop "
+                                             "after materialize or build"),
+        ):
+            self.said.clear()
+            code, out = self.campaign(*args)
+            self.assertEqual((code, out, self.said), (1, "", [message]), args)
+            self.assertFalse((self.repo / "statelens/campaign").exists(), args)
+
+
 class JustfileProfiles(unittest.TestCase):
     """`just fuzz` and `just run` decide by name which profile and which package a
     target belongs to, so each profile must be known to both recipes."""
@@ -5207,12 +5391,15 @@ class JustfileProfiles(unittest.TestCase):
         self.assertIn("a scaffold per target-state card and base", usage)
         self.assertIn("one scaffold per card and base", self.recipe("fuzz"))
 
-    def test_campaign_and_fuzz_take_an_invariant_list(self):
+    def test_campaign_and_fuzz_take_an_invariant_list_and_bare(self):
         for name in ("campaign", "fuzz"):
             usage = self.TEXT.split(f"\n{name} ", 1)[0].rsplit("\n# ", 1)[1]
             self.assertIn("[--invariants LIST]...", usage, name)
+            self.assertIn("[--bare]", usage, name)
+        self.assertIn("[--states-reaching-only]", self.TEXT.split("\nfuzz ", 1)[0])
         self.assertIn(
-            'just campaign --profile "$profile" ${invariants[@]+"${invariants[@]}"}',
+            'just campaign --profile "$profile" ${bare[@]+"${bare[@]}"} '
+            '${invariants[@]+"${invariants[@]}"}',
             self.recipe("fuzz"),
         )
 
@@ -5580,6 +5767,62 @@ class FuzzRecipe(unittest.TestCase):
             self.assertEqual((code, calls), (1, []), args)
             self.assertIn("just fuzz: --rebaseline goes to synthesis; it needs --state-reaching, "
                           "without --skip-synthesis", err, args)
+
+    def test_bare_goes_to_the_campaign_and_the_only_flag_is_state_reaching_bare(self):
+        args = ["--state-targets", "TS-0009", "--fuzz-targets", "simplex_cert_mock"]
+        built = self.lines(["simplex_cert_mock_ts0009_statelens"])
+        code, calls, err = self.fuzz("simplex", "--tmux", "--state-reaching", "--bare", *args,
+                                     after=built)
+        self.assertEqual(code, 0, err)
+        matches = "--match TS-0009 --match simplex_cert_mock"
+        listing = f"python3 scripts/statelens.py targets --profile simplex --state-reaching {matches}"
+        self.assertEqual(calls[:5], [
+            listing,
+            "just campaign --profile simplex --bare",
+            f"python3 scripts/statelens.py synthesize --profile simplex {matches}",
+            listing,
+            "tmux has-session -t statelens-simplex-reach",
+        ])
+        self.assertIn("just run 'simplex_cert_mock_ts0009_statelens' ;", calls[5])
+        # Both spellings make the same calls, in any position among the flags.
+        for flag in ("--states-reaching-only", "--state-reaching-only"):
+            self.assertEqual(self.fuzz("simplex", "--tmux", flag, *args, after=built),
+                             (code, calls, err), flag)
+            self.assertEqual(self.fuzz("simplex", *args, "--tmux", flag, after=built),
+                             (code, calls, err), flag)
+        # The marshal profile, sequentially, with libFuzzer's arguments.
+        code, calls, err = self.fuzz("marshal", "--states-reaching-only", "--", "-runs=1",
+                                     after=self.lines(["marshal_x_ts0001_statelens"]))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(calls[1:], [
+            "just campaign --profile marshal --bare",
+            "python3 scripts/statelens.py synthesize --profile marshal",
+            "python3 scripts/statelens.py targets --profile marshal --state-reaching",
+            "just run marshal_x_ts0001_statelens -- -runs=1",
+        ])
+
+    def test_bare_needs_state_reaching_and_a_campaign_without_invariants(self):
+        for args, message in (
+            (["simplex", "--bare"], "--bare needs --state-reaching; a bare campaign's variants "
+                                    "carry no probe or invariant"),
+            (["simplex", "--tmux", "--bare", "--skip-campaign"], "--bare needs --state-reaching"),
+            (["simplex", "--state-reaching", "--bare", "--skip-campaign"],
+             "--bare runs a bare campaign; drop --skip-campaign"),
+            (["simplex", "--states-reaching-only", "--skip-campaign"],
+             "--states-reaching-only runs a bare campaign; drop --skip-campaign"),
+            (["simplex", "--state-reaching", "--bare", "--invariants", "INV-0001"],
+             "--bare runs a bare campaign, which binds nothing; drop --invariants"),
+            (["simplex", "--state-reaching-only", "--invariants=INV-0001"],
+             "--state-reaching-only runs a bare campaign, which binds nothing; drop --invariants"),
+            (["qmdb", "--states-reaching-only"],
+             "--state-reaching takes simplex or marshal; qmdb has no target states"),
+            (["simplex_cert_mock", "--state-reaching-only"],
+             "--state-reaching narrows a profile; name simplex or marshal"),
+            (["simplex_cert_mock_statelens", "--bare"], "--bare needs --state-reaching"),
+        ):
+            code, calls, err = self.fuzz(*args)
+            self.assertEqual((code, calls), (1, []), args)
+            self.assertIn(f"just fuzz: {message}", err, args)
 
     def test_the_drifted_checkout_command_opens_a_window_per_built_scaffold(self):
         # The command that failed on a finished checkout an upstream fix was merged into,
@@ -7268,6 +7511,24 @@ class Synthesize(unittest.TestCase):
         self.assertEqual(self.read("consensus/src/simplex/voter.rs"), VOTER)
         self.assertNotIn("pub mod ts0004_simplex_a;", self.read(
             "consensus/fuzz/simplex/src/target_states/mod.rs"))
+
+    def test_a_bare_campaign_gives_no_label_and_rules_out_intrinsic_witnesses(self):
+        # What `campaign --bare` leaves (SPEC section 7.14): no probe, no invariant, a plan
+        # that says nothing is bound, and the materialized hooks in instrumentation.diff.
+        self.put("consensus/src/simplex/voter.rs", VOTER_BASE)
+        self.put("statelens/campaign/instrumentation.diff", self.run_git("diff"))
+        self.put("statelens/campaign/meta.json", json.dumps(
+            dict(self.meta, agent=None, bare=True, invariants=[], invariants_available=0)))
+        self.put("statelens/campaign/plan.md",
+                 sl.BARE_PLAN_TEMPLATE.format(base=self.base, profile="simplex"))
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize(), 0, self.said)
+        self.assertIn("campaign   bare: no probe label or invariant, so no intrinsic witness",
+                      self.said)
+        self.assertIn("\n\n" + sl.BARE_LABELS + "\n\n", self.prompts[0])
+        self.assertNotIn("`voter.vote`", self.prompts[0])
+        # Everything else is unchanged: the guards, the continuation and the verdict.
+        self.assertEqual(self.line(), "TS-0004    REACHED 4/4   simplex_a_ts0004_statelens")
 
     def test_a_scaffold_is_built_replayed_kept_and_reported(self):
         self.steps = [self.write_scaffold()]

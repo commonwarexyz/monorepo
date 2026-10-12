@@ -507,6 +507,28 @@ PLAN_TEMPLATE = """\
 |---|---|---|---|---|
 """
 
+# The plan of a bare campaign (SPEC section 7.14): nothing is bound, so there is nothing to
+# list, and the plan lint does not run on it.
+BARE_PLAN_TEMPLATE = """\
+# StateLens instrumentation plan
+
+- Base commit: {base}
+- Profile: {profile}
+- Campaign: bare
+
+Nothing is bound. A bare campaign (`just campaign --bare`) binds no invariant and adds no
+assertion, probe or beacon: it materialized the runtime module with its read side, the
+fresh-run and set_compromised hooks and the StateLens variants, built them and ran the test
+gate. A synthesis on this checkout has no probe label, so no witness can be intrinsic.
+"""
+
+# The LABELS value of a synthesis on a bare campaign (SPEC section 18.6.2).
+BARE_LABELS = (
+    "none: the campaign was bare (`just campaign --bare`), so it bound no invariant and "
+    "installed no probe; `seen` finds no observation and no `intrinsic` witness is possible: "
+    "witness every line with `exact` or `construction` witnesses"
+)
+
 # The tools a campaign runs besides the agent CLI (SPEC section 5.2).
 CAMPAIGN_TOOLS = ("cargo", "cargo-nextest", "cargo-fuzz", "just")
 
@@ -4902,6 +4924,8 @@ def cmd_coverage(args):
 
     out.mkdir(parents=True, exist_ok=True)
     sources, uninstrumented = coverage_scope(repo, profile)
+    # A bare campaign instrumented nothing, so its figures are of the code as it is.
+    scope = "bare campaign, no probe" if campaign_bare(repo / SL) else "instrumented code"
     profiles, objects = [], []
     for number, target in enumerate(ready, 1):
         say(f"coverage: {target} ({number} of {len(ready)}); replaying its corpus")
@@ -4918,14 +4942,16 @@ def cmd_coverage(args):
             raise Abort(2, f"coverage: {target} produced no profile or binary")
         profiles.append(data)
         objects.append(binary)
-        coverage_report(llvm_cov, out, target, [binary], data, sources, uninstrumented)
+        coverage_report(llvm_cov, out, target, [binary], data, sources, uninstrumented, scope)
 
     if len(objects) > 1:
         say(f"coverage: merging {len(profiles)} profile(s)")
         unified = coverage_dir / "unified.profdata"
         merge = [str(llvm_profdata), "merge", "-sparse"] + [str(path) for path in profiles]
         run_tool(merge + ["-o", str(unified)])
-        coverage_report(llvm_cov, out, "unified", objects, unified, sources, uninstrumented)
+        coverage_report(
+            llvm_cov, out, "unified", objects, unified, sources, uninstrumented, scope
+        )
     say(f"coverage: reports in {out.relative_to(repo)}")
     return 0
 
@@ -4975,7 +5001,9 @@ def run_tool(command, capture=False):
     return done.stdout
 
 
-def coverage_report(llvm_cov, out, name, objects, data, sources, uninstrumented):
+def coverage_report(
+    llvm_cov, out, name, objects, data, sources, uninstrumented, scope="instrumented code"
+):
     """One HTML report and its summaries, for one target or for the merge."""
     # llvm-cov reads the first positional as the main binary, so the rest take
     # `-object`; otherwise a source path is read as a binary.
@@ -5013,7 +5041,7 @@ def coverage_report(llvm_cov, out, name, objects, data, sources, uninstrumented)
             columns = total[0].split()
             say(
                 f"coverage: {name} {subsystem} regions {columns[3]}, "
-                f"functions {columns[6]}, lines {columns[9]} (instrumented code)"
+                f"functions {columns[6]}, lines {columns[9]} ({scope})"
             )
     workspace = run_tool(
         [str(llvm_cov), "report"]
@@ -5093,6 +5121,14 @@ def campaign_profile(sl_dir):
         return json.loads((sl_dir / "campaign" / "meta.json").read_text())["profile"]
     except (OSError, ValueError, KeyError):
         return None
+
+
+def campaign_bare(sl_dir):
+    """Whether the campaign in this checkout was bare (SPEC section 7.14)."""
+    try:
+        return json.loads((sl_dir / "campaign" / "meta.json").read_text()).get("bare") is True
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def campaign_invariants(sl_dir):
@@ -5787,6 +5823,9 @@ def cmd_lint_plan(args):
     profile = args.profile or recorded or "simplex"
     if profile not in PROFILES:
         raise Abort(1, f"campaign/meta.json names an unknown profile {profile!r}; pass --profile")
+    if not args.paths and profile == recorded and campaign_bare(sl_dir):
+        say("lint-plan: the campaign was bare and its plan binds nothing; nothing to check")
+        return 0
     paths = [Path(path) for path in args.paths] if args.paths else [repo / PLAN]
     registries = PROFILES[profile]["registries"]
     # A campaign run with `--invariants` has sections for the ids it selected only, so
@@ -7625,8 +7664,23 @@ class Campaign:
     unreviewed = None
     # The `--invariants` lists, when the operator chose what to bind.
     selection = None
+    # `--bare`: materialize, build and test only (SPEC section 7.14).
+    bare = False
 
     def __init__(self, args):
+        self.bare = bool(getattr(args, "bare", False))
+        if self.bare and args.invariants:
+            raise Abort(1, "--bare binds nothing; drop --invariants")
+        if self.bare and not PROFILES[args.profile]["scaffold"]:
+            raise Abort(
+                1,
+                f"--bare prepares a checkout for Target-State Synthesis, which refuses the "
+                f"{args.profile} profile; use simplex or marshal",
+            )
+        if self.bare and args.stop_after in ("index", "instrument"):
+            raise Abort(
+                1, f"--bare skips the {args.stop_after} step; stop after materialize or build"
+            )
         self.repo = repo_root()
         self.sl_dir = self.repo / SL
         self.config = load_config(self.sl_dir)
@@ -7706,6 +7760,8 @@ class Campaign:
             ("build", self.build),
             ("test", self.test_gate),
         )
+        if self.bare:
+            steps = tuple(step for step in steps if step[0] not in ("index", "instrument"))
         try:
             self.check_preconditions()
             self.setup()
@@ -7730,8 +7786,17 @@ class Campaign:
         rows = [("checkout", self.repo)]
         if self.base:
             rows.append(("base", self.base))
-        rows.append(("agent", self.agent))
+        rows.append(("agent", "none (bare campaign)" if self.bare else self.agent))
         rows.append(("profile", self.profile_name))
+        if self.bare:
+            rows.append(("invariants", "none (bare campaign)"))
+            rows.append(
+                (
+                    "coverage",
+                    "bare: nothing is bound (no invariant, assertion, probe or beacon); the "
+                    "targets carry the runtime, the hooks and the variants only",
+                )
+            )
         if self.statuses is not None:
             counts = collections.Counter(self.statuses.values())
             rows.append(
@@ -7845,8 +7910,10 @@ class Campaign:
     # Section 7.1.
 
     def check_preconditions(self):
-        # Checked first, so a missing tool fails before any agent time is spent.
-        check_agent_cli(self.agent)
+        # Checked first, so a missing tool fails before any agent time is spent. A bare
+        # campaign runs no agent.
+        if not self.bare:
+            check_agent_cli(self.agent)
         for tool in CAMPAIGN_TOOLS:
             if shutil.which(tool) is None:
                 raise Abort(2, f"{tool} is not on PATH; see the prerequisites in README.md")
@@ -7882,6 +7949,8 @@ class Campaign:
         (self.dir / "logs").mkdir(parents=True)
         (self.dir / "prompts").mkdir()
         self.initialized = True
+        if self.bare:
+            return self.setup_bare()
         with_false = os.environ.get("STATELENS_FALSE_INVARIANTS") == "1"
         self.invariants = []
         checked = []
@@ -7956,6 +8025,33 @@ class Campaign:
             f"{len(self.targets)} target(s) at {self.base[:10]} with {self.agent}"
         )
 
+    def setup_bare(self):
+        """Section 7.14: no invariant, knowledge base or search index; a record that says
+        nothing is bound."""
+        self.targets = profile_targets(self.repo, self.profile_name)
+        meta = {
+            "base": self.base,
+            "agent": None,
+            "model": None,
+            "effort": None,
+            "profile": self.profile_name,
+            "test_toolchain": self.test_toolchain,
+            "fuzz_toolchain": self.fuzz_toolchain,
+            "started": utc_now().isoformat(timespec="seconds"),
+            "bare": True,
+            "invariants": [],
+            "invariants_available": 0,
+            "targets": self.targets,
+        }
+        (self.dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+        (self.dir / "plan.md").write_text(
+            BARE_PLAN_TEMPLATE.format(base=self.base, profile=self.profile_name)
+        )
+        say(
+            f"campaign: profile {self.profile_name}, bare (nothing bound), "
+            f"{len(self.targets)} target(s) at {self.base[:10]}"
+        )
+
     # Section 7.2 and section 8.3, edits M1 to M3.
 
     def code_index(self):
@@ -7989,6 +8085,9 @@ class Campaign:
         }.get(self.profile_name, [])
         parts = ["runtime module", f"{len(edits.targets)} StateLens variant(s)"] + hooks
         say(f"materialize: {', '.join(parts)} and fresh-run hook are in place")
+        if self.bare:
+            # No record step follows, and synthesis's guard 3 keeps the hooks this diff adds.
+            (self.dir / "instrumentation.diff").write_text(git(self.repo, "diff"))
 
     def snapshot(self):
         """Hashes every path that `git status` reports (SPEC section 7.2).
@@ -8359,6 +8458,16 @@ class Campaign:
         return compose(self.sl_dir, "instrument.md", "repair.md", values)
 
     def build(self):
+        if self.bare:
+            failure = self.build_once(0)
+            if failure is not None:
+                raise Abort(
+                    3,
+                    f"the materialized tree does not build ({failure[0]}); a bare campaign "
+                    "runs no repair agent; see campaign/logs/",
+                )
+            say("build: the materialized tree builds")
+            return
         for attempt in range(REPAIR_ATTEMPTS + 1):
             failure = self.build_once(attempt)
             if failure is None:
@@ -8918,6 +9027,9 @@ def remove_bin_blocks(text, names):
 class Synthesis:
     """Target-State Synthesis (SPEC section 18.6), on the checkout a campaign instrumented."""
 
+    # Whether that campaign was bare (SPEC section 7.14): no probe label, no intrinsic witness.
+    bare = False
+
     def __init__(self, args):
         self.repo = repo_root()
         self.sl_dir = self.repo / SL
@@ -8962,6 +9074,7 @@ class Synthesis:
         # Guard 2: the files the script owns whole.
         self.owned = (self.manifest, "Cargo.lock", self.mod_rs)
         self.base = self.meta.get("base") or ""
+        self.bare = self.meta.get("bare") is True
         self.fuzz_toolchain = self.meta.get("fuzz_toolchain") or pinned_nightly(self.repo)
         self.test_toolchain = self.meta.get("test_toolchain") or ""
         self.runtime_path = (
@@ -9921,6 +10034,8 @@ class Synthesis:
         return "\n".join(out)
 
     def labels_text(self):
+        if self.bare:
+            return BARE_LABELS
         if not self.labels:
             return "(none: the campaign installed no probe)"
         return "\n".join(f"- `{label}` at {where}" for label, where in self.labels)
@@ -11205,6 +11320,8 @@ class Synthesis:
         if lint_paths(cards, registry_files(self.sl_dir)):
             raise Abort(2, "a selected card has lint problems (above); fix them before synthesis")
         say(f"{'cards':<10} {selection.tracked} tracked, {selection.local} local")
+        if self.bare:
+            say(f"{'campaign':<10} bare: no probe label or invariant, so no intrinsic witness")
         self.run_state = worktree_state(self.repo)
         self.reach.mkdir(parents=True, exist_ok=True)
         self.load_baseline()
@@ -11384,7 +11501,7 @@ class Synthesis:
         self.load_standing()
         self.declare()
         self.empty.write_bytes(b"")
-        self.labels = campaign_labels(self.repo, self.profile_name)
+        self.labels = [] if self.bare else campaign_labels(self.repo, self.profile_name)
         # Before any pair, whatever is selected: an earlier synthesis's included.
         self.revalidate_owed()
         outcomes = []
@@ -11814,6 +11931,14 @@ def main(argv):
         help=(
             "bind only these invariants: comma-separated <registry>/INV-NNNN ids, or bare "
             "INV-NNNN ids when the profile binds one registry (repeatable)"
+        ),
+    )
+    campaign.add_argument(
+        "--bare",
+        action="store_true",
+        help=(
+            "materialize, build and test only: bind no invariant and add no probe or beacon, "
+            "for Target-State Synthesis (simplex or marshal; no agent runs)"
         ),
     )
     campaign.add_argument("--stop-after", choices=STOP_STEPS, help="stop after this step")

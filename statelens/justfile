@@ -10,7 +10,7 @@ extract-invariants *args:
 extract-states *args:
     python3 scripts/statelens.py extract --states "$@"
 
-# Instrument this checkout and build the StateLens targets: just campaign [--agent A] [--profile P] [--invariants LIST]...
+# Instrument this checkout and build the StateLens targets: just campaign [--agent A] [--profile P] [--invariants LIST]... [--bare]
 campaign *args:
     python3 scripts/statelens.py campaign "$@"
 
@@ -40,7 +40,7 @@ run target *args:
         cd ../consensus/fuzz && just run "$@" ;;
     esac
 
-# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--fuzz-targets GLOB]... [--state-targets GLOB]... [--invariants LIST]... [--skip-campaign] [--skip-synthesis] [--rebaseline] [--parallel] [--tmux] [--state-reaching] [-- -fork=8]
+# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--fuzz-targets GLOB]... [--state-targets GLOB]... [--invariants LIST]... [--skip-campaign] [--skip-synthesis] [--rebaseline] [--parallel] [--tmux] [--state-reaching] [--bare] [--states-reaching-only] [-- -fork=8]
 fuzz target *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -67,6 +67,11 @@ fuzz target *args:
     # and revalidate every scaffold (synthesize --rebaseline).
     # --invariants LIST goes to the campaign, which binds only the invariants it
     # names, so it needs a campaign and a profile.
+    # --bare goes to the campaign, which then binds nothing and runs no agent: the
+    # runtime, the hooks and the variants are what a synthesis needs. It needs
+    # --state-reaching, since a bare campaign's variants carry no probe or invariant
+    # to fuzz for, and a campaign, so --skip-campaign and --invariants refuse it.
+    # --states-reaching-only, or --state-reaching-only, is --state-reaching --bare.
     # Both pattern flags reach the listing and the synthesis as --match, whose one
     # rule they split: a TS-NNNN pattern names a card, any other a fuzz target.
     fuzz_targets() {
@@ -92,6 +97,8 @@ fuzz target *args:
     campaign=yes
     synthesis=yes
     rebaseline=()
+    bare=()
+    bare_flag=
     narrowed=no
     cards=no
     reaching=no
@@ -106,6 +113,9 @@ fuzz target *args:
         --parallel|--parallels) parallel=yes; shift ;;
         --tmux)                 parallel=yes; windows=yes; shift ;;
         --state-reaching)       reaching=yes; shift ;;
+        --bare)                 bare=(--bare); bare_flag="$1"; shift ;;
+        --states-reaching-only|--state-reaching-only)
+                                reaching=yes; bare=(--bare); bare_flag="$1"; shift ;;
         --fuzz-targets=*)       fuzz_targets "${1#--fuzz-targets=}"; shift ;;
         --fuzz-targets)         [ $# -ge 2 ] || { echo "just fuzz: --fuzz-targets needs a pattern" >&2; exit 1; }
                                 fuzz_targets "$2"; shift 2 ;;
@@ -163,6 +173,18 @@ fuzz target *args:
         echo "just fuzz: --invariants selects what a campaign binds; name simplex, marshal or qmdb" >&2
         exit 1
     fi
+    if [ "${#bare[@]}" -gt 0 ] && [ "$reaching" = no ]; then
+        echo "just fuzz: --bare needs --state-reaching; a bare campaign's variants carry no probe or invariant" >&2
+        exit 1
+    fi
+    if [ "${#bare[@]}" -gt 0 ] && [ "$campaign" = no ]; then
+        echo "just fuzz: $bare_flag runs a bare campaign; drop --skip-campaign" >&2
+        exit 1
+    fi
+    if [ "${#bare[@]}" -gt 0 ] && [ "$selected" = yes ]; then
+        echo "just fuzz: $bare_flag runs a bare campaign, which binds nothing; drop --invariants" >&2
+        exit 1
+    fi
     # The targets are listed before the campaign runs, so that a pattern naming
     # none fails at once rather than after it; with --state-reaching, so do a
     # selection of no card and a selected card with a lint problem. A read loop,
@@ -187,7 +209,7 @@ fuzz target *args:
         list
     fi
     if [ "$campaign" = yes ]; then
-        just campaign --profile "$profile" ${invariants[@]+"${invariants[@]}"}
+        just campaign --profile "$profile" ${bare[@]+"${bare[@]}"} ${invariants[@]+"${invariants[@]}"}
     fi
     if [ "$every" = no ]; then
         just run "$target" "$@"
