@@ -12,15 +12,14 @@
 //! # Lifecycle
 //!
 //! A [`Runnable`] is the reference that entitles its holder to poll the task
-//! once. It waits in a pool worker's ready queue or in the pool's global
-//! queue, and a task has at most one. Only a runnable polls or
-//! schedules its task, so a cloned [`Task`] cannot manufacture queued work. A
-//! wake publishes a runnable only when the task has none, so duplicate wakes
-//! coalesce. A wake that arrives during a poll is recorded in the state, and
-//! the poll hands its runnable back only if it returns pending. That runnable
-//! joins the tail of the ready queue, so a self-waking task cannot skip other
-//! ready work. Completion is terminal, so a late wake of a finished task is a
-//! no-op.
+//! once. It waits in a pool worker's run queue or in the pool's global queue,
+//! and a task has at most one. Only a runnable polls or schedules its task, so
+//! a cloned [`Task`] cannot manufacture queued work. A wake publishes a
+//! runnable only when the task has none, so duplicate wakes coalesce. A wake
+//! that arrives during a poll is recorded in the state, and the poll hands its
+//! runnable back only if it returns pending. That runnable joins the tail of
+//! the run queue, so a self-waking task cannot skip other ready work.
+//! Completion is terminal, so a late wake of a finished task is a no-op.
 //!
 //! ```text
 //! Wakers, from any thread (`notify_by_ref`, `notify_by_value`):
@@ -57,23 +56,25 @@
 //! reference runs no user code. A stale waker keeps the cell's allocation, not
 //! its future, alive.
 //!
-//! A task runs wherever it is woken. A wake that publishes a runnable queues it
-//! on the waking worker when that worker belongs to the task's pool and is not
-//! closing, and pushes it into the pool's global queue otherwise, which any
-//! worker takes from. A wake during a poll leaves the requeue to the poller, on
-//! the poller's worker. A new task's first runnable stays on its spawning
-//! worker when that worker has nothing else queued or is its pool's only
-//! worker.
+//! A wake decides where a task is first queued, not where it runs. A wake that
+//! publishes a runnable queues it on the waking worker when that worker belongs
+//! to the task's pool and is not closing, and pushes it into the pool's global
+//! queue otherwise, which any worker takes from. A wake during a poll leaves
+//! the requeue to the poller, on the poller's worker. A new task's first
+//! runnable stays on its spawning worker when that worker has nothing else
+//! queued or is its pool's only worker. A runnable queued on a worker can still
+//! move before it runs: an overflow of that worker's run queue sends it to the
+//! global queue.
 
 use super::{
     mailbox::{Mailbox, Message},
     pool::Pool,
+    queue::{Owner, Push},
     runtime::{Local, Panics},
     tasks::{Links, Tasks},
 };
 use crossbeam_utils::CachePadded;
 use std::{
-    collections::VecDeque,
     future::Future,
     marker::PhantomData,
     mem::{self, ManuallyDrop},
@@ -97,7 +98,10 @@ cfg_if::cfg_if! {
         /// loom builds.
         #[derive(Default)]
         #[repr(transparent)]
-        pub struct UnsafeCell<T>(std::cell::UnsafeCell<T>);
+        pub struct UnsafeCell<T>(
+            /// Interior value used when loom access tracking is disabled.
+            std::cell::UnsafeCell<T>,
+        );
 
         impl<T> UnsafeCell<T> {
             /// Wrap `value`.
@@ -189,7 +193,10 @@ enum AfterWake {
 /// Transitions exchange with acquire-release ordering, so writes made before a
 /// wake are visible to the poll it causes, and a poll's writes are visible to
 /// the next poll and to teardown.
-struct State(AtomicUsize);
+struct State(
+    /// Lifecycle, cancellation flag, and counted references packed into one word.
+    AtomicUsize,
+);
 
 impl State {
     /// State of a new task whose first poll is queued, holding two references:
@@ -619,7 +626,10 @@ impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
 ///
 /// Task set entries are `Task`s, and a [`Runnable`] wraps one. Dropping the
 /// last reference frees the cell, whose future must already be gone.
-pub struct Task(NonNull<Header>);
+pub struct Task(
+    /// Header pointer with the allocation's provenance and one counted reference.
+    NonNull<Header>,
+);
 
 // SAFETY: `Task::new` requires `F: Send`, and the header (including its
 // `Weak<Pool>`) is `Send + Sync`. Only the thread that wins the running
@@ -785,12 +795,17 @@ impl Task {
 /// clear the task: the closed task set's, which teardown drains, or the
 /// [`Task`] a refused registration returns to its caller.
 #[must_use = "a runnable must be spawned, scheduled, polled, or discarded"]
-pub struct Runnable(Task);
+pub struct Runnable(
+    /// Task reference carrying the exclusive right to start its next poll.
+    Task,
+);
 
 impl Runnable {
-    /// Deliver a woken task's runnable: to the current worker's ready queue
+    /// Deliver a woken task's runnable: to the current worker's run queue
     /// when that worker belongs to the task's pool and is not closing,
-    /// otherwise to the pool's global queue.
+    /// otherwise to the pool's global queue. Local delivery can export the
+    /// runnable through overflow (see [`Pool::enqueue`]). The caller must hold
+    /// no Local borrow, since scheduling can borrow the current worker.
     pub fn schedule(self) {
         // Polls and destructors run without the local borrow, so a wake from
         // inside one can take it here. A closing worker polls nothing more,
@@ -799,7 +814,7 @@ impl Runnable {
         let owner = self.0.owner;
         let refused = Local::with_current(|local| match local {
             Some(local) if local.serves(owner) => {
-                local.ready.push(self);
+                local.enqueue(self);
                 None
             }
             _ => Some(self),
@@ -813,14 +828,15 @@ impl Runnable {
     /// Deliver a new task's first runnable. A worker of the task's pool that
     /// is not closing keeps it when it has nothing else queued or is the pool's
     /// only worker. Otherwise it goes to the global queue, which wakes a parked
-    /// worker to start it.
+    /// worker to start it. Even local delivery can export overflow through
+    /// [`Pool::enqueue`]. The caller must hold no Local borrow.
     pub fn spawn(self) {
         let owner = self.0.owner;
         let refused = Local::with_current(|local| match local {
             Some(local)
-                if local.serves(owner) && (local.ready.is_empty() || local.workers() == 1) =>
+                if local.serves(owner) && (local.ready().is_empty() || local.workers() == 1) =>
             {
-                local.ready.push(self);
+                local.enqueue(self);
                 None
             }
             _ => Some(self),
@@ -1048,38 +1064,64 @@ impl Wake for RootWaker {
     }
 }
 
-/// One worker's ready queue of runnables, touched only by that worker.
-#[derive(Default)]
+/// One pool worker's run queue: the [`Owner`] of a bounded [`Ring`] in the
+/// pool, which only that worker pushes into and pops from.
+///
+/// [`Ring`]: super::queue::Ring
 pub struct Ready {
     /// Runnables in FIFO order.
-    runnables: VecDeque<Runnable>,
+    ring: Owner<Runnable>,
 }
 
 impl Ready {
-    /// Queue a runnable.
+    /// A run queue over its unique owner.
+    pub const fn new(ring: Owner<Runnable>) -> Self {
+        Self { ring }
+    }
+
+    /// Queue a runnable at the tail. A full run queue hands back what it cannot
+    /// hold: its newest half and the runnable, or only the runnable while a
+    /// claim is held on it.
     #[inline]
-    pub fn push(&mut self, runnable: Runnable) {
-        self.runnables.push_back(runnable);
+    pub fn push(&mut self, runnable: Runnable) -> Push<'_, Runnable> {
+        self.ring.push(runnable)
+    }
+
+    /// Queue runnables at the tail with one publication. Panics if they exceed
+    /// [`Self::room`] or the iterator misreports its length.
+    pub fn push_batch(&mut self, runnables: impl ExactSizeIterator<Item = Runnable>) {
+        self.ring.push_batch(runnables);
     }
 
     /// Take the oldest runnable.
     #[inline]
     #[must_use]
     pub fn pop(&mut self) -> Option<Runnable> {
-        self.runnables.pop_front()
+        self.ring.pop()
+    }
+
+    /// Number of runnables queued.
+    pub fn len(&self) -> usize {
+        self.ring.len()
+    }
+
+    /// Slots free for pushes. A pending claim holds its slots, and those this
+    /// worker popped past it, until it is released.
+    pub fn room(&self) -> usize {
+        self.ring.room()
     }
 
     /// Whether no runnable is queued.
     pub fn is_empty(&self) -> bool {
-        self.runnables.is_empty()
+        self.ring.is_empty()
     }
 
     /// Discard every runnable at teardown.
     ///
-    /// The closed task set retains each runnable's task, so discarding them
-    /// loses nothing and runs no user code.
+    /// The task set is closed, so teardown clears each runnable's task or
+    /// already has. Releasing these references runs no user code.
     pub fn discard(&mut self) {
-        for runnable in self.runnables.drain(..) {
+        while let Some(runnable) = self.ring.pop() {
             runnable.discard();
         }
     }
@@ -1089,7 +1131,7 @@ impl Ready {
 #[commonware_macros::test_group("miri")]
 pub mod tests {
     use super::*;
-    use crate::utils::extract_panic_message;
+    use crate::{iouring::queue::Ring, utils::extract_panic_message};
     use commonware_utils::sync::Mutex;
     use std::{
         future::{pending, poll_fn},
@@ -1104,7 +1146,10 @@ pub mod tests {
     };
 
     /// Record when a task's captured state is destroyed.
-    struct DropCount(Arc<AtomicUsize>);
+    struct DropCount(
+        /// Destruction count shared with the test's observer.
+        Arc<AtomicUsize>,
+    );
 
     impl Drop for DropCount {
         fn drop(&mut self) {
@@ -1114,7 +1159,9 @@ pub mod tests {
 
     /// Future whose destructor records its invocation and panics.
     struct PanicsOnDrop {
+        /// Whether its first poll completes or leaves disposal to teardown.
         complete: bool,
+        /// Number of times the destructor was invoked.
         drops: Arc<AtomicUsize>,
     }
 
@@ -1140,8 +1187,11 @@ pub mod tests {
     /// Future that keeps its own waker and wakes it when dropped. It finishes
     /// on its first poll when `complete` is set.
     struct WakesOnDrop {
+        /// Task waker retained for the destructor's wake.
         waker: Option<Waker>,
+        /// Whether its first poll completes.
         complete: bool,
+        /// Count destruction of the future's captured state.
         _drops: DropCount,
     }
 
@@ -1168,8 +1218,11 @@ pub mod tests {
 
     /// Future that wakes itself `wakes` times per poll and finishes after `polls`.
     struct SelfWaker {
+        /// Notifications issued during each poll.
         wakes: usize,
+        /// Polls remaining before completion.
         polls: usize,
+        /// Count destruction of the future's captured state.
         _drops: DropCount,
     }
 
@@ -1199,6 +1252,7 @@ pub mod tests {
         remaining: AtomicUsize,
         /// Addresses seen by each poll, then by the destructor.
         addresses: Arc<Mutex<Vec<usize>>>,
+        /// Prevent moving the future after pinning.
         _pinned: PhantomPinned,
     }
 
@@ -1227,6 +1281,21 @@ pub mod tests {
         Arc::new(Pool::new(vec![Arc::new(Mailbox::new().unwrap())]))
     }
 
+    impl Ready {
+        /// A run queue over a ring of its own, which no pool reads.
+        pub fn private() -> Self {
+            Self::new(Ring::shared().owner())
+        }
+    }
+
+    /// Queue `runnable` in `ready`, which must have room for it.
+    pub fn queue(ready: &mut Ready, runnable: Runnable) {
+        match ready.push(runnable) {
+            Push::Pushed => {}
+            Push::Overflow(..) | Push::Claimed(_) => panic!("no room in the ring"),
+        }
+    }
+
     /// Retain a task of `pool` in `set` and queue its first runnable in
     /// `ready`, returning the caller's own reference.
     fn insert(
@@ -1237,7 +1306,7 @@ pub mod tests {
     ) -> Task {
         let (task, runnable) = Task::new(future, set, Arc::downgrade(pool));
         assert!(set.insert(task.clone()).is_ok());
-        ready.push(runnable);
+        queue(ready, runnable);
         task
     }
 
@@ -1273,6 +1342,7 @@ pub mod tests {
     /// header, and the trailer take exactly one unit.
     #[test]
     fn test_cell_is_aligned_as_a_whole() {
+        /// Task cell carrying a minimal pending future.
         type Small = Cell<std::future::Pending<()>>;
         assert!(std::mem::size_of::<Header>() <= 64);
         let unit = std::mem::align_of::<CachePadded<()>>();
@@ -1286,6 +1356,7 @@ pub mod tests {
     /// smaller than, larger than, and aligned beyond the header.
     #[test]
     fn test_links_follow_the_future() {
+        /// Check that this future's trailer offset reaches its own links.
         fn check<F: Future<Output = ()> + Send + 'static>(future: F) {
             let set = Tasks::new(1);
             let (task, runnable) = Task::new(future, &set, Weak::new());
@@ -1320,6 +1391,7 @@ pub mod tests {
     /// The shared header, including its pool handle, can cross threads.
     #[test]
     fn test_header_is_send_sync() {
+        /// Require the type to move and share safely between threads.
         fn assert_send_sync<T: Send + Sync>() {}
 
         assert_send_sync::<Header>();
@@ -1422,7 +1494,7 @@ pub mod tests {
     fn test_foreign_wakes_coalesce_into_one_runnable() {
         let pool = pool();
         let set = Tasks::new(1);
-        let mut ready = Ready::default();
+        let mut ready = Ready::private();
         let task = insert(&set, &mut ready, &pool, pending());
         assert!(matches!(
             ready.pop().unwrap().poll(set.id()),
@@ -1445,7 +1517,7 @@ pub mod tests {
         assert_eq!(runnables.len(), 1);
 
         // The runnable polls the task again, which leaves it idle once more.
-        ready.push(runnables.pop().unwrap());
+        queue(&mut ready, runnables.pop().unwrap());
         assert!(matches!(
             ready.pop().unwrap().poll(set.id()),
             AfterPoll::Done
@@ -1477,7 +1549,7 @@ pub mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         let pool = pool();
         let set = Tasks::new(1);
-        let mut ready = Ready::default();
+        let mut ready = Ready::private();
         let task = insert(
             &set,
             &mut ready,
@@ -1514,7 +1586,7 @@ pub mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         let pool = pool();
         let set = Tasks::new(1);
-        let mut ready = Ready::default();
+        let mut ready = Ready::private();
         let guard = DropCount(drops.clone());
         let first = insert(&set, &mut ready, &pool, async move {
             let _guard = guard;
@@ -1607,7 +1679,7 @@ pub mod tests {
     #[test]
     fn test_wake_to_a_closed_or_dropped_pool_discards_its_runnable() {
         let set = Tasks::new(1);
-        let mut ready = Ready::default();
+        let mut ready = Ready::private();
         let closed = pool();
         let dropped = pool();
         let first = insert(&set, &mut ready, &closed, pending());
@@ -1642,7 +1714,7 @@ pub mod tests {
             let drops = Arc::new(AtomicUsize::new(0));
             let pool = pool();
             let set = Tasks::new(1);
-            let mut ready = Ready::default();
+            let mut ready = Ready::private();
             let task = insert(
                 &set,
                 &mut ready,
@@ -1673,7 +1745,7 @@ pub mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         let pool = pool();
         let set = Tasks::new(1);
-        let mut ready = Ready::default();
+        let mut ready = Ready::private();
         let handles = [(); 3].map(|_| {
             let guard = DropCount(drops.clone());
             insert(&set, &mut ready, &pool, async move {
@@ -1683,7 +1755,7 @@ pub mod tests {
         });
 
         // Leave one task idle, one queued with its runnable held outside the
-        // worker, and one queued with its runnable still in the ready queue.
+        // worker, and one queued with its runnable still in the run queue.
         assert!(matches!(
             ready.pop().unwrap().poll(set.id()),
             AfterPoll::Done
@@ -1696,7 +1768,7 @@ pub mod tests {
         let mut runnables = scheduled(&pool);
         assert_eq!(runnables.len(), 1);
 
-        // The ready queue's runnable is discarded, and closing and draining
+        // The run queue's runnable is discarded, and closing and draining
         // the set hands out every task. Neither drops a future.
         ready.discard();
         assert!(ready.is_empty());
@@ -1740,7 +1812,7 @@ pub mod tests {
             let drops = Arc::new(AtomicUsize::new(0));
             let pool = pool();
             let set = Tasks::new(1);
-            let mut ready = Ready::default();
+            let mut ready = Ready::private();
 
             // The future clears its own task mid-poll, standing in for
             // teardown on another thread while this one is polling.
@@ -1783,7 +1855,7 @@ pub mod tests {
         let pool = pool();
         let baseline = Arc::weak_count(&pool);
         let set = Tasks::new(1);
-        let mut ready = Ready::default();
+        let mut ready = Ready::private();
         let guard = DropCount(drops.clone());
         let task = insert(&set, &mut ready, &pool, async move {
             let _guard = guard;
@@ -1827,7 +1899,7 @@ pub mod tests {
         let pool = pool();
         let baseline = Arc::weak_count(&pool);
         let set = Tasks::new(1);
-        let mut ready = Ready::default();
+        let mut ready = Ready::private();
         let guard = DropCount(drops.clone());
         let task = insert(&set, &mut ready, &pool, async move {
             let _guard = guard;
@@ -1855,7 +1927,7 @@ pub mod tests {
             let pool = pool();
             let baseline = Arc::weak_count(&pool);
             let set = Tasks::new(1);
-            let mut ready = Ready::default();
+            let mut ready = Ready::private();
             let task = insert(
                 &set,
                 &mut ready,
@@ -1905,7 +1977,7 @@ pub mod tests {
         for complete in [true, false] {
             let pool = pool();
             let set = Tasks::new(1);
-            let mut ready = Ready::default();
+            let mut ready = Ready::private();
             let addresses = Arc::new(Mutex::new(Vec::new()));
             let task = insert(
                 &set,
@@ -1925,7 +1997,7 @@ pub mod tests {
                     AfterPoll::Done
                 ));
                 task.wake_by_ref();
-                ready.push(scheduled(&pool).pop().unwrap());
+                queue(&mut ready, scheduled(&pool).pop().unwrap());
             }
             if complete {
                 // The third poll completes the future, which drops in place.
@@ -1991,7 +2063,10 @@ mod loom_tests {
     }
 
     /// Counts the drops of a future's captured state.
-    struct DropCount(Arc<AtomicUsize>);
+    struct DropCount(
+        /// Destruction count shared with the model's observer.
+        Arc<AtomicUsize>,
+    );
 
     impl Drop for DropCount {
         fn drop(&mut self) {
@@ -2054,7 +2129,7 @@ mod loom_tests {
     }
 
     /// Run pool worker `index` until `tasks` tasks have completed: take from
-    /// its local queue, then a share of the global queue, as `Worker::drive`
+    /// its run queue, then a share of the global queue, as `Worker::drive`
     /// does, and park as a pool worker does when both are empty. A spinning
     /// worker ends its spin on a wake signal and consumes it. The worker that
     /// completes the last task wakes every worker, so none waits forever.
@@ -2066,7 +2141,7 @@ mod loom_tests {
         tasks: usize,
         spin: bool,
     ) {
-        let mut ready = Ready::default();
+        let mut ready = Ready::new(pool.ring(index).owner());
         loop {
             if completed.load(Ordering::Acquire) == tasks {
                 // Anything left is a stale runnable of a completed task.
