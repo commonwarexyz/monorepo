@@ -10292,10 +10292,10 @@ class Synthesis:
             return
         cause = f"{pair.key} changed {', '.join(shared)}"
         # A version that adds only its own module can change a sibling only through items
-        # of that module, which the siblings outside the selection are noted for; one that
-        # edits shared code rechecks every scaffold.
+        # of that module: a sibling that names it is rechecked, the others are noted. One
+        # that edits shared code rechecks every scaffold.
         if set(shared) == {f"{self.states}/{pair.module}.rs"}:
-            others = self.within_selection(others, pair.key, cause, pair.module)
+            others = self.naming(others, pair.key, cause, pair.module)
         else:
             self.widened = True
         if not others:
@@ -10347,32 +10347,31 @@ class Synthesis:
         )
         self.live["step"] = "the finish"
 
-    def within_selection(self, keys, after, cause, module):
-        """The pairs of `keys` this run selected or whose module names `module`, the changed
-        one; each of the others gets a note in its report instead of a revalidation, and a
-        synthesis that selects it rechecks it (section 18.6.2, Finish)."""
-        if self.selected is None:
-            return keys
+    def naming(self, keys, after, cause, module):
+        """The pairs of `keys` whose module names `module`, the only file the kept version
+        changed, so they may use its items; each of the others gets a note in its report
+        instead of a revalidation (section 18.6.2, Finish)."""
 
         def names(key):
             path = self.repo / self.states / f"{self.standing[key]['module']}.rs"
             return path.is_file() and module in path.read_text(errors="replace")
 
-        chosen = [key for key in keys if key in self.selected or names(key)]
+        chosen = [key for key in keys if names(key)]
         skipped = [key for key in keys if key not in chosen]
         for key in skipped:
             entry = self.standing[key]
             entry["report"] = entry["report"].rstrip("\n") + (
                 f"\n\n## Not revalidated after {after}\n\n"
                 f"- Cause: {cause}\n"
-                "- This run did not select the pair; a synthesis that selects it checks it.\n"
+                f"- This scaffold's module does not name {module}; a --redo of the pair "
+                "checks it again.\n"
             )
             (self.reach / f"{key}.md").write_text(entry["report"])
         if skipped:
             shown = ", ".join(skipped[:3]) + (", ..." if len(skipped) > 3 else "")
             say(
-                f"synthesis: {len(skipped)} scaffold(s) outside the selection not revalidated "
-                f"({shown}); their reports say so"
+                f"synthesis: {len(skipped)} scaffold(s) that do not name {module} not "
+                f"revalidated ({shown}); their reports say so"
             )
         return chosen
 

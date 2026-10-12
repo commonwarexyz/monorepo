@@ -79,6 +79,9 @@ fuzz target *args:
     state_targets() {
         case "$1" in
           TS-*) ;;
+          [Tt][Ss][0-9]*|[Tt][Ss]_[0-9]*)
+             echo "just fuzz: --state-targets names cards as TS-NNNN; did you mean TS-${1#[Tt][Ss]}?" | sed 's/TS-_/TS-/' >&2
+             exit 1 ;;
           *) echo "just fuzz: --state-targets names cards (TS-NNNN); a fuzz target is --fuzz-targets $1" >&2
              exit 1 ;;
         esac

@@ -460,11 +460,11 @@ three further attempts. The agent never runs its scaffold; only these replays ju
 
 Each pair costs up to four runs of the agent with their builds and replays, a test gate when
 the kept version edited the profile's code, and, because the modules are public siblings in
-one crate, a build and three replays of the other pairs of the run's selection, the card's
-other pairs included. A version that adds only its own module rechecks only those, and any
-scaffold whose module names it; every other scaffold's report gets a "Not revalidated after"
-note, and a synthesis that selects it checks it. A version that edits shared code, and every
-undo, rechecks every scaffold that stands. The last check builds the selection's scaffolds. Bound it with base patterns: `<base>_tsNNNN` pins a card to one base,
+one crate, a build and three replays of the scaffolds whose module names the new module. A
+version that adds only its own module rechecks only those; every other scaffold's report gets
+a "Not revalidated after" note, and a `--redo` of that pair checks it again. A version that
+edits shared code, and every undo, rechecks every scaffold that stands. The last check builds
+the selection's scaffolds. Bound it with base patterns: `<base>_tsNNNN` pins a card to one base,
 and `--fuzz-targets` does the same for `just fuzz --state-reaching`.
 
 Synthesis never instruments: it adds no probe, assertion or ghost state. The agent may edit the

@@ -959,6 +959,17 @@ considered and left out: with the scoping, a recheck is a few builds. Also fixed
 parser carried a field across a blank `//!` line, so `Missing: none` absorbed the module's
 description into the verdict annotation; a blank header line now ends a field.
 
+## Revision: rechecks only where a module is named (2026-10-12)
+
+The next run selected 10 cards on the 8 twins bases, 80 pairs, and the scoped rule still made
+every kept pair recheck every selected scaffold: after 38 pairs (all REACHED) each pair took
+about 40 minutes and the rest would have taken about two days, so the user stopped it. Now a
+kept version that changes only its own module rechecks only the standing scaffolds whose
+module names it, selected or not, and notes every other ("This scaffold's module does not name
+<module>; a --redo of the pair checks it again."). Shared-code edits and every undo still
+recheck everything. Accepted loss: a sibling changed without being named, through an inherent
+method or trait impl the new module adds to a harness type, is caught only by a `--redo`.
+
 ## Follow-ups (not in this change)
 - Variant `run` lines print `-- -rss_limit_mb=4000 -print_final_stats=1` (statelens.py:5650),
   against the no-flags preference.

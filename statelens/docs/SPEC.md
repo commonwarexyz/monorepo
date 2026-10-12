@@ -623,6 +623,9 @@ fuzz target *args:
     state_targets() {
         case "$1" in
           TS-*) ;;
+          [Tt][Ss][0-9]*|[Tt][Ss]_[0-9]*)
+             echo "just fuzz: --state-targets names cards as TS-NNNN; did you mean TS-${1#[Tt][Ss]}?" | sed 's/TS-_/TS-/' >&2
+             exit 1 ;;
           *) echo "just fuzz: --state-targets names cards (TS-NNNN); a fuzz target is --fuzz-targets $1" >&2
              exit 1 ;;
         esac
@@ -5558,12 +5561,12 @@ version's attempt:
      then, those reports keep the verdicts the restored edits gave them. A kept version always
      changes its module, so a pair revalidates every other scaffold that stands, the card's
      other pairs included; only a pair with none revalidates nothing. When the kept version
-     changed nothing shared but its own module, the revalidation covers only the pairs the run
-     selected and those whose module names the changed one: each other standing scaffold's
-     report gets a section `## Not revalidated after TS-NNNN_<base>` ("- Cause: ...", "- This
-     run did not select the pair; a synthesis that selects it checks it."), the console says
-     "synthesis: <n> scaffold(s) outside the selection not revalidated (...); their reports
-     say so", and a synthesis that selects the pair checks it. A version that edits shared
+     changed nothing shared but its own module, the revalidation covers only the scaffolds
+     whose module names the changed one, since another module can use its items only by
+     naming it: each other standing scaffold's report gets a section `## Not revalidated after
+     TS-NNNN_<base>` ("- Cause: ...", "- This scaffold's module does not name <module>; a
+     --redo of the pair checks it again."), and the console says "synthesis: <n> scaffold(s)
+     that do not name <module> not revalidated (...); their reports say so". A version that edits shared
      code beyond its module, and every undo (`--redo`, the last check, a rollback,
      `--rebaseline`), revalidates every standing scaffold as before. A revalidation directory
      that exists stays as it is,
@@ -6669,13 +6672,12 @@ assertions (`finish` and the scenario's own `assert_eq!`s) can.
   build and three replays of every other scaffold that stands, since a module can use a
   sibling module.
 - A card on b selected bases is b pairs, each with its own attempts, builds, replays and gate,
-  and each kept pair revalidates the other selected pairs, the card's other pairs included,
-  and every standing scaffold when it edited shared code beyond its module: a card on all 20
-  simplex bases (21 targets less Mallory; marshal has 13) costs up to 20 syntheses and
-  20 x 19 revalidation builds with three replays each. A scaffold outside the selection whose
-  module neither the selection's pairs touch nor names a changed module is only noted, so a
-  change that reaches it through an inherent method or a trait impl a new module adds to a
-  harness type is found only when a synthesis selects it. `--fuzz-targets`, or `<base>_tsNNNN` patterns
+  and a kept pair that changed only its own module revalidates only the scaffolds whose
+  module names it, while one that edited shared code revalidates every standing scaffold: a
+  card on all 20 simplex bases (21 targets less Mallory; marshal has 13) costs 20 syntheses
+  and, unless a version edits shared code, almost no revalidation builds. A sibling that a new
+  module changes without being named, through an inherent method or a trait impl the new
+  module adds to a harness type, is only noted, and found by a `--redo` of that pair. `--fuzz-targets`, or `<base>_tsNNNN` patterns
   to `synthesize`, bound it. Accepted: the scaffolds of one card on different bases are
   different fuzz targets, and which base reaches the state is what the pairs find out.
 - Revalidation compares an earlier scaffold with the verdict its report records, read at the

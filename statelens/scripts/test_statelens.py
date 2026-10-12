@@ -5553,6 +5553,14 @@ class FuzzRecipe(unittest.TestCase):
             self.assertEqual((code, calls), (1, []), args)
             self.assertIn("just fuzz: --skip-synthesis needs --state-reaching", err, args)
 
+    def test_a_card_id_without_its_dash_is_refused_with_the_right_id(self):
+        for typo in ("TS0008", "ts0008", "TS_0008"):
+            code, calls, err = self.fuzz("simplex", "--state-reaching", "--skip-campaign",
+                                         "--state-targets", typo)
+            self.assertEqual((code, calls), (1, []), typo)
+            self.assertIn("just fuzz: --state-targets names cards as TS-NNNN; did you mean "
+                          "TS-0008?", err, typo)
+
     def test_rebaseline_goes_to_the_synthesis_only(self):
         code, calls, err = self.fuzz(
             "simplex", "--state-reaching", "--skip-campaign", "--rebaseline",
@@ -8185,22 +8193,19 @@ class Synthesize(unittest.TestCase):
         # The record a restore of TS-0005_simplex_a's edits would have owed went with its report.
         self.assertIsNone(self.read(self.OWED))
 
-    def test_a_card_that_touches_only_its_own_files_revalidates_the_earlier_scaffolds_too(self):
-        # The modules are public siblings of one crate, so TS-0005_simplex_a's module may use TS-0004_simplex_a's
-        # or the other way round: TS-0005_simplex_a's own module counts as shared code, its thin
-        # target, a crate of its own, does not.
+    def test_a_card_that_touches_only_its_own_files_revalidates_only_scaffolds_that_name_it(self):
+        # The modules are public siblings of one crate, so TS-0004_simplex_a's module could use
+        # TS-0005_simplex_a's items only by naming its module: one that does not is noted,
+        # not rebuilt. A sibling that names it is revalidated
+        # (test_a_redo_whose_module_changes_a_helper_a_sibling_uses_revalidates_it).
         self.steps = [self.write_scaffold(), self.second_card()]
         self.assertEqual(self.synthesize(), 0)
         self.assertEqual(self.line("TS-0005"), "TS-0005    REACHED 4/4   " + self.SECOND)
         self.assertEqual(self.builds, [self.FIRST] * 2 + [self.SECOND] * 2
-                         + [self.FIRST, self.FIRST, self.SECOND])
-        self.assertTrue((self.repo / "statelens/campaign/reach/TS-0004_simplex_a/after-TS-0005_simplex_a").is_dir())
-        self.assertIn(f"TS-0005_simplex_a: the kept version changed {self.SECOND_MODULE}; revalidating "
-                      "TS-0004_simplex_a", self.said)
-        self.assertEqual(self.section(self.report("TS-0004_simplex_a"), "Revalidation after TS-0005_simplex_a"),
-                         f"- Cause: TS-0005_simplex_a changed {self.SECOND_MODULE}\n"
-                         "- Before: REACHED 4/4\n- Now: REACHED 4/4\n"
-                         "- Replays: statelens/campaign/reach/TS-0004_simplex_a/after-TS-0005_simplex_a/\n")
+                         + [self.FIRST, self.SECOND])
+        self.assertFalse((self.repo / "statelens/campaign/reach/TS-0004_simplex_a/after-TS-0005_simplex_a").is_dir())
+        self.assertNotIn("## Revalidation after TS-0005_simplex_a", self.report("TS-0004_simplex_a"))
+        self.assert_not_revalidated("TS-0004_simplex_a", "TS-0005_simplex_a")
 
     def test_a_redo_whose_module_changes_a_helper_a_sibling_uses_revalidates_it(self):
         # The review's case: TS-0005_simplex_a's module calls a helper of TS-0004_simplex_a's module, and a
@@ -8644,13 +8649,13 @@ class Synthesize(unittest.TestCase):
         self.assertEqual(json.loads(owed), self.ROLLBACK)
 
     def assert_not_revalidated(self, key, after):
-        """`key` stood outside the run's selection when `after`'s new version, its own module
-        only, was kept: its report is noted, and the console says so."""
+        """`key`'s module does not name `after`'s, whose new version changed only that
+        module: its report is noted instead of revalidated, and the console says so."""
         self.assertIn(f"\n## Not revalidated after {after}\n\n- Cause: {after} changed ",
                       self.report(key))
-        self.assertIn("This run did not select the pair; a synthesis that selects it checks it.",
-                      self.report(key))
-        self.assertTrue(any("outside the selection not revalidated" in line and key in line
+        self.assertIn("module does not name ", self.report(key))
+        self.assertIn("; a --redo of the pair checks it again.", self.report(key))
+        self.assertTrue(any(" not revalidated (" in line and key in line
                             for line in self.said), self.said)
 
     def assert_rollback_revalidated(self):
@@ -8918,16 +8923,12 @@ class Synthesize(unittest.TestCase):
         manifest = self.read(sl.FUZZ_MANIFEST)
         for name in (self.FIRST, self.ON_B):
             self.assertIn(f'name = "{name}"\npath = "fuzz_targets/{name}.rs"', manifest)
-        # The second pair's module is shared code, so it revalidates the first pair's scaffold.
+        # The second pair changed only its own module, which the first pair's module does not
+        # name: the first is noted instead of revalidated, and both are built by the last check.
         self.assertEqual(self.builds, [self.FIRST] * 2 + [self.ON_B] * 2
-                         + [self.FIRST, self.FIRST, self.ON_B])
-        self.assertTrue((reach / "TS-0004_simplex_a/after-TS-0004_simplex_b/final/replay.log")
-                        .is_file())
-        self.assertEqual(
-            self.section(self.report("TS-0004_simplex_a"), "Revalidation after TS-0004_simplex_b"),
-            f"- Cause: TS-0004_simplex_b changed {self.MODULE_ON_B}\n"
-            "- Before: REACHED 4/4\n- Now: REACHED 4/4\n"
-            "- Replays: statelens/campaign/reach/TS-0004_simplex_a/after-TS-0004_simplex_b/\n")
+                         + [self.FIRST, self.ON_B])
+        self.assertFalse((reach / "TS-0004_simplex_a/after-TS-0004_simplex_b").exists())
+        self.assert_not_revalidated("TS-0004_simplex_a", "TS-0004_simplex_b")
         self.assertNotIn("Revalidation", self.report("TS-0004_simplex_b"))
         # Both pairs are skipped by the next run, each with its own line.
         self.said.clear()
