@@ -782,7 +782,7 @@ mod tests {
             let mut reporter = OutputReporter::new(harness.mailbox.clone(), None);
             for (index, block) in [remote, block].into_iter().enumerate() {
                 let (acknowledgement, waiter) = Exact::handle();
-                reporter.report(Update {
+                reporter.report(Update::Block {
                     index: OutputIndex::new(index as u64 + 1),
                     block,
                     acknowledgement,

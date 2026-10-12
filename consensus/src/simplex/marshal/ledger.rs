@@ -8,21 +8,22 @@ use super::{
 };
 use crate::{
     Heightable as _,
-    marshal::{Delivery, Finalized, Floors, Ledger, Linear},
+    marshal::{Delivery, Finalized, Floors, Ledger, Linear, Reported},
     simplex::{scheme::Scheme, types::Finalization},
     types::{Height, OutputIndex},
 };
 use commonware_utils::Acknowledgement;
 use std::{convert::Infallible, num::NonZeroUsize};
 
+/// Simplex orders blocks as they finalize, so it never reports [`Reported::Final`].
 impl<B: crate::Block, A: Acknowledgement> Delivery for Update<B, A> {
     type Block = B;
     type Acknowledgement = A;
 
-    fn finalized(self) -> Option<Finalized<B, A>> {
+    fn reported(self) -> Reported<B, A> {
         match self {
-            Self::Tip(..) => None,
-            Self::Block(block, acknowledgement) => Some(Finalized {
+            Self::Tip(..) => Reported::Advisory,
+            Self::Block(block, acknowledgement) => Reported::Finalized(Finalized {
                 index: OutputIndex::new(block.height().get()),
                 block,
                 acknowledgement,
@@ -120,12 +121,14 @@ mod tests {
         ));
         let round = Round::new(Epoch::zero(), View::new(9));
         let tip = Update::<Block, Exact>::Tip(round, Height::new(7), block.digest());
-        assert!(tip.finalized().is_none());
+        assert!(matches!(tip.reported(), Reported::Advisory));
 
         let (acknowledgement, _waiter) = Exact::handle();
-        let finalized = Update::Block(Arc::clone(&block), acknowledgement)
-            .finalized()
-            .unwrap();
+        let Reported::Finalized(finalized) =
+            Update::Block(Arc::clone(&block), acknowledgement).reported()
+        else {
+            panic!("a block update reports a finalized block");
+        };
         assert_eq!(finalized.index, OutputIndex::new(7));
         assert!(Arc::ptr_eq(&finalized.block, &block));
     }

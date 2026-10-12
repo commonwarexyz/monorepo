@@ -363,6 +363,8 @@ struct Delivered<B: Body<Sha256>> {
 
 struct ReporterState<B: Body<Sha256>> {
     delivered: Vec<Delivered<B>>,
+    /// Final blocks reported before they are ordered, with the ordered deliveries before each.
+    finals: Vec<(BlockRef<Sha256Digest>, usize)>,
     pending: std::collections::VecDeque<(OutputIndex, commonware_utils::acknowledgement::Exact)>,
 }
 
@@ -386,6 +388,7 @@ impl<B: Body<Sha256> + Clone> ApplicationReporter<B> {
         Self {
             state: Arc::new(Mutex::new(ReporterState {
                 delivered: Vec::new(),
+                finals: Vec::new(),
                 pending: std::collections::VecDeque::new(),
             })),
             auto_acknowledge,
@@ -394,6 +397,12 @@ impl<B: Body<Sha256> + Clone> ApplicationReporter<B> {
 
     fn delivered(&self) -> Vec<Delivered<B>> {
         self.state.lock().delivered.clone()
+    }
+
+    /// Returns every final block reported before it was ordered, with the number of ordered
+    /// deliveries that preceded its report.
+    fn finals(&self) -> Vec<(BlockRef<Sha256Digest>, usize)> {
+        self.state.lock().finals.clone()
     }
 
     fn pending(&self) -> Vec<OutputIndex> {
@@ -438,11 +447,19 @@ impl<B: Body<Sha256> + Send + Sync + 'static> Reporter for ApplicationReporter<B
     type Activity = Update<TransactionBlock<Sha256, B>>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        let Update {
-            index,
-            block,
-            acknowledgement,
-        } = activity;
+        let (index, block, acknowledgement) = match activity {
+            Update::Block {
+                index,
+                block,
+                acknowledgement,
+            } => (index, block, acknowledgement),
+            Update::Final(block) => {
+                let mut state = self.state.lock();
+                let delivered = state.delivered.len();
+                state.finals.push((block.reference(), delivered));
+                return Feedback::Ok;
+            }
+        };
         let mut state = self.state.lock();
         state.delivered.push(Delivered { index, block });
         if self.auto_acknowledge {
@@ -509,6 +526,8 @@ struct Harness {
     max_commit_outputs: NonZeroUsize,
     max_hot_block_bytes: NonZeroUsize,
     max_pending_acks: NonZeroUsize,
+    final_lookahead: NonZeroUsize,
+    backfill_concurrency: NonZeroUsize,
     verification_gate: Option<VerificationGate>,
     relay: bool,
 }
@@ -545,6 +564,8 @@ impl Harness {
             max_commit_outputs: NZUsize!(8),
             max_hot_block_bytes: NZUsize!(512 * 1024 * 1024),
             max_pending_acks: NZUsize!(128),
+            final_lookahead: NZUsize!(512),
+            backfill_concurrency: RESOLVER_MAILBOX_SIZE,
             verification_gate: None,
             relay: false,
         }
@@ -574,10 +595,11 @@ impl Harness {
         )
         .with_resolver_mailbox_size(RESOLVER_MAILBOX_SIZE)
         // Backfill must not exceed the resolver mailbox.
-        .with_backfill_concurrency(RESOLVER_MAILBOX_SIZE)
+        .with_backfill_concurrency(self.backfill_concurrency)
         .with_max_commit_outputs(self.max_commit_outputs)
         .with_max_hot_block_bytes(self.max_hot_block_bytes)
         .with_max_pending_acks(self.max_pending_acks)
+        .with_final_lookahead(self.final_lookahead)
         .with_retention(Retention {
             lqc: self.archive_modes[0],
             history: self.archive_modes[1],
@@ -788,6 +810,28 @@ impl Certified {
             }),
             Feedback::Ok
         );
+    }
+
+    /// Returns a settled direct-pool fact for the batch's leader naming `tips`.
+    fn fact(
+        &self,
+        label: &[u8],
+        committee: &Committee<MinPk>,
+        tips: Vec<BlockRef<Sha256Digest>>,
+    ) -> FinalityFact<Sha256Digest> {
+        let positions = self
+            .blocks
+            .iter()
+            .map(|chain| Position::new(chain.len() as u32))
+            .collect();
+        direct_fact(
+            self.proof.leader(),
+            label,
+            committee.codec().view_quorum(),
+            tips,
+            positions,
+            vec![true; CHAINS],
+        )
     }
 }
 
@@ -1019,22 +1063,26 @@ fn local_two_chain_delivery_is_offset_major_and_header_exact() {
     });
 }
 
-#[test]
-fn pool_finality_update_emits_suffix_truncated_by_first_lqc() {
-    runner(132).start(|context| async move {
-        let mut harness = Harness::new(context, 132, [true, true]).await;
-        harness.start(0).await;
+/// A view-1 batch whose leader proposes one block on each chain, while every quorum vote also
+/// extends chain 1 with its second block and one vote extends chain 0 with a block nobody holds.
+///
+/// A fact that leaves chain 0 unsettled emits both proposed blocks and defers chain 1's
+/// extension, which a later fact that settles every chain emits.
+struct Unsettled {
+    batch: Certified,
+    leader: LeaderBlock<MinPk, Sha256Digest>,
+    positions: Vec<Position>,
+}
+
+impl Unsettled {
+    fn new(harness: &Harness, marker: u64) -> Self {
         let mut batch = certify(
             &harness.committee,
             1,
             initial_history(&harness.committee),
             harness.committee.config.genesis().tips(),
-            vec![vec![body(1_320)], vec![body(1_321), body(1_322)]],
+            vec![vec![body(marker)], vec![body(marker + 1), body(marker + 2)]],
         );
-        // The leader proposes only chain 1's first block; its second block reaches the final
-        // tips as an extension every quorum vote endorses. Chain 0's lone extension vote leaves
-        // that chain unsettled, so the extension region halts at chain 0 and defers chain 1's
-        // extension while both proposed blocks emit at once.
         let certified = batch.proof.leader();
         let mut proposals = certified.proposals().to_vec();
         proposals[1] = ChainProposal::new(
@@ -1063,7 +1111,7 @@ fn pool_finality_update_emits_suffix_truncated_by_first_lqc() {
                 .unwrap();
                 if signer == 0 {
                     extensions[0] = Extension::new(
-                        vec![digest(b"unsettled chain extension", 0)],
+                        vec![digest(b"unsettled chain extension", marker)],
                         harness.committee.codec().extension_bound(),
                     )
                     .unwrap();
@@ -1085,18 +1133,132 @@ fn pool_finality_update_emits_suffix_truncated_by_first_lqc() {
                 .assemble_lqc::<Sha256, _>(leader.clone(), &votes, &Sequential)
                 .unwrap(),
         );
+        Self {
+            batch,
+            leader,
+            positions,
+        }
+    }
+
+    /// Returns a direct fact for the leader naming `tips`.
+    fn fact(
+        &self,
+        label: &[u8],
+        votes: usize,
+        tips: Vec<BlockRef<Sha256Digest>>,
+        settled: Vec<bool>,
+    ) -> FinalityFact<Sha256Digest> {
+        direct_fact(
+            &self.leader,
+            label,
+            votes,
+            tips,
+            self.positions.clone(),
+            settled,
+        )
+    }
+}
+
+/// Returns a direct-pool fact for `leader` naming `tips` as the final blocks.
+fn direct_fact(
+    leader: &LeaderBlock<MinPk, Sha256Digest>,
+    label: &[u8],
+    votes: usize,
+    tips: Vec<BlockRef<Sha256Digest>>,
+    positions: Vec<Position>,
+    settled: Vec<bool>,
+) -> FinalityFact<Sha256Digest> {
+    FinalityFact::new(
+        FinalityId::Direct(digest(label, 0)),
+        leader.round(),
+        leader.digest::<Sha256>(),
+        leader.parent(),
+        votes,
+        tips,
+        leader.proposed_heights(),
+        positions,
+        settled,
+    )
+}
+
+/// Reports a leader finality fact to `mailbox` as consensus would.
+fn report_finality(mailbox: &TestMailbox, fact: FinalityFact<Sha256Digest>) {
+    let mut reporter = mailbox.clone();
+    assert_eq!(
+        reporter.report(Activity::LeaderFinalized { fact }),
+        Feedback::Ok
+    );
+}
+
+/// Waits until `reporter` has recorded at least `count` final blocks and returns them.
+async fn wait_finals(
+    context: &deterministic::Context,
+    reporter: &ApplicationReporter<TestBody>,
+    count: usize,
+) -> Vec<(BlockRef<Sha256Digest>, usize)> {
+    for _ in 0..WAIT_STEPS {
+        let finals = reporter.finals();
+        if finals.len() >= count {
+            return finals;
+        }
+        context.sleep(WAIT_STEP).await;
+    }
+    panic!("the marshal did not report {count} final blocks");
+}
+
+/// Asserts that `finals` names exactly `expected`, oldest first on each chain.
+fn assert_finals(
+    finals: &[(BlockRef<Sha256Digest>, usize)],
+    expected: &[Vec<BlockRef<Sha256Digest>>],
+) {
+    assert_eq!(
+        finals.len(),
+        expected.iter().map(Vec::len).sum::<usize>(),
+        "{finals:?}"
+    );
+    for (chain, expected) in expected.iter().enumerate() {
+        let reported = finals
+            .iter()
+            .map(|(reference, _)| *reference)
+            .filter(|reference| reference.chain() == ChainId::new(chain as u32))
+            .collect::<Vec<_>>();
+        assert_eq!(&reported, expected, "chain {chain}");
+    }
+}
+
+/// Returns a block on `parent`'s chain that extends it.
+fn child(parent: &TestBlock, marker: u64) -> Arc<TestBlock> {
+    let body = body(marker);
+    let header = TransactionBlockHeader::new(
+        parent.header().epoch(),
+        parent.header().chain(),
+        Height::new(parent.header().height().get() + 1),
+        parent.reference().digest(),
+        body.digest(),
+    )
+    .unwrap();
+    Arc::new(TransactionBlock::new(header, body).unwrap())
+}
+
+#[test]
+fn pool_finality_update_emits_suffix_truncated_by_first_lqc() {
+    runner(132).start(|context| async move {
+        let mut harness = Harness::new(context, 132, [true, true]).await;
+        harness.start(0).await;
+        let unsettled = Unsettled::new(&harness, 1_320);
+        let Unsettled {
+            batch,
+            leader,
+            positions,
+        } = &unsettled;
+        let quorum = harness.committee.codec().view_quorum();
 
         let mailbox = harness.mailbox(0);
         batch.submit(&mailbox).await;
-        let initial_fact = FinalityFact::new(
-            FinalityId::Direct(digest(b"initial direct pool", 0)),
-            leader.round(),
-            leader.digest::<Sha256>(),
-            leader.parent(),
-            harness.committee.codec().view_quorum(),
+        let initial_fact = unsettled.fact(
+            b"initial direct pool",
+            quorum,
             batch.tips(),
-            leader.proposed_heights(),
-            positions.clone(),
             vec![false, true],
         );
         let mut reporter = mailbox.clone();
@@ -1140,15 +1302,10 @@ fn pool_finality_update_emits_suffix_truncated_by_first_lqc() {
         );
         harness.context.sleep(WAIT_STEP).await;
 
-        let fact = FinalityFact::new(
-            FinalityId::Direct(digest(b"grown direct pool", 0)),
-            leader.round(),
-            leader.digest::<Sha256>(),
-            leader.parent(),
+        let fact = unsettled.fact(
+            b"grown direct pool",
             PARTICIPANTS as usize,
             batch.tips(),
-            leader.proposed_heights(),
-            positions,
             vec![true; CHAINS],
         );
         assert_eq!(
@@ -1169,6 +1326,400 @@ fn pool_finality_update_emits_suffix_truncated_by_first_lqc() {
             .await;
         assert_eq!(progress.floor, batch.id());
         assert!(mailbox.get_certificate(batch.id()).await.unwrap().is_some());
+        harness.shutdown().await;
+    });
+}
+
+#[test]
+fn final_blocks_held_back_by_an_unsettled_sweep_are_reported_before_ordering() {
+    runner(150).start(|context| async move {
+        let mut harness = Harness::new(context, 150, [true, true]).await;
+        harness.start(0).await;
+        let unsettled = Unsettled::new(&harness, 1_500);
+        let batch = &unsettled.batch;
+        let quorum = harness.committee.codec().view_quorum();
+        let mailbox = harness.mailbox(0);
+        let reporter = harness.reporter(0);
+        batch.submit(&mailbox).await;
+
+        // Every block below the fact's tips is final before any L-QC orders it, including chain
+        // 1's extension, which the unsettled chain 0 holds back from the sweep.
+        report_finality(
+            &mailbox,
+            unsettled.fact(b"unsettled pool", quorum, batch.tips(), vec![false, true]),
+        );
+        let finals = wait_finals(&harness.context, &reporter, 3).await;
+        let expected = batch
+            .blocks
+            .iter()
+            .map(|chain| chain.iter().map(|block| block.reference()).collect())
+            .collect::<Vec<_>>();
+        assert_finals(&finals, &expected);
+        assert!(finals.iter().all(|(_, delivered)| *delivered == 0));
+
+        batch.finalize(&mailbox);
+        harness.wait_updates(0, 2).await;
+        report_finality(
+            &mailbox,
+            unsettled.fact(
+                b"repeated pool",
+                quorum + 1,
+                batch.tips(),
+                vec![false, true],
+            ),
+        );
+        report_finality(
+            &mailbox,
+            unsettled.fact(
+                b"settled pool",
+                PARTICIPANTS as usize,
+                batch.tips(),
+                vec![true; CHAINS],
+            ),
+        );
+        let delivered = harness.wait_updates(0, 3).await;
+        assert_eq!(
+            delivered[2].block.reference(),
+            batch.blocks[1][1].reference()
+        );
+
+        // Repeated facts and ordered delivery report nothing again.
+        harness.context.sleep(WAIT_STEP * 10).await;
+        assert_eq!(reporter.finals(), finals);
+        harness.shutdown().await;
+    });
+}
+
+#[test]
+fn blocks_above_the_final_tips_are_never_reported() {
+    runner(151).start(|context| async move {
+        let mut harness = Harness::new(context, 151, [true, true]).await;
+        harness.start(0).await;
+        let unsettled = Unsettled::new(&harness, 1_510);
+        let batch = &unsettled.batch;
+        let mailbox = harness.mailbox(0);
+        let reporter = harness.reporter(0);
+        batch.submit(&mailbox).await;
+        // A proposal above chain 0's final block that the engine recorded as certified.
+        let certified = child(&batch.blocks[0][0], 1_513);
+        mailbox.put_block(Arc::clone(&certified)).await.unwrap();
+        record(&mailbox, certified.reference(), 0);
+
+        // The fact finalizes only each chain's first block.
+        let tips = vec![
+            batch.blocks[0][0].reference(),
+            batch.blocks[1][0].reference(),
+        ];
+        report_finality(
+            &mailbox,
+            unsettled.fact(
+                b"low tips",
+                harness.committee.codec().view_quorum(),
+                tips.clone(),
+                vec![true; CHAINS],
+            ),
+        );
+        let finals = wait_finals(&harness.context, &reporter, 2).await;
+        harness.context.sleep(WAIT_STEP * 10).await;
+        assert_eq!(reporter.finals(), finals);
+        assert_finals(&finals, &[vec![tips[0]], vec![tips[1]]]);
+        harness.shutdown().await;
+    });
+}
+
+#[test]
+fn undelivered_blocks_are_reported_as_final_again_after_a_restart() {
+    runner(152).start(|context| async move {
+        let mut harness = Harness::new(context, 152, [false, true]).await;
+        // Only the first output fits the acknowledgement window.
+        harness.max_pending_acks = NZUsize!(1);
+        harness.start(0).await;
+        let mailbox = harness.mailbox(0);
+        let reporter = harness.reporter(0);
+        let first = certify(
+            &harness.committee,
+            1,
+            initial_history(&harness.committee),
+            harness.committee.config.genesis().tips(),
+            vec![vec![body(1_520)], vec![body(1_521)]],
+        );
+        first.submit(&mailbox).await;
+        first.finalize(&mailbox);
+        harness.wait_updates(0, 1).await;
+        harness
+            .wait_progress(0, |progress| progress.committed == OutputIndex::new(2))
+            .await;
+
+        // Chain 0's block is delivered; chain 1's is committed behind the full window, so it is
+        // still undelivered and final.
+        report_finality(
+            &mailbox,
+            first.fact(b"delivered", &harness.committee, first.tips()),
+        );
+        let finals = wait_finals(&harness.context, &reporter, 1).await;
+        assert_eq!(finals, vec![(first.blocks[1][0].reference(), 1)]);
+        harness.context.sleep(WAIT_STEP * 10).await;
+        assert_eq!(reporter.finals(), finals);
+
+        // After a restart, chain 1's committed block is still undelivered, so it is reported
+        // again without another fact. Chain 0's block is redelivered from the acknowledgement
+        // cursor and is never reported after that redelivery.
+        harness.crash(0).await;
+        harness.start(0).await;
+        let mailbox = harness.mailbox(0);
+        harness.wait_updates(0, 2).await;
+        wait_finals(&harness.context, &reporter, 2).await;
+        harness.context.sleep(WAIT_STEP * 10).await;
+        let finals = reporter.finals();
+        let restarted = &finals[1..];
+        assert_eq!(
+            restarted
+                .iter()
+                .filter(|(reference, _)| *reference == first.blocks[1][0].reference())
+                .count(),
+            1,
+            "{finals:?}"
+        );
+        assert!(
+            restarted
+                .iter()
+                .filter(|(reference, _)| *reference == first.blocks[0][0].reference())
+                .all(|(_, delivered)| *delivered == 1),
+            "{finals:?}"
+        );
+
+        // Blocks finalized above the delivered ones are reported.
+        let next = certify(
+            &harness.committee,
+            2,
+            initial_history(&harness.committee),
+            &first.tips(),
+            vec![vec![body(1_522)], vec![body(1_523)]],
+        );
+        next.submit(&mailbox).await;
+        report_finality(
+            &mailbox,
+            next.fact(b"next", &harness.committee, next.tips()),
+        );
+        let reported = finals.len();
+        let finals = wait_finals(&harness.context, &reporter, reported + 2).await;
+        let expected = next
+            .blocks
+            .iter()
+            .map(|chain| chain.iter().map(|block| block.reference()).collect())
+            .collect::<Vec<_>>();
+        assert_finals(&finals[reported..], &expected);
+        harness.shutdown().await;
+    });
+}
+
+#[test]
+fn final_reports_survive_more_chains_than_header_requests() {
+    runner(155).start(|context| async move {
+        let mut harness = Harness::new(context, 155, [true, true]).await;
+        // The catalog serves one header segment per read, fewer than the chains.
+        harness.backfill_concurrency = NZUsize!(1);
+        harness.start(0).await;
+        let mailbox = harness.mailbox(0);
+        let reporter = harness.reporter(0);
+        let batch = certify(
+            &harness.committee,
+            1,
+            initial_history(&harness.committee),
+            harness.committee.config.genesis().tips(),
+            vec![vec![body(1_550)], vec![body(1_551), body(1_552)]],
+        );
+        batch.submit(&mailbox).await;
+        report_finality(
+            &mailbox,
+            batch.fact(b"two chains", &harness.committee, batch.tips()),
+        );
+        let finals = wait_finals(&harness.context, &reporter, 3).await;
+        let expected = batch
+            .blocks
+            .iter()
+            .map(|chain| chain.iter().map(|block| block.reference()).collect())
+            .collect::<Vec<_>>();
+        assert_finals(&finals, &expected);
+
+        // Marshal keeps running and delivers every block.
+        batch.finalize(&mailbox);
+        harness.wait_updates(0, 3).await;
+        harness.shutdown().await;
+    });
+}
+
+#[test]
+fn final_blocks_missing_from_custody_are_reported_once_admitted() {
+    runner(156).start(|context| async move {
+        let mut harness = Harness::new(context, 156, [true, true]).await;
+        harness.start(0).await;
+        let mailbox = harness.mailbox(0);
+        let reporter = harness.reporter(0);
+        let batch = certify(
+            &harness.committee,
+            1,
+            initial_history(&harness.committee),
+            harness.committee.config.genesis().tips(),
+            vec![vec![body(1_560)], vec![body(1_561), body(1_562)]],
+        );
+        // Custody holds only chain 1's tip: chain 0 lacks its final tip's header, and chain 1
+        // lacks the header below its tip.
+        mailbox
+            .put_block(Arc::clone(&batch.blocks[1][1]))
+            .await
+            .unwrap();
+        report_finality(
+            &mailbox,
+            batch.fact(b"missing", &harness.committee, batch.tips()),
+        );
+        harness.context.sleep(WAIT_STEP * 10).await;
+        assert!(reporter.finals().is_empty());
+
+        // Admitting the missing blocks reports them without another fact or commit.
+        mailbox
+            .put_block(Arc::clone(&batch.blocks[0][0]))
+            .await
+            .unwrap();
+        mailbox
+            .put_block(Arc::clone(&batch.blocks[1][0]))
+            .await
+            .unwrap();
+        let finals = wait_finals(&harness.context, &reporter, 3).await;
+        let expected = batch
+            .blocks
+            .iter()
+            .map(|chain| chain.iter().map(|block| block.reference()).collect())
+            .collect::<Vec<_>>();
+        assert_finals(&finals, &expected);
+        harness.shutdown().await;
+    });
+}
+
+#[test]
+fn final_blocks_resume_above_an_installed_floor() {
+    runner(153).start(|context| async move {
+        let mut harness = Harness::new(context, 153, [false, true]).await;
+        harness.start(0).await;
+        let mailbox = harness.mailbox(0);
+        let reporter = harness.reporter(0);
+        let first = certify(
+            &harness.committee,
+            1,
+            initial_history(&harness.committee),
+            harness.committee.config.genesis().tips(),
+            vec![vec![body(1_530)], vec![body(1_531)]],
+        );
+        first.submit(&mailbox).await;
+        first.finalize(&mailbox);
+        harness.wait_updates(0, 2).await;
+
+        let floor_history = Arc::new(
+            TipRecord::at_tips(first.history.commitment::<Sha256>(), first.tips()).unwrap(),
+        );
+        let floor = certify(
+            &harness.committee,
+            2,
+            floor_history,
+            &first.tips(),
+            vec![vec![body(1_532)], vec![body(1_533)]],
+        );
+        floor.submit(&mailbox).await;
+        mailbox
+            .install_floor(Floor::new(
+                Arc::clone(&floor.proof),
+                Arc::clone(&floor.history),
+                floor.tips(),
+            ))
+            .await
+            .unwrap();
+        harness
+            .wait_progress(0, |progress| {
+                progress.floor_generation == 1 && progress.acknowledged == OutputIndex::new(4)
+            })
+            .await;
+        harness.reporter(0).discard_pending();
+
+        // Blocks at or below the installed floor are not reported, even with their bodies held.
+        report_finality(
+            &mailbox,
+            floor.fact(b"floor", &harness.committee, floor.tips()),
+        );
+        harness.context.sleep(WAIT_STEP * 10).await;
+        assert!(reporter.finals().is_empty());
+
+        let continuation_history = Arc::new(
+            TipRecord::at_tips(floor.history.commitment::<Sha256>(), floor.tips()).unwrap(),
+        );
+        let continuation = certify(
+            &harness.committee,
+            3,
+            continuation_history,
+            &floor.tips(),
+            vec![vec![body(1_534)], vec![body(1_535)]],
+        );
+        continuation.submit(&mailbox).await;
+        report_finality(
+            &mailbox,
+            continuation.fact(b"continuation", &harness.committee, continuation.tips()),
+        );
+        let finals = wait_finals(&harness.context, &reporter, 2).await;
+        assert_finals(
+            &finals,
+            &[
+                vec![continuation.blocks[0][0].reference()],
+                vec![continuation.blocks[1][0].reference()],
+            ],
+        );
+        assert!(finals.iter().all(|(_, delivered)| *delivered == 2));
+        continuation.finalize(&mailbox);
+        harness.wait_updates(0, 4).await;
+        harness.context.sleep(WAIT_STEP * 10).await;
+        assert_eq!(reporter.finals(), finals);
+        harness.shutdown().await;
+    });
+}
+
+#[test]
+fn a_large_finality_jump_reports_the_oldest_window_first_and_slides_to_the_tip() {
+    runner(154).start(|context| async move {
+        let mut harness = Harness::new(context, 154, [true, true]).await;
+        // Each chain reads at most two final blocks ahead at a time.
+        harness.final_lookahead = NZUsize!(2);
+        harness.start(0).await;
+        let mailbox = harness.mailbox(0);
+        let reporter = harness.reporter(0);
+        let batch = certify(
+            &harness.committee,
+            1,
+            initial_history(&harness.committee),
+            harness.committee.config.genesis().tips(),
+            vec![
+                vec![body(1_540)],
+                vec![body(1_541), body(1_542), body(1_543), body(1_544)],
+            ],
+        );
+        batch.submit(&mailbox).await;
+        report_finality(
+            &mailbox,
+            batch.fact(b"jump", &harness.committee, batch.tips()),
+        );
+        // Chain 1's four final blocks span two windows: the oldest pair is reported first, then
+        // the window slides to the tip, all before any block is ordered.
+        let finals = wait_finals(&harness.context, &reporter, 5).await;
+        let expected = batch
+            .blocks
+            .iter()
+            .map(|chain| chain.iter().map(|block| block.reference()).collect())
+            .collect::<Vec<_>>();
+        assert_finals(&finals, &expected);
+        assert!(finals.iter().all(|(_, delivered)| *delivered == 0));
+
+        // Ordered delivery delivers every block and reports nothing again.
+        batch.finalize(&mailbox);
+        harness.wait_updates(0, 5).await;
+        harness.context.sleep(WAIT_STEP * 10).await;
+        assert_eq!(reporter.finals(), finals);
         harness.shutdown().await;
     });
 }

@@ -5,7 +5,7 @@
 //! without naming the engine:
 //!
 //! - [`Delivery`]: an item a marshal reports to its application, which may carry a [`Finalized`]
-//!   block.
+//!   block or announce a final block before it is ordered (see [`Reported`]).
 //! - [`Ledger`]: the finalized stream's retention and acknowledgement window.
 //! - [`Floors`]: where a marshal can resume from, for state sync.
 //! - [`Linear`]: a stream that is one chain, whose blocks' heights are their indices.
@@ -35,16 +35,37 @@ pub trait Delivery: Send + 'static {
     /// The acknowledgement a finalized block carries.
     type Acknowledgement: Acknowledgement;
 
-    /// Returns the finalized block this item carries, or `None` for an advisory item.
-    fn finalized(self) -> Option<Finalized<Self::Block, Self::Acknowledgement>>;
+    /// Returns what this item reports.
+    fn reported(self) -> Reported<Self::Block, Self::Acknowledgement>;
+}
+
+/// What a [`Delivery`] item reports.
+#[derive(Clone, Debug)]
+pub enum Reported<B, A = Exact> {
+    /// A finalized block at its index in the stream.
+    Finalized(Finalized<B, A>),
+    /// A block that is final but not yet delivered in the stream.
+    ///
+    /// The block will be delivered later as a [`Reported::Finalized`] item at an index not yet
+    /// known, unless installing a floor resumes the stream past it. Consumers can use it to start
+    /// work for the block early, such as warming storage, while earlier blocks are still being
+    /// ordered or processed.
+    ///
+    /// It carries no acknowledgement and leaves the stream unchanged. Within one run of a marshal,
+    /// it never follows the block's [`Reported::Finalized`] delivery. After a restart, a marshal may
+    /// report again any block it has not yet delivered in the new run, including one a previous
+    /// run delivered and the consumer already processed, so consumers must tolerate repeats.
+    Final(Arc<B>),
+    /// An advisory item that carries no block.
+    Advisory,
 }
 
 impl<B: Block, A: Acknowledgement> Delivery for Finalized<B, A> {
     type Block = B;
     type Acknowledgement = A;
 
-    fn finalized(self) -> Option<Self> {
-        Some(self)
+    fn reported(self) -> Reported<B, A> {
+        Reported::Finalized(self)
     }
 }
 

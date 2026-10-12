@@ -12,7 +12,7 @@ use crate::{
     multimmit::{
         actors::util::{Completion, gated},
         marshal::{
-            actors::{backfill, catalog, synchronizer},
+            actors::{backfill, catalog, delivery, synchronizer},
             bodies::Bodies,
             mailbox::{Mailbox, Message, Request, SubscriptionSlot, SubscriptionSlots},
             relay::Staged,
@@ -55,6 +55,8 @@ where
     pub(super) backfill: backfill::Mailbox<H, V, B>,
     /// Receives consensus hints and floor installations.
     pub(super) synchronizer: synchronizer::Mailbox<V, H::Digest>,
+    /// Receives finality facts, to report final blocks before they are ordered.
+    pub(super) delivery: delivery::Mailbox<H, B>,
     /// Buffered broadcast ingress, raced against backfill by block subscriptions.
     pub(super) broadcast: buffered::Mailbox<P, TransactionBlock<H, B>>,
     /// Capacity of the router's request queue.
@@ -82,6 +84,7 @@ where
     catalog: catalog::Mailbox<H, V, B>,
     backfill: backfill::Mailbox<H, V, B>,
     synchronizer: synchronizer::Mailbox<V, H::Digest>,
+    delivery: delivery::Mailbox<H, B>,
     broadcast: buffered::Mailbox<P, TransactionBlock<H, B>>,
     mailbox: UnreliableReceiver<Message<H, V, B>>,
     jobs: Pool<'static, JobResult>,
@@ -106,6 +109,7 @@ where
             bodies,
             backfill,
             synchronizer,
+            delivery,
             broadcast,
             mailbox_size,
             max_jobs,
@@ -130,6 +134,7 @@ where
             catalog,
             backfill,
             synchronizer,
+            delivery,
             broadcast,
             mailbox: receiver,
             jobs: Pool::default(),
@@ -294,6 +299,7 @@ where
                 });
             }
             Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } => {
+                let _ = self.delivery.finality(fact.clone());
                 let _ = self.synchronizer.finality(fact);
             }
         }

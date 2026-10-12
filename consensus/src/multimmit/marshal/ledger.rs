@@ -5,7 +5,7 @@
 
 use super::{Error, Floor, Mailbox, Update, storage::catalog_state::frontier_index};
 use crate::{
-    marshal::{Delivery, Finalized, Floors, Ledger},
+    marshal::{Delivery, Finalized, Floors, Ledger, Reported},
     multimmit::types::{Body, TransactionBlock},
     types::OutputIndex,
 };
@@ -18,12 +18,19 @@ impl<B: crate::Block> Delivery for Update<B> {
     type Block = B;
     type Acknowledgement = Exact;
 
-    fn finalized(self) -> Option<Finalized<B>> {
-        Some(Finalized {
-            index: self.index,
-            block: self.block,
-            acknowledgement: self.acknowledgement,
-        })
+    fn reported(self) -> Reported<B> {
+        match self {
+            Self::Block {
+                index,
+                block,
+                acknowledgement,
+            } => Reported::Finalized(Finalized {
+                index,
+                block,
+                acknowledgement,
+            }),
+            Self::Final(block) => Reported::Final(block),
+        }
     }
 }
 

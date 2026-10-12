@@ -7,7 +7,7 @@ use commonware_actor::{
 use commonware_consensus::{
     Block, Reporter,
     ancestry::BlockProvider,
-    marshal::{Delivery, Finalized, Ledger, Linear},
+    marshal::{Delivery, Finalized, Ledger, Linear, Reported},
     types::{Epoch, Height, OutputIndex},
 };
 use commonware_cryptography::Digestible;
@@ -108,9 +108,9 @@ impl<U: Delivery> Reporter for Inbox<U> {
     type Activity = U;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        match activity.finalized() {
-            Some(input) => self.sender.enqueue(Input(input)),
-            None => Feedback::Ok,
+        match activity.reported() {
+            Reported::Finalized(input) => self.sender.enqueue(Input(input)),
+            Reported::Final(_) | Reported::Advisory => Feedback::Ok,
         }
     }
 }
