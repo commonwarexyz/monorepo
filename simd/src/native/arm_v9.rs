@@ -9,16 +9,15 @@ use core::arch::asm;
 /// This profile includes NEON and SHA2 with fixed 128-bit logical vectors.
 /// It does not expose scalable SVE vectors.
 ///
-/// Construction checks NEON, SHA2, SVE, SVE2, and the calling thread's SVE vector
-/// length. Only the low 128 bits are modeled, independently of the full SVE
-/// width. All supported SVE vector lengths are at least 128 bits, so moving
-/// a token to another thread does not invalidate its fixed lane counts.
+/// Construction checks NEON, SHA2, SVE, and SVE2. Only the low 128 bits are
+/// modeled, independently of the full SVE width. All supported SVE vector
+/// lengths are at least 128 bits, so moving a token to another thread does not
+/// invalidate its fixed lane counts.
 #[derive(Clone, Copy, Debug)]
 pub struct NativeArmV9(NativeNeon);
 
 impl NativeArmV9 {
-    /// Returns a token if NEON, SHA2, SVE, and SVE2 are available and this thread's
-    /// SVE vector length contains the modeled 128 bits.
+    /// Returns a token if NEON, SHA2, SVE, and SVE2 are available.
     ///
     /// With `std`, detects features at runtime. Without `std`, requires them
     /// to be enabled at compile time.
@@ -30,21 +29,7 @@ impl NativeArmV9 {
             && std::arch::is_aarch64_feature_detected!("sve2");
         #[cfg(not(feature = "std"))]
         let supported = cfg!(target_feature = "sve") && cfg!(target_feature = "sve2");
-        if !supported {
-            return None;
-        }
-        let bytes: usize;
-        // SAFETY: SVE availability was checked above. CNTB X0 only reads this
-        // thread's vector length and writes the declared general register.
-        // The encoding avoids requiring SVE in the constructor's feature scope.
-        unsafe {
-            asm!(
-                ".inst 0x0420e3e0",
-                out("x0") bytes,
-                options(nomem, nostack, preserves_flags),
-            );
-        }
-        (bytes >= 16).then_some(Self(neon))
+        supported.then_some(Self(neon))
     }
 
     #[inline]
@@ -396,16 +381,13 @@ impl ArmV9 for NativeArmV9 {
         if N == 0 {
             return self.0.u32_xor(a, b);
         }
-        // SAFETY: Construction established NEON, SVE, and SVE2. The current
-        // thread's SVE width is at least 128 bits. Vn aliases Zn's low 128 bits,
+        // SAFETY: Construction established NEON, SVE, and SVE2. Every SVE vector
+        // length is at least 128 bits. Vn aliases Zn's low 128 bits,
         // and XAR acts independently on 32-bit lanes, so arbitrary higher
         // source bits cannot affect the four modeled lanes. Only the declared
-        // destination register is written; the source register is preserved.
-        // The final NEON ORR preserves the low result and zeros every higher
-        // destination bit, giving the same full-register effect as an ordinary
-        // NEON output. No live upper SVE state is retained in a Rust U32 value.
-        // Neither instruction accesses memory, the stack, or flags.
-        #[cfg(target_feature = "neon")]
+        // destination register is written, and the source register is preserved.
+        // Destination bits above 128 may change, and no Rust value of this type
+        // observes them. XAR does not access memory, the stack, or flags.
         unsafe {
             asm!(
                 ".irp n,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31",
@@ -417,33 +399,10 @@ impl ArmV9 for NativeArmV9 {
                 ".endif",
                 ".endr",
                 ".inst {encoding} + (.Lxar_m << 5) + .Lxar_dn",
-                "orr {dn:v}.16b, {dn:v}.16b, {dn:v}.16b",
                 dn = inout(vreg) a,
                 m = in(vreg) b,
                 encoding = const xar_encoding(N),
                 options(pure, nomem, nostack, preserves_flags),
-            );
-        }
-        // SAFETY: The token still establishes NEON/SVE/SVE2 when the compiler's
-        // baseline disables NEON. Explicit vector clobbers require no baseline
-        // feature; LD1/ST1 access the live 128-bit locals through valid pointers.
-        // XAR and the final ORR have the same lane and upper-register contract
-        // as above. Both full vector aliases are clobbered, and flags are intact.
-        #[cfg(not(target_feature = "neon"))]
-        unsafe {
-            let a_ptr = core::ptr::from_mut(&mut a);
-            asm!(
-                "ld1 {{v0.4s}}, [{a}]",
-                "ld1 {{v1.4s}}, [{b}]",
-                ".inst {encoding}",
-                "orr v0.16b, v0.16b, v0.16b",
-                "st1 {{v0.4s}}, [{a}]",
-                a = in(reg) a_ptr,
-                b = in(reg) core::ptr::from_ref(&b),
-                encoding = const xar_encoding(N) + (1 << 5),
-                out("v0") _,
-                out("v1") _,
-                options(nostack, preserves_flags),
             );
         }
         a

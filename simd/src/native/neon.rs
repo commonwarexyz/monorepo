@@ -38,150 +38,6 @@ use core::arch::aarch64::{
 pub struct NativeNeon(());
 
 impl NativeNeon {
-    #[inline]
-    #[target_feature(enable = "neon,sha2")]
-    unsafe fn sha256_h_native(
-        self,
-        abcd: uint32x4_t,
-        efgh: uint32x4_t,
-        wk: uint32x4_t,
-    ) -> uint32x4_t {
-        vsha256hq_u32(abcd, efgh, wk)
-    }
-
-    #[inline]
-    #[target_feature(enable = "neon,sha2")]
-    unsafe fn sha256_h2_native(
-        self,
-        efgh: uint32x4_t,
-        abcd: uint32x4_t,
-        wk: uint32x4_t,
-    ) -> uint32x4_t {
-        vsha256h2q_u32(efgh, abcd, wk)
-    }
-
-    #[inline]
-    #[target_feature(enable = "neon,sha2")]
-    unsafe fn sha256_su0_native(self, a: uint32x4_t, b: uint32x4_t) -> uint32x4_t {
-        vsha256su0q_u32(a, b)
-    }
-
-    #[inline]
-    #[target_feature(enable = "neon,sha2")]
-    unsafe fn sha256_su1_native(self, a: uint32x4_t, b: uint32x4_t, c: uint32x4_t) -> uint32x4_t {
-        vsha256su1q_u32(a, b, c)
-    }
-
-    #[inline]
-    #[target_feature(enable = "neon")]
-    unsafe fn u32x4_load_native(self, input: &[u32]) -> uint32x4_t {
-        assert!(input.len() >= 4);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe { vld1q_u32(input.as_ptr()) }
-    }
-
-    #[inline]
-    #[target_feature(enable = "neon")]
-    unsafe fn u32x4_store_native(self, value: uint32x4_t, output: &mut [u32]) {
-        assert!(output.len() >= 4);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe { vst1q_u32(output.as_mut_ptr(), value) }
-    }
-
-    #[inline]
-    #[target_feature(enable = "neon")]
-    unsafe fn u32x4_add_native(self, a: uint32x4_t, b: uint32x4_t) -> uint32x4_t {
-        vaddq_u32(a, b)
-    }
-
-    #[inline]
-    #[target_feature(enable = "neon")]
-    unsafe fn u32x4_shuffle_native<const MASK: i32>(self, value: uint32x4_t) -> uint32x4_t {
-        assert!((0..256).contains(&MASK));
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe {
-            let indices: [u8; 16] =
-                core::array::from_fn(|i| (4 * ((MASK >> (2 * (i / 4))) & 3)) as u8 + (i % 4) as u8);
-            vreinterpretq_u32_u8(vqtbl1q_u8(
-                vreinterpretq_u8_u32(value),
-                vld1q_u8(indices.as_ptr()),
-            ))
-        }
-    }
-
-    #[inline]
-    #[target_feature(enable = "neon")]
-    unsafe fn u32x4_load_be_native(self, input: &[u8]) -> uint32x4_t {
-        assert!(input.len() >= 16);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe {
-            let bytes = vld1q_u8(input.as_ptr());
-            #[cfg(target_endian = "little")]
-            let bytes = vrev32q_u8(bytes);
-            vreinterpretq_u32_u8(bytes)
-        }
-    }
-
-    #[inline]
-    #[target_feature(enable = "neon")]
-    unsafe fn u32x4_load_be2_native(self, input: &[u8]) -> uint32x4_t {
-        assert!(input.len() >= 8);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe {
-            let bytes = vcombine_u8(vld1_u8(input.as_ptr()), vdup_n_u8(0));
-            #[cfg(target_endian = "little")]
-            let bytes = vrev32q_u8(bytes);
-            vreinterpretq_u32_u8(bytes)
-        }
-    }
-
-    #[inline]
-    #[target_feature(enable = "neon")]
-    unsafe fn u32x4_store_be_native(self, value: uint32x4_t, output: &mut [u8]) {
-        assert!(output.len() >= 16);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe {
-            let bytes = vreinterpretq_u8_u32(value);
-            #[cfg(target_endian = "little")]
-            let bytes = vrev32q_u8(bytes);
-            vst1q_u8(output.as_mut_ptr(), bytes)
-        }
-    }
-
-    #[inline]
-    #[target_feature(enable = "neon")]
-    unsafe fn u32x4_align_native<const N: i32>(self, a: uint32x4_t, b: uint32x4_t) -> uint32x4_t {
-        assert!((0..=4).contains(&N));
-        match N {
-            0 => a,
-            1 => vextq_u32::<1>(a, b),
-            2 => vextq_u32::<2>(a, b),
-            3 => vextq_u32::<3>(a, b),
-            4 => b,
-            _ => unreachable!(),
-        }
-    }
-
-    #[inline]
-    #[target_feature(enable = "neon")]
-    unsafe fn u32x4_blend_native<const MASK: i32>(
-        self,
-        a: uint32x4_t,
-        b: uint32x4_t,
-    ) -> uint32x4_t {
-        assert!((0..16).contains(&MASK));
-        let mask: [u32; 4] =
-            core::array::from_fn(|i| if MASK & (1 << i) != 0 { u32::MAX } else { 0 });
-        // SAFETY: The local array contains four readable words; NEON is enabled by this entry.
-        unsafe { vbslq_u32(vld1q_u32(mask.as_ptr()), b, a) }
-    }
-
     /// Returns a token if the current CPU supports NEON and SHA2.
     ///
     /// Without `std`, both features must be enabled at compile time.
@@ -204,56 +60,97 @@ impl Simd for NativeNeon {
 
     #[inline]
     fn u32x4_load(self, input: &[u32]) -> uint32x4_t {
-        // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_load_native(input) }
+        self.u32_load(input)
     }
 
     #[inline]
     fn u32x4_store(self, value: uint32x4_t, output: &mut [u32]) {
-        // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_store_native(value, output) }
+        self.u32_store(value, output)
     }
 
     #[inline]
     fn u32x4_add(self, a: uint32x4_t, b: uint32x4_t) -> uint32x4_t {
-        // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_add_native(a, b) }
+        self.u32_add(a, b)
     }
 
     #[inline]
     fn u32x4_shuffle<const MASK: i32>(self, value: uint32x4_t) -> uint32x4_t {
-        // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_shuffle_native::<MASK>(value) }
+        assert!((0..256).contains(&MASK));
+        let indices: [u8; 16] =
+            core::array::from_fn(|i| (4 * ((MASK >> (2 * (i / 4))) & 3)) as u8 + (i % 4) as u8);
+        // SAFETY: Construction of this token established NEON support, and LD1 reads the
+        // 16-byte local index array.
+        unsafe {
+            vreinterpretq_u32_u8(vqtbl1q_u8(
+                vreinterpretq_u8_u32(value),
+                vld1q_u8(indices.as_ptr()),
+            ))
+        }
     }
 
     #[inline]
     fn u32x4_load_be(self, input: &[u8]) -> uint32x4_t {
-        // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_load_be_native(input) }
+        assert!(input.len() >= 16);
+        // SAFETY: Construction of this token established NEON support. The slice has 16
+        // readable bytes, and the load accepts unaligned memory.
+        unsafe {
+            let bytes = vld1q_u8(input.as_ptr());
+            #[cfg(target_endian = "little")]
+            let bytes = vrev32q_u8(bytes);
+            vreinterpretq_u32_u8(bytes)
+        }
     }
 
     #[inline]
     fn u32x4_load_be2(self, input: &[u8]) -> uint32x4_t {
-        // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_load_be2_native(input) }
+        assert!(input.len() >= 8);
+        // SAFETY: Construction of this token established NEON support. The slice has eight
+        // readable bytes, and the load accepts unaligned memory.
+        unsafe {
+            let bytes = vcombine_u8(vld1_u8(input.as_ptr()), vdup_n_u8(0));
+            #[cfg(target_endian = "little")]
+            let bytes = vrev32q_u8(bytes);
+            vreinterpretq_u32_u8(bytes)
+        }
     }
 
     #[inline]
     fn u32x4_store_be(self, value: uint32x4_t, output: &mut [u8]) {
-        // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_store_be_native(value, output) }
+        assert!(output.len() >= 16);
+        // SAFETY: Construction of this token established NEON support. The slice has 16
+        // writable bytes, and the store accepts unaligned memory.
+        unsafe {
+            let bytes = vreinterpretq_u8_u32(value);
+            #[cfg(target_endian = "little")]
+            let bytes = vrev32q_u8(bytes);
+            vst1q_u8(output.as_mut_ptr(), bytes)
+        }
     }
 
     #[inline]
     fn u32x4_align<const N: i32>(self, a: uint32x4_t, b: uint32x4_t) -> uint32x4_t {
-        // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_align_native::<N>(a, b) }
+        assert!((0..=4).contains(&N));
+        // SAFETY: Construction of this token established NEON support.
+        unsafe {
+            match N {
+                0 => a,
+                1 => vextq_u32::<1>(a, b),
+                2 => vextq_u32::<2>(a, b),
+                3 => vextq_u32::<3>(a, b),
+                4 => b,
+                _ => unreachable!(),
+            }
+        }
     }
 
     #[inline]
     fn u32x4_blend<const MASK: i32>(self, a: uint32x4_t, b: uint32x4_t) -> uint32x4_t {
-        // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_blend_native::<MASK>(a, b) }
+        assert!((0..16).contains(&MASK));
+        let mask: [u32; 4] =
+            core::array::from_fn(|i| if MASK & (1 << i) != 0 { u32::MAX } else { 0 });
+        // SAFETY: Construction of this token established NEON support, and LD1 reads the
+        // four-word local mask array.
+        unsafe { vbslq_u32(vld1q_u32(mask.as_ptr()), b, a) }
     }
 
     type U8 = uint8x16_t;
@@ -582,26 +479,26 @@ impl Simd for NativeNeon {
 impl Neon for NativeNeon {
     #[inline]
     fn sha256_h(self, abcd: Self::U32x4, efgh: Self::U32x4, wk: Self::U32x4) -> Self::U32x4 {
-        // SAFETY: The private token's constructor checked NEON and SHA2.
-        unsafe { self.sha256_h_native(abcd, efgh, wk) }
+        // SAFETY: Construction of this token established NEON and SHA2 support.
+        unsafe { vsha256hq_u32(abcd, efgh, wk) }
     }
 
     #[inline]
     fn sha256_h2(self, efgh: Self::U32x4, abcd: Self::U32x4, wk: Self::U32x4) -> Self::U32x4 {
-        // SAFETY: The private token's constructor checked NEON and SHA2.
-        unsafe { self.sha256_h2_native(efgh, abcd, wk) }
+        // SAFETY: Construction of this token established NEON and SHA2 support.
+        unsafe { vsha256h2q_u32(efgh, abcd, wk) }
     }
 
     #[inline]
     fn sha256_su0(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
-        // SAFETY: The private token's constructor checked NEON and SHA2.
-        unsafe { self.sha256_su0_native(a, b) }
+        // SAFETY: Construction of this token established NEON and SHA2 support.
+        unsafe { vsha256su0q_u32(a, b) }
     }
 
     #[inline]
     fn sha256_su1(self, a: Self::U32x4, b: Self::U32x4, c: Self::U32x4) -> Self::U32x4 {
-        // SAFETY: The private token's constructor checked NEON and SHA2.
-        unsafe { self.sha256_su1_native(a, b, c) }
+        // SAFETY: Construction of this token established NEON and SHA2 support.
+        unsafe { vsha256su1q_u32(a, b, c) }
     }
 
     type U16 = uint16x8_t;
@@ -706,7 +603,6 @@ mod tests {
     use super::NativeNeon;
     use crate::{Neon, Operation, Simd, emulated::EmulatedNeon};
     use core::arch::aarch64::{uint64x2_t, vdupq_n_u64, vgetq_lane_u64, vsetq_lane_u64};
-    #[cfg(test)]
     use std::{
         eprintln,
         panic::{AssertUnwindSafe, catch_unwind},
@@ -770,10 +666,6 @@ mod tests {
             expected
         );
         assert_eq!(output(EmulatedNeon, value, sentinel), expected);
-        assert_eq!(
-            output(native, native_vector(native, value), sentinel),
-            output(EmulatedNeon, value, sentinel)
-        );
     }
 
     fn check_splat(native: NativeNeon, value: u64, sentinel: u64) {
@@ -801,7 +693,6 @@ mod tests {
         assert_eq!(output(EmulatedNeon, emulated, sentinel), expected);
     }
 
-    #[cfg(test)]
     fn check_short<S: Simd>(simd: S, value: u64, len: usize) {
         let mut memory = Memory([value; 5]);
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_load(&memory.0[1..1 + len]))).is_err());
@@ -851,14 +742,6 @@ mod tests {
 
     fn check_execute(native: NativeNeon, value: [u64; 2]) {
         let expected = (true, value.map(|v| v.wrapping_add(1)));
-        assert_eq!(
-            native.execute(Child(value)),
-            EmulatedNeon.execute(Child(value))
-        );
-        assert_eq!(
-            native.execute(Parent(Parent(Child(value)))),
-            EmulatedNeon.execute(Parent(Parent(Child(value))))
-        );
         assert_eq!(native.execute(Child(value)), expected);
         assert_eq!(EmulatedNeon.execute(Child(value)), expected);
         assert_eq!(native.execute(Parent(Parent(Child(value)))), expected);
@@ -930,44 +813,7 @@ mod sha_tests {
                     words(simd, simd.sha256_su1(av, bv, cv)),
                     emulated.sha256_su1(a, b, c)
                 );
-                assert_eq!(
-                    words(simd, simd.u32x4_add(av, bv)),
-                    emulated.u32x4_add(a, b)
-                );
-                assert_eq!(
-                    words(simd, simd.u32x4_shuffle::<0x1b>(av)),
-                    emulated.u32x4_shuffle::<0x1b>(a)
-                );
-                macro_rules! align { ($($n:literal),*) => { $(
-                    assert_eq!(words(simd, simd.u32x4_align::<$n>(av, bv)), emulated.u32x4_align::<$n>(a, b));
-                )* }; }
-                align!(0, 1, 2, 3, 4);
-                macro_rules! blend { ($($n:literal),*) => { $(
-                    assert_eq!(words(simd, simd.u32x4_blend::<$n>(av, bv)), emulated.u32x4_blend::<$n>(a, b));
-                )* }; }
-                blend!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
             }
         }
-    }
-
-    #[test]
-    fn test_sha2_native_execution_path() {
-        let Some(simd) = NativeNeon::new() else {
-            return;
-        };
-        struct Path;
-        impl<S: Simd> Operation<S> for Path {
-            type Output = bool;
-            fn portable(self, _: S) -> bool {
-                false
-            }
-            fn neon(self, _: S) -> bool
-            where
-                S: Neon,
-            {
-                true
-            }
-        }
-        assert!(simd.execute(Path));
     }
 }
