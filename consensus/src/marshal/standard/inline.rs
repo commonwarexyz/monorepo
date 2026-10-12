@@ -368,7 +368,13 @@ where
                     parent = %parent_commitment
                 )
             },
-            move |block: B, ()| (block.digest_across(&strategy), Arc::new(block)),
+            move |block: B, ()| async move {
+                strategy
+                    .spawn(block.encode_size(), move |strategy| {
+                        (block.digest_across(&strategy), Arc::new(block))
+                    })
+                    .await
+            },
         )
     }
 
@@ -597,7 +603,13 @@ where
                     parent = %parent_commitment
                 )
             },
-            move |block: B, ()| (block.digest_across(&strategy), Arc::new(block)),
+            move |block: B, ()| async move {
+                strategy
+                    .spawn(block.encode_size(), move |strategy| {
+                        (block.digest_across(&strategy), Arc::new(block))
+                    })
+                    .await
+            },
         )
     }
 

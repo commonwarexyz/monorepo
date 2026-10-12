@@ -41,10 +41,12 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
 /// both cases without the application. Otherwise `application` builds on the fetched ancestry
 /// under the span `build_span` returns, and `seal` turns a block it returned, with the metadata
 /// the checks resolved, into the block's staged form and digest, which is answered under the
-/// application's decision. The block is staged before its digest is sent. Dropping the receiver
-/// cancels the wait for the parent and the build.
+/// application's decision. `seal` returns a future so that expensive sealing, such as an erasure
+/// encode, can run on the wrapper's strategy without holding the task's thread. The block is
+/// staged before its digest is sent. Dropping the receiver cancels the wait for the parent and
+/// the build.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare<E, A, D, P, S, N, Fut, M>(
+pub(crate) fn prepare<E, A, D, P, S, N, Fut, M, Seal>(
     context: &E,
     application: &A,
     gates: Gates<D, S>,
@@ -52,7 +54,7 @@ pub(crate) fn prepare<E, A, D, P, S, N, Fut, M>(
     checks: Fut,
     span: Span,
     build_span: impl FnOnce() -> Span + Send + 'static,
-    seal: impl FnOnce(A::Block, M) -> (D, Arc<S>) + Send + 'static,
+    seal: impl FnOnce(A::Block, M) -> Seal + Send + 'static,
 ) -> oneshot::Receiver<Handoff<D>>
 where
     E: Rng + Clock + Spawner + Metrics,
@@ -63,6 +65,7 @@ where
     N: Ancestry<A::Block>,
     M: Send + 'static,
     Fut: Future<Output = Resolved<D, S, N, M>> + Send + 'static,
+    Seal: Future<Output = (D, Arc<S>)> + Send + 'static,
 {
     let mut application = application.clone();
     let (mut tx, rx) = oneshot::channel();
@@ -134,7 +137,7 @@ where
 
             // The block is staged under the application's decision, and its digest reaches
             // consensus only once the relay broadcast and certification can find the block.
-            let (digest, block) = seal(block, metadata);
+            let (digest, block) = seal(block, metadata).await;
             gates
                 .stage(
                     round,
@@ -159,10 +162,11 @@ where
 /// marshal cannot build on, or a build that produces no block, closes the receiver. Otherwise
 /// `application` builds on the fetched ancestry under the span `build_span` returns, and
 /// `seal` turns the built block, with the metadata the checks resolved, into the block's staged
-/// form and digest. The block is staged before its digest is sent. Dropping the receiver
-/// cancels the wait for the parent and the build.
+/// form and digest. It returns a future so that expensive sealing, such as an erasure encode, can
+/// run on the wrapper's strategy without holding the task's thread. The block is staged before
+/// its digest is sent. Dropping the receiver cancels the wait for the parent and the build.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn propose<E, A, D, P, S, N, Fut, M>(
+pub(crate) fn propose<E, A, D, P, S, N, Fut, M, Seal>(
     context: &E,
     application: &A,
     gates: Gates<D, S>,
@@ -170,7 +174,7 @@ pub(crate) fn propose<E, A, D, P, S, N, Fut, M>(
     checks: Fut,
     span: Span,
     build_span: impl FnOnce() -> Span + Send + 'static,
-    seal: impl FnOnce(A::Block, M) -> (D, Arc<S>) + Send + 'static,
+    seal: impl FnOnce(A::Block, M) -> Seal + Send + 'static,
 ) -> oneshot::Receiver<D>
 where
     E: Rng + Clock + Spawner + Metrics,
@@ -181,6 +185,7 @@ where
     N: Ancestry<A::Block>,
     M: Send + 'static,
     Fut: Future<Output = Resolved<D, S, N, M>> + Send + 'static,
+    Seal: Future<Output = (D, Arc<S>)> + Send + 'static,
 {
     let mut application = application.clone();
     let (mut tx, rx) = oneshot::channel();
@@ -253,7 +258,7 @@ where
 
             // The digest reaches consensus only once the relay broadcast and certification can
             // find the staged block.
-            let (digest, block) = seal(built_block, metadata);
+            let (digest, block) = seal(built_block, metadata).await;
             gates
                 .stage(
                     round,
