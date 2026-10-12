@@ -14,7 +14,7 @@
 //!   |     +-- Config, metrics, stop/panic signals
 //!   |     +-- Network, Storage
 //!   |     +-- Pool (each pool worker's mailbox and run queue, global queue,
-//!   |     |       idle set, shutdown barrier)
+//!   |     |       wake word, shutdown barrier)
 //!   |     |       ^-- task headers (Weak)
 //!   |     +-- Tasks (every live ordinary task, for teardown)
 //!   |     `-- Workers <------------------------ ActiveWorker
@@ -62,7 +62,9 @@
 //! a full run queue sends its newest half and the new runnable to the global
 //! queue, or only the new runnable while a thief holds a claim. A worker with
 //! nothing to run steals half of another worker's run queue, rounded down, so
-//! a runnable queued alone stays where it is.
+//! a runnable queued alone stays where it is. A push that leaves a stealable
+//! backlog offers it to a parked worker unless a worker already holds a
+//! search count and is responsible for finding or handing on that work.
 //!
 //! ```text
 //! ordinary spawn:
@@ -97,10 +99,22 @@
 //! whenever its own run queue is empty. A take returns one runnable to poll
 //! next and queues the rest of its share in the run queue, no more than it has
 //! room for and no more than fill it to half. A pool worker that finds both
-//! queues empty after a service pass steals from the other run queues before it
-//! parks. Before parking, the worker checks readiness again because polls and
+//! queues empty after a service pass tries to steal before parking, or relies
+//! on workers already holding search counts when the search cap refuses it.
+//! Before parking, the worker checks readiness again because polls and
 //! callbacks can have produced more work, and a pool worker publishes itself in
-//! the idle set before its last look at the global queue.
+//! the idle set before its last look at the global queue and the other run
+//! queues. A pool worker that searches, or that a wake claimed, holds a search
+//! count, which keeps kicks from waking more workers. It returns the count
+//! before it runs user code, which can wake work and block waiting for a peer
+//! to run it: before each task or root poll and each nonempty callback batch,
+//! and whenever it goes round again without parking, since the catch-up service
+//! that can follow runs callbacks. It also returns the count before pending
+//! messages, which run no user code, to bound how long service turns can
+//! suppress kicks. A park returns the count before its final look. The last
+//! count returned outside a park wakes a parked worker, which carries on the
+//! search. The drive loop withdraws from the idle set and returns the count on
+//! every exit, unwinding included, before the root is destroyed.
 //!
 //! ## Shutdown
 //!
@@ -1205,9 +1219,9 @@ impl Local {
             .ready
     }
 
-    /// Queue a runnable on this pool worker, exporting overflow through
-    /// [`Pool::enqueue`]. The runnable must belong to this pool. Panics on a
-    /// dedicated worker.
+    /// Queue a runnable on this pool worker, offering stealable backlog or
+    /// exporting overflow through [`Pool::enqueue`]. The runnable must belong
+    /// to this pool. Panics on a dedicated worker.
     #[inline]
     pub fn enqueue(&mut self, runnable: Runnable) {
         let Self { seat, shared, .. } = self;
@@ -1690,10 +1704,10 @@ impl Worker {
             let local = self.local.borrow();
             (local.role(), local.shared.clone())
         };
-        if let Role::Pool(index) = role {
-            // An unwind out of the park section can leave this worker's idle
-            // bit set, which would spend a push's wake on it while it waits.
-            shared.pool.park_end(index);
+        if role.is_pool() {
+            // The drive loop withdrew this worker from the idle set and
+            // returned its search count when it ended, unwinding included, so
+            // no wake is spent on it and no kick waits for it here.
             shared.pool.wait_closed();
         }
 
@@ -1917,10 +1931,49 @@ impl Worker {
         pool.take(ready).or_else(|| ready.pop())
     }
 
-    /// Search the other workers' run queues, moving whatever a steal takes into
-    /// this worker's own run queue. Returns whether it took anything.
-    fn search_into_ring(&self, searcher: &mut Searcher<'_>) -> bool {
-        searcher.search(self.local.borrow_mut().ready_mut())
+    /// Run one callback batch, first returning a held search count when the
+    /// batch is not empty, since callbacks run user code. The worker must have
+    /// withdrawn any idle publication and the caller must hold no Local borrow.
+    fn callbacks_after_search(&mut self, searcher: &mut Option<Searcher<'_>>) {
+        if self.local.borrow().deferred.is_empty() {
+            return;
+        }
+        leave_search(searcher);
+        self.callbacks();
+    }
+
+    /// Look for work before a pool worker with nothing ready parks: steal from
+    /// the other run queues, then publish the worker idle and look once more,
+    /// searching again when the last look asks it to. Returns whether the
+    /// worker found work and runs again instead of waiting. `searcher` must
+    /// belong to this worker, whose run queue is empty and Local unborrowed.
+    /// A true result leaves no idle publication but may hold a search count,
+    /// which the caller returns before user code or another service turn. A
+    /// false result leaves an idle publication, which the caller withdraws
+    /// through [`Searcher::finish_park`] once its wait or spin returns.
+    fn find_before_park(&self, searcher: &mut Searcher<'_>) -> bool {
+        if searcher.search(self.local.borrow_mut().ready_mut()) {
+            return true;
+        }
+
+        #[cfg(test)]
+        tests::at_park(
+            searcher.pool(),
+            searcher.index(),
+            tests::ParkPoint::BeforeIdle,
+        );
+
+        if searcher.publish_and_look(self.local.borrow_mut().ready_mut()) {
+            return true;
+        }
+
+        #[cfg(test)]
+        tests::at_park(
+            searcher.pool(),
+            searcher.index(),
+            tests::ParkPoint::BeforeWait,
+        );
+        false
     }
 
     /// Drive tasks and one separately pinned root through bounded service turns.
@@ -1946,6 +1999,10 @@ impl Worker {
             Role::Dedicated => (None, None),
         };
         let owner = shared.tasks.id();
+
+        // A pool worker's part in searching and waking. Dropped on every
+        // return and unwind of this loop, it withdraws a live idle publication
+        // and returns a held search count before the caller destroys the root.
         let mut searcher = index.map(|index| Searcher::new(&shared.pool, index));
 
         // A pool push wakes a parked worker through the wake signal, not the
@@ -1968,6 +2025,10 @@ impl Worker {
                     break;
                 };
 
+                // User code can wake a backlog and wait for a peer to run it.
+                // Return the count so those wakes can kick a parked peer.
+                leave_search(&mut searcher);
+
                 // The inner wrapper handles user polling policy. The poll also
                 // contains the destruction of a finished or cancelled future.
                 match runnable.poll(owner) {
@@ -1985,6 +2046,9 @@ impl Worker {
             let poll_root = mem::take(&mut self.local.borrow_mut().root_ready);
 
             if poll_root {
+                // The root can wake work and block waiting for it just as a
+                // task can, so it must not suppress peers' kicks either.
+                leave_search(&mut searcher);
                 let mut cx = TaskContext::from_waker(root_waker);
 
                 // A wake during this poll sets root_ready again. Pending must
@@ -1997,11 +2061,9 @@ impl Worker {
             // Polls can leave cancelled observers behind. Run one batch before
             // deciding whether kernel service can wait until parking. Reentrant
             // work remains visible to the complete readiness checks below.
-            if !self.local.borrow().deferred.is_empty() {
-                self.callbacks();
-                if self.panics.first.is_some() {
-                    return None;
-                }
+            self.callbacks_after_search(&mut searcher);
+            if self.panics.first.is_some() {
+                return None;
             }
 
             // An apparently idle turn can combine kernel service with the wait.
@@ -2013,10 +2075,22 @@ impl Worker {
 
             // Apply foreign messages and completion callbacks before considering
             // a wait. Any tasks they make ready will be polled on the next turn.
+            // Messages run no user code: they queue callbacks, and the batch
+            // below returns a held search count before it runs them. Returning
+            // the count before a batch of messages as well bounds how long it
+            // keeps kicks from waking a parked worker.
+            if !self.inbox.is_empty() || mailbox.waker.pending(self.processed_seq) {
+                leave_search(&mut searcher);
+            }
             self.messages(&mailbox);
-            self.callbacks();
+            self.callbacks_after_search(&mut searcher);
             if self.panics.first.is_some() {
                 return None;
+            }
+
+            #[cfg(test)]
+            if let (Some(pool), Some(index)) = (pool, index) {
+                tests::at_park(pool, index, tests::ParkPoint::AfterMessages);
             }
 
             // Callbacks and messages can submit I/O or make tasks runnable, so
@@ -2032,12 +2106,15 @@ impl Worker {
             };
 
             // Queued submissions need another service turn even when no task
-            // has a notification that would cause it to be polled.
+            // has a notification that would cause it to be polled. Going round
+            // again without parking ends a search, and the catch-up's callbacks
+            // run user code.
             if ready
                 || pending_submissions
                 || !self.inbox.is_empty()
                 || mailbox.waker.pending(self.processed_seq)
             {
+                leave_search(&mut searcher);
                 if (kernel_deferred && needs_kernel) || (defer && pending_submissions) {
                     // An idle turn must stage work introduced by its callbacks.
                     // A wake alone needs catch-up only if GETEVENTS was deferred.
@@ -2049,8 +2126,11 @@ impl Worker {
 
             // Busy turns use only service's time sample. Take a fresh sample
             // at this actual idle boundary after any elapsed callback time.
+            // Waiting for an expired deadline would not block, so this ends a
+            // search as well, and the catch-up's callbacks run user code.
             let now = Instant::now();
             if deadline.is_some_and(|deadline| deadline <= now) {
+                leave_search(&mut searcher);
                 if kernel_deferred && needs_kernel {
                     self.service(false);
                     self.callbacks();
@@ -2058,37 +2138,20 @@ impl Worker {
                 continue;
             }
 
-            // A worker with nothing to run steals from the other run queues
-            // before it parks, once its own service has found nothing.
+            // Steal, then publish idleness before the last look for work. A
+            // push racing this look either shows up here or leaves some worker,
+            // not necessarily this one, woken or running to take it.
             if let Some(searcher) = &mut searcher
-                && self.search_into_ring(searcher)
+                && self.find_before_park(searcher)
             {
+                // Running again ends a search, and the catch-up's callbacks run
+                // user code.
+                searcher.leave_search();
                 if kernel_deferred && needs_kernel {
                     self.service(false);
                     self.callbacks();
                 }
                 continue;
-            }
-
-            // Publish idleness before the last look at the global queue. A push
-            // racing this check either shows up here or leaves some worker, not
-            // necessarily this one, woken or running to take it.
-            if let (Some(pool), Some(index)) = (pool, index) {
-                #[cfg(test)]
-                tests::at_park(pool, index, tests::ParkPoint::BeforeIdle);
-
-                pool.park_begin(index);
-                if pool.has_global() {
-                    pool.park_end(index);
-                    if kernel_deferred && needs_kernel {
-                        self.service(false);
-                        self.callbacks();
-                    }
-                    continue;
-                }
-
-                #[cfg(test)]
-                tests::at_park(pool, index, tests::ParkPoint::BeforeWait);
             }
 
             #[cfg(test)]
@@ -2105,11 +2168,19 @@ impl Worker {
                     .unwrap()
                     .park(self.processed_seq, deadline);
 
+                // Withdraw before callbacks so their kicks cannot spend a wake
+                // on this already running worker. A claim's count stays held
+                // until the worker returns it before user code, when it goes
+                // round again, or at its next park.
+                if let Some(searcher) = &mut searcher {
+                    searcher.finish_park();
+                }
+
                 if !result.expect("io_uring kernel wait failed") {
                     // A rejected wait may not have entered the kernel. Complete
                     // its deferred service obligation before another polling turn.
                     self.service(false);
-                    self.callbacks();
+                    self.callbacks_after_search(&mut searcher);
                 }
             } else {
                 // A future timer by itself uses a timed futex wait. Spinning
@@ -2128,12 +2199,22 @@ impl Worker {
                 {
                     spinner.on_wake(duration);
                 }
-            }
-
-            if let (Some(pool), Some(index)) = (pool, index) {
-                pool.park_end(index);
+                // End this publication even when spinning or a latched wake
+                // avoided blocking. The next park needs a fresh publication.
+                if let Some(searcher) = &mut searcher {
+                    searcher.finish_park();
+                }
             }
         }
+    }
+}
+
+/// Return a pool worker's held search count, as it must before it runs user
+/// code or goes round its loop again without parking. Any idle publication
+/// must already be withdrawn. Does nothing for a dedicated worker.
+fn leave_search(searcher: &mut Option<Searcher<'_>>) {
+    if let Some(searcher) = searcher {
+        searcher.leave_search();
     }
 }
 
