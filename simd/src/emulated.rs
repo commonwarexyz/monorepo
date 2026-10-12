@@ -17,6 +17,7 @@
 //! ```
 
 mod arm_v9;
+mod common;
 mod ice_lake;
 mod neon;
 mod scalar;

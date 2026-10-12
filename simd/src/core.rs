@@ -360,7 +360,7 @@ pub trait Simd: Copy {
     /// target-feature scope. Emulated implementations require no corresponding hardware
     /// features.
     ///
-    /// Enter a whole SIMD kernel with `simd.execute(#[inline(always)] |simd| ...)`.
+    /// Enter a whole SIMD kernel with `simd.execute(#[inline(always)] |simd: S| ...)`.
     /// A kernel is a substantial SIMD computation that keeps intermediates in registers.
     /// The closure body and hot shared SIMD helpers must inline into the target-feature scope;
     /// annotate both with `#[inline(always)]`. Receiving a token alone does not give an
@@ -609,7 +609,7 @@ pub trait Neon: Simd {
 ///
 /// Closures implementing `FnMut(S) -> R` are operations with output `R` and are invoked
 /// once per execution. They may own inputs and borrow mutable state; closures that only
-/// implement `FnOnce` are excluded. Use `simd.execute(#[inline(always)] |simd| ...)`
+/// implement `FnOnce` are excluded. Use `simd.execute(#[inline(always)] |simd: S| ...)`
 /// to enter a whole kernel: a substantial SIMD computation that keeps intermediates in
 /// registers. Ordinary generic functions can compose leaves and return results directly.
 /// The closure body and hot shared SIMD helpers must inline

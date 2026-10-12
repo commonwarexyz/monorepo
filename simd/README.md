@@ -26,7 +26,7 @@ In particular, we don't imagine that floating-point instructions will be useful.
 
 We also don't try to track every possible subset or iteration of particular
 instruction sets.
-For example, on x86, various iterations of SIMD exist---SSE2, AVX, AVX-512---
+For example, x86 has several iterations of SIMD, such as SSE2, AVX, and AVX-512,
 and some specialized instructions like GFNI, SHA-NI, etc. may not be available.
 Rather than trying to target all the possible combinations of these, we instead
 have a few "frontier" targets, which are platforms that are both widely available,
@@ -138,8 +138,8 @@ fn kernel<S: Simd>(simd: S, a: S::U64, b: S::U64) -> S::U64 {
 ```
 
 `Simd::execute` keeps the supplied backend when executing a child operation.
-Vector types such as `S::U64` depend on the backend and cannot be passed to
-another backend.
+The operation returned by `add::<S>` above remains tied to `S`, even when
+different backends share a register representation.
 
 At the outer boundary, `dispatch` selects a native backend supported by the host,
 falling back to scalar emulation.
@@ -253,7 +253,7 @@ check instruction implementations on supported hardware.
 
 ### Performance Footguns
 
-Enter a whole SIMD kernel through `simd.execute(#[inline(always)] |simd| ...)`.
+Enter a whole SIMD kernel through `simd.execute(#[inline(always)] |simd: S| ...)`.
 You can also define an `#[inline(always)]` function returning `impl Operation<S>`
 and pass its result to `simd.execute`. Annotate the returned operation's body with
 `#[inline(always)]` as well, as in the `add` example above.

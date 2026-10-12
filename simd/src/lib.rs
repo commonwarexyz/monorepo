@@ -44,8 +44,8 @@ extern crate std;
 // produces two u64 lanes; narrowing truncates rather than saturating. Model lane-mask blending
 // separately from bitwise selection with arbitrary partial masks.
 //
-// Ocelot currently requires AVX-512F + GFNI, and curve25519 requires AVX-512F + IFMA. Ocelot's
-// dword-masked memory operations avoid requiring AVX-512BW. Check any additional feature
+// Ocelot currently requires AVX-512F + GFNI, and curve25519 requires AVX-512F + AVX-512VL + IFMA.
+// Ocelot's dword-masked memory operations avoid requiring AVX-512BW. Check any additional feature
 // requirements when introducing new instructions. Field reduction, GF16 multiplication,
 // butterflies, and curve formulas remain algorithms built from these primitives. Scaling by
 // 19 can use shifts and additions, with native code generation checked against existing kernels.

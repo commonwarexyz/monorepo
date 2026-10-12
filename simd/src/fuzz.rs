@@ -18,7 +18,7 @@ pub enum Plan {
     Profile,
     /// Checks unaligned loads against the selected profile's emulator.
     Load,
-    /// Checks stores and their surrounding memory.
+    /// Checks lane insertion into a broadcast vector, stored between sentinel words.
     Store,
     /// Checks broadcasts of arbitrary and boundary words.
     Splat,
