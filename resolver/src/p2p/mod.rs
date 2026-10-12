@@ -127,6 +127,7 @@ mod tests {
     use commonware_p2p::{
         Blocker, Manager as _, Provider, TrackedPeers,
         simulated::{Link, Network, Oracle, Receiver, Sender},
+        utils::mocks::NoopBlocker,
     };
     use commonware_runtime::{
         Clock, Metrics as _, Quota, Runner, Spawner as _, Supervisor as _, deterministic,
@@ -2139,24 +2140,6 @@ mod tests {
         });
     }
 
-    /// A blocker whose blocked-set subscription closes immediately, as test
-    /// mocks elsewhere in the workspace do.
-    #[derive(Clone)]
-    struct ClosedBlocker;
-
-    impl Blocker for ClosedBlocker {
-        type PublicKey = PublicKey;
-
-        fn block(&mut self, _peer: Self::PublicKey) -> commonware_actor::Feedback {
-            commonware_actor::Feedback::Ok
-        }
-
-        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
-            let (_, receiver) = commonware_utils::channel::ring::channel(NZUsize!(1));
-            receiver
-        }
-    }
-
     #[test_traced]
     fn test_closed_blocked_subscription_keeps_fetching() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -2173,12 +2156,13 @@ mod tests {
 
             let (cons1, mut cons_out1) = consumer();
 
-            // The engine keeps serving fetches when the blocked-set stream ends.
+            // The engine keeps serving fetches when the blocked-set stream ends
+            // (NoopBlocker's subscription closes immediately).
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
                 oracle.manager(),
-                ClosedBlocker,
+                NoopBlocker::default(),
                 scheme,
                 connections.remove(0),
                 cons1,
