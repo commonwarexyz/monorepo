@@ -2,9 +2,9 @@
 //!
 //! A pool of workers polls ordinary tasks, worker zero on the calling thread
 //! and the others on threads of their own (see [`super::pool`]). Dedicated and
-//! blocking tasks each get a separate thread and ring. All workers share
-//! configuration and services through [`Shared`], while execution state stays
-//! in each worker's [`Local`].
+//! blocking tasks each get a separate thread and io_uring ring. All workers
+//! share configuration and services through [`Shared`], while execution state
+//! stays in each worker's [`Local`].
 //!
 //! ## State and ownership
 //!
@@ -13,7 +13,8 @@
 //!   +-- Shared (Arc) <-------------------------- Local.shared
 //!   |     +-- Config, metrics, stop/panic signals
 //!   |     +-- Network, Storage
-//!   |     +-- Pool (pool mailboxes, global queue, idle set, shutdown barrier)
+//!   |     +-- Pool (each pool worker's mailbox and run queue, global queue,
+//!   |     |       idle set, shutdown barrier)
 //!   |     |       ^-- task headers (Weak)
 //!   |     +-- Tasks (every live ordinary task, for teardown)
 //!   |     `-- Workers <------------------------ ActiveWorker
@@ -24,10 +25,10 @@
 //!   |                                               |
 //!   +-- Rc<RefCell<Local>> <------------------------+
 //!   |     +-- Shared (Arc)
-//!   |     +-- Ready (runnables)
+//!   |     +-- Ready (owner's end of a pool worker's run queue)
 //!   |     +-- Timers (sleep registrations and deadlines)
 //!   |     +-- Driver
-//!   |     |     +-- ring (SQ/CQ)
+//!   |     |     +-- io_uring ring (SQ/CQ)
 //!   |     |     +-- Waiters (requests and unconsumed results)
 //!   |     |     `-- ready queue, deadlines, cancellations (IDs)
 //!   |     +-- Mailbox (messages and wake source)
@@ -54,15 +55,20 @@
 //! first runnable. A pool worker keeps it when nothing else is queued there or
 //! when it is the pool's only worker. Every other spawn, including one from a
 //! busy pool worker, goes to the pool's global queue, which wakes a parked
-//! worker. A wake queues the task on the pool worker that wakes it, or, from
-//! outside the pool or on a closing worker, on whichever worker takes it from
-//! the global queue. A wake during a poll leaves the task on its poller.
+//! worker. A wake first queues the task in the run queue of the pool worker
+//! that wakes it, or, from outside the pool or on a closing worker, on
+//! whichever worker takes it from the global queue. A wake during a poll first
+//! requeues the task on its poller. A queued task can still move: a push into
+//! a full run queue sends its newest half and the new runnable to the global
+//! queue.
 //!
 //! ```text
 //! ordinary spawn:
 //!   check Tasks --> factory --> Tasks::register
-//!                                  +-- pool worker, quiet or alone --> its Ready
-//!                                  `-- otherwise --> global queue --> a worker's Ready
+//!                                  +-- pool worker, quiet or alone --> its run queue
+//!                                  `-- otherwise --> global queue --> any pool worker
+//!                                                                     +-- first: poll
+//!                                                                     `-- rest: run queue
 //!
 //! dedicated / blocking spawn:
 //!   Workers::reserve --> factory --> new thread
@@ -86,10 +92,12 @@
 //! services I/O and timers, and applies a bounded batch of mailbox messages.
 //! Deferred callbacks run between these phases. A pool worker takes a share of
 //! the global queue every [`Config::with_global_queue_interval`] takes and
-//! whenever its own queue is empty. Before parking, the worker checks readiness
-//! again because polls and callbacks can have produced more work, and a pool
-//! worker publishes itself in the idle set before its last look at the global
-//! queue.
+//! whenever its own run queue is empty. A take returns one runnable to poll
+//! next and queues the rest of its share in the run queue, no more than it has
+//! room for and no more than fill it to half. Before parking, the worker checks
+//! readiness again because polls and callbacks can have produced more work, and
+//! a pool worker publishes itself in the idle set before its last look at the
+//! global queue.
 //!
 //! ## Shutdown
 //!
@@ -108,10 +116,13 @@
 //! abort spawned tasks through the supervision tree, stop the other pool workers
 //!   |
 //!   v
-//! every pool worker drains the task set, then waits for the others
+//! every pool worker discards its run queue and drains the task set
 //!   |
 //!   v
-//! every pool worker closes its mailbox and ring --> join the pool workers
+//! every pool worker waits for the others to finish polling and draining
+//!   |
+//!   v
+//! pool workers close mailbox and io_uring ring  --> join the pool workers
 //!                                                    |
 //!                                                    v
 //!                                  collect a pool worker failure the root missed
@@ -123,8 +134,8 @@
 //!                                        return result or resume panic
 //! ```
 //!
-//! No pool worker closes its mailbox or ring until every pool worker has
-//! drained the set and finished its last poll, since a task polled on one
+//! No pool worker closes its mailbox or io_uring ring until every pool worker
+//! has drained the set and finished its last poll, since a task polled on one
 //! worker can hold registrations on another, whose mailbox forwards their
 //! results. A dedicated worker closes its mailbox once its root is gone.
 //!
@@ -242,8 +253,9 @@ impl Default for RingConfig {
 ///
 /// A pool of [`Self::with_worker_threads`] workers, two by default, polls
 /// ordinary tasks, the first on the thread calling [`crate::Runner::start`].
-/// Tasks marked dedicated or blocking each receive a fresh thread and ring.
-/// Shutdown completes retained writes and syncs without a configured time limit.
+/// Tasks marked dedicated or blocking each receive a fresh thread and io_uring
+/// ring. Shutdown completes retained writes and syncs without a configured
+/// time limit.
 #[derive(Clone)]
 pub struct Config {
     /// Pool workers, including the calling thread.
@@ -251,7 +263,7 @@ pub struct Config {
     /// Every Nth poll of a busy pool worker looks at the global queue first,
     /// defaulting to 31.
     global_queue_interval: u32,
-    /// Per-worker ring capacity and operation wheel tick.
+    /// Per-worker io_uring ring capacity and operation wheel tick.
     ring_config: RingConfig,
     /// Idle spinning policy, shared by all workers.
     idle_spinner: SpinnerConfig,
@@ -305,8 +317,8 @@ impl Config {
     /// Set the number of pool workers, including the calling thread. Defaults
     /// to 2.
     ///
-    /// Must be between 1 and 64. Each worker has its own ring. Dedicated and
-    /// blocking threads are additional to this count.
+    /// Must be between 1 and 64. Each worker has its own io_uring ring.
+    /// Dedicated and blocking threads are additional to this count.
     pub const fn with_worker_threads(mut self, workers: usize) -> Self {
         self.worker_threads = workers;
         self
@@ -324,7 +336,7 @@ impl Config {
         self
     }
 
-    /// Set ring capacity and deadline granularity. See [`RingConfig`].
+    /// Set io_uring ring capacity and deadline granularity. See [`RingConfig`].
     pub const fn with_ring_config(mut self, config: RingConfig) -> Self {
         self.ring_config = config;
         self
@@ -347,9 +359,9 @@ impl Config {
     ///
     /// Caught failures are logged without interrupting the root. Propagated
     /// failures are observed only while the root is executing. A failure of a
-    /// pool worker itself, such as a ring error, fails the runner with either
-    /// setting: it interrupts the root while the root runs, and the runner
-    /// resumes it after shutdown otherwise.
+    /// pool worker itself, such as an io_uring error, fails the runner with
+    /// either setting: it interrupts the root while the root runs, and the
+    /// runner resumes it after shutdown otherwise.
     ///
     /// During worker execution, cancellation-time and task-disposal panics
     /// escaping the user-poll wrapper are contained with either setting. An
@@ -432,7 +444,7 @@ impl Config {
         self.global_queue_interval
     }
 
-    /// Return per-worker ring configuration.
+    /// Return per-worker io_uring ring configuration.
     pub const fn ring_config(&self) -> &RingConfig {
         &self.ring_config
     }
@@ -615,7 +627,10 @@ impl Workers {
 ///
 /// Retains only [`Workers`], allowing Shared and its storage hold to be released
 /// before the worker count reaches zero.
-struct ActiveWorker(Arc<Workers>);
+struct ActiveWorker(
+    /// Registry whose active count includes this reservation.
+    Arc<Workers>,
+);
 
 impl Drop for ActiveWorker {
     fn drop(&mut self) {
@@ -691,14 +706,13 @@ impl Shared {
 /// Runtime capabilities and supervision context for the current task.
 ///
 /// Ordinary children run on the pool, including those spawned by dedicated and
-/// blocking tasks. Task factories run on their caller, while ordinary futures
-/// run on the pool, moving to the worker that wakes them while idle. Resources
-/// and pending I/O and sleep futures can move between workers. Registrations
-/// stay on their original worker. Closing that worker causes unresolved I/O
-/// futures to fail and unresolved sleeps to panic when polled. Pool workers
-/// close only at shutdown, after every pool task has been dropped, while
-/// dedicated and blocking tasks may still run. Detached sync completion handles
-/// can be awaited on any thread.
+/// blocking tasks. Task factories run on their caller, while returned futures
+/// run on the pool and can move between its workers, as can resources and
+/// pending I/O and sleep futures. Registrations stay on their original worker.
+/// Closing that worker causes unresolved I/O futures to fail and unresolved
+/// sleeps to panic when polled. Pool workers close only at shutdown, after
+/// every pool task has been dropped, while dedicated and blocking tasks may
+/// still run. Detached sync completion handles can be awaited on any thread.
 pub struct Context {
     /// User-facing task and metric namespace.
     name: String,
@@ -995,8 +1009,8 @@ pub enum Role {
     /// Pool worker at this index, polling ordinary tasks. Worker zero runs on
     /// the thread calling [`crate::Runner::start`] and shuts the runner down.
     Pool(u32),
-    /// A dedicated worker: a thread and ring of its own, started for one
-    /// dedicated or blocking task, which it polls as its root.
+    /// A dedicated worker: a thread and io_uring ring of its own, started for
+    /// one dedicated or blocking task, which it polls as its root.
     Dedicated,
 }
 
@@ -1021,6 +1035,9 @@ struct Seat {
     /// Identity of the pool's task set, which [`Local::serves`] compares with a
     /// task's owner.
     tasks: NonZeroU64,
+    /// The owner's end of this worker's FIFO run queue, whose shared end the
+    /// pool keeps.
+    ready: Ready,
 }
 
 /// Mutable execution state accessed only by its owning worker thread.
@@ -1032,10 +1049,9 @@ pub struct Local {
     /// This worker's seat, or `None` on a dedicated worker, which polls only
     /// its root.
     seat: Option<Seat>,
-    /// Ring owner, taken only after kernel retirement so it can be dropped unborrowed.
+    /// The io_uring ring's owner, taken only after kernel retirement so it can
+    /// be dropped unborrowed.
     pub driver: Option<Driver>,
-    /// FIFO runnables.
-    pub ready: Ready,
     /// Sleeper registrations and deadlines.
     pub timers: Timers,
     /// Reject new registration and send wakes to the global queue, while
@@ -1056,8 +1072,12 @@ pub struct Local {
 }
 
 impl Local {
-    /// Construct a ring on the thread that will own all its submissions. A
-    /// pool worker takes the mailbox the pool created for it.
+    /// Construct an io_uring ring on the thread that will own all its
+    /// submissions. A pool worker takes the mailbox the pool created for it and
+    /// the owner's end of its run queue, and panics if its index is out of
+    /// range or that end was already taken. A dedicated worker creates its own
+    /// mailbox and has no run queue. An I/O error at startup returns before the
+    /// run queue's owner is taken.
     fn new(shared: Arc<Shared>, role: Role) -> std::io::Result<Self> {
         #[cfg(test)]
         tests::before_startup(&shared.workers)?;
@@ -1074,17 +1094,19 @@ impl Local {
             now,
         )?;
 
+        // Only this worker pushes and pops, while the pool keeps the shared
+        // end.
         let seat = match role {
             Role::Pool(index) => Some(Seat {
                 index,
                 tasks: shared.tasks.id(),
+                ready: Ready::new(shared.pool.ring(index).owner()),
             }),
             Role::Dedicated => None,
         };
         Ok(Self {
             seat,
             driver: Some(driver),
-            ready: Ready::default(),
             timers: Timers::default(),
             closing: false,
             now,
@@ -1162,6 +1184,34 @@ impl Local {
         self.shared.pool.workers()
     }
 
+    /// This pool worker's run queue. Panics on a dedicated worker.
+    pub const fn ready(&self) -> &Ready {
+        &self
+            .seat
+            .as_ref()
+            .expect("a dedicated worker has no run queue")
+            .ready
+    }
+
+    /// This pool worker's run queue, mutably. Panics on a dedicated worker.
+    const fn ready_mut(&mut self) -> &mut Ready {
+        &mut self
+            .seat
+            .as_mut()
+            .expect("a dedicated worker has no run queue")
+            .ready
+    }
+
+    /// Queue a runnable on this pool worker, exporting overflow through
+    /// [`Pool::enqueue`]. The runnable must belong to this pool. Panics on a
+    /// dedicated worker.
+    #[inline]
+    pub fn enqueue(&mut self, runnable: Runnable) {
+        let Self { seat, shared, .. } = self;
+        let seat = seat.as_mut().expect("a dedicated worker has no run queue");
+        shared.pool.enqueue(&mut seat.ready, runnable);
+    }
+
     /// Release an operation or timer on its worker, directly or through its mailbox.
     ///
     /// A worker whose mailbox is closed or gone has already taken responsibility
@@ -1210,10 +1260,11 @@ impl Local {
     /// Whether task polling or callbacks prevent the worker from parking. A
     /// pool worker also has the pool's global queue to take from.
     fn is_ready(&self) -> bool {
-        !self.ready.is_empty()
+        let seat = self.seat.as_ref();
+        seat.is_some_and(|seat| !seat.ready.is_empty())
             || self.root_ready
             || !self.deferred.is_empty()
-            || (self.seat.is_some() && self.shared.pool.has_global())
+            || (seat.is_some() && self.shared.pool.has_global())
     }
 
     /// Earliest absolute deadline across driver requests and sleepers.
@@ -1237,7 +1288,8 @@ thread_local! {
 struct Scope;
 
 impl Scope {
-    /// Reject nesting before any directory hold, thread, or ring is created.
+    /// Reject nesting before any directory hold, pool, thread, or io_uring ring
+    /// is created.
     fn assert_vacant() {
         CURRENT.with(|current| {
             assert!(
@@ -1429,7 +1481,8 @@ pub struct Worker {
     /// Calls to [`Self::next_runnable`] left until the one that looks at the
     /// pool's global queue.
     until_global: u32,
-    /// Calls between two looks at the global queue, from the configuration.
+    /// Configured interval between forced global checks. An empty run queue
+    /// can trigger an earlier check.
     global_queue_interval: u32,
     /// False until kernel retirement and callback cleanup have finished.
     finished: bool,
@@ -1438,6 +1491,7 @@ pub struct Worker {
 impl Worker {
     /// Install TLS only after constructing a cleanup owner. A pool worker
     /// counts itself in the pool's shutdown barrier, which its cleanup leaves.
+    /// Panics if this thread already has a worker installed.
     fn new(local: Local) -> Self {
         if local.role().is_pool() {
             local.shared.pool.enter();
@@ -1610,12 +1664,12 @@ impl Worker {
 
     /// Cancel observers and finish all kernel-visible work before releasing TLS.
     ///
-    /// A pool worker first waits for the pool to close, and after draining the
-    /// task set waits for every other pool worker to finish polling and
-    /// draining. Worker zero stops the other pool workers before it drains,
-    /// so they reach that barrier too. Retains callback failures until cleanup
-    /// finishes. An infrastructure failure before kernel retirement aborts the
-    /// process through [`RetirementGuard`].
+    /// A pool worker first waits for the pool to close, discards its run queue,
+    /// drains the task set, then waits for every other pool worker to finish
+    /// polling and draining. Worker zero stops the other pool workers before
+    /// it drains, so they reach that barrier too. Retains callback failures
+    /// until cleanup finishes. An infrastructure failure before kernel
+    /// retirement aborts the process through [`RetirementGuard`].
     pub fn cleanup(&mut self) {
         if self.finished {
             return;
@@ -1649,13 +1703,14 @@ impl Worker {
             shared.pool.stop();
         }
 
-        // Destroy tasks before closing I/O, letting their futures detach
-        // observers. Every pool worker drains the closed set, each starting at
-        // its own shards, and clears each task outside the local borrow and the
-        // set's locks. A task mid-poll on another worker is left to its poller.
-        // Runnables belong to retained tasks as well.
-        self.local.borrow_mut().ready.discard();
         if let Role::Pool(index) = role {
+            // Each task is retained for teardown or already cleared, so
+            // discarding its runnable runs no user code under this borrow.
+            self.local.borrow_mut().ready_mut().discard();
+
+            // Destroy futures before closing I/O so their observers can detach.
+            // Clear outside local borrows and set locks. A task still polling
+            // on another worker leaves destruction to that poller.
             for task in shared.tasks.drain(index as usize) {
                 Panics::contain(|| task.clear());
             }
@@ -1789,7 +1844,8 @@ impl Worker {
         }
     }
 
-    /// Service the ring and timers using one time sample, collecting callbacks.
+    /// Service the io_uring ring and timers using one time sample, collecting
+    /// callbacks.
     /// Returns whether kernel service was deferred to an idle wait.
     fn service(&mut self, defer_kernel_service: bool) -> bool {
         let mut local = self.local.borrow_mut();
@@ -1813,19 +1869,19 @@ impl Worker {
         outcome
     }
 
-    /// Take the next runnable to poll: a share of the pool's global queue
-    /// every [`Config::with_global_queue_interval`] calls, otherwise the
-    /// oldest local runnable, otherwise a share of the global queue. A dedicated
-    /// worker polls only its root, so its queue stays empty.
+    /// Take the next runnable to poll: a share of the pool's global queue every
+    /// [`Config::with_global_queue_interval`] calls, otherwise the oldest
+    /// runnable in this worker's run queue, otherwise a share of the global
+    /// queue. An empty global take falls back to the run queue. A dedicated
+    /// worker passes `None` and polls only its root. `pool`, when given, must
+    /// be this worker's pool, and the caller must hold no Local borrow.
     ///
     /// The drive loop is instantiated in the caller's crate, so the common
     /// case is inlined there and the global queue sits behind a call.
     #[inline]
     #[must_use]
     fn next_runnable(&mut self, pool: Option<&Pool>) -> Option<Runnable> {
-        let Some(pool) = pool else {
-            return self.local.borrow_mut().ready.pop();
-        };
+        let pool = pool?;
 
         // The interval counts every take, so runnables queued here cannot
         // keep the global queue waiting however fast they requeue. A
@@ -1834,7 +1890,7 @@ impl Worker {
         if self.until_global == 0 {
             self.until_global = self.global_queue_interval;
         } else {
-            if let Some(runnable) = self.local.borrow_mut().ready.pop() {
+            if let Some(runnable) = self.local.borrow_mut().ready_mut().pop() {
                 return Some(runnable);
             }
             if !pool.has_global() {
@@ -1844,13 +1900,16 @@ impl Worker {
         Self::take_global(&self.local, pool)
     }
 
-    /// Take a share of the global queue into the local queue, returning its
-    /// oldest runnable, or the oldest local runnable if the share was empty.
+    /// Return the oldest global runnable and append the rest of its capped
+    /// share to the run queue. Fall back to the oldest run queue runnable if
+    /// the global queue was empty. `local` must be an unborrowed pool worker
+    /// of `pool`.
     #[inline(never)]
     #[must_use]
     fn take_global(local: &RefCell<Local>, pool: &Pool) -> Option<Runnable> {
         let mut local = local.borrow_mut();
-        pool.take(&mut local.ready).or_else(|| local.ready.pop())
+        let ready = local.ready_mut();
+        pool.take(ready).or_else(|| ready.pop())
     }
 
     /// Drive tasks and one separately pinned root through bounded service turns.
@@ -1891,7 +1950,7 @@ impl Worker {
             }
 
             // Bound task polling so a self-waking task cannot starve the root,
-            // mailbox, or ring service.
+            // mailbox, or io_uring service.
             for _ in 0..BATCH_SIZE {
                 let Some(runnable) = self.next_runnable(pool) else {
                     break;
@@ -1902,7 +1961,7 @@ impl Worker {
                 match runnable.poll(owner) {
                     AfterPoll::Done => {}
                     // Join the tail so self-waking tasks cannot skip other ready work.
-                    AfterPoll::Requeue(runnable) => self.local.borrow_mut().ready.push(runnable),
+                    AfterPoll::Requeue(runnable) => self.local.borrow_mut().enqueue(runnable),
                     // The future is gone, so releasing the set's reference and
                     // the runnable's runs no user code.
                     AfterPoll::Retire(task) => drop(shared.tasks.remove(&task)),
@@ -2011,8 +2070,8 @@ impl Worker {
             #[cfg(test)]
             tests::before_park();
 
-            // Unfinished requests need the ring wait to run deferred kernel work.
-            // A futex wake alone cannot advance their I/O.
+            // Unfinished requests need the io_uring wait to run deferred kernel
+            // work. A futex wake alone cannot advance their I/O.
             if needs_kernel {
                 let result = self
                     .local
@@ -2100,7 +2159,7 @@ pub struct Runner {
 }
 
 impl Runner {
-    /// Construct a runner without acquiring storage or creating a ring.
+    /// Construct a runner without acquiring storage or creating an io_uring ring.
     pub const fn new(cfg: Config) -> Self {
         Self { cfg }
     }
