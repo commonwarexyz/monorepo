@@ -1,6 +1,7 @@
 //! A stream that yields the ancestors of a block while prefetching parents.
 
 use crate::{Block, Heightable, types::Height};
+use commonware_codec::EncodeSize;
 use commonware_cryptography::{Digest, Digestible};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
@@ -278,7 +279,9 @@ impl<D: Digest> ExpectedParent<D> {
         )
     }
 
-    fn matches<B: Block<Digest = D>>(self, parent: &B, strategy: &impl Strategy) -> bool {
+    // Checks the parent's height and then its digest, which is computed on `strategy` so a large
+    // block does not hold the polling thread while the strategy works.
+    async fn matches<B: Block<Digest = D>>(self, parent: Arc<B>, strategy: &impl Strategy) -> bool {
         let Self(parent_height, parent_digest) = self;
         if parent.height() != parent_height {
             debug!(
@@ -288,7 +291,11 @@ impl<D: Digest> ExpectedParent<D> {
             );
             return false;
         }
-        let computed_parent_digest = parent.digest_across(strategy);
+        let computed_parent_digest = strategy
+            .spawn(parent.encode_size(), move |strategy| {
+                parent.digest_across(&strategy)
+            })
+            .await;
         if computed_parent_digest != parent_digest {
             debug!(
                 expected = ?parent_digest,
@@ -321,11 +328,12 @@ where
     let strategy = strategy.clone();
     marshal
         .subscribe_parent(child)
-        .map(move |parent| {
+        .then(move |parent| async move {
             let parent = parent?;
             timer.observe(clock.as_ref());
             expected
-                .matches(parent.as_ref(), &strategy)
+                .matches(parent.clone(), &strategy)
+                .await
                 .then_some(parent)
         })
         .boxed()

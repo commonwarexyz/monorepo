@@ -1290,6 +1290,22 @@ where
         self
     }
 
+    /// Decodes a block received over the wire, failing unless its commitment equals `expected`.
+    ///
+    /// An untrusted commitment is recomputed from the block, which re-runs its erasure encode, so
+    /// the decode runs on the strategy and awaiting it does not hold this thread while the
+    /// strategy works.
+    fn decode_block(
+        &self,
+        buf: Bytes,
+        expected: ExpectedCommitment<V::Commitment>,
+    ) -> impl Future<Output = Result<V::Block, commonware_codec::Error>> + Send + 'static {
+        let cfg = self.block_codec_config.clone();
+        self.strategy.spawn(buf.len(), move |strategy| {
+            V::decode_block(buf, &cfg, expected, &strategy)
+        })
+    }
+
     /// Notifies subscribers of a validated block and applies it to any
     /// pending floor transition.
     ///
@@ -1466,9 +1482,7 @@ where
                 } else {
                     ExpectedCommitment::Untrusted(commitment)
                 };
-                let Ok(block) =
-                    V::decode_block(value, &self.block_codec_config, expected, &self.strategy)
-                else {
+                let Ok(block) = self.decode_block(value, expected).await else {
                     response.send_lossy(false);
                     return self;
                 };
@@ -1741,12 +1755,10 @@ where
                     // Notarization alone does not prove the commitment encodes the block,
                     // so decoding must recompute it.
                     let commitment = notarization.proposal.payload;
-                    let Ok(block) = V::decode_block(
-                        block,
-                        &self.block_codec_config,
-                        ExpectedCommitment::Untrusted(commitment),
-                        &self.strategy,
-                    ) else {
+                    let Ok(block) = self
+                        .decode_block(block, ExpectedCommitment::Untrusted(commitment))
+                        .await
+                    else {
                         response.send_lossy(false);
                         continue;
                     };

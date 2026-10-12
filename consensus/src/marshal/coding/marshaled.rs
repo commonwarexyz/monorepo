@@ -827,14 +827,19 @@ where
                     parent = %parent_commitment
                 )
             },
-            move |block: B, coding_config| {
+            move |block: B, coding_config| async move {
                 let erasure_timer = erasure_encode_duration.timer(&*clock);
-                let coded_block = CodedBlock::<B, C, H>::new(block, coding_config, &strategy);
+                let sealed = strategy
+                    .spawn(block.encode_size(), move |strategy| {
+                        let coded_block = CodedBlock::<B, C, H>::new(block, coding_config, &strategy);
+                        (
+                            coded_block.commitment_across(&strategy),
+                            Arc::new(coded_block),
+                        )
+                    })
+                    .await;
                 erasure_timer.observe(&*clock);
-                (
-                    coded_block.commitment_across(&strategy),
-                    Arc::new(coded_block),
-                )
+                sealed
             },
         )
     }
@@ -1117,14 +1122,19 @@ where
                     parent = %parent_commitment
                 )
             },
-            move |block: B, coding_config| {
+            move |block: B, coding_config| async move {
                 let erasure_timer = erasure_encode_duration.timer(&*clock);
-                let coded_block = CodedBlock::<B, C, H>::new(block, coding_config, &strategy);
+                let sealed = strategy
+                    .spawn(block.encode_size(), move |strategy| {
+                        let coded_block = CodedBlock::<B, C, H>::new(block, coding_config, &strategy);
+                        (
+                            coded_block.commitment_across(&strategy),
+                            Arc::new(coded_block),
+                        )
+                    })
+                    .await;
                 erasure_timer.observe(&*clock);
-                (
-                    coded_block.commitment_across(&strategy),
-                    Arc::new(coded_block),
-                )
+                sealed
             },
         )
     }
