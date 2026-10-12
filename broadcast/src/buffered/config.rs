@@ -19,6 +19,7 @@ pub struct Config<P: PublicKey, MCfg, D: Provider<PublicKey = P>> {
     /// The configuration for the codec item.
     pub codec_config: MCfg,
 
-    /// Provider for peer set changes (eviction follows latest primary; see [`buffered`](super)).
+    /// Provider for peer set changes (eviction follows the tracked primary sets; see
+    /// [`buffered`](super)).
     pub peer_provider: D,
 }
