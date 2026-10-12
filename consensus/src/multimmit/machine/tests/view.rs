@@ -697,15 +697,15 @@ fn proposal_anchor_does_not_retire_the_certificate_broadcast() {
         }))
         .unwrap();
     let completed = machine.settle(completed, Until::CursorAdvance);
-    let broadcast = completed
+    let persisted = machine.persist(&completed.persist_job(), Until::CursorAdvance);
+    let broadcast = persisted
         .find(|effect| match effect {
             Capability::Released(job) if job.request().broadcast_one().is_some() => {
                 Some(job.clone())
             }
             _ => None,
         })
-        .expect("the recovered certificate must broadcast");
-    machine.persist(&completed.persist_job(), Until::CursorAdvance);
+        .expect("the recovered certificate must broadcast once durable");
 
     // Observe the scheduled view-1 leader's block whose chain proposal anchors the
     // certificate exactly.

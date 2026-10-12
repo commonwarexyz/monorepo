@@ -25,6 +25,9 @@
 //! - [`bls12381_threshold`][scheme::bls12381_threshold]: Non-attributable threshold signatures.
 //!   Produces succinct constant-size certificates. Requires trusted setup (DKG).
 //!
+//! The scheme's fault model sets the engine's thresholds. See [`scheme::Scheme`] for which models
+//! are sound.
+//!
 //! # Architecture
 //!
 //! The core of the module is the [Engine]. It manages the agreement process by:
@@ -62,6 +65,20 @@
 //! the likelihood of local recovery, participants should tune the [Config::activity_timeout] to a value larger than the expected
 //! drift of online participants (even if all participants are synchronous the tip advancement logic will advance to the `f+1`th highest
 //! reported tip and drop all work below that tip minus the [Config::activity_timeout]).
+//!
+//! ## Divergence
+//!
+//! Digests are expected to be deterministic, so an honest validator that signs a digest other
+//! than its own automaton's is evidence that the local digest is wrong. Once more signers of one
+//! epoch than that epoch tolerates as faulty have signed another digest for a height, or a quorum
+//! certified one before the local digest was known, the engine reports
+//! [`types::Activity::Diverged`] and does not ack the local digest for that height. It keeps
+//! running; halting the application is the reporter's decision. Only signatures that verify
+//! count, so forged acks never report divergence.
+//!
+//! Detection covers only heights still pending around the tip, so an automaton that answers
+//! after its height left that window is never checked; a consumer that must catch such
+//! divergence compares its digests with the certificates it receives.
 //!
 //! ## Epoch-Independent Signatures
 //!
@@ -551,6 +568,13 @@ mod tests {
                 epoch,
             )
             .await;
+
+            // Honest validators outnumber the tolerated faults, so only the validator with the
+            // incorrect digests diverges.
+            for (participant, mut reporter) in reporters {
+                let diverged = reporter.get_diverged().await;
+                assert_eq!(!diverged.is_empty(), participant == fixture.participants[0]);
+            }
         });
     }
 
