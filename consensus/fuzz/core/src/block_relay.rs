@@ -54,6 +54,12 @@ pub struct Relay<P: PublicKey> {
     recipients: Mutex<BTreeMap<P, Vec<Listener>>>,
     filter: Mutex<Option<Filter<P>>>,
     certify_requires_block: AtomicBool,
+    /// A trusted continuation's block gate, consulted before the filter: a block it
+    /// accepts is held (the gate keeps it), not delivered.
+    gate: Mutex<Option<Filter<P>>>,
+    /// Per-recipient application latencies a trusted continuation overrides.
+    latencies: Mutex<BTreeMap<P, crate::continuation::Latencies>>,
+    overridden: AtomicBool,
 }
 
 impl<P: PublicKey> Relay<P> {
@@ -63,7 +69,72 @@ impl<P: PublicKey> Relay<P> {
             recipients: Mutex::new(BTreeMap::new()),
             filter: Mutex::new(None),
             certify_requires_block: AtomicBool::new(false),
+            gate: Mutex::new(None),
+            latencies: Mutex::new(BTreeMap::new()),
+            overridden: AtomicBool::new(false),
         }
+    }
+
+    /// Installs a trusted continuation's block gate: it returns true for a block it
+    /// holds instead of delivering.
+    pub(crate) fn set_gate(
+        &self,
+        gate: impl Fn(&P, Option<u64>, &P, u64, &Sha256Digest, &Bytes) -> bool + Send + Sync + 'static,
+    ) {
+        *self.gate.lock() = Some(Arc::new(gate));
+    }
+
+    /// Removes the block gate.
+    pub(crate) fn clear_gate(&self) {
+        *self.gate.lock() = None;
+    }
+
+    /// Delivers a block the gate held to `recipient`, through the filter, as `sender`
+    /// (with its twin tag) sent it; returns how many of the recipient's applications took
+    /// it.
+    pub(crate) fn redeliver(
+        &self,
+        sender: &P,
+        sender_tag: Option<u64>,
+        recipient: P,
+        block: (Sha256Digest, Bytes),
+    ) -> usize {
+        self.broadcast_from(
+            sender_tag.map(|tag| Registration { tag }),
+            sender,
+            Recipients::One(recipient),
+            block,
+        )
+    }
+
+    /// Drops `who`'s registrations whose application is gone, as after a crash, before a
+    /// restarted application registers anew.
+    pub(crate) fn forget_closed(&self, who: &P) {
+        if let Some(listeners) = self.recipients.lock().get_mut(who) {
+            listeners.retain(|listener| !listener.sender.is_closed());
+        }
+    }
+
+    /// Overrides `who`'s application latencies, or restores its own with `None`.
+    pub(crate) fn set_latency(&self, who: &P, latencies: Option<crate::continuation::Latencies>) {
+        let mut overrides = self.latencies.lock();
+        match latencies {
+            Some(latencies) => {
+                overrides.insert(who.clone(), latencies);
+            }
+            None => {
+                overrides.remove(who);
+            }
+        }
+        self.overridden
+            .store(!overrides.is_empty(), Ordering::Relaxed);
+    }
+
+    fn latency(&self, who: &P) -> Option<crate::continuation::Latencies> {
+        if !self.overridden.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.latencies.lock().get(who).copied()
     }
 
     /// When enabled, a mock [`Application`] backed by this relay holds a certify
@@ -140,21 +211,35 @@ impl<P: PublicKey> Relay<P> {
         );
     }
 
+    /// Returns how many applications took the block.
     fn broadcast_from(
         &self,
         registration: Option<Registration>,
         sender: &P,
         recipients: Recipients<P>,
         (payload, data): (Sha256Digest, Bytes),
-    ) {
+    ) -> usize {
         let channels = {
             let mut channels = Vec::new();
             let registered = self.recipients.lock();
             let filter = self.filter.lock().clone();
+            let gate = self.gate.lock().clone();
             let allow = |recipient: &P, listener: &Listener| {
                 if recipient == sender
                     && registration
                         .is_some_and(|registration| listener.registration.tag == registration.tag)
+                {
+                    return false;
+                }
+                if let Some(gate) = &gate
+                    && gate(
+                        sender,
+                        registration.map(|registration| registration.tag),
+                        recipient,
+                        listener.registration.tag,
+                        &payload,
+                        &data,
+                    )
                 {
                     return false;
                 }
@@ -202,11 +287,15 @@ impl<P: PublicKey> Relay<P> {
             }
             channels
         };
+        let mut taken = 0;
         for (recipient, listener) in channels {
             if let Err(e) = listener.send((payload, data.clone())) {
                 error!(?e, ?recipient, "failed to send block relay payload");
+            } else {
+                taken += 1;
             }
         }
+        taken
     }
 }
 
@@ -363,8 +452,27 @@ impl<E: Clock + Rng + Spawner, P: PublicKey> Application<E, P> {
         )
     }
 
+    /// A latency sample: from the override a trusted continuation set for this
+    /// application, else from its own distribution. Either takes one sample.
+    fn sample(
+        &mut self,
+        own: fn(&Self) -> &Normal<f64>,
+        pick: fn(&crate::continuation::Latencies) -> Latency,
+    ) -> f64 {
+        match self.relay.latency(&self.me).and_then(|latencies| {
+            let (mean, deviation) = pick(&latencies);
+            Normal::new(mean, deviation).ok()
+        }) {
+            Some(normal) => normal.sample(self.context.as_mut()),
+            None => {
+                let normal = *own(self);
+                normal.sample(self.context.as_mut())
+            }
+        }
+    }
+
     async fn propose(&mut self, context: Context<Sha256Digest, P>) -> Sha256Digest {
-        let duration = self.propose_latency.sample(self.context.as_mut());
+        let duration = self.sample(|app| &app.propose_latency, |latencies| latencies.propose);
         self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
@@ -386,7 +494,7 @@ impl<E: Clock + Rng + Spawner, P: PublicKey> Application<E, P> {
         payload: Sha256Digest,
         mut contents: Bytes,
     ) -> bool {
-        let duration = self.verify_latency.sample(self.context.as_mut());
+        let duration = self.sample(|app| &app.verify_latency, |latencies| latencies.verify);
         self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
@@ -402,7 +510,7 @@ impl<E: Clock + Rng + Spawner, P: PublicKey> Application<E, P> {
     }
 
     async fn certify(&mut self, round: Round, payload: Sha256Digest) -> Option<bool> {
-        let duration = self.certify_latency.sample(self.context.as_mut());
+        let duration = self.sample(|app| &app.certify_latency, |latencies| latencies.certify);
         self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;

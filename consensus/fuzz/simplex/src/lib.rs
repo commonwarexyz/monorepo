@@ -4,7 +4,7 @@ pub mod happens_before;
 pub mod invariants;
 pub(crate) mod mallory;
 pub mod state_cov;
-
+mod trusted;
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     Monitor, Viewable,
@@ -21,15 +21,16 @@ use commonware_consensus_fuzz_core::{
     BlockFilterChoice, CertCfgOf, CertifyChoice, EPOCH, FUZZ_LOG_ENV, MAX_SLEEP_DURATION, Mode,
     N4F0C4, N4F1C3, NetworkChannels, PAGE_CACHE_SIZE, PAGE_SIZE, PublicKeyOf, ReporterWiring,
     TWINS_MAX_ROUNDS, TwinsBackend, TwinsCase, TwinsDisrupter, TwinsElector, TwinsReporter,
-    TwinsSetup, TwinsTopology, block_relay, bounded_fuzz_runtime_config, default_link,
+    TwinsSetup, TwinsTopology, block_relay, bounded_fuzz_runtime_config, continuation,
+    default_link,
     network::{
         FinalizationOmissionChannel, FinalizationOmissionReceiver, NotarizeOmissionReceiver,
     },
-    network_faults, print_fuzz_input, run_twins_with_backend, scheduled_partition, setup_network,
-    simplex,
+    network_faults, print_fuzz_input, run_twins_with_backend_and_hook, scheduled_partition,
+    setup_network, simplex,
     simplex_audit::{self, RecordingReporter, summaries},
-    spawn_filtered_honest_validator, spawn_filtered_validator_with_reporter,
-    spawn_network_fault_scheduler, start_disrupter_with_epoch_and_relay, twins_prefix_views, types,
+    spawn_filtered_honest_validator, spawn_network_fault_scheduler,
+    start_disrupter_with_epoch_and_relay, twins_prefix_views, types,
     utils::{Action, Partition, SetPartition, apply_partition, link_peers},
 };
 #[cfg(any(feature = "mocks", test))]
@@ -42,7 +43,7 @@ use commonware_p2p::simulated::{Link, Oracle, SplitTarget};
 use commonware_parallel::Sequential;
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::{
-    Clock, IoBuf, Metrics, Runner, Spawner, Supervisor as _,
+    Clock, Handle, IoBuf, Metrics, Runner, Spawner, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
     telemetry::traces::collector::{CollectingLayer, TraceStorage},
@@ -64,6 +65,7 @@ use std::{
 };
 use tracing::{Dispatch, Level, dispatcher};
 use tracing_subscriber::{Layer as _, filter::filter_fn, layer::SubscriberExt};
+pub use trusted::{fuzz_audit_with_prefix, fuzz_twins_audit_with_prefix, fuzz_with_prefix};
 
 fn configure_block_filter<P: simplex::Simplex>(
     relay: &Arc<block_relay::Relay<PublicKeyOf<P>>>,
@@ -190,6 +192,7 @@ fn spawn_filtered_audited_validator<
     ResolverSender,
     ResolverReceiver,
 >(
+    tap: Option<Arc<continuation::ReplicaTap<P>>>,
     context: deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
@@ -217,7 +220,7 @@ where
     ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
 {
-    spawn_filtered_validator_with_reporter::<
+    continuation::spawn_validator::<
         P,
         EC,
         RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>,
@@ -228,6 +231,7 @@ where
         _,
         _,
     >(
+        tap,
         context,
         oracle,
         participants,
@@ -430,8 +434,13 @@ fn run_standard_once<P: simplex::Simplex>(
     collect_audit: bool,
     happens_before: bool,
     warn_dispatch: Option<Dispatch>,
+    hook: Option<continuation::Hook<P>>,
 ) -> Option<RunAudit> {
-    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0);
+    let cfg = trusted::standard_config(
+        bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0),
+        &input,
+        hook.as_ref(),
+    );
     let executor = deterministic::Runner::new(cfg);
     let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
@@ -447,7 +456,8 @@ fn run_standard_once<P: simplex::Simplex>(
         let (oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
         let initial_partition = initial_network_partition(&input.partition);
-        if initial_partition.is_some() {
+        // A trusted continuation applies the base's network faults at its release.
+        if initial_partition.is_some() && hook.is_none() {
             apply_partition(
                 &oracle,
                 &participants,
@@ -465,15 +475,38 @@ fn run_standard_once<P: simplex::Simplex>(
             input.block_filter,
             BlockFilterChoice::DropRecipient { .. }
         ));
-        configure_block_filter::<P>(&relay, &participants, &input.partition, input.block_filter);
+        if hook.is_none() {
+            configure_block_filter::<P>(
+                &relay,
+                &participants,
+                &input.partition,
+                input.block_filter,
+            );
+        }
         let mut reporters = Vec::new();
         let config = input.configuration;
         let term_length = P::effective_term_length(input.term_length);
+        let mut runner = hook.map(|hook| {
+            trusted::start_standard(
+                hook,
+                &context,
+                &input,
+                &participants,
+                &schemes,
+                &oracle,
+                &relay,
+            )
+        });
 
         // Spawn Byzantine nodes (Disrupters only)
         for i in 0..config.faults as usize {
             let validator = participants[i].clone();
             let channels = registrations.remove(&validator).unwrap();
+            if let Some(runner) = runner.as_mut() {
+                // The prefix acts as B; its Disrupter starts at the release.
+                runner.adopt(channels);
+                continue;
+            }
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
@@ -536,8 +569,20 @@ fn run_standard_once<P: simplex::Simplex>(
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
+            let tap = runner.as_ref().and_then(|runner| runner.tap(i));
             let spawn = || {
-                spawn_filtered_honest_validator::<P, _, _, _, _, _, _, _>(
+                continuation::spawn_validator::<
+                    P,
+                    _,
+                    reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                >(
+                    tap,
                     ctx,
                     &oracle,
                     &participants,
@@ -575,13 +620,28 @@ fn run_standard_once<P: simplex::Simplex>(
             reporters.push((validator, reporter));
         }
 
+        let (rebase, initial_partition) = match runner.as_mut() {
+            Some(runner) => {
+                trusted::release_standard(
+                    runner,
+                    &context,
+                    &mut input,
+                    &participants,
+                    &schemes,
+                    &oracle,
+                    &relay,
+                )
+                .await
+            }
+            None => (0, initial_partition),
+        };
         spawn_network_fault_scheduler::<P, _>(
             &context,
             &oracle,
             &participants,
             &mut reporters,
             input.partition.clone(),
-            input.required_containers,
+            input.required_containers + rebase,
             initial_partition,
         )
         .await;
@@ -589,7 +649,7 @@ fn run_standard_once<P: simplex::Simplex>(
         if should_bound_standard_liveness(&input) {
             let mut finalizers = Vec::new();
             for (validator, reporter) in reporters.iter_mut() {
-                let required_containers = input.required_containers;
+                let required_containers = input.required_containers + rebase;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(
                     context
@@ -605,6 +665,9 @@ fn run_standard_once<P: simplex::Simplex>(
             join_all(finalizers).await;
         } else {
             context.sleep(MAX_SLEEP_DURATION).await;
+        }
+        if let Some(runner) = &runner {
+            runner.check("end");
         }
 
         if config.is_valid() {
@@ -679,14 +742,19 @@ impl NotarizeOmission {
 }
 
 fn run_audited_standard_once<P: simplex::Simplex>(input: FuzzInput) -> (bool, bool) {
-    run_audited_standard_once_with::<P>(input, None)
+    run_audited_standard_once_with::<P>(input, None, None)
 }
 
 fn run_audited_standard_once_with<P: simplex::Simplex>(
     mut input: FuzzInput,
     notarize_omission: Option<NotarizeOmission>,
+    hook: Option<continuation::Hook<P>>,
 ) -> (bool, bool) {
-    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0);
+    let cfg = trusted::standard_config(
+        bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0),
+        &input,
+        hook.as_ref(),
+    );
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(move |mut context| async move {
@@ -701,7 +769,8 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
         let (oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
         let initial_partition = initial_network_partition(&input.partition);
-        if initial_partition.is_some() {
+        // A trusted continuation applies the base's network faults at its release.
+        if initial_partition.is_some() && hook.is_none() {
             apply_partition(
                 &oracle,
                 &participants,
@@ -719,14 +788,37 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
             input.block_filter,
             BlockFilterChoice::DropRecipient { .. }
         ));
-        configure_block_filter::<P>(&relay, &participants, &input.partition, input.block_filter);
+        if hook.is_none() {
+            configure_block_filter::<P>(
+                &relay,
+                &participants,
+                &input.partition,
+                input.block_filter,
+            );
+        }
         let mut reporters = Vec::new();
         let config = input.configuration;
         let term_length = P::effective_term_length(input.term_length);
+        let mut runner = hook.map(|hook| {
+            trusted::start_standard(
+                hook,
+                &context,
+                &input,
+                &participants,
+                &schemes,
+                &oracle,
+                &relay,
+            )
+        });
 
         for i in 0..config.faults as usize {
             let validator = participants[i].clone();
             let channels = registrations.remove(&validator).unwrap();
+            if let Some(runner) = runner.as_mut() {
+                // The prefix acts as B; its Disrupter starts at the release.
+                runner.adopt(channels);
+                continue;
+            }
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
@@ -773,6 +865,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                 .child("validator")
                 .with_attribute("public_key", &validator);
             let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
+            let tap = runner.as_ref().and_then(|runner| runner.tap(i));
             let reporter = if let Some(omission) = &notarize_omission
                 && omission.victim == i
             {
@@ -798,6 +891,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                         omission.omitted_finalizations.clone(),
                     );
                 spawn_filtered_audited_validator::<P, _, _, _, _, _, _, _>(
+                    tap,
                     ctx,
                     &oracle,
                     &participants,
@@ -817,6 +911,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                 )
             } else {
                 spawn_filtered_audited_validator::<P, _, _, _, _, _, _, _>(
+                    tap,
                     ctx,
                     &oracle,
                     &participants,
@@ -838,13 +933,28 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
             reporters.push((validator, reporter));
         }
 
+        let (rebase, initial_partition) = match runner.as_mut() {
+            Some(runner) => {
+                trusted::release_standard(
+                    runner,
+                    &context,
+                    &mut input,
+                    &participants,
+                    &schemes,
+                    &oracle,
+                    &relay,
+                )
+                .await
+            }
+            None => (0, initial_partition),
+        };
         spawn_network_fault_scheduler::<P, _>(
             &context,
             &oracle,
             &participants,
             &mut reporters,
             input.partition.clone(),
-            input.required_containers,
+            input.required_containers + rebase,
             initial_partition,
         )
         .await;
@@ -858,7 +968,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                 if omitted_validator == Some(validator) {
                     continue;
                 }
-                let required_containers = input.required_containers;
+                let required_containers = input.required_containers + rebase;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(
                     context
@@ -874,6 +984,9 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
             join_all(finalizers).await;
         } else {
             context.sleep(MAX_SLEEP_DURATION).await;
+        }
+        if let Some(runner) = &runner {
+            runner.check("end");
         }
 
         if !config.is_valid() {
@@ -941,7 +1054,12 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
     })
 }
 
-fn run<P: simplex::Simplex>(input: FuzzInput, state_coverage: bool, happens_before: bool) {
+fn run<P: simplex::Simplex>(
+    input: FuzzInput,
+    state_coverage: bool,
+    happens_before: bool,
+    hook: Option<continuation::Hook<P>>,
+) {
     if state_coverage || happens_before {
         state_cov::reset();
     }
@@ -950,17 +1068,17 @@ fn run<P: simplex::Simplex>(input: FuzzInput, state_coverage: bool, happens_befo
             // Per-node subscribers shadow the collector for validator tasks, so
             // its dispatch is teed through them to keep trace-event tokens fed.
             let _ = run_with_warn_trace_collection(|dispatch| {
-                run_standard_once::<P>(input, true, false, true, Some(dispatch.clone()))
+                run_standard_once::<P>(input, true, false, true, Some(dispatch.clone()), hook)
             });
         } else {
-            let _ = run_standard_once::<P>(input, false, false, true, None);
+            let _ = run_standard_once::<P>(input, false, false, true, None, hook);
         }
     } else if state_coverage {
         let _ = run_with_warn_trace_collection(|_| {
-            run_standard_once::<P>(input, true, false, false, None)
+            run_standard_once::<P>(input, true, false, false, None, hook)
         });
     } else {
-        let _ = run_standard_once::<P>(input, false, false, false, None);
+        let _ = run_standard_once::<P>(input, false, false, false, None, hook);
     }
 }
 
@@ -987,6 +1105,7 @@ fn run_with_twins_mutator<P: simplex::Simplex>(
         state_coverage,
         happens_before,
         false,
+        None,
     );
 }
 
@@ -1001,8 +1120,16 @@ fn run_with_twins_campaign<P: simplex::Simplex>(
         state_coverage,
         happens_before,
         false,
+        None,
     );
 }
+
+/// The link the mock Twins backend sets between every pair of participants.
+const TWINS_LINK: Link = Link {
+    latency: Duration::from_millis(500),
+    jitter: Duration::from_millis(500),
+    success_rate: probability!(1.0),
+};
 
 struct MockTwinsBackend<P: simplex::Simplex> {
     input: FuzzInput,
@@ -1019,6 +1146,14 @@ struct MockTwinsState<P: simplex::Simplex> {
     reporters: Vec<TwinsReporter<P>>,
     twin_observers: Vec<TwinsReporter<P>>,
     honest_start: usize,
+    /// A trusted continuation's taps, by participant; empty without one.
+    taps: Vec<Option<Arc<continuation::ReplicaTap<P>>>>,
+    /// The twin engines' tasks, by role, kept only under a continuation.
+    actors: commonware_utils::sync::Mutex<Vec<(continuation::Role, Handle<()>)>>,
+    /// Honest reporters pushed before the twin pair started (a continuation
+    /// starts the pair at its release).
+    honest_before: usize,
+    twins_finished: bool,
 }
 
 impl<P: simplex::Simplex> MockTwinsBackend<P> {
@@ -1120,7 +1255,15 @@ impl<P: simplex::Simplex> MockTwinsBackend<P> {
                 track_historical_votes: false,
             },
         );
-        engine.start(vote, certificate, resolver);
+        let handle = engine.start(vote, certificate, resolver);
+        if !state.taps.is_empty() {
+            let role = if relay_tag == block_relay::RELAY_TAG_TWIN_PRIMARY {
+                continuation::Role::Primary
+            } else {
+                continuation::Role::Secondary
+            };
+            state.actors.lock().push((role, handle));
+        }
         let _ = idx;
         reporter
     }
@@ -1137,11 +1280,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
         link_peers(
             &mut oracle,
             &participants,
-            Action::Update(Link {
-                latency: Duration::from_millis(500),
-                jitter: Duration::from_millis(500),
-                success_rate: probability!(1.0),
-            }),
+            Action::Update(TWINS_LINK),
             self.input.partition.set_partition(),
         )
         .await;
@@ -1155,6 +1294,10 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
                 reporters: Vec::new(),
                 twin_observers: Vec::new(),
                 honest_start: 0,
+                taps: Vec::new(),
+                actors: commonware_utils::sync::Mutex::new(Vec::new()),
+                honest_before: 0,
+                twins_finished: false,
             },
         }
     }
@@ -1352,7 +1495,11 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
     }
 
     fn finish_twins(&mut self, state: &mut Self::State, _topology: &TwinsTopology<P, Self::Case>) {
-        state.honest_start = state.reporters.len();
+        // Under a trusted continuation the honest reporters came first: the twins'
+        // go first, as in an ordinary run, where `honest_before` is zero.
+        state.reporters.rotate_left(state.honest_before);
+        state.honest_start = state.reporters.len() - state.honest_before;
+        state.twins_finished = true;
     }
 
     fn spawn_honest(
@@ -1367,6 +1514,10 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
         topology: &TwinsTopology<P, Self::Case>,
         channels: NetworkChannels<PublicKeyOf<P>>,
     ) {
+        if !state.twins_finished {
+            state.honest_before += 1;
+        }
+        let tap = state.taps.get(idx).cloned().flatten();
         let ambiguous: Arc<[u32]> = {
             let mut indices = topology
                 .compromised
@@ -1408,6 +1559,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             if self.record_audit {
                 TwinsReporter::Recording(
                     spawn_filtered_audited_validator::<P, _, _, _, _, _, _, _>(
+                        tap,
                         context,
                         oracle,
                         participants.as_ref(),
@@ -1427,7 +1579,23 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
                     ),
                 )
             } else {
-                TwinsReporter::Summary(spawn_filtered_honest_validator::<P, _, _, _, _, _, _, _>(
+                TwinsReporter::Summary(continuation::spawn_validator::<
+                    P,
+                    _,
+                    reporter::Reporter<
+                        deterministic::Context,
+                        P::Scheme,
+                        TwinsElector<P>,
+                        Sha256Digest,
+                    >,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                >(
+                    tap,
                     context,
                     oracle,
                     participants.as_ref(),
@@ -1509,6 +1677,23 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             }
         }
         join_all(finalizers).await;
+    }
+
+    fn install_taps(
+        &mut self,
+        state: &mut Self::State,
+        taps: Vec<Option<Arc<continuation::ReplicaTap<P>>>>,
+    ) -> bool {
+        state.taps = taps;
+        true
+    }
+
+    fn take_actors(&mut self, state: &mut Self::State) -> Vec<(continuation::Role, Handle<()>)> {
+        std::mem::take(&mut *state.actors.lock())
+    }
+
+    fn link(&self) -> Link {
+        TWINS_LINK
     }
 
     fn check_invariants(
@@ -1602,6 +1787,7 @@ fn run_twins<P: simplex::Simplex>(
     state_coverage: bool,
     happens_before: bool,
     record_audit: bool,
+    hook: Option<continuation::Hook<P>>,
 ) -> Option<happens_before::Summary> {
     if state_coverage || happens_before {
         state_cov::reset();
@@ -1620,6 +1806,7 @@ fn run_twins<P: simplex::Simplex>(
             P::effective_term_length(input.term_length),
         ),
     );
+    let cfg = trusted::twins_config::<P>(cfg, &input, hook.as_ref());
     let executor = deterministic::Runner::new(cfg);
     let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
@@ -1635,7 +1822,13 @@ fn run_twins<P: simplex::Simplex>(
                 hb_log_run,
                 warn_dispatch,
             );
-            run_twins_with_backend::<P, _>(&mut context, &mut backend, scenario_entropy).await;
+            run_twins_with_backend_and_hook::<P, _>(
+                &mut context,
+                &mut backend,
+                scenario_entropy,
+                hook,
+            )
+            .await;
         });
     };
 
@@ -1986,10 +2179,10 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
     let raw_bytes = input.raw_bytes.clone();
     let run_result = match M::MODE {
         Mode::Standard => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            run::<P>(input, C::STATE, C::HAPPENS_BEFORE)
+            run::<P>(input, C::STATE, C::HAPPENS_BEFORE, None)
         })),
         Mode::FaultyNet => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            run::<P>(input, C::STATE, C::HAPPENS_BEFORE)
+            run::<P>(input, C::STATE, C::HAPPENS_BEFORE, None)
         })),
         Mode::TwinsMutator => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twins_mutator::<P>(input, C::STATE, C::HAPPENS_BEFORE)
@@ -2094,7 +2287,7 @@ pub fn fuzz_audit_notarize_omission<P: simplex::Simplex>(mut input: FuzzInput) {
     print_fuzz_input::<P>(Mode::Standard, &input);
     let raw_bytes = input.raw_bytes.clone();
     let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        run_audited_standard_once_with::<P>(input, Some(omission))
+        run_audited_standard_once_with::<P>(input, Some(omission), None)
     }));
     match run_result {
         Ok(_) => assert!(
@@ -2122,7 +2315,7 @@ pub fn fuzz_twins_audit<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
 
     let raw_bytes = input.raw_bytes.clone();
     let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        let _ = run_twins::<P>(input, role, false, false, true);
+        let _ = run_twins::<P>(input, role, false, false, true, None);
     }));
     if let Err(payload) = run_result {
         println!("Panicked with raw_bytes: {:?}", raw_bytes);
@@ -2201,10 +2394,13 @@ mod tests {
             true,
             false,
             None,
+            None,
         )
         .expect("valid connected run should produce audit data");
         let wrapped = run_with_warn_trace_collection(|_| {
-            run_standard_once::<simplex::SimplexCertificateMock>(input, false, true, false, None)
+            run_standard_once::<simplex::SimplexCertificateMock>(
+                input, false, true, false, None, None,
+            )
         })
         .expect("valid connected run should produce audit data");
 
@@ -2232,6 +2428,7 @@ mod tests {
                 false,
                 false,
                 true,
+                None,
             );
         }
     }
@@ -2262,7 +2459,7 @@ mod tests {
             let mut input = audit_input();
             input.certify = certify;
             let audit = run_standard_once::<simplex::SimplexCertificateMock>(
-                input, false, true, false, None,
+                input, false, true, false, None, None,
             );
             assert!(audit.is_some(), "run with {certify:?} produced no audit");
         }
@@ -2290,6 +2487,7 @@ mod tests {
             false,
             true,
             false,
+            None,
         )
         .expect("happens-before summary");
         assert_eq!(summary.node_count(), 3, "only honest validators tracked");
@@ -2363,11 +2561,13 @@ mod tests {
             true,
             true,
             None,
+            None,
         )
         .expect("valid connected run should produce audit data");
-        let b =
-            run_standard_once::<simplex::SimplexCertificateMock>(input, false, true, true, None)
-                .expect("valid connected run should produce audit data");
+        let b = run_standard_once::<simplex::SimplexCertificateMock>(
+            input, false, true, true, None, None,
+        )
+        .expect("valid connected run should produce audit data");
 
         let summary = a.happens_before.as_ref().expect("hb capture requested");
         // Dispatch propagation attributed events to each honest validator, and each
@@ -2416,6 +2616,7 @@ mod tests {
                     true,
                     happens_before,
                     warn_dispatch,
+                    None,
                 )
             })
             .expect("valid connected run should produce audit data");

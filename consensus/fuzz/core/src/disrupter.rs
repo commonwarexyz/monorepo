@@ -149,6 +149,19 @@ where
         }
     }
 
+    /// Moves every sampled faulty view `by` views later, so a Disrupter started
+    /// after a target-state prefix draws its faults from the views that follow
+    /// the release. Zero keeps the sample; a strategy without a sample (every
+    /// view faulty) is unchanged.
+    pub(crate) fn shift_faulty_views(mut self, by: u64) -> Self {
+        if let Some(views) = self.faulty_views.as_mut() {
+            for view in views.iter_mut() {
+                *view = View::new(view.get().saturating_add(by));
+            }
+        }
+        self
+    }
+
     /// Re-stamp a (possibly strategy-mutated) proposal with this disrupter's
     /// epoch. `strategy.rs` hardcodes [`EPOCH`] when rebuilding rounds, so its
     /// output is normalized here before signing/sending.
