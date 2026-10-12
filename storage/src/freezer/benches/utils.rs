@@ -1,8 +1,12 @@
 //! Helpers shared by the Freezer benchmarks.
 
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
+use commonware_runtime::{
+    BLOB_PAGE_SIZE,
+    buffer::paged::{CacheRef, page_size},
+    tokio::Context,
+};
 use commonware_storage::freezer::{Checkpoint, Config, Freezer};
-use commonware_utils::{NZU16, NZUsize, TestRng, sequence::FixedBytes};
+use commonware_utils::{NZUsize, TestRng, sequence::FixedBytes};
 use rand::Rng;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -33,8 +37,7 @@ pub const VALUE_PARTITION: &str = "freezer-bench-value";
 /// Partition for [Freezer] table benchmarks.
 pub const TABLE_PARTITION: &str = "freezer-bench-table";
 
-/// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: NonZeroU16 = NZU16!(16_384);
+const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 
 /// The number of pages to cache in the page cache.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
