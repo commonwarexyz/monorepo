@@ -98,13 +98,15 @@ use alloc::{
 use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
+#[cfg(feature = "std")]
+use core::cell::RefCell;
 use core::{iter::Peekable, ops::Range};
 
 #[cfg(feature = "std")]
 std::thread_local! {
     /// Per-thread scratch for encoding items before they are hashed, reused across batches so
     /// steady-state leaf hashing allocates nothing.
-    static ENCODE_BUF: core::cell::RefCell<Vec<u8>> = const { core::cell::RefCell::new(Vec::new()) };
+    static ENCODE_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Overwritten node digests keyed by position.
