@@ -93,6 +93,9 @@ stability_scope!(BETA {
         fn context(&self) -> Self::Context;
     }
 });
+stability_scope!(ALPHA, cfg(any(test, feature = "mocks")) {
+    pub mod twins;
+});
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_actor::Feedback;
     use commonware_cryptography::{Digest, PublicKey};
