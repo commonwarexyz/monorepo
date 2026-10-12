@@ -76,7 +76,7 @@ impl Drop for ParkGuard {
 enum WorkerFault {
     /// Reject thread creation after taking ownership of its launch payload.
     Launch,
-    /// Fail ring initialization on the newly created worker thread.
+    /// Fail io_uring ring initialization on the newly created worker thread.
     Startup,
     /// Pause a worker after it releases its registration.
     AfterRelease(Box<dyn FnOnce() + Send>),
@@ -160,7 +160,8 @@ pub(super) fn before_launch(payload: Launch) -> Launch {
     payload
 }
 
-/// Reject native initialization on the selected worker before creating its ring.
+/// Reject native initialization on the selected worker before creating its
+/// io_uring ring.
 pub(super) fn before_startup(registry: &Arc<Workers>) -> io::Result<()> {
     if take_worker_fault(registry, |fault| matches!(fault, WorkerFault::Startup)).is_some() {
         return Err(io::Error::other(
@@ -288,7 +289,10 @@ static PARK_HOOKS_ARMED: AtomicBool = AtomicBool::new(false);
 /// Callbacks each run once by one pool worker at one point of its park.
 static PARK_HOOKS: Mutex<Vec<ParkHook>> = Mutex::new(Vec::new());
 
-/// Run `hook` on worker `index` of `pool` when it next reaches `point`.
+/// Run `hook` on worker `index` of `pool` when it next reaches `point`. The
+/// hook runs on the worker's thread once the hook list is unlocked and outside
+/// any borrow of the worker's local state, so it may borrow that state or
+/// install another hook.
 fn on_next_park(pool: &Pool, index: u32, point: ParkPoint, hook: impl FnOnce() + Send + 'static) {
     PARK_HOOKS
         .lock()
@@ -296,7 +300,9 @@ fn on_next_park(pool: &Pool, index: u32, point: ParkPoint, hook: impl FnOnce() +
     PARK_HOOKS_ARMED.store(true, Ordering::Release);
 }
 
-/// Run the hook installed for this worker at this point of its park, if any.
+/// Remove the hook installed for this worker at this point of its park, if
+/// any, and run it once the hook list is unlocked. The caller holds no borrow
+/// of the worker's local state.
 pub fn at_park(pool: &Pool, index: u32, point: ParkPoint) {
     if !PARK_HOOKS_ARMED.load(Ordering::Acquire) {
         return;
@@ -406,9 +412,9 @@ fn chain_foreign_spawns(
     .unwrap();
 }
 
-/// Start a task on worker one that holds a receive in its ring when
-/// `in_ring`, so worker one waits in its ring rather than on its futex.
-/// Returns worker one's thread and the receive's peer.
+/// Start a task on worker one that holds a receive in its io_uring ring when
+/// `in_ring`, so worker one waits in its io_uring ring rather than on its
+/// futex. Returns worker one's thread and the receive's peer.
 fn occupy_worker_one(context: &Context, in_ring: bool) -> (ThreadId, Option<UnixStream>) {
     if !in_ring {
         return (spawn_elsewhere(context, async {}).1, None);
@@ -3476,68 +3482,91 @@ fn test_spinning_worker_sleeps_after_a_signalled_spin() {
     });
 }
 
-/// A worker whose own queue never runs dry still takes from the global queue
-/// every configured interval, and takes a share of it, so a burst of foreign
-/// wakes waits about one interval in all rather than one interval each.
+/// A worker whose run queue never runs dry still takes from the global queue
+/// every configured interval. With one task requeuing itself, a take moves a
+/// share of the global queue, so a burst of foreign wakes waits about one
+/// interval in all rather than one interval each. With enough requeuing tasks
+/// to keep the run queue at least half full, each take moves one runnable, so
+/// the k-th wake of the burst waits at most k + 1 intervals of the other tasks'
+/// polls.
 #[test]
 fn test_busy_worker_takes_a_share_of_the_global_queue_every_interval() {
-    const BURST: usize = 64;
-    for interval in [config().global_queue_interval(), 4] {
-        Runner::new(config().with_global_queue_interval(interval)).start(|context| async move {
-            let stop = Arc::new(AtomicBool::new(false));
-            let yields = Arc::new(AtomicUsize::new(0));
-            let yielder = context.child("yielder").spawn({
-                let stop = stop.clone();
-                let yields = yields.clone();
-                move |_| async move {
-                    while !stop.load(Ordering::Relaxed) {
-                        let count = yields.fetch_add(1, Ordering::Relaxed);
-                        assert!(count < 100_000, "global queue starved");
-                        reschedule().await;
+    const WAITERS: usize = 64;
+
+    // The tasks requeuing themselves, the most polls they make before the
+    // burst has run, and whether each take moves only one runnable.
+    for (requeuers, most_polls, one_per_take) in [(1, 100_000, false), (200, 10_000_000, true)] {
+        for interval in [config().global_queue_interval(), 4] {
+            let cfg = config().with_global_queue_interval(interval);
+            Runner::new(cfg).start(|context| async move {
+                // Idle tasks waiting for a wake from outside the pool, polled
+                // to pending before the requeuing tasks start.
+                let polls = Arc::new(AtomicUsize::new(0));
+                let lags = Arc::new(Mutex::new(Vec::new()));
+                let mut senders = Vec::new();
+                let mut waiters = Vec::new();
+                for _ in 0..WAITERS {
+                    let (sender, receiver) = oneshot::channel::<usize>();
+                    senders.push(sender);
+                    let lags = lags.clone();
+                    let polls = polls.clone();
+                    waiters.push(context.child("waiter").spawn(move |_| async move {
+                        let before = receiver.await.unwrap();
+                        lags.lock().push(polls.load(Ordering::Relaxed) - before);
+                    }));
+                }
+                reschedule().await;
+
+                // Every poll of a requeuing task counts.
+                let stop = Arc::new(AtomicBool::new(false));
+                let mut tasks = Vec::new();
+                for _ in 0..requeuers {
+                    let stop = stop.clone();
+                    let polls = polls.clone();
+                    tasks.push(context.child("requeuer").spawn(move |_| async move {
+                        while !stop.load(Ordering::Relaxed) {
+                            let count = polls.fetch_add(1, Ordering::Relaxed);
+                            assert!(count < most_polls, "global queue starved");
+                            reschedule().await;
+                        }
+                    }));
+                }
+                reschedule().await;
+
+                let before = polls.load(Ordering::Relaxed);
+                thread::spawn(move || {
+                    for sender in senders {
+                        sender.send(before).unwrap();
                     }
+                })
+                .join()
+                .unwrap();
+                for waiter in waiters {
+                    waiter.await.unwrap();
+                }
+                stop.store(true, Ordering::Relaxed);
+                for task in tasks {
+                    task.await.unwrap();
+                }
+
+                let mut lags = lags.lock().clone();
+                assert_eq!(lags.len(), WAITERS);
+                lags.sort_unstable();
+                let interval = interval as usize;
+                for (index, lag) in lags.iter().enumerate() {
+                    let bound = if one_per_take {
+                        (index + 2) * interval
+                    } else {
+                        2 * interval
+                    };
+                    assert!(
+                        *lag <= bound,
+                        "foreign wake {index} waited {lag} polls with interval {interval} \
+                         and {requeuers} requeuing tasks"
+                    );
                 }
             });
-
-            // Idle tasks waiting for a wake from outside the pool.
-            let lags = Arc::new(Mutex::new(Vec::new()));
-            let mut senders = Vec::new();
-            let mut waiters = Vec::new();
-            for _ in 0..BURST {
-                let (sender, receiver) = oneshot::channel::<usize>();
-                senders.push(sender);
-                let lags = lags.clone();
-                let yields = yields.clone();
-                waiters.push(context.child("waiter").spawn(move |_| async move {
-                    let before = receiver.await.unwrap();
-                    lags.lock().push(yields.load(Ordering::Relaxed) - before);
-                }));
-            }
-            for _ in 0..4 {
-                reschedule().await;
-            }
-
-            let before = yields.load(Ordering::Relaxed);
-            thread::spawn(move || {
-                for sender in senders {
-                    sender.send(before).unwrap();
-                }
-            })
-            .join()
-            .unwrap();
-            for waiter in waiters {
-                waiter.await.unwrap();
-            }
-            stop.store(true, Ordering::Relaxed);
-            yielder.await.unwrap();
-
-            let lags = lags.lock();
-            assert_eq!(lags.len(), BURST);
-            let last = lags.iter().max().unwrap();
-            assert!(
-                *last <= 2 * interval as usize,
-                "last foreign wake waited {last} polls with interval {interval}"
-            );
-        });
+        }
     }
 }
 
@@ -3549,7 +3578,7 @@ fn test_busy_worker_checks_the_global_queue_every_interval() {
     const CHAIN: usize = 8;
     for interval in [1, 2, 4, config().global_queue_interval()] {
         Runner::new(config().with_global_queue_interval(interval)).start(|context| async move {
-            // A task that requeues itself keeps this worker's own queue busy.
+            // A task that requeues itself keeps this worker's run queue busy.
             let polls = Arc::new(AtomicUsize::new(0));
             let stop = Arc::new(AtomicBool::new(false));
             let yielder = context.child("yielder").spawn({
@@ -3789,7 +3818,7 @@ fn test_shutdown_retains_a_taken_forward_until_polling_ends() {
 /// Teardown clears two idle tasks whose destructors wake each other, so
 /// whichever is cleared first wakes the other while it is still idle, on a
 /// closing worker. The closing worker's wake goes to the closed global queue,
-/// which discards it, rather than leaving a runnable in its own queue.
+/// which discards it, rather than leaving a runnable in its run queue.
 #[test]
 fn test_wake_from_a_destructor_during_teardown_leaves_no_runnable() {
     struct WakeOther(Arc<Mutex<Option<Waker>>>);
@@ -3922,7 +3951,7 @@ fn test_task_panic_during_root_destruction_is_not_observed() {
 }
 
 /// A pool worker that fails while the pool is open, with a runnable still in
-/// its ready queue, interrupts the root, and shutdown discards that runnable
+/// its run queue, interrupts the root, and shutdown discards that runnable
 /// once the pool has closed.
 #[test]
 fn test_failed_pool_worker_with_queued_runnables_shuts_down() {
@@ -3947,8 +3976,8 @@ fn test_failed_pool_worker_with_queued_runnables_shuts_down() {
                         reschedule().await;
                         assert!(trigger.0.lock().is_some(), "a was not polled here");
 
-                        // The timer's callback wakes A into this worker's
-                        // ready queue, then fails the worker.
+                        // The timer's callback wakes A into this worker's run
+                        // queue, then fails the worker.
                         let sleep = context.sleep(Duration::from_millis(20));
                         let mut sleep = pin!(sleep);
                         let waker = waker(trigger);
