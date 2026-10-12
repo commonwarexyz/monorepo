@@ -35,8 +35,7 @@ We also support NEON for platforms such as Apple silicon that lack SVE2.
 
 These platforms are:
 
-- **Ice Lake**: x86-64 with AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, SHA-NI,
-  SSSE3, and SSE4.1.
+- **Ice Lake**: x86-64 with AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, and SHA-NI.
 - **NEON**: AArch64 with NEON and SHA2.
 - **Armv9**: AArch64 with NEON, SHA2, SVE, and SVE2.
 

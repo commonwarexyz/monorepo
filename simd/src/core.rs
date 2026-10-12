@@ -386,7 +386,7 @@ pub trait Simd: Copy {
 ///
 /// This profile models 512-bit vectors with 64 unsigned byte lanes, 16 unsigned
 /// 32-bit lanes, and eight unsigned 64-bit lanes. Native implementations require
-/// AVX-512F, AVX-512BW, GFNI, AVX-512 IFMA, SHA, SSSE3, and SSE4.1.
+/// AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, and SHA-NI.
 /// The name identifies an instruction bundle, not a required CPU vendor or model.
 ///
 /// Instruction contracts use the [notation defined by `Simd`](Simd#instruction-notation).
