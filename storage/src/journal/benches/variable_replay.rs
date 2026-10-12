@@ -16,44 +16,26 @@ use std::{
 /// Partition name to use in the journal config.
 const PARTITION: &str = "variable-test-partition";
 
-/// Replay all items in the given `journal`, one stream item per journal item or one per
-/// decoded batch.
+/// Replay all items in the given `journal`.
 async fn bench_run(
     journal: Journal<Context, FixedBytes<ITEM_SIZE>>,
     buffer: usize,
     read_options: ReadOptions,
-    batches: bool,
 ) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     let (journal, reader) = journal.snapshot().await.unwrap();
-    if batches {
-        let stream = reader
-            .replay_batches(reader.bounds(), NZUsize!(buffer), read_options)
-            .await
-            .expect("failed to replay journal");
-        pin_mut!(stream);
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok((_, items)) => {
-                    for item in items {
-                        black_box(item);
-                    }
-                }
-                Err(err) => panic!("Failed to read batch: {err}"),
-            }
-        }
-    } else {
-        let stream = reader
-            .replay(0, NZUsize!(buffer), read_options)
-            .await
-            .expect("failed to replay journal");
-        pin_mut!(stream);
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(item) => {
+    let stream = reader
+        .replay(reader.bounds(), NZUsize!(buffer), read_options)
+        .await
+        .expect("failed to replay journal");
+    pin_mut!(stream);
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok((_, items)) => {
+                for item in items {
                     black_box(item);
                 }
-                Err(err) => panic!("Failed to read item: {err}"),
             }
+            Err(err) => panic!("Failed to read batch: {err}"),
         }
     }
     journal
@@ -74,48 +56,44 @@ fn bench_variable_replay(c: &mut Criterion) {
             (ReadOptions::default(), "cache"),
         ] {
             for buffer in [16_384, 65_536, 1_048_576] {
-                for (batches, api) in [(false, "items"), (true, "batches")] {
-                    c.bench_function(
-                        &format!(
-                            "{}/items={} buffer={} size={} read_options={} api={}",
-                            module_path!(),
-                            items,
-                            buffer,
-                            ITEM_SIZE,
-                            label,
-                            api
-                        ),
-                        |b| {
-                            // Setup: populate journal (once, on first sample).
-                            if !initialized {
-                                Runner::new(cfg.clone()).start(|ctx| async move {
-                                    let j =
-                                        get_variable_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
-                                    append_fixed_random_data::<_, ITEM_SIZE>(j, items).await;
-                                });
-                                initialized = true;
-                            }
-
-                            // Benchmark: measure replay time.
-                            b.to_async(&runner).iter_custom(|iters| async move {
-                                let ctx = context::get::<commonware_runtime::tokio::Context>();
-                                let mut j = get_variable_journal(
-                                    ctx.child("storage"),
-                                    PARTITION,
-                                    ITEMS_PER_BLOB,
-                                )
-                                .await;
-                                let mut duration = Duration::ZERO;
-                                for _ in 0..iters {
-                                    let start = Instant::now();
-                                    j = bench_run(j, buffer, read_options, batches).await;
-                                    duration += start.elapsed();
-                                }
-                                duration
+                c.bench_function(
+                    &format!(
+                        "{}/items={} buffer={} size={} read_options={}",
+                        module_path!(),
+                        items,
+                        buffer,
+                        ITEM_SIZE,
+                        label
+                    ),
+                    |b| {
+                        // Setup: populate journal (once, on first sample).
+                        if !initialized {
+                            Runner::new(cfg.clone()).start(|ctx| async move {
+                                let j = get_variable_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
+                                append_fixed_random_data::<_, ITEM_SIZE>(j, items).await;
                             });
-                        },
-                    );
-                }
+                            initialized = true;
+                        }
+
+                        // Benchmark: measure replay time.
+                        b.to_async(&runner).iter_custom(|iters| async move {
+                            let ctx = context::get::<commonware_runtime::tokio::Context>();
+                            let mut j = get_variable_journal(
+                                ctx.child("storage"),
+                                PARTITION,
+                                ITEMS_PER_BLOB,
+                            )
+                            .await;
+                            let mut duration = Duration::ZERO;
+                            for _ in 0..iters {
+                                let start = Instant::now();
+                                j = bench_run(j, buffer, read_options).await;
+                                duration += start.elapsed();
+                            }
+                            duration
+                        });
+                    },
+                );
             }
         }
 

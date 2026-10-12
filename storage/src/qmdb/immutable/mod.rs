@@ -128,7 +128,7 @@ where
     // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
     // the init cache, not the OS cache, decides which probes hit.
     let stream = log
-        .replay_batches(
+        .replay(
             *inactivity_floor_loc..log.bounds().end,
             init_buffer,
             ReadOptions::DONT_CACHE,

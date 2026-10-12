@@ -2011,7 +2011,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         self.probe_items(positions)
     }
 
-    async fn replay_batches(
+    async fn replay(
         &self,
         range: Range<u64>,
         buffer: NonZeroUsize,
@@ -2051,7 +2051,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         self.0.reader().probe_items(positions)
     }
 
-    async fn replay_batches(
+    async fn replay(
         &self,
         range: Range<u64>,
         buffer: NonZeroUsize,
@@ -2274,7 +2274,10 @@ impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{journal::contiguous::Contiguous as _, utils::codec::View};
+    use crate::{
+        journal::contiguous::{Contiguous as _, tests::replay_items},
+        utils::codec::View,
+    };
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -3540,9 +3543,13 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let result = reader
-                    .replay(0, NZUsize!(1024), ReadOptions::default())
-                    .await;
+                let result = replay_items(
+                    &reader,
+                    0..reader.bounds().end,
+                    NZUsize!(1024),
+                    ReadOptions::default(),
+                )
+                .await;
                 assert!(matches!(result, Err(Error::ItemPruned(0))));
             }
 
@@ -3550,21 +3557,25 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let res = reader
-                    .replay(0, NZUsize!(1024), ReadOptions::default())
-                    .await;
+                let res = replay_items(
+                    &reader,
+                    0..reader.bounds().end,
+                    NZUsize!(1024),
+                    ReadOptions::default(),
+                )
+                .await;
                 assert!(matches!(res, Err(Error::ItemPruned(_))));
 
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let stream = reader
-                    .replay(
-                        journal.bounds().start,
-                        NZUsize!(1024),
-                        ReadOptions::default(),
-                    )
-                    .await
-                    .expect("failed to replay journal from pruning boundary");
+                let stream = replay_items(
+                    &reader,
+                    journal.bounds().start..reader.bounds().end,
+                    NZUsize!(1024),
+                    ReadOptions::default(),
+                )
+                .await
+                .expect("failed to replay journal from pruning boundary");
                 pin_mut!(stream);
                 let mut items = Vec::new();
                 while let Some(result) = stream.next().await {
@@ -3648,10 +3659,14 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let stream = reader
-                    .replay(0, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .expect("failed to replay journal");
+                let stream = replay_items(
+                    &reader,
+                    0..reader.bounds().end,
+                    NZUsize!(1024),
+                    ReadOptions::default(),
+                )
+                .await
+                .expect("failed to replay journal");
                 let mut items = Vec::new();
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
@@ -3706,10 +3721,14 @@ mod tests {
             {
                 let mut error_found = false;
                 let (_journal, reader) = journal.snapshot().await.unwrap();
-                let stream = reader
-                    .replay(0, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .expect("failed to replay journal");
+                let stream = replay_items(
+                    &reader,
+                    0..reader.bounds().end,
+                    NZUsize!(1024),
+                    ReadOptions::default(),
+                )
+                .await
+                .expect("failed to replay journal");
                 let mut items = Vec::new();
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
@@ -3757,10 +3776,14 @@ mod tests {
             page_cache.clear();
             recordings.clear();
             {
-                let stream = journal
-                    .replay(0, NZUsize!(56), ReadOptions::DONT_CACHE)
-                    .await
-                    .expect("failed to replay sealed history");
+                let stream = replay_items(
+                    &journal,
+                    0..journal.bounds().end,
+                    NZUsize!(56),
+                    ReadOptions::DONT_CACHE,
+                )
+                .await
+                .expect("failed to replay sealed history");
                 pin_mut!(stream);
                 let (position, item) = stream
                     .next()
@@ -3784,10 +3807,14 @@ mod tests {
             page_cache.clear();
             recordings.clear();
             {
-                let stream = journal
-                    .replay(6, NZUsize!(2048), ReadOptions::default())
-                    .await
-                    .expect("failed to replay writable tip");
+                let stream = replay_items(
+                    &journal,
+                    6..journal.bounds().end,
+                    NZUsize!(2048),
+                    ReadOptions::default(),
+                )
+                .await
+                .expect("failed to replay writable tip");
                 pin_mut!(stream);
                 for i in 6..9 {
                     let (position, item) = stream
@@ -3814,10 +3841,14 @@ mod tests {
             page_cache.clear();
             recordings.clear();
             {
-                let stream = journal
-                    .replay(6, NZUsize!(2048), ReadOptions::default())
-                    .await
-                    .expect("failed to replay buffered tip");
+                let stream = replay_items(
+                    &journal,
+                    6..journal.bounds().end,
+                    NZUsize!(2048),
+                    ReadOptions::default(),
+                )
+                .await
+                .expect("failed to replay buffered tip");
                 pin_mut!(stream);
                 let (position, item) = stream
                     .next()
@@ -3865,10 +3896,14 @@ mod tests {
                 .unwrap();
             let reader;
             (journal, reader) = journal.snapshot().await.unwrap();
-            let stream = reader
-                .replay(0, NZUsize!(1024), ReadOptions::default())
-                .await
-                .unwrap();
+            let stream = replay_items(
+                &reader,
+                0..reader.bounds().end,
+                NZUsize!(1024),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
             pin_mut!(stream);
 
             for i in 0u64..10 {
@@ -3943,10 +3978,14 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let stream = reader
-                    .replay(START_POS, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .expect("failed to replay journal");
+                let stream = replay_items(
+                    &reader,
+                    START_POS..reader.bounds().end,
+                    NZUsize!(1024),
+                    ReadOptions::default(),
+                )
+                .await
+                .expect("failed to replay journal");
                 let mut items = Vec::new();
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
@@ -3980,7 +4019,7 @@ mod tests {
         });
     }
 
-    /// `replay_batches` tiles a range in position order without crossing blob boundaries, through
+    /// Replay tiles a range in position order without crossing blob boundaries, through
     /// sealed blobs and the unsynced tail, at budgets of one item, part of a blob, and the whole
     /// journal.
     #[test_traced]
@@ -4062,7 +4101,7 @@ mod tests {
                     .unwrap();
                 {
                     let stream = journal
-                        .replay_batches(0..ITEMS, NZUsize!(2048), ReadOptions::default())
+                        .replay(0..ITEMS, NZUsize!(2048), ReadOptions::default())
                         .await
                         .unwrap();
                     pin_mut!(stream);
@@ -4087,7 +4126,7 @@ mod tests {
         });
     }
 
-    /// `replay_range` yields exactly the requested positions, spanning blob boundaries, and
+    /// Replay yields exactly the requested positions, spanning blob boundaries, and
     /// validates the range against `bounds()`.
     #[test_traced]
     fn test_fixed_journal_replay_range() {
@@ -4109,10 +4148,10 @@ mod tests {
             // A mid-journal range crossing several blob boundaries yields exactly [start, end).
             let (start, end) = (12u64, 40u64);
             {
-                let stream = journal
-                    .replay_range(start..end, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .expect("failed to replay range");
+                let stream =
+                    replay_items(&journal, start..end, NZUsize!(1024), ReadOptions::default())
+                        .await
+                        .expect("failed to replay range");
                 pin_mut!(stream);
                 let mut next = start;
                 while let Some(result) = stream.next().await {
@@ -4126,8 +4165,7 @@ mod tests {
 
             // An empty range yields an empty stream.
             {
-                let stream = journal
-                    .replay_range(5..5, NZUsize!(1024), ReadOptions::default())
+                let stream = replay_items(&journal, 5..5, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("failed to replay empty range");
                 pin_mut!(stream);
@@ -4135,17 +4173,20 @@ mod tests {
             }
 
             // A range past the journal's end is rejected.
-            let err = journal
-                .replay_range(0..total + 1, NZUsize!(1024), ReadOptions::default())
-                .await
-                .map(|_| ())
-                .unwrap_err();
+            let err = replay_items(
+                &journal,
+                0..total + 1,
+                NZUsize!(1024),
+                ReadOptions::default(),
+            )
+            .await
+            .map(|_| ())
+            .unwrap_err();
             assert!(matches!(err, Error::ItemOutOfRange(pos) if pos == total + 1));
 
             // An inverted range is rejected.
             #[allow(clippy::reversed_empty_ranges)]
-            let err = journal
-                .replay_range(10..5, NZUsize!(1024), ReadOptions::default())
+            let err = replay_items(&journal, 10..5, NZUsize!(1024), ReadOptions::default())
                 .await
                 .map(|_| ())
                 .unwrap_err();
@@ -6514,10 +6555,14 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let stream = reader
-                    .replay(u64::MAX - 1, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .unwrap();
+                let stream = replay_items(
+                    &reader,
+                    u64::MAX - 1..reader.bounds().end,
+                    NZUsize!(1024),
+                    ReadOptions::default(),
+                )
+                .await
+                .unwrap();
                 pin_mut!(stream);
                 let (pos, item) = stream.next().await.unwrap().unwrap();
                 assert_eq!(pos, u64::MAX - 1);
@@ -7134,10 +7179,14 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let stream = reader
-                    .replay(7, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .expect("failed to replay");
+                let stream = replay_items(
+                    &reader,
+                    7..reader.bounds().end,
+                    NZUsize!(1024),
+                    ReadOptions::default(),
+                )
+                .await
+                .expect("failed to replay");
                 pin_mut!(stream);
                 let mut items: Vec<(u64, Digest)> = Vec::new();
                 while let Some(result) = stream.next().await {
@@ -7156,10 +7205,14 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let stream = reader
-                    .replay(12, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .expect("failed to replay from mid-stream");
+                let stream = replay_items(
+                    &reader,
+                    12..reader.bounds().end,
+                    NZUsize!(1024),
+                    ReadOptions::default(),
+                )
+                .await
+                .expect("failed to replay from mid-stream");
                 pin_mut!(stream);
                 let mut items: Vec<(u64, Digest)> = Vec::new();
                 while let Some(result) = stream.next().await {
@@ -8107,10 +8160,14 @@ mod tests {
             assert!(pruned);
 
             {
-                let stream = snapshot
-                    .replay(0, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .unwrap();
+                let stream = replay_items(
+                    &snapshot,
+                    0..snapshot.bounds().end,
+                    NZUsize!(1024),
+                    ReadOptions::default(),
+                )
+                .await
+                .unwrap();
                 pin_mut!(stream);
                 let mut expected = 0u64;
                 while let Some(result) = stream.next().await {

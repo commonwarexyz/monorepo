@@ -1,6 +1,6 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
-use super::{Contiguous, Many, fixed, variable};
+use super::{Contiguous, Many, ReplayBatch, fixed, variable};
 use crate::journal::{Error, contiguous::Mutable};
 use commonware_macros::boxed;
 use commonware_runtime::{
@@ -11,11 +11,37 @@ use commonware_runtime::{
     reschedule,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize};
-use futures::{FutureExt as _, StreamExt, future::BoxFuture};
+use futures::{FutureExt as _, Stream, StreamExt, future::BoxFuture, stream};
 use std::{
     future::Future,
+    num::NonZeroUsize,
+    ops::Range,
     sync::atomic::{AtomicUsize, Ordering},
 };
+
+/// Replay `range` of `journal` and flatten the batches into one `(position, item)` entry per
+/// item, for tests that check items one at a time.
+pub(crate) async fn replay_items<J: Contiguous>(
+    journal: &J,
+    range: Range<u64>,
+    buffer: NonZeroUsize,
+    read_options: ReadOptions,
+) -> Result<impl Stream<Item = Result<(u64, J::Item), Error>> + Send, Error> {
+    let batches = journal.replay(range, buffer, read_options).await?;
+    Ok(
+        batches.flat_map(|batch: Result<ReplayBatch<J::Item>, Error>| {
+            let entries: Vec<_> = match batch {
+                Ok((start, items)) => items
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, item)| Ok((start + i as u64, item)))
+                    .collect(),
+                Err(err) => vec![Err(err)],
+            };
+            stream::iter(entries)
+        }),
+    )
+}
 
 /// Run the full suite of generic tests on a [Contiguous] implementation.
 ///
@@ -232,10 +258,14 @@ where
     }
 
     {
-        let stream = journal
-            .replay(0, NZUsize!(1024), ReadOptions::default())
-            .await
-            .unwrap();
+        let stream = replay_items(
+            &journal,
+            0..journal.bounds().end,
+            NZUsize!(1024),
+            ReadOptions::default(),
+        )
+        .await
+        .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -266,10 +296,14 @@ where
     }
 
     {
-        let stream = journal
-            .replay(7, NZUsize!(1024), ReadOptions::default())
-            .await
-            .unwrap();
+        let stream = replay_items(
+            &journal,
+            7..journal.bounds().end,
+            NZUsize!(1024),
+            ReadOptions::default(),
+        )
+        .await
+        .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -300,10 +334,14 @@ where
     }
 
     {
-        let stream = journal
-            .replay(13, NZUsize!(1024), ReadOptions::default())
-            .await
-            .unwrap();
+        let stream = replay_items(
+            &journal,
+            13..journal.bounds().end,
+            NZUsize!(1024),
+            ReadOptions::default(),
+        )
+        .await
+        .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -335,10 +373,14 @@ where
     }
 
     {
-        let stream = journal
-            .replay(0, NZUsize!(9), ReadOptions::default())
-            .await
-            .unwrap();
+        let stream = replay_items(
+            &journal,
+            0..journal.bounds().end,
+            NZUsize!(9),
+            ReadOptions::default(),
+        )
+        .await
+        .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -356,7 +398,7 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Drain `journal.replay_batches(range)` with `buffer`, checking that the batches tile `range` in
+/// Drain `journal.replay(range)` with `buffer`, checking that the batches tile `range` in
 /// position order, hold `expected(position)`, never cross a boundary between blobs of
 /// `items_per_blob` items, and exceed `buffer` by less than one item of `item_len` encoded bytes.
 pub(super) async fn check_replay_batches<J>(
@@ -370,7 +412,7 @@ pub(super) async fn check_replay_batches<J>(
     J: Contiguous<Item: PartialEq + std::fmt::Debug>,
 {
     let stream = journal
-        .replay_batches(range.clone(), NZUsize!(buffer), ReadOptions::default())
+        .replay(range.clone(), NZUsize!(buffer), ReadOptions::default())
         .await
         .unwrap();
     futures::pin_mut!(stream);
@@ -400,8 +442,8 @@ pub(super) async fn check_replay_batches<J>(
     assert_eq!(next, range.end, "range {range:?} buffer {buffer}");
 }
 
-/// Test that batch replay tiles a range contiguously, agrees with the item stream, stops at blob
-/// boundaries, and rejects the same ranges as item replay.
+/// Test that replay tiles a range contiguously, stops at blob boundaries, and rejects ranges
+/// outside the bounds.
 async fn test_replay_batches<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -421,45 +463,15 @@ where
         }
     }
 
-    // Flattening the batches is the item stream.
-    {
-        let batches = journal
-            .replay_batches(3..33, NZUsize!(40), ReadOptions::default())
-            .await
-            .unwrap();
-        futures::pin_mut!(batches);
-        let mut flattened = Vec::new();
-        while let Some(batch) = batches.next().await {
-            let (start, items) = batch.unwrap();
-            flattened.extend(
-                items
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, item)| (start + i as u64, item)),
-            );
-        }
-
-        let stream = journal
-            .replay_range(3..33, NZUsize!(40), ReadOptions::default())
-            .await
-            .unwrap();
-        futures::pin_mut!(stream);
-        let mut items = Vec::new();
-        while let Some(result) = stream.next().await {
-            items.push(result.unwrap());
-        }
-        assert_eq!(flattened, items);
-    }
-
-    // The range checks match item replay.
+    // Ranges outside the bounds are rejected.
     let res = journal
-        .replay_batches(0..38, NZUsize!(40), ReadOptions::default())
+        .replay(0..38, NZUsize!(40), ReadOptions::default())
         .await
         .map(|_| ());
     assert!(matches!(res, Err(Error::ItemOutOfRange(38))));
     #[allow(clippy::reversed_empty_ranges)]
     let res = journal
-        .replay_batches(10..5, NZUsize!(40), ReadOptions::default())
+        .replay(10..5, NZUsize!(40), ReadOptions::default())
         .await
         .map(|_| ());
     assert!(matches!(res, Err(Error::ItemOutOfRange(10))));
@@ -468,7 +480,7 @@ where
     let (journal, _) = journal.prune(10).await.unwrap();
     check_replay_batches(&journal, 10..37, 40, 10, 8, |pos| pos * 10).await;
     let res = journal
-        .replay_batches(5..20, NZUsize!(40), ReadOptions::default())
+        .replay(5..20, NZUsize!(40), ReadOptions::default())
         .await
         .map(|_| ());
     assert!(matches!(res, Err(Error::ItemPruned(5))));
@@ -545,10 +557,14 @@ where
     {
         // Replay from a position that may or may not be pruned (section-aligned)
         // We replay from position 10 which should be safe
-        let stream = journal
-            .replay(10, NZUsize!(1024), ReadOptions::default())
-            .await
-            .unwrap();
+        let stream = replay_items(
+            &journal,
+            10..journal.bounds().end,
+            NZUsize!(1024),
+            ReadOptions::default(),
+        )
+        .await
+        .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -627,10 +643,14 @@ where
 
     {
         // Replay from position 10 and verify positions
-        let stream = journal
-            .replay(10, NZUsize!(1024), ReadOptions::default())
-            .await
-            .unwrap();
+        let stream = replay_items(
+            &journal,
+            10..journal.bounds().end,
+            NZUsize!(1024),
+            ReadOptions::default(),
+        )
+        .await
+        .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -684,10 +704,14 @@ where
     let journal = factory("replay-on-empty".into()).await.unwrap();
 
     {
-        let stream = journal
-            .replay(0, NZUsize!(1024), ReadOptions::default())
-            .await
-            .unwrap();
+        let stream = replay_items(
+            &journal,
+            0..journal.bounds().end,
+            NZUsize!(1024),
+            ReadOptions::default(),
+        )
+        .await
+        .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -716,10 +740,14 @@ where
     let bounds = journal.bounds();
 
     {
-        let stream = journal
-            .replay(bounds.end, NZUsize!(1024), ReadOptions::default())
-            .await
-            .unwrap();
+        let stream = replay_items(
+            &journal,
+            bounds.end..journal.bounds().end,
+            NZUsize!(1024),
+            ReadOptions::default(),
+        )
+        .await
+        .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -822,10 +850,14 @@ where
 
         // Replay and verify all items
         {
-            let stream = journal
-                .replay(0, NZUsize!(1024), ReadOptions::default())
-                .await
-                .unwrap();
+            let stream = replay_items(
+                &journal,
+                0..journal.bounds().end,
+                NZUsize!(1024),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();
@@ -889,10 +921,14 @@ where
 
         // Replay from position 10 (first non-pruned position)
         {
-            let stream = journal
-                .replay(10, NZUsize!(1024), ReadOptions::default())
-                .await
-                .unwrap();
+            let stream = replay_items(
+                &journal,
+                10..journal.bounds().end,
+                NZUsize!(1024),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();
@@ -1351,10 +1387,14 @@ where
 
         // Replay should yield no items
         {
-            let stream = journal
-                .replay(0, NZUsize!(1024), ReadOptions::default())
-                .await
-                .unwrap();
+            let stream = replay_items(
+                &journal,
+                0..journal.bounds().end,
+                NZUsize!(1024),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();

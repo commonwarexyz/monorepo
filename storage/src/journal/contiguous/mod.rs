@@ -13,7 +13,7 @@
 
 use super::Error;
 use commonware_runtime::{Handle, ReadOptions};
-use futures::{Stream, StreamExt as _, future, stream};
+use futures::{Stream, stream};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 
 mod blobs;
@@ -23,7 +23,7 @@ mod metrics;
 pub mod variable;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Return the number of items that can be written before crossing the current blob boundary.
 ///
@@ -179,24 +179,6 @@ where
     )
 }
 
-/// Flatten a batch stream into one `(position, item)` entry per item.
-fn flatten_batches<T, S>(batches: S) -> impl Stream<Item = Result<(u64, T), Error>> + Send
-where
-    T: Send,
-    S: Stream<Item = Result<ReplayBatch<T>, Error>> + Send,
-{
-    batches.flat_map(|batch| match batch {
-        Ok((start, items)) => stream::iter(
-            items
-                .into_iter()
-                .enumerate()
-                .map(move |(i, item)| Ok((start + i as u64, item))),
-        )
-        .left_stream(),
-        Err(err) => stream::once(future::ready(Err(err))).right_stream(),
-    })
-}
-
 /// A replay batch: the position of its first item and the items that follow it contiguously.
 pub type ReplayBatch<T> = (u64, Vec<T>);
 
@@ -255,7 +237,7 @@ pub trait Contiguous: Send + Sync {
     /// Returns [Error::ItemPruned] if `range.start` precedes `bounds().start`, or
     /// [Error::ItemOutOfRange] if `range.end` exceeds `bounds().end` or the range is inverted
     /// (`start > end`).
-    fn replay_batches(
+    fn replay(
         &self,
         range: Range<u64>,
         buffer: NonZeroUsize,
@@ -263,42 +245,6 @@ pub trait Contiguous: Send + Sync {
     ) -> impl Future<
         Output = Result<impl Stream<Item = Result<ReplayBatch<Self::Item>, Error>> + Send, Error>,
     > + Send;
-
-    /// Return a stream of the items in `range`, in position order.
-    ///
-    /// This flattens [`replay_batches`](Self::replay_batches), which has the `range`, `buffer`,
-    /// `read_options`, and error contract. Consumers that process many items should prefer the
-    /// batch stream: it costs one poll per batch instead of one per item.
-    fn replay_range(
-        &self,
-        range: Range<u64>,
-        buffer: NonZeroUsize,
-        read_options: ReadOptions,
-    ) -> impl Future<
-        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
-    > + Send {
-        async move {
-            let batches = self.replay_batches(range, buffer, read_options).await?;
-            Ok(flatten_batches(batches))
-        }
-    }
-
-    /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
-    ///
-    /// See [`replay_batches`](Self::replay_batches) for the `buffer` and `read_options` contract.
-    fn replay(
-        &self,
-        start_pos: u64,
-        buffer: NonZeroUsize,
-        read_options: ReadOptions,
-    ) -> impl Future<
-        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
-    > + Send {
-        async move {
-            self.replay_range(start_pos..self.bounds().end, buffer, read_options)
-                .await
-        }
-    }
 }
 
 /// Items to append via [`Mutable::append_many`].

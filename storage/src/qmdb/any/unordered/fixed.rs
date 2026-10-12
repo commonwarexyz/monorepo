@@ -1068,7 +1068,7 @@ pub(crate) mod test {
             positions.iter().map(|_| None).collect()
         }
 
-        fn replay_batches(
+        fn replay(
             &self,
             range: Range<u64>,
             buffer: NonZeroUsize,
@@ -1079,7 +1079,7 @@ pub(crate) mod test {
                 JournalError,
             >,
         > + Send {
-            self.0.replay_batches(range, buffer, read_options)
+            self.0.replay(range, buffer, read_options)
         }
     }
 
