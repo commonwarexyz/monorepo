@@ -365,8 +365,10 @@ where
     /// The maximum encoded size of a block.
     ///
     /// Peers are blocked for sending a shard wider than the coding scheme produces for a block of
-    /// this size under the shard's coding config. Larger blocks are neither reconstructed nor
-    /// broadcast. Every node must use the same value.
+    /// this size under the config the shard's commitment claims. That config is untrusted until
+    /// consensus confirms the commitment, so a shard may be as wide as the scheme's widest shard
+    /// for such a block: under a one-shard config, at least the whole block. Larger blocks are
+    /// neither reconstructed nor broadcast. Every node must use the same value.
     pub max_block_size: NonZeroUsize,
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.
@@ -387,10 +389,12 @@ where
     /// [`Mailbox::discovered`] or reports a notarization via
     /// [`Mailbox::notarized`].
     ///
-    /// The shard buffers hold at most `peer_buffer_size` shards per `latest.primary` peer. Each
-    /// shard is no wider than the coding scheme produces for a `max_block_size` block under the
-    /// coding config the shard claims. A config that claims one minimum shard makes a shard span
-    /// the whole coded block, so each peer buffers about `peer_buffer_size` blocks.
+    /// Shards wait here in memory until consensus signals their commitment: at most
+    /// `peer_buffer_size` per `latest.primary` peer, each up to the scheme's widest shard for a
+    /// `max_block_size` block. An honest peer sends each recipient about one shard per block, so
+    /// size the ring for the number of blocks a node can trail its peers by, which is larger for a
+    /// distant or slow node. A ring that is too small evicts shards before they are needed, and the
+    /// node then fetches those blocks from the resolver instead of reconstructing them.
     pub peer_buffer_size: NonZeroUsize,
 
     /// The maximum number of commitment records retained.
@@ -405,7 +409,8 @@ where
     ///
     /// The background receiver decodes incoming network messages in a separate
     /// task and forwards them to the engine over a mailbox with this
-    /// capacity.
+    /// capacity. Each decoded shard is up to the scheme's widest shard for a
+    /// `max_block_size` block.
     pub background_channel_capacity: NonZeroUsize,
 
     /// Provider for peer set information. Pre-leader shards are buffered per
@@ -1997,7 +2002,7 @@ mod tests {
     use commonware_parallel::{Manual, Rayon, Sequential};
     use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic, utils::reschedule};
     use commonware_utils::{
-        N3f1, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
+        N3f1, NZU16, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
         probability, sync::Mutex,
     };
     use futures::FutureExt as _;
@@ -7745,6 +7750,56 @@ mod tests {
                 mailbox.get(commitment).await.is_none(),
                 "block should not reconstruct from evicted buffers"
             );
+        });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5223.
+    ///
+    /// A peer that claims one minimum shard sends more than `peer_buffer_size` of the widest
+    /// shards the receiver admits, for commitments consensus never signals. The peer's buffer
+    /// retains exactly `peer_buffer_size` of them.
+    #[test_traced]
+    fn issue_5223_regression_peer_buffer_bound() {
+        const ONE: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(1),
+        };
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    max_peers_per_set: NZUsize!(4),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+            let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|key| key.public_key());
+            let peer = private_keys[1].public_key();
+            let (mut engine, mut sender) =
+                unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16), STRATEGY).await;
+            let slots = engine.peer_buffer_size.get();
+
+            // Each shard carries a distinct commitment to a maximum-size coded payload, decoded as
+            // the background receiver decodes it.
+            let shard = |salt: u64| {
+                let payload = vec![0u8; MAX_BLOCK_SIZE.get() + CodingConfig::SIZE];
+                let (root, shards) = C::encode(&ONE, payload.as_slice(), &STRATEGY).unwrap();
+                let block = Sha256::hash(&[salt.to_be_bytes().as_slice()]);
+                let commitment =
+                    Commitment::<B, C, H>::from((block, root, Sha256Digest::EMPTY, ONE));
+                let encoded = Shard::<B, C, H>::new(commitment, 1, shards[1].clone()).encode();
+                Shard::<B, C, H>::decode_cfg(encoded, &MAX_BLOCK_SIZE).expect("widest shard")
+            };
+            for salt in 0..2 * slots as u64 {
+                engine.handle_network_shard(&mut sender, peer.clone(), shard(salt));
+            }
+
+            let queue = engine.peer_buffers.get(&peer).expect("peer buffers shards");
+            assert_eq!(queue.len(), slots);
         });
     }
 
