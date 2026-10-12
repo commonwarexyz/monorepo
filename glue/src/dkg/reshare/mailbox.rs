@@ -201,7 +201,7 @@ where
 ///
 /// [`Actor`]: super::Actor
 #[derive(Clone)]
-pub struct Mailbox<B, V, C, A, T>
+pub struct Mailbox<B, V, C, T, A = Exact>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
@@ -213,7 +213,7 @@ where
     strategy: T,
 }
 
-impl<B, V, C, A, T> Mailbox<B, V, C, A, T>
+impl<B, V, C, T, A> Mailbox<B, V, C, T, A>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
@@ -294,7 +294,7 @@ where
     }
 }
 
-impl<B, V, C, A, T> Reporter for Mailbox<B, V, C, A, T>
+impl<B, V, C, T, A> Reporter for Mailbox<B, V, C, T, A>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
@@ -369,7 +369,7 @@ mod tests {
             drop(receiver);
 
             let mut mailbox =
-                Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact, Sequential>::new(
+                Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Sequential, Exact>::new(
                     sender, Sequential,
                 );
 
@@ -383,7 +383,7 @@ mod tests {
         executor.start(|context| async move {
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
             let mut mailbox =
-                Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact, Sequential>::new(
+                Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Sequential, Exact>::new(
                     sender, Sequential,
                 );
             let parent = Arc::new(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
@@ -428,7 +428,7 @@ mod tests {
         executor.start(|context| async move {
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
             let mut mailbox =
-                Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact, Sequential>::new(
+                Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Sequential, Exact>::new(
                     sender, Sequential,
                 );
             let parent = Arc::new(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));

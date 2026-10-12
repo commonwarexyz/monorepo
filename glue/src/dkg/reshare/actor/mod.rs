@@ -250,7 +250,7 @@ where
     pub fn new(
         context: E,
         config: Config<C, M, X, P, SS, T, S, MV, R>,
-    ) -> (Self, Mailbox<B, V, C, A, T>) {
+    ) -> (Self, Mailbox<B, V, C, T, A>) {
         let epocher = FixedEpocher::new(config.blocks_per_epoch);
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         let metrics = ReshareMetrics::new(&context);
@@ -291,7 +291,7 @@ where
         context: E,
         config: Config<C, M, X, P, SS, T, S, MV, R>,
         dkg: DkgConfig<V, C::PublicKey, B::Directory>,
-    ) -> (Self, Mailbox<B, V, C, A, T>) {
+    ) -> (Self, Mailbox<B, V, C, T, A>) {
         let (mut actor, mailbox) = Self::new(context, config);
         actor.mode = Mode::Dkg {
             participants: dkg.participants,

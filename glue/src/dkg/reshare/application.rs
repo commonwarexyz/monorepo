@@ -12,7 +12,7 @@ use commonware_consensus::{
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
-use commonware_utils::{acknowledgement::Exact, sequence::Unit};
+use commonware_utils::sequence::Unit;
 use rand_core::Rng;
 use std::{future, num::NonZeroU64};
 use tracing::{debug, field};
@@ -58,7 +58,7 @@ where
     T: Strategy,
 {
     inner: A,
-    reshare: Mailbox<B, V, C, Exact, T>,
+    reshare: Mailbox<B, V, C, T>,
     epocher: FixedEpocher,
 }
 
@@ -73,11 +73,7 @@ where
     ///
     /// `blocks_per_epoch` must equal the actor's
     /// [`Config::blocks_per_epoch`](crate::dkg::reshare::Config::blocks_per_epoch).
-    pub const fn new(
-        inner: A,
-        reshare: Mailbox<B, V, C, Exact, T>,
-        blocks_per_epoch: NonZeroU64,
-    ) -> Self {
+    pub const fn new(inner: A, reshare: Mailbox<B, V, C, T>, blocks_per_epoch: NonZeroU64) -> Self {
         Self {
             inner,
             reshare,
