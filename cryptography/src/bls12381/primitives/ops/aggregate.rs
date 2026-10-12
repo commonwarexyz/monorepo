@@ -5,8 +5,8 @@
 //!
 //! # Security Considerations
 //!
-//! Aggregate operations ensure the aggregate is valid, but not that the individual elements are valid.
-//! Use [`batch`](super::batch) when you need to ensure each individual signature is valid.
+//! Combining signatures or verifying an aggregate does not establish that each input signature is
+//! valid. Use [`batch`](super::batch) to verify independently supplied signatures.
 //! Aggregating signatures from multiple public keys over the same message additionally requires a
 //! verified proof of possession (PoP) for every public key.
 
@@ -16,6 +16,7 @@ use super::{
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_macros::stability;
 use commonware_math::algebra::Additive;
 use commonware_parallel::Strategy;
 use commonware_utils::iter::NonEmpty;
@@ -92,7 +93,8 @@ impl<V: Variant> Signature<V> {
     }
 
     /// Returns the inner signature value.
-    pub(crate) const fn inner(&self) -> &V::Signature {
+    #[stability(ALPHA)]
+    pub const fn inner(&self) -> &V::Signature {
         &self.0
     }
 
@@ -276,7 +278,7 @@ pub fn verify_same_message<V: Variant>(
     let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
     // Verify the signature
-    V::verify(public.inner(), &hm, signature.inner())
+    V::verify(public.inner(), &hm, &signature.0)
 }
 
 /// Verifies the aggregate signature over multiple messages from a single public key.
@@ -295,7 +297,7 @@ pub fn verify_same_signer<V: Variant>(
     message: &Message<V>,
     signature: &Signature<V>,
 ) -> Result<(), Error> {
-    V::verify(public, message.inner(), signature.inner())
+    V::verify(public, message.inner(), &signature.0)
 }
 
 #[cfg(test)]
