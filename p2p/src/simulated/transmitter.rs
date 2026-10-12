@@ -445,16 +445,13 @@ impl<P: PublicKey> State<P> {
     }
 
     /// Finalizes finished flows and starts follow-on work.
-    ///
-    /// Starting follow-on work rebalances, and the flows that finish as a result join the
-    /// worklist, so the call depth does not depend on how many flows finish at one instant.
     fn finish(
         &mut self,
         mut finished: Vec<(u64, Status<P>)>,
         now: SystemTime,
     ) -> Vec<Completion<P>> {
-        // Flows are finalized in flow order. Follow-on flows get fresh ids, so they normally
-        // land at the back of the worklist.
+        // Flows that finish at one instant are finalized in the order they started, which is
+        // ascending flow id.
         finished.sort_unstable_by_key(|(flow_id, _)| *flow_id);
         let mut pending = VecDeque::from(finished);
         let mut outcomes = Vec::new();
@@ -488,10 +485,10 @@ impl<P: PublicKey> State<P> {
                 sequence,
             ));
 
-            for (flow_id, meta) in self.launch(origin, recipient, now) {
-                let at = pending.partition_point(|(id, _)| *id < flow_id);
-                pending.insert(at, (flow_id, meta));
-            }
+            // Existing flows have already advanced to `now`, and the caps stay fixed here. Any
+            // flow finished by this launch must be the new one. Its id exceeds every pending id,
+            // so appending preserves finalization order.
+            pending.extend(self.launch(origin, recipient, now));
         }
         self.schedule(now);
 
@@ -1397,7 +1394,7 @@ mod tests {
         let completions = state.limit(now, &origin, Some(1_000), None);
         assert!(completions.is_empty());
 
-        // Queue several messages per recipient behind the first transfer to each.
+        // Each pair has followers waiting behind its active transfer.
         for (recipient, len) in [
             (&recipient_b, 100),
             (&recipient_b, 0),
@@ -1502,7 +1499,7 @@ mod tests {
         let completions = state.limit(now, &origin, Some(3_000), None); // 3 KB/s egress
         assert!(completions.is_empty());
 
-        // Send two messages to each recipient so a follower waits behind every transfer.
+        // Each active transfer has one queued follower.
         for recipient in &recipients {
             for _ in 0..2 {
                 let completions = state.enqueue(
@@ -1536,12 +1533,9 @@ mod tests {
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5229
     ///
-    /// Finalizing a completed flow starts the pair's next message, and whatever completes as a
-    /// result is finalized by the same loop, so a long run of completions at one instant uses
-    /// constant stack. Draining one pair's queue at unlimited rate is the longest such run.
+    /// A long queue drains at unlimited rate in one call with constant stack usage.
     #[test]
     fn issue_5229_regression() {
-        // Long enough that nested finalization overflows the test thread's stack.
         const QUEUED: usize = 2_000;
 
         let mut state = State::new();
