@@ -79,6 +79,7 @@ mod tests {
             core::{self, Processed, durability::Durable as _},
             mocks::{
                 application::Application,
+                block::encode_block,
                 harness::{
                     self, BLOCKS_PER_EPOCH, CodingB, CodingCtx, CodingHarness, D, EmptyProvider, K,
                     LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, TestHarness,
@@ -99,10 +100,10 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_actor::{Feedback, mailbox};
-    use commonware_codec::{Encode, FixedSize};
+    use commonware_codec::{DecodeExt as _, Encode, FixedSize};
     use commonware_coding::{Config as CodingConfig, ReedSolomon, Scheme as _};
     use commonware_cryptography::{
-        Committable, Digestible, Hasher,
+        Committable, Digested, Digestible, Hasher,
         certificate::{ConstantProvider, Verifier as _, mocks::Fixture},
         sha256::Sha256,
     };
@@ -233,7 +234,7 @@ mod tests {
             _context: (deterministic::Context, CodingCtx),
             _ancestry: impl Ancestry<CodingB>,
             _input: (),
-        ) -> Option<CodingB> {
+        ) -> Option<Digested<CodingB>> {
             None
         }
 
@@ -612,8 +613,7 @@ mod tests {
         };
         let candidate =
             make_coding_block(candidate_ctx.clone(), genesis.digest(), Height::new(1), 100);
-        let coded_candidate: TestCodedBlock =
-            CodedBlock::new(candidate, coding_config, &Sequential);
+        let coded_candidate: TestCodedBlock = encode_block(candidate, coding_config);
         (candidate_ctx, coded_candidate)
     }
 
@@ -656,7 +656,7 @@ mod tests {
                 parent: (parent_view, parent_commitment),
             };
             let block = make_coding_block(ctx, parent_digest, Height::new(height), height * 100);
-            let coded: TestCodedBlock = CodedBlock::new(block, coding_config, &Sequential);
+            let coded: TestCodedBlock = encode_block(block.clone(), coding_config);
             parent_view = round.view();
             parent_commitment = coded.commitment();
             parent_digest = coded.digest();
@@ -701,8 +701,7 @@ mod tests {
                 parent: (View::zero(), genesis_coding_commitment(&genesis)),
             };
             let candidate = make_coding_block(candidate_ctx, genesis.digest(), height, 100);
-            let dishonest_block: TestCodedBlock =
-                CodedBlock::new(candidate.clone(), dishonest_config, &Sequential);
+            let dishonest_block: TestCodedBlock = encode_block(candidate.clone(), dishonest_config);
             let proposal = Proposal {
                 round,
                 parent: View::zero(),
@@ -769,6 +768,7 @@ mod tests {
                 parent: (parent_ctx.round.view(), parent.commitment()),
             };
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
+            let child = Digested::precomputed(child.clone(), child.digest());
             let subscription = marshal.subscribe_parent(&child);
 
             context.sleep(Duration::from_millis(100)).await;
@@ -1225,10 +1225,9 @@ mod tests {
                 parent: (View::zero(), genesis_coding_commitment(&genesis)),
             };
             let block = make_coding_block(ctx, genesis.digest(), Height::new(1), 100);
-            let coded: TestCodedBlock = CodedBlock::new(
+            let coded: TestCodedBlock = encode_block(
                 block.clone(),
                 coding_config_for_participants(NUM_VALIDATORS as u16),
-                &Sequential,
             );
             assert!(mailbox.verified(round, coded.clone()).await);
             let finalization = CodingHarness::make_finalization(
@@ -1436,7 +1435,7 @@ mod tests {
                 parent: (View::zero(), genesis_parent_commitment),
             };
             let block = make_coding_block(block_ctx.clone(), genesis.digest(), Height::new(1), 100);
-            let coded_block = CodedBlock::new(block, coding_config, &Sequential);
+            let coded_block = encode_block(block.clone(), coding_config);
             let commitment = coded_block.commitment();
             shards.proposed(round, coded_block);
 
@@ -1623,7 +1622,7 @@ mod tests {
             };
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
             shards.proposed(Round::new(Epoch::new(0), View::new(1)), coded_parent);
 
@@ -1635,7 +1634,7 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
             let block_a = make_coding_block(context_a.clone(), parent_digest, Height::new(2), 200);
-            let coded_block_a = CodedBlock::new(block_a.clone(), coding_config, &Sequential);
+            let coded_block_a = encode_block(block_a.clone(), coding_config);
             let commitment_a = coded_block_a.commitment();
             shards.proposed(round_a, coded_block_a);
 
@@ -1648,7 +1647,7 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
             let block_b = make_coding_block(context_b.clone(), parent_digest, Height::new(2), 300);
-            let coded_block_b = CodedBlock::new(block_b.clone(), coding_config, &Sequential);
+            let coded_block_b = encode_block(block_b.clone(), coding_config);
             let commitment_b = coded_block_b.commitment();
             shards.proposed(round_b, coded_block_b);
 
@@ -1761,7 +1760,7 @@ mod tests {
                     parent: (last_view, last_commitment),
                 };
                 let block = make_coding_block(ctx.clone(), parent, Height::new(i), i * 100);
-                let coded_block = CodedBlock::new(block.clone(), coding_config, &Sequential);
+                let coded_block = encode_block(block.clone(), coding_config);
                 last_commitment = coded_block.commitment();
                 if i == 10 {
                     non_boundary = Some((View::new(i), last_commitment));
@@ -1787,8 +1786,7 @@ mod tests {
                 boundary_height,
                 boundary_height.get() * 100,
             );
-            let coded_boundary =
-                CodedBlock::new(boundary_block.clone(), coding_config, &Sequential);
+            let coded_boundary = encode_block(boundary_block.clone(), coding_config);
             let boundary_commitment = coded_boundary.commitment();
             shards.discovered(
                 boundary_commitment,
@@ -2013,7 +2011,7 @@ mod tests {
                 Height::new(5),
                 500,
             );
-            let coded_block: TestCodedBlock = CodedBlock::new(block, coding_config, &Sequential);
+            let coded_block: TestCodedBlock = encode_block(block.clone(), coding_config);
             let commitment = coded_block.commitment();
             assert!(marshal.verified(original_round, coded_block.clone()).await);
             assert!(shards.get(commitment).await.is_none());
@@ -2128,7 +2126,7 @@ mod tests {
                 1900,
             );
             let coded_boundary: TestCodedBlock =
-                CodedBlock::new(boundary_block, coding_config, &Sequential);
+                encode_block(boundary_block.clone(), coding_config);
             let boundary_commitment = coded_boundary.commitment();
             assert!(
                 marshal
@@ -2259,7 +2257,7 @@ mod tests {
                 Height::new(BLOCKS_PER_EPOCH.get() - 1),
                 1900,
             );
-            let coded_block: TestCodedBlock = CodedBlock::new(block, coding_config, &Sequential);
+            let coded_block: TestCodedBlock = encode_block(block.clone(), coding_config);
             let commitment = coded_block.commitment();
 
             // Serving a fetch by round requires the block and the round's
@@ -2363,7 +2361,7 @@ mod tests {
                 parent: (View::zero(), genesis_commitment()),
             };
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
-            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
             shards.proposed(Round::new(Epoch::zero(), View::new(1)), coded_parent);
 
@@ -2376,7 +2374,7 @@ mod tests {
             };
             let block_a = make_coding_block(context_a, parent.digest(), Height::new(2), 200);
             let coded_block_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
-                CodedBlock::new(block_a, coding_config, &Sequential);
+                encode_block(block_a.clone(), coding_config);
             let commitment_a = coded_block_a.commitment();
 
             // Verify using a different consensus context B (hash mismatch).
@@ -2464,7 +2462,7 @@ mod tests {
                 boundary_height,
                 boundary_height.get() * 100,
             );
-            let coded_boundary = CodedBlock::new(boundary_block, coding_config, &Sequential);
+            let coded_boundary = encode_block(boundary_block.clone(), coding_config);
             let boundary_commitment = coded_boundary.commitment();
             let reproposal_round = Round::new(Epoch::zero(), View::new(boundary_height.get() + 1));
             let reproposal_context = CodingCtx {
@@ -2843,7 +2841,7 @@ mod tests {
             };
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(19), 1000);
             let parent_digest = parent.digest();
-            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
             shards.proposed(Round::new(Epoch::zero(), View::new(19)), coded_parent);
 
@@ -2854,7 +2852,7 @@ mod tests {
                 parent: (View::new(19), parent_commitment),
             };
             let block = make_coding_block(block_ctx, parent_digest, Height::new(20), 2000);
-            let coded_block = CodedBlock::new(block.clone(), coding_config, &Sequential);
+            let coded_block = encode_block(block.clone(), coding_config);
             let block_commitment = coded_block.commitment();
             shards.proposed(Round::new(Epoch::new(1), View::new(20)), coded_block);
 
@@ -2954,7 +2952,7 @@ mod tests {
                 1000,
             );
             let parent_digest = honest_parent.digest();
-            let coded_parent = CodedBlock::new(honest_parent.clone(), coding_config, &Sequential);
+            let coded_parent = encode_block(honest_parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
             shards.proposed(Round::new(Epoch::new(1), View::new(21)), coded_parent);
 
@@ -2973,8 +2971,7 @@ mod tests {
                 Height::new(BLOCKS_PER_EPOCH.get() + 15), // Byzantine: non-contiguous height
                 2000,
             );
-            let coded_malicious =
-                CodedBlock::new(malicious_block.clone(), coding_config, &Sequential);
+            let coded_malicious = encode_block(malicious_block.clone(), coding_config);
             let malicious_commitment = coded_malicious.commitment();
             shards.proposed(byzantine_round, coded_malicious);
 
@@ -3018,8 +3015,7 @@ mod tests {
                 Height::new(BLOCKS_PER_EPOCH.get() + 2),
                 3000,
             );
-            let coded_malicious2 =
-                CodedBlock::new(malicious_block2.clone(), coding_config, &Sequential);
+            let coded_malicious2 = encode_block(malicious_block2.clone(), coding_config);
             let malicious_commitment2 = coded_malicious2.commitment();
             shards.proposed(byzantine_round2, coded_malicious2);
 
@@ -3111,7 +3107,7 @@ mod tests {
                 parent: (View::zero(), genesis_commitment()),
             };
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
-            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
             shards.proposed(parent_round, coded_parent);
 
@@ -3123,7 +3119,7 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
-            let coded_child = CodedBlock::new(child, coding_config, &Sequential);
+            let coded_child = encode_block(child.clone(), coding_config);
             let child_commitment = coded_child.commitment();
             shards.proposed(child_round, coded_child);
 
@@ -3203,7 +3199,7 @@ mod tests {
                 parent: (View::zero(), genesis_commitment()),
             };
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
-            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
             shards.proposed(parent_round, coded_parent);
 
@@ -3215,7 +3211,7 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
-            let coded_child = CodedBlock::new(child, coding_config, &Sequential);
+            let coded_child = encode_block(child.clone(), coding_config);
             let child_commitment = coded_child.commitment();
             shards.proposed(child_round, coded_child);
 
@@ -3314,7 +3310,7 @@ mod tests {
                 parent: (View::zero(), genesis_commitment()),
             };
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
-            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
             shards.proposed(parent_round, coded_parent);
 
@@ -3325,7 +3321,7 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
-            let coded_child: TestCodedBlock = CodedBlock::new(child, coding_config, &Sequential);
+            let coded_child: TestCodedBlock = encode_block(child.clone(), coding_config);
             let child_commitment = coded_child.commitment();
 
             // Deliver each peer's sender-indexed gossip shard. Without leader
@@ -3446,7 +3442,7 @@ mod tests {
                 parent: (View::zero(), genesis_commitment()),
             };
             let parent = make_coding_block(parent_context, genesis.digest(), Height::new(1), 100);
-            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
             shards.proposed(parent_round, coded_parent);
 
@@ -3459,7 +3455,7 @@ mod tests {
             };
             let block =
                 make_coding_block(verify_context.clone(), parent.digest(), Height::new(2), 200);
-            let coded_block = CodedBlock::new(block, coding_config, &Sequential);
+            let coded_block = encode_block(block.clone(), coding_config);
             let commitment = coded_block.commitment();
             shards.proposed(round, coded_block);
 
@@ -3541,7 +3537,7 @@ mod tests {
             };
             let certified = make_coding_block(certified_ctx, genesis.digest(), Height::new(1), 100);
             let certified_digest = certified.digest();
-            let coded_certified = CodedBlock::new(certified, coding_config, &Sequential);
+            let coded_certified = encode_block(certified.clone(), coding_config);
             let certified_commitment = coded_certified.commitment();
             shards.proposed(certified_round, coded_certified);
 
@@ -3555,7 +3551,7 @@ mod tests {
             };
             let notarized = make_coding_block(notarized_ctx, certified_digest, Height::new(2), 200);
             let notarized_digest = notarized.digest();
-            let coded_notarized = CodedBlock::new(notarized, coding_config, &Sequential);
+            let coded_notarized = encode_block(notarized.clone(), coding_config);
             let notarized_commitment = coded_notarized.commitment();
             shards.proposed(notarized_round, coded_notarized);
 
@@ -3567,7 +3563,7 @@ mod tests {
                 parent: (View::new(2), notarized_commitment),
             };
             let block = make_coding_block(block_ctx, notarized_digest, Height::new(3), 300);
-            let coded_block = CodedBlock::new(block, coding_config, &Sequential);
+            let coded_block = encode_block(block.clone(), coding_config);
             let commitment = coded_block.commitment();
             shards.proposed(round, coded_block);
 
@@ -3677,11 +3673,11 @@ mod tests {
             let block1 = make_coding_block(block1_ctx, genesis.digest(), Height::new(1), 100);
 
             let coded_block_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
-                CodedBlock::new(block1.clone(), coding_config_a, &Sequential);
+                encode_block(block1.clone(), coding_config_a);
             let commitment_a = coded_block_a.commitment();
 
             let coded_block_b: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
-                CodedBlock::new(block1.clone(), coding_config_b, &Sequential);
+                encode_block(block1.clone(), coding_config_b);
             let commitment_b = coded_block_b.commitment();
 
             assert_eq!(coded_block_a.digest(), coded_block_b.digest());
@@ -3876,10 +3872,9 @@ mod tests {
                 Height::new(1),
                 101,
             );
-            let other: TestCodedBlock = CodedBlock::new(
-                other,
+            let other: TestCodedBlock = encode_block(
+                other.clone(),
                 coding_config_for_participants(NUM_VALIDATORS as u16),
-                &Sequential,
             );
             assert_ne!(other.digest(), candidate.digest());
 
@@ -3899,6 +3894,118 @@ mod tests {
                 "digest mismatch should be rejected"
             );
             assert!(mailbox.get_block(Height::new(1)).await.is_none());
+        });
+    }
+
+    /// Finalized height deliveries bind the bundled bytes to the signed block digest.
+    #[test_traced("WARN")]
+    fn test_coding_finalized_height_delivery_rejects_digest_mismatch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let partition_prefix = "finalized-height-digest-mismatch";
+            let config = test_config(
+                &context,
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+            );
+            let (finalizations_by_height, finalized_blocks) =
+                immutable_finalized_stores(&context, partition_prefix, &config).await;
+            let (actor, mailbox, _) = core::Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<CodingB>::manual_ack();
+            let _actor_handle = actor.start(
+                application.clone(),
+                RecordingCodingBuffer::default(),
+                (resolver_rx, resolver.clone()),
+            );
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            let (candidate_ctx, honest) = missing_candidate(participants[0].clone());
+            let height = honest.height();
+            let other = make_coding_block(candidate_ctx.clone(), honest.parent(), height, 101);
+            let other: TestCodedBlock = encode_block(
+                other.clone(),
+                coding_config_for_participants(NUM_VALIDATORS as u16),
+            );
+            let finalization = CodingHarness::make_finalization(
+                Proposal::new(candidate_ctx.round, View::zero(), honest.commitment()),
+                &schemes,
+                QUORUM,
+            );
+            assert!(finalization.verify(&mut context, &schemes[0], &Sequential));
+            assert_eq!(honest.height(), other.height());
+            assert_eq!(honest.context(), other.context());
+            assert_ne!(honest.inner().encode(), other.inner().encode());
+            let delivered = CodingB::decode(other.inner().encode()).expect("valid block encoding");
+            assert_eq!(&delivered, other.inner());
+            assert_eq!(
+                finalization.proposal.payload.block(),
+                honest.inner().digest()
+            );
+            assert_ne!(finalization.proposal.payload.block(), delivered.digest());
+            let other_digest = other.digest();
+
+            let mut subscriptions = [
+                mailbox
+                    .subscribe_by_commitment(honest.commitment(), core::CommitmentFallback::Wait),
+                mailbox.subscribe_by_commitment(other.commitment(), core::CommitmentFallback::Wait),
+                mailbox.subscribe_by_digest(honest.digest(), core::DigestFallback::Wait),
+                mailbox.subscribe_by_digest(other.digest(), core::DigestFallback::Wait),
+            ];
+            let processed = mailbox.get_processed().await;
+            let tip = application.tip();
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .sender
+                    .as_ref()
+                    .expect("recording resolver should keep its sender")
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                    height,
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (finalization, delivered).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                !response_rx.await.expect("delivery response missing"),
+                "a valid finalization must reject different bundled block bytes"
+            );
+
+            assert!(mailbox.get_block(height).await.is_none());
+            assert!(mailbox.get_block(&honest.digest()).await.is_none());
+            assert!(mailbox.get_block(&other_digest).await.is_none());
+            assert!(mailbox.get_finalization(height).await.is_none());
+            assert_eq!(mailbox.get_processed().await, processed);
+            for subscription in &mut subscriptions {
+                assert!(matches!(
+                    subscription.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+            }
+            assert_eq!(application.blocks().len(), 1);
+            assert!(!application.blocks().contains_key(&height));
+            assert!(application.pending_ack_heights().is_empty());
+            assert_eq!(application.tip(), tip);
         });
     }
 
@@ -4019,8 +4126,8 @@ mod tests {
             let mut parent_commitment = genesis_coding_commitment(&genesis_block());
             for height in 1..=4 {
                 let round = Round::new(Epoch::zero(), View::new(height + 10));
-                let block: TestCodedBlock = CodedBlock::new(
-                    make_coding_block(
+                let block: TestCodedBlock = {
+                    let block = make_coding_block(
                         CodingCtx {
                             round,
                             leader: participants[0].clone(),
@@ -4029,10 +4136,12 @@ mod tests {
                         parent_commitment.block(),
                         Height::new(height),
                         height * 100,
-                    ),
-                    coding_config_for_participants(NUM_VALIDATORS as u16),
-                    &Sequential,
-                );
+                    );
+                    encode_block(
+                        block.clone(),
+                        coding_config_for_participants(NUM_VALIDATORS as u16),
+                    )
+                };
                 parent_view = round.view();
                 parent_commitment = block.commitment();
                 chain.push(block);
@@ -4448,16 +4557,15 @@ mod tests {
 
                 let (candidate_ctx, candidate) = missing_candidate(participants[0].clone());
                 let config = candidate.config();
-                let other: TestCodedBlock = CodedBlock::new(
-                    make_coding_block(
+                let other: TestCodedBlock = {
+                    let block = make_coding_block(
                         candidate_ctx.clone(),
                         genesis_block().digest(),
                         Height::new(1),
                         101,
-                    ),
-                    config,
-                    &Sequential,
-                );
+                    );
+                    encode_block(block, config)
+                };
                 let expected = candidate.commitment();
                 let commitment = TestCommitment::from((
                     expected.block(),
@@ -4470,8 +4578,14 @@ mod tests {
                 // A leader can obtain notarize votes with valid assigned shards even
                 // though their root encodes different bytes from the named block.
                 for (index, shard) in other.shards(&Sequential).iter().enumerate() {
-                    ReedSolomon::<Sha256>::check(&config, &commitment.root(), index as u16, shard)
-                        .expect("assigned shard should verify against the advertised root");
+                    ReedSolomon::<Sha256>::check(
+                        &config,
+                        &commitment.root(),
+                        index as u16,
+                        shard,
+                        &Sequential,
+                    )
+                    .expect("assigned shard should verify against the advertised root");
                 }
 
                 let (value, fallback) = if notarized {
@@ -4546,7 +4660,7 @@ mod tests {
                 parent: (View::new(1), genesis_commitment()),
             };
             let floor_block = make_coding_block(bad_context, parent.digest(), Height::new(2), 200);
-            let coded_floor = CodedBlock::new(floor_block, coding_config, &Sequential);
+            let coded_floor = encode_block(floor_block.clone(), coding_config);
             assert_ne!(coded_floor.parent(), coded_floor.context().parent.1.block());
 
             let finalization = CodingHarness::make_finalization(
@@ -4735,7 +4849,7 @@ mod tests {
                 parent: (View::zero(), genesis_commitment()),
             };
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
-            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
             shards.proposed(parent_round, coded_parent);
 
@@ -4746,7 +4860,7 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
             let child = make_coding_block(child_ctx.clone(), parent.digest(), Height::new(2), 200);
-            let coded_child = CodedBlock::new(child.clone(), coding_config, &Sequential);
+            let coded_child = encode_block(child.clone(), coding_config);
             let child_commitment = coded_child.commitment();
             let child_digest = coded_child.digest();
             shards.proposed(child_round, coded_child);
@@ -4868,10 +4982,9 @@ mod tests {
                 100,
             );
             let block_digest = block_to_propose.digest();
-            let expected_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+            let expected_commitment = encode_block::<_, ReedSolomon<Sha256>, Sha256>(
                 block_to_propose.clone(),
                 coding_config,
-                &Sequential,
             )
             .commitment();
 
@@ -4991,10 +5104,9 @@ mod tests {
                 100,
             );
             let block_digest = block_to_propose.digest();
-            let expected_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+            let expected_commitment = encode_block::<_, ReedSolomon<Sha256>, Sha256>(
                 block_to_propose.clone(),
                 coding_config,
-                &Sequential,
             )
             .commitment();
 
@@ -5089,12 +5201,9 @@ mod tests {
             for data in [100, 200] {
                 let block = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), data);
                 let digest = block.digest();
-                let commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
-                    block.clone(),
-                    coding_config,
-                    &Sequential,
-                )
-                .commitment();
+                let commitment =
+                    encode_block::<_, ReedSolomon<Sha256>, Sha256>(block.clone(), coding_config)
+                        .commitment();
                 let mock_app: MockVerifyingApp<CodingB, S> =
                     MockVerifyingApp::new().with_propose_result(block);
                 let cfg = MarshaledConfig {
@@ -5290,12 +5399,9 @@ mod tests {
                 parent: (parent_round.view(), parent.commitment()),
             };
             let child = make_coding_block(ctx.clone(), parent.digest(), Height::new(2), 7);
-            let child_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
-                child.clone(),
-                coding_config,
-                &Sequential,
-            )
-            .commitment();
+            let child_commitment =
+                encode_block::<_, ReedSolomon<Sha256>, Sha256>(child.clone(), coding_config)
+                    .commitment();
             let cfg = MarshaledConfig {
                 application: MockVerifyingApp::<CodingB, S>::new()
                     .with_handoff(Handoff::Stage(()))
@@ -5390,10 +5496,9 @@ mod tests {
                 };
                 let parent_block = make_coding_block(parent_ctx, genesis.digest(), height, view);
                 let parent_digest = parent_block.digest();
-                let parent = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
-                    parent_block,
+                let parent = encode_block::<_, ReedSolomon<Sha256>, Sha256>(
+                    parent_block.clone(),
                     coding_config,
-                    &Sequential,
                 );
                 let parent_commitment = parent.commitment();
                 assert!(setup.mailbox.verified(parent_round, parent).await);
@@ -5404,12 +5509,9 @@ mod tests {
                     parent: (View::new(view), parent_commitment),
                 };
                 let child = make_coding_block(ctx.clone(), parent_digest, Height::new(2), 7);
-                let child_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
-                    child.clone(),
-                    coding_config,
-                    &Sequential,
-                )
-                .commitment();
+                let child_commitment =
+                    encode_block::<_, ReedSolomon<Sha256>, Sha256>(child.clone(), coding_config)
+                        .commitment();
                 let cfg = MarshaledConfig {
                     application: MockVerifyingApp::<CodingB, S>::new()
                         .with_handoff(Handoff::Stage(()))
@@ -5477,10 +5579,9 @@ mod tests {
             let boundary_block =
                 make_coding_block(boundary_ctx, genesis.digest(), boundary_height, 1);
             let boundary_digest = boundary_block.digest();
-            let boundary = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
-                boundary_block,
+            let boundary = encode_block::<_, ReedSolomon<Sha256>, Sha256>(
+                boundary_block.clone(),
                 coding_config,
-                &Sequential,
             );
             let boundary_commitment = boundary.commitment();
             assert!(setup.mailbox.verified(boundary_round, boundary).await);
@@ -5492,12 +5593,9 @@ mod tests {
                 parent: (View::zero(), boundary_commitment),
             };
             let child = make_coding_block(ctx.clone(), boundary_digest, boundary_height.next(), 2);
-            let child_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
-                child.clone(),
-                coding_config,
-                &Sequential,
-            )
-            .commitment();
+            let child_commitment =
+                encode_block::<_, ReedSolomon<Sha256>, Sha256>(child.clone(), coding_config)
+                    .commitment();
             let cfg = MarshaledConfig {
                 application: MockVerifyingApp::<CodingB, S>::new()
                     .with_handoff(Handoff::Stage(()))
@@ -5584,7 +5682,7 @@ mod tests {
             let stale = make_coding_block(stale_ctx, genesis.digest(), Height::new(1), 100);
             let stale_digest = stale.digest();
             let coded_stale: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
-                CodedBlock::new(stale, coding_config, &Sequential);
+                encode_block(stale.clone(), coding_config);
             let stale_commitment = coded_stale.commitment();
             let (ack, persisted) = oneshot::channel();
             let _ = setup
@@ -5618,12 +5716,9 @@ mod tests {
             };
             let fresh = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), 200);
             let fresh_digest = fresh.digest();
-            let fresh_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
-                fresh.clone(),
-                coding_config,
-                &Sequential,
-            )
-            .commitment();
+            let fresh_commitment =
+                encode_block::<_, ReedSolomon<Sha256>, Sha256>(fresh.clone(), coding_config)
+                    .commitment();
             let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new()
                 .with_handoff(Handoff::Vote(()))
                 .with_propose_result(fresh);
@@ -5754,7 +5849,7 @@ mod tests {
             let boundary_block =
                 make_coding_block(boundary_ctx, genesis.digest(), boundary_height, 1900);
             let coded_boundary: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
-                CodedBlock::new(boundary_block, coding_config, &Sequential);
+                encode_block(boundary_block.clone(), coding_config);
             let boundary_commitment = coded_boundary.commitment();
             let round = Round::new(Epoch::zero(), View::new(boundary_height.get() + 1));
             assert!(marshal.verified(round, coded_boundary).await);

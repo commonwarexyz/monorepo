@@ -31,7 +31,7 @@ use commonware_consensus::{
     types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Hasher, PublicKey, Sha256, Signer as _,
+    Digest as _, Digested, Digestible, Hasher, PublicKey, Sha256, Signer as _,
     bls12381::{
         dkg::feldman_desmedt::Reveal,
         primitives::{
@@ -163,17 +163,31 @@ pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
 }
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
-    const fn genesis(leader: ed25519::PublicKey) -> Self {
+    const fn new(
+        context: Context<sha256::Digest, ed25519::PublicKey>,
+        parent: sha256::Digest,
+        height: Height,
+        payload: Option<Payload<V, ed25519::PrivateKey, D>>,
+    ) -> Self {
         Self {
-            context: Context {
+            context,
+            parent,
+            height,
+            payload,
+        }
+    }
+
+    const fn genesis(leader: ed25519::PublicKey) -> Self {
+        Self::new(
+            Context {
                 round: Round::new(Epoch::zero(), View::zero()),
                 leader,
                 parent: (View::zero(), Sha256Digest::EMPTY),
             },
-            parent: Sha256Digest::EMPTY,
-            height: Height::zero(),
-            payload: None,
-        }
+            Sha256Digest::EMPTY,
+            Height::zero(),
+            None,
+        )
     }
 
     /// Returns the DKG result carried by this block, if present.
@@ -207,12 +221,12 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            context: Context::read(buf)?,
-            parent: sha256::Digest::read(buf)?,
-            height: Height::read(buf)?,
-            payload: Option::<Payload<V, ed25519::PrivateKey, D>>::read_cfg(buf, cfg)?,
-        })
+        Ok(Self::new(
+            Context::read(buf)?,
+            sha256::Digest::read(buf)?,
+            Height::read(buf)?,
+            Option::<Payload<V, ed25519::PrivateKey, D>>::read_cfg(buf, cfg)?,
+        ))
     }
 }
 
@@ -435,6 +449,8 @@ where
                 .clone(),
         );
 
+        let genesis = Digested::compute(genesis, &self.config.strategy).await;
+
         let (buffer, buffer_mailbox) = buffered::Engine::new(
             context.child("buffer"),
             buffered::Config {
@@ -444,6 +460,7 @@ where
                 priority: false,
                 codec_config: block_codec_config,
                 peer_provider: self.config.manager.clone(),
+                strategy: self.config.strategy.clone(),
             },
         );
         let buffer_handle = buffer.start(broadcast);
@@ -499,7 +516,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(self.config.blocks_per_epoch),
-                start: Start::Genesis(genesis.clone().into()),
+                start: Start::Genesis(genesis.clone()),
                 partition_prefix: format!("{}-marshal", self.config.partition_prefix),
                 mailbox_size: self.config.mailbox_size,
                 view_retention: ViewDelta::new(10),
@@ -572,7 +589,10 @@ where
         );
 
         let app = reshare::Application::new(
-            DkgApp(PhantomData),
+            DkgApp {
+                _marker: PhantomData,
+                strategy: self.config.strategy.clone(),
+            },
             reshare_mailbox.clone(),
             self.config.blocks_per_epoch,
         );
@@ -582,6 +602,7 @@ where
             marshal_mailbox.clone(),
             FixedEpocher::new(self.config.blocks_per_epoch),
         );
+        let floor = Floor::Genesis(genesis.digest());
         let simplex = simplex::Engine::new(
             context.child("simplex"),
             simplex::Config {
@@ -595,7 +616,7 @@ where
                 partition: format!("{}-simplex", self.config.partition_prefix),
                 mailbox_size: self.config.mailbox_size,
                 epoch: Epoch::zero(),
-                floor: Floor::Genesis(genesis.digest()),
+                floor,
                 replay_buffer,
                 write_buffer,
                 page_cache,
@@ -633,13 +654,17 @@ where
 }
 
 #[derive(Clone)]
-struct DkgApp<V: Variant, D>(PhantomData<(V, D)>);
+struct DkgApp<V: Variant, D, T> {
+    _marker: PhantomData<(V, D)>,
+    strategy: T,
+}
 
-impl<E, V, D> Application<E> for DkgApp<V, D>
+impl<E, V, D, T> Application<E> for DkgApp<V, D, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     V: Variant,
     D: Directory<ed25519::PublicKey>,
+    T: Strategy,
 {
     type SigningScheme = ConsensusScheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
@@ -651,15 +676,11 @@ where
         (_, context): (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         let parent = ancestry.peek()?.clone();
         let height = parent.height().next();
-        Some(Block {
-            context,
-            parent: parent.digest(),
-            height,
-            payload: input.payload,
-        })
+        let block = Block::new(context, parent.digest(), height, input.payload);
+        Some(Digested::compute(block, &self.strategy).await)
     }
 
     async fn verify(

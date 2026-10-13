@@ -1,4 +1,4 @@
-use super::common::*;
+use super::{common::*, mocks::digested};
 use crate::{
     simulate::{
         engine::{EngineDefinition, InitContext},
@@ -257,8 +257,8 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let tip = ancestry.next().await?;
         let merkleized = Self::execute(tip.height(), batches).await;
         let bounds = merkleized.bounds();
-        if merkleized.root() != tip.state_root
-            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.range
+        if merkleized.root() != tip.inner().state_root
+            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.inner().range
         {
             return None;
         }
@@ -424,6 +424,7 @@ impl EngineDefinition for SingleDbEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -486,7 +487,7 @@ impl EngineDefinition for SingleDbEngine {
         let marshal_config = marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: plan.marshal_start(genesis_block.clone().into()),
+            start: plan.marshal_start(digested(genesis_block.clone())),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
@@ -547,6 +548,7 @@ impl EngineDefinition for SingleDbEngine {
                     retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
+                strategy: Sequential,
             },
         );
 

@@ -13,7 +13,7 @@ use commonware_consensus::{
         ancestry::{Ancestry, BoxedAncestry},
     },
 };
-use commonware_cryptography::Digestible;
+use commonware_cryptography::{Digested, Digestible};
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::{
     acknowledgement::Exact,
@@ -119,7 +119,7 @@ where
         context: (E, A::Context),
         ancestry: BoxedAncestry<A::Block>,
         upstream: A::Input,
-        proposal: Proposal<A::Block>,
+        proposal: Proposal<Digested<A::Block>>,
     },
 
     /// A request to verify a block.
@@ -128,7 +128,7 @@ where
     /// A finalized block and its marshal acknowledgement.
     Finalized {
         span: Span,
-        block: Arc<A::Block>,
+        block: Digested<A::Block>,
         acknowledgement: Exact,
         retry_mailbox: RetryMailbox<E, A>,
     },
@@ -298,7 +298,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         upstream: Self::Input,
-    ) -> Handoff<Self::Block> {
+    ) -> Handoff<Digested<Self::Block>> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
             "stateful.mailbox.prepare",
@@ -320,7 +320,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         upstream: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
             "stateful.mailbox.propose",
