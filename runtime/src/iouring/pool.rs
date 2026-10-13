@@ -1,11 +1,11 @@
 //! The pool of workers that poll ordinary tasks.
 //!
-//! [`Pool`] is the state the workers share: every worker's [`Slot`], which
-//! holds its mailbox and the shared end of its run queue, the pool-wide global
-//! queue, the wake word, and the shutdown barrier. The runner creates it before
-//! any worker starts, every worker reaches it through the runner's shared
-//! services, and every task's header holds a weak reference to it, so a wake
-//! from any thread can find the task's pool without keeping the pool alive.
+//! [`Pool`] is the state the workers share: every worker's mailbox and the
+//! shared end of its run queue, the pool-wide global queue, the wake word, and
+//! the shutdown barrier. The runner creates it before any worker starts, every
+//! worker reaches it through the runner's shared services, and every task's
+//! header holds a weak reference to it, so a wake from any thread can find the
+//! task's pool without keeping the pool alive.
 //! [`Threads`] starts the workers after worker zero, each on a thread of its
 //! own, and joins them at shutdown.
 //!
@@ -170,7 +170,7 @@
 //!
 //! ```text
 //! worker zero                            worker i (1..n)
-//!   Pool::new (every slot)
+//!   Pool::new (mailboxes, run queues)
 //!   enter, start worker i ------------->   enter, report ready
 //!   build and drive the root               drive tasks
 //!   root ends: close the task set,
@@ -287,15 +287,6 @@ struct Closing {
     active: usize,
 }
 
-/// What other threads reach of one pool worker.
-pub struct Slot {
-    /// The worker's mailbox.
-    mailbox: Arc<Mailbox>,
-    /// The shared end of the worker's run queue. The worker takes its owner
-    /// when it starts.
-    queue: LocalQueue,
-}
-
 /// The state every wake reads, on one cache line.
 struct Wake {
     /// Bit `i` is set while worker `i` is published as parked or about to
@@ -310,10 +301,12 @@ struct Wake {
 
 /// State shared by a pool's workers, the wakers of its tasks, and its runner.
 pub struct Pool {
-    /// Every pool worker's mailbox and run queue, indexed by worker. All exist
-    /// before any worker starts, so a push can wake any worker from the first
-    /// spawn on.
-    slots: Box<[Slot]>,
+    /// Every pool worker's mailbox, indexed by worker. All exist before any
+    /// worker starts, so a push can wake any worker from the first spawn on.
+    mailboxes: Box<[Arc<Mailbox>]>,
+    /// The shared end of every pool worker's run queue, indexed by worker.
+    /// Each worker takes its owner when it starts.
+    queues: Box<[LocalQueue]>,
     /// The idle set and the search count. Padded, like the two fields after
     /// it, so parks, pushes, and takes do not contend for one cache line.
     wake: CachePadded<Wake>,
@@ -350,13 +343,8 @@ impl Pool {
             }
         };
         Self {
-            slots: mailboxes
-                .into_iter()
-                .map(|mailbox| Slot {
-                    mailbox,
-                    queue: queue(),
-                })
-                .collect(),
+            mailboxes: mailboxes.into(),
+            queues: (0..workers).map(|_| queue()).collect(),
             wake: CachePadded::new(Wake {
                 idle: AtomicU64::new(0),
                 searching: AtomicUsize::new(0),
@@ -377,18 +365,18 @@ impl Pool {
 
     /// Number of workers in the pool, worker zero included.
     pub fn workers(&self) -> usize {
-        self.slots.len()
+        self.mailboxes.len()
     }
 
     /// Mailbox of worker `index`. Panics if the index is outside the pool.
     pub fn mailbox(&self, index: u32) -> &Arc<Mailbox> {
-        &self.slots[index as usize].mailbox
+        &self.mailboxes[index as usize]
     }
 
     /// Shared end of worker `index`'s run queue, whose owner the worker takes
     /// when it starts. Panics if the index is outside the pool.
     pub fn queue(&self, index: u32) -> &LocalQueue {
-        &self.slots[index as usize].queue
+        &self.queues[index as usize]
     }
 
     /// Lock the global queue.
@@ -570,7 +558,7 @@ impl Pool {
         (0..workers)
             .map(|offset| (start + offset) % workers)
             .filter(|&victim| victim != index as usize)
-            .any(|victim| self.slots[victim].queue.steal_into(ready.queue()) > 0)
+            .any(|victim| self.queues[victim].steal_into(ready.queue()) > 0)
     }
 
     /// Wake a parked worker for a run queue's new backlog, or for the search
@@ -700,7 +688,7 @@ impl Pool {
                     // The worker's wake source latches a wake that arrives
                     // before it blocks, so the claimed worker wakes either
                     // way.
-                    self.slots[index as usize].mailbox.waker.wake();
+                    self.mailboxes[index as usize].waker.wake();
                     return true;
                 }
                 Err(actual) => idle = actual,
@@ -713,10 +701,10 @@ impl Pool {
     /// backlog that a steal would take from. This is a snapshot: another
     /// worker can pop or claim the backlog before a subsequent steal.
     fn has_stealable(&self, index: u32) -> bool {
-        self.slots
+        self.queues
             .iter()
             .enumerate()
-            .any(|(other, slot)| other != index as usize && slot.queue.is_stealable())
+            .any(|(other, queue)| other != index as usize && queue.is_stealable())
     }
 
     /// Count one more pool worker that shutdown waits for. Each worker enters
@@ -770,8 +758,8 @@ impl Pool {
         // a stop root, so it is skipped. The others close their mailboxes only
         // after the shutdown barrier, which worker zero has not reached yet,
         // so every send succeeds.
-        for slot in self.slots.iter().skip(1) {
-            let _ = slot.mailbox.send(Message::WakeRoot);
+        for mailbox in self.mailboxes.iter().skip(1) {
+            let _ = mailbox.send(Message::WakeRoot);
         }
     }
 
