@@ -301,11 +301,10 @@ commonware_macros::stability_scope!(BETA {
 
     /// A shared value paired with its [Digest].
     ///
-    /// Constructing one is where a value's digest is computed. [`Digested::compute`] hashes the
-    /// value as a job on a [Strategy], and [`Digested::new_trusted`] attaches a digest that a
-    /// local source already computed from this exact value. Holders read the digest for free and
-    /// never choose a strategy. The value must not change anything its digest covers while a
-    /// carrier refers to it.
+    /// [`Digested::compute`] hashes the value as a job on a [Strategy], and
+    /// [`Digested::precomputed`] pairs it with a digest a local source already computed from this
+    /// exact value. Holders read the digest for free and never choose a strategy. The value must
+    /// not change anything its digest covers while a carrier refers to it.
     ///
     /// Cloning shares the value. Two values are equal when their digests are equal, which the
     /// [Digestible] contract makes equivalent to the values being equal. The value encodes as the
@@ -341,7 +340,7 @@ commonware_macros::stability_scope!(BETA {
         /// `digest` must come from a local source bound to `inner`, such as the key the value was
         /// stored under, a commitment checked against its bytes, or an earlier [`Self::compute`].
         /// It says nothing about whether the value is valid or certified.
-        pub fn new_trusted(inner: impl Into<Arc<T>>, digest: T::Digest) -> Self {
+        pub fn precomputed(inner: impl Into<Arc<T>>, digest: T::Digest) -> Self {
             Self {
                 inner: inner.into(),
                 digest,

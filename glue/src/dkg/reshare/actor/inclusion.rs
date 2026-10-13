@@ -1632,7 +1632,7 @@ mod tests {
 
     fn ready(block: TestBlock) -> Digested<TestBlock> {
         let digest = block.digest();
-        Digested::new_trusted(block, digest)
+        Digested::precomputed(block, digest)
     }
 
     fn empty_ancestry() -> BoxedAncestry<TestBlock> {

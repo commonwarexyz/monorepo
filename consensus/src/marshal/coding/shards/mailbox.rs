@@ -353,7 +353,7 @@ mod tests {
     fn policy_drains_fifo() {
         let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 1);
         let block = block_on(CodedBlock::<B, C, H>::encode(
-            Digested::new_trusted(inner.clone(), inner.digest()),
+            Digested::precomputed(inner.clone(), inner.digest()),
             coding_config_for_participants(4),
             &Sequential,
         ));

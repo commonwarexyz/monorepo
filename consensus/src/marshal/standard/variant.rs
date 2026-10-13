@@ -83,7 +83,7 @@ where
         stored: Self::StoredBlock,
         digest: <Self::Block as Digestible>::Digest,
     ) -> Self::Block {
-        Digested::new_trusted(stored, digest)
+        Digested::precomputed(stored, digest)
     }
 
     fn restore_across(

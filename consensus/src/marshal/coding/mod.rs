@@ -613,7 +613,7 @@ mod tests {
         let candidate =
             make_coding_block(candidate_ctx.clone(), genesis.digest(), Height::new(1), 100);
         let coded_candidate: TestCodedBlock = block_on(CodedBlock::encode(
-            Digested::new_trusted(candidate.clone(), candidate.digest()),
+            Digested::precomputed(candidate.clone(), candidate.digest()),
             coding_config,
             &Sequential,
         ));
@@ -660,7 +660,7 @@ mod tests {
             };
             let block = make_coding_block(ctx, parent_digest, Height::new(height), height * 100);
             let coded: TestCodedBlock = block_on(CodedBlock::encode(
-                Digested::new_trusted(block.clone(), block.digest()),
+                Digested::precomputed(block.clone(), block.digest()),
                 coding_config,
                 &Sequential,
             ));
@@ -709,7 +709,7 @@ mod tests {
             };
             let candidate = make_coding_block(candidate_ctx, genesis.digest(), height, 100);
             let dishonest_block: TestCodedBlock = CodedBlock::encode(
-                Digested::new_trusted(candidate.clone(), candidate.digest()),
+                Digested::precomputed(candidate.clone(), candidate.digest()),
                 dishonest_config,
                 &Sequential,
             )
@@ -780,7 +780,7 @@ mod tests {
                 parent: (parent_ctx.round.view(), parent.commitment()),
             };
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
-            let child = Digested::new_trusted(child.clone(), child.digest());
+            let child = Digested::precomputed(child.clone(), child.digest());
             let subscription = marshal.subscribe_parent(&child);
 
             context.sleep(Duration::from_millis(100)).await;
@@ -1238,7 +1238,7 @@ mod tests {
             };
             let block = make_coding_block(ctx, genesis.digest(), Height::new(1), 100);
             let coded: TestCodedBlock = CodedBlock::encode(
-                Digested::new_trusted(block.clone(), block.digest()),
+                Digested::precomputed(block.clone(), block.digest()),
                 coding_config_for_participants(NUM_VALIDATORS as u16),
                 &Sequential,
             )
@@ -1450,7 +1450,7 @@ mod tests {
             };
             let block = make_coding_block(block_ctx.clone(), genesis.digest(), Height::new(1), 100);
             let coded_block = CodedBlock::encode(
-                Digested::new_trusted(block.clone(), block.digest()),
+                Digested::precomputed(block.clone(), block.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -1642,7 +1642,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
             let coded_parent = CodedBlock::encode(
-                Digested::new_trusted(parent.clone(), parent.digest()),
+                Digested::precomputed(parent.clone(), parent.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -1659,7 +1659,7 @@ mod tests {
             };
             let block_a = make_coding_block(context_a.clone(), parent_digest, Height::new(2), 200);
             let coded_block_a = CodedBlock::encode(
-                Digested::new_trusted(block_a.clone(), block_a.digest()),
+                Digested::precomputed(block_a.clone(), block_a.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -1677,7 +1677,7 @@ mod tests {
             };
             let block_b = make_coding_block(context_b.clone(), parent_digest, Height::new(2), 300);
             let coded_block_b = CodedBlock::encode(
-                Digested::new_trusted(block_b.clone(), block_b.digest()),
+                Digested::precomputed(block_b.clone(), block_b.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -1795,7 +1795,7 @@ mod tests {
                 };
                 let block = make_coding_block(ctx.clone(), parent, Height::new(i), i * 100);
                 let coded_block = CodedBlock::encode(
-                    Digested::new_trusted(block.clone(), block.digest()),
+                    Digested::precomputed(block.clone(), block.digest()),
                     coding_config,
                     &Sequential,
                 )
@@ -1826,7 +1826,7 @@ mod tests {
                 boundary_height.get() * 100,
             );
             let coded_boundary = CodedBlock::encode(
-                Digested::new_trusted(boundary_block.clone(), boundary_block.digest()),
+                Digested::precomputed(boundary_block.clone(), boundary_block.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -2056,7 +2056,7 @@ mod tests {
                 500,
             );
             let coded_block: TestCodedBlock = CodedBlock::encode(
-                Digested::new_trusted(block.clone(), block.digest()),
+                Digested::precomputed(block.clone(), block.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -2175,7 +2175,7 @@ mod tests {
                 1900,
             );
             let coded_boundary: TestCodedBlock = CodedBlock::encode(
-                Digested::new_trusted(boundary_block.clone(), boundary_block.digest()),
+                Digested::precomputed(boundary_block.clone(), boundary_block.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -2311,7 +2311,7 @@ mod tests {
                 1900,
             );
             let coded_block: TestCodedBlock = CodedBlock::encode(
-                Digested::new_trusted(block.clone(), block.digest()),
+                Digested::precomputed(block.clone(), block.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -2420,7 +2420,7 @@ mod tests {
             };
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::encode(
-                Digested::new_trusted(parent.clone(), parent.digest()),
+                Digested::precomputed(parent.clone(), parent.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -2437,7 +2437,7 @@ mod tests {
             };
             let block_a = make_coding_block(context_a, parent.digest(), Height::new(2), 200);
             let coded_block_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> = CodedBlock::encode(
-                Digested::new_trusted(block_a.clone(), block_a.digest()),
+                Digested::precomputed(block_a.clone(), block_a.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -2530,7 +2530,7 @@ mod tests {
                 boundary_height.get() * 100,
             );
             let coded_boundary = CodedBlock::encode(
-                Digested::new_trusted(boundary_block.clone(), boundary_block.digest()),
+                Digested::precomputed(boundary_block.clone(), boundary_block.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -2914,7 +2914,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(19), 1000);
             let parent_digest = parent.digest();
             let coded_parent = CodedBlock::encode(
-                Digested::new_trusted(parent.clone(), parent.digest()),
+                Digested::precomputed(parent.clone(), parent.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -2930,7 +2930,7 @@ mod tests {
             };
             let block = make_coding_block(block_ctx, parent_digest, Height::new(20), 2000);
             let coded_block = CodedBlock::encode(
-                Digested::new_trusted(block.clone(), block.digest()),
+                Digested::precomputed(block.clone(), block.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3035,7 +3035,7 @@ mod tests {
             );
             let parent_digest = honest_parent.digest();
             let coded_parent = CodedBlock::encode(
-                Digested::new_trusted(honest_parent.clone(), honest_parent.digest()),
+                Digested::precomputed(honest_parent.clone(), honest_parent.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3059,7 +3059,7 @@ mod tests {
                 2000,
             );
             let coded_malicious = CodedBlock::encode(
-                Digested::new_trusted(malicious_block.clone(), malicious_block.digest()),
+                Digested::precomputed(malicious_block.clone(), malicious_block.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3108,7 +3108,7 @@ mod tests {
                 3000,
             );
             let coded_malicious2 = CodedBlock::encode(
-                Digested::new_trusted(malicious_block2.clone(), malicious_block2.digest()),
+                Digested::precomputed(malicious_block2.clone(), malicious_block2.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3205,7 +3205,7 @@ mod tests {
             };
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::encode(
-                Digested::new_trusted(parent.clone(), parent.digest()),
+                Digested::precomputed(parent.clone(), parent.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3222,7 +3222,7 @@ mod tests {
             };
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
             let coded_child = CodedBlock::encode(
-                Digested::new_trusted(child.clone(), child.digest()),
+                Digested::precomputed(child.clone(), child.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3307,7 +3307,7 @@ mod tests {
             };
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::encode(
-                Digested::new_trusted(parent.clone(), parent.digest()),
+                Digested::precomputed(parent.clone(), parent.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3324,7 +3324,7 @@ mod tests {
             };
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
             let coded_child = CodedBlock::encode(
-                Digested::new_trusted(child.clone(), child.digest()),
+                Digested::precomputed(child.clone(), child.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3428,7 +3428,7 @@ mod tests {
             };
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::encode(
-                Digested::new_trusted(parent.clone(), parent.digest()),
+                Digested::precomputed(parent.clone(), parent.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3444,7 +3444,7 @@ mod tests {
             };
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
             let coded_child: TestCodedBlock = CodedBlock::encode(
-                Digested::new_trusted(child.clone(), child.digest()),
+                Digested::precomputed(child.clone(), child.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3570,7 +3570,7 @@ mod tests {
             };
             let parent = make_coding_block(parent_context, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::encode(
-                Digested::new_trusted(parent.clone(), parent.digest()),
+                Digested::precomputed(parent.clone(), parent.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3588,7 +3588,7 @@ mod tests {
             let block =
                 make_coding_block(verify_context.clone(), parent.digest(), Height::new(2), 200);
             let coded_block = CodedBlock::encode(
-                Digested::new_trusted(block.clone(), block.digest()),
+                Digested::precomputed(block.clone(), block.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3675,7 +3675,7 @@ mod tests {
             let certified = make_coding_block(certified_ctx, genesis.digest(), Height::new(1), 100);
             let certified_digest = certified.digest();
             let coded_certified = CodedBlock::encode(
-                Digested::new_trusted(certified.clone(), certified.digest()),
+                Digested::precomputed(certified.clone(), certified.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3694,7 +3694,7 @@ mod tests {
             let notarized = make_coding_block(notarized_ctx, certified_digest, Height::new(2), 200);
             let notarized_digest = notarized.digest();
             let coded_notarized = CodedBlock::encode(
-                Digested::new_trusted(notarized.clone(), notarized.digest()),
+                Digested::precomputed(notarized.clone(), notarized.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3711,7 +3711,7 @@ mod tests {
             };
             let block = make_coding_block(block_ctx, notarized_digest, Height::new(3), 300);
             let coded_block = CodedBlock::encode(
-                Digested::new_trusted(block.clone(), block.digest()),
+                Digested::precomputed(block.clone(), block.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -3825,7 +3825,7 @@ mod tests {
             let block1 = make_coding_block(block1_ctx, genesis.digest(), Height::new(1), 100);
 
             let coded_block_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> = CodedBlock::encode(
-                Digested::new_trusted(block1.clone(), block1.digest()),
+                Digested::precomputed(block1.clone(), block1.digest()),
                 coding_config_a,
                 &Sequential,
             )
@@ -3833,7 +3833,7 @@ mod tests {
             let commitment_a = coded_block_a.commitment();
 
             let coded_block_b: CodedBlock<_, ReedSolomon<Sha256>, Sha256> = CodedBlock::encode(
-                Digested::new_trusted(block1.clone(), block1.digest()),
+                Digested::precomputed(block1.clone(), block1.digest()),
                 coding_config_b,
                 &Sequential,
             )
@@ -4033,7 +4033,7 @@ mod tests {
                 101,
             );
             let other: TestCodedBlock = CodedBlock::encode(
-                Digested::new_trusted(other.clone(), other.digest()),
+                Digested::precomputed(other.clone(), other.digest()),
                 coding_config_for_participants(NUM_VALIDATORS as u16),
                 &Sequential,
             )
@@ -4097,7 +4097,7 @@ mod tests {
             let height = honest.height();
             let other = make_coding_block(candidate_ctx.clone(), honest.parent(), height, 101);
             let other: TestCodedBlock = CodedBlock::encode(
-                Digested::new_trusted(other.clone(), other.digest()),
+                Digested::precomputed(other.clone(), other.digest()),
                 coding_config_for_participants(NUM_VALIDATORS as u16),
                 &Sequential,
             )
@@ -4302,7 +4302,7 @@ mod tests {
                         height * 100,
                     );
                     CodedBlock::encode(
-                        Digested::new_trusted(block.clone(), block.digest()),
+                        Digested::precomputed(block.clone(), block.digest()),
                         coding_config_for_participants(NUM_VALIDATORS as u16),
                         &Sequential,
                     )
@@ -4731,7 +4731,7 @@ mod tests {
                         101,
                     );
                     CodedBlock::encode(
-                        Digested::new_trusted(block.clone(), block.digest()),
+                        Digested::precomputed(block.clone(), block.digest()),
                         config,
                         &Sequential,
                     )
@@ -4832,7 +4832,7 @@ mod tests {
             };
             let floor_block = make_coding_block(bad_context, parent.digest(), Height::new(2), 200);
             let coded_floor = CodedBlock::encode(
-                Digested::new_trusted(floor_block.clone(), floor_block.digest()),
+                Digested::precomputed(floor_block.clone(), floor_block.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -5026,7 +5026,7 @@ mod tests {
             };
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::encode(
-                Digested::new_trusted(parent.clone(), parent.digest()),
+                Digested::precomputed(parent.clone(), parent.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -5042,7 +5042,7 @@ mod tests {
             };
             let child = make_coding_block(child_ctx.clone(), parent.digest(), Height::new(2), 200);
             let coded_child = CodedBlock::encode(
-                Digested::new_trusted(child.clone(), child.digest()),
+                Digested::precomputed(child.clone(), child.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -5169,7 +5169,7 @@ mod tests {
             );
             let block_digest = block_to_propose.digest();
             let expected_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::encode(
-                Digested::new_trusted(block_to_propose.clone(), block_to_propose.digest()),
+                Digested::precomputed(block_to_propose.clone(), block_to_propose.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -5293,7 +5293,7 @@ mod tests {
             );
             let block_digest = block_to_propose.digest();
             let expected_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::encode(
-                Digested::new_trusted(block_to_propose.clone(), block_to_propose.digest()),
+                Digested::precomputed(block_to_propose.clone(), block_to_propose.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -5392,7 +5392,7 @@ mod tests {
                 let block = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), data);
                 let digest = block.digest();
                 let commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::encode(
-                    Digested::new_trusted(block.clone(), block.digest()),
+                    Digested::precomputed(block.clone(), block.digest()),
                     coding_config,
                     &Sequential,
                 )
@@ -5594,7 +5594,7 @@ mod tests {
             };
             let child = make_coding_block(ctx.clone(), parent.digest(), Height::new(2), 7);
             let child_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::encode(
-                Digested::new_trusted(child.clone(), child.digest()),
+                Digested::precomputed(child.clone(), child.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -5695,7 +5695,7 @@ mod tests {
                 let parent_block = make_coding_block(parent_ctx, genesis.digest(), height, view);
                 let parent_digest = parent_block.digest();
                 let parent = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::encode(
-                    Digested::new_trusted(parent_block.clone(), parent_block.digest()),
+                    Digested::precomputed(parent_block.clone(), parent_block.digest()),
                     coding_config,
                     &Sequential,
                 )
@@ -5710,7 +5710,7 @@ mod tests {
                 };
                 let child = make_coding_block(ctx.clone(), parent_digest, Height::new(2), 7);
                 let child_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::encode(
-                    Digested::new_trusted(child.clone(), child.digest()),
+                    Digested::precomputed(child.clone(), child.digest()),
                     coding_config,
                     &Sequential,
                 )
@@ -5784,7 +5784,7 @@ mod tests {
                 make_coding_block(boundary_ctx, genesis.digest(), boundary_height, 1);
             let boundary_digest = boundary_block.digest();
             let boundary = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::encode(
-                Digested::new_trusted(boundary_block.clone(), boundary_block.digest()),
+                Digested::precomputed(boundary_block.clone(), boundary_block.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -5800,7 +5800,7 @@ mod tests {
             };
             let child = make_coding_block(ctx.clone(), boundary_digest, boundary_height.next(), 2);
             let child_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::encode(
-                Digested::new_trusted(child.clone(), child.digest()),
+                Digested::precomputed(child.clone(), child.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -5892,7 +5892,7 @@ mod tests {
             let stale = make_coding_block(stale_ctx, genesis.digest(), Height::new(1), 100);
             let stale_digest = stale.digest();
             let coded_stale: CodedBlock<_, ReedSolomon<Sha256>, Sha256> = CodedBlock::encode(
-                Digested::new_trusted(stale.clone(), stale.digest()),
+                Digested::precomputed(stale.clone(), stale.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -5931,7 +5931,7 @@ mod tests {
             let fresh = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), 200);
             let fresh_digest = fresh.digest();
             let fresh_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::encode(
-                Digested::new_trusted(fresh.clone(), fresh.digest()),
+                Digested::precomputed(fresh.clone(), fresh.digest()),
                 coding_config,
                 &Sequential,
             )
@@ -6068,7 +6068,7 @@ mod tests {
                 make_coding_block(boundary_ctx, genesis.digest(), boundary_height, 1900);
             let coded_boundary: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
                 CodedBlock::encode(
-                    Digested::new_trusted(boundary_block.clone(), boundary_block.digest()),
+                    Digested::precomputed(boundary_block.clone(), boundary_block.digest()),
                     coding_config,
                     &Sequential,
                 )

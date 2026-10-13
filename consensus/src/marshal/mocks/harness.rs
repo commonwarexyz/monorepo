@@ -2038,7 +2038,7 @@ impl TestHarness for StandardHarness {
     ) -> Digested<B> {
         let block = make_raw_block(parent, height, timestamp);
         let digest = block.digest();
-        Digested::new_trusted(block, digest)
+        Digested::precomputed(block, digest)
     }
 
     fn commitment(block: &Digested<B>) -> D {
@@ -2849,7 +2849,7 @@ impl TestHarness for CodingHarness {
         let coding_config = coding_config_for_participants(num_participants);
         let digest = raw.digest();
         block_on(CodedBlock::encode(
-            Digested::new_trusted(raw, digest),
+            Digested::precomputed(raw, digest),
             coding_config,
             &Sequential,
         ))
@@ -2868,7 +2868,7 @@ impl TestHarness for CodingHarness {
             GENESIS_CODING_CONFIG,
         ));
         let digest = inner.digest();
-        CodedBlock::new_trusted(Digested::new_trusted(inner, digest), commitment)
+        CodedBlock::precomputed(Digested::precomputed(inner, digest), commitment)
     }
 
     fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> TestCommitment {

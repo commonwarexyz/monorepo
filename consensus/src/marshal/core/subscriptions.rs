@@ -202,7 +202,7 @@ mod tests {
     fn block(height: u64, timestamp: u64) -> Digested<TestBlock> {
         let block = TestBlock::new(Sha256::fill(0), Height::new(height), timestamp);
         let digest = block.digest();
-        Digested::new_trusted(block, digest)
+        Digested::precomputed(block, digest)
     }
 
     fn assert_receives(

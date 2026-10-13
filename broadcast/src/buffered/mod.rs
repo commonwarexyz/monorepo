@@ -393,7 +393,7 @@ mod tests {
                 first_mailbox
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(message.clone(), message.digest())
+                        Digested::precomputed(message.clone(), message.digest())
                     )
                     .accepted()
             );
@@ -416,7 +416,7 @@ mod tests {
                 first_mailbox
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(message.clone(), message.digest())
+                        Digested::precomputed(message.clone(), message.digest())
                     )
                     .accepted()
             );
@@ -468,7 +468,7 @@ mod tests {
                 mailbox_a
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(m1.clone(), m1.digest())
+                        Digested::precomputed(m1.clone(), m1.digest())
                     )
                     .accepted()
             );
@@ -517,7 +517,7 @@ mod tests {
                 mailbox
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(Arc::clone(&message), digest),
+                        Digested::precomputed(Arc::clone(&message), digest),
                     )
                     .accepted()
             );
@@ -548,7 +548,7 @@ mod tests {
                     first_mailbox
                         .broadcast(
                             Recipients::All,
-                            Digested::new_trusted(message.clone(), message.digest())
+                            Digested::precomputed(message.clone(), message.digest())
                         )
                         .accepted()
                 );
@@ -592,7 +592,7 @@ mod tests {
                 first_mailbox
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(message.clone(), message.digest())
+                        Digested::precomputed(message.clone(), message.digest())
                     )
                     .accepted()
             );
@@ -639,7 +639,7 @@ mod tests {
                 mailbox1
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(message.clone(), message.digest())
+                        Digested::precomputed(message.clone(), message.digest())
                     )
                     .accepted()
             );
@@ -673,7 +673,7 @@ mod tests {
                     mailbox
                         .broadcast(
                             Recipients::All,
-                            Digested::new_trusted(message.clone(), message.digest())
+                            Digested::precomputed(message.clone(), message.digest())
                         )
                         .accepted()
                 );
@@ -721,7 +721,7 @@ mod tests {
                 mailbox_a
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(m1.clone(), m1.digest())
+                        Digested::precomputed(m1.clone(), m1.digest())
                     )
                     .accepted()
             );
@@ -732,7 +732,7 @@ mod tests {
                 mailbox_c
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(m1.clone(), m1.digest())
+                        Digested::precomputed(m1.clone(), m1.digest())
                     )
                     .accepted()
             );
@@ -750,7 +750,7 @@ mod tests {
                     mailbox_a
                         .broadcast(
                             Recipients::All,
-                            Digested::new_trusted(msg.clone(), msg.digest())
+                            Digested::precomputed(msg.clone(), msg.digest())
                         )
                         .accepted()
                 );
@@ -772,7 +772,7 @@ mod tests {
                     mailbox_c
                         .broadcast(
                             Recipients::All,
-                            Digested::new_trusted(msg.clone(), msg.digest())
+                            Digested::precomputed(msg.clone(), msg.digest())
                         )
                         .accepted()
                 );
@@ -809,7 +809,7 @@ mod tests {
                 sender_mb
                     .broadcast(
                         Recipients::One(target_peer.clone()),
-                        Digested::new_trusted(msg.clone(), msg.digest())
+                        Digested::precomputed(msg.clone(), msg.digest())
                     )
                     .accepted()
             );
@@ -862,14 +862,14 @@ mod tests {
             assert!(
                 mb0.broadcast(
                     Recipients::All,
-                    Digested::new_trusted(dup.clone(), dup.digest())
+                    Digested::precomputed(dup.clone(), dup.digest())
                 )
                 .accepted()
             );
             assert!(
                 mb1.broadcast(
                     Recipients::All,
-                    Digested::new_trusted(dup.clone(), dup.digest())
+                    Digested::precomputed(dup.clone(), dup.digest())
                 )
                 .accepted()
             );
@@ -887,7 +887,7 @@ mod tests {
                 assert!(
                     mb0.broadcast(
                         Recipients::All,
-                        Digested::new_trusted(spam.clone(), spam.digest())
+                        Digested::precomputed(spam.clone(), spam.digest())
                     )
                     .accepted()
                 );
@@ -904,7 +904,7 @@ mod tests {
                 assert!(
                     mb1.broadcast(
                         Recipients::All,
-                        Digested::new_trusted(spam.clone(), spam.digest())
+                        Digested::precomputed(spam.clone(), spam.digest())
                     )
                     .accepted()
                 );
@@ -937,21 +937,21 @@ mod tests {
                 assert!(
                     mb1.broadcast(
                         Recipients::All,
-                        Digested::new_trusted(m1.clone(), m1.digest())
+                        Digested::precomputed(m1.clone(), m1.digest())
                     )
                     .accepted()
                 );
                 assert!(
                     mb1.broadcast(
                         Recipients::All,
-                        Digested::new_trusted(m2.clone(), m2.digest())
+                        Digested::precomputed(m2.clone(), m2.digest())
                     )
                     .accepted()
                 );
                 assert!(
                     mb1.broadcast(
                         Recipients::All,
-                        Digested::new_trusted(m3.clone(), m3.digest())
+                        Digested::precomputed(m3.clone(), m3.digest())
                     )
                     .accepted()
                 );
@@ -1006,7 +1006,7 @@ mod tests {
                 honest_mailbox
                     .broadcast(
                         Recipients::One(victim.clone()),
-                        Digested::new_trusted(message.clone(), message.digest())
+                        Digested::precomputed(message.clone(), message.digest())
                     )
                     .accepted()
             );
@@ -1158,7 +1158,7 @@ mod tests {
                 mailbox
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(message.clone(), message.digest())
+                        Digested::precomputed(message.clone(), message.digest())
                     )
                     .accepted(),
                 "broadcast should succeed before shutdown"
@@ -1176,7 +1176,7 @@ mod tests {
             assert_eq!(
                 mailbox.broadcast(
                     Recipients::All,
-                    Digested::new_trusted(message.clone(), message.digest())
+                    Digested::precomputed(message.clone(), message.digest())
                 ),
                 Feedback::Closed,
                 "broadcast after shutdown should return Closed"
@@ -1230,7 +1230,7 @@ mod tests {
                 mailbox
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(message.clone(), message.digest())
+                        Digested::precomputed(message.clone(), message.digest())
                     )
                     .accepted(),
                 "broadcast should succeed"
@@ -1322,7 +1322,7 @@ mod tests {
                 mailbox_a
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(msg.clone(), msg.digest())
+                        Digested::precomputed(msg.clone(), msg.digest())
                     )
                     .accepted()
             );
@@ -1451,7 +1451,7 @@ mod tests {
                 mailbox_a
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(msg.clone(), msg.digest())
+                        Digested::precomputed(msg.clone(), msg.digest())
                     )
                     .accepted()
             );
@@ -1493,7 +1493,7 @@ mod tests {
                 mailbox_a
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(fresh.clone(), fresh.digest())
+                        Digested::precomputed(fresh.clone(), fresh.digest())
                     )
                     .accepted()
             );
@@ -1602,7 +1602,7 @@ mod tests {
             let msg = TestMessage::shared(b"startup-latest-primary-only");
             assert!(
                 mailbox_a
-                    .broadcast(Recipients::All, Digested::new_trusted(msg.clone(), msg.digest()))
+                    .broadcast(Recipients::All, Digested::precomputed(msg.clone(), msg.digest()))
                     .accepted(),
                 "Recipients::All is accepted locally; cache policy is separate"
             );
@@ -1647,7 +1647,7 @@ mod tests {
             // Enqueue a broadcast while the engine task is not running yet (only the mailbox channel)
             let msg = TestMessage::shared(b"queued-before-start");
             assert!(mailbox
-                .broadcast(Recipients::All, Digested::new_trusted(msg.clone(), msg.digest()))
+                .broadcast(Recipients::All, Digested::precomputed(msg.clone(), msg.digest()))
                 .accepted());
 
             // Start the engine (now that a message is enqueued)
@@ -1736,7 +1736,7 @@ mod tests {
                 mailbox_a
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(before.clone(), before.digest())
+                        Digested::precomputed(before.clone(), before.digest())
                     )
                     .accepted(),
                 "broadcast request should be accepted before a peer set is tracked"
@@ -1764,7 +1764,7 @@ mod tests {
                 mailbox_a
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(after.clone(), after.digest())
+                        Digested::precomputed(after.clone(), after.digest())
                     )
                     .accepted()
             );
@@ -1838,7 +1838,7 @@ mod tests {
                 mailbox_a
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(msg.clone(), msg.digest())
+                        Digested::precomputed(msg.clone(), msg.digest())
                     )
                     .accepted()
             );
@@ -1847,7 +1847,7 @@ mod tests {
                 mailbox_c
                     .broadcast(
                         Recipients::All,
-                        Digested::new_trusted(msg.clone(), msg.digest())
+                        Digested::precomputed(msg.clone(), msg.digest())
                     )
                     .accepted()
             );

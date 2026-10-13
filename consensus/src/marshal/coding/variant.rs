@@ -132,7 +132,7 @@ where
         block: Digested<Self::ApplicationBlock>,
         payload: Self::Commitment,
     ) -> Self::Block {
-        Arc::new(CodedBlock::new_trusted(block, payload))
+        Arc::new(CodedBlock::precomputed(block, payload))
     }
 }
 
@@ -326,7 +326,7 @@ mod tests {
         let digest = block.digest();
         let coded = Arc::new(block_on(
             CodedBlock::<NoCloneBlock, TestScheme, Sha256>::encode(
-                Digested::new_trusted(block, digest),
+                Digested::precomputed(block, digest),
                 CONFIG,
                 &Sequential,
             ),
@@ -350,7 +350,7 @@ mod tests {
         let block = no_clone_block(CONFIG);
         let digest = block.digest();
         let coded = block_on(CodedBlock::<NoCloneBlock, TestScheme, Sha256>::encode(
-            Digested::new_trusted(block, digest),
+            Digested::precomputed(block, digest),
             CONFIG,
             &Sequential,
         ));
@@ -414,7 +414,7 @@ mod tests {
         let block = no_clone_block(CONFIG);
         let digest = block.digest();
         let coded = block_on(CodedBlock::<NoCloneBlock, TestScheme, Sha256>::encode(
-            Digested::new_trusted(block, digest),
+            Digested::precomputed(block, digest),
             CONFIG,
             &Sequential,
         ));

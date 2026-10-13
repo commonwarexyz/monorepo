@@ -303,7 +303,7 @@ fn fuzz(input: FuzzInput) {
                         let digest = message.digest();
                         recent_digests.push(digest);
                         let _ = mailbox
-                            .broadcast(resolved_recipients, Digested::new_trusted(message, digest));
+                            .broadcast(resolved_recipients, Digested::precomputed(message, digest));
                     }
                 }
                 BroadcastAction::Subscribe {

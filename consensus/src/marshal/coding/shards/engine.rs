@@ -1026,8 +1026,8 @@ where
                 let block = self
                     .cache_block(
                         round,
-                        Arc::new(CodedBlock::new_trusted(
-                            Digested::new_trusted(inner, commitment.block()),
+                        Arc::new(CodedBlock::precomputed(
+                            Digested::precomputed(inner, commitment.block()),
                             commitment,
                         )),
                     )
@@ -2723,7 +2723,7 @@ mod tests {
             |config, context, _, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -2772,7 +2772,7 @@ mod tests {
             |config, context, _, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -2825,7 +2825,7 @@ mod tests {
         fixture.start(|config, context, _, peers, _, coding_config| async move {
             let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::encode(
-                Digested::new_trusted(inner.clone(), inner.digest()),
+                Digested::precomputed(inner.clone(), inner.digest()),
                 coding_config,
                 &STRATEGY,
             )
@@ -2886,7 +2886,7 @@ mod tests {
 
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -2957,7 +2957,7 @@ mod tests {
             let make_block = |id| {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id);
                 block_on(CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 ))
@@ -3032,7 +3032,7 @@ mod tests {
             let make_block = |id| {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id);
                 block_on(CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 ))
@@ -3116,7 +3116,7 @@ mod tests {
             let make_block = |id| {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id);
                 block_on(CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 ))
@@ -3206,7 +3206,7 @@ mod tests {
             let make_block = |id| {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id);
                 block_on(CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 ))
@@ -3308,7 +3308,7 @@ mod tests {
             let make_block = |id| {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id);
                 block_on(CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 ))
@@ -3372,7 +3372,7 @@ mod tests {
                     let block = {
                         let inner = B::new(Sha256Digest::EMPTY, Height::new(view), view);
                         CodedBlock::<B, C, H>::encode(
-                            Digested::new_trusted(inner.clone(), inner.digest()),
+                            Digested::precomputed(inner.clone(), inner.digest()),
                             coding_config,
                             &STRATEGY,
                         )
@@ -3434,7 +3434,7 @@ mod tests {
             let make_block = |id| {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id);
                 block_on(CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 ))
@@ -3495,7 +3495,7 @@ mod tests {
             let make_block = |id| {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id);
                 block_on(CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 ))
@@ -3589,7 +3589,7 @@ mod tests {
             let block = {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -3631,7 +3631,7 @@ mod tests {
             let other = {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 200);
                 CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -3698,7 +3698,7 @@ mod tests {
             let block = {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -3778,7 +3778,7 @@ mod tests {
             let claimed = {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -3787,7 +3787,7 @@ mod tests {
             let actual = {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -3853,7 +3853,7 @@ mod tests {
             let make_block = |id| {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id * 100);
                 block_on(CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 ))
@@ -3914,7 +3914,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -3968,7 +3968,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner1.clone(), inner1.digest()),
+                    Digested::precomputed(inner1.clone(), inner1.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -3978,7 +3978,7 @@ mod tests {
                 // Create a second block with different payload to get different shard data.
                 let inner2 = B::new(Sha256Digest::EMPTY, Height::new(1), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner2.clone(), inner2.digest()),
+                    Digested::precomputed(inner2.clone(), inner2.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -4033,7 +4033,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -4077,7 +4077,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -4127,7 +4127,7 @@ mod tests {
             |_config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -4179,7 +4179,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -4251,7 +4251,7 @@ mod tests {
             let make_block = |id| {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id * 100);
                 block_on(CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 ))
@@ -4299,7 +4299,7 @@ mod tests {
             let make_block = |id| {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id * 100);
                 block_on(CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 ))
@@ -4352,7 +4352,7 @@ mod tests {
             |config, context, oracle, peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -4416,7 +4416,7 @@ mod tests {
             |config, context, oracle, peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -4497,7 +4497,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -4569,7 +4569,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner1.clone(), inner1.digest()),
+                    Digested::precomputed(inner1.clone(), inner1.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -4578,7 +4578,7 @@ mod tests {
                 // Create a second block with different payload to get different shard data.
                 let inner2 = B::new(Sha256Digest::EMPTY, Height::new(1), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner2.clone(), inner2.digest()),
+                    Digested::precomputed(inner2.clone(), inner2.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -4650,7 +4650,7 @@ mod tests {
                 let block_a = {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                     CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     )
@@ -4662,7 +4662,7 @@ mod tests {
                 let block_b = {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                     CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     )
@@ -4743,7 +4743,7 @@ mod tests {
                 let mut conflicting = {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 300);
                     CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     )
@@ -4776,7 +4776,7 @@ mod tests {
                 let make_block = |id| {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id * 100);
                     block_on(CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     ))
@@ -4869,7 +4869,7 @@ mod tests {
                 let make_block = |id| {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id * 100);
                     block_on(CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     ))
@@ -5028,7 +5028,7 @@ mod tests {
             let make_block = |height, payload| {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(height), payload);
                 block_on(CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 ))
@@ -5085,7 +5085,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, BatchChecking, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -5169,7 +5169,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -5259,7 +5259,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -5320,7 +5320,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -5419,7 +5419,7 @@ mod tests {
                 let target = {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 1);
                     CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     )
@@ -5477,7 +5477,7 @@ mod tests {
                 let pressure_blocks = [2u64, 3].map(|id| {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id);
                     block_on(CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     ))
@@ -5571,7 +5571,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -5629,7 +5629,7 @@ mod tests {
                 let abandoned = {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                     CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     )
@@ -5638,7 +5638,7 @@ mod tests {
                 let replacement = {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 200);
                     CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     )
@@ -5701,7 +5701,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -5804,7 +5804,7 @@ mod tests {
                 // Peer 1 sends peer 2 a shard of a block larger than the maximum.
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -5831,7 +5831,7 @@ mod tests {
         let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
         let size = inner.encode_size();
         let coded_block = block_on(CodedBlock::<B, C, H>::encode(
-            Digested::new_trusted(inner.clone(), inner.digest()),
+            Digested::precomputed(inner.clone(), inner.digest()),
             coding_config_for_participants(4),
             &STRATEGY,
         ));
@@ -5887,7 +5887,7 @@ mod tests {
                 // Peer 0 proposes a block larger than the maximum while peer 1 awaits its shard.
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -5922,7 +5922,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -5977,7 +5977,7 @@ mod tests {
                 // against commitment from block1.
                 let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner1.clone(), inner1.digest()),
+                    Digested::precomputed(inner1.clone(), inner1.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -5986,7 +5986,7 @@ mod tests {
 
                 let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner2.clone(), inner2.digest()),
+                    Digested::precomputed(inner2.clone(), inner2.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -6037,7 +6037,7 @@ mod tests {
                 // against commitment from block1.
                 let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner1.clone(), inner1.digest()),
+                    Digested::precomputed(inner1.clone(), inner1.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -6046,7 +6046,7 @@ mod tests {
 
                 let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner2.clone(), inner2.digest()),
+                    Digested::precomputed(inner2.clone(), inner2.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -6119,7 +6119,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -6178,7 +6178,7 @@ mod tests {
                 // Create two different blocks.
                 let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner1.clone(), inner1.digest()),
+                    Digested::precomputed(inner1.clone(), inner1.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -6187,7 +6187,7 @@ mod tests {
 
                 let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner2.clone(), inner2.digest()),
+                    Digested::precomputed(inner2.clone(), inner2.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -6259,7 +6259,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner1.clone(), inner1.digest()),
+                    Digested::precomputed(inner1.clone(), inner1.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -6268,7 +6268,7 @@ mod tests {
 
                 let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner2.clone(), inner2.digest()),
+                    Digested::precomputed(inner2.clone(), inner2.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -6364,7 +6364,7 @@ mod tests {
                 let block = {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                     CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     )
@@ -6373,7 +6373,7 @@ mod tests {
                 let other = {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                     CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     )
@@ -6433,7 +6433,7 @@ mod tests {
                 // Create two different blocks.
                 let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner1.clone(), inner1.digest()),
+                    Digested::precomputed(inner1.clone(), inner1.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -6442,7 +6442,7 @@ mod tests {
 
                 let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner2.clone(), inner2.digest()),
+                    Digested::precomputed(inner2.clone(), inner2.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -6596,7 +6596,7 @@ mod tests {
             let coding_config = coding_config_for_participants(epoch1_set.len() as u16);
             let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::encode(
-                Digested::new_trusted(inner.clone(), inner.digest()),
+                Digested::precomputed(inner.clone(), inner.digest()),
                 coding_config,
                 &STRATEGY,
             )
@@ -6751,7 +6751,7 @@ mod tests {
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);
             let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::encode(
-                Digested::new_trusted(inner.clone(), inner.digest()),
+                Digested::precomputed(inner.clone(), inner.digest()),
                 coding_config,
                 &STRATEGY,
             )
@@ -6869,7 +6869,7 @@ mod tests {
             let make_block = |id| {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id);
                 block_on(CodedBlock::<B, Gated, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 ))
@@ -6975,7 +6975,7 @@ mod tests {
                 let block = {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(1), id as u64);
                     CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     )
@@ -7062,7 +7062,7 @@ mod tests {
             let block = {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -7071,7 +7071,7 @@ mod tests {
             let other = {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 200);
                 CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -7171,7 +7171,7 @@ mod tests {
             let block = {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -7180,7 +7180,7 @@ mod tests {
             let other = {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 200);
                 CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -7261,7 +7261,7 @@ mod tests {
                 // Block 1: the "claimed" block (its digest goes in the fake commitment).
                 let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner1.clone(), inner1.digest()),
+                    Digested::precomputed(inner1.clone(), inner1.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -7270,7 +7270,7 @@ mod tests {
                 // Block 2: the actual data behind the shards.
                 let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner2.clone(), inner2.digest()),
+                    Digested::precomputed(inner2.clone(), inner2.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -7410,7 +7410,7 @@ mod tests {
             |config, context, _oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -7542,7 +7542,7 @@ mod tests {
                 let block_a = {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 111);
                     CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     )
@@ -7552,7 +7552,7 @@ mod tests {
                 let block_b = {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 222);
                     CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     )
@@ -7657,7 +7657,7 @@ mod tests {
                 let tracked_block = {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                     CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     )
@@ -7669,7 +7669,7 @@ mod tests {
                 let unrelated_block = {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                     CodedBlock::<B, C, H>::encode(
-                        Digested::new_trusted(inner.clone(), inner.digest()),
+                        Digested::precomputed(inner.clone(), inner.digest()),
                         coding_config,
                         &STRATEGY,
                     )
@@ -7725,7 +7725,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -7804,7 +7804,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -7874,7 +7874,7 @@ mod tests {
             |config, context, oracle, mut peers, non_participants, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -7940,7 +7940,7 @@ mod tests {
             |config, context, oracle, mut peers, non_participants, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )
@@ -8068,7 +8068,7 @@ mod tests {
             let receiver_shard = |height: u64| {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(height), 100);
                 let coded_block = block_on(CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 ));
@@ -8230,7 +8230,7 @@ mod tests {
 
             let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::encode(
-                Digested::new_trusted(inner.clone(), inner.digest()),
+                Digested::precomputed(inner.clone(), inner.digest()),
                 coding_config_for_participants(participants.len() as u16),
                 &STRATEGY,
             )
@@ -8341,7 +8341,7 @@ mod tests {
             let coding_config = coding_config_for_participants(epoch0_set.len() as u16);
             let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::encode(
-                Digested::new_trusted(inner.clone(), inner.digest()),
+                Digested::precomputed(inner.clone(), inner.digest()),
                 coding_config,
                 &STRATEGY,
             )
@@ -8494,7 +8494,7 @@ mod tests {
             let coding_config = coding_config_for_participants(num_peers as u16);
             let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::encode(
-                Digested::new_trusted(inner.clone(), inner.digest()),
+                Digested::precomputed(inner.clone(), inner.digest()),
                 coding_config,
                 &STRATEGY,
             )
@@ -8593,7 +8593,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::encode(
-                    Digested::new_trusted(inner.clone(), inner.digest()),
+                    Digested::precomputed(inner.clone(), inner.digest()),
                     coding_config,
                     &STRATEGY,
                 )

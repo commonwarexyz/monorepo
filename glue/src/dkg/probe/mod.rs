@@ -593,7 +593,7 @@ mod tests {
             marshal::Config {
                 provider: mocks::TestProvider::new(schemes[index].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: Start::Genesis(Digested::new_trusted(genesis.clone(), genesis.digest())),
+                start: Start::Genesis(Digested::precomputed(genesis.clone(), genesis.digest())),
                 partition_prefix,
                 mailbox_size: NZUsize!(16),
                 view_retention: ViewDelta::new(8),
@@ -616,7 +616,7 @@ mod tests {
                 marshal
                     .certified(
                         block.context().round,
-                        Digested::new_trusted(block.clone(), block.digest())
+                        Digested::precomputed(block.clone(), block.digest())
                     )
                     .await
             );
@@ -1133,7 +1133,7 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: Digested::new_trusted(
+                    block: Digested::precomputed(
                         harness.boundary.clone(),
                         harness.boundary.digest(),
                     ),
@@ -1203,7 +1203,7 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: Digested::new_trusted(
+                    block: Digested::precomputed(
                         harness.boundary.clone(),
                         harness.boundary.digest(),
                     ),
@@ -1277,7 +1277,7 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: Digested::new_trusted(wrong_block.clone(), wrong_block.digest()),
+                    block: Digested::precomputed(wrong_block.clone(), wrong_block.digest()),
                 }
                 .encode()
                 .to_vec(),
@@ -1297,7 +1297,7 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: Digested::new_trusted(
+                    block: Digested::precomputed(
                         harness.boundary.clone(),
                         harness.boundary.digest(),
                     ),

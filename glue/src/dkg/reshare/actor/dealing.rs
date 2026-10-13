@@ -453,7 +453,7 @@ mod tests {
             };
             let (sender, _) = inert_channel([peer]);
             let block = mocks::genesis_block(signer.public_key());
-            let block = Digested::new_trusted(block.clone(), block.digest());
+            let block = Digested::precomputed(block.clone(), block.digest());
             let (ack, waiter) = Exact::handle();
             assert_eq!(
                 mailbox.report(marshal::Update::Block(block, ack)),

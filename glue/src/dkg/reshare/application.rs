@@ -479,7 +479,7 @@ mod tests {
                 }
                 None => block,
             };
-            Some(Digested::new_trusted(block.clone(), block.digest()))
+            Some(Digested::precomputed(block.clone(), block.digest()))
         }
 
         async fn verify(&mut self, _: (E, Self::Context), _: impl Ancestry<Self::Block>) -> bool {
@@ -618,7 +618,7 @@ mod tests {
             }
             None => block,
         };
-        Digested::new_trusted(block.clone(), block.digest())
+        Digested::precomputed(block.clone(), block.digest())
     }
 
     fn midpoint_parent() -> TestBlock {
@@ -651,7 +651,7 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("app"), block_context(&midpoint, 2)),
-                        ancestry::from_iter([Digested::new_trusted(
+                        ancestry::from_iter([Digested::precomputed(
                             midpoint.clone(),
                             midpoint.digest(),
                         )]),
@@ -672,7 +672,7 @@ mod tests {
                 let proposed = app
                     .propose(
                         (context.child("propose"), block_context(&midpoint, 2)),
-                        ancestry::from_iter([Digested::new_trusted(
+                        ancestry::from_iter([Digested::precomputed(
                             midpoint.clone(),
                             midpoint.digest(),
                         )]),
@@ -687,7 +687,7 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("early"), block_context(&genesis, 1)),
-                        ancestry::from_iter([Digested::new_trusted(
+                        ancestry::from_iter([Digested::precomputed(
                             genesis.clone(),
                             genesis.digest(),
                         )]),
@@ -752,7 +752,7 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("app"), block_context(&parent, 1)),
-                        ancestry::from_iter([Digested::new_trusted(
+                        ancestry::from_iter([Digested::precomputed(
                             parent.clone(),
                             parent.digest(),
                         )]),
@@ -773,7 +773,7 @@ mod tests {
                 let proposed = app
                     .propose(
                         (context.child("propose"), block_context(&parent, 1)),
-                        ancestry::from_iter([Digested::new_trusted(
+                        ancestry::from_iter([Digested::precomputed(
                             parent.clone(),
                             parent.digest(),
                         )]),
@@ -800,7 +800,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
-                    ancestry::from_iter([Digested::new_trusted(parent.clone(), parent.digest())]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await;
@@ -813,7 +813,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app_retry"), block_context(&parent, 3)),
-                    ancestry::from_iter([Digested::new_trusted(parent.clone(), parent.digest())]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await;
@@ -841,7 +841,7 @@ mod tests {
 
             let mut propose = Box::pin(app.propose(
                 (context.child("app"), block_context(&parent, 2)),
-                ancestry::from_iter([Digested::new_trusted(parent.clone(), parent.digest())]),
+                ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                 (),
             ));
             assert!(propose.as_mut().now_or_never().is_none());
@@ -894,7 +894,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
-                    ancestry::from_iter([Digested::new_trusted(parent.clone(), parent.digest())]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await
@@ -927,7 +927,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Digested::new_trusted(parent.clone(), parent.digest())]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await;
@@ -948,7 +948,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Digested::new_trusted(parent.clone(), parent.digest())]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await
@@ -976,7 +976,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Digested::new_trusted(parent.clone(), parent.digest())]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await
@@ -994,7 +994,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let parent = mocks::genesis_block(leader().public_key());
-            let parent = Digested::new_trusted(parent.clone(), parent.digest());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let tip = final_block(&parent, Some(epoch_payload(1)));
             let mut app = wrapper(&context, EpochInfoResponse::Unavailable);
             let inner = app.inner.clone();
@@ -1017,7 +1017,7 @@ mod tests {
         executor.start(|context| async move {
             for response in [EpochInfoResponse::Following, EpochInfoResponse::Pending] {
                 let parent = mocks::genesis_block(leader().public_key());
-                let parent = Digested::new_trusted(parent.clone(), parent.digest());
+                let parent = Digested::precomputed(parent.clone(), parent.digest());
                 let tip = final_block(&parent, Some(epoch_payload(1)));
                 let expected_tip = tip.digest();
                 let expected_parent = parent.digest();
@@ -1073,7 +1073,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let parent = mocks::genesis_block(leader().public_key());
-            let parent = Digested::new_trusted(parent.clone(), parent.digest());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let tip = final_block(&parent, None);
             let mut app = wrapper(&context, EpochInfoResponse::Available(None));
             let inner = app.inner.clone();
@@ -1095,7 +1095,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let parent = mocks::genesis_block(leader().public_key());
-            let parent = Digested::new_trusted(parent.clone(), parent.digest());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let payload = epoch_payload(2);
             let tip = final_block(&parent, Some(payload.clone()));
             let mut app = wrapper(&context, EpochInfoResponse::Available(Some(payload)));
@@ -1118,7 +1118,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let parent = mocks::genesis_block(leader().public_key());
-            let parent = Digested::new_trusted(parent.clone(), parent.digest());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let tip = final_block(&parent, Some(epoch_payload(3)));
             let response = EpochInfoResponse::Available(Some(epoch_payload(4)));
             let mut app = wrapper(&context, response);
@@ -1165,8 +1165,8 @@ mod tests {
                     .verify(
                         (context.child("app"), block_context(&parent, tip.height().get())),
                         ancestry::from_iter([
-                            Digested::new_trusted(tip.clone(), tip.digest()),
-                            Digested::new_trusted(parent.clone(), parent.digest()),
+                            Digested::precomputed(tip.clone(), tip.digest()),
+                            Digested::precomputed(parent.clone(), parent.digest()),
                         ]),
                     )
                     .await;
@@ -1230,8 +1230,8 @@ mod tests {
                     .verify(
                         (context.child("app"), block_context(&parent, tip.height().get())),
                         ancestry::from_iter([
-                            Digested::new_trusted(tip.clone(), tip.digest()),
-                            Digested::new_trusted(parent.clone(), parent.digest()),
+                            Digested::precomputed(tip.clone(), tip.digest()),
+                            Digested::precomputed(parent.clone(), parent.digest()),
                         ]),
                     )
                     .await;

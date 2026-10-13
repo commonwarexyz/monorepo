@@ -376,7 +376,7 @@ mod tests {
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
             let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
             let parent = mocks::genesis_block(PrivateKey::from_seed(0).public_key());
-            let parent = Digested::new_trusted(parent.clone(), parent.digest());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let (release, gate) = oneshot::channel();
             let ancestry = DelayedAncestry {
                 parent: Some(parent.clone()),
@@ -419,7 +419,7 @@ mod tests {
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
             let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
             let parent = mocks::genesis_block(PrivateKey::from_seed(0).public_key());
-            let parent = Digested::new_trusted(parent.clone(), parent.digest());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let (release, gate) = oneshot::channel();
             let ancestry = DelayedAncestry {
                 parent: Some(parent),

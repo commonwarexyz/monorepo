@@ -1127,7 +1127,7 @@ mod tests {
     fn block(height: u64) -> Digested<harness::B> {
         let block = harness::make_raw_block(harness::D::EMPTY, Height::new(height), height);
         let digest = block.digest();
-        Digested::new_trusted(block, digest)
+        Digested::precomputed(block, digest)
     }
 
     fn commitment(height: u64) -> harness::D {

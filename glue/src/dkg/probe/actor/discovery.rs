@@ -735,7 +735,7 @@ mod tests {
         let block = CodingBlock::new::<Sha256>(context, parent, Height::new(1), 0);
         Arc::new(
             CodedBlock::encode(
-                Digested::new_trusted(block.clone(), block.digest()),
+                Digested::precomputed(block.clone(), block.digest()),
                 coding_config_for_participants(participants),
                 &Sequential,
             )
@@ -825,7 +825,7 @@ mod tests {
             let block_message =
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::zero(),
-                    block: Digested::new_trusted(block.clone(), block.digest()),
+                    block: Digested::precomputed(block.clone(), block.digest()),
                 }
                 .encode();
             let (epoch, body) = split_block_response::<

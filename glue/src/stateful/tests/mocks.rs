@@ -420,7 +420,7 @@ pub(crate) fn test_databases() -> TestDatabases {
 /// Pairs a test block with its digest.
 pub(crate) fn digested<B: Digestible>(block: B) -> Digested<B> {
     let digest = block.digest();
-    Digested::new_trusted(block, digest)
+    Digested::precomputed(block, digest)
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

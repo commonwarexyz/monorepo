@@ -147,7 +147,7 @@ mod tests {
 
     pub(super) fn ready<T: crate::Block>(block: T) -> Digested<T> {
         let digest = block.digest();
-        Digested::new_trusted(block, digest)
+        Digested::precomputed(block, digest)
     }
 
     #[test]
@@ -9668,14 +9668,14 @@ mod tests {
                         mailbox
                             .certified(
                                 round,
-                                Digested::new_trusted(Arc::clone(&block), block.digest()),
+                                Digested::precomputed(Arc::clone(&block), block.digest()),
                             )
                             .await
                     } else {
                         mailbox
                             .verified(
                                 round,
-                                Digested::new_trusted(Arc::clone(&block), block.digest()),
+                                Digested::precomputed(Arc::clone(&block), block.digest()),
                             )
                             .await
                     };

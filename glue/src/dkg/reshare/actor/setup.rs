@@ -397,13 +397,13 @@ mod tests {
                 let anchor = processed.anchor().get() as usize;
                 (
                     processed,
-                    Digested::new_trusted(blocks[anchor].clone(), blocks[anchor].digest()),
+                    Digested::precomputed(blocks[anchor].clone(), blocks[anchor].digest()),
                 )
             });
             startup(
                 processed,
                 floor.map(|floor| {
-                    Digested::new_trusted(blocks[floor].clone(), blocks[floor].digest())
+                    Digested::precomputed(blocks[floor].clone(), blocks[floor].digest())
                 }),
             )
             .map(|tip| (tip.height, tip.digest))

@@ -157,7 +157,8 @@ pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
     commitment: Commitment<B, C, H>,
     /// The coded shards.
     ///
-    /// These shards are lazily-constructed when [`CodedBlock`] is formed with [`Self::new_trusted`].
+    /// These shards are lazily-constructed when [`CodedBlock`] is formed with
+    /// [`Self::precomputed`].
     shards: OnceLock<Arc<[C::Shard]>>,
 }
 
@@ -176,13 +177,13 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         C::encode(&config, buf.as_slice(), strategy)
     }
 
-    /// Create a new [`CodedBlock`] from a [`Block`] and trusted [`Commitment`].
+    /// Creates a [`CodedBlock`] from a [`Block`] and its precomputed [`Commitment`].
     ///
     /// `commitment` must encode `inner`. [`Self::shards`] generates shards on
     /// demand and panics if the coding root does not match.
     ///
     /// Panics if `commitment` does not commit to the block's digest.
-    pub fn new_trusted(inner: Digested<B>, commitment: Commitment<B, C, H>) -> Self {
+    pub fn precomputed(inner: Digested<B>, commitment: Commitment<B, C, H>) -> Self {
         assert_eq!(
             inner.digest(),
             commitment.block(),
@@ -242,7 +243,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
 
     /// Returns the inner [`Block`] with its digest, which the commitment binds.
     pub fn inner_digested(&self) -> Digested<B> {
-        Digested::new_trusted(Arc::clone(&self.inner), self.commitment.block())
+        Digested::precomputed(Arc::clone(&self.inner), self.commitment.block())
     }
 }
 
@@ -738,7 +739,7 @@ mod test {
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let digest = block.digest();
         let coded_block = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::new_trusted(block, digest),
+            Digested::precomputed(block, digest),
             CONFIG,
             &Sequential,
         ));
@@ -776,7 +777,7 @@ mod test {
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let digest = block.digest();
         let expected = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::new_trusted(block.clone(), digest),
+            Digested::precomputed(block.clone(), digest),
             EXPECTED_CONFIG,
             &Sequential,
         ))
@@ -804,7 +805,7 @@ mod test {
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let digest = block.digest();
         let coded = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::new_trusted(block, digest),
+            Digested::precomputed(block, digest),
             CONFIG,
             &Sequential,
         ));
@@ -840,7 +841,7 @@ mod test {
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let digest = block.digest();
         let coded = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::new_trusted(block, digest),
+            Digested::precomputed(block, digest),
             CONFIG,
             &Sequential,
         ));
@@ -878,7 +879,7 @@ mod test {
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let digest = block.digest();
         let expected = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::new_trusted(block.clone(), digest),
+            Digested::precomputed(block.clone(), digest),
             EXPECTED_CONFIG,
             &Sequential,
         ))
@@ -913,7 +914,7 @@ mod test {
         let other = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(43), 1_234_567);
         let digest = block.digest();
         let expected = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::new_trusted(block, digest),
+            Digested::precomputed(block, digest),
             CONFIG,
             &Sequential,
         ))
@@ -944,7 +945,7 @@ mod test {
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let digest = block.digest();
         let coded = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::new_trusted(block, digest),
+            Digested::precomputed(block, digest),
             CONFIG,
             &Sequential,
         ));
@@ -970,7 +971,7 @@ mod test {
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let digest = block.digest();
         let coded_block = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::new_trusted(block, digest),
+            Digested::precomputed(block, digest),
             CONFIG,
             &Sequential,
         ));
@@ -993,7 +994,7 @@ mod test {
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let digest = block.digest();
         let coded_block = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::new_trusted(block, digest),
+            Digested::precomputed(block, digest),
             CONFIG,
             &Sequential,
         ));
@@ -1022,7 +1023,7 @@ mod test {
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let digest = block.digest();
         let coded_block = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::new_trusted(block, digest),
+            Digested::precomputed(block, digest),
             CONFIG,
             &Sequential,
         ));

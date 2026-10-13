@@ -393,7 +393,7 @@ mod tests {
                 marshal::Config {
                     provider: mocks::TestProvider::new(fixture.schemes[index].clone()),
                     epocher: FixedEpocher::new(NZU64!(2)),
-                    start: MarshalStart::Genesis(Digested::new_trusted(
+                    start: MarshalStart::Genesis(Digested::precomputed(
                         genesis.clone(),
                         genesis.digest(),
                     )),
@@ -451,7 +451,7 @@ mod tests {
                     marshal
                         .certified(
                             block.context().round,
-                            Digested::new_trusted(block.clone(), block.digest())
+                            Digested::precomputed(block.clone(), block.digest())
                         )
                         .await
                 );
@@ -772,7 +772,7 @@ mod tests {
                     marshal::Config {
                         provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
                         epocher: FixedEpocher::new(NZU64!(2)),
-                        start: MarshalStart::Genesis(Digested::new_trusted(
+                        start: MarshalStart::Genesis(Digested::precomputed(
                             genesis.clone(),
                             genesis.digest(),
                         )),
@@ -859,7 +859,7 @@ mod tests {
             assert_eq!(proposal.round.epoch(), Epoch::zero());
 
             let boundary =
-                Digested::new_trusted(cluster.boundary.clone(), cluster.boundary.digest());
+                Digested::precomputed(cluster.boundary.clone(), cluster.boundary.digest());
             let node = &mut cluster.nodes[0];
             let (acknowledgement, _waiter) = Exact::handle();
             assert_eq!(
@@ -896,7 +896,7 @@ mod tests {
             // Marshal reports the first block of epoch one without the final block of epoch
             // zero.
             let skipped = mocks::child(&cluster.boundary);
-            let skipped = Digested::new_trusted(skipped.clone(), skipped.digest());
+            let skipped = Digested::precomputed(skipped.clone(), skipped.digest());
             let node = &mut cluster.nodes[0];
             let (acknowledgement, waiter) = Exact::handle();
             assert_eq!(
@@ -1060,7 +1060,7 @@ mod tests {
                 marshal::Config {
                     provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
                     epocher: FixedEpocher::new(NZU64!(2)),
-                    start: MarshalStart::Genesis(Digested::new_trusted(
+                    start: MarshalStart::Genesis(Digested::precomputed(
                         genesis.clone(),
                         genesis.digest(),
                     )),

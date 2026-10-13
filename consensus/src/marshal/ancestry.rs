@@ -532,7 +532,7 @@ mod test {
 
     fn digested<B: Digestible>(block: B) -> Digested<B> {
         let digest = block.digest();
-        Digested::new_trusted(block, digest)
+        Digested::precomputed(block, digest)
     }
 
     #[derive(Default, Clone)]

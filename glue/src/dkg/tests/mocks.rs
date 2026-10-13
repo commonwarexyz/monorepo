@@ -725,7 +725,7 @@ pub(crate) async fn closed_marshal_mailbox(
     .expect("blocks archive");
 
     let genesis = genesis_block(signer.public_key());
-    let genesis = Digested::new_trusted(genesis.clone(), genesis.digest());
+    let genesis = Digested::precomputed(genesis.clone(), genesis.digest());
     let (actor, mailbox, _) = MarshalActor::<_, _, _, _, _, _, _, Exact>::init(
         context.child("marshal"),
         finalizations_by_height,

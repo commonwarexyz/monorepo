@@ -948,7 +948,7 @@ impl EngineDefinition for ReshareEngine {
         );
 
         let genesis = Block::genesis(self.participants[0].clone(), self.initial.info.clone());
-        let genesis = Digested::new_trusted(genesis.clone(), genesis.digest());
+        let genesis = Digested::precomputed(genesis.clone(), genesis.digest());
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(
             stateful_startup_context.child("plan"),
