@@ -3884,6 +3884,38 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_read_joining_unpolled_warm_completes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, mut opens) = GatedBlob::new(2);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+
+            // A warm of both pages starts its read, then is retained without being polled while
+            // its pages arrive.
+            let mut warm = pin!(cache_ref.warm(&blob, 0, &[0, 1]));
+            assert!(poll!(warm.as_mut()).is_pending());
+            assert_eq!(blob.reads.lock().len(), 2);
+            open(&mut opens);
+
+            // A read of page 1 joins the warm and completes without reading the page again.
+            select! {
+                result = read_first_byte(&blob, &cache_ref, 1) => {
+                    assert_eq!(result.unwrap(), 1);
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("read joining an unpolled warm did not complete");
+                },
+            }
+            assert_eq!(blob.reads.lock().len(), 2);
+
+            // The warm completes from the pages already read.
+            assert_eq!(warm.await.unwrap(), 2);
+            assert_eq!(blob.reads.lock().len(), 2);
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
     fn test_cache_at_high_offset() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
