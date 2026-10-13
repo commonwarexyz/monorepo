@@ -1172,6 +1172,9 @@ where
     ) -> Self;
 
     fn automaton(&self, context: &deterministic::Context, application: Mailbox) -> Self::Automaton;
+
+    /// Starts incarnation `generation` of a restarted replica that keeps this reporter.
+    fn new_incarnation(&self, _generation: u32) {}
 }
 
 impl<P, EC> HarnessReporter<P, EC, application::Mailbox<Sha256Digest, PublicKeyOf<P>>>
@@ -1289,6 +1292,10 @@ where
             application,
             self.audit(),
         )
+    }
+
+    fn new_incarnation(&self, generation: u32) {
+        self.set_generation(generation);
     }
 }
 
@@ -1977,8 +1984,9 @@ pub async fn run_twins_with_backend<P, B>(
 }
 
 /// [run_twins_with_backend] with an optional trusted-continuation prefix: with one,
-/// the honest replicas start behind the runner's taps, the prefix runs, and the twin
-/// pair starts at the release, before the liveness wait and the invariants.
+/// the honest replicas start behind the runner's taps, the prefix runs, the twin pair
+/// starts at the release, and the run checks safety only: it sleeps
+/// [MAX_SLEEP_DURATION] instead of the liveness wait, then checks the invariants.
 pub async fn run_twins_with_backend_and_hook<P, B>(
     context: &mut deterministic::Context,
     backend: &mut B,
@@ -2020,7 +2028,7 @@ pub async fn run_twins_with_backend_and_hook<P, B>(
         data: case.data,
     };
     backend.configure_topology(&mut setup.state, &topology, &participants);
-    let mut prefix_end =
+    let prefix_end =
         View::new(topology.scenario.rounds().len() as u64 * topology.term_length.get());
 
     let mut runner = hook.map(|hook| {
@@ -2143,15 +2151,20 @@ pub async fn run_twins_with_backend_and_hook<P, B>(
         }
         backend.finish_twins(&mut setup.state, &topology);
         runner.check_release().await;
-        // Liveness counts finalizations past the scripted prefix and the release.
-        prefix_end = prefix_end.max(View::new(release.base));
     }
 
-    backend
-        .observe_liveness(context, &mut setup.state, prefix_end)
-        .await;
-    if let Some(runner) = &runner {
-        runner.check("end");
+    match &runner {
+        // A trusted continuation checks safety only: it runs the base's window and
+        // never waits for progress.
+        Some(runner) => {
+            context.sleep(MAX_SLEEP_DURATION).await;
+            runner.check("end");
+        }
+        None => {
+            backend
+                .observe_liveness(context, &mut setup.state, prefix_end)
+                .await;
+        }
     }
     backend.check_invariants(context, &mut setup.state, &topology);
 }

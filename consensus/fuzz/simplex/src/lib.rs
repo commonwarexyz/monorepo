@@ -438,11 +438,7 @@ fn run_standard_once<P: simplex::Simplex>(
     warn_dispatch: Option<Dispatch>,
     hook: Option<continuation::Hook<P>>,
 ) -> Option<RunAudit> {
-    let cfg = trusted::standard_config(
-        bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0),
-        &input,
-        hook.as_ref(),
-    );
+    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0);
     let executor = deterministic::Runner::new(cfg);
     let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
@@ -649,10 +645,11 @@ fn run_standard_once<P: simplex::Simplex>(
         )
         .await;
 
-        if should_bound_standard_liveness(&input) {
+        // A trusted continuation checks safety only and never waits for progress.
+        if runner.is_none() && should_bound_standard_liveness(&input) {
             let mut finalizers = Vec::new();
             for (validator, reporter) in reporters.iter_mut() {
-                let required_containers = input.required_containers + rebase;
+                let required_containers = input.required_containers;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(
                     context
@@ -754,11 +751,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
     notarize_omission: Option<NotarizeOmission>,
     hook: Option<continuation::Hook<P>>,
 ) -> (bool, bool) {
-    let cfg = trusted::standard_config(
-        bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0),
-        &input,
-        hook.as_ref(),
-    );
+    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0);
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(move |mut context| async move {
@@ -966,7 +959,8 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
         )
         .await;
 
-        if should_bound_standard_liveness(&input) {
+        // A trusted continuation checks safety only and never waits for progress.
+        if runner.is_none() && should_bound_standard_liveness(&input) {
             let mut finalizers = Vec::new();
             let omitted_validator = notarize_omission
                 .as_ref()
@@ -975,7 +969,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                 if omitted_validator == Some(validator) {
                     continue;
                 }
-                let required_containers = input.required_containers + rebase;
+                let required_containers = input.required_containers;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(
                     context
@@ -1827,7 +1821,6 @@ fn run_twins<P: simplex::Simplex>(
             P::effective_term_length(input.term_length),
         ),
     );
-    let cfg = trusted::twins_config::<P>(cfg, &input, hook.as_ref());
     let executor = deterministic::Runner::new(cfg);
     let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
