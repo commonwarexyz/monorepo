@@ -2014,6 +2014,18 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
     }
 });
+commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "std", test)) {
+    /// Confines the calling thread to the CPUs of its current last-level cache domain that it may
+    /// already use, returning how many there are.
+    ///
+    /// A thread pool built afterwards from this thread inherits the confinement, so the thread
+    /// and the pool exchange data through one cache instead of across domains. Returns `None`,
+    /// leaving the thread's affinity unchanged, on machines with a single last-level cache
+    /// domain or where the topology or the thread's affinity is unavailable.
+    pub fn confine_to_cache_domain() -> Option<NonZeroUsize> {
+        topology::confine_to_current_domain()
+    }
+});
 commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)) {
     pub mod mocks;
 });

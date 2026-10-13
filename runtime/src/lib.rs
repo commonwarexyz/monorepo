@@ -464,6 +464,29 @@ stability_scope!(BETA {
         ///
         /// Panics if the runtime cannot initialize the strategy's backing Rayon thread pool.
         fn strategy(&self, parallelism: NonZeroUsize) -> Rayon;
+
+        /// Returns a new [Rayon] strategy whose pool shares the calling thread's last-level
+        /// cache.
+        ///
+        /// Confines the calling thread to the CPUs of its current last-level cache domain (see
+        /// [commonware_parallel::confine_to_cache_domain]) and runs the pool on the CPUs the
+        /// calling thread may then use, with at most one thread per CPU. The calling thread stays
+        /// confined afterwards, so call this from the thread that drives the strategy for its
+        /// lifetime.
+        ///
+        /// # Arguments
+        /// - `parallelism`: The most tasks to execute concurrently in the pool.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the runtime cannot initialize the strategy's backing Rayon thread pool.
+        #[commonware_macros::stability(ALPHA)]
+        fn local_strategy(&self, parallelism: NonZeroUsize) -> Rayon {
+            commonware_parallel::confine_to_cache_domain();
+            let parallelism = std::thread::available_parallelism()
+                .map_or(parallelism, |cpus| parallelism.min(cpus));
+            self.strategy(parallelism)
+        }
     }
 
     /// Interface to register and encode metrics.

@@ -1650,6 +1650,26 @@ mod tests {
     }
 
     #[test]
+    fn test_local_strategy_runs_pool_on_callers_cpus() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            // Request more threads than the caller may use CPUs, so the pool must be capped.
+            let requested = std::thread::available_parallelism()
+                .unwrap()
+                .saturating_add(1);
+            let strategy = context.local_strategy(requested);
+
+            // The pool's threads may use exactly the caller's CPUs, one thread per CPU.
+            let caller = std::thread::available_parallelism().unwrap();
+            let worker = strategy
+                .spawn(1, |_| std::thread::available_parallelism().unwrap())
+                .await;
+            assert_eq!(worker, caller);
+            assert_eq!(strategy.manual().parallelism(), caller.get());
+        });
+    }
+
+    #[test]
     fn test_thread_stack_size_override() {
         let cfg = Config::new().with_thread_stack_size(4 * 1024 * 1024);
         assert_eq!(cfg.thread_stack_size(), 4 * 1024 * 1024);
