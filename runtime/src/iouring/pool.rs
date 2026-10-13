@@ -147,6 +147,20 @@
 //! callback, and a withdrawal reports a claim only when it ends a live
 //! publication.
 //!
+//! The fences carry most of the argument: a store before a sequentially
+//! consistent fence on one side and a load after one on the other side cannot
+//! both miss, whatever the orderings of the store and the load. The accesses
+//! to the wake word are mostly relaxed, since the counts and bits they carry
+//! are read back by read-modify-write operations, which always see the latest
+//! value, and a stale load is covered by a fence pair. Two handshakes need
+//! more. The claim's exchange releases the count it reserved to the claimed
+//! worker, whose withdrawal acquires it, so the worker returns that count
+//! after the reservation. A worker leaving a search releases its count, since
+//! no fence of its own follows: the fence after the last return then acquires
+//! what every earlier return's search stole, so the look it orders, and the
+//! search of the worker it wakes, see the victims' queues as the thieves left
+//! them.
+//!
 //! # Lifecycle
 //!
 //! Worker zero runs on the runner's thread. It starts the others one at a time,
@@ -436,8 +450,11 @@ impl Pool {
                 .store(queue.runnables.len(), Ordering::Release);
         }
 
-        // Pairs with the fence of a parking worker: either the wake sees the
-        // parking worker's bit, or that worker's last look sees the push.
+        // Pairs with the fence in `Searcher::prepare_park`, which a worker
+        // puts between publishing its bit and its last look: either the loads
+        // in `notify_global` see the bit, or that look sees the length stored
+        // above. The pair alone forbids both sides missing the other's store,
+        // so the loads that follow need no ordering of their own.
         fence(Ordering::SeqCst);
         self.notify_global();
         Ok(())
@@ -555,8 +572,10 @@ impl Pool {
     /// the last returned count hands on.
     #[inline]
     fn kick(&self) {
-        // Pairs with the fence of a parking worker: either this wake sees its
-        // publication, or its last look sees the backlog.
+        // Pairs with the fence in `Searcher::prepare_park`: either the loads
+        // in `notify` see the worker's bit, or its last look sees what the
+        // caller published before this fence, the run queue's new tail or the
+        // return of the last search count.
         fence(Ordering::SeqCst);
         self.notify();
     }
@@ -567,22 +586,26 @@ impl Pool {
     fn notify(&self) {
         loop {
             // A worker holding a count either finds the backlog or hands the
-            // duty on when it returns the last count.
-            if self.wake.searching.load(Ordering::SeqCst) != 0 {
+            // duty on when it returns the last count. The caller's fence
+            // orders these loads after the work it published, and a stale
+            // value is covered by the fence of whoever returns that count or
+            // publishes next, so the loads themselves are relaxed.
+            if self.wake.searching.load(Ordering::Relaxed) != 0 {
                 return;
             }
-            let idle = self.wake.idle.load(Ordering::SeqCst);
+            let idle = self.wake.idle.load(Ordering::Relaxed);
             if idle == 0 {
                 return;
             }
 
             // The count the claimed worker inherits. Failing to take it means
             // another worker began searching or another wake is claiming,
-            // which then holds the duty.
+            // which then holds the duty. The reservation reaches the claimed
+            // worker through the claim's release, so it is relaxed here.
             if self
                 .wake
                 .searching
-                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
                 .is_err()
             {
                 return;
@@ -602,11 +625,14 @@ impl Pool {
     /// caller has published the push and fenced.
     fn notify_global(&self) {
         loop {
-            let idle = self.wake.idle.load(Ordering::SeqCst);
+            // Relaxed for the same reasons as in `notify`: the caller's
+            // fence orders the load, and the reservation reaches the claimed
+            // worker through the claim's release.
+            let idle = self.wake.idle.load(Ordering::Relaxed);
             if idle == 0 {
                 return;
             }
-            self.wake.searching.fetch_add(1, Ordering::SeqCst);
+            self.wake.searching.fetch_add(1, Ordering::Relaxed);
             if self.claim(idle) {
                 return;
             }
@@ -623,9 +649,15 @@ impl Pool {
     fn undo_claim(&self) -> bool {
         #[cfg(test)]
         tests::at_wake_point(tests::WakePoint::AfterFailedClaim);
-        if self.wake.searching.fetch_sub(1, Ordering::SeqCst) != 1 {
+        if self.wake.searching.fetch_sub(1, Ordering::Relaxed) != 1 {
             return false;
         }
+
+        // Pairs with the fence in `Searcher::prepare_park`, as a kick's does:
+        // a kick that saw this count returned without looking, so either the
+        // loads after this fence see a bit published since, or that worker's
+        // last look saw the kicked backlog. The return above is relaxed
+        // because this fence, not the return, orders the loads that follow.
         fence(Ordering::SeqCst);
         true
     }
@@ -643,15 +675,18 @@ impl Pool {
         // publication is claimed at most once. The exchange can also fail
         // spuriously or because a worker published or withdrew its bit, and
         // the retry uses the set as it is now.
-        // The reserved count precedes this exchange, so a withdrawing worker
-        // that sees the cleared bit can return it before this wake is signalled.
+        // The exchange releases the reserved count to the claimed worker,
+        // whose withdrawal acquires it, so the worker's later return of that
+        // count follows the reservation in the count's modification order,
+        // even when its wait returns before this wake signals it. A failed
+        // exchange only yields the set to retry with, so it is relaxed.
         while idle != 0 {
             let index = idle.trailing_zeros();
             match self.wake.idle.compare_exchange_weak(
                 idle,
                 idle & !(1 << index),
-                Ordering::SeqCst,
-                Ordering::SeqCst,
+                Ordering::Release,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => {
                     #[cfg(test)]
@@ -883,12 +918,13 @@ impl<'a> Searcher<'a> {
     fn begin(&mut self) -> bool {
         // The cap only limits contention, so it is a soft check: workers that
         // load the count at once can all pass it, and claimed workers inherit
-        // counts without it, which is harmless.
-        let searching = self.pool.wake.searching.load(Ordering::SeqCst);
+        // counts without it, which is harmless. Nothing is published with the
+        // count: a kick that sees it relies on the fence after its return.
+        let searching = self.pool.wake.searching.load(Ordering::Relaxed);
         if 2 * searching >= self.pool.workers() {
             return false;
         }
-        self.pool.wake.searching.fetch_add(1, Ordering::SeqCst);
+        self.pool.wake.searching.fetch_add(1, Ordering::Relaxed);
         self.searching = true;
         true
     }
@@ -915,7 +951,14 @@ impl<'a> Searcher<'a> {
         assert!(!self.published, "search count returned while published");
         self.searching = false;
         let pool = self.pool;
-        if pool.wake.searching.fetch_sub(1, Ordering::SeqCst) == 1 {
+        // Release: this is the one return of a count that no fence of its own
+        // follows, and the worker goes on to run what its search stole. Its
+        // claim release on the victim and the tail it published must reach
+        // whoever returns the last count: that return's fence acquires every
+        // earlier return in the count's modification order, so its look, and
+        // the search of the worker it wakes, see the backlog as this worker
+        // left it. A last return here is followed by the kick's fence.
+        if pool.wake.searching.fetch_sub(1, Ordering::Release) == 1 {
             pool.kick();
         }
     }
@@ -934,17 +977,25 @@ impl<'a> Searcher<'a> {
         assert!(!self.published, "worker published twice");
         assert!(ready.is_empty(), "worker parked with runnables queued");
         let pool = self.pool;
-        pool.wake.idle.fetch_or(1 << self.index, Ordering::SeqCst);
+        pool.wake.idle.fetch_or(1 << self.index, Ordering::Relaxed);
         self.published = true;
 
         // The look below covers whatever this worker would hand on, so the
-        // count is returned without a wake.
+        // count is returned without a wake. The return is relaxed because it
+        // has nothing to publish: a search that stole is left through
+        // `leave_search` before its runnables are polled, and this run queue
+        // is empty, so the count returned here was held through a search
+        // that moved nothing.
         if mem::take(&mut self.searching) {
-            pool.wake.searching.fetch_sub(1, Ordering::SeqCst);
+            pool.wake.searching.fetch_sub(1, Ordering::Relaxed);
         }
 
-        // Pairs with the fence of a push or kick: either its wake sees this
-        // publication, or the look below sees its work.
+        // Pairs with the fences in `Pool::push_batch`, `Pool::kick`, and
+        // `Pool::undo_claim`: either the loads after their fence see the bit
+        // published above, or the look below sees their work, the global
+        // queue's length, a run queue's tail, or the return of a count. The
+        // publication above and the loads below are relaxed, since this
+        // fence pair orders them.
         fence(Ordering::SeqCst);
         if pool.has_global() {
             self.withdraw();
@@ -959,14 +1010,17 @@ impl<'a> Searcher<'a> {
         }
 
         // A worker holding a count searches, or hands the duty on when it
-        // returns the last count, which is ordered after this publication, so
-        // it finds the backlog or wakes a parked worker, this one included.
-        // Otherwise this worker takes the count and searches.
-        if pool.wake.searching.load(Ordering::SeqCst) != 0
+        // returns the last count. That return precedes the fence of the kick
+        // it hands on with, which pairs with the fence above, so its look sees
+        // this publication and finds the backlog or wakes a parked worker,
+        // this one included. Otherwise this worker takes the count and
+        // searches. The count reaches a claimed worker through the claim's
+        // release, so the load and the exchange are relaxed.
+        if pool.wake.searching.load(Ordering::Relaxed) != 0
             || pool
                 .wake
                 .searching
-                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
                 .is_err()
         {
             return Park::Wait;
@@ -977,9 +1031,10 @@ impl<'a> Searcher<'a> {
 
         // A push into the global queue may have claimed this worker meanwhile,
         // bringing a count of its own. That one is returned here, and is never
-        // the last, since this worker holds the count it just took.
+        // the last, since this worker holds the count it just took and the
+        // withdrawal acquired the claim's reservation.
         if self.withdraw() {
-            pool.wake.searching.fetch_sub(1, Ordering::SeqCst);
+            pool.wake.searching.fetch_sub(1, Ordering::Relaxed);
         }
         self.searching = true;
         Park::Search
@@ -1026,7 +1081,9 @@ impl<'a> Searcher<'a> {
         assert!(self.published, "withdrew an idle bit never published");
         self.published = false;
         let bit = 1 << self.index;
-        let claimed = self.pool.wake.idle.fetch_and(!bit, Ordering::SeqCst) & bit == 0;
+        // Acquire pairs with the release of a claim's exchange: a count the
+        // claim reserved is held, and later returned, after the reservation.
+        let claimed = self.pool.wake.idle.fetch_and(!bit, Ordering::Acquire) & bit == 0;
         if claimed {
             assert!(!self.searching, "published while holding a count");
             self.searching = true;
