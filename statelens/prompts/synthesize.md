@@ -6,9 +6,10 @@ its events with the probes a StateLens campaign installed and with harness obser
 off at the target state, and lets the fuzzer and the base's oracles run on from there. You
 write only the state-building prefix. The base's own driver runs it through a hook point,
 the trusted continuation: the driver starts the network and the honest replicas, runs your
-prefix, and at the handoff takes back every capability it lent you, reverts what you changed,
-starts the base's Byzantine actors, and runs its own fault schedule, liveness wait and oracles
-in the same runtime.
+prefix, and at the handoff takes back every capability it lent you, reverts what it can of what
+you changed, starts the base's Byzantine actors, and runs its own fault schedule for a fixed
+window and then its safety oracles, in the same runtime. The continuation checks safety only:
+nothing after the release waits for progress.
 
 ## Where you are
 
@@ -150,16 +151,19 @@ calls with the base's first generic argument. `Prefix` has two methods:
 - `plan(&mut self, pins: &mut Pins<'_>) -> Budget`, before the runtime starts: split the
   knobs from `pins.raw_bytes()`, pick them, pin the fields the History fixes through `pins`,
   open the stages, and return the budget from `Stages::budget`: the sum of your stage
-  deadlines and the release delay `d`. The runner's deadline is the base's plus both.
+  deadlines, which the runner cuts to 60 s (`MAX_PREFIX_BUDGET`), and the release delay `d`.
+  Keep the stage deadlines, setup included, within 60 s.
 - `run(self: Box<Self>, cx: PrefixContext<P>) -> PrefixFuture`, after the network and the
   honest replicas started and before anything of the base's adversary: drive `E1` to
   `E(n-1)` through `cx`, call `Stages::handoff`, and return. Returning is the handoff: the
-  context stops working, and the runner releases, after `d`, everything you changed.
+  context stops working, and the runner releases, after `d`, what you changed. If `run` has
+  not returned once the sum of your stage deadlines, cut to 60 s, has passed, the runner
+  ends it there.
 
 A prefix never holds driver code. The script vetoes a module that starts a runtime or calls
 the runner, a base driver or entry, an engine or validator spawn, a Disrupter or a Twins
-backend, network setup or an oracle link change, a runtime deadline, an oracle or the
-liveness wait, `set_compromised` or the helper's observer. What the prefix may do is what
+backend, network setup or an oracle link change, a runtime deadline, an oracle,
+`set_compromised` or the helper's observer. What the prefix may do is what
 `PrefixContext` offers:
 
 - topology: `participants`, `byzantine` (B, the compromised identity, when the base runs
@@ -175,9 +179,15 @@ liveness wait, `set_compromised` or the helper's observer. What the prefix may d
 - the runner's recorders, installed at spawn and stamped as they record: `deliveries` (what a
   replica's engine received through its gate), `activities` (what its reporter was told),
   `automaton` (verify and certify requested and answered), `elections` (the leaders its voter
-  elected) and `blocks` (the peers it blocked), and `blocked`, the network's blocked pairs now;
-- changes the runner reverts at the release: `set_link`, `set_latency` (a replica's
-  application latencies), `crash` and `restart` (from its journal, with its reporter).
+  elected) and `blocks` (the peers it blocked), and `blocked`, the network's blocked pairs now.
+  An accessor returns a `Log`, a snapshot that reads as a slice. A log, B's inbox and a held
+  queue keep at most 4096 entries (`LOG_CAP`): past it a log records nothing more and a gate
+  drops what it would hold; once the prefix reads one that dropped an entry, the helper treats
+  it as a cut trace (every later witness is `unverifiable (trace truncated)`), so a prefix never
+  depends on more;
+- changes the runner reverts at the release, as far as it can: `set_link`, `set_latency` (a
+  replica's application latencies), `crash` and `restart` (from its journal, with its
+  reporter).
 
 Pick one shape and record it in the module header.
 
@@ -295,14 +305,18 @@ and bind the incarnation it began as `inc<s>`. In Shape A, add a marked call of 
 the base's restart code (the subsystem rules name the known sites). A line that relates a
 replica across a restart names the incarnation.
 
-## Handoff and recovery
+## Handoff and release
 
-Handoff comes first; recovery is the runner's.
+Handoff comes first; the release is the runner's.
 
 - Shape B drives `E1` to `E(n-1)` online, polling in simulated time with `cx.sleep`, with a
   simulated-time deadline per stage: passing it is a miss, never a wait. Race every await on
   a reply of the system under test against the deadline with `commonware_macros::select!`; a
   dropped reply is a miss.
+- The runner ends a prefix that has not returned once the sum of its stage deadlines, cut to
+  60 s (`MAX_PREFIX_BUDGET`), has passed: the first stage without an outcome misses (`the
+  runner ended the prefix at its budget`) and the handoff is lost. That sum must cover every
+  wait the prefix makes, the setup before `E1` included, and stay within 60 s.
 - `Stages::handoff` takes a plain closure that reads `En`'s witness and builds it inside the
   call, with no await or yield, and no value read before the call. The helper takes a
   position, calls it, and takes the handoff mark: the handoff holds only when nothing came
@@ -318,10 +332,13 @@ Handoff comes first; recovery is the runner's.
   delay `plan` returned, a knob in [0, the base's fault phase): held messages and blocks stay
   held, a crashed replica stays down, a link and a latency stay changed. At the release the
   runner delivers the held messages and blocks in arrival order, restores the base's links
-  and latencies, restarts every crashed replica, starts the base's actors for B, and only then
-  the base's fault schedule, its liveness wait, re-based on the highest view finalized at the
-  release, and its oracles. You never release, restore or heal anything for the base.
-- The runtime deadline is the runner's: the base's, plus your budget's prefix and release.
+  and latencies, restarts every crashed replica, and starts the base's actors for B. Then the
+  base runs its fault schedule, whose view-indexed faults are re-based on the highest view
+  finalized at the release, for a fixed window, and then its safety oracles. You never
+  release, restore or heal anything for the base.
+- The release is best-effort: it restores what it can, and an application request already
+  sleeping on a latency you set keeps that latency. Nothing after it needs the system to
+  recover or make progress, so a target state may leave the replicas stalled.
 
 ## Control
 
@@ -334,8 +351,9 @@ event before `En` and every witness is `exact` or `construction`.
 
 ## Oracles
 
-The base's free-running phase and every oracle are the runner's, which runs them after the
-release; the prefix never calls, copies or weakens one, and never measures progress. The
+The base's free-running phase and its safety oracles are the runner's, which runs them after
+the release; the prefix never calls, copies or weakens one, and never measures progress. No
+oracle of a continuation waits for progress, so a History needs no progress after `En`. The
 helper prints `done` after the last oracle. Stage checks are not oracles.
 
 ## Fabrication and B
@@ -395,6 +413,10 @@ What each signal asks for:
   trace's values and sites with what the stage expects.
 - `En` missed, or the handoff lost: the knob domains, the timing, and what keeps the state
   pending at the handoff.
+- A miss with `the runner ended the prefix at its budget`: `run` waited past its budget.
+  Count every wait in the stage deadlines you pass to `Stages::budget`, and race every await
+  against its stage's deadline. The runner cuts the budget to 60 s (`MAX_PREFIX_BUDGET`), so
+  a larger sum does not help: shorten the waits until the deadlines, setup included, fit.
 - `unverifiable`, or `witness rejected`: a witness that binds the relation: an intrinsic
   site for an existential line, otherwise an exact observable keyed by the bound entities,
   with positions where order matters.

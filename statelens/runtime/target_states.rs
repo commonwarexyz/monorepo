@@ -23,18 +23,20 @@
 //! [Watch] is the runner's observer, which only the thin target the script writes
 //! passes: it stamps what the runner's recorders record, publishes the compromised
 //! identity, prints the `release` line and the `actors` lines of the runner's actor
-//! check, and prints `done` after the base's last oracle.
+//! check, and prints `done` after the base's last oracle. When the runner ended the
+//! prefix at its budget, it closes the stages first: the first stage without an
+//! outcome misses and the handoff is lost.
 //!
-//! Once the trace drops an observation at its cap, what it holds from that position
-//! on is incomplete, so the helper prints a `truncated` line with the position, at
-//! its first event after the cut, and neither a stage read at or after the cut nor
-//! a handoff whose mark follows it holds.
+//! Once the trace drops an observation at its cap, or the prefix reads one of the
+//! runner's recorder logs (or a replica's held messages) that dropped an entry at its
+//! cap, what the prefix reads from that position on is incomplete, so the helper
+//! prints a `truncated` line with the earliest such position, at its first event
+//! after the cut, and neither a stage read at or after the cut nor a handoff whose
+//! mark follows it holds. A full log the prefix never reads cuts nothing.
 //!
 //! Environment switches, each read once per process:
 //! - `STATELENS_REACH=1` prints the `[statelens-reach]` lines on stderr.
 //! - `STATELENS_REACH_CONTROL=1` makes [control] true: the control run.
-//! - `STATELENS_REACH_LARGEST=1` makes the runner run the base's largest progress
-//!   budget: the extra reach replay.
 
 // A scaffold module is a child of this one, and a child module can use every
 // private item of its parent. The helper's code is therefore in a private module of
@@ -66,15 +68,6 @@ mod imp {
     fn reach() -> bool {
         static REACH: OnceLock<bool> = OnceLock::new();
         *REACH.get_or_init(|| std::env::var("STATELENS_REACH").is_ok_and(|value| value == "1"))
-    }
-
-    /// Whether `STATELENS_REACH_LARGEST=1`, read once: the extra replay, which runs the
-    /// base's largest progress budget.
-    fn largest() -> bool {
-        static LARGEST: OnceLock<bool> = OnceLock::new();
-        *LARGEST.get_or_init(|| {
-            std::env::var("STATELENS_REACH_LARGEST").is_ok_and(|value| value == "1")
-        })
     }
 
     /// Whether `STATELENS_REACH_CONTROL=1`, read once: the control run, in which the
@@ -114,16 +107,24 @@ mod imp {
         seq
     }
 
-    /// The position of the first observation the trace dropped at its cap, or `None`.
-    /// The first time it finds one while stages are open on this thread, it prints
-    /// the `truncated` line.
+    /// The earliest position from which an observation is missing: the first one the
+    /// trace dropped at its cap, or the first entry a runner log the prefix read
+    /// dropped at its cap ([Watch] hears of it), or `None`. Whenever that position is earlier than
+    /// the one last printed, it prints a `truncated` line with it.
     fn truncation() -> Option<u64> {
-        let seq = statelens::truncated()?;
-        let card = STATE.with(|state| {
+        let trace = statelens::truncated();
+        let (seq, card) = STATE.with(|state| {
             let mut state = state.borrow_mut();
-            let first = !std::mem::replace(&mut state.noticed, true);
-            first.then_some(state.card)
-        });
+            let seq = match (trace, state.dropped) {
+                (Some(a), Some(b)) => a.min(b),
+                (a, b) => a.or(b)?,
+            };
+            let earlier = state.noticed.is_none_or(|printed| seq < printed);
+            if earlier {
+                state.noticed = Some(seq);
+            }
+            Some((seq, earlier.then_some(state.card)))
+        })?;
         if let Some(card) = card {
             emit(card, &format!("truncated seq={seq}"));
         }
@@ -496,8 +497,10 @@ mod imp {
         settled: Vec<bool>,
         /// The stages recorded as held.
         held: u32,
-        /// Whether the `truncated` line was printed.
-        noticed: bool,
+        /// The position the last `truncated` line printed.
+        noticed: Option<u64>,
+        /// The earliest position at which a runner log the prefix read dropped an entry.
+        dropped: Option<u64>,
         since: u64,
         open: bool,
         handed_off: bool,
@@ -514,7 +517,8 @@ mod imp {
                 n: 0,
                 settled: Vec::new(),
                 held: 0,
-                noticed: false,
+                noticed: None,
+                dropped: None,
                 since: 0,
                 open: false,
                 handed_off: false,
@@ -553,7 +557,9 @@ mod imp {
 
         /// Takes the knobs, so none is picked later, and returns the budget the prefix
         /// asks of the runner: `prefix`, the sum of the stage deadlines, and `release`,
-        /// the release delay `d`. The runner's deadline is the base's plus both.
+        /// the release delay `d`. The runner cuts `prefix` to
+        /// [runner::MAX_PREFIX_BUDGET] (60 s) and `release` to the base's fault phase
+        /// (30 s).
         pub fn budget(&self, knobs: Knobs, prefix: Duration, release: Duration) -> runner::Budget {
             drop(knobs);
             runner::Budget { prefix, release }
@@ -707,6 +713,9 @@ mod imp {
         }
 
         fn released(&self, release: &Release) {
+            if release.overran {
+                end_overrun();
+            }
             let list = |items: Vec<String>| {
                 if items.is_empty() {
                     "-".to_string()
@@ -737,6 +746,19 @@ mod imp {
             );
         }
 
+        fn dropped(&self, seq: u64) {
+            // Position 0 is an entry recorded while nothing watched.
+            if seq == 0 {
+                return;
+            }
+            STATE.with(|state| {
+                let mut state = state.borrow_mut();
+                if !state.card.is_empty() {
+                    state.dropped = Some(state.dropped.map_or(seq, |first| first.min(seq)));
+                }
+            });
+        }
+
         fn done(&self) {
             // Shape A: the stages are evaluated over the trace of the whole run.
             let evaluate = STATE.with(|state| {
@@ -748,24 +770,52 @@ mod imp {
             }
             emit(&card(), "done");
         }
+    }
 
-        fn largest(&self) -> bool {
-            largest()
+    /// The detail of the stage a prefix the runner ended at its budget left open.
+    const OVERRAN: &str = "the runner ended the prefix at its budget";
+
+    /// Closes the stages of a prefix the runner ended at its budget: the first stage
+    /// without an outcome misses, and the handoff is lost. Does nothing for a Shape A
+    /// scaffold, whose stages [Watch] evaluates at the end, and after a handoff.
+    fn end_overrun() {
+        let first = STATE.with(|state| {
+            let state = state.borrow();
+            if state.card.is_empty() || state.handed_off || state.evaluate.is_some() {
+                return None;
+            }
+            Some(
+                state
+                    .settled
+                    .iter()
+                    .position(|settled| !settled)
+                    .and_then(|index| u32::try_from(index + 1).ok()),
+            )
+        });
+        let Some(first) = first else {
+            return;
+        };
+        if let Some(k) = first {
+            settle(k, Outcome::Missed(OVERRAN.to_string()), true);
         }
+        Stages { _private: () }.handoff(|| None);
     }
 
     /// Records the outcome of stage `k`, and returns whether it recorded it held.
     /// `last` lets the handoff, the panic hook and [Stages::unverifiable] record
     /// stage n; a `cannot:` miss records it too. Once the trace dropped an
-    /// observation, a miss other than a `cannot:`, and a witness read at or after the
-    /// dropped position, are `unverifiable (trace truncated)`.
+    /// observation, a miss other than a `cannot:` or the runner's end of the prefix,
+    /// which no trace decides, and a witness read at or after the dropped position,
+    /// are `unverifiable (trace truncated)`.
     fn settle(k: u32, outcome: Outcome, last: bool) -> bool {
         let cut = truncation();
         let outcome = match outcome {
             Outcome::Held(witness) if cut.is_some_and(|seq| witness.read >= seq) => {
                 Outcome::Unverifiable(TRUNCATED.to_string())
             }
-            Outcome::Missed(text) if cut.is_some() && !text.starts_with("cannot:") => {
+            Outcome::Missed(text)
+                if cut.is_some() && !text.starts_with("cannot:") && text != OVERRAN =>
+            {
                 Outcome::Unverifiable(TRUNCATED.to_string())
             }
             outcome => outcome,
@@ -1062,7 +1112,12 @@ mod imp {
             assert_ne!(seq, 0, "a recorder takes a position while the stages watch");
             let cited = cite("deliver", "R=1, v=2", "notarize", recorded);
             assert_eq!(cited.seq(), seq);
-            stages.handoff(|| Some(Witness::exact("R=1@E1", &[("deliver", "R=1", "x", Some(cited))])));
+            stages.handoff(|| {
+                Some(Witness::exact(
+                    "R=1@E1",
+                    &[("deliver", "R=1", "x", Some(cited))],
+                ))
+            });
             let check = ActorCheck {
                 at: "release",
                 actors: Vec::new(),
@@ -1072,12 +1127,125 @@ mod imp {
             Watch.done();
             let lines = LINES.take();
             assert!(lines.contains(&format!("entry deliver[R=1,v=2]=notarize seq={seq}")));
-            assert!(lines.contains(&"actors release ok -".to_string()), "{lines:#?}");
-            assert!(lines.contains(
-                &"release base=0 gates=- delivered=0 blocks=0 links=- latencies=- restarted=-"
-                    .to_string()
-            ));
+            assert!(
+                lines.contains(&"actors release ok -".to_string()),
+                "{lines:#?}"
+            );
+            assert!(
+                lines.contains(
+                    &"release base=0 gates=- delivered=0 blocks=0 links=- latencies=- restarted=-"
+                        .to_string()
+                )
+            );
             assert_eq!(lines.last().map(String::as_str), Some("done"));
+        }
+
+        #[test]
+        fn test_a_prefix_ended_at_its_budget_misses_its_open_stage() {
+            let mut stages = open("TS-9007", 3);
+            observe(1, 1);
+            let first = at(statelens::mark());
+            assert!(stages.held(1, Witness::intrinsic("R=0@E1", first)));
+            let overran = Release {
+                overran: true,
+                ..Release::default()
+            };
+            Watch.released(&overran);
+            let lines = LINES.take();
+            let missed = find(&lines, "E2/3").expect("the open stage has a line");
+            assert_eq!(
+                lines[missed],
+                "E2/3 missed the runner ended the prefix at its budget"
+            );
+            assert_eq!(find(&lines, "E3/3"), None, "{lines:#?}");
+            let handoff = find(&lines, "handoff lost mark=").expect("the handoff is lost");
+            let reach = find(&lines, "reach 1/3 control=0").expect("the reach line prints");
+            let release = find(&lines, "release base=0").expect("the release line prints");
+            assert!(
+                missed < handoff && handoff < reach && reach < release,
+                "{lines:#?}"
+            );
+            assert_eq!(FEATURES.take(), vec![1]);
+            // After the handoff, a release closes nothing.
+            Watch.released(&overran);
+            let lines = LINES.take();
+            assert_eq!(find(&lines, "handoff"), None, "{lines:#?}");
+            assert!(find(&lines, "release base=0").is_some());
+        }
+
+        #[test]
+        fn test_a_prefix_ended_with_only_its_last_stage_open_misses_it() {
+            let _stages = open("TS-9008", 1);
+            Watch.released(&Release {
+                overran: true,
+                ..Release::default()
+            });
+            let lines = LINES.take();
+            assert!(
+                lines
+                    .contains(&"E1/1 missed the runner ended the prefix at its budget".to_string()),
+                "{lines:#?}"
+            );
+            assert!(find(&lines, "handoff lost mark=").is_some(), "{lines:#?}");
+            assert!(find(&lines, "reach 0/1 control=0").is_some(), "{lines:#?}");
+        }
+
+        #[test]
+        fn test_a_prefix_ended_at_its_budget_after_a_cut_still_misses() {
+            let mut stages = open("TS-9009", 3);
+            observe(1, 1);
+            let first = at(statelens::mark());
+            assert!(stages.held(1, Witness::intrinsic("R=0@E1", first)));
+            observe(1, statelens::TRACE_CAP);
+            assert!(statelens::truncated().is_some(), "the trace is cut");
+            Watch.released(&Release {
+                overran: true,
+                ..Release::default()
+            });
+            let lines = LINES.take();
+            assert!(
+                lines
+                    .contains(&"E2/3 missed the runner ended the prefix at its budget".to_string()),
+                "{lines:#?}"
+            );
+            assert_eq!(find(&lines, "E3/3"), None, "{lines:#?}");
+            assert!(find(&lines, "handoff lost mark=").is_some(), "{lines:#?}");
+            assert!(find(&lines, "reach 1/3 control=0").is_some(), "{lines:#?}");
+        }
+
+        #[test]
+        fn test_a_recorder_drop_cuts_like_the_trace() {
+            let mut stages = open("TS-9009", 3);
+            observe(1, 1);
+            let first = at(statelens::mark());
+            assert!(stages.held(1, Witness::intrinsic("R=0@E1", first)));
+            // A runner recorder drops the entry it stamps next.
+            let (seq, _) = Watch.position();
+            Watch.dropped(seq);
+            observe(1, 1);
+            let later = at(statelens::mark());
+            assert!(
+                !stages.held(2, Witness::intrinsic("R=0@E2", later)),
+                "a stage read after the drop does not hold"
+            );
+            stages.handoff(|| Some(Witness::intrinsic("R=0@E3", later)));
+            let lines = LINES.take();
+            assert!(lines.contains(&format!("truncated seq={seq}")), "{lines:#?}");
+            assert!(
+                lines.contains(&"E2/3 unverifiable (trace truncated)".to_string()),
+                "{lines:#?}"
+            );
+            assert!(find(&lines, "handoff lost mark=").is_some(), "{lines:#?}");
+            assert_eq!(FEATURES.take(), vec![1]);
+            // An entry dropped while nothing watched (position 0) cuts nothing.
+            let mut stages = open("TS-9009", 1);
+            Watch.dropped(0);
+            observe(1, 1);
+            let last = at(statelens::mark());
+            stages.handoff(|| Some(Witness::intrinsic("R=0@E1", last)));
+            let lines = LINES.take();
+            assert_eq!(find(&lines, "truncated"), None, "{lines:#?}");
+            assert!(find(&lines, "handoff holds mark=").is_some(), "{lines:#?}");
         }
 
         #[test]

@@ -5190,7 +5190,8 @@ class BareCampaign(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.repo, True)
         for relative, text in (
             ("consensus/src/simplex/mod.rs", "pub mod types;\n"),
-            ("consensus/fuzz/core/src/continuation.rs", "pub trait Prefix<P> {}\n"),
+            ("consensus/fuzz/core/src/continuation.rs",
+             "pub trait Prefix<P> {}\n\npub struct Release {\n    pub overran: bool,\n}\n"),
             ("consensus/fuzz/simplex/src/trusted.rs", "pub fn fuzz_with_prefix<P>() {}\n"),
             ("statelens/.gitignore", "campaign/\n"),
             ("statelens/config.env", "STATELENS_AGENT=claude\n"),
@@ -6494,6 +6495,35 @@ Order: E1 and E2 in either order.""")
         self.assertEqual(self.stage(result, 4)["detail"], "witness rejected: as")
         self.assertEqual(sl.verdict_text(result), "UNVERIFIED 2/4")
 
+    def test_a_prefix_the_runner_ended_at_its_budget_misses_its_open_stage(self):
+        # The helper's lines when the runner ends the prefix at its budget: the first open
+        # stage misses with this detail, then the handoff is lost, before the release line.
+        # Its fix is the budget, wherever that stage is.
+        helper = (HERE.parent / "runtime" / "target_states.rs").read_text()
+        overran = sl.OVERRAN
+        self.assertIn(f'const OVERRAN: &str = "{overran}";', helper)
+        for k, held, verdict in (
+            (1, (), "UNREACHED 0/4"),
+            (2, REACHED[1:2], "PARTIAL 1/4"),
+            (4, REACHED[1:5], "PARTIAL 3/4"),
+        ):
+            lines = ("phase prefix",) + held + (
+                f"E{k}/4 missed {overran}",
+                "handoff lost mark=12 next=-",
+                "phase continuation",
+                f"reach {k - 1}/4 control=0",
+                "done",
+            )
+            result = self.verdict(lines)
+            self.assertEqual(sl.verdict_text(result), verdict, result["reasons"])
+            self.assertEqual(self.stage(result, k)["detail"], overran)
+            self.assertIn(f"E{k} missed: {overran}", result["reasons"])
+            feedback = sl.reach_feedback(result)
+            self.assertIn(f"- E{k} missed ({overran}): {sl.FEEDBACK_FIXES['budget']}", feedback)
+            for row in ("first", "middle", "last"):
+                self.assertNotIn(sl.FEEDBACK_FIXES[row], feedback)
+            self.assertIn("release base=0 gates=-", feedback)
+
     def test_partial_counts_the_stages_held(self):
         # A version that holds nothing before its miss ranks below one that holds E1.
         none = ("phase prefix",) + tuple(
@@ -6684,33 +6714,20 @@ E2. R: queues certification of a view.
             feedback = sl.reach_feedback(result)
             self.assertIn(f"{sl.NO_CONTINUATION} in the canonical replay: {reason}", feedback)
             self.assertIn(sl.FEEDBACK_FIXES["continuation"], feedback)
-        # Every replay that ran to its end counts, the control and the largest included.
+        # Every replay that ran to its end counts, the control and the final included.
         canonical = (0, replay_output(REACHED))
-        for name in ("control", "largest"):
-            runs = {"control": control, "largest": canonical}
+        for name in ("control", "final"):
+            runs = {"control": control, "final": canonical}
             runs[name] = (0, replay_output(CONTROL if name == "control" else REACHED, actors=()))
-            result = sl.reach_verdict(card, MODULE, canonical, runs["control"],
-                                      largest=runs["largest"])
+            result = sl.reach_verdict(card, MODULE, canonical, runs["control"], runs["final"])
             self.assertEqual(result["verdict"], sl.NO_CONTINUATION)
             self.assertEqual(result["continuation"][0], name)
         # It is never kept: it is the last verdict of the order.
         self.assertEqual(sl.VERDICT_ORDER[-1], sl.NO_CONTINUATION)
 
-    def test_the_largest_replay_is_judged_like_the_others(self):
+    def test_a_crash_after_a_failed_actor_check_says_so(self):
         card = reach_card()
-        canonical, control = (0, replay_output(REACHED)), (0, replay_output(CONTROL))
-        result = sl.reach_verdict(card, MODULE, canonical, control, largest=canonical)
-        self.assertEqual(sl.verdict_text(result), "REACHED 4/4", result["reasons"])
-        self.assertIn("largest", result["replays"])
-        # A deadline the continuation cannot keep under the base's largest budget.
-        timeout = REACHED[:-1] + ("!==77== ERROR: libFuzzer: timeout after 1201 seconds",)
-        result = sl.reach_verdict(card, MODULE, canonical, control,
-                                  largest=(1, replay_output(timeout)))
-        self.assertEqual(result["verdict"], sl.CRASH)
-        self.assertEqual(result["crash"]["replay"], "largest")
-        self.assertEqual(result["crash"]["kind"], "timeout")
-        self.assertNotIn("actors failed", result["annotations"])
-        # A crash after a failed actor check says so.
+        control = (0, replay_output(CONTROL))
         failed = (ACTORS[0], "actors release failed 0:disrupter=finished")
         crashed = (1, replay_output(REACHED[:-1] + panicked("a.rs:1:1", "boom"), actors=failed))
         result = sl.reach_verdict(card, MODULE, crashed, control)
@@ -7232,11 +7249,11 @@ class HandoverLines(unittest.TestCase):
             f"CONSENSUS_FUZZ_LOG=1 NIGHTLY_VERSION=nightly just run {self.SCAFFOLD} "
             "/repo/statelens/campaign/reach/empty",
         )
-        # The extra replay's file replays with the base's largest progress budget.
-        _run, largest = self.synthesis("/repo").run_lines(
-            self.SCAFFOLD, pathlib.Path("/repo/statelens/campaign/reach/empty"), "largest"
+        # The final replay sets no switch of its own.
+        _run, final = self.synthesis("/repo").run_lines(
+            self.SCAFFOLD, pathlib.Path("/repo/statelens/campaign/reach/empty"), "final"
         )
-        self.assertIn("STATELENS_REACH=1 STATELENS_REACH_LARGEST=1 CONSENSUS_FUZZ_LOG=1", largest)
+        self.assertIn("STATELENS_REACH=1 CONSENSUS_FUZZ_LOG=1", final)
 
     def test_a_checkout_with_a_space_is_quoted_and_the_placeholder_is_not(self):
         run, replay = self.synthesis("/a b").run_lines(self.SCAFFOLD)
@@ -7317,7 +7334,8 @@ class Synthesize(unittest.TestCase):
             ("consensus/src/simplex/mod.rs", "pub mod types;\n"),
             ("consensus/src/simplex/voter.rs", VOTER_BASE),
             ("consensus/fuzz/core/src/simplex.rs", CORE),
-            ("consensus/fuzz/core/src/continuation.rs", "pub trait Prefix<P> {}\n"),
+            ("consensus/fuzz/core/src/continuation.rs",
+             "pub trait Prefix<P> {}\n\npub struct Release {\n    pub overran: bool,\n}\n"),
             ("consensus/fuzz/simplex/src/trusted.rs", "pub fn fuzz_with_prefix<P>() {}\n"),
             ("consensus/fuzz/simplex/Cargo.toml", FUZZ_MANIFEST),
             ("consensus/fuzz/simplex/src/lib.rs", "pub mod state_cov;\n\npub fn fuzz() {}\n"),
@@ -7386,10 +7404,9 @@ class Synthesize(unittest.TestCase):
         # by card, directory and replay, ahead of `replays`, or None.
         self.compiles = lambda _scaffold: True
         self.replay_for = lambda _key, _tag, _name: None
-        # The trusted runner's lines every replay prints, and the replays that ran with
-        # STATELENS_REACH_LARGEST=1, by directory.
+        # The trusted runner's lines every replay prints, and the replays that ran, by name.
         self.actors = ACTORS
-        self.largest = []
+        self.replayed = []
 
     def fake_run(self, command, log_path, cwd, stdin_text=None, echo=True, timeout=None,
                  env=None):
@@ -7439,9 +7456,7 @@ class Synthesize(unittest.TestCase):
         self.assertNotIn("STATELENS_BYZANTINE", env)
         cwd = pathlib.Path(cwd)
         name = "control" if env.get("STATELENS_REACH_CONTROL") == "1" else cwd.name
-        if env.get("STATELENS_REACH_LARGEST") == "1":
-            self.assertEqual(cwd.name, "largest")
-            self.largest.append(self.rel(cwd))
+        self.replayed.append(name)
         key, tag = cwd.parts[-3], cwd.parts[-2]
         card = sl.PAIR_KEY.match(key)["card"]
         crash = cwd / "crash-da39a3ee5e6b4b0d3255bfef95601890afd80709"
@@ -7602,7 +7617,7 @@ class Synthesize(unittest.TestCase):
         self.assertEqual(self.read(sl.FUZZ_MANIFEST).count("simplex_a_ts0004_statelens"), 2,
                          "one [[bin]] block, its name and its path")
 
-    def test_the_thin_target_and_the_extra_replay_are_the_script_s(self):
+    def test_the_thin_target_and_the_replays_are_the_script_s(self):
         self.steps = [self.write_scaffold()]
         self.assertEqual(self.synthesize(), 0)
         self.assertEqual(
@@ -7614,11 +7629,10 @@ class Synthesize(unittest.TestCase):
         self.assertIn("trusted entry `fuzz_with_prefix::<SimplexCertificateMock, Standard, "
                       "CodeCoverage, _, _>`; B's actors from the release: one Disrupter for "
                       "participant 0", self.prompts[0])
-        # Every version is replayed once more with the base's largest progress budget.
-        self.assertEqual(self.largest, ["statelens/campaign/reach/TS-0004_simplex_a/attempt-0/"
-                                        "largest"])
+        # A version is replayed canonical and control, and the kept one once more.
+        self.assertEqual(self.replayed, ["canonical", "control", "final"])
         report = self.report()
-        self.assertIn("## The largest replay", report)
+        self.assertIn("## The final replay", report)
         self.assertIn("actors release ok 0:disrupter=running", report)
 
     def test_a_version_whose_base_actors_did_not_run_is_never_kept(self):
@@ -7714,6 +7728,16 @@ class Synthesize(unittest.TestCase):
                       "`pub fn fuzz_with_prefix<...`): merge the harness with the hook API into "
                       "this branch, then run `just clean` and a new campaign before synthesis",
                       self.output + "\n".join(self.said))
+        self.assertEqual(self.prompts, [])
+        # The harness before D70 has both hooks but no `Release.overran`, which the helper reads.
+        self.put("consensus/fuzz/simplex/src/trusted.rs", "pub fn fuzz_with_prefix<P>() {}\n")
+        self.put("consensus/fuzz/core/src/continuation.rs",
+                 "pub trait Prefix<P> {}\n\npub struct Release {\n    pub largest: bool,\n}\n")
+        self.said.clear()
+        self.assertEqual(self.synthesize(), 2)
+        self.assertIn("the simplex fuzz harness predates the trusted continuation "
+                      "(consensus/fuzz/core/src/continuation.rs does not define "
+                      "`pub overran...`)", self.output + "\n".join(self.said))
         self.assertEqual(self.prompts, [])
 
     def test_a_standing_scaffold_of_the_old_contract_is_reported_not_revalidated(self):

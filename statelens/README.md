@@ -389,10 +389,13 @@ as knobs, and reports which events of the history it reached. qmdb is refused. S
 
 A scaffold is only the prefix that builds the state. The base's own driver runs it through a
 hook point, the trusted continuation: the driver starts the network and the honest replicas,
-runs the prefix, then takes back everything it lent it, reverts what it changed (held messages,
-links, latencies, crashed replicas), starts the base's own Byzantine actors (its Disrupter, or
-its twin pair), and runs its own fault schedule, liveness wait and oracles in the same runtime.
-So a scaffold fuzzes the base's fault model, never a copy of it. Synthesis needs a fuzz harness
+runs the prefix, ending it at its budget if it has not returned, then takes back everything it
+lent it, reverts what it can of what it changed (held messages, links, latencies, crashed
+replicas), starts the base's own Byzantine actors (its Disrupter, or its twin pair), and runs
+its own fault schedule for a fixed window and then its safety oracles, in the same runtime. So
+a scaffold fuzzes the base's fault model, never a copy of it. The continuation checks safety
+only, as the Twins mutator does: it never waits for progress, so a scaffold finds no liveness
+bug; the ordinary fuzz targets still check liveness. Synthesis needs a fuzz harness
 with that hook point and refuses one without it ("the simplex fuzz harness predates the trusted
 continuation ...": merge the harness, `just clean`, run a new campaign). Today the hook point
 exists for the simplex Standard family (`simplex_cert_mock`, `_state_cov`, `_hb`,
@@ -491,12 +494,10 @@ through which a scaffold reports its stages, the declaration and the `[[bin]]` b
 builds. The scaffold keeps its base's input type, `run` recipe and libFuzzer flags, and has no
 seed corpus: the empty input decodes to the card's source history, and the script replays it
 with `STATELENS_REACH=1`, then once more without one harness event of the history, the control
-run, which shows that the state depends on that history, and once more with the base's
-largest progress budget (`STATELENS_REACH_LARGEST=1`), which shows that the continuation can
-finish it. The verdict and its stage lines drive up to three further attempts. The agent never
-runs its scaffold; only these replays judge it. Scaffolds written before the trusted
-continuation are not migrated: synthesis reports each as needing a new campaign or a `--redo`
-of its card.
+run, which shows that the state depends on that history. The verdict and its stage lines
+drive up to three further attempts. The agent never runs its scaffold; only these replays
+judge it. Scaffolds written before the trusted continuation are not migrated: synthesis
+reports each as needing a new campaign or a `--redo` of its card.
 
 Each pair costs up to four runs of the agent with their builds and replays, a test gate when
 the kept version edited the profile's code, and, because the modules are public siblings in

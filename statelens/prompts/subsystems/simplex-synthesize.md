@@ -33,6 +33,10 @@
   still down.
 - The fault phase of `consensus/fuzz/core` is `FAULT_PHASE`, 30 s, so a release delay is a
   knob in [0 s, 30 s).
+- The prefix budget is cut to `MAX_PREFIX_BUDGET`, 60 s: keep the stage deadlines, setup
+  included, within it.
+- After the release every base runs its faults and B's actors for `MAX_SLEEP_DURATION`, 15 s
+  of simulated time, and then its safety oracles; it never waits for finalizations.
 - The scheme: the module names only `cert_mock` instantiations of `consensus/fuzz/core`, such
   as `SimplexCertificateMock`, as the base does.
 - Missing, reported as `cannot:`: journal seeding, because the package has no

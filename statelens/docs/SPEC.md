@@ -4025,9 +4025,10 @@ its events with the probes a StateLens campaign installed and with harness obser
 off at the target state, and lets the fuzzer and the base's oracles run on from there. You
 write only the state-building prefix. The base's own driver runs it through a hook point,
 the trusted continuation: the driver starts the network and the honest replicas, runs your
-prefix, and at the handoff takes back every capability it lent you, reverts what you changed,
-starts the base's Byzantine actors, and runs its own fault schedule, liveness wait and oracles
-in the same runtime.
+prefix, and at the handoff takes back every capability it lent you, reverts what it can of what
+you changed, starts the base's Byzantine actors, and runs its own fault schedule for a fixed
+window and then its safety oracles, in the same runtime. The continuation checks safety only:
+nothing after the release waits for progress.
 
 ## Where you are
 
@@ -4169,16 +4170,19 @@ calls with the base's first generic argument. `Prefix` has two methods:
 - `plan(&mut self, pins: &mut Pins<'_>) -> Budget`, before the runtime starts: split the
   knobs from `pins.raw_bytes()`, pick them, pin the fields the History fixes through `pins`,
   open the stages, and return the budget from `Stages::budget`: the sum of your stage
-  deadlines and the release delay `d`. The runner's deadline is the base's plus both.
+  deadlines, which the runner cuts to 60 s (`MAX_PREFIX_BUDGET`), and the release delay `d`.
+  Keep the stage deadlines, setup included, within 60 s.
 - `run(self: Box<Self>, cx: PrefixContext<P>) -> PrefixFuture`, after the network and the
   honest replicas started and before anything of the base's adversary: drive `E1` to
   `E(n-1)` through `cx`, call `Stages::handoff`, and return. Returning is the handoff: the
-  context stops working, and the runner releases, after `d`, everything you changed.
+  context stops working, and the runner releases, after `d`, what you changed. If `run` has
+  not returned once the sum of your stage deadlines, cut to 60 s, has passed, the runner
+  ends it there.
 
 A prefix never holds driver code. The script vetoes a module that starts a runtime or calls
 the runner, a base driver or entry, an engine or validator spawn, a Disrupter or a Twins
-backend, network setup or an oracle link change, a runtime deadline, an oracle or the
-liveness wait, `set_compromised` or the helper's observer. What the prefix may do is what
+backend, network setup or an oracle link change, a runtime deadline, an oracle,
+`set_compromised` or the helper's observer. What the prefix may do is what
 `PrefixContext` offers:
 
 - topology: `participants`, `byzantine` (B, the compromised identity, when the base runs
@@ -4194,9 +4198,15 @@ liveness wait, `set_compromised` or the helper's observer. What the prefix may d
 - the runner's recorders, installed at spawn and stamped as they record: `deliveries` (what a
   replica's engine received through its gate), `activities` (what its reporter was told),
   `automaton` (verify and certify requested and answered), `elections` (the leaders its voter
-  elected) and `blocks` (the peers it blocked), and `blocked`, the network's blocked pairs now;
-- changes the runner reverts at the release: `set_link`, `set_latency` (a replica's
-  application latencies), `crash` and `restart` (from its journal, with its reporter).
+  elected) and `blocks` (the peers it blocked), and `blocked`, the network's blocked pairs now.
+  An accessor returns a `Log`, a snapshot that reads as a slice. A log, B's inbox and a held
+  queue keep at most 4096 entries (`LOG_CAP`): past it a log records nothing more and a gate
+  drops what it would hold; once the prefix reads one that dropped an entry, the helper treats
+  it as a cut trace (every later witness is `unverifiable (trace truncated)`), so a prefix never
+  depends on more;
+- changes the runner reverts at the release, as far as it can: `set_link`, `set_latency` (a
+  replica's application latencies), `crash` and `restart` (from its journal, with its
+  reporter).
 
 Pick one shape and record it in the module header.
 
@@ -4314,14 +4324,18 @@ and bind the incarnation it began as `inc<s>`. In Shape A, add a marked call of 
 the base's restart code (the subsystem rules name the known sites). A line that relates a
 replica across a restart names the incarnation.
 
-## Handoff and recovery
+## Handoff and release
 
-Handoff comes first; recovery is the runner's.
+Handoff comes first; the release is the runner's.
 
 - Shape B drives `E1` to `E(n-1)` online, polling in simulated time with `cx.sleep`, with a
   simulated-time deadline per stage: passing it is a miss, never a wait. Race every await on
   a reply of the system under test against the deadline with `commonware_macros::select!`; a
   dropped reply is a miss.
+- The runner ends a prefix that has not returned once the sum of its stage deadlines, cut to
+  60 s (`MAX_PREFIX_BUDGET`), has passed: the first stage without an outcome misses (`the
+  runner ended the prefix at its budget`) and the handoff is lost. That sum must cover every
+  wait the prefix makes, the setup before `E1` included, and stay within 60 s.
 - `Stages::handoff` takes a plain closure that reads `En`'s witness and builds it inside the
   call, with no await or yield, and no value read before the call. The helper takes a
   position, calls it, and takes the handoff mark: the handoff holds only when nothing came
@@ -4337,10 +4351,13 @@ Handoff comes first; recovery is the runner's.
   delay `plan` returned, a knob in [0, the base's fault phase): held messages and blocks stay
   held, a crashed replica stays down, a link and a latency stay changed. At the release the
   runner delivers the held messages and blocks in arrival order, restores the base's links
-  and latencies, restarts every crashed replica, starts the base's actors for B, and only then
-  the base's fault schedule, its liveness wait, re-based on the highest view finalized at the
-  release, and its oracles. You never release, restore or heal anything for the base.
-- The runtime deadline is the runner's: the base's, plus your budget's prefix and release.
+  and latencies, restarts every crashed replica, and starts the base's actors for B. Then the
+  base runs its fault schedule, whose view-indexed faults are re-based on the highest view
+  finalized at the release, for a fixed window, and then its safety oracles. You never
+  release, restore or heal anything for the base.
+- The release is best-effort: it restores what it can, and an application request already
+  sleeping on a latency you set keeps that latency. Nothing after it needs the system to
+  recover or make progress, so a target state may leave the replicas stalled.
 
 ## Control
 
@@ -4353,8 +4370,9 @@ event before `En` and every witness is `exact` or `construction`.
 
 ## Oracles
 
-The base's free-running phase and every oracle are the runner's, which runs them after the
-release; the prefix never calls, copies or weakens one, and never measures progress. The
+The base's free-running phase and its safety oracles are the runner's, which runs them after
+the release; the prefix never calls, copies or weakens one, and never measures progress. No
+oracle of a continuation waits for progress, so a History needs no progress after `En`. The
 helper prints `done` after the last oracle. Stage checks are not oracles.
 
 ## Fabrication and B
@@ -4414,6 +4432,10 @@ What each signal asks for:
   trace's values and sites with what the stage expects.
 - `En` missed, or the handoff lost: the knob domains, the timing, and what keeps the state
   pending at the handoff.
+- A miss with `the runner ended the prefix at its budget`: `run` waited past its budget.
+  Count every wait in the stage deadlines you pass to `Stages::budget`, and race every await
+  against its stage's deadline. The runner cuts the budget to 60 s (`MAX_PREFIX_BUDGET`), so
+  a larger sum does not help: shorten the waits until the deadlines, setup included, fit.
 - `unverifiable`, or `witness rejected`: a witness that binds the relation: an intrinsic
   site for an existential line, otherwise an exact observable keyed by the bound entities,
   with positions where order matters.
@@ -4478,6 +4500,10 @@ missing capabilities.
   still down.
 - The fault phase of `consensus/fuzz/core` is `FAULT_PHASE`, 30 s, so a release delay is a
   knob in [0 s, 30 s).
+- The prefix budget is cut to `MAX_PREFIX_BUDGET`, 60 s: keep the stage deadlines, setup
+  included, within it.
+- After the release every base runs its faults and B's actors for `MAX_SLEEP_DURATION`, 15 s
+  of simulated time, and then its safety oracles; it never waits for finalizations.
 - The scheme: the module names only `cert_mock` instantiations of `consensus/fuzz/core`, such
   as `SimplexCertificateMock`, as the base does.
 - Missing, reported as `cannot:`: journal seeding, because the package has no
@@ -4494,7 +4520,8 @@ missing capabilities.
 - No marshal base has a trusted continuation yet: the marshal drivers have no hook point, so
   synthesis refuses every marshal base at selection and never renders these rules. The
   follow-up that adds the marshal runner adapters writes them here: the bases, B and its
-  actors at the release, the pins, the restart sites and the fault phases.
+  actors at the release, the pins, the restart sites and the fault phases. As for simplex,
+  such a continuation checks safety only and never waits for progress.
 ~~~
 
 ---
@@ -4791,9 +4818,10 @@ that passes the vetoes and builds, and that the test gate does not restore (guar
 refused.
 
 A scaffold is a state-building prefix and nothing else (D69): the base target's own driver
-runs it through a hook point, the trusted continuation, which owns the startup, the release of
-everything the prefix changed, the base's Byzantine actors, its fault schedule, its liveness
-wait and its oracles, in the same runtime (section 18.7, Trusted continuation). The script
+runs it through a hook point, the trusted continuation, which owns the startup, the end of a
+prefix past its budget, the release of what the prefix changed, the base's Byzantine actors,
+its fault schedule and its safety oracles, in the same runtime (section 18.7, Trusted
+continuation). A continuation checks safety only and never waits for progress (D70). The script
 writes each scaffold's thin target, binding the base's trusted entry to the prefix, and refuses
 a base whose driver has no hook point: every marshal base, for now, and the simplex bases other
 than the Standard family and the Twins bases.
@@ -4904,6 +4932,23 @@ With the trusted continuation (D69), on 2026-10-12, on the fuzzing branch
   `handoff holds`, `reach 4/4`, `release`, `actors release ok -`, `actors end ok -` and `done`
   on the empty input.
 
+With the safety-only continuation (D70), on 2026-10-13, on the fuzzing branch
+`denis/tss-safety-only-continuation` at `daa7cbfb4` with the change uncommitted:
+
+- `cargo +stable nextest run --release` of the `continuation::` and `trusted::` tests of
+  `consensus/fuzz/core` and `consensus/fuzz/simplex` passes (18 tests). Among them, runs
+  without a prefix keep the auditor states of the record above
+  (`ordinary_runs_are_unchanged`); a Standard run whose progress target its window cannot
+  reach (1,000 views, about 140 finalized) ends after the window with both actor checks and
+  every oracle run (`a_continuation_checks_safety_without_waiting_for_progress`); a prefix
+  that never returns is ended at its budget under Standard and Twins mutator, with both actor
+  checks ok (`a_prefix_past_its_budget_is_ended_there`); and a meddling prefix's four changes
+  are still reverted at the release, though the liveness target of the record above is no
+  longer waited for. The change's author reports that the two new `trusted::` tests fail on
+  the code before it, one with the runtime timeout the campaigns hit; that was not rerun for
+  this record.
+- In `SL/`, `just check-scripts`, `just check-prompts` and `just check-invariants` pass.
+
 Not verified: a synthesis with a real agent or after a real campaign, AC-24 to AC-28 as
 written (the differential test of AC-25 judges the primitives and a hand-written
 reconstruction, never an agent's output), any marshal synthesis by an agent, and whether the
@@ -4920,10 +4965,11 @@ for `design` and `paper`).
 | D62 | `synthesize` is a step of its own, run after a campaign of the same profile on the checkout it instrumented: `HEAD` is the campaign's base, or past it only by commits that touch only `SL/`, the method and not the tree the campaign instrumented, which the synthesis says in one console line; anything else is refused (section 18.6.2, Preconditions). It never instruments: it adds no probe, assertion or ghost state. Its edits follow the edit contract (R-TS-SYN-3, section 18.6.1), whose guards 1 to 3 compare the tree with a baseline that the campaign's first synthesis takes and every later one reuses. Its agent runs with Phase 2 permissions (D4), as a second role with its own scope (amends R-INS-7). Pairs of a card and a base are synthesized one at a time, because they share one crate. qmdb is refused. | R-TS-SYN-1 to R-TS-SYN-4 |
 | D63 | Scaffolds are written, not derived: an exception to D5, D24, D57 and Appendix B.1. Per pair (card, base) the agent writes a module `<package>/src/target_states/tsNNNN_<base>.rs` and a thin target `<base>_tsNNNN_statelens.rs` (Appendix B.6): a card yields one scaffold per selected base, and the agent chooses no base; the script owns `target_states/mod.rs` (the helper template and the `pub mod` lines), its anchored declaration in `<package>/src/lib.rs`, and the `[[bin]]` block, the base's renamed (Appendix B.2), which it writes after the agent's attempt; the agent adds the same block only for its own build and removes it again (section 18.7). The name keeps the `<profile>_` prefix and the `_statelens` suffix, so `just run`, the refusal of section 7.1, `clean` and `--fuzz-targets` keep working. Bases with `fuzz_mutator!` are excluded. D15 and the Byzantine guard apply. | R-TS-SC-1, R-TS-SYN-4, R-P2-4 |
 | D64 | Knobs are the first K <= 16 bytes of the base input's own `raw_bytes`, zero-padded. A knob is `domain[byte % len]` with the source value as `domain[0]`, so the empty input is the canonical input and decodes to the source history. The input type, the `run` recipe and the libFuzzer flags are the base's; there is no seed corpus. | R-TS-SC-2, R-TS-NF-1 |
-| D65 | One stage per History event. A stage is held only through a witness record that binds every entity of its line, from an `exact`, `intrinsic` or `construction` witness, and the script recomputes the records and rejects those that do not establish the line. Positions come from the event sequence (D61), and the helper takes them itself, for a stamped entry and for an action it performs, so order checks are strict, and an incarnation is named by the position of the restart that began it. A held stage adds the feature `(site_hash("TS-NNNN"), k, 0)`. The first miss closes the scripted prefix, except in the control run, and the input continues into the base's free-running phase and every oracle. Handoff comes before recovery: the target state is witnessed at the handoff instant, by a fresh read of `En`'s witness inside the handoff call, with every fault the prefix opened still in place, and those faults are released in the continuation, no later than the base's first heal. | R-TS-SC-3, R-TS-SC-4, R-TS-FB-2 |
+| D65 | One stage per History event. A stage is held only through a witness record that binds every entity of its line, from an `exact`, `intrinsic` or `construction` witness, and the script recomputes the records and rejects those that do not establish the line. Positions come from the event sequence (D61), and the helper takes them itself, for a stamped entry and for an action it performs, so order checks are strict, and an incarnation is named by the position of the restart that began it. A held stage adds the feature `(site_hash("TS-NNNN"), k, 0)`. The first miss closes the scripted prefix, except in the control run, and the input continues into the base's free-running phase and every oracle. Handoff comes before the release: the target state is witnessed at the handoff instant, by a fresh read of `En`'s witness inside the handoff call, with every fault the prefix opened still in place, and those faults are released in the continuation, no later than the base's first heal. | R-TS-SC-3, R-TS-SC-4, R-TS-FB-2 |
 | D66 | The reach check replays fixed inputs and does not fuzz: the canonical empty input, a control run that withholds one harness event, and a final canonical replay, each in individual-file mode with no corpus and no flags (a carve-out from D23 and R-P3-1). The agent builds its scaffold but never runs it: only these replays judge a version, and a crash file any other run leaves is kept as a finding candidate. Verdicts are reported only: every scaffold that passes the vetoes and builds, and that guard 5 does not restore, is fuzzed. Every failure of a replay is a finding candidate. Where it happened is diagnostic context only; the one failure attributed to the scaffold is an error the helper itself raises with `[statelens-scaffold]`, before any engine starts. | R-TS-SYN-5, R-TS-SYN-6 |
 | D67 | Up to `REPAIR_ATTEMPTS` (3) further agent attempts per pair, driven by the verdict and its stage lines. Automatic repair covers only explicitly identified scaffold errors and the outcomes that are not failures. A finding candidate stops refinement for its pair, and that version is kept and fuzzed, never replaced by one that avoids the failure; if guard 5 restores it, its failure stays a finding candidate. Otherwise the best built version is kept. This is not iterative state discovery: there is no frontier. | R-TS-SYN-7 |
-| D69 | The trusted continuation (revision of 2026-10-12, amends D63, D65 and D67). The base drivers own the continuation: an optional prefix hook, absent in ordinary fuzzing, runs a generated prefix after the network, the reporters and the honest engines exist and before the base's Byzantine actors, fault scheduler, liveness wait and oracles start, in the same runtime. The prefix acts only through a restricted context the runner revokes at the handoff, and the runner reverts every change it made at the release, starts exactly the base's actors for the compromised identity, and checks that they run, by identity and role. The script writes the thin target, vetoes driver-level code in a module, refuses a base without a runner adapter and a harness without the hook API, replays every version once more with the base's largest progress budget, and never keeps a version whose actor check failed (NO CONTINUATION). Scaffolds written before it are not migrated. | R-TS-CN-1 to R-TS-CN-4 |
+| D69 | The trusted continuation (revision of 2026-10-12, amends D63, D65 and D67; amended by D70). The base drivers own the continuation: an optional prefix hook, absent in ordinary fuzzing, runs a generated prefix after the network, the reporters and the honest engines exist and before the base's Byzantine actors, fault scheduler and oracles start, in the same runtime. The prefix acts only through a restricted context the runner revokes at the handoff, and the runner reverts the changes it made at the release, starts exactly the base's actors for the compromised identity, and checks that they run, by identity and role. The script writes the thin target, vetoes driver-level code in a module, refuses a base without a runner adapter and a harness without the hook API, and never keeps a version whose actor check failed (NO CONTINUATION). Scaffolds written before it are not migrated. | R-TS-CN-1 to R-TS-CN-4 |
+| D70 | The safety-only continuation (revision of 2026-10-13, amends D65 and D69). Two campaigns' scaffolds produced false crashes from the continuation, not simplex bugs: runtime timeouts, because the liveness wait after the release could not be met from a state the prefix left (an application request still sleeping on a 1e9 ms latency override), and out-of-memory reports, because a prefix that polled the recorders every millisecond cloned logs that kept growing, which ASan turned into RSS. A continuation now checks safety only, as the Twins mutator base always did: after the release every driver runs its fault schedule and the base's Byzantine actors for `MAX_SLEEP_DURATION` (15 s of simulated time), then its safety oracles, and never waits for progress, so nothing after the release depends on the release reverting everything. The runner ends a prefix that has not returned once its budget has passed and reports it (`Release.overran`); the helper then misses the first open stage (`the runner ended the prefix at its budget`) and loses the handoff. The release is best-effort: a link the network refuses stays as it is, and an application request already sleeping on an override keeps its latency. Recorder logs and B's inbox are copy-on-write snapshots of at most `LOG_CAP` (4096) entries, and the held message and block queues drop what they would hold past the same cap. Progress targets are no longer re-based on the release (the view-indexed faults still are), and the largest replay (`STATELENS_REACH_LARGEST=1`, `Observer::largest`) is removed. No longer guaranteed: a scaffold finds no liveness bug, since no continuation waits for progress; the ordinary fuzz targets, which run without a prefix and are unchanged, still check liveness. | R-TS-CN-1, R-TS-CN-2, R-TS-SC-5 |
 | D68 | `just fuzz simplex --state-reaching` and `just fuzz marshal --state-reaching` run the campaign (unless `--skip-campaign`), `synthesize` (unless `--skip-synthesis`), and then the scaffolds only, through the existing sequential, `--parallel` and `--tmux` branches, in the session `statelens-<profile>-reach`. `--state-targets` selects card ids (`TS-0003`) and `--fuzz-targets` candidate bases, both repeatable and both forwarded as `--match`; a pattern of the other flag's form is refused, `--state-targets` and `--skip-synthesis` need `--state-reaching`, and each selected card yields one scaffold per selected base, every candidate base without `--fuzz-targets`. `--skip-synthesis` fuzzes the scaffolds a synthesis already built for the selection, whatever their verdicts, without the synthesis preflight, so fuzzing goes on after the checkout drifted from the synthesis baseline, when an upstream fix was merged into it for example; synthesis itself still refuses such a checkout. Unknown flags are refused (amends R-P2-5). | R-TS-P3-1, R-TS-P3-2 |
 
 ### 18.3 Target-state registry
@@ -5377,7 +5423,8 @@ reported before the agent CLI is checked, an exception to section 12:
   a marshal synthesis exits with code 1, "synthesis refuses every marshal base: its drivers
   have no runner adapter of the trusted continuation yet (a follow-up)";
 - the fuzz harness has the trusted continuation's hook API (D69): for simplex,
-  `consensus/fuzz/core/src/continuation.rs` holds `pub trait Prefix<` and
+  `consensus/fuzz/core/src/continuation.rs` holds `pub overran` (the safety-only `Release`
+  of D70, which the helper reads) and
   `consensus/fuzz/simplex/src/trusted.rs` holds `pub fn fuzz_with_prefix<`; otherwise "the
   <profile> fuzz harness predates the trusted continuation (<file> does not define
   `<marker>...`): merge the harness with the hook API into this branch, then run `just clean`
@@ -5443,8 +5490,8 @@ probe, assertion or ghost state.
   pair's name, once `git apply -R --check` accepts that diff and before it reverse-applies it,
   and every scaffold whose report records a verdict (Once per run), the card's other pairs
   included, is then, before any pair, built, logged to
-  `SL/campaign/logs/fuzz-build-<scaffold>-after-redo.log`, and replayed, canonical, control,
-  final and largest, in `SL/campaign/reach/TS-MMMM_<b>/after-redo/`, and its report takes the new
+  `SL/campaign/logs/fuzz-build-<scaffold>-after-redo.log`, and replayed, canonical, control
+  and final, in `SL/campaign/reach/TS-MMMM_<b>/after-redo/`, and its report takes the new
   verdict under `## Revalidation after --redo`, as revalidation does (Finish), with a warning
   when it stands worse. No pair is rolled back for it. A scaffold that no longer builds gets
   the verdict `NOT BUILT (no longer builds)`, with a warning; it is not revalidated again, and
@@ -5595,7 +5642,7 @@ version's attempt:
       18.7); since the manifest has no scaffold block then, the prompt tells it to add the
       block for its build and remove it again, leaving the manifest as it found it, which
       guard 2 checks.
-   7. Reach check (section 18.8): the canonical, control and largest replays. Before the
+   7. Reach check (section 18.8): the canonical and control replays. Before the
       canonical replay, the script keeps the version as
       built in `attempt-<a>/`: `version.diff`, its diff against `S0`, and `version/`, a copy of
       every file it created or changed. An attempt that left a stray failure keeps the version
@@ -5635,7 +5682,7 @@ version's attempt:
      one, the card's other pairs included, whose card exists and whose report records a
      verdict (Once per run), is built again, logged to
      `SL/campaign/logs/fuzz-build-<scaffold>-after-TS-NNNN_<base>.log`, and replayed,
-     canonical, control, final and largest (section 18.8), in
+     canonical, control and final (section 18.8), in
      `SL/campaign/reach/TS-MMMM_<b>/after-TS-NNNN_<base>/`. A scaffold stands worse when it no longer
      builds, when it gains or loses CRASH (finding candidate), or when its verdict comes later
      in the order of the first bullet, or holds fewer stages under the same verdict (k counts
@@ -5728,7 +5775,7 @@ their verdicts, the crash attribution, the labels and sites read, the run and re
 its latest check, and its revalidations; `TS-NNNN_<base>.diff`, the kept version against `S0`,
 the script's own edits included, and empty when the pair's edits were restored;
 `TS-NNNN_<base>/attempt-<a>/`, the replays of each attempt (section 18.8: `canonical/`,
-`control/`, `largest/` and, for the kept version, `final/`), the files
+`control/` and, for the kept version, `final/`), the files
 step 2.2 swept, `version.diff`, the attempt's version against `S0`, and `version/`, a copy of
 every file it created or changed, which holds what a diff cannot, such as a binary file. Both
 are written before the first replay of every version that built, and right after the sweep
@@ -5770,8 +5817,7 @@ runs, when the replay left no crash file. For a canonical
 replay the line adds that the scaffold fails on its canonical input, which libFuzzer runs
 first, so its `run` line reproduces the failure at once. For the control run the `replay`
 line also sets `STATELENS_REACH_CONTROL=1`, and the line says that the canonical input does
-not reproduce it; for the largest replay it sets `STATELENS_REACH_LARGEST=1`, and the line
-says that the canonical input does not reproduce it either. For a `stray failure` it names the
+not reproduce it. For a `stray failure` it names the
 swept file, also when the pair's
 verdict is not CRASH (finding candidate), because the attempt that left the file was not
 built: "a run of the agent's left <file>, a finding candidate". A `<repo>` or crash-file path
@@ -5800,7 +5846,7 @@ target the script wrote (`THIN`) and its one base (`BASE_TARGET`, `BASE_DETAILS`
 agent chooses no base; the edit contract
 (R-TS-SYN-3 quoted, and guards 1 to 6 restated in the agent's
 terms, since the guards' own text cites sections the agent cannot see); the prefix, its
-context and its shapes; knobs; stages and witnesses; handoff and recovery; the control;
+context and its shapes; knobs; stages and witnesses; handoff and release; the control;
 oracles; fabrication and B; missing
 capabilities; building (build with `BUILD`, the full command for the pair's scaffold, adding
 the scaffold's `[[bin]]` block, the base's
@@ -5819,17 +5865,15 @@ supplies only the prefix that builds the target state. In the fuzz harness
   `Pins` gives `raw_bytes()` for the knobs and pins `term_length` (cutting a lookahead the
   decoder would not draw for it), `lookahead` (at most the term length plus two) and
   `configuration` (N4F1C3 or N4F0C4, N4F1C3 only under Twins), each resetting the dependent
-  fields as the decoder sets them. `Budget` is the sum of the stage deadlines and the release
-  delay `d`. `Observer`, which only trusted code implements (the helper's `Watch`, or a
-  test's), stamps what the runner's recorders record, publishes the compromised identity,
-  reports the release and the actor checks, says `done`, and asks for the largest progress
-  budget.
+  fields as the decoder sets them. `Budget` is the sum of the stage deadlines, `prefix`, and
+  the release delay `d`. `Observer`, which only trusted code implements (the helper's `Watch`,
+  or a test's), stamps what the runner's recorders record, publishes the compromised identity,
+  reports the release and the actor checks, and says `done`.
 - The trusted entries `fuzz_with_prefix::<P, M, C, _, _>` (Standard, FaultyNet, TwinsMutator,
   TwinsCampaign), `fuzz_audit_with_prefix::<P, _, _>` and
   `fuzz_twins_audit_with_prefix::<P, M, _, _>` mirror the base entries `fuzz`, `fuzz_audit` and
-  `fuzz_twins_audit`. Each plans the prefix, applies the largest budget when the observer asks
-  for it (`required_containers` set to `MAX_REQUIRED_CONTAINERS`), passes the hook to the
-  base's own driver, `run_standard_once`, `run_audited_standard_once_with` or `run_twins` and
+  `fuzz_twins_audit`. Each plans the prefix, passes the hook to the base's own driver,
+  `run_standard_once`, `run_audited_standard_once_with` or `run_twins` and
   `run_twins_with_backend_and_hook`, and calls the observer's `done` after the driver
   returns. The base entries pass no hook to the same drivers, which then run exactly what they
   ran before (section 18.1). The audited entry samples no rejected certification, whose view
@@ -5840,39 +5884,59 @@ supplies only the prefix that builds the target state. In the fuzz harness
   replicas with the base's own code, behind the runner's taps: a gate on each receiver, and
   recording wrappers on the reporter, the automaton, the elector and the blocker, with the
   engine and application tasks retained for a crash and a restart. Adaptive partitions and the
-  block filter are not applied yet. Then the prefix runs; its return is the handoff.
-- The context, revoked at the handoff (every call does nothing after it): the participants, B,
-  the honest replicas, the term length, the lookahead, the leader of a view under the honest
-  engines' elector and the last scripted Twins view; `sleep` and `now` in simulated time; B's
+  block filter are not applied yet. Then the prefix runs; its return is the handoff. A prefix
+  that has not returned once `Budget.prefix` has passed is dropped there, which is then the
+  handoff, and the release reports it (`overran`); the helper misses its first open stage.
+- The context, whose capabilities that change the system end at the handoff (each does nothing
+  after it), while the reads keep answering, so a filter sees the same context until the
+  release: the participants, B, the honest replicas, the term length, the lookahead, the
+  leader of a view under the honest engines' elector and the last scripted Twins view; `sleep`
+  and `now` in simulated time; B's
   signer, `send` on B's own vote, certificate and resolver channels, `inbox` (what B received,
   recorded by the runner) and mock blocks as B (`block`, `send_block`); gates (`hold`, `pass`,
   `held`, `open`) and block gates (`hold_blocks`, `pass_blocks`) on honest replicas; the
   recorders (`deliveries`, `activities`, `automaton`, `elections`, `blocks`) and the network's
   blocked pairs, the automaton recorder ending each request as the audit recorder does
   (`Completion::Returned`, `Closed` or `Canceled`) and dropping the automaton's receiver when
-  consensus drops its own, so a cancellation reaches the automaton as without the recorder; and changes the runner reverts: `set_link`, `set_latency`, `crash` and
-  `restart` (journal replay on the replica's partition with its retained reporter, the taps
-  reinstalled, but not the base's happens-before capture). A recorder takes its position from
-  the observer when it records an entry; a prefix cites the entry with the helper's `cite`.
-- The release, at the handoff plus `d`: latency overrides are removed; links are restored to
-  the base's (the Standard drivers' per pair, with a static partition's cuts and a degraded
-  network's slow links; the Twins drivers' 500 ms +- 500 ms); every crashed replica restarts,
+  consensus drops its own, so a cancellation reaches the automaton as without the recorder.
+  A recorder's log and B's inbox are a `Log`, a copy-on-write snapshot that reads as a slice,
+  so taking one copies nothing; each keeps at most `LOG_CAP` (4096) entries, a replica's gate
+  holds at most `LOG_CAP` messages and the block gate as many blocks for all replicas, and past
+  that they drop what they would hold, as a lossy link does. A log, and a replica's gate,
+  remembers the position of the first entry it dropped (`Log::dropped`), and the accessor
+  that returns it to the prefix (`inbox`, `deliveries`, `activities`, `automaton`, `elections`,
+  `blocks`, `held`) reports that position through `Observer::dropped`, so the helper treats
+  what the prefix read as a cut trace (section 9.6); a full log the prefix never reads cuts
+  nothing. B keeps at most `LOG_CAP` blocks it built. And changes the runner reverts:
+  `set_link`, `set_latency`, `crash` and `restart` (journal replay on the replica's partition
+  with its retained reporter, the taps reinstalled, but not the base's happens-before
+  capture). A recorder takes its position from the observer when it records an entry; a
+  prefix cites the entry with the helper's `cite`.
+- The release, at the handoff plus `d`, best-effort: latency overrides are removed (an
+  application request already sleeping on one keeps the latency it drew); links are restored
+  to the base's (the Standard drivers' per pair, with a static partition's cuts and a degraded
+  network's slow links; the Twins drivers' 500 ms +- 500 ms), a link the network refuses
+  staying as it is; every crashed replica restarts,
   its dead application's relay registration dropped; only then every gate opens and delivers
   what it held in arrival order, and the held blocks are delivered, so a restarted replica's
   new receivers and application get what was held for it (the `release` line counts the
   blocks the applications took); the recorders stop; B's channels come back. The highest view any honest replica finalized,
   `base`, re-bases the base's view-indexed faults (an adaptive partition schedule, a dropped
-  block's view, the Disrupter's faulty views) and its progress targets (Standard: the latest
-  finalized view reaches `required_containers + base`; Twins campaign: views after the larger
-  of the scripted end and `base`). Then the driver applies its network faults, starts exactly
-  the base's actors for B (Standard: a Disrupter; Twins: the pair over the split routers, a
-  primary and a secondary engine, or a primary and a Disrupter), runs its fault scheduler,
-  its liveness wait and its oracles. The runtime deadline is the base's plus `Budget`.
+  block's view, the Disrupter's faulty views) and the fault scheduler's horizon. Then the
+  driver applies its network faults, starts exactly the base's actors for B (Standard: a
+  Disrupter; Twins: the pair over the split routers, a primary and a secondary engine, or a
+  primary and a Disrupter), runs its fault scheduler, and, instead of the base's liveness
+  wait, sleeps `MAX_SLEEP_DURATION` (15 s of simulated time), as the Twins mutator base always
+  does, before its safety oracles. A continuation checks safety only (D70): it never waits for
+  progress, so nothing after the release depends on the release reverting everything, and no
+  progress target is re-based. The runtime deadline is the base's: the runner cuts `Budget` to
+  `MAX_PREFIX_BUDGET` (60 s) and `FAULT_PHASE` (30 s), so a hooked run ends within it (a const
+  assert in continuation.rs checks the sum).
 - The actor check. The runner registers each actor task it starts for B by identity and role
   (`disrupter`, `primary`, `secondary`), with an execution marker per identity and role: the
   trusted code that starts the actor wraps its vote receiver in a `MarkedReceiver`, which sets
   the marker when the actor's own task first polls it, as any task that executes does, traffic
-  or not. It checks, at the release and after the liveness wait, that each required role has a
+  or not. It checks, at the release and after the window, that each required role has a
   task that has not finished and whose marker is set (`unpolled` otherwise); the release check
   first gives the actors it just started up to 100 ms of simulated time to run: the Standard family, one
   Disrupter for participant 0 under N4F1C3 and none under N4F0C4; a Twins campaign, a primary
@@ -6049,11 +6113,16 @@ Whether the card names both incarnations is for review, so the script annotates 
 `restart` line between two stages that an `as Ek` links `relation across restart`; a restart
 that no call marks it cannot see (section 18.11).
 
-**Handoff and recovery** are separate, and handoff comes first.
+**Handoff and release** are separate, and handoff comes first.
 
 - Shape B drives `E1` to `E(n-1)` online, polling in simulated time, with a simulated-time
   deadline per stage: passing it is a miss, never a wait. Every await on a SUT reply is raced
   against the deadline, and a dropped reply is a miss.
+- The runner ends a prefix that has not returned once its budget's `prefix` has passed. The
+  helper's `Watch` then, at the release, misses the first stage without an outcome (`the
+  runner ended the prefix at its budget`), an ordinary miss of section 18.8, and reports the
+  handoff lost; it does nothing for a Shape A prefix or after a handoff. The budget must
+  therefore cover every wait the prefix makes, its setup before `E1` included.
 - The handoff check witnesses `En`'s `Holds` line at the handoff instant. It requires a fresh,
   uninterrupted read of `En`'s witness: the scaffold passes the read to `Stages::handoff` as a
   plain closure, which the helper calls between a tick of its own and the handoff mark, so no
@@ -6076,12 +6145,14 @@ that no call marks it cannot see (section 18.11).
 - After `run` returns, every change the prefix made stays in place for `d`, the release delay
   of its budget, a knob in [0, the base's fault phase), 30 s (`FAULT_PHASE`) for simplex: held
   messages and blocks stay held, a crashed replica stays down, a link and a latency stay
-  changed. Recovery is the runner's and never precedes the handoff: the release (Trusted
-  continuation, above) reverts them all before the base's actors, fault schedule and liveness
-  wait start. The prefix never releases, restores or heals anything for the base.
+  changed. The release is the runner's and never precedes the handoff: it reverts what it
+  can (Trusted continuation, above) before the base's actors and fault schedule start, and an
+  application request already sleeping on an overridden latency keeps it. The prefix never
+  releases, restores or heals anything for the base. Since a continuation checks safety only,
+  nothing after the release needs the system to recover or make progress.
 - The runtime deadline is the base's (`fuzz_runtime_timeout(..)` for the Standard, audited and
-  Twins drivers) plus the prefix's stage deadlines plus the release delay, which the runner
-  computes from the budget.
+  Twins drivers): the runner cuts `Budget` to `MAX_PREFIX_BUDGET` (60 s) and `FAULT_PHASE`
+  (30 s), so a hooked run ends within it (a const assert in continuation.rs checks the sum).
 - Shape A imposes no cleanup, and its handoff is implicit: `En`'s witness, read in the handoff
   call the helper's evaluation makes after the base's last oracle, counts only if it has a position and the trace holds a later guarded
   observation of an honest replica in the same `run`, which `Stages::handoff` prints as
@@ -6096,11 +6167,11 @@ and the runner the base's oracles, so `En` gets a line and the run prints its `r
 the card has no `harness` event before `En`, the header says `Control: n/a`, which section 18.8
 accepts only when every witness is `exact` or `construction`.
 
-**Oracles.** The base's free-running phase and every oracle are the runner's, run after the
-release, never called, copied, removed or weakened by a module. Progress targets are re-based
-on the release in the base's own measure (Trusted continuation, above), so the canonical run
-has something left to do. The helper prints `done` after the last oracle. Stage checks and
-verdicts are not oracles.
+**Oracles.** The base's free-running phase, a fixed window, and its safety oracles are the
+runner's, run after the release, never called, copied, removed or weakened by a module. No
+oracle of a continuation waits for progress (D70), so a History needs no progress after `En`,
+and a scaffold finds no liveness bug. The helper prints `done` after the last oracle. Stage
+checks and verdicts are not oracles.
 
 **No fabrication** (rule I5 of the scenario SPEC). Events go through the network or the
 context. A scripted vote goes out only on its signer's own channel (INV-0008): a prefix signs
@@ -6163,7 +6234,10 @@ truncated)` for a later stage and for `En` with no feature, and `handoff lost`, 
 that holds without a cut, an `En` recorded `unverifiable` before the handoff, which keeps its
 reason and loses the handoff, and, with `STATELENS_REACH` unset, a miss that records no `trace`
 line and a handoff that records `next=-`; and the observer's lines: a cited entry with the
-recorder's position, an `actors` line, a `release` line and `done` last; they run with
+recorder's position, an `actors` line, a `release` line and `done` last; and a Shape B prefix
+the runner ended at its budget, whose first open stage, a middle one or the last, misses with
+`the runner ended the prefix at its budget` and whose handoff is lost, before the `reach` and
+`release` lines, with nothing closed by a release after a handoff; they run with
 `cargo +stable nextest run -p <package> --lib target_states::` in a checkout synthesis wrote
 `mod.rs` to. Under `cfg(test)` the helper also records each line it prints and each feature it
 adds in thread-local lists the tests read.
@@ -6174,10 +6248,10 @@ adds in thread-local lists the tests read.
 | `Knobs::pick<T: Copy>(&mut self, domain: &[T]) -> T` | The next knob: `domain[byte % domain.len()]`. It cannot return a value for an empty domain, so a domain of fewer than two values is a scaffold error. |
 | `control() -> bool` | Whether `STATELENS_REACH_CONTROL=1`, read once. |
 | `Stages::new(card: &'static str, n: u32) -> Stages` | Calls `watch()`, opens the prefix phase and prints `phase prefix`, and installs the panic hook below, once per process. Lines print only under `STATELENS_REACH=1`, read once; the work that only feeds them, the trace lines of a miss and the handoff's `next=`, runs only then. |
-| `Stages::budget(&self, knobs: Knobs, prefix: Duration, release: Duration) -> Budget` | Called in `plan`, before the runtime starts, and takes the knobs, so none is picked later; returns the runner's `Budget`: the stage deadlines and the release delay `d`, which the runner adds to the base's deadline. |
+| `Stages::budget(&self, knobs: Knobs, prefix: Duration, release: Duration) -> Budget` | Called in `plan`, before the runtime starts, and takes the knobs, so none is picked later; returns the runner's `Budget`: the stage deadlines and the release delay `d`, which the runner cuts to 60 s and 30 s; the runner ends the prefix once the stage deadlines have passed. |
 | `stamp(observable: &str, key: &str, value: &str) -> Stamp` | A query the prefix makes now, such as the absence of an entry: takes a `tick()`, prints `entry` with it, and returns it as an opaque `Stamp` that only `stamp` and `cite` make, with the `run` current when it was taken; `Stamp::seq()` reads its position and cannot make one. The script checks every stamp an `exact` item carries against its `entry` line anyway (section 18.8). Returns a stamp of position 0 and prints nothing while not watching. |
 | `cite(observable: &str, key: &str, value: &str, recorded: continuation::Stamp) -> Stamp` | An entry one of the runner's recorders recorded: prints `entry` with the position the recorder took through the observer when it recorded it, and returns that position as a `Stamp`. The runner's `Stamp` is opaque too: only a recorder, or `Stamp::now` with an observer, which gives the current position, makes one, so a prefix cannot cite a position earlier than a real record. An entry recorded while nothing watched has position 0, prints nothing and gives no position. |
-| `Watch` | The runner's observer, which only the thin target passes. `position()` takes a `tick()` with the current `run`; `compromised` calls `set_compromised`; `released` prints the `release` line and `actors` an `actors` line (section 18.8); `done` runs a registered Shape A evaluation that has not handed off, then prints `done`; `largest` reads `STATELENS_REACH_LARGEST=1`, once. |
+| `Watch` | The runner's observer, which only the thin target passes. `position()` takes a `tick()` with the current `run`; `compromised` calls `set_compromised`; `released` prints the `release` line, after closing the stages of a Shape B prefix the runner ended at its budget (`overran`): the first stage without an outcome misses (`the runner ended the prefix at its budget`), after a cut of the trace too, since no trace decides it, and the handoff is lost; `actors` prints an `actors` line (section 18.8); `done` runs a registered Shape A evaluation that has not handed off, then prints `done`. |
 | `Witness::exact(bind, reads: &[(observable, key, value, stamp: Option<Stamp>)])`, `Witness::intrinsic(bind, seen: Seen)` | A witness and its bindings, `bind` written `name=value@Ek,...`, and each `key` naming the entities it fixes as `name=value,...`. Each takes a `tick()` when it is built, its `read=`. An `exact` witness's position is its latest stamp's, and it has none when an item has no stamp; an `intrinsic` witness's is its observation's `seq`. |
 | `Witness::act(bind, action, perform: impl FnOnce() -> T) -> (T, Witness)`, `Witness::act_async(bind, action, perform: P) -> impl Future<Output = (T, Witness)> + use<T, F, P>`, with `P: FnOnce() -> F` and `F: Future<Output = T>` | The only way to make a `construction` witness: takes a `tick()`, the action's position and the witness's `read=`, right before it calls `perform`, which performs the action, and returns `perform`'s result with the witness, so the position is the action's and everything the action causes comes after it. `act_async` takes its tick when its future is first polled, and only then calls `perform` and awaits the future it returns, so an action that takes effect when it is called, as a mailbox method that queues its message at the call does, still comes after its position; its future borrows neither `bind` nor `action`. `action` names the verb and the entities it fixes as `verb[name=value,...]`; a bare verb is printed `verb[]`. Before `Stages::new` nothing watches: the position is 0, and the stage has none. |
 | `Stages::held(&mut self, k: u32, witness: Witness) -> bool` | Stage `k` held: prints the record with the witness's `read=`, records the stage feature, and moves `since()` forward to the stage's position + 1, or to its `read=` + 1 when it has none, never back. Stages may be recorded in any order. A call for stage n, which only `Stages::handoff` records, for a stage that already has an outcome, for an event number outside 1 to n, or once the prefix is closed does nothing and returns `false`. A witness whose `read=` is at or after the position `truncated()` returns makes the stage `unverifiable (trace truncated)` instead, with no feature. Returns `true` only when it recorded the stage held. |
@@ -6187,9 +6261,14 @@ adds in thread-local lists the tests read.
 | `Stages::handoff(&mut self, read: impl FnOnce() -> Option<Witness>)` | Decides the handoff itself. It takes a `tick()`; then, when stage n has no outcome and the prefix is open, calls `read`, a plain closure that cannot await or yield; then it takes the handoff mark, a `tick()`, `mark=`, and records `En` held with the witness `read` returned, printing its record, or missed (`not held at handoff`) on `None`. Once the trace dropped an observation at or before `mark=`, `En` is `unverifiable (trace truncated)` instead, whatever `read` returned, and the handoff is lost. The handoff holds when `En` was held in this call and `mark=` is its `read=` + 1: the witness was built inside the call, after the first tick, and no observation or other event came between the read and the mark. Prints `handoff holds|lost mark=<m> next=<run>:<seq>|-`, where `next` is the first observation after `En`'s position, in the `run` of that position, of a replica that is not compromised (Shape A, section 18.7), then `phase continuation` and the `reach` line; closes the prefix and calls `unwatch()`. A second call does nothing. |
 | `Stages::on_panic(&mut self, evaluate: fn(&mut Stages))` | Shape A: the evaluation of the stages, which `Watch::done` runs after the base's last oracle, and the panic hook over the trace so far, handing it a `Stages` handle so that it records the stages through the helper. |
 
-**Truncation.** Once `truncated()` returns a position `s`, the helper prints `truncated seq=<s>`
-once per input, at its first event after the cut: a position it takes or a stage it records, so
-the line precedes every stage line evaluated after the cut.
+**Truncation.** Once `truncated()` returns a position `s`, or the runner reports through
+`Observer::dropped` that the prefix read a log (a recorder log, B's inbox or a replica's held
+messages, section 18.7) whose first entry dropped at `LOG_CAP` had position `s`, the helper prints
+`truncated seq=<s>` with the earliest such position, at its first event after the cut: a position
+it takes or a stage it records, so the line precedes every stage line evaluated after the cut. It
+prints the line again when a later report moves the cut earlier; the script takes the smallest. A
+full log the prefix read therefore makes every later witness, including one for the absence of an
+entry, `unverifiable (trace truncated)`; a full log it never reads cuts nothing.
 
 The panic hook is chained in front of the one libfuzzer-sys installed. For a panic on the
 thread that called `Stages::new`, under `STATELENS_REACH=1`, it first prints `panic` with the
@@ -6217,9 +6296,8 @@ location libfuzzer-sys prints. Section 18.8 classes such a failure as SCAFFOLD E
 ### 18.8 Reach check
 
 The reach check replays fixed inputs and does not fuzz (D66). Each attempt replays the
-canonical input, runs the control, and replays the canonical input once more with the base's
-largest progress budget, the largest replay (D69); the kept version replays the canonical
-input once more (section 18.6.2).
+canonical input and runs the control; the kept version replays the canonical input once more
+(section 18.6.2).
 
 **A replay.** The binary is the fuzz build's release output:
 `$CARGO_TARGET_DIR/<host>/release/<scaffold>` when `CARGO_TARGET_DIR` is set, a relative value
@@ -6227,14 +6305,10 @@ taken from the checkout's root, where the build runs, and otherwise
 `target/<host>/release/<scaffold>` or `<package>/target/<host>/release/<scaffold>`, both
 checked as `coverage` checks its build. It runs in individual-file mode on
 `SL/campaign/reach/empty`, with `SL/campaign/reach/TS-NNNN_<base>/attempt-<a>/<replay>/` as its
-working directory, `<replay>` being `canonical`, `control`, `largest` or, for the kept
+working directory, `<replay>` being `canonical`, `control` or, for the kept
 version's last replay, `final`: libFuzzer reads no corpus and gets no flag from the script, and
 a crash file lands in that directory, beside the replay's log, `replay.log`. The environment
-sets `STATELENS_REACH=1`, `STATELENS_REACH_CONTROL=1` for the control run only, and
-`STATELENS_REACH_LARGEST=1` for the largest replay only, which makes the trusted entry set
-`required_containers` to the base's largest, `MAX_REQUIRED_CONTAINERS`, after the prefix's
-pins, so a continuation that cannot finish that budget within the deadline shows up during
-synthesis; it leaves
+sets `STATELENS_REACH=1`, and `STATELENS_REACH_CONTROL=1` for the control run only; it leaves
 `STATELENS_BYZANTINE` unset, so the guard skips compromised replicas. The script kills a replay,
 with everything it started, after 1,500 s, whether or not the replay's own process still runs,
 longer than libFuzzer's default `-timeout` of 1,200 s, and classes the kill as `timeout`.
@@ -6279,14 +6353,17 @@ key writes whitespace, `@`, `[` and `]` as `_`, keeps its `,` and `=` and may be
 `bind=` the remaining whitespace becomes `_`. `?` is the value of an entity a witness does not identify;
 `<me>` is `-` for a site without a replica, and `<site>` is `<file>:<line>:<column>`. An `exact`
 witness with no read leaves its evidence empty, so two spaces come before `read=`. `missed
-cannot: <capability>` is a missing capability, and `missed not held at handoff` the handoff's
-own miss. Up to 64 `trace` lines follow a miss, from the start of the missed stage. A handoff
-prints its `handoff`, `phase continuation` and `reach` lines in that order. `reach` counts the
-stages the helper recorded as held; `control=1` marks the control run. The `release` and
-`actors` lines are the trusted runner's, printed through the helper's observer, never a
-scaffold's: `release` says what the release reverted and `base=` the view the base's faults
-and progress targets were re-based on; an `actors` line is one actor check (section 18.7),
-`release` right after the base's actors start and `end` after the liveness wait, each actor
+cannot: <capability>` is a missing capability, `missed not held at handoff` the handoff's
+own miss, and `missed the runner ended the prefix at its budget` the ordinary miss of the
+first open stage of a prefix the runner ended at its budget, which the helper prints at the
+release, before the handoff lines (section 18.7). Up to 64 `trace` lines follow a miss, from
+the start of the missed stage. A handoff prints its `handoff`, `phase continuation` and
+`reach` lines in that order. `reach` counts the stages the helper recorded as held;
+`control=1` marks the control run. The `release` and `actors` lines are the trusted runner's,
+printed through the helper's observer, never a scaffold's: `release` says what the release
+reverted and `base=` the view the base's faults were re-based on; an `actors` line is one
+actor check (section 18.7), `release` right after the base's actors start and `end` after the
+window, each actor
 written `<identity>:<role>=<state>` with `<role>` `disrupter`, `primary` or `secondary` and
 `<state>` `running`, `unpolled` (its task has not finished but never ran: its execution marker
 is not set), `finished` or `absent`, and `-` when the base requires none; `ok` when every one
@@ -6351,8 +6428,7 @@ witness is `exact` or `construction`, and is annotated `control n/a` either way.
 without a `Control:` line has no control, annotated `control missing`. A vacuous control has
 no annotation; the report gives its reason.
 
-**Verdicts.** From the canonical run, its control, the largest replay and the kept version's
-last replay:
+**Verdicts.** From the canonical run, its control and the kept version's last replay:
 
 | Verdict | Condition |
 |---|---|
@@ -6363,7 +6439,7 @@ last replay:
 | NO REPORT | The replay did not fail but printed no `reach` or no `done` line: the helper was not used, or the prefix never handed off; or its lines name another card or another `n` |
 | CRASH (finding candidate) | A replay failed, below, unless the failure is the next row's, or a run of the agent's left a crash file (`stray failure`, section 18.6.2). Any failure other than a scaffold error makes the version CRASH, even beside one. The report gives its kind, phase, location and stage lines. |
 | SCAFFOLD ERROR | The replay's first panic is the helper's `[statelens-scaffold]` error (section 18.7), at a location in `target_states/mod.rs` |
-| NO CONTINUATION | A replay that did not fail, canonical, control, largest or final, printed no `actors release` or no `actors end` line, a malformed one, or one that failed: the base's actors did not run after the release. Checked after CRASH and SCAFFOLD ERROR and before NO REPORT, and not for a replay whose lines name another card. Such a version is never kept (section 18.6.2, Finish); the reason names the replay and the line. A CRASH after a failed `actors release` line is annotated `actors failed`. |
+| NO CONTINUATION | A replay that did not fail, canonical, control or final, printed no `actors release` or no `actors end` line, a malformed one, or one that failed: the base's actors did not run after the release. Checked after CRASH and SCAFFOLD ERROR and before NO REPORT, and not for a replay whose lines name another card. Such a version is never kept (section 18.6.2, Finish); the reason names the replay and the line. A CRASH after a failed `actors release` line is annotated `actors failed`. |
 | NOT BUILT | No version passed the vetoes and built; as `NOT BUILT (breaks TS-MMMM_<b>)`, the kept version made the standing scaffold of TS-MMMM on `<b>`, a pair of the same card included, stand worse, and its edits were restored (section 18.6.2, Finish) |
 | GATE FAILED | The kept version's edits under the editable roots made a test of the gate fail, or no longer run, that the inventory does not record as failing, or the gate's output was unusable (guard 5); over a kept CRASH, `GATE FAILED (finding candidate in attempt-<a>/)` |
 
@@ -6372,7 +6448,7 @@ before them. Verdicts are reported only. Every card with a kept version, every v
 BUILT, GATE FAILED and NO CONTINUATION, which is never kept, has a scaffold, and
 `--state-reaching` fuzzes it.
 
-**Crash attribution.** A failure of a replay, canonical, control, largest or final, in either
+**Crash attribution.** A failure of a replay, canonical, control or final, in either
 phase, is a
 panic, a `[statelens][INV-...]` or `[statelens][BYZANTINE]` message, a harness oracle's
 failure, a sanitizer report, an out-of-memory or leak report, a runtime timeout or stall, or
@@ -6423,6 +6499,7 @@ build's last lines, and the verdicts of the earlier attempts, with what each sig
 | `E1` missed | The setup: configuration, pinned and dependent fields, roles, elector or shape |
 | A middle `Ek` missed | The event's content, recipient, channel or order; the trace's `a`, `b` and sites against what the stage expects |
 | `En` missed, or `handoff lost` | Knob domains, timing, and what keeps the state pending at handoff |
+| `Ek` missed with `the runner ended the prefix at its budget` | Count every wait, setup included, in the stage deadlines passed to `Stages::budget`, keep their sum within 60 s (`MAX_PREFIX_BUDGET`), and race every await against its stage's deadline |
 | `unverifiable`, or `witness rejected` | A witness that binds the relation: an intrinsic site for an existential line, otherwise an exact observable keyed by the bound entities, with positions where order matters |
 | `weak`, with bound witnesses | Withhold the event without which `En` cannot hold for these entities, or report that the History is not causal |
 | A vacuous or missing control | Name, or withhold, a later harness event before `En`; in the control run, drive every later event, the handoff check and the base's oracles |
@@ -6430,8 +6507,8 @@ build's last lines, and the verdicts of the earlier attempts, with what each sig
 | SCAFFOLD ERROR | The reason the helper named |
 | NO CONTINUATION | Nothing in the module: the runner starts the base's actors at the release. Return from `run` at the handoff and stay within the budget; if the lines still fail, the base's runner adapter is broken, which a human fixes |
 
-A miss with `cannot:` takes its own row wherever its stage is; the `E1`, middle and `En` rows
-are for the other misses. The `cannot` row does not send the agent to another base: a base
+A miss with `cannot:`, or with `the runner ended the prefix at its budget`, takes its own row
+wherever its stage is; the `E1`, middle and `En` rows are for the other misses. The `cannot` row does not send the agent to another base: a base
 that has the capability is a pair of its own (section 18.6.2). Automatic repair covers only
 these. A CRASH (finding candidate) gets no feedback, because refinement stops (D67).
 
@@ -6584,7 +6661,7 @@ the profile after a campaign that ended `READY` or `PANIC (tests)`.
 | AC-26 | Two canonical replays of each scaffold of AC-24 and AC-25. Stub scaffolds, one per witness rejection rule of section 18.7: an `as Ek` value that differs, and one that `Ek` bound to `?`; an entity missing from `bind=`; an `exact` key without an entity of the line; positions against the History's order; a foreign `run`; a relation across a `restart` line whose incarnation the line does not bind; an `intrinsic` witness with a wrong `me`, one citing two observations, and one giving a view a value; a `construction` witness for `En`, and one for an event whose actor is not `harness`. Two stubs of an ordered pair with presence-only evidence: one for the later stage, and one for the earlier stage while the later is stamped. A stub that performs two harness actions A and then B, with no probe observation between them, for events the History orders A before B, each with a `construction` witness; and one that performs B before A. A stub that restarts one replica twice with no probe observation between the restarts, and whose later line, related by an `as Ek` to a stage before both restarts, names the incarnation the first restart began while its evidence lies after the second. Stubs with a vacuous control, a `weak` control, no `Control:` line, and `Control: n/a` with an `intrinsic` witness. A stub that prints `[statelens-reach]` itself, and one that prints `[statelens-scaffold]` itself. Stubs whose prefix raises an invariant's panic, panics on a line the pair's diff added or moved, makes a sanitizer report in an accessor it added, and fails in the control run only. A stub agent that runs its scaffold and leaves a crash file. A stub with an empty knob domain. A stub with a missed stage. A stub that fills the trace to `TRACE_CAP`, changes the state past the cap, and reads in the handoff the latest observation the trace kept. A stub whose canonical replay fails, with synthesis interrupted (`SIGINT`) during the control replay. | The two replays print the same stage lines. Each rejection stub is UNVERIFIED with `witness rejected: <its rule>`, each presence-only stub UNVERIFIED with `unverifiable (no position)`, and each control stub UNVERIFIED. The two actions get distinct positions, A's smaller, and both stages hold in the first stub; the second is UNVERIFIED with `witness rejected: order`. The two restarts print distinct `seq=` values, so two incarnations, and the stub that names the first is UNVERIFIED with `witness rejected: incarnation`. The printing stubs are vetoed. Each failing stub is CRASH (finding candidate), with refinement stopped after that attempt and its crash file in `attempt-<a>/`; `just run <scaffold>` reproduces the first three, the second and third carry `location in TS-NNNN diff`, and the fourth's `replay` line sets `STATELENS_REACH_CONTROL=1`. The stray crash file is in `attempt-<a>/swept/`, and that attempt is CRASH (finding candidate) with `stray failure`. The empty domain is SCAFFOLD ERROR, and refinement continues. The missed stage prints `handoff lost`, `reach k/n` and then `done`. The truncation stub prints `truncated seq=<s>` and is UNVERIFIED with `unverifiable (trace truncated)`; the same lines with `En` held, `read=` at or after `<s>` and `handoff holds` are UNVERIFIED too. The interrupted synthesis exits with code 130 with the pair's edits restored, and `TS-NNNN_<base>/attempt-<a>/` holds the canonical crash file and log, `version.diff`, which `git apply --check` accepts on the tree before the pair, `version/`, and `interrupted.txt`, which names the pair, the control replay as the step that stopped and gives the canonical replay's `run` and `replay` lines. |
 | AC-27 | On a checkout of AC-24: `just fuzz simplex --parallel --tmux --state-reaching --state-targets TS-0004 --fuzz-targets "simplex_cert_*" --skip-campaign`; the same with `--fuzz-targets simplex_cert_mock`, with `--fuzz-targets "simplex_cert_mock_twins_*"`, with `--state-targets "TS-000*"` and with `--fuzz-targets "nothing*"`; then, on the same checkout after an edit to `consensus/fuzz/core/src/lib.rs` that still compiles (a comment line), as a merged upstream fix leaves one, the first command with `--skip-synthesis` added and the first command as it is; then `just fuzz simplex --bogus`, `just fuzz simplex --state-targets TS-0003`, `just fuzz simplex --skip-synthesis`, `just fuzz simplex --state-reaching --fuzz-targets TS-0003`, `just fuzz simplex --state-reaching --state-targets "simplex_cert_*"`, `just fuzz qmdb --state-reaching` and `just fuzz simplex_cert_mock --state-reaching`. | The first opens the session `statelens-simplex-reach` with one window per `simplex_cert_*` base of TS-0004 whose scaffold built, 16 pairs at `HEAD` (the bases with a runner adapter), and none for a variant, each running `just run <scaffold>` with no added argument, the message saying `20 scaffold(s), one tmux window each`; `simplex_cert_mock` opens one window, `simplex_cert_mock_ts0004`; `simplex_cert_mock_twins_*` opens eight, `simplex_cert_mock_twins_campaign_ts0004` to `simplex_cert_mock_twins_mutator_state_cov_ts0004`; `TS-000*` opens one window per scaffold of TS-0003's and TS-0004's pairs; `nothing*` fails before synthesis. On the edited checkout, the command with `--skip-synthesis` runs no `synthesize` and opens the session with one window per scaffold of TS-0004 already built on a `simplex_cert_*` base, whatever its verdict, each running `just run <scaffold>`; the command without it stops before any window opens, `synthesize` exiting with code 2 (`the checkout differs from the synthesis baseline: consensus/fuzz/core/src/lib.rs; use a fresh clone`). The last seven exit with code 1, `just fuzz simplex --skip-synthesis` with `just fuzz: --skip-synthesis needs --state-reaching` and nothing listed or run. |
 | AC-28 | `just clean --yes` on a checkout of AC-24 or AC-25; then `just campaign` on a checkout that has `<package>/src/target_states/`. For a scaffold whose base runs a real engine under a Byzantine identity (a Twins base, whose twin pair the runner starts at the release), a canonical replay with `STATELENS_BYZANTINE=panic`. | After `clean` every path in its scope, the fuzz packages included, matches `HEAD`, and no `target_states/` or thin target is left. The campaign exits with code 2. The replay panics with `[statelens][BYZANTINE]`; with no such scaffold, this check is recorded as not applicable. |
-| AC-29 | In the fuzz harness: `cargo +nightly-2026-06-21 fmt -p commonware-consensus-fuzz-core -p commonware-consensus-fuzz-simplex -- --check`, the same packages' `clippy --all-targets --all-features -- -D warnings`, and `cargo +stable nextest run -p commonware-consensus-fuzz-core -p commonware-consensus-fuzz-simplex`. In `SL/`: `just check-scripts`, whose `Synthesize` and `ReachCheck` tests cover the trusted continuation with stub agents and builds. | Everything passes. The harness tests show the drivers' ordinary runs unchanged (the auditor states of section 18.1), the base's actors running at the release and at the end for every supported driver family, a missing or finished required actor failing the check, and every change of a meddling prefix reverted at the release. The script tests show the thin target written and restored by the script, the driver-code, `set_compromised` and missing-`prefix` vetoes, the refusal of a base without a runner adapter (exit code 1) and of a harness without the hook API (exit code 2), the `actors` and `release` lines parsed, NO CONTINUATION for a replay without them or with a failed one, never kept, the largest replay with `STATELENS_REACH_LARGEST=1`, and a standing scaffold of the old contract reported and not revalidated. |
+| AC-29 | In the fuzz harness: `cargo +nightly-2026-06-21 fmt -p commonware-consensus-fuzz-core -p commonware-consensus-fuzz-simplex -- --check`, the same packages' `clippy --all-targets --all-features -- -D warnings`, and `cargo +stable nextest run -p commonware-consensus-fuzz-core -p commonware-consensus-fuzz-simplex`. In `SL/`: `just check-scripts`, whose `Synthesize` and `ReachCheck` tests cover the trusted continuation with stub agents and builds. | Everything passes. The harness tests show the drivers' ordinary runs unchanged (the auditor states of section 18.1), the base's actors running at the release and at the end for every supported driver family, a missing or finished required actor failing the check, every change of a meddling prefix reverted at the release, a prefix past its budget ended there, a continuation that runs every oracle after its window although the base's progress target is out of reach, and a log snapshot that shares its log, a log that stops at `LOG_CAP` and a full gate that drops what it would hold. The script tests show the thin target written and restored by the script, the driver-code, `set_compromised` and missing-`prefix` vetoes, the refusal of a base without a runner adapter (exit code 1) and of a harness without the hook API (exit code 2), the `actors` and `release` lines parsed, NO CONTINUATION for a replay without them or with a failed one, never kept, a prefix the runner ended at its budget missing its open stage as an ordinary miss, a kept version replayed canonical, control and final only, and a standing scaffold of the old contract reported and not revalidated. |
 | R-TS-NF-3 | With the same duration and flags, each scaffold and its base's variant, in the same instrumented checkout. | The exec/s values are reported side by side. |
 
 #### 18.10.1 Differential test of the primitives (AC-25)
@@ -6803,10 +6880,14 @@ assertions (`finish` and the scenario's own `assert_eq!`s) can.
 
 ### 18.11 Known limitations
 
-- The trusted continuation (D69) re-bases the base's view-indexed faults and progress targets
-  on the release, but not a Twins base's scripted rounds: their leaders apply from view 1, also
-  during the prefix, and their split from the release, so a long prefix consumes them and the
-  twin pair then runs with every link to both halves. Offsetting the scenario would need an
+- A continuation checks safety only (D70): it runs the base's window after the release and
+  never waits for progress, so a scaffold finds no liveness bug, and a state that stalls the
+  replicas no longer ends in a false crash. Liveness is checked only by the ordinary fuzz
+  targets, which run without a prefix.
+- The trusted continuation (D69) re-bases the base's view-indexed faults on the release, but
+  not a Twins base's scripted rounds: their leaders apply from view 1, also during the
+  prefix, and their split from the release, so a long prefix consumes them and the twin pair
+  then runs with every link to both halves. Offsetting the scenario would need an
   elector the honest engines cannot be built with before the release is known.
 - A replica the prefix restarts, and one the release restarts, runs behind the runner's gate and
   recorders but without the base's happens-before capture and node subscriber, so its trace
@@ -6930,8 +7011,8 @@ assertions (`finish` and the scenario's own `assert_eq!`s) can.
 - The helper's state is per thread, as the trace is: a panic on a thread other than the one
   that called `Stages::new` prints no stage lines, and neither does a scaffold error raised
   before `Stages::new`.
-- Whether a marshal prefix leaves enough height below the epoch ceiling for the liveness
-  measurement is not measured; review of the module checks it.
+- Whether a marshal prefix leaves enough height below the epoch ceiling for the base to run
+  on after the release is not measured; review of the module checks it.
 - The differential test of section 18.10.1 judges hand-written prefixes, never an agent's,
   and compares the settled state after `finish`, not the state at the handoff mark, so a
   prefix whose event is still in flight at its handoff is not told apart from one that
@@ -8473,18 +8554,20 @@ The scaffold helper template of section 18.7.
 //! [Watch] is the runner's observer, which only the thin target the script writes
 //! passes: it stamps what the runner's recorders record, publishes the compromised
 //! identity, prints the `release` line and the `actors` lines of the runner's actor
-//! check, and prints `done` after the base's last oracle.
+//! check, and prints `done` after the base's last oracle. When the runner ended the
+//! prefix at its budget, it closes the stages first: the first stage without an
+//! outcome misses and the handoff is lost.
 //!
-//! Once the trace drops an observation at its cap, what it holds from that position
-//! on is incomplete, so the helper prints a `truncated` line with the position, at
-//! its first event after the cut, and neither a stage read at or after the cut nor
-//! a handoff whose mark follows it holds.
+//! Once the trace drops an observation at its cap, or the prefix reads one of the
+//! runner's recorder logs (or a replica's held messages) that dropped an entry at its
+//! cap, what the prefix reads from that position on is incomplete, so the helper
+//! prints a `truncated` line with the earliest such position, at its first event
+//! after the cut, and neither a stage read at or after the cut nor a handoff whose
+//! mark follows it holds. A full log the prefix never reads cuts nothing.
 //!
 //! Environment switches, each read once per process:
 //! - `STATELENS_REACH=1` prints the `[statelens-reach]` lines on stderr.
 //! - `STATELENS_REACH_CONTROL=1` makes [control] true: the control run.
-//! - `STATELENS_REACH_LARGEST=1` makes the runner run the base's largest progress
-//!   budget: the extra reach replay.
 
 // A scaffold module is a child of this one, and a child module can use every
 // private item of its parent. The helper's code is therefore in a private module of
@@ -8516,15 +8599,6 @@ mod imp {
     fn reach() -> bool {
         static REACH: OnceLock<bool> = OnceLock::new();
         *REACH.get_or_init(|| std::env::var("STATELENS_REACH").is_ok_and(|value| value == "1"))
-    }
-
-    /// Whether `STATELENS_REACH_LARGEST=1`, read once: the extra replay, which runs the
-    /// base's largest progress budget.
-    fn largest() -> bool {
-        static LARGEST: OnceLock<bool> = OnceLock::new();
-        *LARGEST.get_or_init(|| {
-            std::env::var("STATELENS_REACH_LARGEST").is_ok_and(|value| value == "1")
-        })
     }
 
     /// Whether `STATELENS_REACH_CONTROL=1`, read once: the control run, in which the
@@ -8564,16 +8638,24 @@ mod imp {
         seq
     }
 
-    /// The position of the first observation the trace dropped at its cap, or `None`.
-    /// The first time it finds one while stages are open on this thread, it prints
-    /// the `truncated` line.
+    /// The earliest position from which an observation is missing: the first one the
+    /// trace dropped at its cap, or the first entry a runner log the prefix read
+    /// dropped at its cap ([Watch] hears of it), or `None`. Whenever that position is earlier than
+    /// the one last printed, it prints a `truncated` line with it.
     fn truncation() -> Option<u64> {
-        let seq = statelens::truncated()?;
-        let card = STATE.with(|state| {
+        let trace = statelens::truncated();
+        let (seq, card) = STATE.with(|state| {
             let mut state = state.borrow_mut();
-            let first = !std::mem::replace(&mut state.noticed, true);
-            first.then_some(state.card)
-        });
+            let seq = match (trace, state.dropped) {
+                (Some(a), Some(b)) => a.min(b),
+                (a, b) => a.or(b)?,
+            };
+            let earlier = state.noticed.is_none_or(|printed| seq < printed);
+            if earlier {
+                state.noticed = Some(seq);
+            }
+            Some((seq, earlier.then_some(state.card)))
+        })?;
         if let Some(card) = card {
             emit(card, &format!("truncated seq={seq}"));
         }
@@ -8946,8 +9028,10 @@ mod imp {
         settled: Vec<bool>,
         /// The stages recorded as held.
         held: u32,
-        /// Whether the `truncated` line was printed.
-        noticed: bool,
+        /// The position the last `truncated` line printed.
+        noticed: Option<u64>,
+        /// The earliest position at which a runner log the prefix read dropped an entry.
+        dropped: Option<u64>,
         since: u64,
         open: bool,
         handed_off: bool,
@@ -8964,7 +9048,8 @@ mod imp {
                 n: 0,
                 settled: Vec::new(),
                 held: 0,
-                noticed: false,
+                noticed: None,
+                dropped: None,
                 since: 0,
                 open: false,
                 handed_off: false,
@@ -9003,7 +9088,9 @@ mod imp {
 
         /// Takes the knobs, so none is picked later, and returns the budget the prefix
         /// asks of the runner: `prefix`, the sum of the stage deadlines, and `release`,
-        /// the release delay `d`. The runner's deadline is the base's plus both.
+        /// the release delay `d`. The runner cuts `prefix` to
+        /// [runner::MAX_PREFIX_BUDGET] (60 s) and `release` to the base's fault phase
+        /// (30 s).
         pub fn budget(&self, knobs: Knobs, prefix: Duration, release: Duration) -> runner::Budget {
             drop(knobs);
             runner::Budget { prefix, release }
@@ -9157,6 +9244,9 @@ mod imp {
         }
 
         fn released(&self, release: &Release) {
+            if release.overran {
+                end_overrun();
+            }
             let list = |items: Vec<String>| {
                 if items.is_empty() {
                     "-".to_string()
@@ -9187,6 +9277,19 @@ mod imp {
             );
         }
 
+        fn dropped(&self, seq: u64) {
+            // Position 0 is an entry recorded while nothing watched.
+            if seq == 0 {
+                return;
+            }
+            STATE.with(|state| {
+                let mut state = state.borrow_mut();
+                if !state.card.is_empty() {
+                    state.dropped = Some(state.dropped.map_or(seq, |first| first.min(seq)));
+                }
+            });
+        }
+
         fn done(&self) {
             // Shape A: the stages are evaluated over the trace of the whole run.
             let evaluate = STATE.with(|state| {
@@ -9198,24 +9301,52 @@ mod imp {
             }
             emit(&card(), "done");
         }
+    }
 
-        fn largest(&self) -> bool {
-            largest()
+    /// The detail of the stage a prefix the runner ended at its budget left open.
+    const OVERRAN: &str = "the runner ended the prefix at its budget";
+
+    /// Closes the stages of a prefix the runner ended at its budget: the first stage
+    /// without an outcome misses, and the handoff is lost. Does nothing for a Shape A
+    /// scaffold, whose stages [Watch] evaluates at the end, and after a handoff.
+    fn end_overrun() {
+        let first = STATE.with(|state| {
+            let state = state.borrow();
+            if state.card.is_empty() || state.handed_off || state.evaluate.is_some() {
+                return None;
+            }
+            Some(
+                state
+                    .settled
+                    .iter()
+                    .position(|settled| !settled)
+                    .and_then(|index| u32::try_from(index + 1).ok()),
+            )
+        });
+        let Some(first) = first else {
+            return;
+        };
+        if let Some(k) = first {
+            settle(k, Outcome::Missed(OVERRAN.to_string()), true);
         }
+        Stages { _private: () }.handoff(|| None);
     }
 
     /// Records the outcome of stage `k`, and returns whether it recorded it held.
     /// `last` lets the handoff, the panic hook and [Stages::unverifiable] record
     /// stage n; a `cannot:` miss records it too. Once the trace dropped an
-    /// observation, a miss other than a `cannot:`, and a witness read at or after the
-    /// dropped position, are `unverifiable (trace truncated)`.
+    /// observation, a miss other than a `cannot:` or the runner's end of the prefix,
+    /// which no trace decides, and a witness read at or after the dropped position,
+    /// are `unverifiable (trace truncated)`.
     fn settle(k: u32, outcome: Outcome, last: bool) -> bool {
         let cut = truncation();
         let outcome = match outcome {
             Outcome::Held(witness) if cut.is_some_and(|seq| witness.read >= seq) => {
                 Outcome::Unverifiable(TRUNCATED.to_string())
             }
-            Outcome::Missed(text) if cut.is_some() && !text.starts_with("cannot:") => {
+            Outcome::Missed(text)
+                if cut.is_some() && !text.starts_with("cannot:") && text != OVERRAN =>
+            {
                 Outcome::Unverifiable(TRUNCATED.to_string())
             }
             outcome => outcome,
@@ -9512,7 +9643,12 @@ mod imp {
             assert_ne!(seq, 0, "a recorder takes a position while the stages watch");
             let cited = cite("deliver", "R=1, v=2", "notarize", recorded);
             assert_eq!(cited.seq(), seq);
-            stages.handoff(|| Some(Witness::exact("R=1@E1", &[("deliver", "R=1", "x", Some(cited))])));
+            stages.handoff(|| {
+                Some(Witness::exact(
+                    "R=1@E1",
+                    &[("deliver", "R=1", "x", Some(cited))],
+                ))
+            });
             let check = ActorCheck {
                 at: "release",
                 actors: Vec::new(),
@@ -9522,12 +9658,125 @@ mod imp {
             Watch.done();
             let lines = LINES.take();
             assert!(lines.contains(&format!("entry deliver[R=1,v=2]=notarize seq={seq}")));
-            assert!(lines.contains(&"actors release ok -".to_string()), "{lines:#?}");
-            assert!(lines.contains(
-                &"release base=0 gates=- delivered=0 blocks=0 links=- latencies=- restarted=-"
-                    .to_string()
-            ));
+            assert!(
+                lines.contains(&"actors release ok -".to_string()),
+                "{lines:#?}"
+            );
+            assert!(
+                lines.contains(
+                    &"release base=0 gates=- delivered=0 blocks=0 links=- latencies=- restarted=-"
+                        .to_string()
+                )
+            );
             assert_eq!(lines.last().map(String::as_str), Some("done"));
+        }
+
+        #[test]
+        fn test_a_prefix_ended_at_its_budget_misses_its_open_stage() {
+            let mut stages = open("TS-9007", 3);
+            observe(1, 1);
+            let first = at(statelens::mark());
+            assert!(stages.held(1, Witness::intrinsic("R=0@E1", first)));
+            let overran = Release {
+                overran: true,
+                ..Release::default()
+            };
+            Watch.released(&overran);
+            let lines = LINES.take();
+            let missed = find(&lines, "E2/3").expect("the open stage has a line");
+            assert_eq!(
+                lines[missed],
+                "E2/3 missed the runner ended the prefix at its budget"
+            );
+            assert_eq!(find(&lines, "E3/3"), None, "{lines:#?}");
+            let handoff = find(&lines, "handoff lost mark=").expect("the handoff is lost");
+            let reach = find(&lines, "reach 1/3 control=0").expect("the reach line prints");
+            let release = find(&lines, "release base=0").expect("the release line prints");
+            assert!(
+                missed < handoff && handoff < reach && reach < release,
+                "{lines:#?}"
+            );
+            assert_eq!(FEATURES.take(), vec![1]);
+            // After the handoff, a release closes nothing.
+            Watch.released(&overran);
+            let lines = LINES.take();
+            assert_eq!(find(&lines, "handoff"), None, "{lines:#?}");
+            assert!(find(&lines, "release base=0").is_some());
+        }
+
+        #[test]
+        fn test_a_prefix_ended_with_only_its_last_stage_open_misses_it() {
+            let _stages = open("TS-9008", 1);
+            Watch.released(&Release {
+                overran: true,
+                ..Release::default()
+            });
+            let lines = LINES.take();
+            assert!(
+                lines
+                    .contains(&"E1/1 missed the runner ended the prefix at its budget".to_string()),
+                "{lines:#?}"
+            );
+            assert!(find(&lines, "handoff lost mark=").is_some(), "{lines:#?}");
+            assert!(find(&lines, "reach 0/1 control=0").is_some(), "{lines:#?}");
+        }
+
+        #[test]
+        fn test_a_prefix_ended_at_its_budget_after_a_cut_still_misses() {
+            let mut stages = open("TS-9009", 3);
+            observe(1, 1);
+            let first = at(statelens::mark());
+            assert!(stages.held(1, Witness::intrinsic("R=0@E1", first)));
+            observe(1, statelens::TRACE_CAP);
+            assert!(statelens::truncated().is_some(), "the trace is cut");
+            Watch.released(&Release {
+                overran: true,
+                ..Release::default()
+            });
+            let lines = LINES.take();
+            assert!(
+                lines
+                    .contains(&"E2/3 missed the runner ended the prefix at its budget".to_string()),
+                "{lines:#?}"
+            );
+            assert_eq!(find(&lines, "E3/3"), None, "{lines:#?}");
+            assert!(find(&lines, "handoff lost mark=").is_some(), "{lines:#?}");
+            assert!(find(&lines, "reach 1/3 control=0").is_some(), "{lines:#?}");
+        }
+
+        #[test]
+        fn test_a_recorder_drop_cuts_like_the_trace() {
+            let mut stages = open("TS-9009", 3);
+            observe(1, 1);
+            let first = at(statelens::mark());
+            assert!(stages.held(1, Witness::intrinsic("R=0@E1", first)));
+            // A runner recorder drops the entry it stamps next.
+            let (seq, _) = Watch.position();
+            Watch.dropped(seq);
+            observe(1, 1);
+            let later = at(statelens::mark());
+            assert!(
+                !stages.held(2, Witness::intrinsic("R=0@E2", later)),
+                "a stage read after the drop does not hold"
+            );
+            stages.handoff(|| Some(Witness::intrinsic("R=0@E3", later)));
+            let lines = LINES.take();
+            assert!(lines.contains(&format!("truncated seq={seq}")), "{lines:#?}");
+            assert!(
+                lines.contains(&"E2/3 unverifiable (trace truncated)".to_string()),
+                "{lines:#?}"
+            );
+            assert!(find(&lines, "handoff lost mark=").is_some(), "{lines:#?}");
+            assert_eq!(FEATURES.take(), vec![1]);
+            // An entry dropped while nothing watched (position 0) cuts nothing.
+            let mut stages = open("TS-9009", 1);
+            Watch.dropped(0);
+            observe(1, 1);
+            let last = at(statelens::mark());
+            stages.handoff(|| Some(Witness::intrinsic("R=0@E1", last)));
+            let lines = LINES.take();
+            assert_eq!(find(&lines, "truncated"), None, "{lines:#?}");
+            assert!(find(&lines, "handoff holds mark=").is_some(), "{lines:#?}");
         }
 
         #[test]

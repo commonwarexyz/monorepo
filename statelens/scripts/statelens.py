@@ -5946,14 +5946,15 @@ def scaffold_bases(repo, profile):
 
 # SPEC section 18.7: the trusted continuation. A scaffold is a prefix the base's own
 # driver runs through a hook point; the profile's fuzz harness exposes it as a hook API,
-# found by the markers of `api`, whose absence refuses synthesis. `entries` maps each base
+# found by the markers of `api`, whose absence refuses synthesis (`pub overran`: the
+# safety-only harness of D70, which the helper's `Release` needs). `entries` maps each base
 # entry the harness hooks to its trusted entry and the modes, the entry's second generic
 # argument, it takes (None: every one); a base with another entry has no runner adapter,
 # and synthesis refuses it. `cfg` is the attribute of the base targets' `mod fuzz`.
 CONTINUATION = {
     "simplex": {
         "api": (
-            ("consensus/fuzz/core/src/continuation.rs", "pub trait Prefix<"),
+            ("consensus/fuzz/core/src/continuation.rs", "pub overran"),
             ("consensus/fuzz/simplex/src/trusted.rs", "pub fn fuzz_with_prefix<"),
         ),
         "crate": "commonware_consensus_fuzz_simplex",
@@ -6284,6 +6285,8 @@ REPORT_VERDICT = re.compile(
 # The run and replay lines of a report whose card kept a scaffold: a revalidation rewrites
 # them for the scaffold's latest check (section 18.6.2, Finish).
 REPORT_RUN_BLOCK = re.compile(r"## Run and replay\n\n```\n.*?\n```", re.S)
+# The detail of the stage a prefix the runner ended at its budget left open (the helper's).
+OVERRAN = "the runner ended the prefix at its budget"
 # The feedback table of section 18.8: what each signal asks the next attempt to fix.
 FEEDBACK_FIXES = {
     "veto": "That, as reported",
@@ -6293,6 +6296,11 @@ FEEDBACK_FIXES = {
         "what the stage expects"
     ),
     "last": "Knob domains, timing, and what keeps the state pending at handoff",
+    "budget": (
+        "Count every wait, setup included, in the stage deadlines passed to Stages::budget, "
+        "keep their sum within 60 s (MAX_PREFIX_BUDGET), and race every await against its "
+        "stage's deadline"
+    ),
     "cannot": (
         "Nothing in the scaffold, unless an edit the contract allows, or another shape, "
         "gives the capability; otherwise a human adds it"
@@ -7096,16 +7104,14 @@ def reach_verdict(
     stray=None,
     diff=None,
     labels=None,
-    largest=None,
 ):
     """The verdict of a scaffold version's reach check (SPEC section 18.8).
 
-    `module` is the scaffold module's text; `canonical`, `control`, `final` and `largest`
-    (the extra replay with the base's largest progress budget) are each replay's (exit
-    code, output), or None when it did not run, the code being None when the script killed
-    it. `stray` names a crash file a run of the agent's left (section 18.6.2), `diff` is
-    the card's diff, and `labels` every probe label and `sl_implies!` ID under the editable
-    roots. Returns a dict: `verdict`, `k`, `n`, `annotations`, `reasons`, `control` and
+    `module` is the scaffold module's text; `canonical`, `control` and `final` are each
+    replay's (exit code, output), or None when it did not run, the code being None when the
+    script killed it. `stray` names a crash file a run of the agent's left (section 18.6.2),
+    `diff` is the card's diff, and `labels` every probe label and `sl_implies!` ID under the
+    editable roots. Returns a dict: `verdict`, `k`, `n`, `annotations`, `reasons`, `control` and
     `control_reason`, `crash` (replay_failure of the replay that failed, with its
     `replay`), `scaffold_error`, `continuation` (why the base's actors did not run, with
     the replay, or None), `header` and `replays`.
@@ -7113,12 +7119,7 @@ def reach_verdict(
     header = module_header(module or "")
     n = len(history.events)
     replays, failures, continuation, actors_failed = {}, [], [], []
-    for name, replay in (
-        ("canonical", canonical),
-        ("control", control),
-        ("final", final),
-        ("largest", largest),
-    ):
+    for name, replay in (("canonical", canonical), ("control", control), ("final", final)):
         if replay is None:
             continue
         code, text = replay
@@ -7327,6 +7328,8 @@ def reach_feedback(result):
                 part = "first" if k == 1 else "last" if k == n else "middle"
                 if stage["detail"].startswith("cannot:"):
                     part = "cannot"
+                elif stage["detail"] == OVERRAN:
+                    part = "budget"
                 signal = f"E{k} missed" + (f" ({stage['detail']})" if stage["detail"] else "")
                 fixes.append((signal, FEEDBACK_FIXES[part]))
                 break
@@ -8717,8 +8720,8 @@ def unreviewed_note(unreviewed):
 REPLAY_TIMEOUT = 1500
 # The replays of a scaffold version (section 18.8), and the switch each sets besides
 # STATELENS_REACH=1.
-REPLAYS = ("canonical", "control", "final", "largest")
-REPLAY_SWITCHES = {"control": "STATELENS_REACH_CONTROL=1", "largest": "STATELENS_REACH_LARGEST=1"}
+REPLAYS = ("canonical", "control", "final")
+REPLAY_SWITCHES = {"control": "STATELENS_REACH_CONTROL=1"}
 # Files a run of a scaffold leaves (section 18.6.2, step 2.2); all but the last are failures.
 STRAY_NAME = re.compile(r"^(?:crash|oom|timeout|leak|slow-unit)-")
 STRAY_FAILURE = re.compile(r"^(?:crash|oom|timeout|leak)-")
@@ -10221,10 +10224,9 @@ class Synthesis:
                 tail = tail + [f"statelens: the build left no binary {scaffold} for {self.host}"]
         return binary, command, tail, log
 
-    def replay(self, card_id, binary, directory, control=False, largest=False):
+    def replay(self, card_id, binary, directory, control=False):
         """One replay of the empty input (section 18.8): (exit code or None, output). The
-        control run sets STATELENS_REACH_CONTROL=1, the extra replay
-        STATELENS_REACH_LARGEST=1, which runs the base's largest progress budget."""
+        control run sets STATELENS_REACH_CONTROL=1."""
         if directory.exists():
             shutil.rmtree(directory)
         directory.mkdir(parents=True)
@@ -10233,12 +10235,9 @@ class Synthesis:
         env = dict(os.environ)
         env.pop("STATELENS_BYZANTINE", None)
         env.pop("STATELENS_REACH_CONTROL", None)
-        env.pop("STATELENS_REACH_LARGEST", None)
         env["STATELENS_REACH"] = "1"
         if control:
             env["STATELENS_REACH_CONTROL"] = "1"
-        if largest:
-            env["STATELENS_REACH_LARGEST"] = "1"
         log = directory / "replay.log"
         code, _ = run_logged(
             [str(binary), str(self.empty)],
@@ -10336,9 +10335,6 @@ class Synthesis:
         live["step"] = "the control replay"
         control = self.replay(pair.card, binary, directory / "control", control=True)
         live["replays"]["control"] = control[0]
-        live["step"] = "the largest replay"
-        largest = self.replay(pair.card, binary, directory / "largest", largest=True)
-        live["replays"]["largest"] = largest[0]
         live["step"] = "the reach check"
         module_text = (self.repo / self.states / f"{module}.rs").read_text(errors="replace")
         stray = failures[0] if failures else None
@@ -10350,7 +10346,6 @@ class Synthesis:
             stray=stray,
             diff=diff,
             labels={label for label, _ in self.labels},
-            largest=largest,
         )
         if step["unmarked"]:
             result["annotations"].append("unmarked edit")
@@ -10368,7 +10363,6 @@ class Synthesis:
             "module": module_text,
             "canonical": canonical,
             "control": control,
-            "largest": largest,
             "diff": diff,
             "stray": stray,
             "unmarked": step["unmarked"],
@@ -10684,7 +10678,6 @@ class Synthesis:
                 replays={
                     "canonical": kept["canonical"][0],
                     "control": kept["control"][0],
-                    "largest": kept["largest"][0],
                 },
                 scaffold=kept["scaffold"],
             )
@@ -10715,7 +10708,6 @@ class Synthesis:
                         stray=kept["stray"],
                         diff=kept["diff"],
                         labels={label for label, _ in self.labels},
-                        largest=kept["largest"],
                     )
                     if kept["unmarked"]:
                         result["annotations"].append("unmarked edit")
@@ -10984,7 +10976,7 @@ class Synthesis:
 
     def check_scaffold(self, key, tag):
         """Builds the kept scaffold of the pair `key` again and replays it, canonical,
-        control, final and largest, in `TS-NNNN_<base>/<tag>/`, or `<tag>.<stamp>/` when that
+        control and final, in `TS-NNNN_<base>/<tag>/`, or `<tag>.<stamp>/` when that
         exists, and keeps that directory in its entry. Returns (result, problem): the reach
         check's result, None when it does not build, and why it stands worse than its
         report, or None."""
@@ -11002,13 +10994,7 @@ class Synthesis:
         # For `preserve`: where an interrupted revalidation left its replays.
         self.live["revalidation"] = directory
         replays = [
-            self.replay(
-                entry["card"],
-                binary,
-                directory / name,
-                control=name == "control",
-                largest=name == "largest",
-            )
+            self.replay(entry["card"], binary, directory / name, control=name == "control")
             for name in REPLAYS
         ]
         before = report_verdict(entry["report"])
@@ -11017,7 +11003,7 @@ class Synthesis:
         if before["verdict"] == CRASH and "stray failure" in before["annotations"]:
             stray = "the file its report names"
         path = self.repo / self.states / f"{entry['module']}.rs"
-        canonical, control, final, largest = replays
+        canonical, control, final = replays
         result = reach_verdict(
             entry["history"],
             path.read_text(errors="replace") if path.is_file() else "",
@@ -11026,7 +11012,6 @@ class Synthesis:
             final,
             stray=stray,
             labels={label for label, _ in self.labels},
-            largest=largest,
         )
         if stands_worse(before, result):
             return result, (
@@ -11097,11 +11082,6 @@ class Synthesis:
             note = (
                 "failed in the control replay (STATELENS_REACH_CONTROL=1); the canonical input "
                 "does not reproduce it"
-            )
-        elif replay == "largest":
-            note = (
-                "failed in the largest replay (STATELENS_REACH_LARGEST=1, the base's largest "
-                "progress budget); the canonical input does not reproduce it"
             )
         else:
             note = (
@@ -11235,7 +11215,7 @@ class Synthesis:
     def run_lines(self, scaffold, crash_file=None, replay=None):
         """The `run` line of a scaffold and the `replay` line of `crash_file`, by default a
         placeholder in its artifacts directory; `replay` names the replay that left it, whose
-        switch (the control's, the largest's) the replay line sets.
+        switch (the control's) the replay line sets.
         The paths are quoted for the shell, so a line runs as printed from a checkout whose
         path holds a space; the placeholder stays as it is."""
         here = f"cd {shlex.quote(str(self.repo / SL))} && "
@@ -11567,7 +11547,6 @@ def cmd_reach_verdict(args):
         module,
         replay(args.canonical, args.canonical_code),
         replay(args.control, args.control_code),
-        largest=replay(args.largest, args.largest_code),
     )
     print(verdict_text(result), flush=True)
     for reason in result["reasons"]:
@@ -11987,8 +11966,8 @@ def main(argv):
         description=(
             "Compute the reach verdict (SPEC section 18.8) of one scaffold from a card, "
             "the scaffold module and the captured output of its canonical replay and, "
-            "optionally, its control and largest replays, as the synthesis computes it. Exit "
-            "code 0 for REACHED, 1 otherwise."
+            "optionally, its control replay, as the synthesis computes it. Exit code 0 for "
+            "REACHED, 1 otherwise."
         ),
     )
     reach.add_argument("--card", required=True, help="the target-state card (TS-NNNN.md)")
@@ -12002,12 +11981,6 @@ def main(argv):
     reach.add_argument("--control", help="the control replay's output, if it ran")
     reach.add_argument(
         "--control-code", type=int, default=0, help="the control replay's exit code"
-    )
-    reach.add_argument(
-        "--largest", help="the largest replay's output (STATELENS_REACH_LARGEST=1), if it ran"
-    )
-    reach.add_argument(
-        "--largest-code", type=int, default=0, help="the largest replay's exit code"
     )
     args = parser.parse_args(argv)
 
