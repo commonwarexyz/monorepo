@@ -888,7 +888,7 @@ fn catch_up_callback_after_the_count_returns(catch_up: CatchUp) {
                         );
                         searching.store(true, Ordering::SeqCst);
                         spin_until(
-                            || pool.ring(0).is_stealable(),
+                            || pool.queue(0).is_stealable(),
                             "the root never queued a stealable backlog",
                         );
                         register();
@@ -4965,7 +4965,7 @@ fn test_failed_search_after_the_last_look_publishes_again() {
                 });
                 searching.store(true, Ordering::SeqCst);
                 spin_until(
-                    || pool.ring(0).is_stealable(),
+                    || pool.queue(0).is_stealable(),
                     "the root never queued a stealable backlog",
                 );
             }
