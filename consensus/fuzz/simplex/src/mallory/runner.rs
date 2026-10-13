@@ -1570,6 +1570,7 @@ fn run_inner<P: Simplex>(
             Epoch::new(commonware_consensus_fuzz_core::EPOCH),
             term_length,
             input.optimistic_views,
+            input.handoff,
             &observers,
         );
         let states = invariants::extract(reporters, config.n as usize);

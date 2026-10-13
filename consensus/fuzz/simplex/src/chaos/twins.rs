@@ -58,7 +58,7 @@ use crate::{
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    Monitor as _, Viewable as _,
+    Handoff, Monitor as _, Viewable as _,
     simplex::{
         Engine, Floor, SkipBudget, SkipPolicy, config,
         mocks::{application, relay, reporter, twins},
@@ -536,6 +536,7 @@ fn check_safety<P: Simplex>(
     elector: TwinsElector<P>,
     term_length: TermLength,
     optimistic_views: ViewDelta,
+    handoff: Handoff<()>,
 ) {
     // Full audit-history suite over the RECORDING reporters: the append-only,
     // full-proposal (parent-aware) conflict checks (`finalization_history` /
@@ -564,6 +565,7 @@ fn check_safety<P: Simplex>(
         Epoch::new(commonware_consensus_fuzz_core::EPOCH),
         term_length,
         optimistic_views,
+        handoff,
         &observers,
     );
 }
@@ -598,6 +600,7 @@ async fn paced_step<P: Simplex>(
     elector: &TwinsElector<P>,
     term_length: TermLength,
     optimistic_views: ViewDelta,
+    handoff: Handoff<()>,
 ) {
     let jitter = Duration::from_millis(context.random_range(0..=CHAOS_TWINS_JITTER_MS));
     context.sleep(jitter).await;
@@ -614,6 +617,7 @@ async fn paced_step<P: Simplex>(
         elector.clone(),
         term_length,
         optimistic_views,
+        handoff,
     );
 }
 
@@ -767,6 +771,7 @@ pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInp
                 elector.clone(),
                 term_length,
                 input.optimistic_views,
+                input.handoff,
             );
         };
         // Confirm from the crash node's own leader map that the next term is
@@ -800,6 +805,7 @@ pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInp
                 &elector,
                 term_length,
                 input.optimistic_views,
+                input.handoff,
             )
             .await;
         }
@@ -866,6 +872,7 @@ pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInp
                 &elector,
                 term_length,
                 input.optimistic_views,
+                input.handoff,
             )
             .await;
         }
@@ -877,6 +884,7 @@ pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInp
             elector.clone(),
             term_length,
             input.optimistic_views,
+            input.handoff,
         );
     });
 }
