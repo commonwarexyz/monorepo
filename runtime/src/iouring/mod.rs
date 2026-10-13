@@ -8,11 +8,12 @@
 //! Tasks spawned or woken from outside the pool, and tasks spawned on a worker
 //! with other work queued when the pool has more than one worker, go to the
 //! global queue that any worker takes from. Each worker has a bounded run
-//! queue, and a push into a full one sends the newest of its tasks to the
-//! global queue. A worker with nothing to run takes half of another worker's
-//! queued tasks, rounded down, so a task queued alone behind a long poll waits
-//! for it. Dedicated and blocking tasks each receive a supervised thread and
-//! io_uring ring. Their ordinary descendants execute on the pool. Task
+//! queue. A push into a full run queue sends its newest half and the new task
+//! to the global queue, or only the new task while a thief holds a claim.
+//! Before parking, a worker with nothing to run can steal half of another
+//! worker's queued tasks, rounded down, so a task queued alone behind a long
+//! poll waits for it. Dedicated and blocking tasks each receive a supervised
+//! thread and io_uring ring. Their ordinary descendants execute on the pool. Task
 //! factories run synchronously on the thread that calls
 //! [`crate::Spawner::spawn`].
 //!
@@ -63,9 +64,10 @@
 //! network operations, dropping the future or closing the worker requests cancellation.
 //!
 //! Shutdown waits for all workers to finish runtime cleanup and failure publication,
-//! with no timeout. No pool worker closes until every pool task has been dropped,
-//! though dedicated and blocking tasks may still run and find a pool worker
-//! closed. Native thread-local destructors may run after the runner returns.
+//! with no timeout. No pool worker closes its mailbox or io_uring ring until
+//! every pool task's future has been dropped, though dedicated and blocking
+//! tasks may still run and find a pool worker closed. Native thread-local
+//! destructors may run after the runner returns.
 //!
 //! # Examples
 //!
