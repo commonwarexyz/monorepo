@@ -69,7 +69,7 @@
 use super::{
     mailbox::{Mailbox, Message},
     pool::Pool,
-    queue::{Owner, Push},
+    queue::{self, Push},
     runtime::{Local, Panics},
     tasks::{Links, Tasks},
 };
@@ -1064,19 +1064,19 @@ impl Wake for RootWaker {
     }
 }
 
-/// One pool worker's run queue: the [`Owner`] of a bounded [`LocalQueue`] in
-/// the pool, which only that worker pushes into and pops from, and which the
-/// pool's other workers steal from.
+/// One pool worker's run queue: the [`queue::Owner`] of a bounded
+/// [`LocalQueue`] in the pool, which only that worker pushes into and pops
+/// from, and which the pool's other workers steal from.
 ///
-/// [`LocalQueue`]: super::queue::LocalQueue
+/// [`LocalQueue`]: super::pool::LocalQueue
 pub struct Ready {
     /// Runnables in FIFO order.
-    queue: Owner<Runnable>,
+    queue: queue::Owner<Runnable>,
 }
 
 impl Ready {
     /// A run queue over its unique owner.
-    pub const fn new(queue: Owner<Runnable>) -> Self {
+    pub const fn new(queue: queue::Owner<Runnable>) -> Self {
         Self { queue }
     }
 
@@ -1118,7 +1118,7 @@ impl Ready {
     }
 
     /// The run queue's owner, for a steal into it.
-    pub const fn queue(&mut self) -> &mut Owner<Runnable> {
+    pub const fn queue(&mut self) -> &mut queue::Owner<Runnable> {
         &mut self.queue
     }
 
@@ -1138,7 +1138,7 @@ impl Ready {
 #[commonware_macros::test_group("miri")]
 pub mod tests {
     use super::*;
-    use crate::{iouring::queue::LocalQueue, utils::extract_panic_message};
+    use crate::{iouring::pool::LocalQueue, utils::extract_panic_message};
     use commonware_utils::sync::Mutex;
     use std::{
         future::{pending, poll_fn},

@@ -220,7 +220,7 @@
 
 use super::{
     mailbox::{Mailbox, Message},
-    queue::{CAPACITY, LocalQueue, Overflow, Push, STEALABLE},
+    queue::{self, CAPACITY, Overflow, Push, STEALABLE},
     runtime::{Panic, Role, Shared, Worker},
     task::{Ready, Runnable},
 };
@@ -259,6 +259,11 @@ const HALF: usize = CAPACITY / 2;
 /// one bit of a `u64`.
 pub const MAX_WORKERS: usize = 64;
 
+/// A pool worker's run queue as the pool holds it: the shared end that the
+/// other workers steal through. The worker takes its [`queue::Owner`] when it
+/// starts.
+pub type LocalQueue = queue::Queue<Runnable>;
+
 /// The global queue's contents, guarded by the pool-wide lock.
 struct GlobalQueue {
     /// Whether pushes are still accepted. Shutdown clears it, after which a
@@ -288,7 +293,7 @@ pub struct Slot {
     mailbox: Arc<Mailbox>,
     /// The shared end of the worker's run queue. The worker takes its owner
     /// when it starts.
-    queue: LocalQueue<Runnable>,
+    queue: LocalQueue,
 }
 
 /// The state every wake reads, on one cache line.
@@ -382,7 +387,7 @@ impl Pool {
 
     /// Shared end of worker `index`'s run queue, whose owner the worker takes
     /// when it starts. Panics if the index is outside the pool.
-    pub fn queue(&self, index: u32) -> &LocalQueue<Runnable> {
+    pub fn queue(&self, index: u32) -> &LocalQueue {
         &self.slots[index as usize].queue
     }
 

@@ -1,9 +1,8 @@
 //! A bounded FIFO queue in a ring buffer, with one owner and shared thieves.
 //!
-//! Each pool worker's run queue is a [`LocalQueue`] of its runnables. Only the
+//! Each pool worker's run queue is a [`Queue`] of its runnables. Only the
 //! holder of its [`Owner`] pushes and pops. Other workers hold the shared
-//! handle and steal half of an unclaimed backlog with
-//! [`LocalQueue::steal_into`].
+//! handle and steal half of an unclaimed backlog with [`Queue::steal_into`].
 //!
 //! # Positions
 //!
@@ -47,7 +46,7 @@
 //! stays with its owner. It claims the values with one exchange on the head,
 //! moves them into the thief's own queue, releases the claim, then publishes
 //! them with one tail store. It goes only into a queue with at least half its
-//! slots free, so the batch always fits. [`LocalQueue::is_stealable`] is a hint
+//! slots free, so the batch always fits. [`Queue::is_stealable`] is a hint
 //! about the source's backlog. The claim checks the source again, and the
 //! steal also checks the destination's room.
 //!
@@ -67,7 +66,7 @@
 //! # Pops without an exchange
 //!
 //! A queue built exclusive has no reader but its owner, so the owner pops with
-//! plain loads and a store rather than an exchange. [`LocalQueue::steal_into`]
+//! plain loads and a store rather than an exchange. [`Queue::steal_into`]
 //! asserts that its source is shared. A pool of one worker has no other worker
 //! to steal from its run queue, so that queue is exclusive.
 //!
@@ -137,11 +136,11 @@ unsafe impl<T: Send> Sync for Inner<T> {}
 // SAFETY: the queue owns its values and each value can move between threads.
 unsafe impl<T: Send> Send for Inner<T> {}
 
-/// Shared handle of a local queue, through which thieves steal and from which
-/// its owner is taken.
-pub struct LocalQueue<T>(Arc<CachePadded<Inner<T>>>);
+/// Shared handle of a queue, through which thieves steal and from which its
+/// owner is taken.
+pub struct Queue<T>(Arc<CachePadded<Inner<T>>>);
 
-/// Unique owner of a local queue, movable between threads but never shared.
+/// Unique owner of a queue, movable between threads but never shared.
 pub struct Owner<T>(Arc<CachePadded<Inner<T>>>, PhantomData<Cell<()>>);
 
 /// Result of publishing a value into a queue.
@@ -180,7 +179,7 @@ const fn pack(steal: u32, real: u32) -> u64 {
     (steal as u64) << 32 | real as u64
 }
 
-impl<T> LocalQueue<T> {
+impl<T> Queue<T> {
     /// An empty queue that thieves may steal from.
     pub fn shared() -> Self {
         Self::at(0, false)
@@ -563,7 +562,7 @@ impl<T> Drop for Inner<T> {
 
 /// Claims held by a test in place of a paused thief.
 #[cfg(test)]
-impl<T> LocalQueue<T> {
+impl<T> Queue<T> {
     /// Claim the oldest `count` values as a thief paused after its claim
     /// exchange would hold them.
     pub(super) fn hold_claim(&self, count: u32) -> (u32, u32) {
@@ -621,7 +620,7 @@ mod tests {
     }
 
     /// Take every value from a queue whose owner is gone.
-    fn take_unowned<T>(queue: &LocalQueue<T>) -> Vec<T> {
+    fn take_unowned<T>(queue: &Queue<T>) -> Vec<T> {
         let (steal, real) = unpack(queue.0.head.load(Ordering::Acquire));
         assert_eq!(steal, real);
         let tail = queue.0.tail.load(Ordering::Acquire);
@@ -649,7 +648,7 @@ mod tests {
     /// time or as a batch, and interleaved pops and pushes keep the order.
     #[test]
     fn test_fifo_up_to_capacity() {
-        for queue in [LocalQueue::shared(), LocalQueue::exclusive()] {
+        for queue in [Queue::shared(), Queue::exclusive()] {
             let mut owner = queue.owner();
             assert!(owner.is_empty());
             assert_eq!(owner.room(), CAPACITY);
@@ -679,7 +678,7 @@ mod tests {
     #[test]
     fn test_positions_wrap_across_the_maximum() {
         for exclusive in [false, true] {
-            let queue = LocalQueue::at(u32::MAX - 7, exclusive);
+            let queue = Queue::at(u32::MAX - 7, exclusive);
             let mut owner = queue.owner();
             owner.push_batch(0..CAPACITY);
             assert_eq!(drain(&mut owner), (0..CAPACITY).collect::<Vec<_>>());
@@ -703,7 +702,7 @@ mod tests {
     #[test]
     fn test_lone_value_pops_across_the_maximum() {
         for position in [0, u32::MAX] {
-            let queue = LocalQueue::at(position, false);
+            let queue = Queue::at(position, false);
             let mut owner = queue.owner();
             push(&mut owner, 7);
             assert!(!queue.is_stealable());
@@ -719,7 +718,7 @@ mod tests {
     /// the oldest half with room for as many more.
     #[test]
     fn test_overflow_keeps_the_oldest_half() {
-        for queue in [LocalQueue::shared(), LocalQueue::exclusive()] {
+        for queue in [Queue::shared(), Queue::exclusive()] {
             let mut owner = queue.owner();
             owner.push_batch(0..CAPACITY);
             match owner.push(CAPACITY) {
@@ -747,8 +746,8 @@ mod tests {
     /// `u32::MAX`.
     #[test]
     fn test_steal_wraps_across_the_maximum() {
-        let source = LocalQueue::at(u32::MAX - 7, false);
-        let destination = LocalQueue::at(u32::MAX - 3, false);
+        let source = Queue::at(u32::MAX - 7, false);
+        let destination = Queue::at(u32::MAX - 3, false);
         let mut owner = source.owner();
         let mut into = destination.owner();
         owner.push_batch(0..CAPACITY);
@@ -763,8 +762,8 @@ mod tests {
     #[test]
     fn test_steal_takes_half_rounded_down() {
         for available in [1usize, 2, 3, 7, 8, 255, 256] {
-            let source = LocalQueue::shared();
-            let destination = LocalQueue::shared();
+            let source = Queue::shared();
+            let destination = Queue::shared();
             let mut owner = source.owner();
             let mut into = destination.owner();
             owner.push_batch(0..available);
@@ -780,8 +779,8 @@ mod tests {
     /// even once its owner is empty, and proceeds after the release.
     #[test]
     fn test_steal_room_counts_a_pending_claim() {
-        let source = LocalQueue::shared();
-        let destination = LocalQueue::shared();
+        let source = Queue::shared();
+        let destination = Queue::shared();
         let mut owner = source.owner();
         let mut into = destination.owner();
         owner.push_batch(CAPACITY..2 * CAPACITY);
@@ -807,8 +806,8 @@ mod tests {
     #[test]
     fn test_steal_needs_half_the_destination_free() {
         for (held, moved) in [(HALF as usize, CAPACITY / 2), (HALF as usize + 1, 0)] {
-            let source = LocalQueue::shared();
-            let destination = LocalQueue::shared();
+            let source = Queue::shared();
+            let destination = Queue::shared();
             let mut owner = source.owner();
             let mut into = destination.owner();
             owner.push_batch(0..CAPACITY);
@@ -824,7 +823,7 @@ mod tests {
     /// A push into a full queue under a claim hands back only the new value.
     #[test]
     fn test_full_queue_with_a_claim_moves_only_the_new_value() {
-        let queue = LocalQueue::shared();
+        let queue = Queue::shared();
         let mut owner = queue.owner();
         owner.push_batch(0..CAPACITY);
         let claim = queue.hold_claim(HALF);
@@ -838,8 +837,8 @@ mod tests {
     /// A steal takes nothing while another thief holds a claim.
     #[test]
     fn test_second_thief_backs_off_a_pending_claim() {
-        let source = LocalQueue::shared();
-        let destination = LocalQueue::shared();
+        let source = Queue::shared();
+        let destination = Queue::shared();
         let mut owner = source.owner();
         let mut into = destination.owner();
         owner.push_batch(0..CAPACITY);
@@ -853,7 +852,7 @@ mod tests {
     /// A held claim does not block a push while the queue has a free slot.
     #[test]
     fn test_pending_claim_with_room_allows_a_push() {
-        let queue = LocalQueue::shared();
+        let queue = Queue::shared();
         let mut owner = queue.owner();
         owner.push_batch(0..CAPACITY - 1);
         let claim = queue.hold_claim(HALF);
@@ -867,7 +866,7 @@ mod tests {
     /// and the retry hands back only the new value.
     #[test]
     fn test_claim_between_push_snapshot_and_exchange_retries() {
-        let queue = LocalQueue::shared();
+        let queue = Queue::shared();
         let mut owner = queue.owner();
         owner.push_batch(0..CAPACITY);
         let mut claim = None;
@@ -892,13 +891,13 @@ mod tests {
     /// overflowing from a stale snapshot.
     #[test]
     fn test_completed_steal_between_push_snapshot_and_exchange() {
-        let queue = LocalQueue::shared();
+        let queue = Queue::shared();
         let mut owner = queue.owner();
         owner.push_batch(0..CAPACITY);
         let (start_tx, start_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let thief = thread::spawn(move || {
-            let destination = LocalQueue::shared();
+            let destination = Queue::shared();
             let mut into = destination.owner();
             start_rx.recv().unwrap();
             assert_eq!(queue.steal_into(&mut into), CAPACITY / 2);
@@ -926,7 +925,7 @@ mod tests {
     /// values or a pending claim take the room.
     #[test]
     fn test_batch_asserts_room() {
-        let queue = LocalQueue::<usize>::shared();
+        let queue = Queue::<usize>::shared();
         let mut owner = queue.owner();
         owner.push_batch(0..CAPACITY - 1);
         assert!(catch_unwind(AssertUnwindSafe(|| owner.push_batch(0..2))).is_err());
@@ -951,7 +950,7 @@ mod tests {
     /// Dropping an owner with a queued value panics on the owner's thread.
     #[test]
     fn test_nonempty_owner_drop_panics() {
-        let queue = LocalQueue::shared();
+        let queue = Queue::shared();
         let mut owner = queue.owner();
         push(&mut owner, 1);
         let result = catch_unwind(AssertUnwindSafe(|| drop(owner)));
@@ -962,7 +961,7 @@ mod tests {
     /// Dropping an overflow before it is exhausted panics.
     #[test]
     fn test_unexhausted_overflow_drop_panics() {
-        let queue = LocalQueue::shared();
+        let queue = Queue::shared();
         let mut owner = queue.owner();
         owner.push_batch(0..CAPACITY);
         let result = catch_unwind(AssertUnwindSafe(|| match owner.push(CAPACITY) {
@@ -979,7 +978,7 @@ mod tests {
     fn test_unwinding_skips_drop_assertions() {
         assert!(
             catch_unwind(|| {
-                let queue = LocalQueue::shared();
+                let queue = Queue::shared();
                 let mut owner = queue.owner();
                 owner.push_batch(0..CAPACITY);
                 let _batch = match owner.push(CAPACITY) {
@@ -995,7 +994,7 @@ mod tests {
     /// A queue hands out its owner once.
     #[test]
     fn test_second_owner_panics() {
-        let queue = LocalQueue::<usize>::shared();
+        let queue = Queue::<usize>::shared();
         let _owner = queue.owner();
         assert!(catch_unwind(AssertUnwindSafe(|| queue.owner())).is_err());
     }
@@ -1003,7 +1002,7 @@ mod tests {
     /// A steal into the source queue panics.
     #[test]
     fn test_self_steal_panics() {
-        let queue = LocalQueue::<usize>::shared();
+        let queue = Queue::<usize>::shared();
         let mut owner = queue.owner();
         assert!(catch_unwind(AssertUnwindSafe(|| queue.steal_into(&mut owner))).is_err());
     }
@@ -1011,8 +1010,8 @@ mod tests {
     /// A steal from an exclusive queue panics and leaves its values in place.
     #[test]
     fn test_steal_from_an_exclusive_queue_panics() {
-        let source = LocalQueue::exclusive();
-        let destination = LocalQueue::shared();
+        let source = Queue::exclusive();
+        let destination = Queue::shared();
         let mut owner = source.owner();
         let mut into = destination.owner();
         owner.push_batch(0..4);
@@ -1025,7 +1024,7 @@ mod tests {
     #[test]
     fn test_owner_and_two_thieves_account_for_every_value_once() {
         let total = if cfg!(miri) { 64 } else { 4096 };
-        let queue = Arc::new(LocalQueue::<Counted>::shared());
+        let queue = Arc::new(Queue::<Counted>::shared());
         let mut owner = queue.owner();
         let done = Arc::new(AtomicBool::new(false));
         let barrier = Arc::new(Barrier::new(3));
@@ -1036,7 +1035,7 @@ mod tests {
                 let done = done.clone();
                 let barrier = barrier.clone();
                 thread::spawn(move || {
-                    let destination = LocalQueue::shared();
+                    let destination = Queue::shared();
                     let mut into = destination.owner();
                     let mut seen = Vec::new();
                     barrier.wait();
@@ -1097,8 +1096,8 @@ mod tests {
         struct SyncMarker;
         impl<T: ?Sized + Sync> AmbiguousIfSync<SyncMarker> for T {}
 
-        send::<LocalQueue<Cell<usize>>>();
-        sync::<LocalQueue<Cell<usize>>>();
+        send::<Queue<Cell<usize>>>();
+        sync::<Queue<Cell<usize>>>();
         send::<Owner<Cell<usize>>>();
         let _ = <Owner<usize> as AmbiguousIfSync<_>>::check;
     }
@@ -1129,8 +1128,8 @@ mod loom_tests {
     }
 
     /// Steal once from `queue` into a fresh queue, returning every value taken.
-    fn steal_once(queue: &LocalQueue<usize>) -> Vec<usize> {
-        let destination = LocalQueue::shared();
+    fn steal_once(queue: &Queue<usize>) -> Vec<usize> {
+        let destination = Queue::shared();
         let mut into = destination.owner();
         let moved = queue.steal_into(&mut into);
         let seen = drain(&mut into);
@@ -1146,7 +1145,7 @@ mod loom_tests {
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(3);
         builder.check(|| {
-            let queue = LocalQueue::at(u32::MAX - 1, false);
+            let queue = Queue::at(u32::MAX - 1, false);
             let mut owner = queue.owner();
             let thief = thread::spawn(move || {
                 let mut seen = steal_once(&queue);
@@ -1174,7 +1173,7 @@ mod loom_tests {
     #[test]
     fn test_owner_drops_while_a_thief_holds_a_claim() {
         loom::model(|| {
-            let queue = LocalQueue::at(u32::MAX - 1, false);
+            let queue = Queue::at(u32::MAX - 1, false);
             let mut owner = queue.owner();
             owner.push_batch(0..CAPACITY);
             let claim = queue.hold_claim(HALF);
@@ -1193,7 +1192,7 @@ mod loom_tests {
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(2);
         builder.check(|| {
-            let queue = Arc::new(LocalQueue::shared());
+            let queue = Arc::new(Queue::shared());
             let mut owner = queue.owner();
             owner.push_batch(0..3);
             let thieves: Vec<_> = (0..2)
@@ -1218,7 +1217,7 @@ mod loom_tests {
     #[test]
     fn test_push_against_steal_tracks_cells() {
         loom::model(|| {
-            let queue = LocalQueue::at(u32::MAX - 1, false);
+            let queue = Queue::at(u32::MAX - 1, false);
             let mut owner = queue.owner();
             owner.push_batch(0..2);
             let thief = thread::spawn(move || steal_once(&queue));
@@ -1241,7 +1240,7 @@ mod loom_tests {
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(2);
         builder.check(|| {
-            let queue = LocalQueue::shared();
+            let queue = Queue::shared();
             let mut owner = queue.owner();
             let thief = thread::spawn(move || {
                 for _ in 0..2 {
@@ -1263,7 +1262,7 @@ mod loom_tests {
     #[test]
     fn test_full_overflow_against_a_thief() {
         loom::model(|| {
-            let queue = LocalQueue::shared();
+            let queue = Queue::shared();
             let mut owner = queue.owner();
             owner.push_batch(0..CAPACITY);
             let thief = thread::spawn(move || steal_once(&queue));
@@ -1290,12 +1289,12 @@ mod loom_tests {
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(2);
         builder.check(|| {
-            let sources: Vec<_> = (0..3).map(|_| Arc::new(LocalQueue::shared())).collect();
+            let sources: Vec<_> = (0..3).map(|_| Arc::new(Queue::shared())).collect();
             let mut owners: Vec<_> = sources.iter().map(|queue| queue.owner()).collect();
             for (index, owner) in owners.iter_mut().enumerate() {
                 owner.push_batch(index * CAPACITY..(index + 1) * CAPACITY);
             }
-            let destination = Arc::new(LocalQueue::shared());
+            let destination = Arc::new(Queue::shared());
             let mut into = destination.owner();
             into.push_batch(100..102);
             let transferring = thread::spawn(move || {
@@ -1305,7 +1304,7 @@ mod loom_tests {
                 into
             });
             let stealing = thread::spawn(move || {
-                let last = LocalQueue::shared();
+                let last = Queue::shared();
                 let mut owner = last.owner();
                 let mut seen = Vec::new();
                 for _ in 0..3 {
