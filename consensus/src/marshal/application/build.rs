@@ -41,10 +41,8 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
 /// both cases without the application. Otherwise `application` builds on the fetched ancestry
 /// under the span `build_span` returns, and `seal` turns a block it returned, with the metadata
 /// the checks resolved, into the block's staged form and digest, which is answered under the
-/// application's decision. `seal` returns a future so that expensive sealing, such as an erasure
-/// encode, can run on the wrapper's strategy without holding the task's thread. The block is
-/// staged before its digest is sent. Dropping the receiver cancels the wait for the parent and
-/// the build.
+/// application's decision. The block is staged before its digest is sent. Dropping the receiver
+/// cancels the wait for the parent and the build.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare<E, A, D, P, S, N, Fut, M, Seal>(
     context: &E,
@@ -162,9 +160,8 @@ where
 /// marshal cannot build on, or a build that produces no block, closes the receiver. Otherwise
 /// `application` builds on the fetched ancestry under the span `build_span` returns, and
 /// `seal` turns the built block, with the metadata the checks resolved, into the block's staged
-/// form and digest. It returns a future so that expensive sealing, such as an erasure encode, can
-/// run on the wrapper's strategy without holding the task's thread. The block is staged before
-/// its digest is sent. Dropping the receiver cancels the wait for the parent and the build.
+/// form and digest. The block is staged before its digest is sent. Dropping the receiver cancels
+/// the wait for the parent and the build.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn propose<E, A, D, P, S, N, Fut, M, Seal>(
     context: &E,

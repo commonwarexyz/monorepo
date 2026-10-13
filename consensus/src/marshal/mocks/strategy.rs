@@ -39,7 +39,7 @@ impl GatedStrategy {
         }
     }
 
-    /// Gates exactly the next call to `spawn`, including a job whose waiter is dropped.
+    /// Gates exactly the next call to `spawn`.
     pub fn arm(&self) -> Gate {
         let (started_tx, started) = oneshot::channel();
         let (release, release_rx) = oneshot::channel();

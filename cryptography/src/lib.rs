@@ -317,9 +317,6 @@ commonware_macros::stability_scope!(BETA {
 
     impl<T: Digestible> Digested<T> {
         /// Computes the digest of `inner` as a job on `strategy`.
-        ///
-        /// The job is sized by the value's encoded size. Submitted work runs to completion even if
-        /// the returned future is dropped, which only discards the result.
         #[track_caller]
         pub fn compute(
             inner: impl Into<Arc<T>>,
