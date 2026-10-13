@@ -149,6 +149,8 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _, ReadExt as _, Viewing};
+#[commonware_macros::stability(ALPHA)]
+use commonware_runtime::buffer::paged::Sealed;
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery},
@@ -1821,11 +1823,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     pub(super) fn immutable_runs(
         &self,
         positions: &[u64],
-    ) -> Vec<(
-        Range<usize>,
-        commonware_runtime::buffer::paged::Sealed<E::Blob>,
-        u64,
-    )> {
+    ) -> Vec<(Range<usize>, Sealed<E::Blob>, u64)> {
         let items_per_blob = self.items_per_blob.get();
         let start = positions.partition_point(|&pos| pos < self.bounds.start);
         let end = positions.partition_point(|&pos| pos < self.bounds.end);
