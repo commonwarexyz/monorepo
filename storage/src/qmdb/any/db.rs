@@ -225,11 +225,16 @@ where
     /// Return a future that reads the storage holding the applied operations of `keys` into
     /// the page cache, so later reads of those keys avoid storage I/O while the pages stay cached.
     ///
-    /// The keys are looked up before this returns. The future does not borrow the database, so it
-    /// can run alongside any database operation, and it can be dropped at any point. Prefetching
-    /// is best effort: absent keys are skipped, unapplied batches are ignored, and failures are
-    /// logged. Prefetched pages stay cached until their first read while the page cache has room
-    /// for them alongside the pages read in the meantime.
+    /// Prefetching is candidate-based. The keys are looked up in the index before this returns,
+    /// and every operation the index holds for a key's translated key is read. Keys absent from
+    /// the index are skipped, but an absent key whose translated key collides with an indexed
+    /// key's causes that unrelated key's operations to be read. Unapplied batches are ignored,
+    /// and failures are logged. The future does not borrow the database, so it can run alongside
+    /// any database operation, and it can be dropped at any point.
+    ///
+    /// Residency is best effort. Prefetched pages are admitted only to the page cache's Main
+    /// section, so they stay cached until their first read only while Main, not the whole cache,
+    /// has room for them alongside the pages it admits in the meantime.
     pub fn prefetch(
         &self,
         keys: &[&U::Key],
