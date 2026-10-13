@@ -1,7 +1,9 @@
 use super::{
     App, Block, NoopQmdbResolver, SingleDatabaseSet, build_chain,
     common::{EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
-    fixtures, qmdb_config,
+    fixtures,
+    mocks::digested,
+    qmdb_config,
 };
 use crate::stateful::{
     Application, Config, Stateful, SyncPlan,
@@ -24,7 +26,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::archive::prunable;
 use commonware_utils::{NZU64, NZUsize, channel::ring};
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 /// Keeps a finalized target unapplied across recovery cuts.
 #[derive(Clone)]
@@ -38,7 +40,10 @@ impl<R: Reporter<Activity = marshal::Update<Block>>> Reporter for HoldBlock<R> {
     type Activity = marshal::Update<Block>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        if matches!(&activity, marshal::Update::Block(block, _) if block.height == self.height) {
+        if matches!(
+            &activity,
+            marshal::Update::Block(block, _) if block.inner().height == self.height
+        ) {
             assert!(
                 self.held.send_lossy(activity),
                 "floor observation receiver dropped"
@@ -121,7 +126,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     marshal::Config {
                         provider: ConstantProvider::new(fixture.schemes[0].clone()),
                         epocher: FixedEpocher::new(EPOCH_LENGTH),
-                        start: plan.marshal_start(Arc::new(genesis.clone())),
+                        start: plan.marshal_start(digested(genesis.clone())),
                         partition_prefix: "floor-marshal".to_string(),
                         mailbox_size: NZUsize!(8),
                         view_retention: ViewDelta::new(10),
@@ -176,7 +181,11 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
             if boot == 0 {
                 while marshal.get_processed().await != Some(Processed::Block(Height::zero())) {}
                 for block in &blocks {
-                    assert!(marshal.verified(block.context.round, block.clone()).await);
+                    assert!(
+                        marshal
+                            .verified(block.context.round, digested(block.clone()))
+                            .await
+                    );
                     marshal.report(Activity::Finalization(fixtures::finalization(
                         &fixture,
                         block.height.get(),
@@ -191,7 +200,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                 let report = floor_reports.recv().await.expect("floor report missing");
                 assert!(matches!(
                     &report,
-                    marshal::Update::Block(block, _) if block.height == floor_height
+                    marshal::Update::Block(block, _) if block.inner().height == floor_height
                 ));
                 assert_eq!(
                     marshal.get_processed().await,

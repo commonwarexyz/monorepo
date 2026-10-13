@@ -124,7 +124,7 @@ where
     /// [`PruneConfig::assert_valid`]).
     pub prune_config: Option<PruneConfig>,
 
-    /// Strategy for computing block digests and commitments.
+    /// Strategy for computing the digests of blocks built by the application.
     pub strategy: T,
 }
 
@@ -161,7 +161,7 @@ where
 
     /// Pruning schedule from [`Config::prune_config`], with a random phase.
     pruning: Option<Pruning<SyncTargets<A, E>>>,
-    /// Strategy for computing block digests and commitments.
+    /// Strategy for computing the digests of blocks built by the application.
     strategy: T,
 }
 
@@ -183,7 +183,7 @@ where
     /// # Panics
     ///
     /// Panics if [`Config::prune_config`] fails [`PruneConfig::assert_valid`].
-    pub fn new(mut context: E, config: Config<E, A, S, V, R, T>) -> (Self, Mailbox<E, A, T>) {
+    pub fn new(mut context: E, config: Config<E, A, S, V, R, T>) -> (Self, Mailbox<E, A>) {
         let pruning = config.prune_config.map(|prune_config| {
             Pruning::random(
                 prune_config,
@@ -205,9 +205,9 @@ where
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
                 pruning,
-                strategy: config.strategy.clone(),
+                strategy: config.strategy,
             },
-            Mailbox::new(sender, config.strategy),
+            Mailbox::new(sender),
         )
     }
 
@@ -241,7 +241,6 @@ where
             finalization,
             marshal: (marshal.clone(), floor),
             completion: sender,
-            strategy: self.strategy.clone(),
         });
         let syncing = Syncing {
             context: self.context,
@@ -271,7 +270,6 @@ where
             &marshal,
             self.db_config,
             self.plan.completed(),
-            &self.strategy,
         )
         .await;
 
@@ -310,7 +308,7 @@ mod tests {
         db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
         tests::{
             fixtures,
-            mocks::{TestApp, TestBlock, TestDb},
+            mocks::{TestApp, TestBlock, TestDb, digested},
         },
     };
     use commonware_consensus::{
@@ -318,7 +316,7 @@ mod tests {
         marshal::{Update, ancestry},
         simplex::mocks::scheme as scheme_mocks,
     };
-    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_cryptography::{Digestible as _, sha256::Digest as Sha256Digest};
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{Clock, Handle, Runner as _, Supervisor as _, deterministic};
@@ -401,7 +399,7 @@ mod tests {
         context: &deterministic::Context,
         application: TestApp,
     ) -> (
-        Mailbox<deterministic::Context, TestApp, Sequential>,
+        Mailbox<deterministic::Context, TestApp>,
         Handle<()>,
         Box<dyn std::any::Any>,
     ) {
@@ -453,7 +451,7 @@ mod tests {
                 mailbox
                     .prepare(
                         (context.child("wait"), child.context()),
-                        ancestry::from_iter([Arc::new(genesis)]),
+                        ancestry::from_iter([digested(genesis)]),
                         (),
                     )
                     .await
@@ -478,13 +476,13 @@ mod tests {
                 let prepared = mailbox
                     .prepare(
                         (context.child("build"), child.context()),
-                        ancestry::from_iter([Arc::new(genesis)]),
+                        ancestry::from_iter([digested(genesis)]),
                         (),
                     )
                     .await;
                 assert_eq!(
-                    prepared,
-                    decision.map(|()| child),
+                    prepared.map(|block| (block.inner().clone(), block.digest())),
+                    decision.map(|()| (child.clone(), child.digest())),
                     "a built block must carry the {decision:?} decision"
                 );
                 handle.abort();
@@ -597,36 +595,39 @@ mod tests {
 
             // Fill the single ready slot and reliable overflow with independently owned ancestries.
             let owners = [
-                Arc::new(TestBlock::new(2, 2)),
-                Arc::new(TestBlock::new(3, 3)),
-                Arc::new(TestBlock::new(4, 4)),
+                digested(TestBlock::new(2, 2)),
+                digested(TestBlock::new(3, 3)),
+                digested(TestBlock::new(4, 4)),
             ];
-            let weak_owners = owners.iter().map(Arc::downgrade).collect::<Vec<_>>();
+            let weak_owners = owners
+                .iter()
+                .map(|owner| Arc::downgrade(&owner.inner_shared()))
+                .collect::<Vec<_>>();
 
             let mut first_mailbox = mailbox.clone();
             let mut first = Box::pin(first_mailbox.verify(
                 (context.child("verify_first"), owners[0].context()),
-                ancestry::from_iter([Arc::clone(&owners[0])]),
+                ancestry::from_iter([owners[0].clone()]),
             ));
             assert!(poll!(&mut first).is_pending());
 
             let mut second_mailbox = mailbox.clone();
             let mut second = Box::pin(second_mailbox.verify(
                 (context.child("verify_second"), owners[1].context()),
-                ancestry::from_iter([Arc::clone(&owners[1])]),
+                ancestry::from_iter([owners[1].clone()]),
             ));
             assert!(poll!(&mut second).is_pending());
 
             let mut third_mailbox = mailbox.clone();
             let mut third = Box::pin(third_mailbox.verify(
                 (context.child("verify_third"), owners[2].context()),
-                ancestry::from_iter([Arc::clone(&owners[2])]),
+                ancestry::from_iter([owners[2].clone()]),
             ));
             assert!(poll!(&mut third).is_pending());
 
             // Queue a finalization behind the verifications, then cancel every caller.
             let (acknowledgement, mut acknowledgement_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(finalized), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(finalized), acknowledgement));
 
             drop(first);
             drop(second);

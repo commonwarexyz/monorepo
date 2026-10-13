@@ -10,7 +10,6 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Recipients;
-use std::sync::Arc;
 use tracing::debug;
 
 /// Relays a consensus broadcast [`Plan`] through marshal for a proposal staged in `gates`.
@@ -26,15 +25,15 @@ use tracing::debug;
 /// only after the propose plan. Within a process, a proposal is therefore missing only when
 /// its round is decided, and a prepare plan may already have sent the block. Prepare and
 /// propose plans send nothing for a round at or below the decided cutoff of [`Gates`].
-pub(crate) fn broadcast<S, V, B>(
-    gates: &Gates<V::Commitment, B>,
+pub(crate) fn broadcast<S, V>(
+    gates: &Gates<V::Commitment, V::Block>,
     marshal: &Mailbox<S, V>,
     commitment: V::Commitment,
     plan: Plan<S::PublicKey>,
 ) -> Feedback
 where
     S: Scheme,
-    V: Variant<Block = Arc<B>>,
+    V: Variant,
 {
     match plan {
         Plan::Prepare { round } => {

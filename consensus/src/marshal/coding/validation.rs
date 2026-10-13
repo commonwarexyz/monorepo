@@ -76,7 +76,6 @@ pub(crate) fn validate_block<H, ES, B, CB, C>(
     context: &B::Context,
     commitment: Commitment<CB, C, H>,
     parent_commitment: Commitment<CB, C, H>,
-    strategy: &impl Strategy,
 ) -> Result<(), BlockError>
 where
     H: Hasher,
@@ -86,10 +85,10 @@ where
     C: Scheme,
     B::Context: Epochable + PartialEq,
 {
-    if block.commitment_across(strategy) != commitment {
+    if block.commitment() != commitment {
         return Err(BlockError::Commitment);
     }
-    if parent.commitment_across(strategy) != parent_commitment {
+    if parent.commitment() != parent_commitment {
         return Err(BlockError::ParentCommitment);
     }
     if !is_block_in_expected_epoch(epocher, block.height(), context.epoch()) {
@@ -317,7 +316,6 @@ mod tests {
                 &fixture.context,
                 fixture.commitment,
                 fixture.parent_commitment,
-                &Sequential,
             ),
             Ok(())
         );
@@ -363,7 +361,6 @@ mod tests {
                 &fixture.context,
                 wrong,
                 fixture.parent_commitment,
-                &Sequential,
             ),
             Err(BlockError::Commitment)
         );
@@ -386,7 +383,6 @@ mod tests {
                 &fixture.context,
                 fixture.commitment,
                 wrong,
-                &Sequential,
             ),
             Err(BlockError::ParentCommitment)
         );
@@ -404,7 +400,6 @@ mod tests {
                 &wrong_context,
                 fixture.commitment,
                 fixture.parent_commitment,
-                &Sequential,
             ),
             Err(BlockError::Epoch)
         );
@@ -423,7 +418,6 @@ mod tests {
                 &fixture.context,
                 fixture.commitment,
                 fixture.parent_commitment,
-                &Sequential,
             ),
             Err(BlockError::ParentDigest)
         );
@@ -442,7 +436,6 @@ mod tests {
                 &fixture.context,
                 fixture.commitment,
                 fixture.parent_commitment,
-                &Sequential,
             ),
             Err(BlockError::Height)
         );
@@ -464,7 +457,6 @@ mod tests {
                 &fixture.context,
                 wrong_commitment,
                 fixture.parent_commitment,
-                &Sequential,
             ),
             Err(BlockError::ContextDigest)
         );
@@ -482,7 +474,6 @@ mod tests {
                 &wrong_context,
                 fixture.commitment,
                 fixture.parent_commitment,
-                &Sequential,
             ),
             Err(BlockError::Context)
         );

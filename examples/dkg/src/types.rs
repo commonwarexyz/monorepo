@@ -31,7 +31,7 @@ use commonware_glue::{
     dkg::{self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock, types::Payload},
     stateful::db::{Shared, SyncEngineConfig},
 };
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Sequential;
 use commonware_runtime::{BufMut, Quota, buffer::paged::CacheRef};
 use commonware_storage::{
     Context as StorageContext,
@@ -57,7 +57,7 @@ use std::{
     fs, io,
     num::{NonZeroU32, NonZeroU64},
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
 use tracing::info;
 
@@ -121,9 +121,6 @@ pub struct Block {
     pub(crate) state_root: sha256::Digest,
     pub(crate) range: NonEmptyRange<Location>,
     pub(crate) payload: Option<Payload<MinSig, ed25519::PrivateKey>>,
-
-    /// The SHA-256 digest of the block's encoding, computed at most once.
-    digest: OnceLock<sha256::Digest>,
 }
 
 impl Block {
@@ -142,7 +139,6 @@ impl Block {
             state_root: target.root,
             range: target.range,
             payload,
-            digest: OnceLock::new(),
         }
     }
 
@@ -209,13 +205,7 @@ impl Digestible for Block {
     type Digest = sha256::Digest;
 
     fn digest(&self) -> sha256::Digest {
-        self.digest_across(&Sequential)
-    }
-
-    fn digest_across(&self, strategy: &impl Strategy) -> sha256::Digest {
-        *self
-            .digest
-            .get_or_init(|| Sha256::hash_across(&[&self.encode()], strategy))
+        Sha256::hash(&[&self.encode()])
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::{
-    CertifiableBlock,
+    CertifiableBlock, Heightable,
     marshal::{
         ancestry::BlockProvider,
         coding::{
@@ -11,9 +11,11 @@ use crate::{
     simplex::{scheme::Scheme as SimplexScheme, types::Context},
     types::{Round, coding::Commitment},
 };
-use commonware_codec::{Decode as _, Error as CodecError, Input, Read};
+use commonware_codec::{Codec, Decode as _, Error as CodecError, Input, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
-use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey, certificate::Scheme};
+use commonware_cryptography::{
+    Committable, Digested, Digestible, Hasher, PublicKey, certificate::Scheme,
+};
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_utils::channel::oneshot;
@@ -26,14 +28,14 @@ use std::{future::Future, sync::Arc};
 #[derive(Default)]
 pub struct Coding<B, C, H, P>(std::marker::PhantomData<(B, C, H, P)>)
 where
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey;
 
 impl<B, C, H, P> Clone for Coding<B, C, H, P>
 where
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
@@ -45,7 +47,7 @@ where
 
 impl<B, C, H, P> Copy for Coding<B, C, H, P>
 where
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
@@ -54,7 +56,7 @@ where
 
 impl<B, C, H, P> Variant for Coding<B, C, H, P>
 where
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
@@ -65,15 +67,6 @@ where
     type Commitment = Commitment<B, C, H>;
 
     fn commitment(block: &Self::Block) -> Self::Commitment {
-        // Commitment is deterministic from the coded block contents.
-        block.commitment()
-    }
-
-    fn commitment_across(block: &Self::Block, strategy: &impl Strategy) -> Self::Commitment {
-        block.commitment_across(strategy)
-    }
-
-    fn stored_commitment(block: &Self::StoredBlock) -> Self::Commitment {
         block.commitment()
     }
 
@@ -84,6 +77,10 @@ where
 
     fn parent_commitment(block: &Self::Block) -> Self::Commitment {
         // Parent commitment is embedded in the consensus context.
+        block.context().parent.1
+    }
+
+    fn stored_parent_commitment(block: &Self::StoredBlock) -> Self::Commitment {
         block.context().parent.1
     }
 
@@ -101,26 +98,47 @@ where
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         expected: ExpectedCommitment<Self::Commitment>,
         strategy: &impl Strategy,
-    ) -> Result<Self::Block, CodecError> {
-        let (inner, config) = <(B, CodingConfig)>::decode_cfg(buf, &(block_cfg.clone(), ()))?;
-        CodedBlock::from_decoded(inner, config, expected, strategy).map(Arc::new)
+    ) -> impl Future<Output = Result<Self::Block, CodecError>> + Send {
+        let decoded = <(B, CodingConfig)>::decode_cfg(buf, &(block_cfg.clone(), ()))
+            .map(|(inner, config)| CodedBlock::from_decoded(inner, config, expected, strategy));
+        async move { decoded?.await.map(Arc::new) }
     }
 
-    fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
-        block.inner_shared()
+    fn restore(
+        stored: Self::StoredBlock,
+        digest: <Self::Block as Digestible>::Digest,
+    ) -> Self::Block {
+        assert_eq!(
+            stored.digest(),
+            digest,
+            "stored block was keyed by another digest"
+        );
+        stored.into()
+    }
+
+    fn restore_across(
+        stored: Self::StoredBlock,
+        _strategy: &impl Strategy,
+    ) -> impl Future<Output = Self::Block> + Send {
+        // The stored commitment carries the block's identity, so nothing is computed.
+        std::future::ready(stored.into())
+    }
+
+    fn into_shared(block: Self::Block) -> Digested<Self::ApplicationBlock> {
+        block.inner_digested()
     }
 
     fn from_application_block(
-        block: Self::ApplicationBlock,
+        block: Digested<Self::ApplicationBlock>,
         payload: Self::Commitment,
     ) -> Self::Block {
-        Arc::new(CodedBlock::new_trusted(block, payload))
+        Arc::new(CodedBlock::precomputed(block, payload))
     }
 }
 
 impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H, P>
 where
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
@@ -164,7 +182,7 @@ where
 impl<S, B, C, H, P> BlockProvider for Mailbox<S, Coding<B, C, H, P>>
 where
     S: Scheme,
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
@@ -173,8 +191,8 @@ where
 
     fn subscribe_parent(
         &self,
-        block: &Self::Block,
-    ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
+        block: &Digested<Self::Block>,
+    ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
         let receiver = block.height().previous().map(|parent_height| {
             self.subscribe_by_commitment(
                 block.context().parent.1,
@@ -183,7 +201,7 @@ where
                 },
             )
         });
-        async move { receiver?.await.ok().map(|block| block.inner_shared()) }
+        async move { receiver?.await.ok().map(|block| block.inner_digested()) }
     }
 }
 
@@ -205,6 +223,7 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::{NZU16, NZUsize, test_rng};
+    use futures::executor::block_on;
 
     type TestCommitment = Commitment<NoCloneBlock, ReedSolomon<Sha256>, Sha256>;
     type TestContext = Context<TestCommitment, PublicKey>;
@@ -304,43 +323,48 @@ mod tests {
     #[test]
     fn storage_conversion_shares_coding_block() {
         let block = no_clone_block(CONFIG);
-        let coded = Arc::new(CodedBlock::<NoCloneBlock, TestScheme, Sha256>::new(
-            block,
-            CONFIG,
-            &Sequential,
+        let digest = block.digest();
+        let coded = Arc::new(block_on(
+            CodedBlock::<NoCloneBlock, TestScheme, Sha256>::encode(
+                Digested::precomputed(block, digest),
+                CONFIG,
+                &Sequential,
+            ),
         ));
         let expected = coded.commitment();
         let stored: StoredCodedBlock<_, _, _> = coded.clone().into();
 
-        assert_eq!(TestVariant::stored_commitment(&stored), expected);
+        assert_eq!(stored.commitment(), expected);
         assert!(std::ptr::eq(stored.inner(), coded.inner()));
 
         let recovered = stored.into();
         assert_eq!(TestVariant::commitment(&recovered), expected);
         assert!(Arc::ptr_eq(
-            &TestVariant::into_shared(recovered),
+            &TestVariant::into_shared(recovered).inner_shared(),
             &coded.inner_shared()
         ));
     }
 
     #[test]
     fn decode_block_recomputes_untrusted_root() {
-        let coded = CodedBlock::<NoCloneBlock, TestScheme, Sha256>::new(
-            no_clone_block(CONFIG),
+        let block = no_clone_block(CONFIG);
+        let digest = block.digest();
+        let coded = block_on(CodedBlock::<NoCloneBlock, TestScheme, Sha256>::encode(
+            Digested::precomputed(block, digest),
             CONFIG,
             &Sequential,
-        );
+        ));
         let expected = coded.commitment();
         let encoded = coded.encode();
         let strategy = Rayon::new(NZUsize!(2)).unwrap().manual();
 
         // An untrusted commitment is recomputed, so the decoded block already holds its shards.
-        let decoded = TestVariant::decode_block(
+        let decoded = block_on(TestVariant::decode_block(
             encoded.clone(),
             &(),
             ExpectedCommitment::Untrusted(expected),
             &strategy,
-        )
+        ))
         .unwrap();
         assert_eq!(TestVariant::commitment(&decoded), expected);
         assert!(decoded.shard(0).is_some());
@@ -353,20 +377,20 @@ mod tests {
             CONFIG,
         ));
         assert!(
-            TestVariant::decode_block(
+            block_on(TestVariant::decode_block(
                 encoded.clone(),
                 &(),
                 ExpectedCommitment::Untrusted(other),
                 &strategy,
-            )
+            ))
             .is_err()
         );
-        let trusted = TestVariant::decode_block(
+        let trusted = block_on(TestVariant::decode_block(
             encoded.clone(),
             &(),
             ExpectedCommitment::Trusted(other),
             &strategy,
-        )
+        ))
         .unwrap();
         assert_eq!(TestVariant::commitment(&trusted), other);
         assert!(trusted.shard(0).is_none());
@@ -375,27 +399,29 @@ mod tests {
         let mut extended = encoded.to_vec();
         extended.push(0);
         assert!(
-            TestVariant::decode_block(
+            block_on(TestVariant::decode_block(
                 extended,
                 &(),
                 ExpectedCommitment::Untrusted(expected),
                 &strategy,
-            )
+            ))
             .is_err()
         );
     }
 
     #[test]
     fn decode_block_binds_context_digest() {
-        let coded = CodedBlock::<NoCloneBlock, TestScheme, Sha256>::new(
-            no_clone_block(CONFIG),
+        let block = no_clone_block(CONFIG);
+        let digest = block.digest();
+        let coded = block_on(CodedBlock::<NoCloneBlock, TestScheme, Sha256>::encode(
+            Digested::precomputed(block, digest),
             CONFIG,
             &Sequential,
-        );
+        ));
         let expected = coded.commitment();
         let encoded = coded.encode();
 
-        // Only the context digest differs, which the coded block's own checks cannot see.
+        // Only the context digest differs, which only the full-commitment comparison can see.
         let other = TestCommitment::from((
             expected.block(),
             expected.root(),
@@ -407,7 +433,13 @@ mod tests {
             ExpectedCommitment::Untrusted(other),
         ] {
             assert!(
-                TestVariant::decode_block(encoded.clone(), &(), expected, &Sequential).is_err()
+                block_on(TestVariant::decode_block(
+                    encoded.clone(),
+                    &(),
+                    expected,
+                    &Sequential
+                ))
+                .is_err()
             );
         }
     }

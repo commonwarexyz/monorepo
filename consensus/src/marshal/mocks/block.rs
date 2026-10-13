@@ -2,7 +2,58 @@ use crate::types::Height;
 use bytes::BufMut;
 use commonware_codec::{Buf, Codec, EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
 use commonware_cryptography::{Digest, Digestible, Hasher};
+#[cfg(test)]
+use commonware_utils::sync::Mutex;
 use std::fmt::Debug;
+#[cfg(test)]
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, LazyLock, Weak,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+
+/// Per-test counters follow a block's encoded identity through archive decoding.
+/// Tests must register distinct blocks and keep the counter alive while work is pending.
+#[derive(Default)]
+#[cfg(test)]
+pub struct DigestCounter {
+    calls: Arc<AtomicUsize>,
+    digests: Vec<Vec<u8>>,
+}
+
+#[cfg(test)]
+static DIGEST_COUNTERS: LazyLock<Mutex<BTreeMap<Vec<u8>, Weak<AtomicUsize>>>> =
+    LazyLock::new(Mutex::default);
+
+#[cfg(test)]
+impl DigestCounter {
+    /// Counts raw digest calls for this block and any decoded copies.
+    pub fn track<D: Digest, C>(&mut self, block: &Block<D, C>) {
+        let digest = block.digest.as_ref().to_vec();
+        let previous = DIGEST_COUNTERS
+            .lock()
+            .insert(digest.clone(), Arc::downgrade(&self.calls));
+        assert!(previous.and_then(|counter| counter.upgrade()).is_none());
+        self.digests.push(digest);
+    }
+
+    /// Returns the number of raw digest computations for the registered blocks.
+    pub fn count(&self) -> usize {
+        self.calls.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+impl Drop for DigestCounter {
+    fn drop(&mut self) {
+        let mut counters = DIGEST_COUNTERS.lock();
+        for digest in &self.digests {
+            counters.remove(digest);
+        }
+    }
+}
 
 /// A mock block with no explicit consensus context.
 /// Its parent digest also serves as its certification context.
@@ -216,6 +267,14 @@ impl<D: Digest, C: Clone + Send + Sync + 'static> Digestible for Block<D, C> {
     type Digest = D;
 
     fn digest(&self) -> D {
+        #[cfg(test)]
+        if let Some(counter) = DIGEST_COUNTERS
+            .lock()
+            .get(self.digest.as_ref())
+            .and_then(Weak::upgrade)
+        {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
         self.digest
     }
 }

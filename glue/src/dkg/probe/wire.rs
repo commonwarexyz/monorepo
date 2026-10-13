@@ -237,7 +237,7 @@ where
 
 /// Decodes a block response body and binds it to `commitment`, the payload of a verified
 /// finalization.
-pub(crate) fn read_block<V>(
+pub(crate) async fn read_block<V>(
     reader: impl Buf,
     commitment: V::Commitment,
     block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
@@ -252,6 +252,7 @@ where
         ExpectedCommitment::Trusted(commitment),
         strategy,
     )
+    .await
 }
 
 #[cfg(all(test, feature = "arbitrary"))]

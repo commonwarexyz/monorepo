@@ -98,17 +98,16 @@ fn state_sync_skips_inclusion_prefix(
 /// Returns the later of marshal's processed position and the parent of the
 /// state-sync floor (`None` when neither exists).
 ///
-/// `processed` pairs the position with a stored block: the processed block
-/// itself, or its child when the processed block is absent.
+/// `processed` pairs the position with the ready processed block or its child
+/// when the processed block is absent.
 pub(super) fn startup<B: Block>(
     processed: Option<(Processed, B)>,
     floor: Option<B>,
-    strategy: &impl Strategy,
 ) -> Option<FinalizedTip<B::Digest>> {
     let processed = processed.map(|(processed, block)| match processed {
         Processed::Block(height) => FinalizedTip {
             height,
-            digest: block.digest_across(strategy),
+            digest: block.digest(),
         },
         Processed::Absent(height) => FinalizedTip {
             height,
@@ -279,7 +278,7 @@ where
             .get_block(Identifier::Height(height))
             .await
             .map(MV::into_shared)?;
-        let Some(Payload::EpochInfo(info)) = block.payload() else {
+        let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
             panic!("boundary block {height} missing epoch info");
         };
         Some(info)
@@ -373,14 +372,13 @@ mod tests {
         types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height},
     };
     use commonware_cryptography::{
-        Digestible as _, Signer,
+        Digested, Digestible as _, Signer,
         bls12381::{
             dkg::feldman_desmedt::{Info, Player, Reveal, deal},
             primitives::sharing::Mode,
         },
         ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_utils::{N3f1, NZU64, ordered::Set, test_rng};
 
@@ -397,12 +395,16 @@ mod tests {
         let tip = |processed: Option<Processed>, floor: Option<usize>| {
             let processed = processed.map(|processed| {
                 let anchor = processed.anchor().get() as usize;
-                (processed, blocks[anchor].clone())
+                (
+                    processed,
+                    Digested::precomputed(blocks[anchor].clone(), blocks[anchor].digest()),
+                )
             });
             startup(
                 processed,
-                floor.map(|floor| blocks[floor].clone()),
-                &Sequential,
+                floor.map(|floor| {
+                    Digested::precomputed(blocks[floor].clone(), blocks[floor].digest())
+                }),
             )
             .map(|tip| (tip.height, tip.digest))
         };

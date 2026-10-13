@@ -19,7 +19,7 @@ use std::num::NonZeroU64;
 
 /// Mailbox paired with [`mocks::TestReshareActor`].
 pub(super) type TestMailbox =
-    Mailbox<mocks::TestBlock, mocks::TestBlsVariant, mocks::TestSigner, Sequential, Exact>;
+    Mailbox<mocks::TestBlock, mocks::TestBlsVariant, mocks::TestSigner, Exact>;
 
 /// Builds an unstarted actor with deterministic storage, networking, and marshal fixtures.
 pub(super) async fn new_actor(

@@ -13,8 +13,7 @@ use commonware_consensus::{
         ancestry::{Ancestry, BoxedAncestry},
     },
 };
-use commonware_cryptography::Digestible;
-use commonware_parallel::Strategy;
+use commonware_cryptography::{Digested, Digestible};
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::{
     acknowledgement::Exact,
@@ -120,7 +119,7 @@ where
         context: (E, A::Context),
         ancestry: BoxedAncestry<A::Block>,
         upstream: A::Input,
-        proposal: Proposal<A::Block>,
+        proposal: Proposal<Digested<A::Block>>,
     },
 
     /// A request to verify a block.
@@ -129,7 +128,7 @@ where
     /// A finalized block and its marshal acknowledgement.
     Finalized {
         span: Span,
-        block: Arc<A::Block>,
+        block: Digested<A::Block>,
         acknowledgement: Exact,
         retry_mailbox: RetryMailbox<E, A>,
     },
@@ -221,40 +220,35 @@ where
 /// and reporting calls to the actor. If the actor stops before responding, `prepare` returns
 /// [`Handoff::Wait`], `propose` returns `None`, and `verify` panics with "stateful actor dropped
 /// during verify".
-pub struct Mailbox<E, A, T>
+pub struct Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    T: Strategy,
 {
     sender: Sender<Message<E, A>>,
     retry_mailbox: RetryMailbox<E, A>,
-    strategy: T,
 }
 
-impl<E, A, T> Clone for Mailbox<E, A, T>
+impl<E, A> Clone for Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    T: Strategy,
 {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
             retry_mailbox: self.retry_mailbox.clone(),
-            strategy: self.strategy.clone(),
         }
     }
 }
 
-impl<E, A, T> Mailbox<E, A, T>
+impl<E, A> Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    T: Strategy,
 {
     /// Creates a mailbox from the send half of the actor's message channel.
-    pub(super) fn new(sender: Sender<Message<E, A>>, strategy: T) -> Self {
+    pub(super) fn new(sender: Sender<Message<E, A>>) -> Self {
         let retry_sender = sender.clone();
         let retry_mailbox = Arc::new(move |message| {
             let _ = retry_sender.enqueue(message);
@@ -262,7 +256,6 @@ where
         Self {
             sender,
             retry_mailbox,
-            strategy,
         }
     }
 
@@ -289,11 +282,10 @@ where
     }
 }
 
-impl<E, A, T> ConsensusApplication<E> for Mailbox<E, A, T>
+impl<E, A> ConsensusApplication<E> for Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    T: Strategy,
 {
     type SigningScheme = A::SigningScheme;
     type Context = A::Context;
@@ -306,7 +298,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         upstream: Self::Input,
-    ) -> Handoff<Self::Block> {
+    ) -> Handoff<Digested<Self::Block>> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
             "stateful.mailbox.prepare",
@@ -328,7 +320,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         upstream: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
             "stateful.mailbox.propose",
@@ -374,11 +366,10 @@ where
     }
 }
 
-impl<E, A, T> Reporter for Mailbox<E, A, T>
+impl<E, A> Reporter for Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    T: Strategy,
 {
     type Activity = Update<A::Block>;
 
@@ -391,7 +382,7 @@ where
                     "stateful.mailbox.finalized",
                     epoch = context.epoch().traced(),
                     view = context.view().traced(),
-                    digest = %block.digest_across(&self.strategy)
+                    digest = %block.digest()
                 );
                 Message::Finalized {
                     span,

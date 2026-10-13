@@ -4,17 +4,17 @@ use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
 };
 use commonware_codec::Codec;
-use commonware_cryptography::{Digestible, PublicKey};
+use commonware_cryptography::{Digested, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::{collections::VecDeque, sync::Arc};
+use std::collections::VecDeque;
 
 /// Message types that can be sent to the `Mailbox`
 pub(crate) enum Message<P: PublicKey, M: Digestible> {
     /// Broadcast a [crate::Broadcaster::Message] to the network.
     Broadcast {
         recipients: Recipients<P>,
-        message: Arc<M>,
+        message: Digested<M>,
     },
 
     /// Subscribe to receive a message by digest.
@@ -24,13 +24,13 @@ pub(crate) enum Message<P: PublicKey, M: Digestible> {
     /// by dropping the responder.
     Subscribe {
         digest: M::Digest,
-        responder: oneshot::Sender<Arc<M>>,
+        responder: oneshot::Sender<Digested<M>>,
     },
 
     /// Get a message by digest.
     Get {
         digest: M::Digest,
-        responder: oneshot::Sender<Option<Arc<M>>>,
+        responder: oneshot::Sender<Option<Digested<M>>>,
     },
 }
 
@@ -104,7 +104,7 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
     /// by dropping the responder.
     ///
     /// If the engine has shut down, the returned receiver will resolve to `Canceled`.
-    pub fn subscribe(&self, digest: M::Digest) -> oneshot::Receiver<Arc<M>> {
+    pub fn subscribe(&self, digest: M::Digest) -> oneshot::Receiver<Digested<M>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self
             .sender
@@ -115,31 +115,24 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
     /// Get a message by digest.
     ///
     /// If the engine has shut down, returns `None`.
-    pub async fn get(&self, digest: M::Digest) -> Option<Arc<M>> {
+    pub async fn get(&self, digest: M::Digest) -> Option<Digested<M>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Get { digest, responder });
         receiver.await.unwrap_or_default()
-    }
-
-    /// Broadcast a shared message to recipients.
-    ///
-    /// If the engine has shut down, returns [`Feedback::Closed`].
-    pub fn broadcast_shared(&self, recipients: Recipients<P>, message: Arc<M>) -> Feedback {
-        self.sender.enqueue(Message::Broadcast {
-            recipients,
-            message,
-        })
     }
 }
 
 impl<P: PublicKey, M: Digestible + Codec> Broadcaster for Mailbox<P, M> {
     type Recipients = Recipients<P>;
-    type Message = M;
+    type Message = Digested<M>;
 
     /// Broadcast a message to recipients.
     ///
     /// If the engine has shut down, returns [`Feedback::Closed`].
     fn broadcast(&self, recipients: Self::Recipients, message: Self::Message) -> Feedback {
-        self.broadcast_shared(recipients, Arc::new(message))
+        self.sender.enqueue(Message::Broadcast {
+            recipients,
+            message,
+        })
     }
 }

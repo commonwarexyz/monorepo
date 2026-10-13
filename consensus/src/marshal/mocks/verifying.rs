@@ -5,12 +5,21 @@
 //! both standard and coding variants.
 
 use crate::{CertifiableBlock, Epochable, Handoff, marshal::ancestry::Ancestry};
+use commonware_cryptography::Digested;
+use commonware_parallel::Sequential;
 use commonware_runtime::deterministic;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use std::{future::pending, marker::PhantomData, sync::Arc};
+use std::{
+    future::pending,
+    marker::PhantomData,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 /// A mock application that implements `Application` for testing.
 ///
@@ -28,6 +37,7 @@ pub struct MockVerifyingApp<B, S> {
     handoff: Handoff<()>,
     /// Shared by clones so that only the first proposal build waits on the gate.
     proposal_gate: Arc<Mutex<Option<ProposalGate>>>,
+    builds: Arc<AtomicUsize>,
     /// Blocks for which `verify` returns false.
     pub reject: Option<fn(&B) -> bool>,
     _phantom: PhantomData<S>,
@@ -51,6 +61,11 @@ impl<B, S> MockVerifyingApp<B, S> {
     pub fn with_propose_result(mut self, block: B) -> Self {
         self.propose_result = Some(block);
         self
+    }
+
+    /// Returns how many blocks this application materialized across its clones.
+    pub fn builds(&self) -> usize {
+        self.builds.load(Ordering::Relaxed)
     }
 
     /// Configure the blocks for which `verify` returns false.
@@ -87,6 +102,7 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
             verify_result: true,
             handoff: Handoff::Wait,
             proposal_gate: Arc::default(),
+            builds: Arc::default(),
             reject: None,
             _phantom: PhantomData,
         }
@@ -109,7 +125,7 @@ where
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> Handoff<Self::Block> {
+    ) -> Handoff<Digested<Self::Block>> {
         if self.handoff.is_wait() {
             return Handoff::Wait;
         }
@@ -124,7 +140,7 @@ where
         _context: (deterministic::Context, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         let gate = self.proposal_gate.lock().take();
         if let Some(gate) = gate {
             // Cancelling this future drops the sender, which errors the receiver.
@@ -132,7 +148,13 @@ where
             gate.started.send_lossy(());
             pending::<()>().await;
         }
-        self.propose_result.clone()
+        match self.propose_result.clone() {
+            Some(block) => {
+                self.builds.fetch_add(1, Ordering::Relaxed);
+                Some(Digested::compute(block, &Sequential).await)
+            }
+            None => None,
+        }
     }
 
     async fn verify(
@@ -141,7 +163,7 @@ where
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         if let (Some(reject), Some(block)) = (self.reject, ancestry.peek())
-            && reject(block)
+            && reject(block.inner())
         {
             return false;
         }
@@ -193,7 +215,7 @@ where
         _context: (deterministic::Context, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         None
     }
 

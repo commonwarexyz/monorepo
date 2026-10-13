@@ -85,12 +85,11 @@
 
 use commonware_codec::Encode;
 use commonware_consensus::{
-    CertifiableBlock, Epochable, Roundable, Viewable,
+    CertifiableBlock, Epochable, Heightable, Roundable, Viewable,
     types::{Height, Round},
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{Digest, Digested, Digestible};
 use commonware_macros::select;
-use commonware_parallel::Strategy;
 use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, reschedule};
 use commonware_storage::qmdb::sync::{self, Request, Source, source};
 use commonware_utils::{
@@ -638,8 +637,8 @@ pub struct Anchor<D: Digest> {
 }
 
 impl<D: Digest> Anchor<D> {
-    /// Builds the anchor of `block`, computing its digest across `strategy`.
-    pub fn from_block<B>(block: &B, strategy: &impl Strategy) -> Self
+    /// Builds the anchor of `block`.
+    pub fn from_block<B>(block: &Digested<B>) -> Self
     where
         B: CertifiableBlock<Digest = D>,
         B::Context: Epochable + Viewable,
@@ -647,7 +646,7 @@ impl<D: Digest> Anchor<D> {
         Self {
             height: block.height(),
             round: block.context().round(),
-            digest: block.digest_across(strategy),
+            digest: block.digest(),
         }
     }
 }
