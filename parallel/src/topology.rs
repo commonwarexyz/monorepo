@@ -16,9 +16,12 @@
 
 cfg_if::cfg_if! {
     if #[cfg(all(target_os = "linux", not(miri)))] {
-        use std::sync::{
-            OnceLock,
-            atomic::{AtomicUsize, Ordering},
+        use std::{
+            num::NonZeroUsize,
+            sync::{
+                OnceLock,
+                atomic::{AtomicUsize, Ordering},
+            },
         };
 
         /// Byte size of `cpu_set_t`, as passed to the affinity syscalls. Distinct from
@@ -62,6 +65,19 @@ cfg_if::cfg_if! {
             /// Whether every CPU in `self` is also in `other`.
             fn is_subset_of(&self, other: &Self) -> bool {
                 (0..libc::CPU_SETSIZE as usize).all(|cpu| !self.contains(cpu) || other.contains(cpu))
+            }
+
+            /// The CPUs of `self` that `allowed` also contains, and how many there are.
+            fn within(&self, allowed: &Self) -> (Self, usize) {
+                let mut both = Self::empty();
+                let mut count = 0usize;
+                for cpu in 0..(libc::CPU_SETSIZE as usize) {
+                    if self.contains(cpu) && allowed.contains(cpu) {
+                        both.set(cpu);
+                        count += 1;
+                    }
+                }
+                (both, count)
             }
 
             /// Whether the sets hold exactly the same CPUs. Used by restore assertions in
@@ -271,6 +287,23 @@ cfg_if::cfg_if! {
             topology.current_domain().map(SpawnDomain)
         }
 
+        /// Confines the calling thread to the CPUs of its current domain that its affinity mask
+        /// already allows, returning how many there are. Returns `None`, leaving the mask
+        /// unchanged, when there are fewer than two domains, the thread's position is unknown,
+        /// or the mask cannot be read or applied.
+        #[commonware_macros::stability(ALPHA)]
+        pub(crate) fn confine_to_current_domain() -> Option<NonZeroUsize> {
+            let topology = topology();
+            if topology.domains() <= 1 {
+                return None;
+            }
+            let domain = topology.current_domain()?;
+            let target = topology.domain_sets.get(domain as usize)?;
+            let (effective, allowed) = target.within(&thread_affinity()?);
+            let allowed = NonZeroUsize::new(allowed)?;
+            set_thread_affinity(&effective).then_some(allowed)
+        }
+
         std::thread_local! {
             /// Whether this thread currently holds a live [`AffinityGuard`]. A worker that
             /// picks up nested jobs while pinned must not pin again: the thread occupies one
@@ -313,14 +346,7 @@ cfg_if::cfg_if! {
 
                 // Intersect the domain with the thread's current allowance so the pin narrows
                 // placement and never widens it past operator restrictions.
-                let mut effective = CpuSet::empty();
-                let mut allowed = 0usize;
-                for cpu in 0..(libc::CPU_SETSIZE as usize) {
-                    if target.contains(cpu) && saved.contains(cpu) {
-                        effective.set(cpu);
-                        allowed += 1;
-                    }
-                }
+                let (effective, allowed) = target.within(&saved);
 
                 // A one-CPU effective set would co-locate the job on the caller's only core
                 // with zero placement freedom; require room for the caller plus this job.
@@ -762,6 +788,28 @@ cfg_if::cfg_if! {
                 let after = current_mask();
                 assert!(before.equals(&after));
             }
+
+            #[test]
+            fn confine_to_current_domain_narrows_to_one_domain() {
+                let before = current_mask();
+                let Some(count) = confine_to_current_domain() else {
+                    // Without several domains, the mask is left alone.
+                    assert!(before.equals(&current_mask()));
+                    return;
+                };
+
+                // The thread now runs on `count` CPUs it was already allowed, all in one domain.
+                let after = current_mask();
+                assert_eq!(allowed_cpus().len(), count.get());
+                assert!(after.is_subset_of(&before));
+                assert!(
+                    topology()
+                        .domain_sets
+                        .iter()
+                        .any(|domain| after.is_subset_of(domain))
+                );
+                assert!(set_thread_affinity(&before));
+            }
         }
     } else {
         /// Single-domain stub: pinning is unavailable and compiles to a no-op.
@@ -770,6 +818,12 @@ cfg_if::cfg_if! {
 
         /// Always `None`: no multi-domain topology to pin within.
         pub(crate) const fn spawn_domain() -> Option<SpawnDomain> {
+            None
+        }
+
+        /// Always `None`: no multi-domain topology to confine within.
+        #[commonware_macros::stability(ALPHA)]
+        pub(crate) const fn confine_to_current_domain() -> Option<core::num::NonZeroUsize> {
             None
         }
 
