@@ -2450,6 +2450,117 @@ mod loom_tests {
         });
     }
 
+    /// A gate two threads pass in turn: the first signals that it holds a
+    /// search count, the second signals that its pushes are queued.
+    type Gate = Arc<(Mutex<u8>, Condvar)>;
+
+    /// Advance `gate` to `stage`.
+    fn reach(gate: &Gate, stage: u8) {
+        *gate.0.lock().unwrap() = stage;
+        gate.1.notify_all();
+    }
+
+    /// Block until `gate` has reached `stage`.
+    fn await_stage(gate: &Gate, stage: u8) {
+        let mut current = gate.0.lock().unwrap();
+        while *current < stage {
+            current = gate.1.wait(current).unwrap();
+        }
+    }
+
+    /// Block until at least `count` tasks have raised `ran`.
+    fn wait_ran_count(ran: &Arc<(Mutex<usize>, Condvar)>, count: usize) {
+        let mut raised = ran.0.lock().unwrap();
+        while *raised < count {
+            raised = ran.1.wait(raised).unwrap();
+        }
+    }
+
+    /// A searcher that stole half of a busy worker's backlog and returned its
+    /// count while another worker held one publishes what it moved: the claim
+    /// it released on the victim's run queue reaches the fence of the last
+    /// returned count, so the look that fence orders, or the search of the
+    /// worker it wakes, finds the rest of the backlog and steals it. Worker
+    /// one takes a count before worker zero queues four tasks, so their kicks
+    /// are suppressed, steals two, returns its count, and leaves after
+    /// running them. Worker zero blocks until three tasks have run, which
+    /// needs worker two to steal one of the two left behind. A count return
+    /// that publishes nothing lets worker two read the victim's head as still
+    /// claimed after its own fence and park for good, which loom reports as a
+    /// deadlock.
+    #[test]
+    fn test_search_return_publishes_the_steal_to_the_last_return() {
+        const TASKS: usize = 2 * STEALABLE;
+        let mut builder = loom::model::Builder::new();
+        builder.preemption_bound = Some(2);
+        builder.check(|| {
+            let pool = pool(3);
+            let set = Arc::new(Tasks::new(3));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let ran: Arc<(Mutex<usize>, Condvar)> = Arc::new((Mutex::new(0), Condvar::new()));
+            let gate: Gate = Arc::new((Mutex::new(0), Condvar::new()));
+
+            // Worker one holds a count across the pushes, steals half of
+            // them, returns the count, runs what it stole, and leaves.
+            let thief = thread::spawn({
+                let pool = pool.clone();
+                let set = set.clone();
+                let completed = completed.clone();
+                let gate = gate.clone();
+                move || {
+                    let mut ready = Ready::new(pool.ring(1).owner());
+                    let mut searcher = Searcher::new(&pool, 1);
+                    assert!(!searcher.search(&mut ready));
+                    reach(&gate, 1);
+                    await_stage(&gate, 2);
+                    let _ = searcher.search(&mut ready);
+                    searcher.leave_search();
+                    while let Some(runnable) = ready.pop() {
+                        complete(&pool, &set, runnable, &completed, TASKS);
+                    }
+                }
+            });
+            let parked = thread::spawn({
+                let pool = pool.clone();
+                let set = set.clone();
+                let completed = completed.clone();
+                move || {
+                    let mut ready = Ready::new(pool.ring(2).owner());
+                    work(&pool, &set, &mut ready, 2, &completed, TASKS, false);
+                }
+            });
+
+            // Worker zero queues the tasks while worker one holds its count,
+            // then blocks as in a long poll until three have run, then runs
+            // what is left.
+            await_stage(&gate, 1);
+            let mut ready = Ready::new(pool.ring(0).owner());
+            let handles: Vec<Task> = (0..TASKS)
+                .map(|_| {
+                    let ran = ran.clone();
+                    let future = poll_fn(move |_| {
+                        *ran.0.lock().unwrap() += 1;
+                        ran.1.notify_all();
+                        Poll::Ready(())
+                    });
+                    let (task, runnable) =
+                        Task::new(future, &set, std::sync::Arc::downgrade(&pool));
+                    assert!(set.insert(task.clone()).is_ok());
+                    pool.enqueue(&mut ready, runnable);
+                    task
+                })
+                .collect();
+            reach(&gate, 2);
+            wait_ran_count(&ran, TASKS - 1);
+            thief.join().unwrap();
+            work(&pool, &set, &mut ready, 0, &completed, TASKS, false);
+            parked.join().unwrap();
+            for task in handles {
+                assert_eq!(refs(&task.state), 1);
+            }
+        });
+    }
+
     /// A foreign wake racing the poll path, by value or by reference, is never
     /// lost, even one that finds the task already notified by an earlier wake
     /// from the same thread: the task completes in a poll its runnable runs,
