@@ -45,6 +45,7 @@ const WRITE_BUFFER: NonZeroUsize = NZUsize!(1_024 * 1024); // 1MB
 /// The size of the buffer used to replay the journal.
 const REPLAY_BUFFER: NonZeroUsize = NZUsize!(1_024 * 1024); // 1MB
 
+/// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 
 /// The number of pages to cache in the page cache. Make it big enough to be

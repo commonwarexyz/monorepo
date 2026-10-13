@@ -37,6 +37,7 @@ pub const VALUE_PARTITION: &str = "freezer-bench-value";
 /// Partition for [Freezer] table benchmarks.
 pub const TABLE_PARTITION: &str = "freezer-bench-table";
 
+/// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 
 /// The number of pages to cache in the page cache.

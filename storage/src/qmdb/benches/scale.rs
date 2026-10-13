@@ -84,8 +84,8 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
 
 /// Page cache size, realistic for a multi-GB database rather than the shared bench default of
 /// 2 MiB (512 pages). `generate` and `init` use it, so the init-cache benefit is measured on top
-/// of a realistic page cache instead of an unrealistically tiny one. 65536 * 4 KiB = 256 MiB.
-const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(65536);
+/// of a realistic page cache instead of an unrealistically tiny one. 262144 * 4 KiB = 1 GiB.
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(262144);
 
 /// Page cache size for the get modes when `cache_pages` is not given: small enough that
 /// uniform-random reads at benchmark scale virtually never hit it, so cold reads reach the

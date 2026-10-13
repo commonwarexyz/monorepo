@@ -24,6 +24,7 @@ const ITEMS_PER_SECTION: u64 = 16_384;
 /// Number of bytes to buffer when replaying a [commonware_runtime::Blob].
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
+/// Page size for the page cache.
 const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 
 /// The number of pages to cache in the page cache (8,192 × 4KB = 32MB).
