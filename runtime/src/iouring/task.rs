@@ -1064,20 +1064,20 @@ impl Wake for RootWaker {
     }
 }
 
-/// One pool worker's run queue: the [`Owner`] of a bounded [`Ring`] in the
-/// pool, which only that worker pushes into and pops from, and which the
+/// One pool worker's run queue: the [`Owner`] of a bounded [`LocalQueue`] in
+/// the pool, which only that worker pushes into and pops from, and which the
 /// pool's other workers steal from.
 ///
-/// [`Ring`]: super::queue::Ring
+/// [`LocalQueue`]: super::queue::LocalQueue
 pub struct Ready {
     /// Runnables in FIFO order.
-    ring: Owner<Runnable>,
+    queue: Owner<Runnable>,
 }
 
 impl Ready {
     /// A run queue over its unique owner.
-    pub const fn new(ring: Owner<Runnable>) -> Self {
-        Self { ring }
+    pub const fn new(queue: Owner<Runnable>) -> Self {
+        Self { queue }
     }
 
     /// Queue a runnable at the tail. A full run queue hands back what it cannot
@@ -1085,41 +1085,41 @@ impl Ready {
     /// claim is held on it.
     #[inline]
     pub fn push(&mut self, runnable: Runnable) -> Push<'_, Runnable> {
-        self.ring.push(runnable)
+        self.queue.push(runnable)
     }
 
     /// Queue runnables at the tail with one publication. Panics if they exceed
     /// [`Self::room`] or the iterator misreports its length.
     pub fn push_batch(&mut self, runnables: impl ExactSizeIterator<Item = Runnable>) {
-        self.ring.push_batch(runnables);
+        self.queue.push_batch(runnables);
     }
 
     /// Take the oldest runnable not claimed by a thief.
     #[inline]
     #[must_use]
     pub fn pop(&mut self) -> Option<Runnable> {
-        self.ring.pop()
+        self.queue.pop()
     }
 
     /// Runnables queued and not claimed by a thief.
     pub fn len(&self) -> usize {
-        self.ring.len()
+        self.queue.len()
     }
 
     /// Slots free for pushes. A pending claim holds its slots, and those this
     /// worker popped past it, until it is released.
     pub fn room(&self) -> usize {
-        self.ring.room()
+        self.queue.room()
     }
 
     /// Whether no unclaimed runnable is queued.
     pub fn is_empty(&self) -> bool {
-        self.ring.is_empty()
+        self.queue.is_empty()
     }
 
     /// The run queue's owner, for a steal into it.
-    pub const fn ring(&mut self) -> &mut Owner<Runnable> {
-        &mut self.ring
+    pub const fn queue(&mut self) -> &mut Owner<Runnable> {
+        &mut self.queue
     }
 
     /// Discard every unclaimed runnable at teardown. One under a thief's claim
@@ -1128,7 +1128,7 @@ impl Ready {
     /// The task set is closed, so teardown clears each runnable's task or
     /// already has. Releasing these references runs no user code.
     pub fn discard(&mut self) {
-        while let Some(runnable) = self.ring.pop() {
+        while let Some(runnable) = self.queue.pop() {
             runnable.discard();
         }
     }
@@ -1138,7 +1138,7 @@ impl Ready {
 #[commonware_macros::test_group("miri")]
 pub mod tests {
     use super::*;
-    use crate::{iouring::queue::Ring, utils::extract_panic_message};
+    use crate::{iouring::queue::LocalQueue, utils::extract_panic_message};
     use commonware_utils::sync::Mutex;
     use std::{
         future::{pending, poll_fn},
@@ -1289,9 +1289,9 @@ pub mod tests {
     }
 
     impl Ready {
-        /// A run queue over a ring of its own, which no pool reads.
+        /// A run queue over a local queue of its own, which no pool reads.
         pub fn private() -> Self {
-            Self::new(Ring::shared().owner())
+            Self::new(LocalQueue::shared().owner())
         }
     }
 
@@ -1299,7 +1299,7 @@ pub mod tests {
     pub fn queue(ready: &mut Ready, runnable: Runnable) {
         match ready.push(runnable) {
             Push::Pushed(_) => {}
-            Push::Overflow(..) | Push::Claimed(_) => panic!("no room in the ring"),
+            Push::Overflow(..) | Push::Claimed(_) => panic!("no room in the run queue"),
         }
     }
 
@@ -2245,12 +2245,12 @@ mod loom_tests {
                     let set = set.clone();
                     let completed = completed.clone();
                     thread::spawn(move || {
-                        let mut ready = Ready::new(pool.ring(index).owner());
+                        let mut ready = Ready::new(pool.queue(index).owner());
                         work(&pool, &set, &mut ready, index, &completed, tasks, spin);
                     })
                 })
                 .collect();
-            let mut ready = Ready::new(pool.ring(0).owner());
+            let mut ready = Ready::new(pool.queue(0).owner());
             work(&pool, &set, &mut ready, 0, &completed, tasks, spin);
             pushing.join().unwrap();
             for other in others {
@@ -2353,14 +2353,14 @@ mod loom_tests {
                 let set = set.clone();
                 let completed = completed.clone();
                 move || {
-                    let mut ready = Ready::new(pool.ring(1).owner());
+                    let mut ready = Ready::new(pool.queue(1).owner());
                     work(&pool, &set, &mut ready, 1, &completed, STEALABLE, false);
                 }
             });
 
             // Worker zero queues the tasks in its own run queue, then blocks as
             // in a long poll until one of them has run, then runs what is left.
-            let mut ready = Ready::new(pool.ring(0).owner());
+            let mut ready = Ready::new(pool.queue(0).owner());
             let handles = enqueue_raising(&pool, &set, &mut ready, &ran, STEALABLE);
             wait_ran(&ran);
             work(&pool, &set, &mut ready, 0, &completed, STEALABLE, false);
@@ -2392,7 +2392,7 @@ mod loom_tests {
                 let completed = completed.clone();
                 let ran = ran.clone();
                 move || {
-                    let mut ready = Ready::new(pool.ring(1).owner());
+                    let mut ready = Ready::new(pool.queue(1).owner());
                     let mut searcher = Searcher::new(&pool, 1);
                     let _ = searcher.search(&mut ready);
                     searcher.leave_search();
@@ -2407,12 +2407,12 @@ mod loom_tests {
                 let set = set.clone();
                 let completed = completed.clone();
                 move || {
-                    let mut ready = Ready::new(pool.ring(2).owner());
+                    let mut ready = Ready::new(pool.queue(2).owner());
                     work(&pool, &set, &mut ready, 2, &completed, STEALABLE, false);
                 }
             });
 
-            let mut ready = Ready::new(pool.ring(0).owner());
+            let mut ready = Ready::new(pool.queue(0).owner());
             let handles = enqueue_raising(&pool, &set, &mut ready, &ran, STEALABLE);
             wait_ran(&ran);
             searching.join().unwrap();
@@ -2440,7 +2440,7 @@ mod loom_tests {
                 move || assert!(pool.push(runnable).is_ok())
             });
             {
-                let ready = Ready::new(pool.ring(1).owner());
+                let ready = Ready::new(pool.queue(1).owner());
                 let mut searcher = Searcher::new(&pool, 1);
                 let _ = searcher.prepare_park(&ready);
             }
@@ -2508,7 +2508,7 @@ mod loom_tests {
                 let completed = completed.clone();
                 let gate = gate.clone();
                 move || {
-                    let mut ready = Ready::new(pool.ring(1).owner());
+                    let mut ready = Ready::new(pool.queue(1).owner());
                     let mut searcher = Searcher::new(&pool, 1);
                     assert!(!searcher.search(&mut ready));
                     reach(&gate, 1);
@@ -2525,7 +2525,7 @@ mod loom_tests {
                 let set = set.clone();
                 let completed = completed.clone();
                 move || {
-                    let mut ready = Ready::new(pool.ring(2).owner());
+                    let mut ready = Ready::new(pool.queue(2).owner());
                     work(&pool, &set, &mut ready, 2, &completed, TASKS, false);
                 }
             });
@@ -2534,7 +2534,7 @@ mod loom_tests {
             // then blocks as in a long poll until three have run, then runs
             // what is left.
             await_stage(&gate, 1);
-            let mut ready = Ready::new(pool.ring(0).owner());
+            let mut ready = Ready::new(pool.queue(0).owner());
             let handles: Vec<Task> = (0..TASKS)
                 .map(|_| {
                     let ran = ran.clone();

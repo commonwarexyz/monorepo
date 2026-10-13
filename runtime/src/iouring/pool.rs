@@ -29,7 +29,7 @@
 //!
 //! # Run queues
 //!
-//! Each pool worker queues its runnables in a run queue, a bounded [`Ring`] of
+//! Each pool worker queues its runnables in a run queue, a [`LocalQueue`] of
 //! [`CAPACITY`] that only it pushes into and pops from. A push into a full run
 //! queue moves its newest half and the new runnable into the global queue in
 //! one batch, keeping the oldest half in the run queue. If a thief's claim
@@ -220,7 +220,7 @@
 
 use super::{
     mailbox::{Mailbox, Message},
-    queue::{CAPACITY, Overflow, Push, Ring, STEALABLE},
+    queue::{CAPACITY, LocalQueue, Overflow, Push, STEALABLE},
     runtime::{Panic, Role, Shared, Worker},
     task::{Ready, Runnable},
 };
@@ -288,7 +288,7 @@ pub struct Slot {
     mailbox: Arc<Mailbox>,
     /// The shared end of the worker's run queue. The worker takes its owner
     /// when it starts.
-    ring: Ring<Runnable>,
+    queue: LocalQueue<Runnable>,
 }
 
 /// The state every wake reads, on one cache line.
@@ -337,11 +337,11 @@ impl Pool {
 
         // A worker reads another's run queue only to steal from it, and a pool
         // of one worker has no other worker, so its run queue is exclusive.
-        let ring = || {
+        let queue = || {
             if workers == 1 {
-                Ring::exclusive()
+                LocalQueue::exclusive()
             } else {
-                Ring::shared()
+                LocalQueue::shared()
             }
         };
         Self {
@@ -349,7 +349,7 @@ impl Pool {
                 .into_iter()
                 .map(|mailbox| Slot {
                     mailbox,
-                    ring: ring(),
+                    queue: queue(),
                 })
                 .collect(),
             wake: CachePadded::new(Wake {
@@ -382,8 +382,8 @@ impl Pool {
 
     /// Shared end of worker `index`'s run queue, whose owner the worker takes
     /// when it starts. Panics if the index is outside the pool.
-    pub fn ring(&self, index: u32) -> &Ring<Runnable> {
-        &self.slots[index as usize].ring
+    pub fn queue(&self, index: u32) -> &LocalQueue<Runnable> {
+        &self.slots[index as usize].queue
     }
 
     /// Lock the global queue.
@@ -565,7 +565,7 @@ impl Pool {
         (0..workers)
             .map(|offset| (start + offset) % workers)
             .filter(|&victim| victim != index as usize)
-            .any(|victim| self.slots[victim].ring.steal_into(ready.ring()) > 0)
+            .any(|victim| self.slots[victim].queue.steal_into(ready.queue()) > 0)
     }
 
     /// Wake a parked worker for a run queue's new backlog, or for the search
@@ -711,7 +711,7 @@ impl Pool {
         self.slots
             .iter()
             .enumerate()
-            .any(|(other, slot)| other != index as usize && slot.ring.is_stealable())
+            .any(|(other, slot)| other != index as usize && slot.queue.is_stealable())
     }
 
     /// Count one more pool worker that shutdown waits for. Each worker enters
@@ -1377,7 +1377,7 @@ pub mod tests {
 
     /// The owner's end of worker `index`'s run queue.
     fn ready(pool: &Pool, index: u32) -> Ready {
-        Ready::new(pool.ring(index).owner())
+        Ready::new(pool.queue(index).owner())
     }
 
     /// A task that no set retains, with its first runnable.
@@ -1486,7 +1486,7 @@ pub mod tests {
     /// it is polled. A run queue already half full gets none, and a take into
     /// it returns one runnable.
     #[test]
-    fn test_take_fills_the_ring_at_most_to_half() {
+    fn test_take_fills_the_run_queue_at_most_to_half() {
         for held in [0, 100, HALF - 1, HALF, 200, CAPACITY - 1] {
             let pool = pool(1);
             let set = Tasks::new(1);
@@ -1504,7 +1504,7 @@ pub mod tests {
             assert_eq!(
                 moved,
                 GLOBAL_BATCH.min(HALF.saturating_sub(held) + 1),
-                "ring held {held}"
+                "run queue held {held}"
             );
 
             first.discard();
@@ -1534,7 +1534,7 @@ pub mod tests {
             queue(&mut ready, runnable);
             tasks.push(task);
         }
-        let claim = pool.ring(0).hold_claim(HALF as u32);
+        let claim = pool.queue(0).hold_claim(HALF as u32);
         while let Some(runnable) = ready.pop() {
             runnable.discard();
         }
@@ -1546,7 +1546,7 @@ pub mod tests {
 
         // Released, the claim's slots are free again, and a take queues the
         // rest of an even split of the 199 left.
-        for runnable in pool.ring(0).finish_claim(claim) {
+        for runnable in pool.queue(0).finish_claim(claim) {
             runnable.discard();
         }
         pool.take(&mut ready).unwrap().discard();
@@ -1584,7 +1584,7 @@ pub mod tests {
     /// half, then the new runnable, into the global queue in that order. Once
     /// the queue has closed, that batch is discarded.
     #[test]
-    fn test_full_ring_moves_its_newest_half_to_the_global_queue() {
+    fn test_full_run_queue_moves_its_newest_half_to_the_global_queue() {
         let pool = pool(1);
         let set = Tasks::new(1);
         let mut ready = ready(&pool, 0);
@@ -1629,7 +1629,7 @@ pub mod tests {
     /// queue keeps the rest. Once the queue has closed, that runnable is
     /// discarded.
     #[test]
-    fn test_full_ring_under_a_claim_moves_only_the_new_runnable() {
+    fn test_full_run_queue_under_a_claim_moves_only_the_new_runnable() {
         for open in [true, false] {
             let pool = pool(2);
             let set = Tasks::new(1);
@@ -1640,7 +1640,7 @@ pub mod tests {
                 queue(&mut ready, runnable);
                 tasks.push(task);
             }
-            let claim = pool.ring(0).hold_claim(HALF as u32);
+            let claim = pool.queue(0).hold_claim(HALF as u32);
             if !open {
                 pool.close();
             }
@@ -1657,7 +1657,7 @@ pub mod tests {
             }
             assert!(pool.pop().is_none());
 
-            for runnable in pool.ring(0).finish_claim(claim) {
+            for runnable in pool.queue(0).finish_claim(claim) {
                 runnable.discard();
             }
             ready.discard();
@@ -1671,7 +1671,7 @@ pub mod tests {
     /// A search steals half of another worker's backlog, rounded down, and
     /// leaves a lone runnable with its worker.
     #[test]
-    fn test_search_steals_half_of_another_ring() {
+    fn test_search_steals_half_of_another_run_queue() {
         let pool = pool(3);
         let set = Tasks::new(1);
         let (mut zero, mut one, mut two) = (ready(&pool, 0), ready(&pool, 1), ready(&pool, 2));
@@ -1712,7 +1712,7 @@ pub mod tests {
     /// A pool of one worker builds its run queue exclusive, which refuses
     /// thieves, and a larger pool builds shared ones.
     #[test]
-    fn test_only_a_one_worker_pool_has_an_exclusive_ring() {
+    fn test_only_a_one_worker_pool_has_an_exclusive_run_queue() {
         for (workers, exclusive) in [(1, true), (2, false)] {
             let pool = pool(workers);
             let set = Tasks::new(1);
@@ -1723,9 +1723,9 @@ pub mod tests {
                 queue(&mut ready, runnable);
                 tasks.push(task);
             }
-            let thief = Ring::shared();
+            let thief = LocalQueue::shared();
             let mut into = Ready::new(thief.owner());
-            let stolen = catch_unwind(AssertUnwindSafe(|| pool.ring(0).steal_into(into.ring())));
+            let stolen = catch_unwind(AssertUnwindSafe(|| pool.queue(0).steal_into(into.queue())));
             assert_eq!(stolen.is_err(), exclusive);
             ready.discard();
             into.discard();
@@ -1932,7 +1932,7 @@ pub mod tests {
             tasks.push(task);
         }
         assert!(thief.begin());
-        let claim = pool.ring(0).hold_claim(HALF as u32);
+        let claim = pool.queue(0).hold_claim(HALF as u32);
         while let Some(runnable) = zero.pop() {
             runnable.discard();
         }
@@ -1942,7 +1942,7 @@ pub mod tests {
         assert!(pool.is_idle(0) && !signalled(&pool, 0));
         assert_eq!(pool.search_count(), 1);
 
-        for runnable in pool.ring(0).finish_claim(claim) {
+        for runnable in pool.queue(0).finish_claim(claim) {
             runnable.discard();
         }
         thief.leave_search();
