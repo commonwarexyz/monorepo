@@ -52,7 +52,9 @@ where
     if matches!(M::MODE, Mode::FaultyNet) {
         input.partition = Partition::Adaptive(Vec::new());
     }
-    print_fuzz_input::<P>(M::MODE, &input);
+    if !twins {
+        print_fuzz_input::<P>(M::MODE, &input);
+    }
     let raw_bytes = input.raw_bytes.clone();
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| match M::MODE {
         Mode::TwinsMutator => {
@@ -114,7 +116,6 @@ where
     let mut input = input;
     let observer: Arc<dyn Observer> = Arc::new(observer);
     let hook = Hook::plan(Box::new(prefix), observer.clone(), &mut input, true);
-    print_fuzz_input::<P>(M::MODE, &input);
     let raw_bytes = input.raw_bytes.clone();
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let _ = run_twins::<P>(input, role, false, false, true, Some(hook));
@@ -695,7 +696,7 @@ mod tests {
             ),
             (
                 TwinsRole::Mutator,
-                "55a975179caa8783392b5b42d779b7d236ba4503b8264e43023b711f60a68bbf",
+                "a3db6cc5dda47688cc95aa639dc18dbae60d30c6931c1d87771f2ed77e99cc9d",
             ),
         ] {
             let input = twins.clone();

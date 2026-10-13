@@ -1024,13 +1024,17 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                 )
             })
         });
-        invariants::check_no_invalid_reports_if_no_faults(config.faults, &summary_reporters);
         let byzantine: HashSet<usize> = if matches!(input.certify, CertifyChoice::RejectView { .. })
         {
             HashSet::new()
         } else {
             (0..config.faults as usize).collect()
         };
+        // Under rejected certification the Byzantine slot runs a normal engine
+        // (see the spawn above), so every report must be valid.
+        if byzantine.is_empty() {
+            invariants::check_no_invalid_reports(&summary_reporters);
+        }
         invariants::check_vote_invariants_with_byzantine(
             &byzantine,
             P::elector(term_length, input.optimistic_views),
@@ -1809,6 +1813,11 @@ fn run_twins<P: simplex::Simplex>(
     // Twins reuse the standard input; a certify variant sampled for an
     // all-honest configuration would stall this quorum-tight one.
     input.certify = CertifyChoice::Always;
+    let mode = match role {
+        TwinsRole::Mutator => Mode::TwinsMutator,
+        TwinsRole::Campaign => Mode::TwinsCampaign,
+    };
+    print_fuzz_input::<P>(mode, &input);
 
     let cfg = bounded_fuzz_runtime_config(
         &input.raw_bytes,
@@ -2179,7 +2188,8 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         install_mallory_panic_hook();
     } else if matches!(M::MODE, Mode::Chaos | Mode::ChaosTwins) {
         install_chaos_panic_hook();
-    } else {
+    } else if !matches!(M::MODE, Mode::TwinsMutator | Mode::TwinsCampaign) {
+        // Twins modes print inside `run_twins`, after their input overrides.
         if matches!(M::MODE, Mode::FaultyNet) {
             // We run only fuzzing with network faults, populated later by the
             // chosen strategy.
@@ -2285,6 +2295,7 @@ pub fn fuzz_audit_notarize_omission<P: simplex::Simplex>(mut input: FuzzInput) {
     input.configuration = N4F0C4;
     input.partition = Partition::Connected;
     input.degraded_network = false;
+    input.block_filter = BlockFilterChoice::None;
     input.required_containers = input.required_containers.max(4);
     input.term_length = TermLength::ONE;
     input.certify = CertifyChoice::Always;
@@ -2323,7 +2334,6 @@ pub fn fuzz_twins_audit<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
         Mode::TwinsCampaign => TwinsRole::Campaign,
         mode => panic!("fuzz_twins_audit requires a Twins mode, got {mode:?}"),
     };
-    print_fuzz_input::<P>(M::MODE, &input);
 
     let raw_bytes = input.raw_bytes.clone();
     let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {

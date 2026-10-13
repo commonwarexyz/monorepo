@@ -9,7 +9,7 @@ pub mod simplex_audit;
 pub use commonware_consensus::simplex::mocks::scheme as simplex_certificate_mock;
 pub mod strategy;
 mod twins_network;
-pub use twins_network::resolver_view as twins_resolver_view;
+pub use twins_network::{resolver_view as twins_resolver_view, within_mask as twins_within_mask};
 pub mod continuation;
 pub mod types;
 pub mod utils;
