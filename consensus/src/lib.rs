@@ -66,10 +66,6 @@ stability_scope!(BETA {
     /// read from storage, must use a canonical encoding. Every byte sequence `bytes` accepted by
     /// the decoder must satisfy `encode(decode(bytes)) == bytes`, and decoders must reject
     /// alternate encodings of the same block.
-    ///
-    /// [`Digestible::digest`] computes the digest of a decoded or freshly built block. Marshal
-    /// computes it once, when the block is built, received, or restored, and hands consumers a
-    /// [`Digested`] block.
     pub trait Block: Heightable + Digestible + Encode {
         /// Get the parent block's digest.
         fn parent(&self) -> Self::Digest;
