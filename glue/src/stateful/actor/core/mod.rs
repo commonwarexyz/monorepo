@@ -158,7 +158,6 @@ where
     resolvers: R,
     /// Sync engine settings.
     sync_config: SyncEngineConfig,
-
     /// Pruning schedule from [`Config::prune_config`], with a random phase.
     pruning: Option<Pruning<SyncTargets<A, E>>>,
     /// Strategy for computing the digests of blocks built by the application.

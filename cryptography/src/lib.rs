@@ -72,7 +72,7 @@ commonware_macros::stability_scope!(ALPHA {
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     use alloc::{sync::Arc, vec::Vec};
-    use commonware_codec::{Encode, EncodeSize, ReadExt, Write};
+    use commonware_codec::{BufsMut, Encode, EncodeSize, ReadExt, Write};
     use commonware_math::algebra::Random;
     use commonware_parallel::Strategy;
     use commonware_utils::Array;
@@ -316,7 +316,7 @@ commonware_macros::stability_scope!(BETA {
     }
 
     impl<T: Digestible> Digested<T> {
-        /// Computes the digest of `inner` as a job on `strategy`, splitting the hashing across it.
+        /// Computes the digest of `inner` as a job on `strategy`.
         ///
         /// The job is sized by the value's encoded size. Submitted work runs to completion even if
         /// the returned future is dropped, which only discards the result.
@@ -396,11 +396,19 @@ commonware_macros::stability_scope!(BETA {
         fn write(&self, buf: &mut impl bytes::BufMut) {
             self.inner.write(buf);
         }
+
+        fn write_bufs(&self, buf: &mut impl BufsMut) {
+            self.inner.write_bufs(buf);
+        }
     }
 
     impl<T: Digestible + EncodeSize> EncodeSize for Digested<T> {
         fn encode_size(&self) -> usize {
             self.inner.encode_size()
+        }
+
+        fn encode_inline_size(&self) -> usize {
+            self.inner.encode_inline_size()
         }
     }
 

@@ -729,8 +729,6 @@ where
                 return Resolved::Skip;
             }
 
-            let commitment = parent.commitment();
-
             // Special case: If the parent block is the last block in the epoch,
             // re-propose it so as not to produce any blocks that will be cut out
             // by the epoch transition.
@@ -738,7 +736,7 @@ where
                 .last(consensus_context.epoch())
                 .expect("current epoch should exist");
             if parent.height() == last_in_epoch {
-                return Resolved::Reuse(commitment, parent);
+                return Resolved::Reuse(parent.commitment(), parent);
             }
 
             let ancestor_stream = marshal.ancestor_stream(

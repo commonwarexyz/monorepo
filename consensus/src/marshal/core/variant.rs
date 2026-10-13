@@ -36,9 +36,10 @@ pub enum ExpectedCommitment<C> {
 ///
 /// Working blocks carry their identity. A [`Variant::Block`] reads its digest and commitment from
 /// what it was built with, and [`Variant::into_shared`] yields a [`Digested`] application block,
-/// so identity is read, never computed. A block's identity is established once, where its raw
-/// form enters marshal. The application digests a block it built, [`Variant::decode_block`] a
-/// received block, and [`Variant::restore`] or [`Variant::restore_across`] a stored block.
+/// so readers never compute identity themselves. A block's identity is established once, where
+/// its raw form enters marshal. The application digests a block it built,
+/// [`Variant::decode_block`] a received block, and [`Variant::restore`] or
+/// [`Variant::restore_across`] a stored block.
 pub trait Variant: Clone + Send + Sync + 'static {
     /// The working block type of marshal, whose digest and consensus commitment are ready.
     ///
@@ -54,7 +55,7 @@ pub trait Variant: Clone + Send + Sync + 'static {
     ///
     /// Decoding only parses, so a stored block's identity is reattached from the key it was
     /// stored under by [`Self::restore`], or computed by [`Self::restore_across`] when the key
-    /// is unknown. Marshal never computes a stored block's digest directly.
+    /// is unknown.
     type StoredBlock: Block<Digest = <Self::Block as Digestible>::Digest>
         + Codec<Cfg = <Self::ApplicationBlock as Read>::Cfg>;
 
@@ -92,9 +93,6 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Decodes a [`Self::Block`] received over the wire, failing unless [`Self::commitment`] of
     /// the result equals the commitment in `expected`.
-    ///
-    /// The block's identity is computed as jobs submitted to `strategy`, which decides whether
-    /// each runs inline or on its workers.
     fn decode_block(
         buf: impl Input,
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,

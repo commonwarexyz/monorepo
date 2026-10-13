@@ -333,16 +333,16 @@ where
 mod tests {
     use super::*;
     use crate::{
-        marshal::{coding::types::coding_config_for_participants, mocks::block::EmptyBlock},
+        marshal::{
+            coding::types::coding_config_for_participants,
+            mocks::block::{EmptyBlock, encode_block},
+        },
         types::{Epoch, Height, View},
     };
     use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
-        Committable, Digest as _, Digested, Digestible, Sha256, ed25519,
-        sha256::Digest as Sha256Digest,
+        Committable, Digest as _, Sha256, ed25519, sha256::Digest as Sha256Digest,
     };
-    use commonware_parallel::Sequential;
-    use futures::executor::block_on;
 
     type B = EmptyBlock<Sha256>;
     type H = Sha256;
@@ -352,11 +352,7 @@ mod tests {
     #[test]
     fn policy_drains_fifo() {
         let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 1);
-        let block = block_on(CodedBlock::<B, C, H>::encode(
-            Digested::precomputed(inner.clone(), inner.digest()),
-            coding_config_for_participants(4),
-            &Sequential,
-        ));
+        let block = encode_block::<B, C, H>(inner, coding_config_for_participants(4));
         let commitment = block.commitment();
         let round = Round::new(Epoch::zero(), View::new(1));
 

@@ -157,8 +157,8 @@ pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
     commitment: Commitment<B, C, H>,
     /// The coded shards.
     ///
-    /// These shards are lazily-constructed when [`CodedBlock`] is formed with
-    /// [`Self::precomputed`].
+    /// These shards are lazily-constructed when [`CodedBlock`] is formed without erasure coding,
+    /// by [`Self::precomputed`], a trusted decode, or restoration from storage.
     shards: OnceLock<Arc<[C::Shard]>>,
 }
 
@@ -264,9 +264,6 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
 
     /// Erasure codes `inner` with `config` as a job on `strategy`, producing a [`CodedBlock`] that
     /// holds its shards.
-    ///
-    /// Submitted work runs to completion even if the returned future is dropped, which only
-    /// discards the result.
     #[track_caller]
     pub fn encode(
         inner: Digested<B>,
@@ -605,7 +602,7 @@ pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::marshal::mocks::block::EmptyBlock;
+    use crate::marshal::mocks::block::{EmptyBlock, encode_block};
     use bytes::Buf as _;
     use commonware_codec::{Decode, Encode, Error, Input};
     use commonware_coding::ReedSolomon;
@@ -737,12 +734,7 @@ mod test {
         };
 
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let digest = block.digest();
-        let coded_block = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::precomputed(block, digest),
-            CONFIG,
-            &Sequential,
-        ));
+        let coded_block = encode_block::<TestBlock, RS, H>(block, CONFIG);
 
         let encoded = coded_block.encode();
         let decoded = decode(
@@ -775,13 +767,8 @@ mod test {
         };
 
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let digest = block.digest();
-        let expected = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::precomputed(block.clone(), digest),
-            EXPECTED_CONFIG,
-            &Sequential,
-        ))
-        .commitment();
+        let expected =
+            encode_block::<TestBlock, RS, H>(block.clone(), EXPECTED_CONFIG).commitment();
         let encoded = (block, EMBEDDED_CONFIG).encode();
 
         let Err(err) = decode(encoded, ExpectedCommitment::Untrusted(expected)) else {
@@ -803,12 +790,7 @@ mod test {
 
         // Build an expected commitment that differs only in its coding root.
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let digest = block.digest();
-        let coded = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::precomputed(block, digest),
-            CONFIG,
-            &Sequential,
-        ));
+        let coded = encode_block::<TestBlock, RS, H>(block, CONFIG);
         let commitment = coded.commitment();
         let wrong_root = Sha256::hash(&[b"wrong root"]);
         assert_ne!(wrong_root, commitment.root());
@@ -839,12 +821,7 @@ mod test {
         };
 
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let digest = block.digest();
-        let coded = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::precomputed(block, digest),
-            CONFIG,
-            &Sequential,
-        ));
+        let coded = encode_block::<TestBlock, RS, H>(block, CONFIG);
         let decoded = decode(
             coded.encode(),
             ExpectedCommitment::Trusted(coded.commitment()),
@@ -855,14 +832,6 @@ mod test {
         assert_eq!(decoded.commitment(), coded.commitment());
         assert!(decoded.shard(0).is_none());
         assert_eq!(decoded.shards(&Sequential), coded.shards(&Sequential));
-
-        // Binding to a trusted commitment defers shard generation the same way.
-        let decoded = decode(
-            coded.encode(),
-            ExpectedCommitment::Trusted(coded.commitment()),
-        )
-        .unwrap();
-        assert!(decoded.shard(0).is_none());
     }
 
     #[test]
@@ -877,22 +846,9 @@ mod test {
         };
 
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let digest = block.digest();
-        let expected = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::precomputed(block.clone(), digest),
-            EXPECTED_CONFIG,
-            &Sequential,
-        ))
-        .commitment();
+        let expected =
+            encode_block::<TestBlock, RS, H>(block.clone(), EXPECTED_CONFIG).commitment();
         let encoded = (block, EMBEDDED_CONFIG).encode();
-
-        let Err(err) = decode(encoded.clone(), ExpectedCommitment::Trusted(expected)) else {
-            panic!("config mismatch should be rejected");
-        };
-        assert!(
-            matches!(err, Error::Invalid("CodedBlock", "config mismatch")),
-            "unexpected error: {err:?}"
-        );
 
         let Err(err) = decode(encoded, ExpectedCommitment::Trusted(expected)) else {
             panic!("config mismatch should be rejected");
@@ -912,13 +868,7 @@ mod test {
 
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let other = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(43), 1_234_567);
-        let digest = block.digest();
-        let expected = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::precomputed(block, digest),
-            CONFIG,
-            &Sequential,
-        ))
-        .commitment();
+        let expected = encode_block::<TestBlock, RS, H>(block, CONFIG).commitment();
         assert_ne!(other.digest(), expected.block());
         let encoded = (other, CONFIG).encode();
 
@@ -943,12 +893,7 @@ mod test {
         // A trusted commitment is not re-encoded at decode, so a root that does
         // not encode the block is only caught when shards are generated.
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let digest = block.digest();
-        let coded = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::precomputed(block, digest),
-            CONFIG,
-            &Sequential,
-        ));
+        let coded = encode_block::<TestBlock, RS, H>(block, CONFIG);
         let commitment = coded.commitment();
         let expected = Commitment::<TestBlock, RS, H>::from((
             commitment.block(),
@@ -969,12 +914,7 @@ mod test {
         };
 
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let digest = block.digest();
-        let coded_block = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::precomputed(block, digest),
-            CONFIG,
-            &Sequential,
-        ));
+        let coded_block = encode_block::<TestBlock, RS, H>(block, CONFIG);
         let cloned = coded_block.clone();
 
         assert!(Arc::ptr_eq(&coded_block.inner, &cloned.inner));
@@ -992,12 +932,7 @@ mod test {
         };
 
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let digest = block.digest();
-        let coded_block = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::precomputed(block, digest),
-            CONFIG,
-            &Sequential,
-        ));
+        let coded_block = encode_block::<TestBlock, RS, H>(block, CONFIG);
         let stored = StoredCodedBlock::<TestBlock, RS, H>::new(coded_block.clone());
 
         assert_eq!(stored.commitment(), coded_block.commitment());
@@ -1021,12 +956,7 @@ mod test {
         };
 
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let digest = block.digest();
-        let coded_block = block_on(CodedBlock::<TestBlock, RS, H>::encode(
-            Digested::precomputed(block, digest),
-            CONFIG,
-            &Sequential,
-        ));
+        let coded_block = encode_block::<TestBlock, RS, H>(block, CONFIG);
         let original_commitment = coded_block.commitment();
         let original_digest = coded_block.digest();
 

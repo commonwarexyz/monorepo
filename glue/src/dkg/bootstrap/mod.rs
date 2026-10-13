@@ -154,7 +154,7 @@ pub struct Completion<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
 }
 
 /// Block type used by the one-shot DKG chain.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     context: Context<sha256::Digest, ed25519::PublicKey>,
     parent: sha256::Digest,
@@ -249,17 +249,6 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ConsensusBlock for Block<V, D
         self.parent
     }
 }
-
-impl<V: Variant, D: Directory<ed25519::PublicKey>> PartialEq for Block<V, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.context == other.context
-            && self.parent == other.parent
-            && self.height == other.height
-            && self.payload == other.payload
-    }
-}
-
-impl<V: Variant, D: Directory<ed25519::PublicKey>> Eq for Block<V, D> {}
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> CertifiableBlock for Block<V, D> {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;

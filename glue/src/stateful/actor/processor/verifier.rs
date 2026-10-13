@@ -15,7 +15,6 @@ use commonware_consensus::{
     },
 };
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
-use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use rand_core::Rng;
 use tracing::{debug, info_span, warn};
@@ -55,22 +54,20 @@ where
 }
 
 /// Executes one verification request against the processor's shared speculative state.
-pub(in crate::stateful::actor) struct Verifier<E, A, T>
+pub(in crate::stateful::actor) struct Verifier<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    T: Strategy,
 {
     pub(super) app: A,
-    pub(super) execution: Execution<E, A, T>,
+    pub(super) execution: Execution<E, A>,
     pub(super) replays: ReplayFlights<BlockDigest<A, E>>,
 }
 
-impl<E, A, T> Clone for Verifier<E, A, T>
+impl<E, A> Clone for Verifier<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    T: Strategy,
 {
     fn clone(&self) -> Self {
         Self {
@@ -81,11 +78,10 @@ where
     }
 }
 
-impl<E, A, T> Verifier<E, A, T>
+impl<E, A> Verifier<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    T: Strategy,
 {
     /// Verifies the first block of `ancestry` on its parent's state.
     ///

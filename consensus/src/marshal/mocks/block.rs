@@ -1,7 +1,9 @@
-use crate::types::Height;
+use crate::{marshal::coding::types::CodedBlock, types::Height};
 use bytes::BufMut;
 use commonware_codec::{Buf, Codec, EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
-use commonware_cryptography::{Digest, Digestible, Hasher};
+use commonware_coding::{Config as CodingConfig, Scheme};
+use commonware_cryptography::{Digest, Digested, Digestible, Hasher};
+use commonware_parallel::Sequential;
 #[cfg(test)]
 use commonware_utils::sync::Mutex;
 use std::fmt::Debug;
@@ -13,6 +15,20 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
+
+/// Computes a block's digest and wraps the block with its identity.
+pub fn ready<B: crate::Block>(block: B) -> Digested<B> {
+    let digest = block.digest();
+    Digested::precomputed(block, digest)
+}
+
+/// Encodes a block with its digest and coding configuration using the sequential strategy.
+pub fn encode_block<B: crate::CertifiableBlock, C: Scheme, H: Hasher>(
+    block: B,
+    config: CodingConfig,
+) -> CodedBlock<B, C, H> {
+    futures::executor::block_on(CodedBlock::encode(ready(block), config, &Sequential))
+}
 
 /// Per-test counters follow a block's encoded identity through archive decoding.
 /// Tests must register distinct blocks and keep the counter alive while work is pending.

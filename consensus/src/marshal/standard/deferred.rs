@@ -117,7 +117,10 @@ use commonware_runtime::{
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand_core::Rng;
-use std::{future::Future, sync::Arc};
+use std::{
+    future::{Future, ready},
+    sync::Arc,
+};
 use tracing::{Instrument as _, debug, info_span};
 
 /// An [`Application`] adapter that handles epoch transitions and validates block ancestry.
@@ -532,8 +535,6 @@ where
                 return Resolved::Skip;
             }
 
-            let parent_digest = parent.digest();
-
             // Special case: If the parent block is the last block in the epoch,
             // re-propose it so as not to produce any blocks that will be cut out
             // by the epoch transition.
@@ -541,7 +542,7 @@ where
                 .last(consensus_context.epoch())
                 .expect("current epoch should exist");
             if parent.height() == last_in_epoch {
-                return Resolved::Reuse(parent_digest, parent);
+                return Resolved::Reuse(parent.digest(), parent);
             }
 
             let ancestor_stream =
@@ -609,7 +610,7 @@ where
                     parent = %parent_commitment
                 )
             },
-            |block, ()| async move { (block.digest(), block) },
+            |block, ()| ready((block.digest(), block)),
         )
     }
 
@@ -810,7 +811,7 @@ where
                     parent = %parent_commitment
                 )
             },
-            |block, ()| async move { (block.digest(), block) },
+            |block, ()| ready((block.digest(), block)),
         )
     }
 

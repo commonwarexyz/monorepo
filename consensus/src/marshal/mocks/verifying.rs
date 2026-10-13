@@ -12,14 +12,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use std::{
-    future::pending,
-    marker::PhantomData,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
+use std::{future::pending, marker::PhantomData, sync::Arc};
 
 /// A mock application that implements `Application` for testing.
 ///
@@ -37,7 +30,6 @@ pub struct MockVerifyingApp<B, S> {
     handoff: Handoff<()>,
     /// Shared by clones so that only the first proposal build waits on the gate.
     proposal_gate: Arc<Mutex<Option<ProposalGate>>>,
-    builds: Arc<AtomicUsize>,
     /// Blocks for which `verify` returns false.
     pub reject: Option<fn(&B) -> bool>,
     _phantom: PhantomData<S>,
@@ -61,11 +53,6 @@ impl<B, S> MockVerifyingApp<B, S> {
     pub fn with_propose_result(mut self, block: B) -> Self {
         self.propose_result = Some(block);
         self
-    }
-
-    /// Returns how many blocks this application materialized across its clones.
-    pub fn builds(&self) -> usize {
-        self.builds.load(Ordering::Relaxed)
     }
 
     /// Configure the blocks for which `verify` returns false.
@@ -102,7 +89,6 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
             verify_result: true,
             handoff: Handoff::Wait,
             proposal_gate: Arc::default(),
-            builds: Arc::default(),
             reject: None,
             _phantom: PhantomData,
         }
@@ -149,10 +135,7 @@ where
             pending::<()>().await;
         }
         match self.propose_result.clone() {
-            Some(block) => {
-                self.builds.fetch_add(1, Ordering::Relaxed);
-                Some(Digested::compute(block, &Sequential).await)
-            }
+            Some(block) => Some(Digested::compute(block, &Sequential).await),
             None => None,
         }
     }

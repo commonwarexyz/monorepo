@@ -209,7 +209,10 @@ where
 mod tests {
     use super::*;
     use crate::{
-        marshal::{coding::types::StoredCodedBlock, mocks::block::Block},
+        marshal::{
+            coding::types::StoredCodedBlock,
+            mocks::block::{Block, encode_block},
+        },
         types::{Epoch, Height, View},
     };
     use bytes::BufMut;
@@ -323,13 +326,8 @@ mod tests {
     #[test]
     fn storage_conversion_shares_coding_block() {
         let block = no_clone_block(CONFIG);
-        let digest = block.digest();
-        let coded = Arc::new(block_on(
-            CodedBlock::<NoCloneBlock, TestScheme, Sha256>::encode(
-                Digested::precomputed(block, digest),
-                CONFIG,
-                &Sequential,
-            ),
+        let coded = Arc::new(encode_block::<NoCloneBlock, TestScheme, Sha256>(
+            block, CONFIG,
         ));
         let expected = coded.commitment();
         let stored: StoredCodedBlock<_, _, _> = coded.clone().into();
@@ -348,12 +346,7 @@ mod tests {
     #[test]
     fn decode_block_recomputes_untrusted_root() {
         let block = no_clone_block(CONFIG);
-        let digest = block.digest();
-        let coded = block_on(CodedBlock::<NoCloneBlock, TestScheme, Sha256>::encode(
-            Digested::precomputed(block, digest),
-            CONFIG,
-            &Sequential,
-        ));
+        let coded = encode_block::<NoCloneBlock, TestScheme, Sha256>(block, CONFIG);
         let expected = coded.commitment();
         let encoded = coded.encode();
         let strategy = Rayon::new(NZUsize!(2)).unwrap().manual();
@@ -412,12 +405,7 @@ mod tests {
     #[test]
     fn decode_block_binds_context_digest() {
         let block = no_clone_block(CONFIG);
-        let digest = block.digest();
-        let coded = block_on(CodedBlock::<NoCloneBlock, TestScheme, Sha256>::encode(
-            Digested::precomputed(block, digest),
-            CONFIG,
-            &Sequential,
-        ));
+        let coded = encode_block::<NoCloneBlock, TestScheme, Sha256>(block, CONFIG);
         let expected = coded.commitment();
         let encoded = coded.encode();
 

@@ -58,6 +58,7 @@ pub use variant::Standard;
 #[cfg(test)]
 mod tests {
     use super::{Deferred, Inline, Standard};
+    pub(super) use crate::marshal::mocks::block::ready;
     use crate::{
         Application as ConsensusApplication, Automaton, CertifiableAutomaton, Handoff, Heightable,
         Relay, Reporter, Viewable,
@@ -145,11 +146,6 @@ mod tests {
         time::Duration,
     };
 
-    pub(super) fn ready<T: crate::Block>(block: T) -> Digested<T> {
-        let digest = block.digest();
-        Digested::precomputed(block, digest)
-    }
-
     #[test]
     fn mailbox_provides_application_blocks() {
         fn assert_provider<P: BlockProvider<Block = B>>() {}
@@ -194,10 +190,10 @@ mod tests {
                 }
 
                 let mut counter = DigestCounter::default();
-                let mut built = 0;
                 let mut digests = Vec::new();
                 let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
-                for height in 1..=3 {
+                for (built, height) in (1..=3).enumerate() {
+                    let built = built + 1;
                     let round = Round::new(Epoch::zero(), View::new(height));
                     let block_context = Ctx {
                         round,
@@ -216,7 +212,7 @@ mod tests {
                     let mut wrapper = Wrapper::new(
                         kind,
                         context.child("proposal").with_attribute("height", height),
-                        app.clone(),
+                        app,
                         marshal.clone(),
                     );
                     let digest = wrapper
@@ -224,8 +220,6 @@ mod tests {
                         .await
                         .await
                         .expect("proposal must build a block");
-                    assert_eq!(app.builds(), 1);
-                    built += app.builds();
                     assert_eq!(counter.count(), built, "{kind:?} proposal hashing");
 
                     assert!(
@@ -7894,171 +7888,114 @@ mod tests {
         });
     }
 
-    /// Identity work must finish before publication and a dropped caller cannot publish it.
+    /// Identity work must finish before the block is published.
     #[test_traced("WARN")]
     fn test_standard_resolver_delivery_waits_for_identity_job() {
-        for cancel in [false, true] {
-            let runner = deterministic::Runner::timed(Duration::from_secs(30));
-            runner.start(|mut context| async move {
-                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
-                let prefix = "gated-finalized-identity";
-                let strategy = GatedStrategy::new(context.child("strategy"));
-                let (finalizations, blocks) = prunable_finalized_stores(&context, prefix).await;
-                let blocks = Recording::new(blocks, |block: &Arc<B>| Arc::as_ptr(block) as usize);
-                let operations = blocks.ops();
-                let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
-                    context.child("actor"),
-                    finalizations,
-                    blocks,
-                    Config {
-                        provider: ConstantProvider::new(schemes[0].clone()),
-                        epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                        start: Start::Genesis(StandardHarness::genesis_block(
-                            NUM_VALIDATORS as u16,
-                        )),
-                        mailbox_size: NZUsize!(100),
-                        view_retention: ViewDelta::new(10),
-                        max_repair: NZUsize!(10),
-                        max_pending_acks: NZUsize!(1),
-                        block_codec_config: (),
-                        partition_prefix: prefix.to_string(),
-                        prunable_items_per_section: NZU64!(10),
-                        replay_buffer: NZUsize!(1024),
-                        key_write_buffer: NZUsize!(1024),
-                        value_write_buffer: NZUsize!(1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        strategy: strategy.clone(),
-                    },
-                )
-                .await;
-                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-                let application = Application::<B>::manual_ack();
-                let actor_handle =
-                    actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
-                assert_eq!(application.acknowledged().await, Height::zero());
-                while mailbox.get_processed().await.map(Processed::height) != Some(Height::zero()) {
-                    reschedule().await;
-                }
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let prefix = "gated-finalized-identity";
+            let strategy = GatedStrategy::new(context.child("strategy"));
+            let (finalizations, blocks) = prunable_finalized_stores(&context, prefix).await;
+            let blocks = Recording::new(blocks, |block: &Arc<B>| Arc::as_ptr(block) as usize);
+            let operations = blocks.ops();
+            let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("actor"),
+                finalizations,
+                blocks,
+                Config {
+                    provider: ConstantProvider::new(schemes[0].clone()),
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                    mailbox_size: NZUsize!(100),
+                    view_retention: ViewDelta::new(10),
+                    max_repair: NZUsize!(10),
+                    max_pending_acks: NZUsize!(1),
+                    block_codec_config: (),
+                    partition_prefix: prefix.to_string(),
+                    prunable_items_per_section: NZU64!(10),
+                    replay_buffer: NZUsize!(1024),
+                    key_write_buffer: NZUsize!(1024),
+                    value_write_buffer: NZUsize!(1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    strategy: strategy.clone(),
+                },
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let actor_handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+            assert_eq!(application.acknowledged().await, Height::zero());
+            while mailbox.get_processed().await.map(Processed::height) != Some(Height::zero()) {
+                reschedule().await;
+            }
 
-                let height = Height::new(1);
-                let round = Round::new(Epoch::zero(), View::new(1));
-                let block = make_raw_block(
-                    StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest(),
-                    height,
-                    0x1DE_1000,
-                );
-                let digest = block.digest();
-                let mut counter = DigestCounter::default();
-                counter.track(&block);
-                let finalization = StandardHarness::make_finalization(
-                    Proposal::new(round, View::zero(), digest),
-                    &schemes,
-                    QUORUM,
-                );
-                let mut subscriber = mailbox.subscribe_by_digest(digest, DigestFallback::Wait);
-                StandardHarness::report_finalization(&mut mailbox, finalization).await;
-                let _ = mailbox.get_processed().await;
-                let Gate {
-                    started,
-                    release,
-                    finished,
-                } = strategy.arm();
-                let (response, mut response_rx) = oneshot::channel();
-                assert!(
-                    resolver
-                        .enqueue(handler::Message::Deliver {
-                            delivery: Delivery {
-                                key: handler::Key::Block(digest),
-                                subscribers: NonEmptyVec::new((
-                                    handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                        height,
-                                    }),
-                                    tracing::Span::none(),
-                                )),
-                            },
-                            value: block.encode(),
-                            response,
-                        })
-                        .accepted()
-                );
-                started.await.expect("identity job must start");
-                context.sleep(Duration::from_millis(10)).await;
-                assert_eq!(counter.count(), 0);
-                assert!(matches!(response_rx.try_recv(), Err(TryRecvError::Empty)));
-                assert!(matches!(subscriber.try_recv(), Err(TryRecvError::Empty)));
-                assert!(!application.blocks().contains_key(&height));
-                assert!(
-                    !operations
-                        .lock()
-                        .iter()
-                        .any(|op| matches!(op, Op::Put(h, _) if *h == height))
-                );
+            let height = Height::new(1);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(
+                StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest(),
+                height,
+                0x1DE_1000,
+            );
+            let digest = block.digest();
+            let mut counter = DigestCounter::default();
+            counter.track(&block);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), digest),
+                &schemes,
+                QUORUM,
+            );
+            let mut subscriber = mailbox.subscribe_by_digest(digest, DigestFallback::Wait);
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            let _ = mailbox.get_processed().await;
+            let Gate { started, release } = strategy.arm();
+            let (response, mut response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Block(digest),
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                    height,
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: block.encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            started.await.expect("identity job must start");
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(counter.count(), 0);
+            assert!(matches!(response_rx.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(subscriber.try_recv(), Err(TryRecvError::Empty)));
+            assert!(!application.blocks().contains_key(&height));
+            assert!(
+                !operations
+                    .lock()
+                    .iter()
+                    .any(|op| matches!(op, Op::Put(h, _) if *h == height))
+            );
 
-                if cancel {
-                    actor_handle.abort();
-                    let _ = actor_handle.await;
-                    release
-                        .send(())
-                        .expect("independent identity job remains alive");
-                    finished
-                        .await
-                        .expect("identity job completes after caller cancellation");
-                    context.sleep(Duration::from_millis(10)).await;
-                    assert_eq!(counter.count(), 1);
-                    assert!(response_rx.await.is_err());
-                    assert!(subscriber.await.is_err());
-                    assert!(!application.blocks().contains_key(&height));
-                    assert!(
-                        !operations
-                            .lock()
-                            .iter()
-                            .any(|op| matches!(op, Op::Put(h, _) if *h == height))
-                    );
-
-                    let (finalizations, blocks) = prunable_finalized_stores(&context, prefix).await;
-                    let (actor, recovered, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
-                        context.child("recovered"),
-                        finalizations,
-                        blocks,
-                        test_config(
-                            &context,
-                            prefix,
-                            ConstantProvider::new(schemes[0].clone()),
-                            NZUsize!(1),
-                        ),
-                    )
-                    .await;
-                    let (resolver_rx, resolver) =
-                        RecordingResolver::holding(context.child("recovered_resolver"));
-                    let recovered_handle = actor
-                        .start_unbuffered(Application::<B>::default(), (resolver_rx, resolver));
-                    assert!(recovered.get_block(&digest).await.is_none());
-                    assert!(recovered.get_block(height).await.is_none());
-                    assert!(recovered.get_finalization(height).await.is_none());
-                    recovered_handle.abort();
-                    let _ = recovered_handle.await;
-                } else {
-                    release.send(()).expect("identity job remains alive");
-                    finished.await.expect("identity job completes");
-                    assert!(response_rx.await.expect("delivery response missing"));
-                    assert_eq!(subscriber.await.unwrap().inner(), &block);
-                    assert_eq!(application.acknowledged().await, height);
-                    assert_eq!(counter.count(), 2);
-                    assert!(
-                        operations
-                            .lock()
-                            .iter()
-                            .any(|op| matches!(op, Op::Put(h, _) if *h == height))
-                    );
-                    actor_handle.abort();
-                    let _ = actor_handle.await;
-                }
-            });
-        }
+            release.send(()).expect("identity job remains alive");
+            assert!(response_rx.await.expect("delivery response missing"));
+            assert_eq!(subscriber.await.unwrap().inner(), &block);
+            assert_eq!(application.acknowledged().await, height);
+            assert_eq!(counter.count(), 2);
+            assert!(
+                operations
+                    .lock()
+                    .iter()
+                    .any(|op| matches!(op, Op::Put(h, _) if *h == height))
+            );
+            actor_handle.abort();
+            let _ = actor_handle.await;
+        });
     }
 
     #[test_traced("WARN")]

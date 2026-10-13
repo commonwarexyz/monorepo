@@ -39,11 +39,10 @@ pub(crate) fn validate_block<B>(
 where
     B: Block,
 {
-    let computed_parent_digest = parent.digest();
-    if block.parent() != computed_parent_digest {
+    if block.parent() != parent.digest() {
         return Err(Error::ParentDigest);
     }
-    if computed_parent_digest != parent_digest {
+    if parent.digest() != parent_digest {
         return Err(Error::ExpectedParentDigest);
     }
     if !has_contiguous_height(parent.height(), block.height()) {

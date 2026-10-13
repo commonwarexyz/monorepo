@@ -14,7 +14,10 @@ use crate::{
         },
         config::{Config, Start},
         core::{Actor, CommitmentFallback, DigestFallback, Mailbox, Processed},
-        mocks::{application::Application, block::Block},
+        mocks::{
+            application::Application,
+            block::{Block, encode_block, ready},
+        },
         resolver::p2p as resolver,
         standard::Standard,
     },
@@ -54,7 +57,7 @@ use commonware_storage::{
 use commonware_utils::{
     NZU16, NZU64, NZUsize, TestRng, non_empty, probability, test_rng, vec::NonEmptyVec,
 };
-use futures::{StreamExt, executor::block_on};
+use futures::StreamExt;
 use rand::{
     RngExt as _,
     seq::{IteratorRandom, SliceRandom},
@@ -2036,9 +2039,7 @@ impl TestHarness for StandardHarness {
         timestamp: u64,
         _num_participants: u16,
     ) -> Digested<B> {
-        let block = make_raw_block(parent, height, timestamp);
-        let digest = block.digest();
-        Digested::precomputed(block, digest)
+        ready(make_raw_block(parent, height, timestamp))
     }
 
     fn commitment(block: &Digested<B>) -> D {
@@ -2847,12 +2848,7 @@ impl TestHarness for CodingHarness {
         };
         let raw = CodingB::new::<Sha256>(context, parent, height, timestamp);
         let coding_config = coding_config_for_participants(num_participants);
-        let digest = raw.digest();
-        block_on(CodedBlock::encode(
-            Digested::precomputed(raw, digest),
-            coding_config,
-            &Sequential,
-        ))
+        encode_block(raw, coding_config)
     }
 
     fn genesis_parent_commitment(_num_participants: u16) -> TestCommitment {

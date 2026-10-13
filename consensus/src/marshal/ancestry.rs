@@ -317,7 +317,7 @@ where
     let clock = clock.clone();
     marshal
         .subscribe_parent(child)
-        .then(move |parent| async move {
+        .map(move |parent| {
             let parent = parent?;
             timer.observe(clock.as_ref());
             expected.matches(&parent).then_some(parent)

@@ -10,13 +10,11 @@ use std::{cmp::Ordering, fmt, future::Future, sync::Arc};
 pub struct Gate {
     pub started: oneshot::Receiver<()>,
     pub release: oneshot::Sender<()>,
-    pub finished: oneshot::Receiver<()>,
 }
 
 struct Pending {
     started: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
-    finished: oneshot::Sender<()>,
 }
 
 /// Runs jobs on the deterministic runtime and gates the next submission when armed.
@@ -45,19 +43,13 @@ impl GatedStrategy {
     pub fn arm(&self) -> Gate {
         let (started_tx, started) = oneshot::channel();
         let (release, release_rx) = oneshot::channel();
-        let (finished_tx, finished) = oneshot::channel();
         let mut pending = self.pending.lock();
         assert!(pending.is_none(), "a job is already armed");
         *pending = Some(Pending {
             started: started_tx,
             release: release_rx,
-            finished: finished_tx,
         });
-        Gate {
-            started,
-            release,
-            finished,
-        }
+        Gate { started, release }
     }
 }
 
@@ -78,17 +70,11 @@ impl Strategy for GatedStrategy {
             .child("job")
             .shared(true)
             .spawn(move |_| async move {
-                let finished = if let Some(pending) = pending {
+                if let Some(pending) = pending {
                     pending.started.send_lossy(());
                     pending.release.await.expect("job release dropped");
-                    Some(pending.finished)
-                } else {
-                    None
-                };
-                let result = f(strategy);
-                if let Some(finished) = finished {
-                    finished.send_lossy(());
                 }
+                let result = f(strategy);
                 result_tx.send_lossy(result);
             });
         async move { result_rx.await.expect("job result dropped") }

@@ -91,7 +91,10 @@ use commonware_runtime::{
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand_core::Rng;
-use std::{future::Future, sync::Arc};
+use std::{
+    future::{Future, ready},
+    sync::Arc,
+};
 use tracing::{Instrument as _, debug, info_span};
 
 /// Waits for a marshal block subscription while allowing consensus to cancel the work.
@@ -278,14 +281,12 @@ where
             };
             parent_timer.observe(&*context);
 
-            let parent_digest = parent.digest();
-
             // At epoch boundary, re-propose the parent block.
             let last_in_epoch = epocher
                 .last(consensus_context.epoch())
                 .expect("current epoch should exist");
             if parent.height() == last_in_epoch {
-                return Resolved::Reuse(parent_digest, parent);
+                return Resolved::Reuse(parent.digest(), parent);
             }
 
             let ancestor_stream =
@@ -348,7 +349,7 @@ where
                     parent = %parent_commitment
                 )
             },
-            |block, ()| async move { (block.digest(), block) },
+            |block, ()| ready((block.digest(), block)),
         )
     }
 
@@ -572,7 +573,7 @@ where
                     parent = %parent_commitment
                 )
             },
-            |block, ()| async move { (block.digest(), block) },
+            |block, ()| ready((block.digest(), block)),
         )
     }
 

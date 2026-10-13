@@ -265,30 +265,26 @@ where
 }
 
 /// Databases, speculative state, and metrics shared by the processor and its verifiers.
-struct Execution<E, A, T>
+struct Execution<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    T: Strategy,
 {
     databases: A::Databases,
     state: Arc<Mutex<ExecutionState<A, E>>>,
     metrics: StatefulMetrics,
-    strategy: T,
 }
 
-impl<E, A, T> Clone for Execution<E, A, T>
+impl<E, A> Clone for Execution<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    T: Strategy,
 {
     fn clone(&self) -> Self {
         Self {
             databases: self.databases.clone(),
             state: self.state.clone(),
             metrics: self.metrics.clone(),
-            strategy: self.strategy.clone(),
         }
     }
 }
@@ -636,9 +632,10 @@ where
     T: Strategy,
 {
     app: A,
-    execution: Execution<E, A, T>,
+    execution: Execution<E, A>,
     replays: ReplayFlights<BlockDigest<A, E>>,
     pruning: Option<Pruning<SyncTargets<A, E>>>,
+    strategy: T,
 }
 
 impl<E, A, T> Processor<E, A, T>
@@ -666,15 +663,15 @@ where
                     finalizing: None,
                 })),
                 metrics,
-                strategy,
             },
             replays: ReplayFlights::default(),
             pruning,
+            strategy,
         }
     }
 
     /// Returns a verifier that shares this processor's speculative state.
-    pub(super) fn verifier(&self) -> Verifier<E, A, T> {
+    pub(super) fn verifier(&self) -> Verifier<E, A> {
         Verifier {
             app: self.app.clone(),
             execution: self.execution.clone(),
@@ -730,12 +727,12 @@ where
     /// A proposal on a parent that has not yet certified answers the block under the application's
     /// decision, or [`Handoff::Wait`] if `ancestry` is empty, if the parent's ancestry is invalid
     /// or incomplete, or if the application declines. An ordinary proposal answers the block, or
-    /// `None` in the same cases. An ancestor
-    /// subscription ends only once the provider can no longer obtain the block (see
-    /// [`BlockProvider::subscribe_parent`]), so an incomplete ancestry declines at once rather
-    /// than holding the actor until consensus abandons the request. Returns without answering if
-    /// `proposal` is cancelled first. A built block's state is cached as verified. Replaying the
-    /// parent's uncached ancestry is shared with concurrent verifications of the same blocks.
+    /// `None` in the same cases. An ancestor subscription ends only once the provider can no
+    /// longer obtain the block (see [`BlockProvider::subscribe_parent`]), so an incomplete
+    /// ancestry declines at once rather than holding the actor until consensus abandons the
+    /// request. Returns without answering if `proposal` is cancelled first. A built block's state
+    /// is cached as verified. Replaying the parent's uncached ancestry is shared with concurrent
+    /// verifications of the same blocks.
     ///
     /// Panics if the application proposes state that does not match the block's commitments.
     pub(super) async fn propose<S, V>(
@@ -864,7 +861,7 @@ where
             A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)),
             "proposed state must match block commitments",
         );
-        let block = Digested::compute(block, &self.execution.strategy).await;
+        let block = Digested::compute(block, &self.strategy).await;
         assert!(
             self.cache_pending(
                 block.digest(),
@@ -1082,11 +1079,10 @@ where
     }
 }
 
-impl<E, A, T> Execution<E, A, T>
+impl<E, A> Execution<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    T: Strategy,
 {
     fn processed(&self) -> Anchor<BlockDigest<A, E>> {
         self.state.lock().processed

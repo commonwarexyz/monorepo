@@ -12,7 +12,6 @@ use commonware_consensus::marshal::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
-use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{channel::oneshot, futures::Pool};
 use futures::FutureExt as _;
@@ -100,11 +99,7 @@ where
 
     /// Starts an attempt for `request` with `verifier`, or drops `request` if its caller has
     /// cancelled.
-    pub(super) fn schedule<T: Strategy>(
-        &mut self,
-        mut verifier: Verifier<E, A, T>,
-        mut request: Request<E, A>,
-    ) {
+    pub(super) fn schedule(&mut self, mut verifier: Verifier<E, A>, mut request: Request<E, A>) {
         let Some(ancestry) = request.ancestry.upgrade() else {
             return;
         };
