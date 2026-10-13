@@ -304,8 +304,8 @@ commonware_macros::stability_scope!(BETA {
     /// Constructing one is where a value's digest is computed. [`Digested::compute`] hashes the
     /// value as a job on a [Strategy], and [`Digested::new_trusted`] attaches a digest that a
     /// local source already computed from this exact value. Holders read the digest for free and
-    /// never choose a strategy, so a [Digestible] implementation does not need to cache it. The
-    /// value must not change anything its digest covers while a carrier refers to it.
+    /// never choose a strategy. The value must not change anything its digest covers while a
+    /// carrier refers to it.
     ///
     /// Cloning shares the value. Two values are equal when their digests are equal, which the
     /// [Digestible] contract makes equivalent to the values being equal. The value encodes as the

@@ -31,7 +31,7 @@ use commonware_glue::{
     dkg::{self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock, types::Payload},
     stateful::db::{Shared, SyncEngineConfig},
 };
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Sequential;
 use commonware_runtime::{BufMut, Quota, buffer::paged::CacheRef};
 use commonware_storage::{
     Context as StorageContext,
@@ -205,11 +205,7 @@ impl Digestible for Block {
     type Digest = sha256::Digest;
 
     fn digest(&self) -> sha256::Digest {
-        self.digest_across(&Sequential)
-    }
-
-    fn digest_across(&self, strategy: &impl Strategy) -> sha256::Digest {
-        Sha256::hash_across(&[&self.encode()], strategy)
+        Sha256::hash(&[&self.encode()])
     }
 }
 
