@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
-use crate::storage::{preadv2, pwritev2};
+use crate::storage::{DIRECT_ALIGNMENT, direct_aligned, preadv2, pwritev2, read_direct};
 use crate::{
-    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    Buf, BufferPool, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     storage::{
         Generation, Pending, Sender, Tracker,
         hold::{Held, Hold},
@@ -23,6 +23,7 @@ use std::sync::mpsc;
 use std::{
     fs::File,
     io::IoSlice,
+    num::NonZeroUsize,
     ops::Deref,
     os::{fd::AsRawFd, unix::fs::FileExt},
     sync::{
@@ -90,9 +91,9 @@ struct Shared {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: AtomicBool,
-    /// Descriptor for direct I/O on the same inode, opened by the first batched read. `None`
-    /// once the filesystem has rejected direct I/O on this file. Empty until an open succeeds
-    /// or is rejected (see [aio::direct]).
+    /// Descriptor for direct I/O on the same inode, opened by the first batched read or aligned
+    /// uncached read. `None` once the filesystem has rejected direct I/O on this file. Empty
+    /// until an open succeeds or is rejected (see [aio::direct]).
     #[cfg(target_os = "linux")]
     direct: once_cell::sync::OnceCell<Option<File>>,
     #[cfg(test)]
@@ -113,6 +114,9 @@ struct Hooks {
     /// Ranges batched reads served from their direct reads rather than a positioned fallback.
     #[cfg(target_os = "linux")]
     direct_reads: std::sync::atomic::AtomicUsize,
+    /// Positioned reads served through the `O_DIRECT` descriptor rather than the page cache.
+    #[cfg(target_os = "linux")]
+    positioned_direct_reads: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -304,6 +308,70 @@ impl Blob {
         self.shared.tracker.skipped()
     }
 
+    /// Number of positioned reads served through the `O_DIRECT` descriptor, so a test can tell a
+    /// direct read from one that fell back to buffered I/O.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn positioned_direct_reads(&self) -> usize {
+        self.shared
+            .test
+            .positioned_direct_reads
+            .load(Ordering::Relaxed)
+    }
+
+    /// Whether a read of `len` bytes at file offset `offset` with `options` can bypass the page
+    /// cache with direct I/O, given an aligned buffer.
+    #[allow(clippy::missing_const_for_fn)]
+    fn direct_eligible(offset: u64, len: usize, options: ReadOptions) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            options.contains(ReadOptions::DONT_CACHE)
+                && len > 0
+                && offset.is_multiple_of(DIRECT_ALIGNMENT as u64)
+                && len.is_multiple_of(DIRECT_ALIGNMENT)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (offset, len, options);
+            false
+        }
+    }
+
+    /// An empty buffer of capacity `len` aligned for direct I/O.
+    fn aligned_buffer(len: usize) -> IoBufMut {
+        #[cfg(target_os = "linux")]
+        let alignment = NonZeroUsize::new(DIRECT_ALIGNMENT).expect("nonzero");
+        #[cfg(not(target_os = "linux"))]
+        let alignment = NonZeroUsize::MIN;
+        IoBufMut::with_alignment(len, alignment)
+    }
+
+    /// Read `buf.len()` bytes at `offset` through the `O_DIRECT` descriptor, bypassing the page
+    /// cache entirely. Returns `false` without reading if the offset, length, or buffer address is
+    /// not [DIRECT_ALIGNMENT]-aligned, or no direct descriptor is available (see [aio::direct]).
+    #[cfg(target_os = "linux")]
+    fn read_direct_at(file: &Shared, buf: &mut [u8], offset: u64) -> Result<bool, Error> {
+        if !direct_aligned(offset, buf) {
+            return Ok(false);
+        }
+        let Some(direct) = aio::direct(file) else {
+            return Ok(false);
+        };
+        let Some(read) = read_direct(direct, buf, offset)? else {
+            return Ok(false);
+        };
+
+        // A short read stops at end of file, where the remainder is no longer aligned. Read it
+        // through the page cache, which reports the same end of file.
+        if read < buf.len() {
+            file.read_exact_at(&mut buf[read..], offset + read as u64)?;
+        }
+        #[cfg(test)]
+        file.test
+            .positioned_direct_reads
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(true)
+    }
+
     #[cfg(target_os = "linux")]
     fn read_exact_at(
         mut cache: Cache,
@@ -311,6 +379,11 @@ impl Blob {
         mut buf: &mut [u8],
         mut offset: u64,
     ) -> Result<(), Error> {
+        // Aligned uncached reads skip the page cache entirely rather than populating and then
+        // dropping it.
+        if matches!(cache, Cache::Disabled) && Self::read_direct_at(file, buf, offset)? {
+            return Ok(());
+        }
         if !cache.is_disabled(&file.dont_cache_supported) {
             file.read_exact_at(buf, offset)?;
             return Ok(());
@@ -447,8 +520,15 @@ impl crate::Blob for Blob {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(offset, len, self.pool.alloc(len), options)
-            .await
+        // Pooled buffers are not aligned for direct I/O, so a read that can bypass the page cache
+        // gets an aligned buffer of its own.
+        let buf = match offset.checked_add(self.data_offset) {
+            Some(file_offset) if Self::direct_eligible(file_offset, len, options) => {
+                Self::aligned_buffer(len)
+            }
+            _ => self.pool.alloc(len),
+        };
+        self.read_at_buf(offset, len, buf, options).await
     }
 
     async fn read_at_buf(
@@ -469,6 +549,7 @@ impl crate::Blob for Blob {
         }
         let file = self.shared.clone();
         let pool = self.pool.clone();
+        let direct = Self::direct_eligible(offset, len, options);
         let cache = if options.contains(ReadOptions::DONT_CACHE) {
             Cache::Disabled
         } else {
@@ -480,8 +561,13 @@ impl crate::Blob for Blob {
                 Self::read_exact_at(cache, &file, buf.as_mut(), offset)?;
             } else {
                 // Read into a temporary contiguous buffer and copy back to preserve structure.
+                let mut temp = if direct {
+                    Self::aligned_buffer(len)
+                } else {
+                    pool.alloc(len)
+                };
                 // SAFETY: `len` bytes are filled via read_exact_at below.
-                let mut temp = unsafe { pool.alloc_len(len) };
+                unsafe { temp.set_len(len) };
                 Self::read_exact_at(cache, &file, temp.as_mut(), offset)?;
                 bufs.copy_from_slice(temp.as_ref());
             }
@@ -704,6 +790,46 @@ mod tests {
             Storage::new(Config::new(directory.clone(), layouts), pool),
             directory,
         )
+    }
+
+    /// An `O_DIRECT` read must see the latest buffered write even when nothing was synced. The
+    /// direct descriptor is a separate open file description, but dirty pages belong to the inode,
+    /// and Linux flushes them before a direct read (`kiocb_write_and_wait` in `__iomap_dio_rw`).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_direct_read_sees_latest_unsynced_write() {
+        let (storage, directory) =
+            storage_for_reopen_test("direct_read_unsynced_write", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+
+        // The V1 header's data offset is one alignment unit, so offset 0 and this length are both
+        // direct-eligible.
+        const LEN: usize = DIRECT_ALIGNMENT;
+        let pattern_a = vec![0xAAu8; LEN];
+        let pattern_b = vec![0xBBu8; LEN];
+
+        blob.write_at(0, pattern_a, WriteOptions::default())
+            .await
+            .unwrap();
+        // Overwrite with no sync between the writes and the read.
+        blob.write_at(0, pattern_b.clone(), WriteOptions::default())
+            .await
+            .unwrap();
+
+        let before = blob.positioned_direct_reads();
+        let read = blob.read_at(0, LEN, ReadOptions::DONT_CACHE).await.unwrap();
+        assert_eq!(
+            read.coalesce().as_ref(),
+            pattern_b.as_slice(),
+            "direct read did not see the latest unsynced write"
+        );
+        assert!(
+            blob.positioned_direct_reads() > before,
+            "read did not take the O_DIRECT path"
+        );
+
+        drop(blob);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[tokio::test]
@@ -1538,6 +1664,57 @@ mod tests {
             Err(Error::BlobCorrupt(_, _, _))
         ));
         assert_eq!(std::fs::read(&path).unwrap(), raw);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_uncached_reads_match_written_bytes() {
+        // Aligned uncached reads go through `O_DIRECT` where the filesystem supports it, and every
+        // other shape takes the page-cache path. Both must return the written bytes and report
+        // end of file the same way.
+        let (storage, directory) =
+            storage_for_reopen_test("uncached_reads", Layout::V1..=Layout::V1);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        let align = DIRECT_ALIGNMENT;
+        let data: Vec<u8> = (0..5 * align + 100).map(|i| (i % 251) as u8).collect();
+        blob.write_at(0, crate::IoBuf::from(data.clone()), WriteOptions::default())
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+
+        // Aligned reads, a read ending in the final partial block, and unaligned offsets and
+        // lengths.
+        for (offset, len) in [
+            (0, align),
+            (align, 3 * align),
+            (0, 5 * align),
+            (4 * align, align + 100),
+            (1, align),
+            (100, 300),
+            (align, 17),
+        ] {
+            let read = blob
+                .read_at(offset as u64, len, ReadOptions::DONT_CACHE)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), &data[offset..offset + len], "{offset}+{len}");
+        }
+
+        // The aligned reads attempted direct I/O.
+        assert!(blob.shared.direct.get().is_some());
+
+        // An aligned read running past the end of the blob fails.
+        assert!(
+            blob.read_at((4 * align) as u64, 2 * align, ReadOptions::DONT_CACHE)
+                .await
+                .is_err()
+        );
+
+        drop(blob);
         storage.remove("partition", None).await.unwrap();
         drop(storage);
         std::fs::remove_dir_all(directory).unwrap();

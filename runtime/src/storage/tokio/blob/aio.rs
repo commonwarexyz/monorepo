@@ -3,10 +3,9 @@
 //! them all at once and the submitting thread pays only a few microseconds per read.
 
 use super::*;
-use crate::{BLOB_PAGE_SIZE, BufMut as _, IoBufMut};
+use crate::{BLOB_PAGE_SIZE, BufMut as _, IoBufMut, storage::open_direct};
 use commonware_utils::NZUsize;
 use futures::stream::{self, BoxStream};
-use std::os::unix::fs::OpenOptionsExt as _;
 
 /// The `nr_events` each AIO context is created with (`io_setup`): the requests it processes
 /// concurrently, and so the reads one blocking task submits through one context in
@@ -38,21 +37,17 @@ struct Read {
 /// One completed read, sent to the stream as soon as the kernel reports it.
 type Completion = Result<(usize, IoBufsMut), Error>;
 
-/// The blob's `O_DIRECT` descriptor on its inode, opened by the first submission that needs
-/// it and shared by every later one. `None` when the filesystem rejects direct I/O, which
-/// the blob remembers, or when the open fails for a reason that may not recur, such as a
-/// descriptor limit, which leaves the cell empty for the next submission to try again.
+/// The blob's `O_DIRECT` descriptor on its inode, opened by the first submission or aligned
+/// uncached read that needs it and shared by every later one. `None` when the filesystem
+/// rejects direct I/O, which the blob remembers, or when the open fails for a reason that may
+/// not recur, such as a descriptor limit, which leaves the cell empty for the next read to try
+/// again.
 pub(super) fn direct(file: &Shared) -> Option<&File> {
     file.direct
-        .get_or_try_init(|| {
-            let path = format!("/proc/self/fd/{}", file.as_raw_fd());
-            let mut options = std::fs::OpenOptions::new();
-            options.read(true).custom_flags(libc::O_DIRECT);
-            match options.open(path) {
-                Ok(direct) => Ok(Some(direct)),
-                Err(err) if err.raw_os_error() == Some(libc::EINVAL) => Ok(None),
-                Err(err) => Err(err),
-            }
+        .get_or_try_init(|| match open_direct(file) {
+            Ok(direct) => Ok(Some(direct)),
+            Err(err) if err.raw_os_error() == Some(libc::EINVAL) => Ok(None),
+            Err(err) => Err(err),
         })
         .ok()?
         .as_ref()
