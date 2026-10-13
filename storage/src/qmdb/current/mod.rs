@@ -2304,9 +2304,9 @@ pub mod tests {
         db.destroy().await.unwrap();
     }
 
-    // Instantiate the prefetch tests for one variant over a page cache the tests can clear,
-    // with room for every page they warm. Small caches admit new pages through a single slot,
-    // so a warmed page would be evicted by the next.
+    // Instantiate the prefetch tests for one variant over a page cache the tests can clear. The
+    // tests expect prefetched keys to be served from the cache, so the cache's Main section must
+    // hold every page they warm.
     macro_rules! prefetch_tests {
         ($label:ident, $db:ty, $cfg:ident) => {
             paste::paste! {
