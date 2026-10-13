@@ -21,6 +21,8 @@ use futures::{
 };
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
+#[commonware_macros::stability(ALPHA)]
+use tracing::warn;
 
 /// Metrics for a journal's blobs.
 struct Metrics {
@@ -498,9 +500,9 @@ impl<B: RBlob> Warm<B> {
             .groups
             .into_iter()
             .map(|(blob, ranges)| async move { blob.warm(&ranges).await });
-        for result in futures::future::join_all(reads).await {
+        for result in future::join_all(reads).await {
             if let Err(err) = result {
-                tracing::warn!(?err, "prefetch read failed");
+                warn!(?err, "prefetch read failed");
             }
         }
     }

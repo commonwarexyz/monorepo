@@ -34,12 +34,18 @@ use crate::{
     },
 };
 use bytes::{Bytes, BytesMut};
+#[commonware_macros::stability(ALPHA)]
+use commonware_codec::DecodeExt;
 use commonware_codec::{Codec, CodecShared, Copying, varint::MAX_U32_VARINT_SIZE};
 use commonware_macros::boxed;
+#[commonware_macros::stability(ALPHA)]
+use commonware_runtime::buffer::paged::Sealed;
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay},
 };
+#[commonware_macros::stability(ALPHA)]
+use futures::future::join_all;
 use futures::{
     FutureExt as _, Stream,
     future::{try_join, try_join_all},
@@ -481,9 +487,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
     ///
     /// Reads each frame's offset and its same-blob successor's offset from the offsets journal
     /// (through the page cache), then the pages covering the frames. Offset pages are warmed like
-    /// frame pages (see [commonware_runtime::buffer::paged::Sealed::warm]), so both stay cached
-    /// until the frames are read. A blob's last frame ends at the end of its blob. Bytes still in
-    /// the tail's write buffer are skipped.
+    /// frame pages (see [Sealed::warm]), so both stay cached until the frames are read. A blob's
+    /// last frame ends at the end of its blob. Bytes still in the tail's write buffer are skipped.
     #[commonware_macros::stability(ALPHA)]
     pub(super) fn prefetch(
         &self,
@@ -497,7 +502,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         // lookup list. `frames` holds each frame's index in `lookups`.
         let mut lookups: Vec<u64> = Vec::with_capacity(2 * (end - start));
         let mut frames: Vec<usize> = Vec::with_capacity(end - start);
-        let mut blobs: Vec<(u64, commonware_runtime::buffer::paged::Sealed<E::Blob>)> = Vec::new();
+        let mut blobs: Vec<(u64, Sealed<E::Blob>)> = Vec::new();
         for &position in &positions[start..end] {
             let blob = position_to_blob(position, items_per_blob);
             if blobs.last().map(|&(last, _)| last) != Some(blob) {
@@ -551,14 +556,13 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                     let result = blob.read_many_into(&mut buf, &items, offset_size).await;
                     (missing, buf, result)
                 });
-            for (missing, buf, result) in futures::future::join_all(reads).await {
+            for (missing, buf, result) in join_all(reads).await {
                 if let Err(err) = result {
                     warn!(?err, "prefetch offsets read failed");
                     continue;
                 }
                 for (idx, item) in missing.into_iter().zip(buf.chunks(offset_size.get())) {
-                    offsets[idx] =
-                        <u64 as commonware_codec::DecodeExt<()>>::decode(Copying(item)).ok();
+                    offsets[idx] = <u64 as DecodeExt<()>>::decode(Copying(item)).ok();
                 }
             }
 
