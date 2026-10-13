@@ -1,18 +1,24 @@
 //! Trusted continuation: a hook point inside the base drivers that runs a state-building
 //! prefix after the network, the reporters and the honest engines exist, and before the
-//! base's Byzantine actors, fault scheduler, liveness wait and oracles start.
+//! base's Byzantine actors, fault scheduler and oracles start.
 //!
 //! A [Prefix] drives the system through the restricted [PrefixContext] only. The runner
 //! owns everything else: it spawns the honest replicas with the recording wrappers and
 //! gates of a [ReplicaTap], keeps the compromised identity's channels while the prefix
-//! signs and sends as it, and at the handoff revokes the context. After the release
-//! delay it reverts every change the prefix made, starts exactly the base's actors for
-//! the compromised identity, records them in an [ActorRegistry], and lets the base's
-//! own code continue in the same runtime. Drivers called without a prefix run unchanged.
+//! signs and sends as it, ends the prefix at its budget if it has not returned, and at
+//! the handoff revokes the context. After the release delay it reverts the changes the
+//! prefix made, starts exactly the base's actors for the compromised identity, records
+//! them in an [ActorRegistry], and lets the base's own code continue in the same runtime.
+//!
+//! A continuation checks safety only: the base runs its fault scheduler and Byzantine
+//! actors for a fixed window and then its safety oracles, and never waits for progress.
+//! A prefix can leave the system in any state a fault can (crashed or slow replicas,
+//! cut links, held messages), so nothing after the release depends on the release
+//! reverting everything. Drivers called without a prefix run unchanged.
 
 use crate::{
-    CertifyChoice, Configuration, EPOCH, FuzzInput, HarnessReporter, MAX_REQUIRED_CONTAINERS,
-    N4F0C4, N4F1C3, NetworkChannels, PublicKeyOf, ReporterWiring, block_relay, simplex::Simplex,
+    CertifyChoice, Configuration, EPOCH, FAULT_PHASE, FuzzInput, HarnessReporter, N4F0C4, N4F1C3,
+    NetworkChannels, PublicKeyOf, ReporterWiring, block_relay, simplex::Simplex,
     start_validator_engine, utils,
 };
 use bytes::Bytes;
@@ -36,7 +42,7 @@ use commonware_utils::{
         mpsc, oneshot,
     },
     ordered::Set,
-    sync::Mutex,
+    sync::{AsyncMutex, Mutex},
 };
 use futures::FutureExt as _;
 use std::{
@@ -55,6 +61,25 @@ use std::{
 /// How long the release check waits for the actors it just started to run.
 const RELEASE_SETTLE: Duration = Duration::from_millis(100);
 const RELEASE_POLL: Duration = Duration::from_millis(1);
+
+/// Most entries a recorder log, B's inbox, a replica's held messages, or the held blocks
+/// keep. Past it a recorder records nothing more and a gate drops what it would hold, so
+/// a prefix that polls a log costs bounded memory however long it runs.
+pub const LOG_CAP: usize = 1 << 12;
+
+/// Most simulated time a prefix may ask for; the runner ends one that has not returned
+/// by then. A longer budget is cut to it, and a longer release delay to [FAULT_PHASE].
+pub const MAX_PREFIX_BUDGET: Duration = Duration::from_secs(60);
+
+// A continuation ends within the prefix budget, the release delay, the release check
+// and the base's fixed window, so the base's runtime deadline never needs extending.
+const _: () = assert!(
+    MAX_PREFIX_BUDGET.as_millis()
+        + FAULT_PHASE.as_millis()
+        + RELEASE_SETTLE.as_millis()
+        + crate::MAX_SLEEP_DURATION.as_millis()
+        < crate::FUZZ_RUNTIME_TIMEOUT_FLOOR.as_millis()
+);
 
 /// The future of a [Prefix]'s online part.
 pub type PrefixFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -110,6 +135,83 @@ impl Stamp {
 pub struct Recorded<T> {
     pub value: T,
     pub stamp: Stamp,
+}
+
+/// A trusted recorder's log, or a snapshot of it, which reads as a slice. A snapshot
+/// shares the log, so taking one copies nothing; the recorder copies the log only to
+/// append while a snapshot of it is alive. Iterating a snapshot by value clones it. A
+/// log keeps at most [LOG_CAP] entries and remembers the position of the first one it
+/// dropped.
+#[derive(Debug)]
+pub struct Log<T> {
+    entries: Arc<Vec<T>>,
+    dropped: Option<u64>,
+}
+
+impl<T: Clone> Log<T> {
+    /// Appends `value`, recorded at position `seq`, or drops it once the log holds
+    /// [LOG_CAP] entries. Position 0 is an entry recorded while nothing watched.
+    fn push(&mut self, value: T, seq: u64) {
+        if self.entries.len() >= LOG_CAP {
+            if seq != 0 {
+                self.dropped.get_or_insert(seq);
+            }
+            return;
+        }
+        Arc::make_mut(&mut self.entries).push(value);
+    }
+}
+
+impl<T> Log<T> {
+    /// The position of the first entry the log dropped at its cap, if any: from it
+    /// on, the log misses entries, so what it lacks proves nothing.
+    pub const fn dropped(&self) -> Option<u64> {
+        self.dropped
+    }
+}
+
+impl<T> Clone for Log<T> {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            dropped: self.dropped,
+        }
+    }
+}
+
+impl<T> Default for Log<T> {
+    fn default() -> Self {
+        Self {
+            entries: Arc::default(),
+            dropped: None,
+        }
+    }
+}
+
+impl<T> std::ops::Deref for Log<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        &self.entries
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Log<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter()
+    }
+}
+
+impl<T: Clone> IntoIterator for Log<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Arc::unwrap_or_clone(self.entries).into_iter()
+    }
 }
 
 /// A message a replica received, or held, on one of its channels.
@@ -269,7 +371,7 @@ pub struct ActorStatus {
 /// The actor check at one point of a continuation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActorCheck {
-    /// `release` (the handoff plus the release delay) or `end` (after the liveness wait).
+    /// `release` (the handoff plus the release delay) or `end` (after the base's fixed window).
     pub at: &'static str,
     pub actors: Vec<ActorStatus>,
 }
@@ -400,39 +502,20 @@ pub trait Observer: Send + Sync + 'static {
     /// Called after the base's last oracle.
     fn done(&self) {}
 
-    /// Whether to run the base's largest progress budget (a reach replay of StateLens).
-    fn largest(&self) -> bool {
-        false
-    }
-}
-
-/// An observer that stamps nothing: positions are 0.
-pub struct Unobserved;
-
-impl Observer for Unobserved {
-    fn position(&self) -> (u64, u32) {
-        (0, 0)
-    }
-
-    fn compromised(&self, _identities: &[usize]) {}
-
-    fn actors(&self, _check: &ActorCheck) {}
+    /// Reports, when the prefix reads a recorder log, B's inbox, or a replica's held
+    /// messages, the position of the first entry it dropped at its cap. From that
+    /// position on what the prefix read misses entries, so a check over it, in
+    /// particular one for the absence of an entry, decides nothing.
+    fn dropped(&self, _seq: u64) {}
 }
 
 /// What the prefix asks of the runtime: the sum of its stage deadlines, and the release
-/// delay `d` from the handoff to the release.
+/// delay `d` from the handoff to the release. The runner ends a prefix that has not
+/// returned once `prefix` has passed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Budget {
     pub prefix: Duration,
     pub release: Duration,
-}
-
-impl Budget {
-    /// The runtime deadline of a continuation: the base's plus this budget.
-    pub fn deadline(self, base: Duration) -> Duration {
-        base.saturating_add(self.prefix)
-            .saturating_add(self.release)
-    }
 }
 
 /// The decoded input fields a prefix may pin before the runtime starts. Each setter
@@ -521,18 +604,19 @@ pub struct Hook<P: Simplex> {
 }
 
 impl<P: Simplex> Hook<P> {
-    /// Plans `prefix` against `input` and binds it to `observer`. The largest budget
-    /// the observer asks for is applied after the prefix's pins.
+    /// Plans `prefix` against `input` and binds it to `observer`. The budget is cut to
+    /// [MAX_PREFIX_BUDGET] and the release delay to [FAULT_PHASE].
     pub fn plan(
         mut prefix: Box<dyn Prefix<P>>,
         observer: Arc<dyn Observer>,
         input: &mut FuzzInput,
         twins: bool,
     ) -> Self {
-        let budget = prefix.plan(&mut Pins::new(input, twins));
-        if observer.largest() {
-            input.required_containers = MAX_REQUIRED_CONTAINERS;
-        }
+        let asked = prefix.plan(&mut Pins::new(input, twins));
+        let budget = Budget {
+            prefix: asked.prefix.min(MAX_PREFIX_BUDGET),
+            release: asked.release.min(FAULT_PHASE),
+        };
         Self {
             prefix,
             observer,
@@ -540,12 +624,9 @@ impl<P: Simplex> Hook<P> {
         }
     }
 
+    /// The budget the runner applies.
     pub const fn budget(&self) -> Budget {
         self.budget
-    }
-
-    pub fn observer(&self) -> Arc<dyn Observer> {
-        self.observer.clone()
     }
 }
 
@@ -561,6 +642,9 @@ pub struct Latencies {
 /// What a release reverted.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Release {
+    /// Whether the prefix had not returned when its budget ran out, so the runner ended
+    /// it there.
+    pub overran: bool,
     /// The replicas whose gates were opened.
     pub gates: Vec<usize>,
     /// The held messages delivered, in arrival order, at the release.
@@ -575,7 +659,7 @@ pub struct Release {
     /// The replicas restarted from their journal.
     pub restarted: Vec<usize>,
     /// The highest view any honest replica finalized at the release; the base's
-    /// view-indexed faults and progress targets are re-based on it.
+    /// view-indexed faults are re-based on it.
     pub base: u64,
 }
 
@@ -587,6 +671,8 @@ type BlockFilter = Arc<dyn Fn(Option<View>, &Sha256Digest) -> bool + Send + Sync
 struct Gate<K> {
     hold: Option<HoldFilter>,
     held: VecDeque<(Channel, K, IoBuf)>,
+    /// The position of the first message the full gate dropped.
+    dropped: Option<u64>,
     ready: [VecDeque<(K, IoBuf)>; 3],
     wake: [Option<mpsc::UnboundedSender<()>>; 3],
 }
@@ -596,6 +682,7 @@ impl<K> Gate<K> {
         Self {
             hold: None,
             held: VecDeque::new(),
+            dropped: None,
             ready: [VecDeque::new(), VecDeque::new(), VecDeque::new()],
             wake: [None, None, None],
         }
@@ -646,12 +733,17 @@ pub struct ReplicaTap<P: Simplex> {
     observer: Arc<dyn Observer>,
     recording: Arc<AtomicBool>,
     gate: Mutex<Gate<PublicKeyOf<P>>>,
-    deliveries: Mutex<Vec<Recorded<Inbound>>>,
-    activities: Mutex<Vec<Recorded<ActivityOf<P>>>>,
-    automaton: Mutex<Vec<Recorded<AutomatonEvent>>>,
-    elections: Mutex<Vec<Recorded<(View, usize)>>>,
-    blocks: Mutex<Vec<Recorded<usize>>>,
+    deliveries: Mutex<Log<Recorded<Inbound>>>,
+    activities: Mutex<Log<Recorded<ActivityOf<P>>>>,
+    automaton: Mutex<Log<Recorded<AutomatonEvent>>>,
+    elections: Mutex<Log<Recorded<(View, usize)>>>,
+    blocks: Mutex<Log<Recorded<usize>>>,
+    /// The highest view this replica reported a finalization of, kept past the logs' cap.
+    finalized: AtomicU64,
     incarnation: Mutex<Incarnation<P>>,
+    /// Held while this replica crashes or restarts: a concurrent crash or restart of it
+    /// returns false, so two incarnations never run on its partition at once.
+    busy: AsyncMutex<()>,
 }
 
 impl<P: Simplex> ReplicaTap<P> {
@@ -667,37 +759,29 @@ impl<P: Simplex> ReplicaTap<P> {
             observer,
             recording,
             gate: Mutex::new(Gate::new()),
-            deliveries: Mutex::new(Vec::new()),
-            activities: Mutex::new(Vec::new()),
-            automaton: Mutex::new(Vec::new()),
-            elections: Mutex::new(Vec::new()),
-            blocks: Mutex::new(Vec::new()),
+            deliveries: Mutex::default(),
+            activities: Mutex::default(),
+            automaton: Mutex::default(),
+            elections: Mutex::default(),
+            blocks: Mutex::default(),
+            finalized: AtomicU64::new(0),
             incarnation: Mutex::new(Incarnation {
                 app: None,
                 engine: None,
                 respawn: None,
             }),
+            busy: AsyncMutex::new(()),
         }
-    }
-
-    /// This replica's index among the participants.
-    pub const fn index(&self) -> usize {
-        self.index
     }
 
     fn recording(&self) -> bool {
         self.recording.load(Ordering::Relaxed)
     }
 
-    fn stamp(&self) -> Stamp {
-        let (seq, run) = self.observer.position();
-        Stamp { seq, run }
-    }
-
-    fn record<T>(&self, log: &Mutex<Vec<Recorded<T>>>, value: T) {
+    fn record<T: Clone>(&self, log: &Mutex<Log<Recorded<T>>>, value: T) {
         if self.recording() {
-            let stamp = self.stamp();
-            log.lock().push(Recorded { value, stamp });
+            let stamp = Stamp::now(&*self.observer);
+            log.lock().push(Recorded { value, stamp }, stamp.seq());
         }
     }
 
@@ -712,8 +796,8 @@ impl<P: Simplex> ReplicaTap<P> {
 
     /// Whether the gate holds `message`, which it then keeps.
     fn hold(&self, channel: Channel, sender: &PublicKeyOf<P>, payload: &IoBuf) -> bool {
-        let mut gate = self.gate.lock();
-        let Some(hold) = gate.hold.clone() else {
+        // The filter runs with the gate unlocked, so it may call the context.
+        let Some(hold) = self.gate.lock().hold.clone() else {
             return false;
         };
         let inbound = Inbound {
@@ -724,8 +808,22 @@ impl<P: Simplex> ReplicaTap<P> {
         if !hold(&inbound) {
             return false;
         }
-        gate.held
-            .push_back((channel, sender.clone(), payload.clone()));
+        let full = {
+            let mut gate = self.gate.lock();
+            let full = gate.held.len() >= LOG_CAP;
+            if !full {
+                gate.held
+                    .push_back((channel, sender.clone(), payload.clone()));
+            }
+            full
+        };
+        // A full gate drops the message, as a lossy link would, and remembers where.
+        if full {
+            let seq = Stamp::now(&*self.observer).seq();
+            if seq != 0 {
+                self.gate.lock().dropped.get_or_insert(seq);
+            }
+        }
         true
     }
 
@@ -841,6 +939,11 @@ where
     type Activity = R::Activity;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
+        if let Activity::Finalization(finalization) = &activity {
+            self.tap
+                .finalized
+                .fetch_max(finalization.view().get(), Ordering::Relaxed);
+        }
         if self.tap.recording() {
             self.tap.record(&self.tap.activities, activity.clone());
         }
@@ -1192,8 +1295,13 @@ where
     };
     let (app, engine) = build.incarnation(&tap, pending, recovered, resolver);
     let weak = Arc::downgrade(&tap);
+    let mut generation = 0u32;
     let respawn: Respawn<P> = Box::new(move |(pending, recovered, resolver)| {
         let tap = Weak::upgrade(&weak).expect("a respawned replica keeps its tap");
+        // The restarted engine replays its journal into the retained reporter: a new
+        // generation keeps its votes apart from the previous incarnation's.
+        generation += 1;
+        build.reporter.new_incarnation(generation);
         build.incarnation(&tap, pending, recovered, resolver)
     });
     let mut incarnation = tap.incarnation.lock();
@@ -1343,7 +1451,7 @@ struct Shared<P: Simplex> {
     revoked: AtomicBool,
     scheme: Option<P::Scheme>,
     senders: Mutex<Option<Senders<PublicKeyOf<P>>>>,
-    inbox: Arc<Mutex<Vec<Recorded<Inbound>>>>,
+    inbox: Mutex<Log<Recorded<Inbound>>>,
     made: Mutex<BTreeMap<Sha256Digest, Bytes>>,
     nonce: AtomicU64,
     links: Mutex<BTreeSet<(usize, usize)>>,
@@ -1352,10 +1460,16 @@ struct Shared<P: Simplex> {
 }
 
 impl<P: Simplex> Shared<P> {
+    /// The tap a capability that changes the system takes: none past the handoff.
     fn tap(&self, replica: usize) -> Option<&Arc<ReplicaTap<P>>> {
         if self.revoked.load(Ordering::Relaxed) {
             return None;
         }
+        self.read(replica)
+    }
+
+    /// The tap a read takes: valid past the handoff, since a filter runs until the release.
+    fn read(&self, replica: usize) -> Option<&Arc<ReplicaTap<P>>> {
         self.taps.get(replica).and_then(Option::as_ref)
     }
 
@@ -1468,7 +1582,7 @@ impl<P: Simplex> Runner<P> {
             revoked: AtomicBool::new(false),
             scheme,
             senders: Mutex::new(None),
-            inbox: Arc::new(Mutex::new(Vec::new())),
+            inbox: Mutex::default(),
             made: Mutex::new(BTreeMap::new()),
             nonce: AtomicU64::new(0),
             links: Mutex::new(BTreeSet::new()),
@@ -1506,11 +1620,6 @@ impl<P: Simplex> Runner<P> {
         self.registry.clone()
     }
 
-    /// The budget the prefix asked for.
-    pub const fn budget(&self) -> Budget {
-        self.budget
-    }
-
     /// Keeps the compromised identity's registered channels: the prefix sends as it,
     /// and the runner records what it receives, until the release.
     pub fn adopt(&mut self, channels: NetworkChannels<PublicKeyOf<P>>) {
@@ -1523,34 +1632,43 @@ impl<P: Simplex> Runner<P> {
         self.receivers = Some((vote_receiver, cert_receiver, res_receiver));
     }
 
-    /// Runs the prefix, then performs the release: revokes the prefix's capabilities,
-    /// waits the release delay, reverts every change the prefix made, and returns the
-    /// compromised identity's channels with what was reverted. The caller then starts
-    /// the base's actors for it.
+    /// Runs the prefix, ending it once its budget has passed, then performs the
+    /// release: revokes the prefix's capabilities, waits the release delay, reverts the
+    /// changes the prefix made, and returns the compromised identity's channels with
+    /// what was reverted. The caller then starts the base's actors for it.
     pub async fn run(&mut self) -> (Option<NetworkChannels<PublicKeyOf<P>>>, Release) {
         // The compromised identity's inbox: recorded until the release, then returned.
         let (stop, stopped) = oneshot::channel::<()>();
         let inbox = self.receivers.take().map(|receivers| {
-            let log = self.shared.inbox.clone();
             let shared = self.shared.clone();
             self.context
                 .child("inbox")
-                .spawn(move |_| inbox_task::<P>(receivers, log, shared, stopped))
+                .spawn(move |_| inbox_task::<P>(receivers, shared, stopped))
         });
         self.install_block_gate();
+        let mut overran = false;
         if let Some(prefix) = self.prefix.take() {
             let cx = PrefixContext {
                 context: self.context.child("prefix"),
                 shared: self.shared.clone(),
             };
-            prefix.run(cx).await;
+            // A prefix that has not returned by its budget is dropped there: every
+            // capability either completes synchronously or leaves a state the release
+            // reverts or the continuation tolerates.
+            select! {
+                _ = prefix.run(cx) => {},
+                _ = self.context.sleep(self.budget.prefix) => {
+                    overran = true;
+                },
+            }
         }
-        // The handoff: the context no longer reaches anything.
+        // The handoff: the context no longer changes anything.
         self.shared.revoked.store(true, Ordering::Relaxed);
         if !self.budget.release.is_zero() {
             self.context.sleep(self.budget.release).await;
         }
         let mut release = self.revert().await;
+        release.overran = overran;
         self.recording.store(false, Ordering::Relaxed);
         stop.send_lossy(());
         let receivers = match inbox {
@@ -1591,14 +1709,7 @@ impl<P: Simplex> Runner<P> {
             .taps
             .iter()
             .flatten()
-            .filter_map(|tap| {
-                tap.activities
-                    .lock()
-                    .iter()
-                    .filter(|entry| matches!(entry.value, Activity::Finalization(_)))
-                    .map(|entry| entry.value.view().get())
-                    .max()
-            })
+            .map(|tap| tap.finalized.load(Ordering::Relaxed))
             .max()
             .unwrap_or(0)
     }
@@ -1606,17 +1717,30 @@ impl<P: Simplex> Runner<P> {
     fn install_block_gate(&self) {
         let gate = self.shared.block_gate.clone();
         let participants = self.shared.participants.clone();
+        // Set while a filter runs: a block the filter sends is delivered, not filtered,
+        // so a filter that sends a block it accepts cannot recurse.
+        let filtering = AtomicBool::new(false);
         self.shared.relay.set_gate(
             move |sender, sender_tag, recipient, _tag, payload, contents| {
-                let mut gate = gate.lock();
                 let Some(index) = participants.iter().position(|key| key == recipient) else {
                     return false;
                 };
-                let Some(filter) = gate.filters.get(&index).cloned() else {
+                // The filter runs with the gate unlocked, so it may call the context.
+                let Some(filter) = gate.lock().filters.get(&index).cloned() else {
                     return false;
                 };
-                if !filter(block_relay::mock_block_view(contents), payload) {
+                if filtering.swap(true, Ordering::Relaxed) {
                     return false;
+                }
+                let hold = filter(block_relay::mock_block_view(contents), payload);
+                filtering.store(false, Ordering::Relaxed);
+                if !hold {
+                    return false;
+                }
+                let mut gate = gate.lock();
+                // A full gate drops the block, as a lossy link would.
+                if gate.held.len() >= LOG_CAP {
+                    return true;
                 }
                 gate.held.push((
                     sender.clone(),
@@ -1630,10 +1754,11 @@ impl<P: Simplex> Runner<P> {
         );
     }
 
-    /// Reverts every change of the prefix: latency overrides removed, links restored to
+    /// Reverts the changes of the prefix: latency overrides removed, links restored to
     /// the base's, crashed replicas restarted, and only then gates opened and held blocks
     /// delivered, so a restarted replica's new receivers and application get what was held
-    /// for it.
+    /// for it. An application request already sleeping on an override keeps the latency it
+    /// drew. Nothing here can fail the run: a link the network refuses stays as it is.
     async fn revert(&mut self) -> Release {
         let mut release = Release::default();
         let latencies = std::mem::take(&mut *self.shared.latencies.lock());
@@ -1659,7 +1784,7 @@ impl<P: Simplex> Runner<P> {
                     .oracle
                     .add_link(sender, receiver, link)
                     .await
-                    .expect("the base's link is restored");
+                    .ok();
             }
             release.links.push((from, to));
         }
@@ -1703,7 +1828,6 @@ impl<P: Simplex> Runner<P> {
 /// receivers.
 async fn inbox_task<P: Simplex>(
     (mut votes, mut certificates, mut resolver): Receivers<PublicKeyOf<P>>,
-    log: Arc<Mutex<Vec<Recorded<Inbound>>>>,
     shared: Arc<Shared<P>>,
     mut stop: oneshot::Receiver<()>,
 ) -> Receivers<PublicKeyOf<P>> {
@@ -1717,22 +1841,28 @@ async fn inbox_task<P: Simplex>(
         let Ok((sender, payload)) = message else {
             break;
         };
-        let (seq, run) = shared.observer.position();
+        let stamp = Stamp::now(&*shared.observer);
         let from = shared.participants.iter().position(|key| key == &sender);
-        log.lock().push(Recorded {
-            value: Inbound {
-                from,
-                channel,
-                payload,
+        shared.inbox.lock().push(
+            Recorded {
+                value: Inbound {
+                    from,
+                    channel,
+                    payload,
+                },
+                stamp,
             },
-            stamp: Stamp { seq, run },
-        });
+            stamp.seq(),
+        );
     }
     (votes, certificates, resolver)
 }
 
 /// Crash-stops honest replica `tap`: aborts and awaits its tasks.
 async fn crash<P: Simplex>(tap: &ReplicaTap<P>) -> bool {
+    let Ok(_busy) = tap.busy.try_lock() else {
+        return false;
+    };
     let (app, engine) = {
         let mut incarnation = tap.incarnation.lock();
         if incarnation.respawn.is_none() {
@@ -1741,8 +1871,13 @@ async fn crash<P: Simplex>(tap: &ReplicaTap<P>) -> bool {
         (incarnation.app.take(), incarnation.engine.take())
     };
     let crashed = engine.is_some();
-    for handle in [engine, app].into_iter().flatten() {
+    // Both tasks are aborted before either is awaited, so a caller dropped while
+    // awaiting leaves no half of the replica running.
+    let handles: Vec<_> = [engine, app].into_iter().flatten().collect();
+    for handle in &handles {
         handle.abort();
+    }
+    for handle in handles {
         let _ = handle.await;
     }
     crashed
@@ -1751,6 +1886,9 @@ async fn crash<P: Simplex>(tap: &ReplicaTap<P>) -> bool {
 /// Restarts a crashed honest replica from its journal, on its partition, with its
 /// retained reporter, behind its gate and recorders.
 async fn restart<P: Simplex>(shared: &Shared<P>, tap: &Arc<ReplicaTap<P>>) -> bool {
+    let Ok(_busy) = tap.busy.try_lock() else {
+        return false;
+    };
     if !tap.crashed() {
         return false;
     }
@@ -1776,8 +1914,10 @@ async fn restart<P: Simplex>(shared: &Shared<P>, tap: &Arc<ReplicaTap<P>>) -> bo
 }
 
 /// The restricted capabilities a [Prefix] drives the system with. Every capability
-/// ends at the handoff: the runner then takes back the compromised identity's
-/// channels and reverts every change made through this context.
+/// that changes the system ends at the handoff, while the reads keep answering, so a
+/// filter sees the same context until the release: the runner then takes back the
+/// compromised identity's channels and reverts what it can of the changes made through
+/// this context.
 pub struct PrefixContext<P: Simplex> {
     context: deterministic::Context,
     shared: Arc<Shared<P>>,
@@ -1821,9 +1961,13 @@ impl<P: Simplex> PrefixContext<P> {
         (self.shared.leader)(view)
     }
 
-    /// Sleeps `duration` of simulated time.
+    /// Sleeps `duration` of simulated time, at least 1 ms and at most
+    /// [MAX_PREFIX_BUDGET], so every sleep yields and the runner can end the prefix at
+    /// its budget.
     pub async fn sleep(&self, duration: Duration) {
-        self.context.sleep(duration).await;
+        self.context
+            .sleep(duration.clamp(Duration::from_millis(1), MAX_PREFIX_BUDGET))
+            .await;
     }
 
     /// The simulated time since the start of the run.
@@ -1836,8 +1980,7 @@ impl<P: Simplex> PrefixContext<P> {
 
     /// The position a query takes now, for a witness that names a moment.
     pub fn stamp(&self) -> Stamp {
-        let (seq, run) = self.shared.observer.position();
-        Stamp { seq, run }
+        Stamp::now(&*self.shared.observer)
     }
 
     /// B's signing scheme.
@@ -1868,16 +2011,34 @@ impl<P: Simplex> PrefixContext<P> {
     }
 
     /// Everything B received so far, stamped.
-    pub fn inbox(&self) -> Vec<Recorded<Inbound>> {
-        self.shared.inbox.lock().clone()
+    pub fn inbox(&self) -> Log<Recorded<Inbound>> {
+        self.snapshot(&self.shared.inbox)
+    }
+
+    /// A snapshot of `log`; reports the position of the first entry it dropped.
+    fn snapshot<T>(&self, log: &Mutex<Log<T>>) -> Log<T> {
+        let log = log.lock().clone();
+        self.report(log.dropped());
+        log
+    }
+
+    /// Reports a drop at `dropped`, if any, to the observer.
+    fn report(&self, dropped: Option<u64>) {
+        if let Some(seq) = dropped {
+            self.shared.observer.dropped(seq);
+        }
     }
 
     /// Builds a mock block for `round` on `parent` as B would, without sending it;
-    /// returns its digest.
+    /// returns its digest. B keeps at most [LOG_CAP] blocks: past that, the block is
+    /// not kept and [Self::send_block] refuses it.
     pub fn block(&self, round: Round, parent: Sha256Digest) -> Sha256Digest {
         let nonce = self.shared.nonce.fetch_add(1, Ordering::Relaxed);
         let (digest, contents) = block_relay::mock_block(round, parent, nonce);
-        self.shared.made.lock().insert(digest, contents);
+        let mut made = self.shared.made.lock();
+        if made.len() < LOG_CAP {
+            made.insert(digest, contents);
+        }
         digest
     }
 
@@ -1906,7 +2067,8 @@ impl<P: Simplex> PrefixContext<P> {
     }
 
     /// Holds, from now on, every message to honest `replica` that `hold` accepts, until
-    /// it is passed or the release; replaces an earlier filter.
+    /// it is passed or the release; replaces an earlier filter. Past [LOG_CAP] held
+    /// messages the gate drops what it would hold. `hold` may call the context.
     pub fn hold(&self, replica: usize, hold: impl Fn(&Inbound) -> bool + Send + Sync + 'static) {
         if let Some(tap) = self.shared.tap(replica) {
             tap.gate.lock().hold = Some(Arc::new(hold));
@@ -1914,36 +2076,51 @@ impl<P: Simplex> PrefixContext<P> {
     }
 
     /// Delivers to honest `replica` the held messages `select` accepts, in arrival
-    /// order; returns how many.
+    /// order; returns how many. `select` may call the context; while it runs,
+    /// [Self::held] for `replica` is empty.
     pub fn pass(&self, replica: usize, select: impl Fn(&Inbound) -> bool) -> usize {
         let Some(tap) = self.shared.tap(replica) else {
             return 0;
         };
-        let participants = self.shared.participants.clone();
-        tap.gate.lock().pass(|channel, sender, payload| {
-            select(&Inbound {
-                from: participants.iter().position(|key| key == sender),
-                channel,
-                payload: payload.clone(),
+        // The selector runs with the gate unlocked; what is held meanwhile stays held.
+        let held = std::mem::take(&mut tap.gate.lock().held);
+        let mut selected = held
+            .iter()
+            .map(|(channel, sender, payload)| {
+                select(&Inbound {
+                    from: tap.position(sender),
+                    channel: *channel,
+                    payload: payload.clone(),
+                })
             })
-        })
+            .collect::<Vec<_>>()
+            .into_iter();
+        let mut gate = tap.gate.lock();
+        let added = std::mem::replace(&mut gate.held, held);
+        gate.held.extend(added);
+        gate.pass(|_, _, _| selected.next().unwrap_or(false))
     }
 
     /// The messages held for honest `replica`, in arrival order.
     pub fn held(&self, replica: usize) -> Vec<Inbound> {
-        let Some(tap) = self.shared.tap(replica) else {
+        let Some(tap) = self.shared.read(replica) else {
             return Vec::new();
         };
-        tap.gate
-            .lock()
-            .held
-            .iter()
-            .map(|(channel, sender, payload)| Inbound {
-                from: tap.position(sender),
-                channel: *channel,
-                payload: payload.clone(),
-            })
-            .collect()
+        let (held, dropped) = {
+            let gate = tap.gate.lock();
+            let held = gate
+                .held
+                .iter()
+                .map(|(channel, sender, payload)| Inbound {
+                    from: tap.position(sender),
+                    channel: *channel,
+                    payload: payload.clone(),
+                })
+                .collect();
+            (held, gate.dropped)
+        };
+        self.report(dropped);
+        held
     }
 
     /// Stops holding for honest `replica` and delivers what it holds.
@@ -1952,7 +2129,9 @@ impl<P: Simplex> PrefixContext<P> {
     }
 
     /// Holds, from now on, every block to honest `replica` whose view and digest `hold`
-    /// accepts, until passed or the release.
+    /// accepts, until passed or the release. Past [LOG_CAP] held blocks, for all
+    /// replicas together, the gate drops what it would hold. `hold` may call the context;
+    /// a block it sends is delivered without filtering.
     pub fn hold_blocks(
         &self,
         replica: usize,
@@ -1969,6 +2148,7 @@ impl<P: Simplex> PrefixContext<P> {
 
     /// Delivers to honest `replica` the held blocks `select` accepts; returns how many its
     /// application took (none while it is crashed: the block is then lost, as on a link).
+    /// `select` may call the context; while it runs, no block is held.
     pub fn pass_blocks(
         &self,
         replica: usize,
@@ -1977,16 +2157,18 @@ impl<P: Simplex> PrefixContext<P> {
         let Some(key) = self.shared.tap(replica).and(self.shared.key(replica)) else {
             return 0;
         };
-        let passed: Vec<_> = {
-            let mut gate = self.shared.block_gate.lock();
-            let (passed, kept) = std::mem::take(&mut gate.held).into_iter().partition(
-                |(_, _, recipient, payload, contents)| {
+        // The selector runs with the gate unlocked; what is held meanwhile stays held.
+        let held = std::mem::take(&mut self.shared.block_gate.lock().held);
+        let (passed, kept): (Vec<_>, Vec<_>) =
+            held.into_iter()
+                .partition(|(_, _, recipient, payload, contents)| {
                     recipient == &key && select(block_relay::mock_block_view(contents), payload)
-                },
-            );
-            gate.held = kept;
-            passed
-        };
+                });
+        {
+            let mut gate = self.shared.block_gate.lock();
+            let added = std::mem::replace(&mut gate.held, kept);
+            gate.held.extend(added);
+        }
         passed
             .into_iter()
             .map(|(sender, tag, recipient, payload, contents)| {
@@ -1998,40 +2180,43 @@ impl<P: Simplex> PrefixContext<P> {
     }
 
     /// What honest `replica`'s engine received through its gate, stamped.
-    pub fn deliveries(&self, replica: usize) -> Vec<Recorded<Inbound>> {
-        self.shared
-            .tap(replica)
-            .map_or_else(Vec::new, |tap| tap.deliveries.lock().clone())
+    pub fn deliveries(&self, replica: usize) -> Log<Recorded<Inbound>> {
+        self.shared.read(replica).map_or_else(Log::default, |tap| {
+            // What the full gate dropped never reaches the deliveries either.
+            let dropped = tap.gate.lock().dropped;
+            self.report(dropped);
+            self.snapshot(&tap.deliveries)
+        })
     }
 
     /// What honest `replica`'s engine reported, stamped.
-    pub fn activities(&self, replica: usize) -> Vec<Recorded<ActivityOf<P>>> {
+    pub fn activities(&self, replica: usize) -> Log<Recorded<ActivityOf<P>>> {
         self.shared
-            .tap(replica)
-            .map_or_else(Vec::new, |tap| tap.activities.lock().clone())
+            .read(replica)
+            .map_or_else(Log::default, |tap| self.snapshot(&tap.activities))
     }
 
     /// What honest `replica`'s automaton was asked and answered, stamped.
-    pub fn automaton(&self, replica: usize) -> Vec<Recorded<AutomatonEvent>> {
+    pub fn automaton(&self, replica: usize) -> Log<Recorded<AutomatonEvent>> {
         self.shared
-            .tap(replica)
-            .map_or_else(Vec::new, |tap| tap.automaton.lock().clone())
+            .read(replica)
+            .map_or_else(Log::default, |tap| self.snapshot(&tap.automaton))
     }
 
     /// Every election honest `replica`'s voter ran, by view, stamped. The voter
     /// also elects the next term's leader ahead of entering it, so a view can
     /// appear early and more than once.
-    pub fn elections(&self, replica: usize) -> Vec<Recorded<(View, usize)>> {
+    pub fn elections(&self, replica: usize) -> Log<Recorded<(View, usize)>> {
         self.shared
-            .tap(replica)
-            .map_or_else(Vec::new, |tap| tap.elections.lock().clone())
+            .read(replica)
+            .map_or_else(Log::default, |tap| self.snapshot(&tap.elections))
     }
 
     /// The peers honest `replica` blocked, stamped.
-    pub fn blocks(&self, replica: usize) -> Vec<Recorded<usize>> {
+    pub fn blocks(&self, replica: usize) -> Log<Recorded<usize>> {
         self.shared
-            .tap(replica)
-            .map_or_else(Vec::new, |tap| tap.blocks.lock().clone())
+            .read(replica)
+            .map_or_else(Log::default, |tap| self.snapshot(&tap.blocks))
     }
 
     /// The network's blocked pairs, (blocker, blocked), now.
@@ -2076,7 +2261,7 @@ impl<P: Simplex> PrefixContext<P> {
     }
 
     /// Overrides honest `replica`'s application latencies until the release; `None`
-    /// restores the base's.
+    /// restores the base's. A request already sleeping keeps the latency it drew.
     pub fn set_latency(&self, replica: usize, latencies: Option<Latencies>) -> bool {
         let Some(key) = self.shared.tap(replica).and(self.shared.key(replica)) else {
             return false;
@@ -2087,7 +2272,8 @@ impl<P: Simplex> PrefixContext<P> {
     }
 
     /// Crash-stops honest `replica`: its engine and application tasks are aborted and
-    /// awaited. The release restarts it if the prefix did not.
+    /// awaited. The release restarts it if the prefix did not. False if it is crashed,
+    /// or while another crash or restart of it runs.
     pub async fn crash(&self, replica: usize) -> bool {
         match self.shared.tap(replica) {
             Some(tap) => crash(tap).await,
@@ -2096,7 +2282,8 @@ impl<P: Simplex> PrefixContext<P> {
     }
 
     /// Restarts crashed honest `replica` from its journal, on its partition, with its
-    /// retained reporter.
+    /// retained reporter. False if it is not crashed, or while another crash or restart
+    /// of it runs.
     pub async fn restart(&self, replica: usize) -> bool {
         match self.shared.tap(replica).cloned() {
             Some(tap) => restart(&self.shared, &tap).await,
@@ -2106,7 +2293,7 @@ impl<P: Simplex> PrefixContext<P> {
 
     /// Whether honest `replica` is crashed.
     pub fn crashed(&self, replica: usize) -> bool {
-        self.shared.tap(replica).is_some_and(|tap| tap.crashed())
+        self.shared.read(replica).is_some_and(|tap| tap.crashed())
     }
 }
 
@@ -2163,23 +2350,36 @@ pub fn start_disrupter<P: Simplex>(
     )
 }
 
-/// A [Prefix] that does nothing, the type of an absent hook.
-pub struct NoPrefix;
-
-impl<P: Simplex> Prefix<P> for NoPrefix {
-    fn plan(&mut self, _pins: &mut Pins<'_>) -> Budget {
-        Budget::default()
-    }
-
-    fn run(self: Box<Self>, _cx: PrefixContext<P>) -> PrefixFuture {
-        Box::pin(async {})
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use commonware_runtime::Runner as _;
+
+    /// An observer that stamps nothing: positions are 0.
+    struct Unobserved;
+
+    impl Observer for Unobserved {
+        fn position(&self) -> (u64, u32) {
+            (0, 0)
+        }
+
+        fn compromised(&self, _identities: &[usize]) {}
+
+        fn actors(&self, _check: &ActorCheck) {}
+    }
+
+    /// A [Prefix] that does nothing.
+    struct NoPrefix;
+
+    impl<P: Simplex> Prefix<P> for NoPrefix {
+        fn plan(&mut self, _pins: &mut Pins<'_>) -> Budget {
+            Budget::default()
+        }
+
+        fn run(self: Box<Self>, _cx: PrefixContext<P>) -> PrefixFuture {
+            Box::pin(async {})
+        }
+    }
 
     #[test]
     fn registry_reports_running_unpolled_finished_and_absent_actors() {
@@ -2535,5 +2735,81 @@ mod tests {
         let mut twins = Pins::new(&mut input, true);
         assert!(!twins.configuration(N4F0C4));
         assert_eq!(input.configuration, N4F1C3);
+    }
+
+    #[test]
+    fn a_log_snapshot_shares_the_log_until_the_next_record_and_the_log_stops_at_its_cap() {
+        let mut log = Log::<u64>::default();
+        log.push(1, 1);
+        let snapshot = log.clone();
+        assert!(
+            Arc::ptr_eq(&snapshot.entries, &log.entries),
+            "taking a snapshot copied"
+        );
+        let again = log.clone();
+        assert!(Arc::ptr_eq(&again.entries, &log.entries));
+        drop(again);
+        // Appending while a snapshot is alive leaves the snapshot as it was.
+        log.push(2, 2);
+        assert_eq!(&*snapshot, &[1]);
+        assert_eq!(&*log, &[1, 2]);
+        drop(snapshot);
+        for value in 2..LOG_CAP as u64 {
+            log.push(value, value);
+        }
+        assert_eq!(log.len(), LOG_CAP);
+        assert_eq!(log.dropped(), None);
+        // An entry recorded while nothing watched has no position to report.
+        log.push(0, 0);
+        assert_eq!(log.dropped(), None);
+        let first = LOG_CAP as u64 + 5;
+        log.push(0, first);
+        log.push(0, first + 1);
+        assert_eq!(log.len(), LOG_CAP, "a full log drops the entry");
+        assert_eq!(
+            log.dropped(),
+            Some(first),
+            "the first drop's position is kept"
+        );
+        assert_eq!(log.clone().dropped(), Some(first), "a snapshot carries it");
+    }
+
+    #[test]
+    fn a_full_gate_drops_what_it_would_hold() {
+        type P = crate::SimplexCertificateMock;
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let input = test_input();
+            let (_oracle, participants, _schemes, _registrations) =
+                crate::setup_network::<P>(&mut context, &input).await;
+            /// Hands out positions 1, 2, ...
+            struct Count(AtomicU64);
+
+            impl Observer for Count {
+                fn position(&self) -> (u64, u32) {
+                    (self.0.fetch_add(1, Ordering::Relaxed) + 1, 1)
+                }
+
+                fn compromised(&self, _identities: &[usize]) {}
+
+                fn actors(&self, _check: &ActorCheck) {}
+            }
+
+            let tap = ReplicaTap::<P>::new(
+                1,
+                participants.clone().into(),
+                Arc::new(Count(AtomicU64::new(0))),
+                Arc::new(AtomicBool::new(true)),
+            );
+            tap.gate.lock().hold = Some(Arc::new(|_| true));
+            let payload = IoBuf::from(vec![0u8; 8]);
+            for _ in 0..LOG_CAP + 10 {
+                assert!(tap.hold(Channel::Vote, &participants[2], &payload));
+            }
+            assert_eq!(tap.gate.lock().held.len(), LOG_CAP);
+            // Holding takes no position; the first drop takes position 1.
+            assert_eq!(tap.gate.lock().dropped, Some(1));
+            assert_eq!(tap.open(), LOG_CAP);
+        });
     }
 }

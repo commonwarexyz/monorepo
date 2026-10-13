@@ -438,11 +438,7 @@ fn run_standard_once<P: simplex::Simplex>(
     warn_dispatch: Option<Dispatch>,
     hook: Option<continuation::Hook<P>>,
 ) -> Option<RunAudit> {
-    let cfg = trusted::standard_config(
-        bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0),
-        &input,
-        hook.as_ref(),
-    );
+    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0);
     let executor = deterministic::Runner::new(cfg);
     let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
@@ -649,10 +645,11 @@ fn run_standard_once<P: simplex::Simplex>(
         )
         .await;
 
-        if should_bound_standard_liveness(&input) {
+        // A trusted continuation checks safety only and never waits for progress.
+        if runner.is_none() && should_bound_standard_liveness(&input) {
             let mut finalizers = Vec::new();
             for (validator, reporter) in reporters.iter_mut() {
-                let required_containers = input.required_containers + rebase;
+                let required_containers = input.required_containers;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(
                     context
@@ -754,11 +751,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
     notarize_omission: Option<NotarizeOmission>,
     hook: Option<continuation::Hook<P>>,
 ) -> (bool, bool) {
-    let cfg = trusted::standard_config(
-        bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0),
-        &input,
-        hook.as_ref(),
-    );
+    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0);
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(move |mut context| async move {
@@ -966,7 +959,8 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
         )
         .await;
 
-        if should_bound_standard_liveness(&input) {
+        // A trusted continuation checks safety only and never waits for progress.
+        if runner.is_none() && should_bound_standard_liveness(&input) {
             let mut finalizers = Vec::new();
             let omitted_validator = notarize_omission
                 .as_ref()
@@ -975,7 +969,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                 if omitted_validator == Some(validator) {
                     continue;
                 }
-                let required_containers = input.required_containers + rebase;
+                let required_containers = input.required_containers;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(
                     context
@@ -1024,13 +1018,17 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                 )
             })
         });
-        invariants::check_no_invalid_reports_if_no_faults(config.faults, &summary_reporters);
         let byzantine: HashSet<usize> = if matches!(input.certify, CertifyChoice::RejectView { .. })
         {
             HashSet::new()
         } else {
             (0..config.faults as usize).collect()
         };
+        // Under rejected certification the Byzantine slot runs a normal engine
+        // (see the spawn above), so every report must be valid.
+        if byzantine.is_empty() {
+            invariants::check_no_invalid_reports(&summary_reporters);
+        }
         invariants::check_vote_invariants_with_byzantine(
             &byzantine,
             P::elector(term_length, input.optimistic_views),
@@ -1809,6 +1807,11 @@ fn run_twins<P: simplex::Simplex>(
     // Twins reuse the standard input; a certify variant sampled for an
     // all-honest configuration would stall this quorum-tight one.
     input.certify = CertifyChoice::Always;
+    let mode = match role {
+        TwinsRole::Mutator => Mode::TwinsMutator,
+        TwinsRole::Campaign => Mode::TwinsCampaign,
+    };
+    print_fuzz_input::<P>(mode, &input);
 
     let cfg = bounded_fuzz_runtime_config(
         &input.raw_bytes,
@@ -1818,7 +1821,6 @@ fn run_twins<P: simplex::Simplex>(
             P::effective_term_length(input.term_length),
         ),
     );
-    let cfg = trusted::twins_config::<P>(cfg, &input, hook.as_ref());
     let executor = deterministic::Runner::new(cfg);
     let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
@@ -2179,7 +2181,8 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         install_mallory_panic_hook();
     } else if matches!(M::MODE, Mode::Chaos | Mode::ChaosTwins) {
         install_chaos_panic_hook();
-    } else {
+    } else if !matches!(M::MODE, Mode::TwinsMutator | Mode::TwinsCampaign) {
+        // Twins modes print inside `run_twins`, after their input overrides.
         if matches!(M::MODE, Mode::FaultyNet) {
             // We run only fuzzing with network faults, populated later by the
             // chosen strategy.
@@ -2285,6 +2288,7 @@ pub fn fuzz_audit_notarize_omission<P: simplex::Simplex>(mut input: FuzzInput) {
     input.configuration = N4F0C4;
     input.partition = Partition::Connected;
     input.degraded_network = false;
+    input.block_filter = BlockFilterChoice::None;
     input.required_containers = input.required_containers.max(4);
     input.term_length = TermLength::ONE;
     input.certify = CertifyChoice::Always;
@@ -2323,7 +2327,6 @@ pub fn fuzz_twins_audit<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
         Mode::TwinsCampaign => TwinsRole::Campaign,
         mode => panic!("fuzz_twins_audit requires a Twins mode, got {mode:?}"),
     };
-    print_fuzz_input::<P>(M::MODE, &input);
 
     let raw_bytes = input.raw_bytes.clone();
     let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {

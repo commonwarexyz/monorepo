@@ -210,23 +210,26 @@ fn spawn_twin_pair<P: Simplex>(
     let make_vote_forwarder = || {
         let participants = participants.clone();
         let scenario = scenario.clone();
-        move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
+        move |origin: SplitOrigin, intended: &Recipients<_>, message: &IoBuf| {
             let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
                 return None;
             };
             let (primary, secondary) =
                 scenario.partitions(msg.view(), term_length, participants.as_ref());
-            match origin {
-                SplitOrigin::Primary => Some(Recipients::Some(primary)),
-                SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
-            }
+            let mask = match origin {
+                SplitOrigin::Primary => primary,
+                SplitOrigin::Secondary => secondary,
+            };
+            Some(commonware_consensus_fuzz_core::twins_within_mask(
+                intended, mask,
+            ))
         }
     };
     let make_certificate_forwarder = || {
         let codec = scheme.certificate_codec_config();
         let participants = participants.clone();
         let scenario = scenario.clone();
-        move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
+        move |origin: SplitOrigin, intended: &Recipients<_>, message: &IoBuf| {
             let Ok(msg) =
                 Certificate::<P::Scheme, Sha256Digest>::decode_cfg(message.clone(), &codec)
             else {
@@ -234,10 +237,13 @@ fn spawn_twin_pair<P: Simplex>(
             };
             let (primary, secondary) =
                 scenario.partitions(msg.view(), term_length, participants.as_ref());
-            match origin {
-                SplitOrigin::Primary => Some(Recipients::Some(primary)),
-                SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
-            }
+            let mask = match origin {
+                SplitOrigin::Primary => primary,
+                SplitOrigin::Secondary => secondary,
+            };
+            Some(commonware_consensus_fuzz_core::twins_within_mask(
+                intended, mask,
+            ))
         }
     };
     let make_vote_router = || {
@@ -267,16 +273,19 @@ fn spawn_twin_pair<P: Simplex>(
         let codec = scheme.certificate_codec_config();
         let participants = participants.clone();
         let scenario = scenario.clone();
-        move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
+        move |origin: SplitOrigin, intended: &Recipients<_>, message: &IoBuf| {
             let view = commonware_consensus_fuzz_core::twins_resolver_view::<P, Sha256Digest>(
                 message, &codec,
             )?;
             let (primary, secondary) =
                 scenario.partitions(view, term_length, participants.as_ref());
-            match origin {
-                SplitOrigin::Primary => Some(Recipients::Some(primary)),
-                SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
-            }
+            let mask = match origin {
+                SplitOrigin::Primary => primary,
+                SplitOrigin::Secondary => secondary,
+            };
+            Some(commonware_consensus_fuzz_core::twins_within_mask(
+                intended, mask,
+            ))
         }
     };
     let make_resolver_router = || {

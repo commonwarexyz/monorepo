@@ -89,9 +89,9 @@ impl<P: PublicKey> Relay<P> {
         *self.gate.lock() = None;
     }
 
-    /// Delivers a block the gate held to `recipient`, through the filter, as `sender`
-    /// (with its twin tag) sent it; returns how many of the recipient's applications took
-    /// it.
+    /// Delivers a block the gate held to `recipient`, past the gate and through the
+    /// filter, as `sender` (with its twin tag) sent it; returns how many of the
+    /// recipient's applications took it.
     pub(crate) fn redeliver(
         &self,
         sender: &P,
@@ -100,6 +100,7 @@ impl<P: PublicKey> Relay<P> {
         block: (Sha256Digest, Bytes),
     ) -> usize {
         self.broadcast_from(
+            false,
             sender_tag.map(|tag| Registration { tag }),
             sender,
             Recipients::One(recipient),
@@ -193,7 +194,7 @@ impl<P: PublicKey> Relay<P> {
         recipients: Recipients<P>,
         (payload, data): (Sha256Digest, Bytes),
     ) {
-        self.broadcast_from(None, sender, recipients, (payload, data));
+        self.broadcast_from(true, None, sender, recipients, (payload, data));
     }
 
     pub(crate) fn broadcast_with_tag(
@@ -204,6 +205,7 @@ impl<P: PublicKey> Relay<P> {
         (payload, data): (Sha256Digest, Bytes),
     ) {
         self.broadcast_from(
+            true,
             Some(Registration { tag: sender_tag }),
             sender,
             recipients,
@@ -211,9 +213,10 @@ impl<P: PublicKey> Relay<P> {
         );
     }
 
-    /// Returns how many applications took the block.
+    /// Returns how many applications took the block; `gated` consults the gate.
     fn broadcast_from(
         &self,
+        gated: bool,
         registration: Option<Registration>,
         sender: &P,
         recipients: Recipients<P>,
@@ -221,9 +224,14 @@ impl<P: PublicKey> Relay<P> {
     ) -> usize {
         let channels = {
             let mut channels = Vec::new();
-            let registered = self.recipients.lock();
+            // A snapshot, so the gate and the filter run with no lock held and may relay.
+            let registered = self.recipients.lock().clone();
             let filter = self.filter.lock().clone();
-            let gate = self.gate.lock().clone();
+            let gate = if gated {
+                self.gate.lock().clone()
+            } else {
+                None
+            };
             let allow = |recipient: &P, listener: &Listener| {
                 if recipient == sender
                     && registration
@@ -587,6 +595,7 @@ impl<E: Clock + Rng + Spawner, P: PublicKey> Application<E, P> {
             }
         };
         self.relay.broadcast_from(
+            true,
             Some(self.relay_registration),
             &self.me,
             recipients,

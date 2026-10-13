@@ -29,6 +29,27 @@ type PublicKey<P> = <<P as simplex::Simplex>::Scheme as Verifier>::PublicKey;
 type TwinRecipients<P> = Recipients<PublicKey<P>>;
 type ForwardedRecipients<P> = Option<TwinRecipients<P>>;
 
+/// Narrows a twin half's intended recipients to the identities its mask admits:
+/// a broadcast becomes the mask, a targeted send keeps the targets inside the
+/// mask and reaches no one when none remain.
+pub fn within_mask<P: commonware_cryptography::PublicKey>(
+    intended: &Recipients<P>,
+    mask: Vec<P>,
+) -> Recipients<P> {
+    match intended {
+        Recipients::All => Recipients::Some(mask),
+        Recipients::Some(peers) => Recipients::Some(
+            peers
+                .iter()
+                .filter(|peer| mask.contains(peer))
+                .cloned()
+                .collect(),
+        ),
+        Recipients::One(peer) if mask.contains(peer) => Recipients::One(peer.clone()),
+        Recipients::One(_) => Recipients::Some(Vec::new()),
+    }
+}
+
 pub fn resolver_view<P: simplex::Simplex, D: Digest>(
     message: &IoBuf,
     codec: &<<P::Scheme as Verifier>::Certificate as Read>::Cfg,
@@ -53,14 +74,15 @@ pub(crate) fn vote_forwarder<P: simplex::Simplex, D: Digest>(
 + Sync
 + Clone
 + 'static {
-    move |origin, _, message| {
+    move |origin, intended, message| {
         let vote = Vote::<P::Scheme, D>::decode(message.clone()).ok()?;
         let (primary, secondary) =
             scenario.partitions(vote.view(), term_length, participants.as_ref());
-        match origin {
-            SplitOrigin::Primary => Some(Recipients::Some(primary)),
-            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
-        }
+        let mask = match origin {
+            SplitOrigin::Primary => primary,
+            SplitOrigin::Secondary => secondary,
+        };
+        Some(within_mask(intended, mask))
     }
 }
 
@@ -75,14 +97,15 @@ pub(crate) fn certificate_forwarder<P: simplex::Simplex, D: Digest>(
 + Clone
 + 'static {
     let codec = scheme.certificate_codec_config();
-    move |origin, _, message| {
+    move |origin, intended, message| {
         let certificate = Certificate::<P::Scheme, D>::decode_cfg(message.clone(), &codec).ok()?;
         let (primary, secondary) =
             scenario.partitions(certificate.view(), term_length, participants.as_ref());
-        match origin {
-            SplitOrigin::Primary => Some(Recipients::Some(primary)),
-            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
-        }
+        let mask = match origin {
+            SplitOrigin::Primary => primary,
+            SplitOrigin::Secondary => secondary,
+        };
+        Some(within_mask(intended, mask))
     }
 }
 
@@ -131,13 +154,14 @@ pub(crate) fn resolver_forwarder<P: simplex::Simplex, D: Digest>(
 + Clone
 + 'static {
     let codec = scheme.certificate_codec_config();
-    move |origin, _, message| {
+    move |origin, intended, message| {
         let view = resolver_view::<P, D>(message, &codec)?;
         let (primary, secondary) = scenario.partitions(view, term_length, participants.as_ref());
-        match origin {
-            SplitOrigin::Primary => Some(Recipients::Some(primary)),
-            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
-        }
+        let mask = match origin {
+            SplitOrigin::Primary => primary,
+            SplitOrigin::Secondary => secondary,
+        };
+        Some(within_mask(intended, mask))
     }
 }
 
@@ -153,5 +177,41 @@ pub(crate) fn resolver_router<P: simplex::Simplex, D: Digest>(
             return SplitTarget::None;
         };
         scenario.route(view, term_length, sender, participants.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::within_mask;
+    use commonware_p2p::Recipients;
+
+    #[test]
+    fn within_mask_keeps_targets_inside_the_mask() {
+        let keys = crate::simplex_certificate_mock::fixture(
+            &mut commonware_utils::test_rng(),
+            b"twins_within_mask",
+            4,
+        )
+        .participants;
+        let mask = vec![keys[1].clone(), keys[2].clone()];
+        let peers = |recipients| match recipients {
+            Recipients::Some(peers) => peers,
+            Recipients::One(peer) => vec![peer],
+            Recipients::All => panic!("a broadcast must become the mask"),
+        };
+
+        assert_eq!(peers(within_mask(&Recipients::All, mask.clone())), mask);
+        assert_eq!(
+            peers(within_mask(
+                &Recipients::Some(vec![keys[2].clone(), keys[0].clone(), keys[1].clone()]),
+                mask.clone(),
+            )),
+            vec![keys[2].clone(), keys[1].clone()]
+        );
+        assert!(matches!(
+            within_mask(&Recipients::One(keys[2].clone()), mask.clone()),
+            Recipients::One(ref peer) if *peer == keys[2]
+        ));
+        assert!(peers(within_mask(&Recipients::One(keys[3].clone()), mask)).is_empty());
     }
 }
