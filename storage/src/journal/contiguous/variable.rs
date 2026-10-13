@@ -1835,9 +1835,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     pub(crate) async fn snapshot(
         mut self: Box<Self>,
     ) -> Result<(Box<Self>, Reader<'static, E, V>), Error> {
-        let (blobs, data) = self.blobs.snapshot().await?;
+        let ((blobs, data), (offsets, offsets_reader)) =
+            futures::try_join!(self.blobs.snapshot(), self.offsets.snapshot())?;
         self.blobs = blobs;
-        let (offsets, offsets_reader) = self.offsets.snapshot().await?;
         self.offsets = offsets;
         let reader = Reader {
             data,
@@ -2474,9 +2474,16 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
-    /// creation, and the snapshot stays readable across concurrent appends and prunes. It keeps
-    /// the journal's blobs open, so reopening a partition that still holds one of them fails
-    /// while the snapshot is alive.
+    /// creation, and the snapshot stays readable across concurrent appends and prunes.
+    ///
+    /// Capture writes buffered items to the tail blob without making them durable, first waiting
+    /// for any in-flight sync of that blob when there are buffered items to write. While the
+    /// snapshot is alive it keeps the journal's blobs open, so reopening one of them fails with
+    /// `BlobAlreadyOpen`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture fails, which consumes the journal.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, V>), Error> {
         let (inner, reader) = self.0.snapshot().await?;
         self.0 = inner;
@@ -2613,6 +2620,15 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
 
     async fn destroy(self) -> Result<(), Error> {
         Self::destroy(self).await
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<E: Context, V: CodecShared> super::Snapshottable for Journal<E, V> {
+    type Reader = Reader<'static, E, V>;
+
+    async fn snapshot(self) -> Result<(Self, Self::Reader), Error> {
+        Self::snapshot(self).await
     }
 }
 

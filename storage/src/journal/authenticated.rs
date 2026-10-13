@@ -16,7 +16,7 @@ use crate::{
     Context,
     journal::{
         Error as JournalError,
-        contiguous::{Contiguous, Many, Mutable},
+        contiguous::{Contiguous, Many, Mutable, Snapshottable},
     },
     merkle::{
         self, Bagging, Family, Location, Position, Proof, Readable, batch, full::Merkle,
@@ -34,6 +34,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, ReadOptions};
 use commonware_utils::NZU64;
 use core::{
+    future::Future,
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
 };
@@ -240,28 +241,124 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> Readable
     }
 }
 
-/// An append-only data structure that maintains a sequential journal of items alongside a
-/// Merkle-family structure. The item at index i in the journal corresponds to the leaf at Location
-/// i in the Merkle structure. This structure enables efficient proofs that an item is included in
-/// the journal at a specific location.
-pub struct Journal<F, E, C, H, S>
+/// Allows [Authenticated] to be pub(crate) while aliases [Journal] and [Snapshot] are pub.
+mod private {
+    use super::{Hasher, StandardHasher};
+
+    /// An append-only data structure that maintains a sequential journal of items alongside a
+    /// Merkle-family structure. The item at index i in the journal corresponds to the leaf at
+    /// Location i in the Merkle structure. This structure enables efficient proofs that an item
+    /// is included in the journal at a specific location.
+    pub struct Authenticated<C, M, H>
+    where
+        H: Hasher,
+    {
+        /// Merkle structure where each leaf is an item digest.
+        /// Invariant: leaf i corresponds to item i in `journal`.
+        pub(crate) merkle: M,
+
+        /// Journal of items.
+        /// Invariant: item i corresponds to leaf i in `merkle`.
+        pub(crate) journal: C,
+
+        pub(crate) hasher: StandardHasher<H>,
+    }
+}
+
+pub(crate) use private::Authenticated;
+
+impl<F, C, M, H> Authenticated<C, M, H>
 where
     F: Family,
-    E: Context,
-    C: Contiguous<Item: EncodeShared>,
+    C: Contiguous,
+    M: merkle::storage::Storage<Family = F, Digest = H::Digest>,
     H: Hasher,
-    S: Strategy,
 {
-    /// Merkle structure where each leaf is an item digest.
-    /// Invariant: leaf i corresponds to item i in the journal.
-    pub(crate) merkle: Merkle<F, E, H::Digest, S>,
+    /// Returns the Location one past the last visible item.
+    pub fn size(&self) -> Location<F> {
+        Location::new(self.journal.bounds().end)
+    }
 
-    /// Journal of items.
-    /// Invariant: item i corresponds to leaf i in the Merkle structure.
-    pub(crate) journal: C,
+    /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `loc` exceeds the item
+    /// count, and with [merkle::Error::ElementPruned] if a required node has been pruned.
+    pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
+        self.merkle.pinned_nodes_at(loc).await.map_err(Into::into)
+    }
 
-    pub(crate) hasher: StandardHasher<H>,
+    /// Generate a proof of inclusion for items starting at `start_loc`.
+    ///
+    /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
+    /// where `end_loc` is the minimum of the current item count and `start_loc + max_ops`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >= current
+    ///   item count.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] or [Error::Merkle] with
+    ///   [merkle::Error::ElementPruned] if a required item or Merkle node has been pruned.
+    pub async fn proof(
+        &self,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+        inactive_peaks: usize,
+    ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
+        self.historical_proof(self.size(), start_loc, max_ops, inactive_peaks)
+            .await
+    }
+
+    /// Generate a historical proof with respect to the state of the Merkle structure when it had
+    /// `historical_leaves` leaves.
+    ///
+    /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
+    /// where `end_loc` is the minimum of `historical_leaves` and `start_loc + max_ops`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >=
+    ///   `historical_leaves` or `historical_leaves` > number of items in the journal.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] or [Error::Merkle] with
+    ///   [merkle::Error::ElementPruned] if a required item or Merkle node has been pruned.
+    pub async fn historical_proof(
+        &self,
+        historical_leaves: Location<F>,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+        inactive_peaks: usize,
+    ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
+        let bounds = self.journal.bounds();
+
+        if *historical_leaves > bounds.end {
+            return Err(merkle::Error::RangeOutOfBounds(Location::new(bounds.end)).into());
+        }
+        if start_loc >= historical_leaves {
+            return Err(merkle::Error::RangeOutOfBounds(start_loc).into());
+        }
+
+        let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
+
+        let proof = merkle::verification::historical_range_proof(
+            &self.hasher,
+            &self.merkle,
+            historical_leaves,
+            start_loc..end_loc,
+            inactive_peaks,
+        )
+        .await?;
+
+        let positions: Vec<u64> = (*start_loc..*end_loc).collect();
+        let ops = self.journal.read_many(&positions).await?;
+
+        Ok((proof, ops))
+    }
 }
+
+/// A live authenticated journal, a mutable item journal paired with its Merkle structure.
+pub type Journal<F, E, C, H, S> =
+    private::Authenticated<C, Merkle<F, E, <H as Hasher>::Digest, S>, H>;
 
 impl<F, E, C, H, S> core::fmt::Debug for Journal<F, E, C, H, S>
 where
@@ -286,107 +383,12 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Returns the Location of the next item appended to the journal.
-    pub fn size(&self) -> Location<F> {
-        Location::new(self.journal.bounds().end)
-    }
-
     /// Compute the root of the Merkle structure using `inactive_peaks` and the bagging carried by
     /// the journal's hasher.
     pub fn root(&self, inactive_peaks: usize) -> Result<H::Digest, Error<F>> {
         self.merkle
             .root(&self.hasher, inactive_peaks)
             .map_err(Into::into)
-    }
-
-    /// Convert authenticated-journal errors to the contiguous journal trait error type.
-    fn map_error(error: Error<F>) -> JournalError {
-        match error {
-            Error::Journal(inner) => inner,
-            Error::Merkle(inner) => JournalError::Merkle(anyhow::Error::from(inner)),
-        }
-    }
-
-    /// Return a reference to the merkleization strategy.
-    pub const fn strategy(&self) -> &S {
-        self.merkle.strategy()
-    }
-
-    /// Create a speculative batch atop this journal.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, C::Item, S> {
-        let root = self.merkle.to_batch();
-        UnmerkleizedBatch {
-            inner: root.new_batch(),
-            hasher: StandardHasher::new(self.hasher.root_bagging()),
-            items: Vec::new(),
-            parent: None,
-        }
-    }
-
-    /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound job
-    /// submitted through [`Strategy::spawn`].
-    ///
-    /// The job hashes against an immutable snapshot of the committed Merkle state, so a parallel
-    /// strategy can host the batch's dominant CPU phase on its own pool instead of occupying the
-    /// calling task. If the job's caller is cancelled, the job still runs to completion
-    /// against its snapshot and the result is discarded.
-    pub(crate) async fn merkleize(
-        &self,
-        batch: UnmerkleizedBatch<F, H, C::Item, S>,
-        items: Vec<C::Item>,
-        inactive_peaks: usize,
-    ) -> Result<(MerkleizedBatchArc<F, H, C::Item, S>, H::Digest), merkle::Error<F>>
-    where
-        C::Item: 'static,
-    {
-        let ancestors = batch.inner.retain_ancestors();
-        let mem = self.merkle.snapshot();
-        let hasher = self.hasher.clone();
-        let strategy = self.strategy().clone();
-        strategy
-            .spawn(items.len(), move |_| {
-                let merkleized = batch.add_many(items).merkleize(&mem);
-                let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
-                drop(ancestors);
-                Ok((merkleized, root))
-            })
-            .await
-    }
-
-    /// Create an owned [`MerkleizedBatch`] representing the current committed state.
-    ///
-    /// The batch has no items (the committed items are on disk, not in memory).
-    /// This is the starting point for building owned batch chains.
-    pub(crate) fn to_merkleized_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, C::Item, S>> {
-        Arc::new(MerkleizedBatch {
-            inner: self.merkle.to_batch(),
-            bagging: self.hasher.root_bagging(),
-            items: Arc::new(Vec::new()),
-            parent: None,
-            ancestor_base_leaves: *self.size(),
-            ancestor_items: Vec::new(),
-        })
-    }
-
-    /// Generate a proof of inclusion for items starting at `start_loc`.
-    ///
-    /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
-    /// where `end_loc` is the minimum of the current item count and `start_loc + max_ops`.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >= current
-    ///   item count.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] or [Error::Merkle] with
-    ///   [merkle::Error::ElementPruned] if a required item or Merkle node has been pruned.
-    pub async fn proof(
-        &self,
-        start_loc: Location<F>,
-        max_ops: NonZeroU64,
-        inactive_peaks: usize,
-    ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
-        self.historical_proof(self.size(), start_loc, max_ops, inactive_peaks)
-            .await
     }
 
     /// Inclusion proof for the items `batch` appends, anchored at the batch's speculative tip.
@@ -433,51 +435,73 @@ where
             .map_err(Error::Merkle)
     }
 
-    /// Generate a historical proof with respect to the state of the Merkle structure when it had
-    /// `historical_leaves` leaves.
+    /// Convert authenticated-journal errors to the contiguous journal trait error type.
+    fn map_error(error: Error<F>) -> JournalError {
+        match error {
+            Error::Journal(inner) => inner,
+            Error::Merkle(inner) => JournalError::Merkle(anyhow::Error::from(inner)),
+        }
+    }
+
+    /// Return a reference to the merkleization strategy.
+    pub const fn strategy(&self) -> &S {
+        self.merkle.strategy()
+    }
+
+    /// Create a speculative batch atop this journal.
+    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, C::Item, S> {
+        let root = self.merkle.to_batch();
+        UnmerkleizedBatch {
+            inner: root.new_batch(),
+            hasher: StandardHasher::new(self.hasher.root_bagging()),
+            items: Vec::new(),
+            parent: None,
+        }
+    }
+
+    /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound job
+    /// submitted through [`Strategy::spawn`].
     ///
-    /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
-    /// where `end_loc` is the minimum of `historical_leaves` and `start_loc + max_ops`.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >=
-    ///   `historical_leaves` or `historical_leaves` > number of items in the journal.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] or [Error::Merkle] with
-    ///   [merkle::Error::ElementPruned] if a required item or Merkle node has been pruned.
-    pub async fn historical_proof(
+    /// The job hashes against an immutable view of the committed Merkle state, so a parallel
+    /// strategy can host the batch's dominant CPU phase on its own pool instead of occupying the
+    /// calling task. If the job's caller is cancelled, the job still runs to completion
+    /// against its view and the result is discarded.
+    pub(crate) async fn merkleize(
         &self,
-        historical_leaves: Location<F>,
-        start_loc: Location<F>,
-        max_ops: NonZeroU64,
+        batch: UnmerkleizedBatch<F, H, C::Item, S>,
+        items: Vec<C::Item>,
         inactive_peaks: usize,
-    ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
-        let bounds = self.journal.bounds();
-
-        if *historical_leaves > bounds.end {
-            return Err(merkle::Error::RangeOutOfBounds(Location::new(bounds.end)).into());
-        }
-        if start_loc >= historical_leaves {
-            return Err(merkle::Error::RangeOutOfBounds(start_loc).into());
-        }
-
-        let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
-
+    ) -> Result<(MerkleizedBatchArc<F, H, C::Item, S>, H::Digest), merkle::Error<F>>
+    where
+        C::Item: 'static,
+    {
+        let ancestors = batch.inner.retain_ancestors();
+        let mem = self.merkle.view();
         let hasher = self.hasher.clone();
-        let proof = self
-            .merkle
-            .historical_range_proof(
-                &hasher,
-                historical_leaves,
-                start_loc..end_loc,
-                inactive_peaks,
-            )
-            .await?;
+        let strategy = self.strategy().clone();
+        strategy
+            .spawn(items.len(), move |_| {
+                let merkleized = batch.add_many(items).merkleize(&mem);
+                let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
+                drop(ancestors);
+                Ok((merkleized, root))
+            })
+            .await
+    }
 
-        let positions: Vec<u64> = (*start_loc..*end_loc).collect();
-        let ops = self.journal.read_many(&positions).await?;
-
-        Ok((proof, ops))
+    /// Create an owned [`MerkleizedBatch`] representing the current committed state.
+    ///
+    /// The batch has no items (the committed items are on disk, not in memory).
+    /// This is the starting point for building owned batch chains.
+    pub(crate) fn to_merkleized_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, C::Item, S>> {
+        Arc::new(MerkleizedBatch {
+            inner: self.merkle.to_batch(),
+            bagging: self.hasher.root_bagging(),
+            items: Arc::new(Vec::new()),
+            parent: None,
+            ancestor_base_leaves: *self.size(),
+            ancestor_items: Vec::new(),
+        })
     }
 
     /// Like [`Contiguous::read_many`], but returns the items partitioned into the shards the
@@ -834,6 +858,43 @@ where
     }
 }
 
+impl<F, E, C, H, S> Journal<F, E, C, H, S>
+where
+    F: Family,
+    E: Context,
+    C: Snapshottable,
+    H: Hasher,
+    S: Strategy,
+{
+    /// Capture an owned immutable [Snapshot] of the journal and its Merkle structure.
+    ///
+    /// Capture writes buffered data and keeps the journal's and Merkle structure's blobs open
+    /// while the snapshot is alive, as [`Snapshottable`] describes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either capture fails, which consumes the journal.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn snapshot(mut self) -> Result<(Self, Snapshot<F, E, C::Reader, H>), Error<F>> {
+        let (journal, merkle) = (self.journal, self.merkle);
+        let ((journal, frozen), (merkle, nodes)) = futures::try_join!(
+            async { journal.snapshot().await.map_err(Error::Journal) },
+            async { merkle.snapshot().await.map_err(Error::from) },
+        )?;
+        self.journal = journal;
+        self.merkle = merkle;
+        let hasher = self.hasher.clone();
+        Ok((
+            self,
+            Snapshot {
+                journal: frozen,
+                merkle: nodes,
+                hasher,
+            },
+        ))
+    }
+}
+
 /// Selected journal and Merkle state awaiting coordinated durable finalization.
 pub(crate) struct Recovery<F, E, C, H, S>
 where
@@ -1129,6 +1190,64 @@ where
 
     async fn destroy(self) -> Result<(), JournalError> {
         Self::destroy(self).await.map_err(Self::map_error)
+    }
+}
+
+/// Owned immutable snapshot of an authenticated journal, with bounds frozen at capture.
+///
+/// The snapshot reflects the journal's size at capture, including applied operations that are
+/// not yet durable.
+#[commonware_macros::stability(ALPHA)]
+pub type Snapshot<F, E, R, H> =
+    private::Authenticated<R, merkle::full::Snapshot<F, E, <H as Hasher>::Digest>, H>;
+
+impl<F, E, R, H> Contiguous for Snapshot<F, E, R, H>
+where
+    F: Family,
+    E: Context,
+    R: Contiguous<Item: Send>,
+    H: Hasher,
+{
+    type Item = R::Item;
+
+    fn bounds(&self) -> Range<u64> {
+        self.journal.bounds()
+    }
+
+    fn read(
+        &self,
+        position: u64,
+    ) -> impl Future<Output = Result<Self::Item, JournalError>> + Send + Sync {
+        self.journal.read(position)
+    }
+
+    fn read_many(
+        &self,
+        positions: &[u64],
+    ) -> impl Future<Output = Result<Vec<Self::Item>, JournalError>> + Send {
+        self.journal.read_many(positions)
+    }
+
+    fn try_read_sync(&self, position: u64) -> Option<Self::Item> {
+        self.journal.try_read_sync(position)
+    }
+
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>> {
+        self.journal.try_read_many_sync(positions)
+    }
+
+    fn replay_range(
+        &self,
+        range: Range<u64>,
+        buffer: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> impl Future<
+        Output = Result<
+            impl Stream<Item = Result<(u64, Self::Item), JournalError>> + Send,
+            JournalError,
+        >,
+    > + Send {
+        self.journal.replay_range(range, buffer, read_options)
     }
 }
 
@@ -3972,6 +4091,197 @@ mod tests {
     fn test_apply_batch_after_committed_ancestor_dropped_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_apply_batch_after_committed_ancestor_dropped_inner::<mmb::Family>);
+    }
+
+    /// A captured snapshot keeps serving the same bytes and proofs while the live journal
+    /// appends, syncs, and prunes past it.
+    async fn test_snapshot_frozen_across_append_and_prune_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let mut journal = create_journal_with_ops::<F>(context, "snapshot-frozen", 50).await;
+
+        // Leave some operations buffered and unsynced, as a capture before `start_sync` does.
+        for i in 0..5u8 {
+            (journal, _) = journal
+                .append(&create_operation::<F>(i.wrapping_add(200)))
+                .await
+                .unwrap();
+        }
+
+        let size = journal.size();
+        let live_proof;
+        let live_ops;
+        (live_proof, live_ops) = journal
+            .proof(Location::new(0), NZU64!(10), 0)
+            .await
+            .unwrap();
+        let (live_historical, live_historical_ops) = journal
+            .historical_proof(size, Location::new(5), NZU64!(5), 0)
+            .await
+            .unwrap();
+
+        let snapshot;
+        (journal, snapshot) = journal.snapshot().await.unwrap();
+        assert_eq!(snapshot.size(), size);
+
+        // At capture, snapshot output matches the live journal byte-for-byte.
+        let (snapshot_proof, snapshot_ops) = snapshot
+            .proof(Location::new(0), NZU64!(10), 0)
+            .await
+            .unwrap();
+        assert_eq!(live_proof.encode(), snapshot_proof.encode());
+        assert_eq!(
+            live_ops.iter().map(Encode::encode).collect::<Vec<_>>(),
+            snapshot_ops.iter().map(Encode::encode).collect::<Vec<_>>()
+        );
+
+        // Advance the live journal well past the snapshot by appending, syncing, and pruning.
+        for i in 0..30u8 {
+            (journal, _) = journal
+                .append(&create_operation::<F>(i.wrapping_add(50)))
+                .await
+                .unwrap();
+        }
+        journal = journal.sync().await.unwrap();
+        (journal, _) = journal.prune(Location::new(20)).await.unwrap();
+        assert!(journal.size() > size);
+
+        // The snapshot still serves the same proof and the same bytes, including for locations
+        // the live journal has since pruned.
+        let (snapshot_proof2, snapshot_ops2) = snapshot
+            .proof(Location::new(0), NZU64!(10), 0)
+            .await
+            .unwrap();
+        assert_eq!(snapshot_proof.encode(), snapshot_proof2.encode());
+        assert_eq!(
+            snapshot_ops.iter().map(Encode::encode).collect::<Vec<_>>(),
+            snapshot_ops2.iter().map(Encode::encode).collect::<Vec<_>>()
+        );
+        let pruned_reads = snapshot.read_many(&[0, 1, 2]).await.unwrap();
+        assert_eq!(
+            pruned_reads.iter().map(Encode::encode).collect::<Vec<_>>(),
+            live_ops[..3].iter().map(Encode::encode).collect::<Vec<_>>()
+        );
+
+        // The operations buffered at capture read back from the snapshot.
+        let buffered_reads = snapshot.read_many(&[50, 51, 52, 53, 54]).await.unwrap();
+        assert_eq!(
+            buffered_reads
+                .iter()
+                .map(Encode::encode)
+                .collect::<Vec<_>>(),
+            (0..5u8)
+                .map(|i| create_operation::<F>(i.wrapping_add(200)).encode())
+                .collect::<Vec<_>>()
+        );
+
+        // Historical proofs at or below the frozen size match the capture-time proof, while
+        // anything above is rejected.
+        let (historical, historical_ops) = snapshot
+            .historical_proof(size, Location::new(5), NZU64!(5), 0)
+            .await
+            .unwrap();
+        assert_eq!(historical.encode(), live_historical.encode());
+        assert_eq!(
+            historical_ops
+                .iter()
+                .map(Encode::encode)
+                .collect::<Vec<_>>(),
+            live_historical_ops
+                .iter()
+                .map(Encode::encode)
+                .collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            snapshot.proof(size, NZU64!(1), 0).await,
+            Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
+        ));
+        assert!(matches!(
+            snapshot
+                .historical_proof(size + 1, Location::new(0), NZU64!(1), 0)
+                .await,
+            Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
+        ));
+
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_snapshot_frozen_across_append_and_prune_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_snapshot_frozen_across_append_and_prune_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_snapshot_frozen_across_append_and_prune_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_snapshot_frozen_across_append_and_prune_inner::<mmb::Family>);
+    }
+
+    /// A snapshot captured after bounded recovery exposes only the selected prefix, even after
+    /// the writer replaces the discarded suffix and prunes the captured operations.
+    async fn test_snapshot_after_bounded_initialization_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let suffix = "snapshot-bounded";
+        let journal = create_journal_with_ops::<F>(context.child("seed"), suffix, 50).await;
+        let size = Location::new(30);
+        let (expected_proof, expected_ops) = journal
+            .historical_proof(size, Location::new(0), NZU64!(100), 0)
+            .await
+            .unwrap();
+        drop(journal);
+
+        let journal = TestJournal::<F>::init_at_most(
+            context.child("recover"),
+            merkle_config(suffix, &context),
+            journal_config(suffix, &context),
+            *size,
+            |_| true,
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        let (mut journal, snapshot) = journal.snapshot().await.unwrap();
+        assert_eq!(snapshot.bounds(), 0..*size);
+        assert!(matches!(
+            snapshot.read(*size).await,
+            Err(crate::journal::Error::ItemOutOfRange(_))
+        ));
+        assert!(matches!(
+            snapshot
+                .historical_proof(size + 1, Location::new(0), NZU64!(1), 0)
+                .await,
+            Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
+        ));
+
+        for i in 100..130u8 {
+            (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+        }
+        journal = journal.sync().await.unwrap();
+        (journal, _) = journal.prune(Location::new(20)).await.unwrap();
+        let (proof, ops) = snapshot
+            .proof(Location::new(0), NZU64!(100), 0)
+            .await
+            .unwrap();
+        assert_eq!(proof.encode(), expected_proof.encode());
+        assert_eq!(
+            ops.iter().map(Encode::encode).collect::<Vec<_>>(),
+            expected_ops.iter().map(Encode::encode).collect::<Vec<_>>()
+        );
+        journal.destroy().await.unwrap();
+    }
+
+    #[test]
+    fn test_snapshot_after_bounded_initialization_mmr() {
+        deterministic::Runner::default()
+            .start(test_snapshot_after_bounded_initialization_inner::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_snapshot_after_bounded_initialization_mmb() {
+        deterministic::Runner::default()
+            .start(test_snapshot_after_bounded_initialization_inner::<mmb::Family>);
     }
 
     /// Merkleization retains a speculative suffix after its committed prefix is released.
