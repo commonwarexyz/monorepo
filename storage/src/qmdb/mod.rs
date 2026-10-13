@@ -352,14 +352,36 @@ pub enum Error<F: Family> {
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
-    /// The batch was created from a different database state than the current one.
+    /// The batch cannot be merkleized or applied against the current database state.
+    ///
+    /// Causes:
+    /// - The database moved off the batch's chain. Reads report this case as
+    ///   [`Error::StaleRead`]. Apply also refuses at the batch's own tip (it is already applied),
+    ///   where reads still pass.
+    /// - Merkleize only: an unapplied ancestor was dropped, so the chain no longer reaches the live
+    ///   database. Reads stay exact, since each merkleized batch retains its ancestors' overlays.
+    /// - Current merkleize only: the batch was built against another database instance.
     ///
     /// See [`chain`] for more details on staleness detection.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
-    /// The batch's inactivity floor is lower than the database's current floor.
-    #[error("floor regressed: batch floor {0} < current floor {1}")]
+    /// A batch read found the database on none of the batch's chain states: a batch other than
+    /// this one or an ancestor was applied (or the database was reinitialized off the chain).
+    /// The caller should fork a new batch from the current state.
+    #[error("stale read: a non-ancestor batch was applied")]
+    StaleRead,
+
+    /// A batch read asked for a location below the inactivity floor its chain commits to.
+    ///
+    /// Such locations may or may not be pruned depending on local history, so they are refused
+    /// on every node alike.
+    #[error("location below inactivity floor: {0}")]
+    BelowInactivityFloor(Location<F>),
+
+    /// The batch's inactivity floor is lower than the floor it builds on: its parent's, or the
+    /// database's for a batch with no parent.
+    #[error("floor regressed: batch floor {0} < prior floor {1}")]
     FloorRegressed(Location<F>, Location<F>),
 
     /// The batch's inactivity floor exceeds its own commit operation's location. The floor

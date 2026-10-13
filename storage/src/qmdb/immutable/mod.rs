@@ -18,8 +18,8 @@
 //!   onward. Keys set before the floor are not loaded into memory.
 //!
 //! The floor must be monotonically non-decreasing across commits and must not exceed
-//! the batch's total operation count. Pass `db.inactivity_floor_loc()` to keep the
-//! floor unchanged, or a higher value to advance it.
+//! the location of the batch's own commit operation. Pass `db.inactivity_floor_loc()` to keep
+//! the floor unchanged, or a higher value to advance it.
 //!
 //! # Examples
 //!
@@ -350,12 +350,24 @@ where
 
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
     /// has been pruned.
+    ///
+    /// Unlike batch reads, this may return a value written below the inactivity floor, but only on
+    /// a node that has not pruned it or rebuilt its index since (a reopen indexes from the floor).
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
+        self.get_from(key, Location::new(0)).await
+    }
+
+    /// Like [`Self::get`], but also ignores operations below `floor`.
+    pub(crate) async fn get_from(
+        &self,
+        key: &K,
+        floor: Location<F>,
+    ) -> Result<Option<V::Value>, Error<F>> {
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
         self.metrics.lookups_requested.inc();
         let iter = self.snapshot.get(key);
-        let oldest = self.journal.bounds().start;
+        let oldest = Location::new(self.journal.bounds().start).max(floor);
         let mut result = None;
         for &loc in iter {
             if loc < oldest {
@@ -372,8 +384,18 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as the input keys. Like [`Self::get`], this may return
+    /// values written below the inactivity floor.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
+        self.get_many_from(keys, Location::new(0)).await
+    }
+
+    /// Like [`Self::get_many`], but also ignores operations below `floor`.
+    pub(crate) async fn get_many_from(
+        &self,
+        keys: &[&K],
+        floor: Location<F>,
+    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -384,7 +406,7 @@ where
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
         let mut results: Vec<Option<V::Value>> = vec![None; keys.len()];
 
-        let oldest = self.journal.bounds().start;
+        let oldest = Location::new(self.journal.bounds().start).max(floor);
 
         for (key_idx, key) in keys.iter().enumerate() {
             for &loc in self.snapshot.get(key) {
@@ -667,8 +689,9 @@ where
     ///   commit is its own location; a floor past the commit would permit
     ///   pruning the commit itself.
     ///
-    /// Floor validation happens before any journal mutation, so on floor errors the on-disk
-    /// state is unchanged and reopening recovers the database as it was.
+    /// [`batch::UnmerkleizedBatch::merkleize`] already enforces both floor rules, so a batch it
+    /// produced never fails them here. Apply re-checks them as a guard, before any journal
+    /// mutation.
     ///
     /// Returns the range of locations written.
     ///
@@ -803,6 +826,366 @@ pub(super) mod tests {
         TwoCap,
         commonware_parallel::Sequential,
     >;
+
+    /// Reads stay exact after the ancestor batches are dropped, because merkleization
+    /// retains their diffs.
+    #[boxed]
+    pub(crate) async fn run_dropped_ancestor_reads<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+        // Commit a key the chain never touches.
+        let untouched = Sha256::fill(0u8);
+        let untouched_value = Sha256::fill(100u8);
+        let seed = db
+            .new_batch()
+            .set(untouched, untouched_value)
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(seed).await.unwrap();
+
+        // A three-level uncommitted chain, one key per level.
+        let a = db
+            .new_batch()
+            .set(Sha256::fill(1u8), Sha256::fill(101u8))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let b = a
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(2u8), Sha256::fill(102u8))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let c = b
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(3u8), Sha256::fill(103u8))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let child = c.new_batch::<Sha256>();
+        drop(a);
+        drop(b);
+
+        // The merkleized batch and its unmerkleized child both resolve every
+        // ancestor write from the retained overlays.
+        for i in 0..4u8 {
+            let key = Sha256::fill(i);
+            let expected = Some(Sha256::fill(i.wrapping_add(100)));
+            assert_eq!(c.get(&key, &db).await.unwrap(), expected);
+            assert_eq!(child.get(&key, &db).await.unwrap(), expected);
+        }
+        let keys: Vec<_> = (0..4u8).map(Sha256::fill).collect();
+        let key_refs: Vec<_> = keys.iter().collect();
+        let expected: Vec<_> = (0..4u8)
+            .map(|i| Some(Sha256::fill(i.wrapping_add(100))))
+            .collect();
+        assert_eq!(c.get_many(&key_refs, &db).await.unwrap(), expected);
+        assert_eq!(child.get_many(&key_refs, &db).await.unwrap(), expected);
+
+        // Merkleizing the child is refused: its dropped ancestors are unapplied, so the chain no
+        // longer reaches the database.
+        assert!(matches!(
+            child.merkleize(&db, None, Location::new(0)).await,
+            Err(Error::StaleBatch)
+        ));
+
+        // Applying the chain lands the same values the reads reported.
+        let (db, _) = db.apply_batch(c).await.unwrap();
+        for i in 0..4u8 {
+            assert_eq!(
+                db.get(&Sha256::fill(i)).await.unwrap(),
+                Some(Sha256::fill(i.wrapping_add(100)))
+            );
+        }
+        assert_eq!(db.get(&untouched).await.unwrap(), Some(untouched_value));
+        db.destroy().await.unwrap();
+    }
+
+    /// A batch's proof and pinned nodes are refused once a sibling is applied.
+    #[boxed]
+    pub(crate) async fn run_proof_refused_after_sibling_apply<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+        let batch = db
+            .new_batch()
+            .set(Sha256::fill(1u8), Sha256::fill(101u8))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let sibling = db
+            .new_batch()
+            .set(Sha256::fill(1u8), Sha256::fill(102u8))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        assert!(batch.proof(&db).is_ok());
+        assert!(batch.pinned_nodes(&db).is_ok());
+
+        // Applying the sibling moves the database off the batch's chain.
+        let (db, _) = db.apply_batch(sibling).await.unwrap();
+        assert!(matches!(batch.proof(&db), Err(Error::StaleRead)));
+        assert!(matches!(batch.pinned_nodes(&db), Err(Error::StaleRead)));
+        db.destroy().await.unwrap();
+    }
+
+    /// Batch reads cover only operations at or above the chain's inactivity floor, so a long-lived,
+    /// a pruned, and a reopened instance at the same commitment all answer alike.
+    #[boxed]
+    pub(crate) async fn run_reads_ignore_inactive_operations<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+        let (old, fresh, own) = (Sha256::fill(1u8), Sha256::fill(2u8), Sha256::fill(3u8));
+
+        // `old` lands at location 1, and the commit at 2 keeps the floor at 0.
+        let seed = db
+            .new_batch()
+            .set(old, Sha256::fill(101u8))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(seed).await.unwrap();
+
+        // Filler keys push the next write past a blob boundary, so pruning can drop `old`.
+        let mut filler = db.new_batch();
+        for i in 10..18u8 {
+            filler = filler.set(Sha256::fill(i), Sha256::fill(i));
+        }
+        let filler = filler.merkleize(&db, None, Location::new(0)).await.unwrap();
+        let (db, _) = db.apply_batch(filler).await.unwrap();
+
+        // A parent writes `fresh` at `base` and raises the floor there, leaving `old` inactive.
+        let base = db.bounds().end;
+        let parent = db
+            .new_batch()
+            .set(fresh, Sha256::fill(102u8))
+            .merkleize(&db, None, base)
+            .await
+            .unwrap();
+        assert_eq!(parent.get(&old, &db).await.unwrap(), None);
+        assert_eq!(
+            parent.get(&fresh, &db).await.unwrap(),
+            Some(Sha256::fill(102u8))
+        );
+        let child = parent.new_batch::<Sha256>();
+        assert_eq!(child.get(&old, &db).await.unwrap(), None);
+        assert_eq!(
+            child.get_many(&[&old, &fresh], &db).await.unwrap(),
+            vec![None, Some(Sha256::fill(102u8))]
+        );
+
+        // A child raising the floor to its commit, past every write including its own, sees none.
+        let grandchild = child
+            .set(own, Sha256::fill(103u8))
+            .merkleize(&db, None, base + 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            grandchild
+                .get_many(&[&old, &fresh, &own], &db)
+                .await
+                .unwrap(),
+            vec![None, None, None]
+        );
+        drop(grandchild);
+
+        // Apply the parent. The long-lived instance still indexes `old`, a pruned one has dropped
+        // it, and a reopened one rebuilds its index from the floor. Batch reads agree on all three.
+        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let expected = vec![None, Some(Sha256::fill(102u8))];
+        assert_eq!(
+            db.new_batch().get_many(&[&old, &fresh], &db).await.unwrap(),
+            expected
+        );
+        let db = db.prune(base).await.unwrap();
+        assert!(db.bounds().start > Location::new(1), "`old` must be pruned");
+        assert_eq!(
+            db.new_batch().get_many(&[&old, &fresh], &db).await.unwrap(),
+            expected
+        );
+        drop(db);
+        let db = open_db(context.child("db")).await;
+        assert_eq!(
+            db.new_batch().get_many(&[&old, &fresh], &db).await.unwrap(),
+            expected
+        );
+        assert_eq!(db.new_batch().get(&old, &db).await.unwrap(), None);
+        db.destroy().await.unwrap();
+    }
+
+    /// A surviving child chain merkleizes across a prune whose floor passed the chain
+    /// base without losing the nodes it needs.
+    #[boxed]
+    pub(crate) async fn run_merkleize_across_prune<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+        // Seed committed state spanning several journal blobs so the prune below
+        // can actually drop history, leaving the chain base above zero.
+        let mut seed = db.new_batch();
+        for i in 0..40u8 {
+            seed = seed.set(Sha256::fill(i), Sha256::fill(i.wrapping_add(100)));
+        }
+        let seed = seed.merkleize(&db, None, Location::new(0)).await.unwrap();
+        let (db, _) = db.apply_batch(seed).await.unwrap();
+        let db = db.commit().await.unwrap();
+
+        // The parent declares a floor at its own commit, past the chain base.
+        let parent_floor = db.bounds().end + 1;
+        let parent = db
+            .new_batch()
+            .set(Sha256::fill(200u8), Sha256::fill(212u8))
+            .merkleize(&db, None, parent_floor)
+            .await
+            .unwrap();
+
+        // Two identical children forked before the apply. One merkleizes now to
+        // record the expected root.
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(201u8), Sha256::fill(213u8));
+        let twin = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(201u8), Sha256::fill(213u8));
+        let expected = twin
+            .merkleize(&db, None, parent_floor)
+            .await
+            .unwrap()
+            .root();
+
+        // Apply the parent and prune to its floor.
+        let (db, _) = db.apply_batch(Arc::clone(&parent)).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let floor = db.inactivity_floor_loc();
+        let db = db.prune(floor).await.unwrap();
+        assert!(*db.bounds().start > 0, "the prune must drop history");
+
+        // The surviving child still merkleizes to the same root.
+        let merkleized = child.merkleize(&db, None, parent_floor).await.unwrap();
+        assert_eq!(merkleized.root(), expected);
+        db.destroy().await.unwrap();
+    }
+
+    /// Once a sibling batch is applied, losing-fork reads return `StaleRead`, while
+    /// merkleization and application return `StaleBatch`.
+    #[boxed]
+    pub(crate) async fn run_stale_fork_refuses<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+        let k1 = Sha256::fill(1u8);
+        let k2 = Sha256::fill(2u8);
+        let floor = db.inactivity_floor_loc();
+        let winner = db
+            .new_batch()
+            .set(k1, Sha256::fill(3u8))
+            .merkleize(&db, None, floor)
+            .await
+            .unwrap();
+        let loser = db
+            .new_batch()
+            .set(k1, Sha256::fill(4u8))
+            .merkleize(&db, None, floor)
+            .await
+            .unwrap();
+        assert_eq!(winner.bounds().tip.size, loser.bounds().tip.size);
+        assert_ne!(winner.root(), loser.root());
+
+        let child = loser.new_batch::<Sha256>().set(k2, Sha256::fill(5u8));
+        let (db, _) = db.apply_batch(winner).await.unwrap();
+
+        assert!(matches!(child.get(&k1, &db).await, Err(Error::StaleRead)));
+        assert!(matches!(
+            child.get_many(&[&k1], &db).await,
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(loser.get(&k1, &db).await, Err(Error::StaleRead)));
+        assert!(matches!(
+            child.merkleize(&db, None, floor).await,
+            Err(Error::StaleBatch)
+        ));
+        assert!(matches!(db.validate_batch(&loser), Err(Error::StaleBatch)));
+        db.destroy().await.unwrap();
+    }
+
+    /// Applying a batch's child moves the database past the parent's own states, so reads
+    /// through the parent refuse while the child keeps reading.
+    #[boxed]
+    pub(crate) async fn run_descendant_apply_makes_parent_reads_stale<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+        let (k1, k2) = (Sha256::fill(1u8), Sha256::fill(2u8));
+        let floor = db.inactivity_floor_loc();
+        let parent = db
+            .new_batch()
+            .set(k1, Sha256::fill(3u8))
+            .merkleize(&db, None, floor)
+            .await
+            .unwrap();
+        assert_eq!(parent.get(&k1, &db).await.unwrap(), Some(Sha256::fill(3u8)));
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(k2, Sha256::fill(4u8))
+            .merkleize(&db, None, floor)
+            .await
+            .unwrap();
+
+        let (db, _) = db.apply_batch(child.clone()).await.unwrap();
+        assert_eq!(child.get(&k1, &db).await.unwrap(), Some(Sha256::fill(3u8)));
+        assert!(matches!(parent.get(&k1, &db).await, Err(Error::StaleRead)));
+        assert!(matches!(
+            parent.get_many(&[&k1], &db).await,
+            Err(Error::StaleRead)
+        ));
+        db.destroy().await.unwrap();
+    }
 
     #[boxed]
     pub(crate) async fn run_empty<F: Family, V, C>(
@@ -1160,6 +1543,9 @@ pub(super) mod tests {
         );
         let (parent_proof, child_proof) = (parent.proof(&db).unwrap(), child.proof(&db).unwrap());
         let (db, parent_range) = db.apply_batch(parent).await.unwrap();
+        // At the parent's tip, the child proves from the live store with the same result.
+        assert_eq!(child.proof(&db).unwrap(), child_proof);
+        assert_eq!(child.pinned_nodes(&db).unwrap(), child_pins);
         let (db, child_range) = db.apply_batch(child).await.unwrap();
         assert_eq!(parent_start, parent_range.start);
         assert_eq!(*parent_start + parent_ops.len() as u64, *parent_range.end);
@@ -3229,22 +3615,19 @@ pub(super) mod tests {
             .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
 
-        // Apply batch with floor=1 (regression). Should return an error.
+        // Merkleize a batch with floor=1 (regression). Should return an error.
         let k2 = Sha256::fill(3u8);
         let v2 = Sha256::fill(4u8);
-        let merkleized = db
+        let result = db
             .new_batch()
             .set(k2, v2)
             .merkleize(&db, None, Location::new(1))
-            .await
-            .unwrap();
-        let result = db.apply_batch(merkleized).await;
+            .await;
         assert!(matches!(result, Err(Error::FloorRegressed(new, current))
                 if new == Location::new(1) && current == Location::new(2)));
     }
 
-    /// Verify that applying a batch with a floor beyond the total operation
-    /// count returns an error.
+    /// Verify that merkleizing a batch with a floor beyond its commit location returns an error.
     #[boxed]
     pub(crate) async fn run_floor_beyond_size<F: Family, V, C>(
         context: deterministic::Context,
@@ -3262,15 +3645,14 @@ pub(super) mod tests {
         // Setting floor=100 exceeds total_size.
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(2u8);
-        let merkleized = db
+        let result = db
             .new_batch()
             .set(k1, v1)
             .merkleize(&db, None, Location::new(100))
-            .await
-            .unwrap();
-        let result = db.apply_batch(merkleized).await;
+            .await;
         assert!(matches!(result, Err(Error::FloorBeyondSize(floor, commit))
                 if floor == Location::new(100) && commit == Location::new(2)));
+        drop(db);
 
         let db = open_db(context.child("test")).await;
 
@@ -3279,17 +3661,16 @@ pub(super) mod tests {
         // prune to remove the commit and leave the db unrecoverable.
         let k2 = Sha256::fill(3u8);
         let v2 = Sha256::fill(4u8);
-        let merkleized = db
+        let result = db
             .new_batch()
             .set(k2, v2)
             .merkleize(&db, None, Location::new(3))
-            .await
-            .unwrap();
-        let result = db.apply_batch(merkleized).await;
+            .await;
         assert!(matches!(result, Err(Error::FloorBeyondSize(floor, commit))
                 if floor == Location::new(3) && commit == Location::new(2)));
 
         // Floor == total_size - 1 (the commit location) is the maximum valid.
+        drop(db);
         let db = open_db(context.child("test")).await;
         let merkleized = db
             .new_batch()
@@ -3302,13 +3683,12 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// A chained batch where an *ancestor* declares a floor below the previous ancestor's
-    /// floor must be rejected, even when that ancestor's floor is still at or above the
-    /// database's current floor. This isolates the cross-batch monotonicity step (every
-    /// commit's floor at or above the previous commit's floor) from the simpler "every
-    /// commit's floor at or above the live floor" rule.
+    /// A chained batch that declares a floor below its parent's floor must be rejected, even
+    /// when its floor is still at or above the database's current floor. This isolates the
+    /// cross-batch monotonicity step (every commit's floor at or above the previous commit's
+    /// floor) from the simpler "every commit's floor at or above the live floor" rule.
     #[boxed]
-    pub(crate) async fn run_chained_ancestor_floor_regression<F: Family, V, C>(
+    pub(crate) async fn run_chained_floor_regression<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3323,34 +3703,22 @@ pub(super) mod tests {
         // Live floor is 0 (from the seeded initial commit).
         // a: 1 set + commit at loc 2, floor=2 (valid: >= 0, == commit_loc).
         // b: 1 set + commit at loc 4, floor=1 (regresses below a's floor=2, but still >= 0).
-        // c: 1 set + commit at loc 6, floor=2 (would be valid in isolation).
-        // Applying c must fail at b with FloorRegressed(1, 2) -- not at b vs the live floor,
-        // and not at c, proving the per-ancestor running floor is what catches it.
+        // Merkleizing b must fail with FloorRegressed(1, 2) -- against a's floor, not the live
+        // floor, proving the parent's floor is what catches it.
         let a = db
             .new_batch()
             .set(Sha256::fill(1u8), Sha256::fill(2u8))
             .merkleize(&db, None, Location::new(2))
             .await
             .unwrap();
-        let b = a
+
+        let Err(err) = a
             .new_batch::<Sha256>()
             .set(Sha256::fill(3u8), Sha256::fill(4u8))
             .merkleize(&db, None, Location::new(1))
             .await
-            .unwrap();
-        let c = b
-            .new_batch::<Sha256>()
-            .set(Sha256::fill(5u8), Sha256::fill(6u8))
-            .merkleize(&db, None, Location::new(2))
-            .await
-            .unwrap();
-
-        let root_before = db.root();
-        let last_commit_before = db.size() - 1;
-        let floor_before = db.inactivity_floor_loc();
-
-        let Err(err) = db.apply_batch(c).await else {
-            panic!("expected apply_batch to fail");
+        else {
+            panic!("expected merkleize to fail");
         };
         assert!(
             matches!(err, Error::FloorRegressed(new, prev)
@@ -3358,21 +3726,14 @@ pub(super) mod tests {
             "unexpected error: {err:?}"
         );
 
-        // Reopen the partition and verify the rejected chain persisted nothing.
-        let db = open_db(context.child("test")).await;
-        assert_eq!(db.root(), root_before);
-        assert_eq!(db.size() - 1, last_commit_before);
-        assert_eq!(db.inactivity_floor_loc(), floor_before);
-
         db.destroy().await.unwrap();
     }
 
-    /// A chained batch where an *ancestor's* floor exceeds its own commit location must be
-    /// rejected, identifying the ancestor's commit_loc (not the tip's). This is the more dangerous
-    /// variant. Monotonicity can still be satisfied while the floor poisons future
-    /// `historical_proof` and recovery.
+    /// A chained batch whose floor exceeds its own commit location, counted past its parent's
+    /// operations, is refused at merkleize. Monotonicity alone would accept it, while the floor
+    /// would poison future `historical_proof` and recovery.
     #[boxed]
-    pub(crate) async fn run_chained_ancestor_floor_beyond_size<F: Family, V, C>(
+    pub(crate) async fn run_chained_floor_beyond_commit<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3384,40 +3745,29 @@ pub(super) mod tests {
     {
         let db = open_db(context.child("test")).await;
 
-        // a: 1 set + commit at loc 2; declare floor=3 (one past the commit -- invalid).
-        // b: tip valid on its own (floor=0 <= b's commit_loc), but a's floor is bad.
+        // a: 1 set + commit at loc 2, floor=2.
         let a = db
             .new_batch()
             .set(Sha256::fill(1u8), Sha256::fill(2u8))
-            .merkleize(&db, None, Location::new(3))
+            .merkleize(&db, None, Location::new(2))
             .await
             .unwrap();
-        let b = a
+
+        // b: 1 set + commit at loc 4, declaring floor=5 (one past its commit). The error names
+        // commit location 4, so the bound counts a's operations.
+        let Err(err) = a
             .new_batch::<Sha256>()
             .set(Sha256::fill(3u8), Sha256::fill(4u8))
-            .merkleize(&db, None, Location::new(0))
+            .merkleize(&db, None, Location::new(5))
             .await
-            .unwrap();
-
-        let root_before = db.root();
-        let last_commit_before = db.size() - 1;
-        let floor_before = db.inactivity_floor_loc();
-
-        let Err(err) = db.apply_batch(b).await else {
-            panic!("expected apply_batch to fail");
+        else {
+            panic!("expected merkleize to fail");
         };
-        // The error must identify the ancestor's commit_loc (2), not the tip's (4).
         assert!(
             matches!(err, Error::FloorBeyondSize(floor, commit)
-                if floor == Location::new(3) && commit == Location::new(2)),
+                if floor == Location::new(5) && commit == Location::new(4)),
             "unexpected error: {err:?}"
         );
-
-        // Reopen the partition and verify the rejected chain persisted nothing.
-        let db = open_db(context.child("test")).await;
-        assert_eq!(db.root(), root_before);
-        assert_eq!(db.size() - 1, last_commit_before);
-        assert_eq!(db.inactivity_floor_loc(), floor_before);
 
         db.destroy().await.unwrap();
     }
