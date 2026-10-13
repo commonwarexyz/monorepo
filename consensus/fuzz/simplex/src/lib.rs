@@ -694,6 +694,7 @@ fn run_standard_once<P: simplex::Simplex>(
                 Epoch::new(EPOCH),
                 term_length,
                 input.optimistic_views,
+                input.handoff,
                 &reporter_only,
             );
             let reporter_states = (state_coverage || collect_audit)
@@ -1036,6 +1037,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
             Epoch::new(EPOCH),
             term_length,
             input.optimistic_views,
+            input.handoff,
             &summary_reporters,
         );
         invariants::check::<P>(
@@ -1741,6 +1743,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             Epoch::new(EPOCH),
             topology.term_length,
             topology.optimistic_views,
+            self.input.handoff,
             &observers,
         );
         if self.state_coverage {
@@ -2695,6 +2698,21 @@ mod tests {
             TEST_CONTAINERS,
             TermLength::new(NZU32!(5)),
         ));
+    }
+
+    /// A pipelined handoff vote at a term start whose parent never certifies
+    /// before the run ends: the incoming leader's own notarize at the term
+    /// start is legal entry evidence, not a premature vote.
+    #[test_traced]
+    fn test_certificate_mock_twins_mutator_pipelined_handoff_vote() {
+        fuzz::<SimplexCertificateMock, TwinsMutator, CodeCoverage>(FuzzInput {
+            handoff: Handoff::Vote(()),
+            ..test_input(
+                0x6472_82CB_8572_3852,
+                PROPERTY_TEST_CONTAINERS,
+                TermLength::ONE,
+            )
+        });
     }
 
     fn property_test_strategy() -> impl Strategy<Value = FuzzInput> {

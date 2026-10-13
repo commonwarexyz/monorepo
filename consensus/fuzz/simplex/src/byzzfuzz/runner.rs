@@ -603,6 +603,7 @@ pub fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput) {
             Epoch::new(EPOCH),
             term_length,
             input.optimistic_views,
+            input.handoff,
             &reporters,
         );
 

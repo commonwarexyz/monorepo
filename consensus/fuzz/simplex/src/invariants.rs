@@ -257,8 +257,10 @@ fn effective_lookahead(term_length: TermLength, optimistic_views: ViewDelta) -> 
 
 // Whether the entry-evidence rule `invariant` is skipped for intra-term
 // views: engines running a nonzero optimistic lookahead enter those views
-// before their predecessor is certified. Term starts are never entered
-// optimistically, so the rule keeps applying there (`entry_rule_applies`).
+// before their predecessor is certified. Term starts stay checked
+// (`entry_rule_applies`), except for a pipelined handoff vote: the incoming
+// leader's own notarize at term start v on v-1 held as optimistic ancestry.
+// Its nullify and finalize at v still need entry evidence.
 // Logged once per skipped rule under the fuzz log switch.
 fn skips_intra_term_entry(invariant: &str, optimistic_views: ViewDelta) -> bool {
     if optimistic_views.is_zero() {
@@ -698,13 +700,15 @@ fn check_basic_invariants<P: Simplex>(
 /// Checks invariants that require per-signer information (votes and fault
 /// evidence). `faults` is the number of Byzantine nodes by participant index
 /// (`0..faults`); only correct nodes (`faults..n`) are checked for equivocation.
-/// See [`check_vote_invariants_with_byzantine`] for `optimistic_views`.
+/// See [`check_vote_invariants_with_byzantine`] for `optimistic_views` and
+/// `handoff`.
 pub fn check_vote_invariants<E, S, L>(
     faults: usize,
     elector: L,
     epoch: Epoch,
     term_length: TermLength,
     optimistic_views: ViewDelta,
+    handoff: Handoff<()>,
     reporters: &[Reporter<E, S, L, Sha256Digest>],
 ) where
     E: CryptoRng,
@@ -718,6 +722,7 @@ pub fn check_vote_invariants<E, S, L>(
         epoch,
         term_length,
         optimistic_views,
+        handoff,
         reporters,
     );
 }
@@ -888,12 +893,18 @@ pub fn check_no_invalid_reports_if_no_faults<E, S, L>(
 /// elector private, so callers supply it). When nonzero under a multi-view
 /// term, the invariants that assume non-optimistic view entry are skipped
 /// for intra-term views.
+///
+/// `handoff` is the decision every honest application returns for a
+/// term-start proposal whose parent is not yet certified. Under
+/// [`Handoff::Vote`] the incoming leader's own term-start notarize vote may
+/// precede its predecessor's certificate.
 pub fn check_vote_invariants_with_byzantine<E, S, L>(
     byzantine: &HashSet<usize>,
     elector: L,
     epoch: Epoch,
     term_length: TermLength,
     optimistic_views: ViewDelta,
+    handoff: Handoff<()>,
     reporters: &[Reporter<E, S, L, Sha256Digest>],
 ) where
     E: CryptoRng,
@@ -1109,6 +1120,8 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     let mut notarize_conflicts: BTreeMap<(u64, Vec<u8>), BTreeSet<Sha256Digest>> = BTreeMap::new();
     let mut finalize_conflicts: BTreeMap<(u64, Vec<u8>), BTreeSet<Sha256Digest>> = BTreeMap::new();
     let mut correct_vote_views: BTreeSet<(u64, Vec<u8>)> = BTreeSet::new();
+    let mut correct_notarize_views: BTreeSet<(u64, Vec<u8>)> = BTreeSet::new();
+    let mut correct_entry_votes: BTreeSet<(u64, Vec<u8>)> = BTreeSet::new();
     let mut correct_raw_notarize_payloads: BTreeMap<u64, BTreeSet<Sha256Digest>> = BTreeMap::new();
     let mut notarization_cert_payloads: BTreeMap<u64, BTreeSet<Sha256Digest>> = BTreeMap::new();
     let mut nullification_cert_views: BTreeSet<u64> = BTreeSet::new();
@@ -1134,6 +1147,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                         pk.as_ref()
                     );
                     correct_vote_views.insert((view.get(), pk.as_ref().to_vec()));
+                    correct_notarize_views.insert((view.get(), pk.as_ref().to_vec()));
                     correct_raw_notarize_payloads
                         .entry(view.get())
                         .or_default()
@@ -1160,6 +1174,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                         pk.as_ref()
                     );
                     correct_vote_views.insert((view.get(), pk.as_ref().to_vec()));
+                    correct_entry_votes.insert((view.get(), pk.as_ref().to_vec()));
                     seen_nullify
                         .entry(view.get())
                         .or_default()
@@ -1184,6 +1199,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                         pk.as_ref()
                     );
                     correct_vote_views.insert((view.get(), pk.as_ref().to_vec()));
+                    correct_entry_votes.insert((view.get(), pk.as_ref().to_vec()));
                     seen_finalize
                         .entry(view.get())
                         .or_default()
@@ -1230,6 +1246,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                     continue;
                 }
                 correct_vote_views.insert((view, pk.as_ref().to_vec()));
+                correct_notarize_views.insert((view, pk.as_ref().to_vec()));
                 record_payload_conflict(
                     &mut seen_notarize_payload,
                     &mut notarize_conflicts,
@@ -1262,6 +1279,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                     continue;
                 }
                 correct_vote_views.insert((view, pk.as_ref().to_vec()));
+                correct_entry_votes.insert((view, pk.as_ref().to_vec()));
                 seen_nullify.entry(view).or_default().insert(pk.clone());
             }
         }
@@ -1292,6 +1310,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                     continue;
                 }
                 correct_vote_views.insert((view, pk.as_ref().to_vec()));
+                correct_entry_votes.insert((view, pk.as_ref().to_vec()));
                 seen_finalize.entry(view).or_default().insert(pk.clone());
                 record_payload_conflict(
                     &mut seen_finalize_payload,
@@ -1474,18 +1493,50 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     // Skipped for intra-term views when any engine runs a nonzero optimistic
     // lookahead: the rule below assumes non-optimistic entry; the
     // optimistic-entry rule (same term, own-vote chain, within lookahead) is
-    // not checked. Term starts are never entered optimistically and stay
-    // checked.
+    // not checked. Term starts stay checked, except for a pipelined handoff
+    // vote: under Handoff::Vote and a Scheduled elector, the incoming leader
+    // of term start v casts its own notarize vote on v-1 held as optimistic
+    // ancestry, so that vote is exempt while the leader's own notarize at
+    // v-1 is in the union (an observed notarization at v-1 is already entry
+    // evidence). Its nullify and finalize at v still need entry evidence, as
+    // do all other signers' votes; a Dynamic elector never pipelines.
     let skip_entry = skips_intra_term_entry(
         "correct_view_entry_requires_predecessor_certificate",
         optimistic_views,
     );
+    let handoff_elector = reporters
+        .first()
+        .filter(|_| matches!(handoff, Handoff::Vote(())))
+        .map(|first| {
+            (
+                elector.clone().build(&first.participants),
+                &first.participants,
+            )
+        });
+    let pipelined_handoff_vote = |view: u64, signer: &Vec<u8>| {
+        let Some((built, participants)) = &handoff_elector else {
+            return false;
+        };
+        if !is_term_start(view, term_length) {
+            return false;
+        }
+        let Some(input) = <L::Elector as ElectorInstance<S>>::Mode::early() else {
+            return false;
+        };
+        let leader = built.elect(Round::new(epoch, View::new(view)), input);
+        participants
+            .key(leader)
+            .is_some_and(|key| key.as_ref() == signer.as_slice())
+            && correct_notarize_views.contains(&(view - 1, signer.clone()))
+            && !correct_entry_votes.contains(&(view, signer.clone()))
+    };
     let mut premature_votes = BTreeSet::new();
     for (view, signer) in &correct_vote_views {
         if entry_rule_applies(skip_entry, *view, term_length)
             && *view > 1
             && !value_progress_views.contains(&(view - 1))
             && !entered_via_nullification(*view, &nullified_views, term_length)
+            && !pipelined_handoff_vote(*view, signer)
         {
             premature_votes.insert((*view, signer.clone()));
         }
@@ -1654,6 +1705,13 @@ fn check_fuzz_invariants<E, S, L>(
         let mut trigger_successful_certifications: BTreeMap<u32, BTreeSet<Round>> = BTreeMap::new();
         let mut trigger_own_votes: BTreeMap<u32, BTreeSet<Round>> = BTreeMap::new();
         let mut accepted_signed: BTreeSet<(Round, View, Sha256Digest)> = BTreeSet::new();
+        // Handoff candidates this node's application answered with Vote,
+        // keyed by (round, payload) with the uncertified parent, and this
+        // node's own notarize votes. Neither is incarnation-scoped: a
+        // replayed vote follows its original decision in the log.
+        let mut handoff_votes: BTreeMap<(Round, Sha256Digest), (View, Sha256Digest)> =
+            BTreeMap::new();
+        let mut own_notarized: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
 
         // Resolves an attributable certificate's signer bitmap to participant
         // keys; `None` for non-attributable schemes.
@@ -1747,6 +1805,31 @@ fn check_fuzz_invariants<E, S, L>(
                     valid: true,
                     activity,
                 } => {
+                    // The observer's own notarize vote for a term-start
+                    // candidate its application answered with Vote on the
+                    // immediately preceding view, held as its own notarize
+                    // vote or an observed notarization. Such a vote precedes
+                    // entry into its view. A rejected certification of that
+                    // parent is not excluded: the audit records the rejection
+                    // when the application answers, not when the voter
+                    // consumes it.
+                    let handoff_vote = match activity {
+                        Activity::Notarize(vote) if vote.signer() == observer_idx => handoff_votes
+                            .get(&(vote.proposal.round, vote.proposal.payload))
+                            .is_some_and(|&(parent_view, parent_payload)| {
+                                let parent_round =
+                                    Round::new(vote.proposal.round.epoch(), parent_view);
+                                parent_view == vote.proposal.parent
+                                    && parent_view.get() + 1 == vote.proposal.round.view().get()
+                                    && (own_notarized.contains(&(parent_round, parent_payload))
+                                        || observed_notarizations.iter().any(|proposal| {
+                                            proposal.round == parent_round
+                                                && proposal.payload == parent_payload
+                                        }))
+                            }),
+                        _ => false,
+                    };
+
                     // These sets are deliberately updated while walking the
                     // append-only log so later checks establish prior local
                     // observation rather than eventual or cross-node evidence.
@@ -1761,14 +1844,22 @@ fn check_fuzz_invariants<E, S, L>(
                         // An own notarize vote may run up to the optimistic
                         // lookahead ahead of the current view (the admission
                         // window), so it only proves the node reached that
-                        // many views below it; nullify and finalize votes
-                        // never run ahead.
+                        // many views below it; a pipelined handoff vote is
+                        // admitted from anywhere in the outgoing term, so it
+                        // proves only that term's start. Nullify and finalize
+                        // votes never run ahead.
                         Activity::Notarize(vote) if vote.signer() == observer_idx => {
                             let round = vote.proposal.round;
-                            incarnation_trigger_own_votes.insert(Round::new(
-                                round.epoch(),
-                                round.view().saturating_sub(optimistic_views),
-                            ));
+                            let reached = if handoff_vote {
+                                View::new(term_start(
+                                    round.view().get().saturating_sub(1),
+                                    term_length,
+                                ))
+                            } else {
+                                round.view().saturating_sub(optimistic_views)
+                            };
+                            incarnation_trigger_own_votes
+                                .insert(Round::new(round.epoch(), reached));
                         }
                         Activity::Nullify(vote) if vote.signer() == observer_idx => {
                             incarnation_trigger_own_votes.insert(vote.round);
@@ -2022,12 +2113,15 @@ fn check_fuzz_invariants<E, S, L>(
                             // below assumes non-optimistic entry; the
                             // optimistic-entry rule (same term, own-vote
                             // chain, within lookahead) is not checked. Term
-                            // starts are never entered optimistically and
-                            // stay checked. The nullify arm below always
-                            // runs: nullify votes are current-view-only, and
-                            // the current view still advances only on
-                            // certification, finalization, or a
-                            // nullification.
+                            // starts stay checked, except for a pipelined
+                            // handoff vote (`handoff_vote` above): the
+                            // incoming leader's own notarize at term start v
+                            // on v-1 held as optimistic ancestry. Its nullify
+                            // and finalize at v still need entry evidence:
+                            // the nullify arm below always runs, as nullify
+                            // votes are current-view-only, and the current
+                            // view still advances only on certification,
+                            // finalization, or a nullification.
                             let view = vote.proposal.round.view().get();
                             if view >= 2 && entry_rule_applies(skip_entry, view, term_length) {
                                 assert!(
@@ -2037,11 +2131,13 @@ fn check_fuzz_invariants<E, S, L>(
                                             vote.proposal.round.epoch(),
                                             &observed_nullifications,
                                             term_length,
-                                        ),
+                                        )
+                                        || handoff_vote,
                                     "Invariant violation: local notarize without entry evidence for view {view}: observer {observer_bytes:?}, proposal {:?}",
                                     vote.proposal
                                 );
                             }
+                            own_notarized.insert((vote.proposal.round, vote.proposal.payload));
                         }
                         Activity::Nullify(vote) if vote.signer() == observer_idx => {
                             // Invariant: local_view_entry_requires_certified_predecessor
@@ -2129,6 +2225,15 @@ fn check_fuzz_invariants<E, S, L>(
                     }
                 }
                 Event::Automaton(event) => {
+                    if let AutomatonEvent::PrepareCompleted {
+                        context,
+                        outcome: Completion::Returned(Handoff::Vote(payload)),
+                    } = event
+                        && &context.leader == observer
+                        && is_term_start(context.round.view().get(), term_length)
+                    {
+                        handoff_votes.insert((context.round, *payload), context.parent);
+                    }
                     match event {
                         AutomatonEvent::PrepareRequested { context }
                         | AutomatonEvent::ProposeRequested { context }
@@ -3464,6 +3569,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep_a, rep_b],
         );
     }
@@ -3488,6 +3594,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep_a, rep_b],
         );
     }
@@ -3509,6 +3616,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep_a, rep_b],
         );
     }
@@ -3526,6 +3634,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3555,6 +3664,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3581,6 +3691,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3610,6 +3721,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3642,6 +3754,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3682,6 +3795,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3708,6 +3822,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3738,6 +3853,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep_a, rep_b],
         );
     }
@@ -3762,6 +3878,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3787,6 +3904,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3812,6 +3930,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3841,6 +3960,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3881,6 +4001,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3902,6 +4023,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep_a, rep_b],
         );
     }
@@ -3921,6 +4043,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3940,6 +4063,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             lookahead,
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3960,7 +4084,186 @@ mod tests {
             Epoch::new(0),
             term_length,
             lookahead,
+            Handoff::Wait,
             &[rep],
+        );
+    }
+
+    /// The elector of an engine running `term_length` terms with `lookahead`:
+    /// single-view terms rotate without a term configuration.
+    fn handoff_elector(term_length: TermLength, lookahead: ViewDelta) -> RoundRobin {
+        if term_length.get() == 1 {
+            RoundRobin::default()
+        } else {
+            term_elector(term_length, lookahead)
+        }
+    }
+
+    /// Index of `elector`'s leader for `view` at epoch 0.
+    fn leader_index(participants: &[Ed25519PublicKey], elector: RoundRobin, view: u64) -> usize {
+        let set = Set::try_from(participants.to_vec()).expect("unique keys");
+        let elector = <RoundRobin as Elector<MockScheme>>::build(elector, &set);
+        usize::from(elector.elect(round(view), ()))
+    }
+
+    /// Index of the incoming leader at the term start `view`.
+    fn term_start_leader(term_length: TermLength, lookahead: ViewDelta, view: u64) -> usize {
+        let (participants, _) = vote_fixture();
+        leader_index(&participants, handoff_elector(term_length, lookahead), view)
+    }
+
+    /// Reports `voter`'s notarize at `view - 1` (when `parent_vote`) and for
+    /// a candidate at `view`, plus its nullify at `view` (when `nullify`),
+    /// with history certified only through `view - 2`, then runs the summary
+    /// checks under `handoff`.
+    fn check_early_vote(
+        term_length: TermLength,
+        lookahead: ViewDelta,
+        view: u64,
+        voter: usize,
+        parent_vote: bool,
+        nullify: bool,
+        handoff: Handoff<()>,
+    ) {
+        let (participants, schemes) = vote_fixture();
+        let mut rep = Reporter::new(
+            test_rng(),
+            ReporterConfig {
+                participants: Set::try_from(participants.to_vec()).expect("unique keys"),
+                scheme: schemes[0].clone(),
+                elector: handoff_elector(term_length, lookahead),
+            },
+        );
+        rep.certified.lock().extend((1..=view - 2).map(View::new));
+        if parent_vote {
+            rep.report(Activity::Notarize(
+                Notarize::sign(&schemes[voter], proposal(view - 1, view - 2, 0xA)).unwrap(),
+            ));
+        }
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[voter], proposal(view, view - 1, 0xB)).unwrap(),
+        ));
+        if nullify {
+            rep.report(Activity::Nullify(
+                Nullify::sign::<Sha256Digest>(&schemes[voter], round(view)).unwrap(),
+            ));
+        }
+        check_vote_invariants_with_byzantine(
+            &HashSet::new(),
+            handoff_elector(term_length, lookahead),
+            Epoch::new(0),
+            term_length,
+            lookahead,
+            handoff,
+            &[rep],
+        );
+    }
+
+    #[test]
+    fn pipelined_handoff_vote_at_term_start_passes() {
+        let leader = term_start_leader(TermLength::ONE, ViewDelta::zero(), 3);
+        check_early_vote(
+            TermLength::ONE,
+            ViewDelta::zero(),
+            3,
+            leader,
+            true,
+            false,
+            Handoff::Vote(()),
+        );
+    }
+
+    #[test]
+    fn pipelined_handoff_vote_at_stable_term_start_passes() {
+        let term_length = TermLength::new(NZU32!(5));
+        for lookahead in [ViewDelta::zero(), ViewDelta::new(1)] {
+            let leader = term_start_leader(term_length, lookahead, 6);
+            check_early_vote(
+                term_length,
+                lookahead,
+                6,
+                leader,
+                true,
+                false,
+                Handoff::Vote(()),
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "voted in view 3 without entry evidence at predecessor view 2")]
+    fn staged_handoff_keeps_term_start_vote_checked() {
+        let leader = term_start_leader(TermLength::ONE, ViewDelta::zero(), 3);
+        check_early_vote(
+            TermLength::ONE,
+            ViewDelta::zero(),
+            3,
+            leader,
+            true,
+            false,
+            Handoff::Stage(()),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "voted in view 3 without entry evidence at predecessor view 2")]
+    fn early_term_start_vote_by_non_leader_is_rejected() {
+        let leader = term_start_leader(TermLength::ONE, ViewDelta::zero(), 3);
+        check_early_vote(
+            TermLength::ONE,
+            ViewDelta::zero(),
+            3,
+            (leader + 1) % N as usize,
+            true,
+            false,
+            Handoff::Vote(()),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "voted in view 3 without entry evidence at predecessor view 2")]
+    fn handoff_vote_without_own_parent_vote_is_rejected() {
+        let leader = term_start_leader(TermLength::ONE, ViewDelta::zero(), 3);
+        check_early_vote(
+            TermLength::ONE,
+            ViewDelta::zero(),
+            3,
+            leader,
+            false,
+            false,
+            Handoff::Vote(()),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "voted in view 3 without entry evidence at predecessor view 2")]
+    fn handoff_leader_nullify_at_term_start_is_rejected() {
+        let leader = term_start_leader(TermLength::ONE, ViewDelta::zero(), 3);
+        check_early_vote(
+            TermLength::ONE,
+            ViewDelta::zero(),
+            3,
+            leader,
+            true,
+            true,
+            Handoff::Vote(()),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "voted in view 7 without entry evidence at predecessor view 6")]
+    fn handoff_vote_inside_a_term_is_rejected() {
+        // View 7 is the second view of a five-view term.
+        let term_length = TermLength::new(NZU32!(5));
+        let leader = term_start_leader(term_length, ViewDelta::zero(), 7);
+        check_early_vote(
+            term_length,
+            ViewDelta::zero(),
+            7,
+            leader,
+            true,
+            false,
+            Handoff::Vote(()),
         );
     }
 
@@ -3980,6 +4283,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             lookahead,
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -3999,6 +4303,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::new(1),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -4021,6 +4326,7 @@ mod tests {
             Epoch::new(0),
             term_length,
             lookahead,
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -4042,6 +4348,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -4063,6 +4370,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -4084,6 +4392,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -4111,6 +4420,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -4133,6 +4443,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep_a, rep_b],
         );
     }
@@ -4153,6 +4464,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -4173,6 +4485,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -5186,6 +5499,117 @@ mod tests {
         check_fuzz_invariants(term_length, std::slice::from_ref(&reporter));
     }
 
+    /// How the leader of a term start holds the outgoing view it builds on.
+    enum ParentHold {
+        /// Its own notarize vote for the parent.
+        OwnVote,
+        /// An observed notarization of `payload` at the parent view.
+        Observed(u8),
+    }
+
+    /// Audit log of the leader of term start 3 under single-view terms: it
+    /// holds the outgoing view 2 as `hold`, its application answers
+    /// `decision` for the term-start candidate on parent `(2, 0xA)` (an
+    /// ordinary proposal when `None`), and it casts its own notarize for that
+    /// candidate while view 2 never certifies.
+    fn audited_term_start_vote(
+        hold: ParentHold,
+        decision: Option<Handoff<Sha256Digest>>,
+    ) -> AuditReporter {
+        let (participants, schemes) = vote_fixture();
+        let leader = leader_index(&participants, RoundRobin::default(), 3);
+        let outgoing = leader_index(&participants, RoundRobin::default(), 2);
+        let mut reporter = audit_reporter(leader, &participants, &schemes);
+        let parent = proposal(2, 1, 0xA);
+        let candidate = proposal(3, 2, 0xB);
+        reporter.report(Activity::Finalization(finalization_activity(
+            &schemes, 1, 0, 0xC,
+        )));
+        match hold {
+            ParentHold::OwnVote => {
+                record_verify_result_with_parent_digest(
+                    &reporter,
+                    participants[outgoing].clone(),
+                    &parent,
+                    digest(0xC),
+                    true,
+                );
+                reporter.report(Activity::Notarize(
+                    Notarize::sign(&schemes[leader], parent.clone()).unwrap(),
+                ));
+            }
+            ParentHold::Observed(payload) => {
+                reporter.report(Activity::Notarization(notarization_activity(
+                    &schemes, 2, 1, payload,
+                )));
+            }
+        }
+        let context = Context {
+            round: candidate.round,
+            leader: participants[leader].clone(),
+            parent: (parent.round.view(), parent.payload),
+        };
+        let event = match decision {
+            Some(handoff) => AutomatonEvent::PrepareCompleted {
+                context,
+                outcome: Completion::Returned(handoff),
+            },
+            None => AutomatonEvent::ProposeCompleted {
+                context,
+                outcome: Completion::Returned(candidate.payload),
+            },
+        };
+        record_automaton(&reporter, event);
+        reporter.report(Activity::Notarize(
+            Notarize::sign(&schemes[leader], candidate).unwrap(),
+        ));
+        reporter
+    }
+
+    fn check_audited_term_start_vote(hold: ParentHold, decision: Option<Handoff<Sha256Digest>>) {
+        let reporter = audited_term_start_vote(hold, decision);
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn audited_pipelined_handoff_vote_passes() {
+        check_audited_term_start_vote(ParentHold::OwnVote, Some(Handoff::Vote(digest(0xB))));
+    }
+
+    #[test]
+    fn audited_handoff_vote_on_observed_notarization_passes() {
+        check_audited_term_start_vote(ParentHold::Observed(0xA), Some(Handoff::Vote(digest(0xB))));
+    }
+
+    #[test]
+    #[should_panic(expected = "local notarize without entry evidence for view 3")]
+    fn audited_handoff_vote_on_other_notarized_payload_is_rejected() {
+        check_audited_term_start_vote(ParentHold::Observed(0xD), Some(Handoff::Vote(digest(0xB))));
+    }
+
+    #[test]
+    #[should_panic(expected = "local notarize without entry evidence for view 3")]
+    fn audited_staged_handoff_keeps_term_start_vote_checked() {
+        check_audited_term_start_vote(ParentHold::OwnVote, Some(Handoff::Stage(digest(0xB))));
+    }
+
+    #[test]
+    #[should_panic(expected = "local notarize without entry evidence for view 3")]
+    fn audited_term_start_vote_without_handoff_decision_is_rejected() {
+        check_audited_term_start_vote(ParentHold::OwnVote, None);
+    }
+
+    #[test]
+    fn handoff_vote_does_not_advance_past_parent_trigger() {
+        // The handoff vote at view 3 leaves the leader in view 2, so a
+        // certification rejection of view 2 that lands after the vote arms a
+        // timeout the leader has not yet advanced past.
+        let reporter =
+            audited_term_start_vote(ParentHold::OwnVote, Some(Handoff::Vote(digest(0xB))));
+        record_certify_result(&reporter, &proposal(2, 1, 0xA), false);
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
     #[test]
     #[should_panic(expected = "local nullify without entry evidence for view 5")]
     fn own_nullify_without_predecessor_certificate_is_rejected_under_optimistic_lookahead() {
@@ -5909,6 +6333,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -5933,6 +6358,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -5956,6 +6382,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -5976,6 +6403,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -5996,6 +6424,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -6017,6 +6446,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep_a, rep_b],
         );
     }
@@ -6035,6 +6465,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -6056,6 +6487,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -6074,6 +6506,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -6108,6 +6541,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -6126,6 +6560,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -6142,6 +6577,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -6166,6 +6602,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -6195,6 +6632,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -6222,6 +6660,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -6248,6 +6687,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -6277,6 +6717,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -6390,6 +6831,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[rep],
         );
     }
@@ -6475,6 +6917,31 @@ mod tests {
         check_certificate_leader_derivation(
             Random::new(RandomVersion::V1),
             TermLength::ONE,
+            &[rep],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "voted in view 3 without entry evidence at predecessor view 2")]
+    fn handoff_vote_requires_a_scheduled_elector() {
+        // A Dynamic elector cannot name the incoming leader before the
+        // certificate that unlocks the term exists, so nothing is exempt.
+        let (participants, schemes) = threshold_vote_fixture();
+        let mut rep = random_elector_reporter(&participants, &schemes);
+        rep.certified.lock().insert(View::new(1));
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[1], proposal(2, 1, 0xA)).unwrap(),
+        ));
+        rep.report(Activity::Notarize(
+            Notarize::sign(&schemes[1], proposal(3, 2, 0xB)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(
+            &HashSet::new(),
+            Random::new(RandomVersion::V1),
+            Epoch::new(0),
+            TermLength::ONE,
+            ViewDelta::zero(),
+            Handoff::Vote(()),
             &[rep],
         );
     }
@@ -6596,6 +7063,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[reporter],
         );
     }
@@ -6620,6 +7088,7 @@ mod tests {
             Epoch::new(0),
             TermLength::ONE,
             ViewDelta::zero(),
+            Handoff::Wait,
             &[reporter],
         );
     }

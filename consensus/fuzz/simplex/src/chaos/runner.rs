@@ -37,7 +37,7 @@ use crate::{
     },
 };
 use commonware_consensus::{
-    Monitor as _,
+    Handoff, Monitor as _,
     simplex::mocks::{relay, reporter::Reporter},
     types::{Epoch, TermLength, View, ViewDelta},
 };
@@ -320,6 +320,7 @@ fn check_safety<P: Simplex>(
     reporters: &[ChaosReporter<P>],
     term_length: TermLength,
     optimistic_views: ViewDelta,
+    handoff: Handoff<()>,
 ) {
     // Audit-history invariants plus the basic replica-state suite over the
     // lossless per-node event logs. The logs live in the retained reporters,
@@ -353,6 +354,7 @@ fn check_safety<P: Simplex>(
         Epoch::new(commonware_consensus_fuzz_core::EPOCH),
         term_length,
         optimistic_views,
+        handoff,
         &summaries,
     );
 }
@@ -408,6 +410,7 @@ async fn paced_enact<P: Simplex>(
         reporters,
         P::effective_term_length(input.term_length),
         input.optimistic_views,
+        input.handoff,
     );
     boundary
 }
@@ -666,6 +669,7 @@ fn run_with<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput, st
             &reporters,
             term_length,
             input.optimistic_views,
+            input.handoff,
         );
     });
 }
