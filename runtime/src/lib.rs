@@ -1099,6 +1099,7 @@ stability_scope!(BETA {
 
     /// Join the handles of reads started one range at a time into one [`Blob::start_read_many`]
     /// handle.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn join_reads(reads: Vec<Handle<IoBufsMut>>) -> Handle<Vec<IoBufsMut>> {
         Handle::from_future(async move {
             let mut bufs = Vec::with_capacity(reads.len());
