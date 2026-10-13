@@ -112,7 +112,9 @@ pub trait DbAny: BatchableDb<Key: Key, Value: CodecShared + Clone> + Send + Sync
     + use<'a, Self, Q>;
 
     /// Return a future that warms the page cache for the applied state of `keys` without
-    /// borrowing the database. Best effort: absent keys are skipped and failures are logged.
+    /// borrowing the database. Best effort and candidate-based: keys absent from the index are
+    /// skipped, but an absent key whose translated key collides with an indexed key's may cause
+    /// reads of unrelated operations. Failures are logged.
     fn prefetch(
         &self,
         keys: &[&Self::Key],
