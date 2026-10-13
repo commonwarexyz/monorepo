@@ -1169,7 +1169,7 @@ impl Local {
             Role::Pool(index) => Some(Seat {
                 index,
                 tasks: shared.tasks.id(),
-                ready: Ready::new(shared.pool.ring(index).owner()),
+                ready: Ready::new(shared.pool.queue(index).owner()),
             }),
             Role::Dedicated => None,
         };
