@@ -291,32 +291,32 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// Like [Self::get_or_insert_mut], for a key the caller expects to request soon but has not
     /// requested yet.
     ///
-    /// On a miss, admits the key to Main unreferenced, immediately before the CLOCK hand, instead
-    /// of to Small. On a hit, moves the entry to the same place without recording use (see
-    /// [Self::expect]). Small holds only a tenth of the capacity, so a predicted set larger than
-    /// that would evict itself from Small before its first request. Behind the hand, the entry is
-    /// the last resident the sweep reaches. It displaces only a Main resident that was not
-    /// referenced since the hand last passed it, so referenced residents keep their second chance.
-    /// A request before the hand reaches the entry sets its reference bit (Main has no correlation
-    /// window), so a requested entry earns a second chance like any other Main resident, while an
-    /// unrequested one is evicted when the hand reaches it.
+    /// The entry is placed in Main, without recording use, as the last resident Main's eviction
+    /// sweep reaches: a missing key is admitted there, and a resident one is moved there (see
+    /// [Self::expect]). Admitting it displaces only a Main resident that was not referenced since
+    /// the sweep last passed it. A request before the sweep reaches the entry gives it the same
+    /// second chance as any referenced Main resident, and an unrequested entry is evicted when the
+    /// sweep reaches it.
     ///
-    /// The hand moves one resident per Main eviction (caused by an expected entry, a Ghost hit,
-    /// or a Small entry promoted on eviction) and one per referenced resident it passes. Small
-    /// admissions that evict from Small do not move it. So in a full cache with Main capacity
-    /// `M` (`capacity - max(capacity / 10, 1)`), a run of `W` expected entries admitted together
-    /// survives until requested as long as `W + A + R < M`, where `A` counts later Main
-    /// admissions and `R` the referenced residents the hand passes, both from the first entry of
-    /// the run onward.
-    ///
-    /// Expected entries always reside in Main: a full Main yields its next victim even while Small
-    /// has unused capacity, which stays available to demand misses.
+    /// Expected entries always reside in Main: a full Main evicts from itself even while Small has
+    /// unused capacity, which stays available to demand misses. An expected set therefore survives
+    /// until requested only while it fits in Main alongside Main's other admissions, regardless
+    /// of the cache's total capacity.
     #[commonware_macros::stability(ALPHA)]
     pub fn get_or_insert_mut_expected<F: FnOnce() -> V>(
         &mut self,
         key: K,
         make: F,
     ) -> (usize, &mut V) {
+        // The entry sits immediately before the CLOCK hand, unreferenced. The hand moves one
+        // resident per Main eviction (caused by an expected entry, a Ghost hit, or a Small entry
+        // promoted on eviction) and one per referenced resident it passes. Small admissions that
+        // evict from Small do not move it. Main has no correlation window, so a request before
+        // the hand arrives sets the reference bit. In a full cache with Main capacity `M`
+        // (`capacity - max(capacity / 10, 1)`), a run of `W` expected entries admitted together
+        // therefore survives until requested as long as `W + A + R < M`, where `A` counts later
+        // Main admissions and `R` the referenced residents the hand passes, both from the first
+        // entry of the run onward.
         let hash = self.hasher.hash_one(&key);
         let slot = match self.find_slot_hashed(&key, hash) {
             Some(slot) => {
@@ -333,7 +333,7 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// The entry moves to where [Self::get_or_insert_mut_expected] admits a new key, immediately
     /// before the Main CLOCK hand, without recording use. A Main resident keeps its reference bit.
     /// A Small resident moves to Main, evicting an unreferenced Main resident if Main is full, so
-    /// it no longer depends on Small's short probation. An expected set thus shares one survival
+    /// its survival does not depend on Small's probation. An expected set thus shares one survival
     /// bound whether its keys were resident or not.
     #[commonware_macros::stability(ALPHA)]
     pub fn expect(&mut self, key: &K) -> bool {
