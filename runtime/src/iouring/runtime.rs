@@ -63,8 +63,9 @@
 //! queue, or only the new runnable while a thief holds a claim. A worker with
 //! nothing to run steals half of another worker's run queue, rounded down, so
 //! a runnable queued alone stays where it is. A push that leaves a stealable
-//! backlog offers it to a parked worker unless a worker already holds a
-//! search count and is responsible for finding or handing on that work.
+//! backlog offers it to a parked worker unless an existing search count
+//! covers finding or handing on that work. A count can belong to a searching
+//! worker or to a wake that has reserved it but has not yet claimed a worker.
 //!
 //! ```text
 //! ordinary spawn:
@@ -1076,7 +1077,8 @@ pub struct Local {
     pub closing: bool,
     /// Shared monotonic sample for the current service turn.
     pub now: Instant,
-    /// Root wake flag, taken before each root poll so a wake during the poll is kept.
+    /// Root wake flag, set by local wakes or applied mailbox messages and
+    /// taken before each root poll so a wake during the poll is kept.
     pub root_ready: bool,
     /// Strong mailbox ownership retained through kernel retirement.
     pub mailbox: Arc<Mailbox>,
@@ -2033,7 +2035,9 @@ impl Worker {
                 // contains the destruction of a finished or cancelled future.
                 match runnable.poll(owner) {
                     AfterPoll::Done => {}
-                    // Join the tail so self-waking tasks cannot skip other ready work.
+                    // Queue a self-wake behind this worker's other work instead
+                    // of polling it again at once. Overflow or stealing can
+                    // still move it elsewhere.
                     AfterPoll::Requeue(runnable) => self.local.borrow_mut().enqueue(runnable),
                     // The future is gone, so releasing the set's reference and
                     // the runnable's runs no user code.
@@ -2051,8 +2055,9 @@ impl Worker {
                 leave_search(&mut searcher);
                 let mut cx = TaskContext::from_waker(root_waker);
 
-                // A wake during this poll sets root_ready again. Pending must
-                // not clear it, including a wake caused by the root itself.
+                // A local wake during this poll sets root_ready again, and a
+                // foreign wake queues a message that sets it when applied.
+                // Pending must not clear a wake caused by the root itself.
                 if let Poll::Ready(output) = root.as_mut().poll(&mut cx) {
                     return Some(output);
                 }

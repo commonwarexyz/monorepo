@@ -4,10 +4,11 @@
 //! future, and a trailer with the task's [`Links`] in the runner's task set.
 //! The header holds the task's [`State`], a vtable for the erased future,
 //! the pool that runs the task, and the identity of the set that retains it.
-//! A [`Task`] and a task's [`Waker`] are each a thin pointer to that header
-//! holding one reference, so cloning either counts a reference, and a wake is
-//! an atomic transition on the state, plus a queue push when it publishes a
-//! [`Runnable`].
+//! A [`Task`] holds a thin pointer to that header. A task's [`Waker`] carries
+//! the same pointer as its data, alongside the waker vtable. Each owning
+//! `Task` or `Waker` counts one reference, so cloning either counts another,
+//! and a wake is an atomic transition on the state, plus a queue push when it
+//! publishes a [`Runnable`].
 //!
 //! # Lifecycle
 //!
@@ -17,11 +18,13 @@
 //! a cloned [`Task`] cannot manufacture queued work. A wake publishes a
 //! runnable only when the task has none, so duplicate wakes coalesce. A wake
 //! that arrives during a poll is recorded in the state, and the poll hands its
-//! runnable back only if it returns pending. That runnable joins the tail of
-//! the run queue, so a self-waking task cannot skip other ready work.
+//! runnable back only if it returns pending. That runnable is offered at the
+//! tail of the poller's run queue, behind its queued work.
 //! Completion is terminal, so a late wake of a finished task is a no-op.
 //!
 //! ```text
+//! Lifecycle transitions (reference counts omitted):
+//!
 //! Wakers, from any thread (`notify_by_ref`, `notify_by_value`):
 //!   Idle              -> Queued       publishes a runnable
 //!   Running           -> Notified     a pending poll requeues its runnable
@@ -496,7 +499,7 @@ struct Vtable {
 #[repr(C)]
 pub struct Header {
     /// Lifecycle and reference count, changed on any thread by wakers and
-    /// references and by the poller.
+    /// references, by the poller, and by teardown.
     state: State,
     /// Operations on the concrete future behind this header.
     vtable: &'static Vtable,
@@ -1029,6 +1032,9 @@ unsafe fn waker_drop(ptr: *const ()) {
 }
 
 /// Waker for the root future, which the worker pins on its stack.
+/// Wakes must run without a `Local` borrow, since a wake borrows the current
+/// worker's `Local` to compare it with the owner, and on the owning worker
+/// borrows it mutably to mark the root ready.
 pub struct RootWaker {
     /// Worker polling the root, without extending its lifetime.
     mailbox: Weak<Mailbox>,
@@ -1134,6 +1140,7 @@ impl Ready {
     }
 }
 
+/// Task lifecycle, reference, layout, and destruction contracts, also run by Miri.
 #[cfg(test)]
 #[commonware_macros::test_group("miri")]
 pub mod tests {
@@ -1549,8 +1556,8 @@ pub mod tests {
         assert!(!state.start_poll());
     }
 
-    /// Wakes during a pending poll requeue the polled runnable once, and wakes
-    /// during the final poll are ignored.
+    /// Wakes during a pending poll requeue the polled runnable once, and
+    /// completion clears wakes recorded during the final poll.
     #[test]
     fn test_wakes_during_poll_coalesce_into_one_requeue() {
         let drops = Arc::new(AtomicUsize::new(0));
@@ -1568,15 +1575,16 @@ pub mod tests {
             },
         );
 
-        // Wakes during the poll leave the task queued, and the poll hands its
-        // runnable back rather than publishing one.
+        // A pending poll with recorded wakes hands its runnable back rather
+        // than publishing another one.
         let AfterPoll::Requeue(runnable) = ready.pop().unwrap().poll(set.id()) else {
             panic!("self-woken pending poll must requeue");
         };
         assert_eq!(task_of(&runnable).as_ptr(), task.as_ptr());
         assert!(scheduled(&pool).is_empty());
 
-        // The final poll wakes itself again, which the terminal state ignores.
+        // The final poll records another wake, which completion clears
+        // instead of requeueing the runnable.
         let AfterPoll::Retire(retired) = runnable.poll(set.id()) else {
             panic!("final poll must complete");
         };
@@ -2476,20 +2484,15 @@ mod loom_tests {
         }
     }
 
-    /// A searcher that stole half of a busy worker's backlog and returned its
-    /// count while another worker held one publishes what it moved: the claim
-    /// it released on the victim's run queue reaches the fence of the last
-    /// returned count, so the look that fence orders, or the search of the
-    /// worker it wakes, finds the rest of the backlog and steals it. Worker
-    /// one takes a count before worker zero queues four tasks, so their kicks
-    /// are suppressed, steals two, returns its count, and leaves after
-    /// running them. Worker zero blocks until three tasks have run, which
-    /// needs worker two to steal one of the two left behind. A count return
-    /// that publishes nothing lets worker two read the victim's head as still
-    /// claimed after its own fence and park for good, which loom reports as a
-    /// deadlock.
+    /// A searcher's released claim reaches the last count return's fence
+    /// through its release of the count. Peers must run three of four queued
+    /// tasks before their owner resumes. Schedules where worker one steals
+    /// two and returns a nonfinal count require worker two to find the
+    /// remaining backlog, rather than park after observing a stale claim.
+    /// A lost handoff leaves the owner blocked and loom reports a deadlock.
     #[test]
     fn test_search_return_publishes_the_steal_to_the_last_return() {
+        /// Backlog requiring more progress than one half-backlog steal.
         const TASKS: usize = 2 * STEALABLE;
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(2);
@@ -2500,8 +2503,9 @@ mod loom_tests {
             let ran: Arc<(Mutex<usize>, Condvar)> = Arc::new((Mutex::new(0), Condvar::new()));
             let gate: Gate = Arc::new((Mutex::new(0), Condvar::new()));
 
-            // Worker one holds a count across the pushes, steals half of
-            // them, returns the count, runs what it stole, and leaves.
+            // An empty search takes a count, held across the pushes so their
+            // kicks are left to it. This worker then scans once more, runs
+            // whatever it stole, and leaves.
             let thief = thread::spawn({
                 let pool = pool.clone();
                 let set = set.clone();

@@ -29,6 +29,17 @@
 //! - I5: every value is read at most once, and its slot is written again
 //!   only after that read.
 //!
+//! # Ordering
+//!
+//! A release store of `tail` publishes initialized slots to a thief's
+//! acquiring tail load. Releasing a claim publishes its completed reads
+//! through `head`, which the owner acquires before reusing those slots.
+//! Shared head updates also release the tail publications they observed, so
+//! acquiring the head before loading the tail keeps that tail from lagging
+//! behind the head. An overflow can still advance the tail after the head
+//! snapshot, so a claim refreshes an apparent backlog larger than capacity.
+//! The owner reads its own tail with relaxed loads, since only it writes it.
+//!
 //! # Overflow
 //!
 //! A push into a full queue exchanges the head to `(tail, tail)`, taking every
@@ -110,8 +121,8 @@ pub const STEALABLE: usize = 2;
 /// Mask that selects a position's slot.
 const MASK: usize = CAPACITY - 1;
 
-// Positions select slots by masking, and a full queue's distance must fit in a
-// wrapping `u32` comparison.
+/// Positions select slots by masking, and a full queue's distance must fit in
+/// a wrapping `u32` comparison.
 const _: () = assert!(CAPACITY.is_power_of_two() && CAPACITY < 1 << 31);
 
 /// Shared indices and slots governed by invariants I1 through I5.
@@ -126,7 +137,8 @@ struct Inner<T> {
     /// Whether no reader but the owner ever touches the queue, fixed at
     /// construction.
     exclusive: bool,
-    /// Initialized only in the ranges owned by the queue or an overflow.
+    /// Storage for unclaimed, claimed, and overflow values. A pop owns its
+    /// slot from the head update until its read completes.
     slots: Box<[UnsafeCell<MaybeUninit<T>>]>,
 }
 
@@ -138,22 +150,41 @@ unsafe impl<T: Send> Send for Inner<T> {}
 
 /// Shared handle of a queue, through which thieves steal and from which its
 /// owner is taken.
-pub struct Queue<T>(Arc<CachePadded<Inner<T>>>);
+pub struct Queue<T>(
+    /// Shared indices and storage, kept alive by every queue and owner handle.
+    Arc<CachePadded<Inner<T>>>,
+);
 
 /// Unique owner of a queue, movable between threads but never shared.
-pub struct Owner<T>(Arc<CachePadded<Inner<T>>>, PhantomData<Cell<()>>);
+pub struct Owner<T>(
+    /// The same indices and storage reached by the shared queue handle.
+    Arc<CachePadded<Inner<T>>>,
+    /// Prevent sharing the owner while permitting it to move between threads.
+    PhantomData<Cell<()>>,
+);
 
 /// Result of publishing a value into a queue.
 pub enum Push<'a, T> {
     /// The value was published, with the length computed from the push's head
     /// snapshot. A concurrent claim can make this an overestimate.
-    Pushed(usize),
+    Pushed(
+        /// Available length computed from the push's head snapshot.
+        usize,
+    ),
     /// The queue was full: the newest half and the new value must be published
     /// elsewhere, in that order.
-    Overflow(Overflow<'a, T>, T),
+    Overflow(
+        /// Removed newest half, which must be exhausted.
+        Overflow<'a, T>,
+        /// New value that was not inserted.
+        T,
+    ),
     /// No slot was free while a thief held a claim, so only the new value must
     /// move elsewhere.
-    Claimed(T),
+    Claimed(
+        /// New value that was not inserted.
+        T,
+    ),
 }
 
 /// Newest half of a full queue, yielded oldest first.
@@ -203,7 +234,8 @@ impl<T> Queue<T> {
         })))
     }
 
-    /// Take the owner, panicking if it was already taken.
+    /// Take the owner, panicking if it was already taken, even if it has since
+    /// been dropped.
     pub fn owner(&self) -> Owner<T> {
         assert!(
             !self.0.owned.swap(true, Ordering::AcqRel),
@@ -215,9 +247,9 @@ impl<T> Queue<T> {
     /// Whether a snapshot shows no claim and at least [`STEALABLE`] values.
     /// Concurrent changes can make this hint stale before a steal claims them.
     pub fn is_stealable(&self) -> bool {
-        // The head is loaded before the tail: the tail only grows, so the
-        // distance cannot wrap to a huge backlog from a tail older than the
-        // head.
+        // Shared head updates release the tail they observed. Acquire the
+        // head first so the tail cannot lag behind it and turn the wrapping
+        // distance into a false backlog.
         let (steal, real) = unpack(self.0.head.load(Ordering::Acquire));
         let tail = self.0.tail.load(Ordering::Acquire);
         steal == real && tail.wrapping_sub(real) >= STEALABLE as u32
@@ -238,6 +270,8 @@ impl<T> Queue<T> {
             !Arc::ptr_eq(&into.0, &self.0),
             "cannot steal into the source queue"
         );
+        // Only this owner writes the destination tail. Acquiring its head
+        // observes completed claim reads before their slots are reused.
         let tail = into.0.tail.load(Ordering::Relaxed);
         let (steal, _) = unpack(into.0.head.load(Ordering::Acquire));
         if tail.wrapping_sub(steal) > HALF {
@@ -272,6 +306,8 @@ impl<T> Queue<T> {
             if steal != real {
                 return None;
             }
+            // Acquire the owner's release publication before reading any
+            // slot that a successful claim grants us.
             let tail = self.0.tail.load(Ordering::Acquire);
             let available = tail.wrapping_sub(real);
 
@@ -287,6 +323,8 @@ impl<T> Queue<T> {
             }
             assert!(count <= HALF, "claim exceeds half the queue");
             let claimed = pack(steal, real.wrapping_add(count));
+            // Release carries the observed tail to later acquiring head
+            // readers, preserving their head-before-tail snapshot order.
             match self
                 .0
                 .head
@@ -299,11 +337,14 @@ impl<T> Queue<T> {
     }
 
     /// Release a claim once its slots have been read, lifting `steal` to the
-    /// current `real`, which owner pops may have moved past the claim.
+    /// current `real`, which owner pops may have moved past the claim. The
+    /// caller must hold exactly this claim and have read every claimed slot.
     fn release_claim(&self, first: u32, count: u32) {
         let mut head = pack(first, first.wrapping_add(count));
         loop {
             let (_, real) = unpack(head);
+            // Release lets an owner that acquires this head reuse the read
+            // slots.
             match self.0.head.compare_exchange(
                 head,
                 pack(real, real),
@@ -351,6 +392,7 @@ impl<T> Owner<T> {
     /// attempt's head snapshot, where a test pauses the owner.
     fn push_with(&mut self, value: T, mut after_snapshot: impl FnMut()) -> Push<'_, T> {
         loop {
+            // Acquire completed claim reads before writing a freed slot.
             let head = self.0.head.load(Ordering::Acquire);
             let (steal, real) = unpack(head);
             let tail = self.0.tail.load(Ordering::Relaxed);
@@ -371,6 +413,8 @@ impl<T> Owner<T> {
                 CAPACITY as u32,
                 "overflow requires a full queue"
             );
+            // The exchange arbitrates against a claim and releases the
+            // owner's preceding tail publications to later head readers.
             if self
                 .0
                 .head
@@ -437,6 +481,8 @@ impl<T> Owner<T> {
             } else {
                 pack(steal, next_real)
             };
+            // Release carries the owner's tail stores to thieves that acquire
+            // this head before loading the tail.
             match self
                 .0
                 .head
@@ -564,7 +610,10 @@ impl<T> Drop for Inner<T> {
 #[cfg(test)]
 impl<T> Queue<T> {
     /// Claim the oldest `count` values as a thief paused after its claim
-    /// exchange would hold them.
+    /// exchange would hold them. Panics unless no claim is held and `count`
+    /// is positive, at most [`HALF`], and within the available values, or if
+    /// another head update wins the exchange. The caller must read and release
+    /// the returned claim exactly once through [`Self::finish_claim`].
     pub(super) fn hold_claim(&self, count: u32) -> (u32, u32) {
         let head = self.0.head.load(Ordering::Acquire);
         let (steal, real) = unpack(head);
@@ -586,6 +635,7 @@ impl<T> Queue<T> {
     }
 
     /// Read a held claim's values and release it, as the paused thief would.
+    /// The caller must own the unread claim returned by [`Self::hold_claim`].
     pub(super) fn finish_claim(&self, claim: (u32, u32)) -> Vec<T> {
         let (first, count) = claim;
         let values = (0..count)
@@ -600,6 +650,7 @@ impl<T> Queue<T> {
     }
 }
 
+/// Queue contracts and races, with slot accesses also checked under Miri.
 #[cfg(all(test, not(feature = "loom")))]
 #[commonware_macros::test_group("miri")]
 mod tests {
@@ -636,7 +687,12 @@ mod tests {
     }
 
     /// Counts its drops, so a value read twice or never shows.
-    struct Counted(usize, Arc<AtomicUsize>);
+    struct Counted(
+        /// Identity used to check that every published value is returned.
+        usize,
+        /// Shared count of destroyed values.
+        Arc<AtomicUsize>,
+    );
 
     impl Drop for Counted {
         fn drop(&mut self) {
@@ -1088,7 +1144,8 @@ mod tests {
         fn send<T: Send>() {}
         fn sync<T: Sync>() {}
 
-        // Resolving the check is ambiguous exactly when the owner is Sync.
+        /// Resolving the check is ambiguous exactly when the type is `Sync`,
+        /// since both implementations then match.
         trait AmbiguousIfSync<A> {
             fn check() {}
         }
