@@ -247,7 +247,8 @@ impl BatchReads {
 /// The driver lives while a reader waiting on the batch holds it: the reader that started the
 /// batch, or a [BatchJoin] entry's `fetch`. The last waiter of a joined page removes that
 /// entry when it cancels, so a batch that no reader waits on is dropped and withdraws its pages.
-/// Handles to the driver are therefore only dropped outside the cache lock.
+/// Dropping the last handle to the driver takes the cache lock, so handles are dropped only
+/// outside it.
 struct BatchFetches {
     cache: Arc<RwLock<Cache>>,
     blob_id: u64,

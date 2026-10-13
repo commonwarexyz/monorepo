@@ -247,6 +247,12 @@ impl<B: Blob> View<'_, B> {
     ///
     /// Returns the number of items fully served without a blob read (from the in-memory tail and
     /// the page cache). The remaining items required at least one blob read.
+    ///
+    /// Pages missing from the page cache are read with one batched blob read and cached.
+    /// Concurrent reads that miss the same page share one blob read of it: a read that finds the
+    /// page already being fetched waits on that fetch and drives it, so it completes even if the
+    /// read that started the fetch is not polled. Dropping the returned future abandons the
+    /// fetches no other read is waiting on.
     pub async fn read_many_into(
         &self,
         buf: &mut [u8],
