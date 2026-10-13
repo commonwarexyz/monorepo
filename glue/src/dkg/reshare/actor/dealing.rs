@@ -10,6 +10,7 @@ use crate::dkg::{
 };
 use commonware_codec::{Decode, Encode};
 use commonware_consensus::{
+    Heightable as _,
     marshal::core::Variant as MarshalVariant,
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher},
@@ -334,6 +335,7 @@ mod tests {
     use commonware_actor::Feedback;
     use commonware_consensus::{Reporter, marshal};
     use commonware_cryptography::{
+        Digested, Digestible as _,
         bls12381::{
             dkg::feldman_desmedt::{Dealer as CryptoDealer, Info, Player as CryptoPlayer, Reveal},
             primitives::sharing::Mode,
@@ -450,7 +452,8 @@ mod tests {
                 received: received.clone(),
             };
             let (sender, _) = inert_channel([peer]);
-            let block = Arc::new(mocks::genesis_block(signer.public_key()));
+            let block = mocks::genesis_block(signer.public_key());
+            let block = Digested::new_trusted(block.clone(), block.digest());
             let (ack, waiter) = Exact::handle();
             assert_eq!(
                 mailbox.report(marshal::Update::Block(block, ack)),

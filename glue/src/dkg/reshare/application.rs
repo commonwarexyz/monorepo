@@ -5,12 +5,11 @@ use crate::dkg::{
     types::Payload,
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, CertifiableBlock, Handoff,
+    Application as ConsensusApplication, CertifiableBlock, Handoff, Heightable,
     marshal::ancestry::Ancestry,
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
-use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
-use commonware_parallel::Strategy;
+use commonware_cryptography::{Digested, Signer, bls12381::primitives::variant::Variant};
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::sequence::Unit;
 use rand_core::Rng;
@@ -50,30 +49,28 @@ pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = U
 /// The inner application may be one adapted through
 /// [`stateful`](crate::stateful). [`Application`] forwards its own input to the
 /// inner application as [`Input::upstream`].
-pub struct Application<A, B, V, C, T>
+pub struct Application<A, B, V, C>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
-    T: Strategy,
 {
     inner: A,
-    reshare: Mailbox<B, V, C, T>,
+    reshare: Mailbox<B, V, C>,
     epocher: FixedEpocher,
 }
 
-impl<A, B, V, C, T> Application<A, B, V, C, T>
+impl<A, B, V, C> Application<A, B, V, C>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
-    T: Strategy,
 {
     /// Wraps `inner`, using `reshare` to fetch reshare payloads.
     ///
     /// `blocks_per_epoch` must equal the actor's
     /// [`Config::blocks_per_epoch`](crate::dkg::reshare::Config::blocks_per_epoch).
-    pub const fn new(inner: A, reshare: Mailbox<B, V, C, T>, blocks_per_epoch: NonZeroU64) -> Self {
+    pub const fn new(inner: A, reshare: Mailbox<B, V, C>, blocks_per_epoch: NonZeroU64) -> Self {
         Self {
             inner,
             reshare,
@@ -92,13 +89,12 @@ where
     }
 }
 
-impl<A, B, V, C, T> Clone for Application<A, B, V, C, T>
+impl<A, B, V, C> Clone for Application<A, B, V, C>
 where
     A: Clone,
     B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
-    T: Strategy,
 {
     fn clone(&self) -> Self {
         Self {
@@ -109,7 +105,7 @@ where
     }
 }
 
-impl<A, E, B, V, C, I, T> ConsensusApplication<E> for Application<A, B, V, C, T>
+impl<A, E, B, V, C, I> ConsensusApplication<E> for Application<A, B, V, C>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: ConsensusApplication<E, Block = B, Input = Input<I, V, C, B::Directory>>,
@@ -118,7 +114,6 @@ where
     V: Variant,
     C: Signer,
     I: Send,
-    T: Strategy,
 {
     type SigningScheme = A::SigningScheme;
     type Context = A::Context;
@@ -155,7 +150,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> Handoff<Self::Block> {
+    ) -> Handoff<Digested<Self::Block>> {
         let Some(parent) = ancestry.peek() else {
             return Handoff::Wait;
         };
@@ -206,7 +201,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         let Some(parent) = ancestry.peek() else {
             debug!("proposal rejected: missing parent ancestry");
             return None;
@@ -282,7 +277,7 @@ where
         };
         let height = tip.height();
         let phase = self.phase(height);
-        let tip_payload = tip.payload();
+        let tip_payload = tip.inner().payload();
         let span = tracing::Span::current();
         span.record("height", height.traced());
         span.record("phase", field::debug(phase));
@@ -354,7 +349,6 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         sha256::Sha256,
     };
-    use commonware_parallel::Sequential;
     use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
         Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, ordered::Set,
@@ -370,7 +364,7 @@ mod tests {
 
     type TestPayload = Payload<TestBlsVariant, PrivateKey>;
     type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
-    type TestWrapper = Application<RecordingApp, TestBlock, TestBlsVariant, PrivateKey, Sequential>;
+    type TestWrapper = Application<RecordingApp, TestBlock, TestBlsVariant, PrivateKey>;
 
     impl CertifiableBlock for TestBlock {
         type Context = TestContext;
@@ -447,7 +441,7 @@ mod tests {
             context: (E, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
-        ) -> Handoff<Self::Block> {
+        ) -> Handoff<Digested<Self::Block>> {
             if self.handoff.is_wait() {
                 return Handoff::Wait;
             }
@@ -462,7 +456,7 @@ mod tests {
             (_, context): (E, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
-        ) -> Option<Self::Block> {
+        ) -> Option<Digested<Self::Block>> {
             let parent = ancestry.peek()?.clone();
             self.proposed.lock().push(input.payload.clone());
             if let Some(entered) = self.proposal_entered.lock().take() {
@@ -479,12 +473,13 @@ mod tests {
 
             let block =
                 TestBlock::new::<Sha256>(context, parent.digest(), parent.height().next(), 0);
-            Some(match input.payload {
+            let block = match input.payload {
                 Some(payload) => {
                     block.with_payload::<Sha256, TestBlsVariant, PrivateKey>(NZU32!(16), payload)
                 }
                 None => block,
-            })
+            };
+            Some(Digested::new_trusted(block.clone(), block.digest()))
         }
 
         async fn verify(&mut self, _: (E, Self::Context), _: impl Ancestry<Self::Block>) -> bool {
@@ -516,7 +511,7 @@ mod tests {
             let _ = reply.send(response);
         });
 
-        Application::new(inner, Mailbox::new(sender, Sequential), NZU64!(2))
+        Application::new(inner, Mailbox::new(sender), NZU64!(2))
     }
 
     fn log_wrapper(
@@ -565,7 +560,7 @@ mod tests {
         });
 
         (
-            Application::new(inner, Mailbox::new(sender, Sequential), NZU64!(4)),
+            Application::new(inner, Mailbox::new(sender), NZU64!(4)),
             release_rx,
         )
     }
@@ -574,7 +569,10 @@ mod tests {
         PrivateKey::from_seed(99)
     }
 
-    fn block_context(parent: &TestBlock, view: u64) -> TestContext {
+    fn block_context(
+        parent: &impl Digestible<Digest = mocks::TestDigest>,
+        view: u64,
+    ) -> TestContext {
         TestContext {
             round: Round::new(Epoch::zero(), View::new(view)),
             leader: leader().public_key(),
@@ -604,7 +602,10 @@ mod tests {
         })
     }
 
-    fn final_block(parent: &TestBlock, payload: Option<TestPayload>) -> Arc<TestBlock> {
+    fn final_block(
+        parent: &impl commonware_consensus::Block<Digest = mocks::TestDigest>,
+        payload: Option<TestPayload>,
+    ) -> Digested<TestBlock> {
         let block = TestBlock::new::<Sha256>(
             block_context(parent, 1),
             parent.digest(),
@@ -617,7 +618,7 @@ mod tests {
             }
             None => block,
         };
-        Arc::new(block)
+        Digested::new_trusted(block.clone(), block.digest())
     }
 
     fn midpoint_parent() -> TestBlock {
@@ -650,7 +651,10 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("app"), block_context(&midpoint, 2)),
-                        ancestry::from_iter([Arc::new(midpoint.clone())]),
+                        ancestry::from_iter([Digested::new_trusted(
+                            midpoint.clone(),
+                            midpoint.digest(),
+                        )]),
                         (),
                     )
                     .await;
@@ -668,19 +672,25 @@ mod tests {
                 let proposed = app
                     .propose(
                         (context.child("propose"), block_context(&midpoint, 2)),
-                        ancestry::from_iter([Arc::new(midpoint.clone())]),
+                        ancestry::from_iter([Digested::new_trusted(
+                            midpoint.clone(),
+                            midpoint.digest(),
+                        )]),
                         (),
                     )
                     .await
                     .expect("the ordinary proposal builds");
-                assert!(proposed.payload() == Some(payload.clone()));
+                assert!(proposed.inner().payload() == Some(payload.clone()));
                 assert!(inner.proposed() == vec![Some(payload.clone())]);
 
                 // Before the midpoint no dealer log is reserved, so the decision is forwarded.
                 let prepared = app
                     .prepare(
                         (context.child("early"), block_context(&genesis, 1)),
-                        ancestry::from_iter([Arc::new(genesis.clone())]),
+                        ancestry::from_iter([Digested::new_trusted(
+                            genesis.clone(),
+                            genesis.digest(),
+                        )]),
                         (),
                     )
                     .await;
@@ -688,7 +698,7 @@ mod tests {
                     (Handoff::Vote(()), Handoff::Vote(block))
                     | (Handoff::Stage(()), Handoff::Stage(block)) => {
                         assert!(inner.proposed() == vec![Some(payload.clone()), None]);
-                        assert!(block.payload().is_none());
+                        assert!(block.inner().payload().is_none());
                     }
                     (Handoff::Wait, Handoff::Wait) => {
                         assert!(
@@ -737,13 +747,15 @@ mod tests {
                         }
                     }
                 });
-                let mut app =
-                    Application::new(inner.clone(), Mailbox::new(sender, Sequential), NZU64!(2));
+                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
 
                 let prepared = app
                     .prepare(
                         (context.child("app"), block_context(&parent, 1)),
-                        ancestry::from_iter([Arc::new(parent.clone())]),
+                        ancestry::from_iter([Digested::new_trusted(
+                            parent.clone(),
+                            parent.digest(),
+                        )]),
                         (),
                     )
                     .await;
@@ -761,12 +773,15 @@ mod tests {
                 let proposed = app
                     .propose(
                         (context.child("propose"), block_context(&parent, 1)),
-                        ancestry::from_iter([Arc::new(parent.clone())]),
+                        ancestry::from_iter([Digested::new_trusted(
+                            parent.clone(),
+                            parent.digest(),
+                        )]),
                         (),
                     )
                     .await
                     .expect("the ordinary proposal builds");
-                assert!(proposed.payload() == Some(payload.clone()));
+                assert!(proposed.inner().payload() == Some(payload.clone()));
                 assert!(inner.proposed() == vec![Some(payload.clone())]);
                 assert_eq!(*requests.lock(), 1);
             }
@@ -785,7 +800,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
-                    ancestry::from_iter([Arc::new(parent.clone())]),
+                    ancestry::from_iter([Digested::new_trusted(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await;
@@ -798,7 +813,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app_retry"), block_context(&parent, 3)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::new_trusted(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await;
@@ -822,12 +837,11 @@ mod tests {
             let (sender, mut receiver) = mailbox::new::<
                 Message<TestBlock, TestBlsVariant, PrivateKey>,
             >(context.child("mailbox"), NZUsize!(4));
-            let mut app =
-                Application::new(inner.clone(), Mailbox::new(sender, Sequential), NZU64!(4));
+            let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(4));
 
             let mut propose = Box::pin(app.propose(
                 (context.child("app"), block_context(&parent, 2)),
-                ancestry::from_iter([Arc::new(parent)]),
+                ancestry::from_iter([Digested::new_trusted(parent.clone(), parent.digest())]),
                 (),
             ));
             assert!(propose.as_mut().now_or_never().is_none());
@@ -880,12 +894,12 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::new_trusted(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await
                 .expect("proposal should be built");
-            assert!(proposed.payload() == Some(payload.clone()));
+            assert!(proposed.inner().payload() == Some(payload.clone()));
             let proposed_payloads = inner.proposed();
             assert_eq!(proposed_payloads.len(), 1);
             assert!(proposed_payloads[0] == Some(payload));
@@ -913,7 +927,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::new_trusted(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await;
@@ -934,13 +948,13 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::new_trusted(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await
                 .expect("proposal should be built");
 
-            assert!(proposed.payload().is_none());
+            assert!(proposed.inner().payload().is_none());
             let proposed_payloads = inner.proposed();
             assert_eq!(proposed_payloads.len(), 1);
             assert!(proposed_payloads[0].is_none());
@@ -962,13 +976,13 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::new_trusted(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await
                 .expect("proposal should be built");
 
-            assert!(proposed.payload() == Some(payload.clone()));
+            assert!(proposed.inner().payload() == Some(payload.clone()));
             let proposed_payloads = inner.proposed();
             assert_eq!(proposed_payloads.len(), 1);
             assert!(proposed_payloads[0] == Some(payload));
@@ -979,7 +993,8 @@ mod tests {
     fn verification_rejects_unavailable_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let parent = mocks::genesis_block(leader().public_key());
+            let parent = Digested::new_trusted(parent.clone(), parent.digest());
             let tip = final_block(&parent, Some(epoch_payload(1)));
             let mut app = wrapper(&context, EpochInfoResponse::Unavailable);
             let inner = app.inner.clone();
@@ -1001,7 +1016,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             for response in [EpochInfoResponse::Following, EpochInfoResponse::Pending] {
-                let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+                let parent = mocks::genesis_block(leader().public_key());
+                let parent = Digested::new_trusted(parent.clone(), parent.digest());
                 let tip = final_block(&parent, Some(epoch_payload(1)));
                 let expected_tip = tip.digest();
                 let expected_parent = parent.digest();
@@ -1011,8 +1027,7 @@ mod tests {
                 >(
                     context.child("mailbox"), NZUsize!(1)
                 );
-                let mut app =
-                    Application::new(inner.clone(), Mailbox::new(sender, Sequential), NZU64!(2));
+                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
                 let mut verify = Box::pin(app.verify(
                     (context.child("app"), block_context(&parent, 1)),
                     ancestry::from_iter([tip, parent]),
@@ -1057,7 +1072,8 @@ mod tests {
     fn verification_accepts_legitimate_no_artifact_final_block() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let parent = mocks::genesis_block(leader().public_key());
+            let parent = Digested::new_trusted(parent.clone(), parent.digest());
             let tip = final_block(&parent, None);
             let mut app = wrapper(&context, EpochInfoResponse::Available(None));
             let inner = app.inner.clone();
@@ -1078,7 +1094,8 @@ mod tests {
     fn verification_accepts_equal_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let parent = mocks::genesis_block(leader().public_key());
+            let parent = Digested::new_trusted(parent.clone(), parent.digest());
             let payload = epoch_payload(2);
             let tip = final_block(&parent, Some(payload.clone()));
             let mut app = wrapper(&context, EpochInfoResponse::Available(Some(payload)));
@@ -1100,7 +1117,8 @@ mod tests {
     fn verification_rejects_mismatched_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let parent = mocks::genesis_block(leader().public_key());
+            let parent = Digested::new_trusted(parent.clone(), parent.digest());
             let tip = final_block(&parent, Some(epoch_payload(3)));
             let response = EpochInfoResponse::Available(Some(epoch_payload(4)));
             let mut app = wrapper(&context, response);
@@ -1130,7 +1148,7 @@ mod tests {
             let (sender, _receiver) = mailbox::new::<
                 Message<TestBlock, TestBlsVariant, PrivateKey>,
             >(context.child("mailbox"), NZUsize!(1));
-            let mut app = Application::new(inner.clone(), Mailbox::new(sender, Sequential), NZU64!(6));
+            let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(6));
             let mut parent = mocks::child(&mocks::genesis_block(leader().public_key()));
 
             // Each candidate extends the previous one and carries epoch info.
@@ -1146,7 +1164,10 @@ mod tests {
                 let verified = app
                     .verify(
                         (context.child("app"), block_context(&parent, tip.height().get())),
-                        ancestry::from_iter([Arc::new(tip.clone()), Arc::new(parent)]),
+                        ancestry::from_iter([
+                            Digested::new_trusted(tip.clone(), tip.digest()),
+                            Digested::new_trusted(parent.clone(), parent.digest()),
+                        ]),
                     )
                     .await;
                 assert!(!verified, "{phase:?} block carried epoch info");
@@ -1171,7 +1192,7 @@ mod tests {
             let (sender, _receiver) = mailbox::new::<
                 Message<TestBlock, TestBlsVariant, PrivateKey>,
             >(context.child("mailbox"), NZUsize!(1));
-            let mut app = Application::new(inner.clone(), Mailbox::new(sender, Sequential), NZU64!(6));
+            let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(6));
             let mut parent = mocks::child(&mocks::genesis_block(leader().public_key()));
 
             // Build one signed dealer log for the epoch.
@@ -1208,7 +1229,10 @@ mod tests {
                 let verified = app
                     .verify(
                         (context.child("app"), block_context(&parent, tip.height().get())),
-                        ancestry::from_iter([Arc::new(tip.clone()), Arc::new(parent)]),
+                        ancestry::from_iter([
+                            Digested::new_trusted(tip.clone(), tip.digest()),
+                            Digested::new_trusted(parent.clone(), parent.digest()),
+                        ]),
                     )
                     .await;
                 assert_eq!(verified, accepted, "{phase:?} block carried a dealer log");

@@ -14,11 +14,11 @@
 
 use crate::{Block, simplex::scheme::Scheme, types::Round};
 use commonware_codec::{Codec, Error as CodecError, Input, Read};
-use commonware_cryptography::{Digest, Digestible, PublicKey};
+use commonware_cryptography::{Digest, Digested, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_utils::channel::oneshot;
-use std::{future::Future, marker::PhantomData, sync::Arc};
+use std::{future::Future, marker::PhantomData};
 
 /// A block commitment and the evidence available when decoding it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,53 +33,41 @@ pub enum ExpectedCommitment<C> {
 }
 
 /// A marker trait describing the types used by a variant of Marshal.
+///
+/// Working blocks carry their identity. A [`Variant::Block`] reads its digest and commitment from
+/// what it was built with, and [`Variant::into_shared`] yields a [`Digested`] application block,
+/// so identity is read, never computed. A block's identity is established once, where its raw
+/// form enters marshal. The application digests a block it built, [`Variant::decode_block`] a
+/// received block, and [`Variant::restore`] or [`Variant::restore_across`] a stored block.
 pub trait Variant: Clone + Send + Sync + 'static {
-    /// The working block type of marshal, supporting the consensus commitment.
+    /// The working block type of marshal, whose digest and consensus commitment are ready.
     ///
     /// Cloning must share the block payload, and conversion to [`Self::StoredBlock`]
     /// must not copy it.
     type Block: Block<Digest = <Self::ApplicationBlock as Digestible>::Digest>
         + Into<Self::StoredBlock>;
 
-    /// The application block type.
-    type ApplicationBlock: Block;
+    /// The application block type, as decoded from the wire.
+    type ApplicationBlock: Block + Codec;
 
-    /// The type of block stored in the archive.
+    /// The type of block stored in the archive, as decoded from storage.
     ///
-    /// Must be convertible back to the working block type via `Into`.
+    /// Decoding only parses, so a stored block's identity is reattached from the key it was
+    /// stored under by [`Self::restore`], or computed by [`Self::restore_across`] when the key
+    /// is unknown. Marshal never computes a stored block's digest directly.
     type StoredBlock: Block<Digest = <Self::Block as Digestible>::Digest>
-        + Into<Self::Block>
         + Codec<Cfg = <Self::ApplicationBlock as Read>::Cfg>;
 
     /// The [`Digest`] type used by consensus.
     type Commitment: Digest;
 
-    /// Computes the consensus commitment for a block.
+    /// Returns the consensus commitment of a block.
     ///
     /// The commitment is what validators sign over during consensus.
     ///
     /// Together with [`Variant::commitment_to_inner`], implementations must satisfy:
     /// `commitment_to_inner(commitment(block)) == block.digest()`.
     fn commitment(block: &Self::Block) -> Self::Commitment;
-
-    /// Computes the consensus commitment for a block, splitting any work across `strategy`.
-    fn commitment_across(block: &Self::Block, _strategy: &impl Strategy) -> Self::Commitment {
-        Self::commitment(block)
-    }
-
-    /// Computes the consensus commitment for a stored block.
-    ///
-    /// The stored representation carries enough information to derive the
-    /// commitment without reconstructing a working block.
-    fn stored_commitment(block: &Self::StoredBlock) -> Self::Commitment;
-
-    /// Computes the consensus commitment for a stored block, splitting any work across `strategy`.
-    fn stored_commitment_across(
-        block: &Self::StoredBlock,
-        _strategy: &impl Strategy,
-    ) -> Self::Commitment {
-        Self::stored_commitment(block)
-    }
 
     /// Extracts the block digest from a consensus commitment.
     ///
@@ -91,6 +79,12 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// Returns the parent commitment referenced by `block`.
     fn parent_commitment(block: &Self::Block) -> Self::Commitment;
 
+    /// Returns the parent commitment referenced by a stored block.
+    ///
+    /// The parent linkage is part of the stored bytes, so walking ancestry through storage does
+    /// not restore each block's identity.
+    fn stored_parent_commitment(block: &Self::StoredBlock) -> Self::Commitment;
+
     /// Validates a certificate payload against the active consensus scheme.
     fn check_payload<S>(scheme: &S, payload: Self::Commitment) -> bool
     where
@@ -98,19 +92,38 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Decodes a [`Self::Block`] received over the wire, failing unless [`Self::commitment`] of
     /// the result equals the commitment in `expected`.
+    ///
+    /// The block's identity is computed as jobs submitted to `strategy`, which decides whether
+    /// each runs inline or on its workers.
     fn decode_block(
         buf: impl Input,
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         expected: ExpectedCommitment<Self::Commitment>,
         strategy: &impl Strategy,
-    ) -> Result<Self::Block, CodecError>;
+    ) -> impl Future<Output = Result<Self::Block, CodecError>> + Send;
 
-    /// Converts a working block to a shared application block without copying the payload.
-    fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock>;
+    /// Restores a working block from its stored form and `digest`, the key it was stored under.
+    fn restore(
+        stored: Self::StoredBlock,
+        digest: <Self::Block as Digestible>::Digest,
+    ) -> Self::Block;
 
-    /// Reconstructs a working block from an application block and trusted payload.
+    /// Restores a working block from its stored form when the key it was stored under is
+    /// unknown, computing any identity the stored form lacks as a job on `strategy`.
+    fn restore_across(
+        stored: Self::StoredBlock,
+        strategy: &impl Strategy,
+    ) -> impl Future<Output = Self::Block> + Send;
+
+    /// Converts a working block to the application block without copying the payload.
+    fn into_shared(block: Self::Block) -> Digested<Self::ApplicationBlock>;
+
+    /// Reconstructs a working block from an application block and the trusted consensus payload
+    /// that commits to it.
+    ///
+    /// Panics if `payload` does not commit to the block's digest.
     fn from_application_block(
-        block: Self::ApplicationBlock,
+        block: Digested<Self::ApplicationBlock>,
         payload: Self::Commitment,
     ) -> Self::Block;
 }

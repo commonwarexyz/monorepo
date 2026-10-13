@@ -31,7 +31,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest, Digestible, Hasher, PublicKey as CryptoPublicKey, Signer,
+    Digest, Digested, Digestible, Hasher, PublicKey as CryptoPublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::DealerPrivMsg,
         primitives::{
@@ -602,11 +602,11 @@ impl Registrar for MockConsumer {
 
 #[derive(Clone, Default)]
 pub(crate) struct MarshalApplication {
-    blocks: Arc<Mutex<BTreeMap<Height, Arc<TestBlock>>>>,
+    blocks: Arc<Mutex<BTreeMap<Height, Digested<TestBlock>>>>,
 }
 
 impl MarshalApplication {
-    pub(crate) fn blocks(&self) -> BTreeMap<Height, Arc<TestBlock>> {
+    pub(crate) fn blocks(&self) -> BTreeMap<Height, Digested<TestBlock>> {
         self.blocks.lock().clone()
     }
 }
@@ -724,6 +724,8 @@ pub(crate) async fn closed_marshal_mailbox(
     .await
     .expect("blocks archive");
 
+    let genesis = genesis_block(signer.public_key());
+    let genesis = Digested::new_trusted(genesis.clone(), genesis.digest());
     let (actor, mailbox, _) = MarshalActor::<_, _, _, _, _, _, _, Exact>::init(
         context.child("marshal"),
         finalizations_by_height,
@@ -731,7 +733,7 @@ pub(crate) async fn closed_marshal_mailbox(
         marshal::Config {
             provider: TestProvider::new(scheme),
             epocher: FixedEpocher::new(blocks_per_epoch),
-            start: MarshalStart::Genesis(genesis_block(signer.public_key()).into()),
+            start: MarshalStart::Genesis(genesis),
             partition_prefix: format!("{partition_prefix}-marshal"),
             mailbox_size: NZUsize!(16),
             view_retention: ViewDelta::new(8),

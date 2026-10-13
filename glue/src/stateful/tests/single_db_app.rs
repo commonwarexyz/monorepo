@@ -1,4 +1,4 @@
-use super::common::*;
+use super::{common::*, mocks::digested};
 use crate::{
     simulate::{
         engine::{EngineDefinition, InitContext},
@@ -257,8 +257,8 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let tip = ancestry.next().await?;
         let merkleized = Self::execute(tip.height(), batches).await;
         let bounds = merkleized.bounds();
-        if merkleized.root() != tip.state_root
-            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.range
+        if merkleized.root() != tip.inner().state_root
+            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.inner().range
         {
             return None;
         }
@@ -487,7 +487,7 @@ impl EngineDefinition for SingleDbEngine {
         let marshal_config = marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: plan.marshal_start(genesis_block.clone().into()),
+            start: plan.marshal_start(digested(genesis_block.clone())),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
@@ -570,7 +570,6 @@ impl EngineDefinition for SingleDbEngine {
             stateful_mailbox.clone(),
             marshal_mailbox.clone(),
             FixedEpocher::new(EPOCH_LENGTH),
-            Sequential,
         );
 
         // Marshal reporter: stateful mailbox, wrapped by monitor.

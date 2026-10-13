@@ -31,7 +31,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{
-    ChaCha20Poly1305, bls12381::primitives::variant::MinSig, ed25519, sha256::Sha256,
+    ChaCha20Poly1305, Digested, bls12381::primitives::variant::MinSig, ed25519, sha256::Sha256,
 };
 use commonware_glue::{
     dkg::{
@@ -200,11 +200,15 @@ pub async fn run(context: tokio::Context, args: Validator) {
 
     let genesis_target =
         <types::Database<tokio::Context> as DatabaseSet<tokio::Context>>::initial_sync_targets();
-    let genesis = Block::genesis(
-        network.participants[0].clone(),
-        genesis_info.clone(),
-        genesis_target,
-    );
+    let genesis = Digested::compute(
+        Block::genesis(
+            network.participants[0].clone(),
+            genesis_info.clone(),
+            genesis_target,
+        ),
+        &Sequential,
+    )
+    .await;
     let stateful_startup = context.child("stateful_startup");
     let mut plan = SyncPlan::init(stateful_startup.child("plan"), partition_prefix).await;
     let (probe_actor, probe_mailbox) = probe::Actor::new(probe_config(
@@ -239,7 +243,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: plan.marshal_start(genesis.clone().into()),
+            start: plan.marshal_start(genesis.clone()),
             partition_prefix: partition_prefix.to_string(),
             mailbox_size: MAILBOX_SIZE,
             view_retention: ViewDelta::new(10),
@@ -329,7 +333,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let (stateful_actor, stateful_mailbox) = Stateful::new(
         context.child("stateful"),
         StatefulConfig {
-            application: App::new(genesis.clone()),
+            application: App::new(genesis.inner().clone()),
             db_config: types::db_config(partition_prefix, page_cache.clone()),
             provider: (),
             marshal: (marshal.clone(), floor),
@@ -352,7 +356,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
         ),
         marshal.clone(),
         FixedEpocher::new(BLOCKS_PER_EPOCH),
-        Sequential,
     );
     let (orchestrator_actor, orchestrator_mailbox) = orchestrator::Actor::new(
         context.child("orchestrator"),

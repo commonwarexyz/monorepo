@@ -29,13 +29,13 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
 use commonware_consensus::{
-    Heightable as _,
+    Block as _, Heightable as _,
     marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{EpochPhase, FixedEpocher, Height},
 };
 use commonware_cryptography::{
-    BatchVerifier, PublicKey, Signer,
+    BatchVerifier, Digested, Digestible as _, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::Reveal,
         primitives::{sharing::Mode as SharingMode, variant::Variant as BlsVariant},
@@ -250,7 +250,7 @@ where
     pub fn new(
         context: E,
         config: Config<C, M, X, P, SS, T, S, MV, R>,
-    ) -> (Self, Mailbox<B, V, C, T, A>) {
+    ) -> (Self, Mailbox<B, V, C, A>) {
         let epocher = FixedEpocher::new(config.blocks_per_epoch);
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         let metrics = ReshareMetrics::new(&context);
@@ -263,7 +263,7 @@ where
                 blocker: config.blocker,
                 participants_provider: config.participants_provider,
                 secret_store: Some(config.secret_store),
-                strategy: config.strategy.clone(),
+                strategy: config.strategy,
                 registrar: config.registrar,
                 marshal: config.marshal,
                 state_sync: config.state_sync,
@@ -283,7 +283,7 @@ where
                 mode: Mode::Reshare,
                 tip: None,
             },
-            Mailbox::new(sender, config.strategy),
+            Mailbox::new(sender),
         )
     }
 
@@ -291,7 +291,7 @@ where
         context: E,
         config: Config<C, M, X, P, SS, T, S, MV, R>,
         dkg: DkgConfig<V, C::PublicKey, B::Directory>,
-    ) -> (Self, Mailbox<B, V, C, T, A>) {
+    ) -> (Self, Mailbox<B, V, C, A>) {
         let (mut actor, mailbox) = Self::new(context, config);
         actor.mode = Mode::Dkg {
             participants: dkg.participants,
@@ -376,7 +376,7 @@ where
             (None, None)
         };
 
-        self.tip = startup(anchor, floor, &self.strategy);
+        self.tip = startup(anchor, floor);
 
         if matches!(self.mode, Mode::Dkg { .. }) {
             self.run_dkg(&mut store, &mut dealing_mux).await;
@@ -439,7 +439,7 @@ where
     /// Panics if `block` conflicts with the tip at the same height, skips
     /// heights above the tip, or is at the next height without the tip as its
     /// parent.
-    fn covered(&self, block: &B) -> bool {
+    fn covered(&self, block: &Digested<B>) -> bool {
         self.tip.is_some_and(|tip| {
             if block.height() == tip.height {
                 assert_eq!(block.digest(), tip.digest, "conflicting finalized block");
@@ -464,7 +464,7 @@ where
     /// # Panics
     ///
     /// Panics if `block` is not above the tip.
-    fn advance(&mut self, block: &B) {
+    fn advance(&mut self, block: &Digested<B>) {
         assert!(
             self.tip.is_none_or(|tip| block.height() > tip.height),
             "completed block must advance the tip"

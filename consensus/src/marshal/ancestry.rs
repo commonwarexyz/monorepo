@@ -1,9 +1,7 @@
 //! A stream that yields the ancestors of a block while prefetching parents.
 
 use crate::{Block, Heightable, types::Height};
-use commonware_codec::EncodeSize;
-use commonware_cryptography::{Digest, Digestible};
-use commonware_parallel::Strategy;
+use commonware_cryptography::{Digest, Digested, Digestible};
 use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
 use futures::{
     FutureExt, Stream,
@@ -29,10 +27,10 @@ use tracing::debug;
 /// advance, exhaust, or invalidate another. Each clone's [`peek`](Self::peek)
 /// reports its own remaining view; clones need not become ready at the same
 /// time.
-pub trait Ancestry<B: Block>: Stream<Item = Arc<B>> + Clone + Send + Unpin + 'static {
+pub trait Ancestry<B: Block>: Stream<Item = Digested<B>> + Clone + Send + Unpin + 'static {
     /// Peeks at the latest block in the stream without consuming it. Returns [None]
     /// if the stream does not yet have a block available or has been exhausted.
-    fn peek(&self) -> Option<&B>;
+    fn peek(&self) -> Option<&Digested<B>>;
 }
 
 /// Returns true when `child_height` is exactly the successor of `parent_height`.
@@ -43,7 +41,7 @@ pub(crate) fn has_contiguous_height(parent_height: Height, child_height: Height)
 
 // Adjacent heights do not establish ancestry, so the parent digest must also match the digest
 // committed to by the child.
-fn assert_contiguous_parent<B: Block>(child: &B, parent: &B) {
+fn assert_contiguous_parent<B: Block>(child: &Digested<B>, parent: &Digested<B>) {
     assert!(
         has_contiguous_height(parent.height(), child.height()),
         "blocks must be contiguous in height"
@@ -56,14 +54,14 @@ fn assert_contiguous_parent<B: Block>(child: &B, parent: &B) {
 }
 
 // Checks blocks in the same newest-to-oldest order in which they will be yielded.
-fn validate_ancestry<B: Block>(blocks: &VecDeque<Arc<B>>) {
+fn validate_ancestry<B: Block>(blocks: &VecDeque<Digested<B>>) {
     let mut blocks = blocks.iter();
     let Some(mut child) = blocks.next() else {
         return;
     };
 
     for parent in blocks {
-        assert_contiguous_parent(child.as_ref(), parent.as_ref());
+        assert_contiguous_parent(child, parent);
         child = parent;
     }
 }
@@ -77,7 +75,7 @@ fn validate_ancestry<B: Block>(blocks: &VecDeque<Arc<B>>) {
 /// # Panics
 ///
 /// Panics during construction if the blocks do not form a contiguous chain in iterator order.
-pub fn from_iter<B: Block>(blocks: impl IntoIterator<Item = Arc<B>>) -> impl Ancestry<B> {
+pub fn from_iter<B: Block>(blocks: impl IntoIterator<Item = Digested<B>>) -> impl Ancestry<B> {
     let blocks: VecDeque<_> = blocks.into_iter().collect();
     validate_ancestry(&blocks);
 
@@ -95,7 +93,7 @@ pub fn from_iter<B: Block>(blocks: impl IntoIterator<Item = Arc<B>>) -> impl Anc
 /// Panics during construction if the prefixed blocks do not form a contiguous chain. The returned
 /// stream panics when the first tail block is peeked or polled if it is not the parent of the
 /// oldest prefixed block.
-pub fn with_prefix<B, S>(blocks: impl IntoIterator<Item = Arc<B>>, tail: S) -> impl Ancestry<B>
+pub fn with_prefix<B, S>(blocks: impl IntoIterator<Item = Digested<B>>, tail: S) -> impl Ancestry<B>
 where
     B: Block,
     S: Ancestry<B>,
@@ -130,21 +128,21 @@ impl<B: Block> Clone for BoxedAncestry<B> {
 impl<B: Block> Unpin for BoxedAncestry<B> {}
 
 impl<B: Block> Ancestry<B> for BoxedAncestry<B> {
-    fn peek(&self) -> Option<&B> {
+    fn peek(&self) -> Option<&Digested<B>> {
         self.0.peek_erased()
     }
 }
 
 impl<B: Block> Stream for BoxedAncestry<B> {
-    type Item = Arc<B>;
+    type Item = Digested<B>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut *self.0).poll_next(cx)
     }
 }
 
-trait ErasedAncestry<B: Block>: Stream<Item = Arc<B>> + Send + Unpin + 'static {
-    fn peek_erased(&self) -> Option<&B>;
+trait ErasedAncestry<B: Block>: Stream<Item = Digested<B>> + Send + Unpin + 'static {
+    fn peek_erased(&self) -> Option<&Digested<B>>;
 
     fn clone_box(&self) -> Box<dyn ErasedAncestry<B>>;
 }
@@ -154,7 +152,7 @@ where
     B: Block,
     A: Ancestry<B>,
 {
-    fn peek_erased(&self) -> Option<&B> {
+    fn peek_erased(&self) -> Option<&Digested<B>> {
         Ancestry::peek(self)
     }
 
@@ -165,19 +163,19 @@ where
 
 #[derive(Clone)]
 struct BoundedAncestry<B: Block> {
-    blocks: VecDeque<Arc<B>>,
+    blocks: VecDeque<Digested<B>>,
 }
 
 impl<B: Block> Unpin for BoundedAncestry<B> {}
 
 impl<B: Block> Ancestry<B> for BoundedAncestry<B> {
-    fn peek(&self) -> Option<&B> {
-        self.blocks.front().map(Arc::as_ref)
+    fn peek(&self) -> Option<&Digested<B>> {
+        self.blocks.front()
     }
 }
 
 impl<B: Block> Stream for BoundedAncestry<B> {
-    type Item = Arc<B>;
+    type Item = Digested<B>;
 
     fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(self.blocks.pop_front())
@@ -186,9 +184,9 @@ impl<B: Block> Stream for BoundedAncestry<B> {
 
 #[derive(Clone)]
 struct PrefixedAncestry<B: Block, S> {
-    blocks: VecDeque<Arc<B>>,
+    blocks: VecDeque<Digested<B>>,
     tail: S,
-    boundary_child: Option<Arc<B>>,
+    boundary_child: Option<Digested<B>>,
 }
 
 impl<B: Block, S> Unpin for PrefixedAncestry<B, S> {}
@@ -198,7 +196,7 @@ where
     B: Block,
     S: Ancestry<B>,
 {
-    fn peek(&self) -> Option<&B> {
+    fn peek(&self) -> Option<&Digested<B>> {
         // Prefix contiguity is established at construction, so these blocks can be exposed
         // directly.
         if let Some(block) = self.blocks.front() {
@@ -209,7 +207,7 @@ where
         // before exposing it.
         let parent = self.tail.peek()?;
         if let Some(child) = &self.boundary_child {
-            assert_contiguous_parent(child.as_ref(), parent);
+            assert_contiguous_parent(child, parent);
         }
         Some(parent)
     }
@@ -220,7 +218,7 @@ where
     B: Block,
     S: Ancestry<B>,
 {
-    type Item = Arc<B>;
+    type Item = Digested<B>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Keep the boundary child until a tail block is yielded and can be validated against it.
@@ -233,7 +231,7 @@ where
         match Pin::new(&mut self.tail).poll_next(cx) {
             Poll::Ready(Some(parent)) => {
                 if let Some(child) = self.boundary_child.take() {
-                    assert_contiguous_parent(child.as_ref(), parent.as_ref());
+                    assert_contiguous_parent(&child, &parent);
                 }
                 Poll::Ready(Some(parent))
             }
@@ -261,27 +259,26 @@ pub trait BlockProvider: Send + 'static {
     /// The child block can carry variant-specific context needed to retrieve its parent.
     fn subscribe_parent(
         &self,
-        block: &Self::Block,
-    ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static;
+        block: &Digested<Self::Block>,
+    ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static;
 }
 
 // Expected parent height and digest for a pending fetch.
 struct ExpectedParent<D>(Height, D);
 
 // Pending parent fetch that returns only a validated parent.
-type PendingFetch<B> = BoxFuture<'static, Option<Arc<B>>>;
+type PendingFetch<B> = BoxFuture<'static, Option<Digested<B>>>;
 
 impl<D: Digest> ExpectedParent<D> {
-    fn from_child<B: Block<Digest = D>>(child: &B) -> Self {
+    fn from_child<B: Block<Digest = D>>(child: &Digested<B>) -> Self {
         Self(
             child.height().previous().expect("child must have parent"),
             child.parent(),
         )
     }
 
-    // Checks the parent's height and then its digest, which is computed on `strategy` so a large
-    // block does not hold the polling thread while the strategy works.
-    async fn matches<B: Block<Digest = D>>(self, parent: Arc<B>, strategy: &impl Strategy) -> bool {
+    // Checks the parent's height and digest against those the child commits to.
+    fn matches<B: Block<Digest = D>>(self, parent: &Digested<B>) -> bool {
         let Self(parent_height, parent_digest) = self;
         if parent.height() != parent_height {
             debug!(
@@ -291,15 +288,10 @@ impl<D: Digest> ExpectedParent<D> {
             );
             return false;
         }
-        let computed_parent_digest = strategy
-            .spawn(parent.encode_size(), move |strategy| {
-                parent.digest_across(&strategy)
-            })
-            .await;
-        if computed_parent_digest != parent_digest {
+        if parent.digest() != parent_digest {
             debug!(
                 expected = ?parent_digest,
-                actual = ?computed_parent_digest,
+                actual = ?parent.digest(),
                 "ending ancestry stream: fetched parent has non-contiguous ancestry"
             );
             return false;
@@ -310,31 +302,25 @@ impl<D: Digest> ExpectedParent<D> {
 
 // Builds a parent fetch that records latency when a parent arrives. The fetch
 // returns only a parent with the expected height and digest.
-fn timed_parent_fetch<C, M, T>(
+fn timed_parent_fetch<C, M>(
     clock: &Arc<C>,
     marshal: &M,
-    child: &M::Block,
+    child: &Digested<M::Block>,
     fetch_duration: &Timed,
-    strategy: &T,
 ) -> PendingFetch<M::Block>
 where
     C: Clock,
     M: BlockProvider,
-    T: Strategy,
 {
     let expected = ExpectedParent::from_child(child);
     let timer = fetch_duration.timer(clock.as_ref());
     let clock = clock.clone();
-    let strategy = strategy.clone();
     marshal
         .subscribe_parent(child)
         .then(move |parent| async move {
             let parent = parent?;
             timer.observe(clock.as_ref());
-            expected
-                .matches(parent.clone(), &strategy)
-                .await
-                .then_some(parent)
+            expected.matches(&parent).then_some(parent)
         })
         .boxed()
 }
@@ -342,18 +328,17 @@ where
 /// Yields the ancestors of a block while prefetching parents, including the
 /// height-zero genesis block if it is available.
 #[pin_project]
-pub struct AncestorStream<M: BlockProvider, C: Clock, T: Strategy> {
-    buffered: Vec<Arc<M::Block>>,
+pub struct AncestorStream<M: BlockProvider, C: Clock> {
+    buffered: Vec<Digested<M::Block>>,
     marshal: M,
     fetch_duration: Timed,
     clock: Arc<C>,
-    strategy: T,
-    pending_child: Option<Arc<M::Block>>,
+    pending_child: Option<Digested<M::Block>>,
     #[pin]
     pending: OptionFuture<PendingFetch<M::Block>>,
 }
 
-impl<M: BlockProvider, C: Clock, T: Strategy> AncestorStream<M, C, T> {
+impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     /// Creates a new [AncestorStream] starting from the given ancestry.
     ///
     /// # Panics
@@ -362,9 +347,8 @@ impl<M: BlockProvider, C: Clock, T: Strategy> AncestorStream<M, C, T> {
     pub(crate) fn new(
         clock: Arc<C>,
         marshal: M,
-        initial: impl IntoIterator<Item = Arc<M::Block>>,
+        initial: impl IntoIterator<Item = Digested<M::Block>>,
         fetch_duration: Timed,
-        strategy: T,
     ) -> Self {
         let mut buffered = initial.into_iter().collect::<Vec<_>>();
         buffered.sort_by_key(|block| block.height());
@@ -388,7 +372,6 @@ impl<M: BlockProvider, C: Clock, T: Strategy> AncestorStream<M, C, T> {
             buffered,
             fetch_duration,
             clock,
-            strategy,
             pending_child: None,
             pending: None.into(),
         }
@@ -396,26 +379,24 @@ impl<M: BlockProvider, C: Clock, T: Strategy> AncestorStream<M, C, T> {
 
     /// Peeks at the latest block in the stream without consuming it. Returns [None]
     /// if the stream does not yet have a block available or has been exhausted.
-    pub fn peek(&self) -> Option<&M::Block> {
-        self.buffered.last().map(Arc::as_ref)
+    pub fn peek(&self) -> Option<&Digested<M::Block>> {
+        self.buffered.last()
     }
 }
 
-impl<M, C, T> Clone for AncestorStream<M, C, T>
+impl<M, C> Clone for AncestorStream<M, C>
 where
     M: BlockProvider + Clone,
     C: Clock,
-    T: Strategy,
 {
     fn clone(&self) -> Self {
         let pending_child = self.pending_child.clone();
         let marshal = self.marshal.clone();
         let fetch_duration = self.fetch_duration.clone();
         let clock = self.clock.clone();
-        let strategy = self.strategy.clone();
         let pending = pending_child
             .as_ref()
-            .map(|child| timed_parent_fetch(&clock, &marshal, child, &fetch_duration, &strategy))
+            .map(|child| timed_parent_fetch(&clock, &marshal, child, &fetch_duration))
             .into();
 
         Self {
@@ -423,31 +404,28 @@ where
             marshal,
             fetch_duration,
             clock,
-            strategy,
             pending_child,
             pending,
         }
     }
 }
 
-impl<M, C, T> Ancestry<M::Block> for AncestorStream<M, C, T>
+impl<M, C> Ancestry<M::Block> for AncestorStream<M, C>
 where
     M: BlockProvider + Clone,
     C: Clock,
-    T: Strategy,
 {
-    fn peek(&self) -> Option<&M::Block> {
+    fn peek(&self) -> Option<&Digested<M::Block>> {
         Self::peek(self)
     }
 }
 
-impl<M, C, T> Stream for AncestorStream<M, C, T>
+impl<M, C> Stream for AncestorStream<M, C>
 where
     M: BlockProvider,
     C: Clock,
-    T: Strategy,
 {
-    type Item = Arc<M::Block>;
+    type Item = Digested<M::Block>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         const END_BOUND: Height = Height::zero();
@@ -460,13 +438,8 @@ where
             let should_walk_parent = height > END_BOUND;
             let end_of_buffered = this.buffered.is_empty();
             if should_walk_parent && end_of_buffered {
-                let future = timed_parent_fetch(
-                    this.clock,
-                    this.marshal,
-                    &block,
-                    this.fetch_duration,
-                    this.strategy,
-                );
+                let future =
+                    timed_parent_fetch(this.clock, this.marshal, &block, this.fetch_duration);
                 *this.pending_child = Some(block.clone());
                 *this.pending.as_mut() = Some(future).into();
 
@@ -506,13 +479,8 @@ where
                 let height = block.height();
                 let should_walk_parent = height > END_BOUND;
                 if should_walk_parent {
-                    let future = timed_parent_fetch(
-                        this.clock,
-                        this.marshal,
-                        &block,
-                        this.fetch_duration,
-                        this.strategy,
-                    );
+                    let future =
+                        timed_parent_fetch(this.clock, this.marshal, &block, this.fetch_duration);
                     *this.pending_child = Some(block.clone());
                     *this.pending.as_mut() = Some(future).into();
 
@@ -549,7 +517,6 @@ mod test {
     use super::*;
     use crate::marshal::mocks::block::EmptyBlock;
     use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner as _, Supervisor as _, deterministic,
         telemetry::metrics::{
@@ -563,6 +530,11 @@ mod test {
 
     type TestBlock = EmptyBlock<Sha256>;
 
+    fn digested<B: Digestible>(block: B) -> Digested<B> {
+        let digest = block.digest();
+        Digested::new_trusted(block, digest)
+    }
+
     #[derive(Default, Clone)]
     struct MockProvider(Vec<TestBlock>);
     impl BlockProvider for MockProvider {
@@ -570,20 +542,20 @@ mod test {
 
         fn subscribe_parent(
             &self,
-            block: &Self::Block,
-        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
-            let parent = block.parent;
+            block: &Digested<Self::Block>,
+        ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
+            let parent = block.parent();
             std::future::ready(
                 self.0
                     .iter()
                     .find(|b| b.digest() == parent)
                     .cloned()
-                    .map(Arc::new),
+                    .map(digested),
             )
         }
     }
 
-    type ParentSubscription = oneshot::Sender<Arc<TestBlock>>;
+    type ParentSubscription = oneshot::Sender<Digested<TestBlock>>;
 
     #[derive(Default, Clone)]
     struct PendingProvider {
@@ -595,7 +567,7 @@ mod test {
             self.subscriptions.lock().len()
         }
 
-        fn complete_all(&self, parent: Arc<TestBlock>) {
+        fn complete_all(&self, parent: Digested<TestBlock>) {
             let subscriptions = std::mem::take(&mut *self.subscriptions.lock());
             for subscription in subscriptions {
                 assert!(subscription.send(parent.clone()).is_ok());
@@ -608,8 +580,8 @@ mod test {
 
         fn subscribe_parent(
             &self,
-            _block: &Self::Block,
-        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
+            _block: &Digested<Self::Block>,
+        ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
             let (subscription, parent) = oneshot::channel();
             self.subscriptions.lock().push(subscription);
             parent.map(Result::ok)
@@ -630,7 +602,7 @@ mod test {
             }
         }
 
-        fn complete_first(&self, parent: Arc<TestBlock>) {
+        fn complete_first(&self, parent: Digested<TestBlock>) {
             let subscription = self
                 .state
                 .lock()
@@ -646,8 +618,8 @@ mod test {
 
         fn subscribe_parent(
             &self,
-            _block: &Self::Block,
-        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
+            _block: &Digested<Self::Block>,
+        ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
             let mut state = self.state.lock();
             let call = state.0;
             state.0 += 1;
@@ -656,7 +628,7 @@ mod test {
                 state.1 = Some(subscription);
                 parent.map(Result::ok).boxed()
             } else {
-                std::future::ready(Some(Arc::new(self.wrong_parent.clone()))).boxed()
+                std::future::ready(Some(digested(self.wrong_parent.clone()))).boxed()
             }
         }
     }
@@ -668,9 +640,9 @@ mod test {
 
         fn subscribe_parent(
             &self,
-            _block: &Self::Block,
-        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
-            std::future::ready(Some(Arc::new(self.0.clone())))
+            _block: &Digested<Self::Block>,
+        ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
+            std::future::ready(Some(digested(self.0.clone())))
         }
     }
 
@@ -686,7 +658,7 @@ mod test {
         context: &deterministic::Context,
         marshal: M,
         initial: impl IntoIterator<Item = M::Block>,
-    ) -> AncestorStream<M, deterministic::Context, Sequential>
+    ) -> AncestorStream<M, deterministic::Context>
     where
         M: BlockProvider,
     {
@@ -695,9 +667,8 @@ mod test {
         AncestorStream::new(
             Arc::new(stream_context),
             marshal,
-            initial.into_iter().map(Arc::new),
+            initial.into_iter().map(digested),
             fetch_duration,
-            Sequential,
         )
     }
 
@@ -738,7 +709,10 @@ mod test {
             let child = TestBlock::new(parent.digest(), Height::new(3), 3);
             let mut stream = stream(&context, MockProvider(vec![parent]), [child.clone()]);
 
-            assert_eq!(stream.next().await.as_deref(), Some(&child));
+            assert_eq!(
+                stream.next().await.as_ref().map(Digested::inner),
+                Some(&child)
+            );
             assert_eq!(stream.next().await, None);
         });
     }
@@ -755,7 +729,10 @@ mod test {
                 [child.clone()],
             );
 
-            assert_eq!(stream.next().await.as_deref(), Some(&child));
+            assert_eq!(
+                stream.next().await.as_ref().map(Digested::inner),
+                Some(&child)
+            );
             assert_eq!(stream.next().await, None);
         });
     }
@@ -769,9 +746,12 @@ mod test {
             let provider = PendingProvider::default();
             let mut stream = stream(&context, provider.clone(), [child.clone()]);
 
-            assert_eq!(stream.next().await.as_deref(), Some(&child));
+            assert_eq!(
+                stream.next().await.as_ref().map(Digested::inner),
+                Some(&child)
+            );
             assert_eq!(provider.subscription_count(), 1);
-            provider.complete_all(Arc::new(fetched_parent));
+            provider.complete_all(digested(fetched_parent));
             assert_eq!(stream.next().await, None);
         });
     }
@@ -786,9 +766,15 @@ mod test {
             let provider = PendingThenWrongProvider::new(wrong_grandparent);
             let mut stream = stream(&context, provider.clone(), [child.clone()]);
 
-            assert_eq!(stream.next().await.as_deref(), Some(&child));
-            provider.complete_first(Arc::new(parent.clone()));
-            assert_eq!(stream.next().await.as_deref(), Some(&parent));
+            assert_eq!(
+                stream.next().await.as_ref().map(Digested::inner),
+                Some(&child)
+            );
+            provider.complete_first(digested(parent.clone()));
+            assert_eq!(
+                stream.next().await.as_ref().map(Digested::inner),
+                Some(&parent)
+            );
             assert_eq!(stream.next().await, None);
         });
     }
@@ -813,7 +799,7 @@ mod test {
         }
 
         let block = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 1);
-        let ancestry = from_iter([Arc::new(block.clone())]);
+        let ancestry = from_iter([digested(block.clone())]);
 
         assert_eq!(peek_height(ancestry), Some(block.height()));
     }
@@ -834,7 +820,7 @@ mod test {
         let parent = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 1);
         let child = TestBlock::new(parent.digest(), Height::new(3), 3);
 
-        let _ = from_iter([Arc::new(child), Arc::new(parent)]);
+        let _ = from_iter([digested(child), digested(parent)]);
     }
 
     #[test]
@@ -844,7 +830,7 @@ mod test {
         let wrong_parent = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 2);
         let child = TestBlock::new(expected_parent.digest(), Height::new(2), 3);
 
-        let _ = from_iter([Arc::new(child), Arc::new(wrong_parent)]);
+        let _ = from_iter([digested(child), digested(wrong_parent)]);
     }
 
     #[test]
@@ -854,7 +840,7 @@ mod test {
         let child = TestBlock::new(parent.digest(), Height::new(2), 2);
         let grandchild = TestBlock::new(child.digest(), Height::new(3), 3);
 
-        let _ = from_iter([Arc::new(grandchild), Arc::new(parent), Arc::new(child)]);
+        let _ = from_iter([digested(grandchild), digested(parent), digested(child)]);
     }
 
     #[test]
@@ -862,12 +848,18 @@ mod test {
         deterministic::Runner::default().start(|_| async move {
             let parent = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 1);
             let child = TestBlock::new(parent.digest(), Height::new(2), 2);
-            let mut ancestry = from_iter([Arc::new(child.clone()), Arc::new(parent.clone())]);
+            let mut ancestry = from_iter([digested(child.clone()), digested(parent.clone())]);
 
-            assert_eq!(ancestry.peek(), Some(&child));
-            assert_eq!(ancestry.next().await.as_deref(), Some(&child));
-            assert_eq!(ancestry.peek(), Some(&parent));
-            assert_eq!(ancestry.next().await.as_deref(), Some(&parent));
+            assert_eq!(ancestry.peek().map(Digested::inner), Some(&child));
+            assert_eq!(
+                ancestry.next().await.as_ref().map(Digested::inner),
+                Some(&child)
+            );
+            assert_eq!(ancestry.peek().map(Digested::inner), Some(&parent));
+            assert_eq!(
+                ancestry.next().await.as_ref().map(Digested::inner),
+                Some(&parent)
+            );
             assert_eq!(ancestry.peek(), None);
             assert_eq!(ancestry.next().await, None);
         });
@@ -877,10 +869,13 @@ mod test {
     fn test_with_prefix_peeks_tail_when_prefix_empty() {
         deterministic::Runner::default().start(|_| async move {
             let block = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 1);
-            let mut ancestry = with_prefix([], from_iter([Arc::new(block.clone())]));
+            let mut ancestry = with_prefix([], from_iter([digested(block.clone())]));
 
-            assert_eq!(ancestry.peek(), Some(&block));
-            assert_eq!(ancestry.next().await.as_deref(), Some(&block));
+            assert_eq!(ancestry.peek().map(Digested::inner), Some(&block));
+            assert_eq!(
+                ancestry.next().await.as_ref().map(Digested::inner),
+                Some(&block)
+            );
             assert_eq!(ancestry.peek(), None);
         });
     }
@@ -891,14 +886,20 @@ mod test {
             let parent = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 1);
             let child = TestBlock::new(parent.digest(), Height::new(2), 2);
             let mut ancestry = with_prefix(
-                [Arc::new(child.clone())],
-                from_iter([Arc::new(parent.clone())]),
+                [digested(child.clone())],
+                from_iter([digested(parent.clone())]),
             );
 
-            assert_eq!(ancestry.peek(), Some(&child));
-            assert_eq!(ancestry.next().await.as_deref(), Some(&child));
-            assert_eq!(ancestry.peek(), Some(&parent));
-            assert_eq!(ancestry.next().await.as_deref(), Some(&parent));
+            assert_eq!(ancestry.peek().map(Digested::inner), Some(&child));
+            assert_eq!(
+                ancestry.next().await.as_ref().map(Digested::inner),
+                Some(&child)
+            );
+            assert_eq!(ancestry.peek().map(Digested::inner), Some(&parent));
+            assert_eq!(
+                ancestry.next().await.as_ref().map(Digested::inner),
+                Some(&parent)
+            );
             assert_eq!(ancestry.peek(), None);
         });
     }
@@ -910,13 +911,19 @@ mod test {
             let wrong_parent = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 2);
             let child = TestBlock::new(expected_parent.digest(), Height::new(2), 3);
             let mut ancestry = with_prefix(
-                [Arc::new(child.clone())],
-                from_iter([Arc::new(wrong_parent)]),
+                [digested(child.clone())],
+                from_iter([digested(wrong_parent)]),
             );
             let mut cloned = ancestry.clone();
 
-            assert_eq!(ancestry.next().await.as_deref(), Some(&child));
-            assert_eq!(cloned.next().await.as_deref(), Some(&child));
+            assert_eq!(
+                ancestry.next().await.as_ref().map(Digested::inner),
+                Some(&child)
+            );
+            assert_eq!(
+                cloned.next().await.as_ref().map(Digested::inner),
+                Some(&child)
+            );
 
             // Each clone owns its unresolved seam check.
             assert!(
@@ -941,8 +948,8 @@ mod test {
         let child = TestBlock::new(parent.digest(), Height::new(3), 3);
 
         let _ = with_prefix(
-            [Arc::new(child), Arc::new(parent)],
-            from_iter(Vec::<Arc<TestBlock>>::new()),
+            [digested(child), digested(parent)],
+            from_iter(Vec::<Digested<TestBlock>>::new()),
         );
     }
 
@@ -954,18 +961,24 @@ mod test {
             let consumed = TestBlock::new(parent.digest(), Height::new(2), 2);
             let provider = PendingProvider::default();
             let mut tail = stream(&context, provider.clone(), [consumed.clone()]);
-            assert_eq!(tail.next().await.as_deref(), Some(&consumed));
+            assert_eq!(
+                tail.next().await.as_ref().map(Digested::inner),
+                Some(&consumed)
+            );
             assert_eq!(tail.peek(), None);
             assert_eq!(provider.subscription_count(), 1);
 
             let child = TestBlock::new(consumed.digest(), Height::new(3), 3);
-            let mut ancestry = with_prefix([Arc::new(child.clone())], tail);
-            assert_eq!(ancestry.next().await.as_deref(), Some(&child));
+            let mut ancestry = with_prefix([digested(child.clone())], tail);
+            assert_eq!(
+                ancestry.next().await.as_ref().map(Digested::inner),
+                Some(&child)
+            );
 
             // A pending tail poll must not discard the unresolved seam check.
             assert!(ancestry.next().now_or_never().is_none());
 
-            provider.complete_all(Arc::new(parent));
+            provider.complete_all(digested(parent));
             let _ = ancestry.next().await;
         });
     }
@@ -980,19 +993,22 @@ mod test {
             let stream = stream(&context, provider, [child.clone()]);
 
             let results = stream.collect::<Vec<_>>().await;
-            assert_eq!(results, vec![Arc::new(child), Arc::new(genesis)]);
+            assert_eq!(results, vec![digested(child), digested(genesis)]);
         });
     }
 
     #[test]
     fn test_clone_preserves_pending_parent_fetch() {
         deterministic::Runner::default().start(|context| async move {
-            let parent = Arc::new(TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 0));
+            let parent = digested(TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 0));
             let child = TestBlock::new(parent.digest(), Height::new(1), 1);
             let provider = PendingProvider::default();
             let mut stream = stream(&context, provider.clone(), [child.clone()]);
 
-            assert_eq!(stream.next().await.as_deref(), Some(&child));
+            assert_eq!(
+                stream.next().await.as_ref().map(Digested::inner),
+                Some(&child)
+            );
             assert_eq!(provider.subscription_count(), 1);
 
             let mut cloned = stream.clone();
@@ -1009,7 +1025,7 @@ mod test {
     #[test]
     fn test_empty_yields_none() {
         deterministic::Runner::default().start(|context| async move {
-            let mut stream: AncestorStream<MockProvider, deterministic::Context, Sequential> =
+            let mut stream: AncestorStream<MockProvider, deterministic::Context> =
                 stream(&context, MockProvider::default(), vec![]);
             assert_eq!(stream.next().await, None);
         });
@@ -1028,7 +1044,7 @@ mod test {
             let results = stream.collect::<Vec<_>>().await;
             assert_eq!(
                 results,
-                vec![Arc::new(block3), Arc::new(block2), Arc::new(block1)]
+                vec![digested(block3), digested(block2), digested(block1)]
             );
         });
     }
@@ -1050,7 +1066,7 @@ mod test {
             let results = stream.collect::<Vec<_>>().await;
             assert_eq!(
                 results,
-                vec![Arc::new(block3), Arc::new(block2), Arc::new(block1)]
+                vec![digested(block3), digested(block2), digested(block1)]
             );
         });
     }
@@ -1066,7 +1082,7 @@ mod test {
             let stream = stream(&context, provider, [block3.clone()]);
 
             let results = stream.collect::<Vec<_>>().await;
-            assert_eq!(results, vec![Arc::new(block3)]);
+            assert_eq!(results, vec![digested(block3)]);
         });
     }
 }

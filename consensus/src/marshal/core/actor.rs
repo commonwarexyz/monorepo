@@ -29,7 +29,7 @@ use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
-    Digestible,
+    Digested, Digestible,
     certificate::{Provider, Scoped, Verifier},
 };
 use commonware_macros::{boxed, select_loop};
@@ -283,20 +283,20 @@ where
         strategy: &T,
     ) -> FB {
         let anchor_height = anchor.height();
-        let anchor_commitment = V::commitment_across(&anchor, strategy);
+        let anchor_commitment = V::commitment(&anchor);
         match finalized_blocks
             .get(ArchiveID::Index(anchor_height.get()))
             .await
         {
             Ok(Some(stored)) => {
-                let stored: V::Block = stored.into();
+                let stored = V::restore_across(stored, strategy).await;
                 assert_eq!(
                     stored.height(),
                     anchor_height,
                     "stored genesis block height mismatch"
                 );
                 assert!(
-                    V::commitment_across(&stored, strategy) == anchor_commitment,
+                    V::commitment(&stored) == anchor_commitment,
                     "stored genesis block does not match configured anchor"
                 );
             }
@@ -313,7 +313,7 @@ where
                 }
 
                 finalized_blocks = finalized_blocks
-                    .put(&anchor.into())
+                    .put(anchor.digest(), &anchor.into())
                     .await
                     .expect("failed to store startup anchor")
                     .sync()
@@ -636,7 +636,10 @@ where
             Message::GetVerified {
                 round, response, ..
             } => {
-                let block = self.cache.get_verified(round).await.map(Into::into);
+                let block = match self.cache.get_verified(round).await {
+                    Some(stored) => Some(V::restore_across(stored, &self.strategy).await),
+                    None => None,
+                };
                 response.send_lossy(block);
             }
             Message::Forward {
@@ -845,7 +848,10 @@ where
                     response.send_lossy(result);
                 }
                 BlockID::Height(height) => {
-                    let result = self.get_finalized_block(height).await;
+                    let result = match self.get_finalized_block(height).await {
+                        Some(stored) => Some(V::restore_across(stored, &self.strategy).await),
+                        None => None,
+                    };
                     response.send_lossy(result);
                 }
                 BlockID::Latest => {
@@ -868,10 +874,11 @@ where
             Message::GetAnchor { response, .. } => {
                 let anchor = match self.floor.processed() {
                     Some(processed) => {
-                        let block = self
+                        let stored = self
                             .get_finalized_block(processed.anchor())
                             .await
                             .expect("processed position must be backed by a stored block");
+                        let block = V::restore_across(stored, &self.strategy).await;
                         Some((processed, block))
                     }
                     None => None,
@@ -1073,10 +1080,14 @@ where
                     debug!(%height, "finalization missing on request");
                     return;
                 };
-                let Some(block) = self.get_finalized_block(height).await else {
+                let Some(stored) = self.get_finalized_block(height).await else {
                     debug!(%height, "finalized block missing on request");
                     return;
                 };
+
+                // The block at a height is stored under the digest its finalization commits to.
+                let digest = V::commitment_to_inner(finalization.proposal.payload);
+                let block = V::restore(stored, digest);
                 response.send_lossy((finalization, V::into_shared(block)).encode());
             }
             Key::Notarized { round } => {
@@ -1290,22 +1301,6 @@ where
         self
     }
 
-    /// Decodes a block received over the wire, failing unless its commitment equals `expected`.
-    ///
-    /// An untrusted commitment is recomputed from the block, which re-runs its erasure encode, so
-    /// the decode runs on the strategy and awaiting it does not hold this thread while the
-    /// strategy works.
-    fn decode_block(
-        &self,
-        buf: Bytes,
-        expected: ExpectedCommitment<V::Commitment>,
-    ) -> impl Future<Output = Result<V::Block, commonware_codec::Error>> + Send + 'static {
-        let cfg = self.block_codec_config.clone();
-        self.strategy.spawn(buf.len(), move |strategy| {
-            V::decode_block(buf, &cfg, expected, &strategy)
-        })
-    }
-
     /// Notifies subscribers of a validated block and applies it to any
     /// pending floor transition.
     ///
@@ -1326,7 +1321,7 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> (Box<Self>, bool) {
-        let commitment = V::commitment_across(&block, &self.strategy);
+        let commitment = V::commitment(&block);
         self.block_subscriptions.notify(block.clone());
 
         let Some(finalization) = self.floor.take_matching(commitment) else {
@@ -1389,7 +1384,9 @@ where
         let round = finalization.round();
         let stored: V::StoredBlock = block.into();
         (self.finalized_blocks, self.finalizations_by_height) = try_join!(
-            self.finalized_blocks.put(&stored).map_err(BoxedError::from),
+            self.finalized_blocks
+                .put(digest, &stored)
+                .map_err(BoxedError::from),
             self.finalizations_by_height
                 .put(height, digest, &finalization)
                 .map_err(BoxedError::from),
@@ -1482,7 +1479,10 @@ where
                 } else {
                     ExpectedCommitment::Untrusted(commitment)
                 };
-                let Ok(block) = self.decode_block(value, expected).await else {
+                let Ok(block) =
+                    V::decode_block(value, &self.block_codec_config, expected, &self.strategy)
+                        .await
+                else {
                     response.send_lossy(false);
                     return self;
                 };
@@ -1592,9 +1592,12 @@ where
                 // block, so only the height and digest are checked here. The working block is then
                 // rebuilt from the finalized commitment.
                 let commitment = finalization.proposal.payload;
-                if block.height() != height
-                    || block.digest_across(&self.strategy) != V::commitment_to_inner(commitment)
-                {
+                if block.height() != height {
+                    response.send_lossy(false);
+                    return self;
+                }
+                let block = Digested::compute(block, &self.strategy).await;
+                if block.digest() != V::commitment_to_inner(commitment) {
                     response.send_lossy(false);
                     return self;
                 }
@@ -1755,9 +1758,13 @@ where
                     // Notarization alone does not prove the commitment encodes the block,
                     // so decoding must recompute it.
                     let commitment = notarization.proposal.payload;
-                    let Ok(block) = self
-                        .decode_block(block, ExpectedCommitment::Untrusted(commitment))
-                        .await
+                    let Ok(block) = V::decode_block(
+                        block,
+                        &self.block_codec_config,
+                        ExpectedCommitment::Untrusted(commitment),
+                        &self.strategy,
+                    )
+                    .await
                     else {
                         response.send_lossy(false);
                         continue;
@@ -1892,7 +1899,7 @@ where
             let block = match self.staged.remove(next_height) {
                 Some(block) => block,
                 None => match self.get_finalized_block(next_height).await {
-                    Some(block) => block,
+                    Some(stored) => V::restore_across(stored, &self.strategy).await,
                     None => return self,
                 },
             };
@@ -1994,14 +2001,14 @@ where
         self
     }
 
-    /// Get a finalized block from the immutable archive.
-    async fn get_finalized_block(&self, height: Height) -> Option<V::Block> {
+    /// Get a finalized block from the immutable archive in its stored form.
+    async fn get_finalized_block(&self, height: Height) -> Option<V::StoredBlock> {
         match self
             .finalized_blocks
             .get(ArchiveID::Index(height.get()))
             .await
         {
-            Ok(stored) => stored.map(|stored| stored.into()),
+            Ok(stored) => stored,
             Err(e) => panic!("failed to get block: {e}"),
         }
     }
@@ -2043,9 +2050,9 @@ where
             ));
         }
 
-        self.get_finalized_block(height)
-            .await
-            .map(|block| (block.height(), block.digest_across(&self.strategy)))
+        let stored = self.get_finalized_block(height).await?;
+        let block = V::restore_across(stored, &self.strategy).await;
+        Some((block.height(), block.digest()))
     }
 
     /// Add a finalized block, and optionally a finalization, to the archive.
@@ -2068,7 +2075,7 @@ where
         finalization: Option<Finalization<P::Scheme, V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> (Box<Self>, bool) {
-        let digest = block.digest_across(&self.strategy);
+        let digest = block.digest();
         // Blocks below the last processed height are not useful to us, so we ignore them (this
         // has the nice byproduct of ensuring we don't call a backing store with a block below the
         // pruning boundary)
@@ -2090,7 +2097,9 @@ where
         let finalizations_by_height = self.finalizations_by_height;
         (self.finalized_blocks, self.finalizations_by_height) = try_join!(
             // Update the finalized blocks archive
-            self.finalized_blocks.put(&stored).map_err(BoxedError::from),
+            self.finalized_blocks
+                .put(digest, &stored)
+                .map_err(BoxedError::from),
             // Update the finalizations archive (if provided)
             async {
                 let store = if let Some(finalization) = finalization {
@@ -2153,11 +2162,11 @@ where
     ) -> Option<V::Block> {
         // Check verified / notarized blocks via cache manager.
         if let Some(block) = self.cache.find_block_matching(digest, |_| true).await {
-            return Some(block.into());
+            return Some(block);
         }
         // Check finalized blocks.
         match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
-            Ok(stored) => stored.map(|stored| stored.into()),
+            Ok(stored) => stored.map(|stored| V::restore(stored, digest)),
             Err(e) => panic!("failed to get block: {e}"),
         }
     }
@@ -2170,18 +2179,17 @@ where
         let digest = V::commitment_to_inner(commitment);
         if let Some(block) = self
             .cache
-            .find_block_matching(digest, |stored| {
-                V::stored_commitment_across(stored, &self.strategy) == commitment
-            })
+            .find_block_matching(digest, |block| V::commitment(block) == commitment)
             .await
         {
-            return Some(block.into());
+            return Some(block);
         }
 
         match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
-            Ok(Some(stored)) => (V::stored_commitment_across(&stored, &self.strategy)
-                == commitment)
-                .then(|| stored.into()),
+            Ok(Some(stored)) => {
+                let block = V::restore(stored, digest);
+                (V::commitment(&block) == commitment).then_some(block)
+            }
             Ok(None) => None,
             Err(e) => panic!("failed to get block: {e}"),
         }
@@ -2293,7 +2301,7 @@ where
             let (mut height, mut parent_digest, mut parent_commitment) = (
                 cursor.height(),
                 cursor.parent(),
-                V::parent_commitment(&cursor),
+                V::stored_parent_commitment(&cursor),
             );
 
             // Compute the lower bound of the recursive repair. `gap_start` is `Some`
@@ -2427,8 +2435,9 @@ where
         let (Some(block), Some(finalization)) = (block, finalization) else {
             return processed_round;
         };
+        let block = V::restore_across(block, strategy).await;
         assert!(
-            V::stored_commitment_across(&block, strategy) == finalization.proposal.payload,
+            V::commitment(&block) == finalization.proposal.payload,
             "successor block does not match stored finalization"
         );
         processed_round.max(finalization.round())

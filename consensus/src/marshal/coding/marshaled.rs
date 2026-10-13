@@ -110,9 +110,10 @@ use crate::{
     types::{Epoch, Epocher, Round, View, coding::Commitment},
 };
 use commonware_actor::Feedback;
+use commonware_codec::Codec;
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
-    Committable, Digestible, Hasher,
+    Committable, Digested, Digestible, Hasher,
     certificate::{Provider, Scheme as _, Verifier},
 };
 use commonware_macros::select;
@@ -136,13 +137,14 @@ use tracing::{Instrument as _, debug, info_span, warn};
 /// The outcome of the coding proposal checks. A build carries the coding configuration of the
 /// epoch's participants to the sealing step.
 type CodingResolved<B, C, H, A> =
-    Resolved<Commitment<B, C, H>, CodedBlock<B, C, H>, A, CodingConfig>;
+    Resolved<Commitment<B, C, H>, Arc<CodedBlock<B, C, H>>, A, CodingConfig>;
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
 pub struct MarshaledConfig<A, B, C, H, Z, S, ES>
 where
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>
+        + Codec,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
@@ -173,7 +175,8 @@ pub struct Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>
+        + Codec,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
@@ -187,7 +190,7 @@ where
     scheme_provider: Z,
     epocher: ES,
     strategy: S,
-    gates: Gates<Commitment<B, C, H>, CodedBlock<B, C, H>>,
+    gates: Gates<Commitment<B, C, H>, Arc<CodedBlock<B, C, H>>>,
 
     build_duration: Timed,
     verify_duration: Timed,
@@ -200,7 +203,8 @@ impl<E, A, B, C, H, Z, S, ES> Clone for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>
+        + Codec,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
@@ -236,7 +240,7 @@ where
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
@@ -288,7 +292,7 @@ where
 
         let erasure_histogram = context.histogram(
             "erasure_encode_duration",
-            "Histogram of time taken to erasure encode a block, in seconds",
+            "Histogram of time taken to erasure encode a built block on the strategy, in seconds",
             Buckets::LOCAL,
         );
         let erasure_encode_duration = Timed::new(erasure_histogram);
@@ -340,7 +344,6 @@ where
         let epocher = self.epocher.clone();
         let verify_duration = self.verify_duration.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
-        let strategy = self.strategy.clone();
 
         // Verification needs the full block but waits only for local delivery. Certification starts
         // recovery only when the block is not available locally. If the shard engine evicts a
@@ -439,7 +442,6 @@ where
                         &consensus_context,
                         commitment,
                         parent_commitment,
-                        &strategy,
                     ) {
                         debug!(
                             ?err,
@@ -458,9 +460,8 @@ where
 
                     let ancestry_stream = marshal.ancestor_stream(
                         Arc::new(runtime_context.child("ancestor_stream")),
-                        [block.inner_shared(), parent.inner_shared()],
+                        [block.inner_digested(), parent.inner_digested()],
                         ancestor_fetch_duration,
-                        strategy,
                     );
                     let validity_request = application
                         .verify(
@@ -681,7 +682,6 @@ where
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
         let build_duration = self.build_duration.clone();
-        let strategy = self.strategy.clone();
         async move {
             let Some(scheme) = scheme_provider.scheme(consensus_context.epoch()) else {
                 debug!(round = %consensus_context.round, "no scheme for epoch, skipping proposal");
@@ -729,9 +729,7 @@ where
                 return Resolved::Skip;
             }
 
-            // The application builds on the parent's digest, which the commitment binds, so it
-            // is computed across the strategy here.
-            let commitment = parent.commitment_across(&strategy);
+            let commitment = parent.commitment();
 
             // Special case: If the parent block is the last block in the epoch,
             // re-propose it so as not to produce any blocks that will be cut out
@@ -745,9 +743,8 @@ where
 
             let ancestor_stream = marshal.ancestor_stream(
                 context.clone(),
-                [parent.inner_shared()],
+                [parent.inner_digested()],
                 ancestor_fetch_duration,
-                strategy,
             );
             Resolved::Build(
                 ancestor_stream,
@@ -768,7 +765,7 @@ where
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
@@ -827,20 +824,11 @@ where
                     parent = %parent_commitment
                 )
             },
-            move |block: B, coding_config| async move {
+            move |block: Digested<B>, coding_config| async move {
                 let erasure_timer = erasure_encode_duration.timer(&*clock);
-                let sealed = strategy
-                    .spawn(block.encode_size(), move |strategy| {
-                        let coded_block =
-                            CodedBlock::<B, C, H>::new(block, coding_config, &strategy);
-                        (
-                            coded_block.commitment_across(&strategy),
-                            Arc::new(coded_block),
-                        )
-                    })
-                    .await;
+                let coded = CodedBlock::encode(block, coding_config, &strategy).await;
                 erasure_timer.observe(&*clock);
-                sealed
+                (coded.commitment(), Arc::new(coded))
             },
         )
     }
@@ -1078,7 +1066,7 @@ where
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
@@ -1123,20 +1111,11 @@ where
                     parent = %parent_commitment
                 )
             },
-            move |block: B, coding_config| async move {
+            move |block: Digested<B>, coding_config| async move {
                 let erasure_timer = erasure_encode_duration.timer(&*clock);
-                let sealed = strategy
-                    .spawn(block.encode_size(), move |strategy| {
-                        let coded_block =
-                            CodedBlock::<B, C, H>::new(block, coding_config, &strategy);
-                        (
-                            coded_block.commitment_across(&strategy),
-                            Arc::new(coded_block),
-                        )
-                    })
-                    .await;
+                let coded = CodedBlock::encode(block, coding_config, &strategy).await;
                 erasure_timer.observe(&*clock);
-                sealed
+                (coded.commitment(), Arc::new(coded))
             },
         )
     }
@@ -1164,7 +1143,7 @@ where
             Block = B,
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
         >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
@@ -1200,7 +1179,7 @@ where
             Block = B,
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
         >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
@@ -1237,6 +1216,7 @@ mod tests {
     use commonware_cryptography::sha256::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::deterministic;
+    use std::sync::Arc;
 
     type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
@@ -1256,7 +1236,7 @@ mod tests {
         /// Exposes the gates this wrapper prunes to the tests of the coding variant.
         pub(in crate::marshal::coding) const fn gates(
             &self,
-        ) -> &Gates<TestCommitment, TestCodedBlock> {
+        ) -> &Gates<TestCommitment, Arc<TestCodedBlock>> {
             &self.gates
         }
     }

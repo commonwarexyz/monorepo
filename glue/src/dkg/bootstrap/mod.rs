@@ -31,7 +31,7 @@ use commonware_consensus::{
     types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Hasher, PublicKey, Sha256, Signer as _,
+    Digest as _, Digested, Digestible, Hasher, PublicKey, Sha256, Signer as _,
     bls12381::{
         dkg::feldman_desmedt::Reveal,
         primitives::{
@@ -61,7 +61,6 @@ use rand_core::{CryptoRng, Rng};
 use std::{
     marker::PhantomData,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-    sync::OnceLock,
     time::Duration,
 };
 
@@ -161,9 +160,6 @@ pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     parent: sha256::Digest,
     height: Height,
     payload: Option<Payload<V, ed25519::PrivateKey, D>>,
-
-    /// The SHA-256 digest of the block's encoding, computed at most once.
-    digest: OnceLock<sha256::Digest>,
 }
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
@@ -178,7 +174,6 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
             parent,
             height,
             payload,
-            digest: OnceLock::new(),
         }
     }
 
@@ -243,9 +238,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Digestible for Block<V, D> {
     }
 
     fn digest_across(&self, strategy: &impl Strategy) -> sha256::Digest {
-        *self
-            .digest
-            .get_or_init(|| Sha256::hash_across(&[&self.encode()], strategy))
+        Sha256::hash_across(&[&self.encode()], strategy)
     }
 }
 
@@ -261,7 +254,6 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ConsensusBlock for Block<V, D
     }
 }
 
-// The cached digest is derived from the other fields, so equality ignores it.
 impl<V: Variant, D: Directory<ed25519::PublicKey>> PartialEq for Block<V, D> {
     fn eq(&self, other: &Self) -> bool {
         self.context == other.context
@@ -472,6 +464,8 @@ where
                 .clone(),
         );
 
+        let genesis = Digested::compute(genesis, &self.config.strategy).await;
+
         let (buffer, buffer_mailbox) = buffered::Engine::new(
             context.child("buffer"),
             buffered::Config {
@@ -537,7 +531,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(self.config.blocks_per_epoch),
-                start: Start::Genesis(genesis.clone().into()),
+                start: Start::Genesis(genesis.clone()),
                 partition_prefix: format!("{}-marshal", self.config.partition_prefix),
                 mailbox_size: self.config.mailbox_size,
                 view_retention: ViewDelta::new(10),
@@ -610,7 +604,10 @@ where
         );
 
         let app = reshare::Application::new(
-            DkgApp(PhantomData),
+            DkgApp {
+                _marker: PhantomData,
+                strategy: self.config.strategy.clone(),
+            },
             reshare_mailbox.clone(),
             self.config.blocks_per_epoch,
         );
@@ -619,9 +616,8 @@ where
             app,
             marshal_mailbox.clone(),
             FixedEpocher::new(self.config.blocks_per_epoch),
-            self.config.strategy.clone(),
         );
-        let floor = Floor::Genesis(genesis.digest_across(&self.config.strategy));
+        let floor = Floor::Genesis(genesis.digest());
         let simplex = simplex::Engine::new(
             context.child("simplex"),
             simplex::Config {
@@ -673,13 +669,17 @@ where
 }
 
 #[derive(Clone)]
-struct DkgApp<V: Variant, D>(PhantomData<(V, D)>);
+struct DkgApp<V: Variant, D, T> {
+    _marker: PhantomData<(V, D)>,
+    strategy: T,
+}
 
-impl<E, V, D> Application<E> for DkgApp<V, D>
+impl<E, V, D, T> Application<E> for DkgApp<V, D, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     V: Variant,
     D: Directory<ed25519::PublicKey>,
+    T: Strategy,
 {
     type SigningScheme = ConsensusScheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
@@ -691,10 +691,11 @@ where
         (_, context): (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         let parent = ancestry.peek()?.clone();
         let height = parent.height().next();
-        Some(Block::new(context, parent.digest(), height, input.payload))
+        let block = Block::new(context, parent.digest(), height, input.payload);
+        Some(Digested::compute(block, &self.strategy).await)
     }
 
     async fn verify(

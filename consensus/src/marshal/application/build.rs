@@ -12,18 +12,18 @@ use crate::{
     marshal::{ancestry::Ancestry, application::gates::Gates},
     simplex::types::Context,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::{Digest, Digested, PublicKey};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::metrics::histogram::Timer};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand_core::Rng;
-use std::{future::Future, sync::Arc};
+use std::future::Future;
 use tracing::{Instrument as _, Span, debug};
 
 /// The outcome of the marshal's proposal checks for a parent.
 pub(crate) enum Resolved<D, S, A, M = ()> {
     /// The marshal re-proposes the epoch boundary block, whose digest is the first field.
-    Reuse(D, Arc<S>),
+    Reuse(D, S),
     /// The marshal cannot build on this parent.
     Skip,
     /// The parent is fetched and the application may build on its ancestry. The timer
@@ -54,18 +54,18 @@ pub(crate) fn prepare<E, A, D, P, S, N, Fut, M, Seal>(
     checks: Fut,
     span: Span,
     build_span: impl FnOnce() -> Span + Send + 'static,
-    seal: impl FnOnce(A::Block, M) -> Seal + Send + 'static,
+    seal: impl FnOnce(Digested<A::Block>, M) -> Seal + Send + 'static,
 ) -> oneshot::Receiver<Handoff<D>>
 where
     E: Rng + Clock + Spawner + Metrics,
     A: Application<E, Context = Context<D, P>, Input = ()>,
     D: Digest,
     P: PublicKey,
-    S: Send + Sync + 'static,
+    S: Clone + Send + Sync + 'static,
     N: Ancestry<A::Block>,
     M: Send + 'static,
     Fut: Future<Output = Resolved<D, S, N, M>> + Send + 'static,
-    Seal: Future<Output = (D, Arc<S>)> + Send + 'static,
+    Seal: Future<Output = (D, S)> + Send + 'static,
 {
     let mut application = application.clone();
     let (mut tx, rx) = oneshot::channel();
@@ -174,18 +174,18 @@ pub(crate) fn propose<E, A, D, P, S, N, Fut, M, Seal>(
     checks: Fut,
     span: Span,
     build_span: impl FnOnce() -> Span + Send + 'static,
-    seal: impl FnOnce(A::Block, M) -> Seal + Send + 'static,
+    seal: impl FnOnce(Digested<A::Block>, M) -> Seal + Send + 'static,
 ) -> oneshot::Receiver<D>
 where
     E: Rng + Clock + Spawner + Metrics,
     A: Application<E, Context = Context<D, P>, Input = ()>,
     D: Digest,
     P: PublicKey,
-    S: Send + Sync + 'static,
+    S: Clone + Send + Sync + 'static,
     N: Ancestry<A::Block>,
     M: Send + 'static,
     Fut: Future<Output = Resolved<D, S, N, M>> + Send + 'static,
-    Seal: Future<Output = (D, Arc<S>)> + Send + 'static,
+    Seal: Future<Output = (D, S)> + Send + 'static,
 {
     let mut application = application.clone();
     let (mut tx, rx) = oneshot::channel();

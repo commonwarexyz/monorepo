@@ -119,7 +119,7 @@ mod tests {
         types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
     };
     use commonware_cryptography::{
-        Digestible as _, Hasher as _,
+        Digested, Digestible as _, Hasher as _,
         bls12381::{dkg::feldman_desmedt::deal, primitives::sharing::Mode},
         certificate::Verifier as _,
         sha256::Sha256,
@@ -141,7 +141,6 @@ mod tests {
     };
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
-        sync::Arc,
         time::Duration,
     };
 
@@ -394,7 +393,10 @@ mod tests {
                 marshal::Config {
                     provider: mocks::TestProvider::new(fixture.schemes[index].clone()),
                     epocher: FixedEpocher::new(NZU64!(2)),
-                    start: MarshalStart::Genesis(genesis.into()),
+                    start: MarshalStart::Genesis(Digested::new_trusted(
+                        genesis.clone(),
+                        genesis.digest(),
+                    )),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(16),
                     view_retention: ViewDelta::new(8),
@@ -447,7 +449,10 @@ mod tests {
             if let Some(block) = &boundary {
                 assert!(
                     marshal
-                        .certified(block.context().round, block.clone())
+                        .certified(
+                            block.context().round,
+                            Digested::new_trusted(block.clone(), block.digest())
+                        )
                         .await
                 );
                 let finalization = make_finalization(
@@ -532,7 +537,7 @@ mod tests {
         context: &deterministic::Context,
         marshal: &mocks::TestMarshalMailbox,
         height: Height,
-    ) -> Arc<mocks::TestBlock> {
+    ) -> Digested<mocks::TestBlock> {
         for _ in 0..50 {
             if let Some(block) = marshal.get_block(height).await {
                 return block;
@@ -767,7 +772,10 @@ mod tests {
                     marshal::Config {
                         provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
                         epocher: FixedEpocher::new(NZU64!(2)),
-                        start: MarshalStart::Genesis(genesis.into()),
+                        start: MarshalStart::Genesis(Digested::new_trusted(
+                            genesis.clone(),
+                            genesis.digest(),
+                        )),
                         partition_prefix: partition_prefix.clone(),
                         mailbox_size: NZUsize!(16),
                         view_retention: ViewDelta::new(8),
@@ -850,7 +858,8 @@ mod tests {
             let proposal = wait_for_proposal(&context, &cluster.nodes, Epoch::zero()).await;
             assert_eq!(proposal.round.epoch(), Epoch::zero());
 
-            let boundary = Arc::new(cluster.boundary.clone());
+            let boundary =
+                Digested::new_trusted(cluster.boundary.clone(), cluster.boundary.digest());
             let node = &mut cluster.nodes[0];
             let (acknowledgement, _waiter) = Exact::handle();
             assert_eq!(
@@ -886,7 +895,8 @@ mod tests {
 
             // Marshal reports the first block of epoch one without the final block of epoch
             // zero.
-            let skipped = Arc::new(mocks::child(&cluster.boundary));
+            let skipped = mocks::child(&cluster.boundary);
+            let skipped = Digested::new_trusted(skipped.clone(), skipped.digest());
             let node = &mut cluster.nodes[0];
             let (acknowledgement, waiter) = Exact::handle();
             assert_eq!(
@@ -1050,7 +1060,10 @@ mod tests {
                 marshal::Config {
                     provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
                     epocher: FixedEpocher::new(NZU64!(2)),
-                    start: MarshalStart::Genesis(genesis.into()),
+                    start: MarshalStart::Genesis(Digested::new_trusted(
+                        genesis.clone(),
+                        genesis.digest(),
+                    )),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(16),
                     view_retention: ViewDelta::new(8),

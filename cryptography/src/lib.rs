@@ -72,11 +72,11 @@ commonware_macros::stability_scope!(ALPHA {
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     use alloc::{sync::Arc, vec::Vec};
-    use commonware_codec::{Encode, ReadExt};
+    use commonware_codec::{Encode, EncodeSize, ReadExt, Write};
     use commonware_math::algebra::Random;
     use commonware_parallel::Strategy;
     use commonware_utils::Array;
-    use core::num::NonZeroUsize;
+    use core::{fmt, future::Future, num::NonZeroUsize};
     use rand_chacha::ChaCha20Rng;
     use rand_core::{CryptoRng, SeedableRng as _};
     #[cfg(feature = "std")]
@@ -299,6 +299,118 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
+    /// A shared value paired with its [Digest].
+    ///
+    /// Constructing one is where a value's digest is computed. [`Digested::compute`] hashes the
+    /// value as a job on a [Strategy], and [`Digested::new_trusted`] attaches a digest that a
+    /// local source already computed from this exact value. Holders read the digest for free and
+    /// never choose a strategy, so a [Digestible] implementation does not need to cache it. The
+    /// value must not change anything its digest covers while a carrier refers to it.
+    ///
+    /// Cloning shares the value. Two values are equal when their digests are equal, which the
+    /// [Digestible] contract makes equivalent to the values being equal. The value encodes as the
+    /// inner value does, and there is no decoding. A decoded value is paired with its digest by
+    /// one of the constructors.
+    pub struct Digested<T: Digestible> {
+        inner: Arc<T>,
+        digest: T::Digest,
+    }
+
+    impl<T: Digestible> Digested<T> {
+        /// Computes the digest of `inner` as a job on `strategy`, splitting the hashing across it.
+        ///
+        /// The job is sized by the value's encoded size. Submitted work runs to completion even if
+        /// the returned future is dropped, which only discards the result.
+        #[track_caller]
+        pub fn compute(
+            inner: impl Into<Arc<T>>,
+            strategy: &impl Strategy,
+        ) -> impl Future<Output = Self> + Send + 'static
+        where
+            T: EncodeSize,
+        {
+            let inner: Arc<T> = inner.into();
+            strategy.spawn(inner.encode_size(), move |strategy| {
+                let digest = inner.digest_across(&strategy);
+                Self { inner, digest }
+            })
+        }
+
+        /// Pairs `inner` with a digest already computed from this exact value.
+        ///
+        /// `digest` must come from a local source bound to `inner`, such as the key the value was
+        /// stored under, a commitment checked against its bytes, or an earlier [`Self::compute`].
+        /// It says nothing about whether the value is valid or certified.
+        pub fn new_trusted(inner: impl Into<Arc<T>>, digest: T::Digest) -> Self {
+            Self {
+                inner: inner.into(),
+                digest,
+            }
+        }
+
+        /// Returns a reference to the value.
+        pub fn inner(&self) -> &T {
+            &self.inner
+        }
+
+        /// Returns a shared reference to the value.
+        pub fn inner_shared(&self) -> Arc<T> {
+            Arc::clone(&self.inner)
+        }
+    }
+
+    impl<T: Digestible> Clone for Digested<T> {
+        fn clone(&self) -> Self {
+            Self {
+                inner: Arc::clone(&self.inner),
+                digest: self.digest,
+            }
+        }
+    }
+
+    impl<T: Digestible + fmt::Debug> fmt::Debug for Digested<T> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Digested")
+                .field("digest", &self.digest)
+                .field("inner", &self.inner)
+                .finish()
+        }
+    }
+
+    impl<T: Digestible> PartialEq for Digested<T> {
+        fn eq(&self, other: &Self) -> bool {
+            self.digest == other.digest
+        }
+    }
+
+    impl<T: Digestible> Eq for Digested<T> {}
+
+    impl<T: Digestible> Digestible for Digested<T> {
+        type Digest = T::Digest;
+
+        fn digest(&self) -> Self::Digest {
+            self.digest
+        }
+    }
+
+    impl<T: Digestible + Write> Write for Digested<T> {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            self.inner.write(buf);
+        }
+    }
+
+    impl<T: Digestible + EncodeSize> EncodeSize for Digested<T> {
+        fn encode_size(&self) -> usize {
+            self.inner.encode_size()
+        }
+    }
+
+    impl<T: Digestible> From<Digested<T>> for Arc<T> {
+        fn from(digested: Digested<T>) -> Self {
+            digested.inner
+        }
+    }
+
     /// An object that can produce a commitment of itself.
     pub trait Committable: Clone + Sized + Send + Sync + 'static {
         /// The type of commitment produced by this object.
@@ -317,11 +429,6 @@ commonware_macros::stability_scope!(BETA {
         /// relation between digest and commitment and a one-to-many relation
         /// between commitment and digest.
         fn commitment(&self) -> Self::Commitment;
-
-        /// Returns the object's commitment, splitting any work in computing it across `strategy`.
-        fn commitment_across(&self, _strategy: &impl Strategy) -> Self::Commitment {
-            self.commitment()
-        }
     }
 
     pub type DigestOf<H> = <H as Hasher>::Digest;
