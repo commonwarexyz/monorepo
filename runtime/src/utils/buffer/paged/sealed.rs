@@ -178,11 +178,12 @@ impl<B: Blob> Sealed<B> {
     /// is not async. Replay validates full pages read from storage and uses the frozen partial
     /// page. Every underlying blob read uses `read_options`, including refills after seeking.
     ///
-    /// Pages are read in batches ahead of the decoder. The batches in flight together span
-    /// `buffer_size`, each rounded up to whole pages, so they exceed it by less than one page
-    /// each. It does not bound what a large fill or a retained byte field keeps alive. A seek or
-    /// a dropped replay discards the batches read ahead, and their reads finish as
-    /// [`Blob::read_many`] describes.
+    /// Pages are read in batches ahead of the decoder. The batch being decoded and the batches in
+    /// flight together span `buffer_size`, each rounded up to whole pages, so they exceed it by
+    /// less than one page each. A fill that crosses into the next batch keeps the earlier batch
+    /// alive until its last bytes are consumed, and a large fill or a retained byte field keeps
+    /// more alive. A seek or a dropped replay discards the batches read ahead, and their reads
+    /// finish as [`Blob::start_read_many`] describes.
     pub fn replay(
         &self,
         buffer_size: NonZeroUsize,

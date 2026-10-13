@@ -1,16 +1,9 @@
 use super::Checksum;
-use crate::{Blob, Error, IoBuf, IoBufsMut, ReadOptions};
+use crate::{Blob, Error, Handle, IoBuf, IoBufsMut, ReadOptions};
 use bytes::{BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{Buf, FixedSize};
-use commonware_utils::{Widen, sync::Mutex};
-use futures::{StreamExt as _, future::BoxFuture, task::noop_waker_ref};
-use std::{
-    collections::VecDeque,
-    num::NonZeroU16,
-    ops::Range,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use commonware_utils::Widen;
+use std::{collections::VecDeque, num::NonZeroU16, ops::Range, sync::Arc};
 use tracing::error;
 
 /// Buffered pages from storage or a frozen logical tail.
@@ -33,25 +26,14 @@ pub(super) struct BufferState {
 /// request latency at every batch boundary, while many small requests pay a fixed cost each.
 const MAX_READ_AHEAD: usize = 3;
 
-/// The physical bytes of one batch.
-type Batch = BoxFuture<'static, Result<IoBufsMut, Error>>;
-
-/// A batch issued ahead of the decoder.
+/// A batch started ahead of the decoder.
 struct Inflight {
     /// First page of the batch.
     first_page: u64,
     /// Number of pages in the batch.
     pages: usize,
-    /// The read.
-    state: State,
-}
-
-/// Progress of an issued batch.
-enum State {
-    /// Still being read.
-    Reading(Mutex<Batch>),
-    /// Landed before the decoder reached it.
-    Landed(Result<IoBufsMut, Error>),
+    /// The started read of the batch's pages, as one range.
+    read: Handle<Vec<IoBufsMut>>,
 }
 
 impl Inflight {
@@ -60,38 +42,19 @@ impl Inflight {
         self.first_page + Widen::widen(self.pages)
     }
 
-    /// Poll the batch's read once so it makes whatever progress its blob makes on a first poll
-    /// while the decoder works on the batches before it. Later polls carry the decoder's own
-    /// waker.
-    fn start(mut self) -> Self {
-        if let State::Reading(batch) = &mut self.state
-            && let Poll::Ready(result) = batch
-                .get_mut()
-                .as_mut()
-                .poll(&mut Context::from_waker(noop_waker_ref()))
-        {
-            self.state = State::Landed(result);
-        }
-        self
-    }
-
     /// Wait for the batch's bytes.
     async fn wait(self) -> Result<IoBufsMut, Error> {
-        match self.state {
-            State::Reading(batch) => batch.into_inner().await,
-            State::Landed(result) => result,
-        }
+        self.read.await?.pop().ok_or(Error::ReadFailed)
     }
 }
 
 /// Async I/O component that prefetches pages and validates CRCs.
 ///
-/// Pages are read in batches of `batch_pages` pages through [`Blob::read_many`], and up to
-/// [`MAX_READ_AHEAD`] batches after the one being decoded are kept in flight so the device works
-/// while the decoder does. They are polled once when issued and then held until the decoder
-/// reaches them, as the progress contract of [`Blob`] allows. The batches in flight and the one
-/// being decoded together span the replay buffer, each rounded up to whole pages, so they
-/// exceed it by less than one page each.
+/// Pages are read in batches of `batch_pages` pages, each started through
+/// [`Blob::start_read_many`] and held as a [`Handle`] until the decoder reaches it, with up to
+/// [`MAX_READ_AHEAD`] batches after the one being decoded in flight so the device works while
+/// the decoder does. The batches in flight and the one being decoded together span the replay
+/// buffer, each rounded up to whole pages, so they exceed it by less than one page each.
 ///
 /// The decoder's position advances only after a batch passes checksum validation, so a corrupt
 /// page fails the fill that reaches it and no later page is yielded. When the batch at that
@@ -183,26 +146,23 @@ impl<B: Blob> PageReader<B> {
         self.inflight.clear();
     }
 
-    /// Issue batches after the queued ones, or after `consumed_end` when none is queued, until
+    /// Start batches after the queued ones, or after `consumed_end` when none is queued, until
     /// [`MAX_READ_AHEAD`] are in flight or the blob ends.
-    fn top_up(&mut self, consumed_end: u64) -> Result<(), Error> {
+    async fn top_up(&mut self, consumed_end: u64) -> Result<(), Error> {
         let mut next = self.inflight.back().map_or(consumed_end, Inflight::end);
         while self.inflight.len() < MAX_READ_AHEAD {
-            let Some(batch) = self.prepare_batch(next)? else {
+            let Some(batch) = self.start_batch(next).await? else {
                 break;
             };
             next = batch.end();
-            self.inflight.push_back(batch.start());
+            self.inflight.push_back(batch);
         }
         Ok(())
     }
 
-    /// Prepare a read of up to `batch_pages` consecutive physical pages starting at `first_page`,
-    /// or `None` when no stored page remains there.
-    ///
-    /// This only constructs the read. [`Inflight::start`] polls it once so the blob begins it,
-    /// and [`Inflight::wait`] awaits its bytes.
-    fn prepare_batch(&self, first_page: u64) -> Result<Option<Inflight>, Error> {
+    /// Start a read of up to `batch_pages` consecutive physical pages from `first_page`, or
+    /// `None` when no stored page remains there.
+    async fn start_batch(&self, first_page: u64) -> Result<Option<Inflight>, Error> {
         let physical_page_size: u64 = Widen::widen(self.physical_page_size);
         let start = first_page
             .checked_mul(physical_page_size)
@@ -212,24 +172,15 @@ impl<B: Blob> PageReader<B> {
         }
         let pages = ((self.physical_blob_size - start) / physical_page_size)
             .min(Widen::widen(self.batch_pages)) as usize;
-
-        let blob = self.blob.clone();
-        let read_options = self.read_options;
         let len = pages * self.physical_page_size;
-        let batch = Box::pin(async move {
-            // Accept the batch only once its read stream has ended without an error.
-            let ranges = [(start, len)];
-            let mut reads = std::pin::pin!(blob.read_many(&ranges, read_options));
-            let (_, bufs) = reads.next().await.ok_or(Error::ReadFailed)??;
-            while let Some(result) = reads.next().await {
-                result?;
-            }
-            Ok(bufs)
-        });
+        let read = self
+            .blob
+            .start_read_many(&[(start, len)], self.read_options)
+            .await;
         Ok(Some(Inflight {
             first_page,
             pages,
-            state: State::Reading(Mutex::new(batch)),
+            read,
         }))
     }
 
@@ -252,8 +203,8 @@ impl<B: Blob> PageReader<B> {
     /// lands and reading on demand otherwise.
     ///
     /// A batch read ahead whose read failed, or a queue that does not start at the decoder's
-    /// position, is discarded before the demand read is issued and the queue topped up again.
-    /// The read ahead may have failed because whoever issued it is gone, and nothing queued may
+    /// position, is discarded before the demand read is started and the queue topped up again.
+    /// The read ahead may have failed because whoever started it is gone, and nothing queued may
     /// stand between the decoder and the bytes it needs.
     async fn read_batch(&mut self) -> Result<(usize, IoBufsMut), Error> {
         if let Some(batch) = self
@@ -261,7 +212,7 @@ impl<B: Blob> PageReader<B> {
             .pop_front_if(|batch| batch.first_page == self.blob_page)
         {
             let pages = batch.pages;
-            self.top_up(batch.end())?;
+            self.top_up(batch.end()).await?;
             if let Ok(bufs) = batch.wait().await {
                 return Ok((pages, bufs));
             }
@@ -269,11 +220,11 @@ impl<B: Blob> PageReader<B> {
 
         self.inflight.clear();
         let batch = self
-            .prepare_batch(self.blob_page)?
-            .expect("pages remain to be issued")
-            .start();
+            .start_batch(self.blob_page)
+            .await?
+            .expect("pages remain to be issued");
         let pages = batch.pages;
-        self.top_up(batch.end())?;
+        self.top_up(batch.end()).await?;
         Ok((pages, batch.wait().await?))
     }
 
@@ -647,11 +598,14 @@ mod tests {
     use bytes::Buf as _;
     use commonware_macros::test_traced;
     use commonware_utils::{NZU16, NZUsize, channel::oneshot, sync::Mutex};
-    use futures::stream;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use futures::task::noop_waker_ref;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Context, Poll},
+    };
 
-    /// Every read in call order. Each records whether it was a `read_many` call, which every
-    /// replay batch must be, and its ranges.
+    /// Every read in call order. Each records whether it was a started read, which every replay
+    /// batch must be, and its ranges.
     type Calls = Arc<Mutex<Vec<(bool, Vec<(u64, usize)>)>>>;
 
     /// How a [GroupingBlob] serves the reads it records.
@@ -661,12 +615,12 @@ mod tests {
         fail_from: Option<u64>,
         /// Times each read yields after being recorded, before it completes.
         yields: usize,
-        /// End every `read_many` stream with an error after its results.
+        /// Fail every started read after it has read its bytes.
         trailing_error: bool,
-        /// Hold every `read_many` result until the test releases its offset through [Gates].
+        /// Hold every started read until the test releases its offset through [Gates].
         gated: bool,
-        /// Serve `read_many` only while holding one of these permits, in request order, and fail
-        /// the first read at offset 0. The counter records the attempts at that offset.
+        /// Serve started reads only while holding one of these permits, in request order, and
+        /// fail the first read at offset 0. The counter records the attempts at that offset.
         admission: Option<(Arc<tokio::sync::Semaphore>, Arc<AtomicUsize>)>,
         /// Fail the first read at this offset only. The counter records the attempts there.
         fail_once: Option<(u64, Arc<AtomicUsize>)>,
@@ -764,31 +718,52 @@ mod tests {
             self.inner.read_at(offset, len, options).await
         }
 
-        fn read_many(
+        /// Start the read as the [Reads] say: record it, fail it outright, or hand back bytes
+        /// that land only once the test releases their gate, a permit admits them, and they
+        /// have yielded.
+        async fn start_read_many(
             &self,
             ranges: &[(u64, usize)],
             options: ReadOptions,
-        ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
-            if let Some((permits, attempts)) = &self.reads.admission {
-                self.record(true, ranges).unwrap();
-                let (offset, len) = ranges[0];
-                return stream::once(async move {
-                    let _permit = permits.acquire().await.unwrap();
+        ) -> Handle<Vec<IoBufsMut>> {
+            if let Err(err) = self.record(true, ranges) {
+                return Handle::ready(Err(err));
+            }
+            let bytes = self.inner.start_read_many(ranges, options).await;
+            let offset = ranges[0].0;
+            let gate = self.reads.gated.then(|| {
+                let (release, released) = oneshot::channel();
+                self.gates.0.lock().push((offset, release));
+                released
+            });
+            let admission = self.reads.admission.clone();
+            let yields = self.reads.yields;
+            let trailing_error = self.reads.trailing_error;
+            Handle::from_future(async move {
+                if let Some(released) = gate {
+                    let _ = released.await;
+                }
+                let _permit = match &admission {
+                    Some((permits, _)) => Some(permits.acquire().await.unwrap()),
+                    None => None,
+                };
+                if let Some((_, attempts)) = &admission {
                     let fail = offset == 0 && attempts.fetch_add(1, Ordering::SeqCst) == 0;
                     crate::reschedule().await;
                     crate::reschedule().await;
                     if fail {
-                        Err(Error::ReadFailed)
-                    } else {
-                        self.inner
-                            .read_at(offset, len, options)
-                            .await
-                            .map(|buf| (0, buf))
+                        return Err(Error::ReadFailed);
                     }
-                })
-                .left_stream();
-            }
-            self.ungated_read_many(ranges, options).right_stream()
+                }
+                for _ in 0..yields {
+                    crate::reschedule().await;
+                }
+                let bufs = bytes.await?;
+                if trailing_error {
+                    return Err(Error::ReadFailed);
+                }
+                Ok(bufs)
+            })
         }
 
         async fn write_at(
@@ -807,44 +782,6 @@ mod tests {
         }
         async fn start_sync(&self) -> Handle<()> {
             self.inner.start_sync().await
-        }
-    }
-
-    impl<B: Blob> GroupingBlob<B> {
-        fn ungated_read_many(
-            &self,
-            ranges: &[(u64, usize)],
-            options: ReadOptions,
-        ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
-            if let Err(err) = self.record(true, ranges) {
-                return stream::iter([Err(err)]).left_stream();
-            }
-            // Yield `yields` times before the first result, as `begin` does for `read_at`.
-            let mut left = self.reads.yields;
-            let delay = stream::poll_fn(move |cx| {
-                if left == 0 {
-                    return Poll::Ready(None);
-                }
-                left -= 1;
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            });
-            let trailing = self.reads.trailing_error.then_some(Err(Error::ReadFailed));
-            let gate = self.reads.gated.then(|| {
-                let (release, released) = oneshot::channel();
-                self.gates.0.lock().push((ranges[0].0, release));
-                released
-            });
-            let held = stream::once(async move {
-                if let Some(released) = gate {
-                    let _ = released.await;
-                }
-            })
-            .filter_map(|()| async { None });
-            held.chain(delay)
-                .chain(self.inner.read_many(ranges, options))
-                .chain(stream::iter(trailing))
-                .right_stream()
         }
     }
 
@@ -917,7 +854,7 @@ mod tests {
         .await
     }
 
-    /// The reads a replay of [PIPE_BLOB_BYTES] bytes issues, one `read_many` call per batch.
+    /// The reads a replay of [PIPE_BLOB_BYTES] bytes starts, one per batch.
     fn piped_calls(batches: std::ops::Range<usize>) -> Vec<(bool, Vec<(u64, usize)>)> {
         batches
             .map(|i| {
@@ -978,8 +915,8 @@ mod tests {
         });
     }
 
-    /// A blob whose reads take turns only while polled is outside the [`Blob`] contract, but it
-    /// models reads ahead that can no longer complete, so a retry must not wait on them.
+    /// A blob whose started reads take turns only while their handles are polled models reads
+    /// ahead that can no longer complete, so a retry must not wait on them.
     #[rstest::rstest]
     #[case(1)]
     #[case(2)]
@@ -1185,8 +1122,7 @@ mod tests {
     fn test_dropped_fill_reads_the_same_batch_again() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Reads yield twice before completing, once when the reader starts them and once
-            // in the fill's wait, so a fill can be dropped while it waits.
+            // Reads yield before completing, so a fill can be dropped while it waits on one.
             let reads = Reads {
                 yields: 2,
                 ..Reads::default()
@@ -1296,7 +1232,7 @@ mod tests {
     fn test_read_error_after_the_batch_fails_the_fill() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // A `read_many` call that yields its range and then an error has failed.
+            // A started read that reads its bytes and then fails has failed.
             let reads = Reads {
                 trailing_error: true,
                 ..Reads::default()
