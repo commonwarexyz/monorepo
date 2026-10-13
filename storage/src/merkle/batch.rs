@@ -104,15 +104,15 @@ use core::{iter::Peekable, ops::Range};
 
 #[cfg(feature = "std")]
 std::thread_local! {
-    /// Per-thread scratch for encoding items before they are hashed, reused across batches so
-    /// steady-state leaf hashing allocates nothing.
+    /// Per-thread encoding scratch, reused across Rayon splits and batches to
+    /// avoid repeatedly allocating and growing a fresh buffer.
     static ENCODE_BUF: Cell<Vec<u8>> = const { Cell::new(Vec::new()) };
 }
 
 /// The most [`ENCODE_BUF`] capacity a thread keeps between items. A buffer grown past it by an
 /// unusually large item is freed after that item instead of being held for the thread's lifetime.
 #[cfg(feature = "std")]
-const MAX_RETAINED_ENCODE_BUF: usize = 64 * 1024;
+const MAX_RETAINED_ENCODE_CAPACITY: usize = 64 * 1024;
 
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
@@ -350,13 +350,13 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             .map_collect_vec(items.iter().enumerate(), |(i, item)| {
                 let pos = Position::try_from(first + i as u64).expect("valid leaf location");
 
-                // Own the buffer while the encoder and hasher run, so a nested call on this
-                // thread (e.g. from nested parallel work) starts from an empty one instead.
+                // Leave the thread-local slot empty while encoding and hashing, so callbacks
+                // can re-enter add_many without accessing this call's buffer.
                 let mut buf = ENCODE_BUF.take();
                 buf.clear();
                 item.write(&mut buf);
                 let digest = hasher.leaf_digest(pos, buf.as_slice());
-                if buf.capacity() <= MAX_RETAINED_ENCODE_BUF {
+                if buf.capacity() <= MAX_RETAINED_ENCODE_CAPACITY {
                     ENCODE_BUF.set(buf);
                 }
                 digest
@@ -1646,14 +1646,15 @@ mod tests {
         hash_plan_is_exact::<crate::mmb::Family>();
     }
 
-    /// An item whose encoder runs `add_many` itself on the same thread (as nested parallel work
-    /// can) must not disturb the outer call's scratch buffer.
+    /// Reentrant encoding must preserve bytes written before and after the nested call.
+    #[cfg(feature = "std")]
     #[test]
     fn add_many_tolerates_nested_add_many() {
         struct Nested(u8);
 
         impl Write for Nested {
             fn write(&self, buf: &mut impl bytes::BufMut) {
+                buf.put_u8(0xFF);
                 let hasher: H = Standard::new(ForwardFold);
                 let inner = Mem::<crate::mmr::Family, D>::new();
                 let _ = inner.new_batch().add_many(&hasher, &[u64::from(self.0)]);
@@ -1670,7 +1671,7 @@ mod tests {
             .merkleize(&base, &hasher);
         let mut expected = base.new_batch();
         for i in 0..4u8 {
-            expected = expected.add(&hasher, &[i]);
+            expected = expected.add(&hasher, &[0xFF, i]);
         }
         let expected = expected.merkleize(&base, &hasher);
         assert_eq!(
