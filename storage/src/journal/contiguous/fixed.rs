@@ -293,8 +293,8 @@ impl<B: RBlob, A: CodecFixedShared> super::BatchDecoder for FixedReplayState<'_,
 
         // Decode the whole items of a buffered page from one view of it, which costs one page
         // lookup per page instead of one per item and shares the page's allocation with retained
-        // fields. An item that straddles a page boundary, or any item while replaying a live
-        // view, goes through the general path. Stop this blob on error because decoding may
+        // fields. An item that straddles a page boundary, or a read boundary while replaying a
+        // live view, goes through the general path. Stop this blob on error because decoding may
         // have consumed only part of a record.
         let mut items = Vec::with_capacity(count);
         while items.len() < count {

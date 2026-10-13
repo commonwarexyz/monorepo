@@ -82,9 +82,9 @@ use std::{
 /// on reopen cheap. Note this only reduces the file count, not the on-disk byte growth.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
 
-/// Page cache size, realistic for a multi-GB database rather than the shared bench default of 8 MB
-/// (512 pages). `generate` and `init` use it, so the init-cache benefit is measured on top of a
-/// realistic page cache instead of an unrealistically tiny one. 65536 * 16 KiB = 1 GiB.
+/// Page cache size, realistic for a multi-GB database rather than the shared bench default of
+/// 2 MiB (512 pages). `generate` and `init` use it, so the init-cache benefit is measured on top
+/// of a realistic page cache instead of an unrealistically tiny one. 65536 * 4 KiB = 256 MiB.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(65536);
 
 /// Page cache size for the get modes when `cache_pages` is not given: small enough that

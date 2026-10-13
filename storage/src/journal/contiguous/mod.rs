@@ -114,8 +114,6 @@ struct ReplayStreamState<S: BatchDecoder> {
     current: Option<S>,
     /// Error to yield after the batch decoded before it.
     pending: Option<Error>,
-    /// Set after an error is yielded so the stream terminates cleanly.
-    done: bool,
 }
 
 impl<S: BatchDecoder + Send> ReplayStreamState<S>
@@ -126,11 +124,7 @@ where
     async fn next(mut self) -> Option<(Result<Batch<S::Item>, Error>, Self)> {
         loop {
             if let Some(err) = self.pending.take() {
-                self.done = true;
                 return Some((Err(err), self));
-            }
-            if self.done {
-                return None;
             }
 
             let state = match self.current.take().or_else(|| self.states.next()) {
@@ -143,7 +137,10 @@ where
                     // A failed blob is dropped, and its error ends the stream before any later
                     // blob is read.
                     match decoded.error {
-                        Some(err) => self.pending = Some(err),
+                        Some(err) => {
+                            self.pending = Some(err);
+                            self.states = Vec::new().into_iter();
+                        }
                         None => self.current = Some(state),
                     }
                     if !decoded.batch.items.is_empty() {
@@ -171,7 +168,6 @@ where
             states: states.into_iter(),
             current: None,
             pending: None,
-            done: false,
         },
         ReplayStreamState::next,
     )
