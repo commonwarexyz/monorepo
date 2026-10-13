@@ -158,12 +158,12 @@ impl<B: Blob> Sealed<B> {
     /// Read the pages covering the `(offset, len)` byte ranges (ascending by offset) into the page
     /// cache ahead of their first read, returning how many pages were read from the blob.
     ///
-    /// Covered pages stay cached until their first read while the cache has room for them
-    /// alongside the pages read in the meantime (see
-    /// [commonware_utils::cache::Cache::get_or_insert_mut_expected]). A page that fails
-    /// validation, or that a failed read never supplies, is not cached, and the first error is
-    /// returned after the pages that arrived are cached. Dropping the future leaves the cache
-    /// consistent.
+    /// Residency is best effort. Covered pages are admitted only to the cache's Main section (see
+    /// [commonware_utils::cache::Cache::get_or_insert_mut_expected]), so they stay cached until
+    /// their first read only while Main, not the whole cache, has room for them alongside the
+    /// pages it admits in the meantime. A page that fails validation, or that a failed read never
+    /// supplies, is not cached, and the first error is returned after the pages that arrived are
+    /// cached. Dropping the future leaves the cache consistent.
     #[commonware_macros::stability(ALPHA)]
     pub async fn warm(&self, ranges: &[(u64, u64)]) -> Result<usize, Error> {
         self.view().warm(ranges).await
