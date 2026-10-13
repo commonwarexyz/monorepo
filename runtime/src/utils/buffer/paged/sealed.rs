@@ -182,8 +182,8 @@ impl<B: Blob> Sealed<B> {
     /// flight together span `buffer_size`, each rounded up to whole pages, so they exceed it by
     /// less than one page each. A fill that crosses into the next batch keeps the earlier batch
     /// alive until its last bytes are consumed, and a large fill or a retained byte field keeps
-    /// more alive. A seek or a dropped replay discards the batches read ahead, and their reads
-    /// finish as [`Blob::start_read_many`] describes.
+    /// more alive. A seek or a dropped replay abandons the batches read ahead, as
+    /// [`Blob::start_read_many`] describes.
     pub fn replay(
         &self,
         buffer_size: NonZeroUsize,

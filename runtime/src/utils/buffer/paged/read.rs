@@ -3,6 +3,7 @@ use crate::{Blob, Error, Handle, IoBuf, IoBufsMut, ReadOptions};
 use bytes::{BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{Buf, FixedSize};
 use commonware_utils::Widen;
+use futures::FutureExt as _;
 use std::{collections::VecDeque, num::NonZeroU16, ops::Range, sync::Arc};
 use tracing::error;
 
@@ -173,9 +174,14 @@ impl<B: Blob> PageReader<B> {
         let pages = ((self.physical_blob_size - start) / physical_page_size)
             .min(Widen::widen(self.batch_pages)) as usize;
         let len = pages * self.physical_page_size;
+
+        // Boxing keeps the blob's start future out of the replay's state machine. With it
+        // inlined, the decoders' hot loops compiled differently and the variable decoder ran 8%
+        // slower.
         let read = self
             .blob
             .start_read_many(&[(start, len)], self.read_options)
+            .boxed()
             .await;
         Ok(Some(Inflight {
             first_page,
