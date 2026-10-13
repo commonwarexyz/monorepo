@@ -104,7 +104,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         let journal = {
             debug!("initializing cache");
             let mut replay = journal
-                .replay(0, 0, cfg.replay_buffer, ReadOptions::default())
+                .replay(0, 0, cfg.replay_buffer, ReadOptions::DONT_CACHE)
                 .await?;
             while let Some(result) = replay.next().await {
                 // Extract key from record

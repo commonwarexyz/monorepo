@@ -1,10 +1,37 @@
-use super::Checksum;
+use super::{CacheRef, Checksum};
 use crate::{Blob, Error, IoBuf, ReadOptions};
 use bytes::{BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{Buf, FixedSize};
 use commonware_utils::Widen;
-use std::{collections::VecDeque, num::NonZeroU16, sync::Arc};
-use tracing::error;
+use std::{
+    collections::VecDeque,
+    num::NonZeroU16,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+use tracing::{error, warn};
+
+/// Destination for the pages a [PageReader] validates, for a replay of a recovering blob.
+pub(super) struct ReplayCache {
+    /// Page cache to populate.
+    pub(super) cache_ref: CacheRef,
+    /// Cache key identifying the blob being read.
+    pub(super) blob_id: u64,
+    /// Shrink count of the recovering blob. A shrink can replace pages read before it, so pages are
+    /// published only while the count still equals `start`.
+    pub(super) shrinks: Arc<AtomicU64>,
+    /// Value of `shrinks` when the replay began.
+    pub(super) start: u64,
+}
+
+impl ReplayCache {
+    /// Whether no shrink has happened since the replay began.
+    fn current(&self) -> bool {
+        self.shrinks.load(Ordering::Relaxed) == self.start
+    }
+}
 
 /// Buffered pages from storage or a frozen logical tail.
 ///
@@ -17,6 +44,16 @@ pub(super) struct BufferState {
     num_pages: usize,
     /// Logical length of the last page (may be partial).
     last_page_len: usize,
+}
+
+/// How a [PageReader] handles a stored page that is not well-formed: one whose checksum is
+/// invalid, or a logically partial page before the last.
+#[derive(Clone, Copy)]
+pub(super) enum Malformed {
+    /// Fail the read with [Error::InvalidChecksum].
+    Fail,
+    /// End the blob's readable prefix before an invalid page, or after a partial one.
+    End,
 }
 
 /// Async I/O component that prefetches pages and validates CRCs.
@@ -40,8 +77,12 @@ pub(super) struct PageReader<B: Blob> {
     blob_page: u64,
     /// Number of pages to prefetch at once.
     prefetch_count: usize,
+    /// Destination for pages validated while filling a batch, if the replay publishes them.
+    cache: Option<ReplayCache>,
     /// Options applied to every blob read.
     read_options: ReadOptions,
+    /// Handling of a stored page that is not well-formed.
+    malformed: Malformed,
 }
 
 impl<B: Blob> PageReader<B> {
@@ -51,11 +92,16 @@ impl<B: Blob> PageReader<B> {
     /// (e.g., junk pages from an interrupted write). Each physical page is the same
     /// size on disk, but the CRC record indicates how much logical data it contains.
     /// The last page may be logically partial (CRC length < logical page size), but
-    /// all preceding pages must be logically full. A logically partial non-last page
-    /// indicates corruption and will cause an `Error::InvalidChecksum`.
+    /// all preceding pages must be logically full. A page with an invalid checksum or a
+    /// logically partial non-last page is handled according to `malformed`.
     ///
     /// A frozen `partial_page` contains exactly the logical bytes of the final partial page.
     /// Its physical page is included in `physical_blob_size` but is not read from storage.
+    /// Ending at an earlier malformed page discards the frozen page.
+    ///
+    /// With a `cache`, every full page validated while filling a batch is written into it, so a
+    /// replay warms the cache ordinary reads use. Without one, the replay leaves the cache alone.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         blob: Arc<B>,
         mut physical_blob_size: u64,
@@ -63,7 +109,9 @@ impl<B: Blob> PageReader<B> {
         partial_page: Option<IoBuf>,
         prefetch_count: usize,
         page_size: NonZeroU16,
+        cache: Option<ReplayCache>,
         read_options: ReadOptions,
+        malformed: Malformed,
     ) -> Self {
         let page_size = page_size.get() as usize;
         let physical_page_size = page_size + Checksum::SIZE;
@@ -94,8 +142,20 @@ impl<B: Blob> PageReader<B> {
             partial_page: partial_page.map(Bytes::from),
             blob_page: 0,
             prefetch_count,
+            cache,
             read_options,
+            malformed,
         }
+    }
+
+    /// End the readable prefix after `pages` pages and `logical_size` logical bytes.
+    fn end_at(&mut self, pages: u64, logical_size: u64) -> Result<(), Error> {
+        self.physical_blob_size = pages
+            .checked_mul(Widen::widen(self.physical_page_size))
+            .ok_or(Error::OffsetOverflow)?;
+        self.logical_blob_size = self.logical_blob_size.min(logical_size);
+        self.partial_page = None;
+        Ok(())
     }
 
     /// Returns the size of the blob.
@@ -159,16 +219,28 @@ impl<B: Blob> PageReader<B> {
                 .freeze(),
         );
 
-        // Validate CRCs and compute total logical bytes
+        // Validate CRCs and compute total logical bytes. Ending at a malformed page keeps only
+        // the pages before it, plus the page itself when it is valid but partial.
+        let mut pages = pages_to_read;
         let mut total_logical = 0usize;
         let mut last_len = 0usize;
         let is_final_batch = Widen::widen(pages_to_read) == max_pages;
         for page_idx in 0..pages_to_read {
+            let page = self.blob_page + page_idx as u64;
+            let logical_start = page
+                .checked_mul(self.page_size as u64)
+                .ok_or(Error::OffsetOverflow)?;
             let page_start = page_idx * self.physical_page_size;
             let page_slice =
                 &physical_buf.as_ref()[page_start..page_start + self.physical_page_size];
             let Some(checksum) = Checksum::validate_page(page_slice) else {
-                error!(page = self.blob_page + page_idx as u64, "CRC mismatch");
+                if matches!(self.malformed, Malformed::End) {
+                    warn!(page, "replay ends before page with invalid checksum");
+                    pages = page_idx;
+                    self.end_at(page, logical_start)?;
+                    break;
+                }
+                error!(page, "CRC mismatch");
                 return Err(Error::InvalidChecksum);
             };
             let len = checksum.len as usize;
@@ -176,9 +248,10 @@ impl<B: Blob> PageReader<B> {
             // Only the final page in the blob may have partial length
             let is_last_page_in_blob =
                 self.partial_page.is_none() && is_final_batch && page_idx + 1 == pages_to_read;
-            if !is_last_page_in_blob && len != self.page_size {
+            let partial_interior = !is_last_page_in_blob && len != self.page_size;
+            if partial_interior && matches!(self.malformed, Malformed::Fail) {
                 error!(
-                    page = self.blob_page + page_idx as u64,
+                    page,
                     expected = self.page_size,
                     actual = len,
                     "non-last page has partial length"
@@ -186,21 +259,59 @@ impl<B: Blob> PageReader<B> {
                 return Err(Error::InvalidChecksum);
             }
 
-            let logical_start = (self.blob_page + page_idx as u64)
-                .checked_mul(self.page_size as u64)
-                .ok_or(Error::OffsetOverflow)?;
             let logical_remaining = self.logical_blob_size.saturating_sub(logical_start);
             let logical_remaining_in_page = logical_remaining.min(self.page_size as u64) as usize;
             let exposed_len = len.min(logical_remaining_in_page);
 
             total_logical += exposed_len;
             last_len = exposed_len;
+
+            // A valid partial page ends the prefix wherever it appears.
+            if partial_interior {
+                warn!(page, len, "replay ends at partial page");
+                pages = page_idx + 1;
+                let logical_end = logical_start
+                    .checked_add(len as u64)
+                    .ok_or(Error::OffsetOverflow)?;
+                self.end_at(page + 1, logical_end)?;
+                break;
+            }
         }
-        self.blob_page += Widen::widen(pages_to_read);
+
+        // Cache every validated page that is logically full; a page exposing fewer bytes sits at
+        // the blob's current end and is not page-aligned for the cache.
+        let full_pages = if pages > 0 && last_len == self.page_size {
+            pages
+        } else {
+            pages.saturating_sub(1)
+        };
+        if full_pages > 0
+            && let Some(cache) = &self.cache
+        {
+            let physical_page_size = self.physical_page_size;
+            let page_size = self.page_size;
+
+            // A shrink bumps the count before the writer re-caches any page it replaces, and
+            // re-caching takes the same lock, so this check cannot let old bytes overwrite new ones.
+            cache.cache_ref.cache_pages_if(
+                cache.blob_id,
+                (0..full_pages).map(|idx| {
+                    let start = idx * physical_page_size;
+                    &physical_buf.as_ref()[start..start + page_size]
+                }),
+                self.blob_page * page_size as u64,
+                || cache.current(),
+            );
+        }
+
+        self.blob_page += Widen::widen(pages);
+        if pages == 0 {
+            return Ok(None);
+        }
 
         let state = BufferState {
             buffer: physical_buf,
-            num_pages: pages_to_read,
+            num_pages: pages,
             last_page_len: last_len,
         };
 
@@ -254,6 +365,11 @@ impl ReplayBuf {
         // If buffers is empty, this is the first fill after a seek.
         // Skip bytes before the seek offset (offset_in_page).
         let skip = if self.buffers.is_empty() {
+            // A recoverable replay can end its prefix before the seek offset, which leaves the
+            // cursor at the new end.
+            self.offset_in_page =
+                self.offset_in_page
+                    .min(Self::page_len(&state, 0, self.page_size));
             self.offset_in_page
         } else {
             0

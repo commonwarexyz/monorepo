@@ -647,7 +647,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             && end < blob.size()
         {
             end = end.min(
-                blob.recoverable_prefix_len_at_most(0, end, replay_buffer, ReadOptions::default())
+                blob.recoverable_prefix_len_at_most(0, end, replay_buffer, ReadOptions::DONT_CACHE)
                     .await?,
             );
         }
@@ -657,7 +657,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             .truncate_pending(section, end - end % Self::CHUNK_SIZE as u64)
             .await?;
         let mut replay = journal
-            .replay(0, 0, replay_buffer, ReadOptions::default())
+            .replay(0, 0, replay_buffer, ReadOptions::DONT_CACHE)
             .await?;
         while let Some(item) = replay.next().await {
             item?;
@@ -1745,6 +1745,50 @@ mod tests {
             assert!(replay.next().await.is_none());
 
             let journal = replay.finish().expect("failed to finish replay");
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    /// Replay reads each item once, so it must leave the page cache cold: a later read of a
+    /// replayed item still goes to storage.
+    #[test_traced]
+    fn test_segmented_fixed_replay_leaves_page_cache_cold() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let cfg = aligned_cfg(&context);
+            let page_cache = cfg.page_cache.clone();
+            let mut journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            // One digest fills two full pages. Sync it, then drop what the write path cached.
+            (journal, _) = journal
+                .append(1, &test_digest(1))
+                .await
+                .expect("failed to append");
+            journal = journal.sync(1).await.expect("failed to sync");
+            page_cache.clear();
+
+            let mut replay = journal
+                .replay(0, 0, NZUsize!(1024), ReadOptions::DONT_CACHE)
+                .await
+                .expect("failed to replay");
+            let (_, _, item) = replay
+                .next()
+                .await
+                .expect("missing replay item")
+                .expect("failed to read replay item");
+            assert_eq!(item, test_digest(1));
+            assert!(replay.next().await.is_none());
+            let journal = replay.finish().expect("failed to finish replay");
+
+            recordings.clear();
+            assert_eq!(
+                journal.get(1, 0).await.expect("failed to get"),
+                test_digest(1)
+            );
+            assert!(!recordings.snapshot().reads.is_empty());
             journal.destroy().await.expect("failed to destroy");
         });
     }

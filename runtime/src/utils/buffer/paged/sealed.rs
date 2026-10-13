@@ -14,7 +14,7 @@
 
 use super::{
     CHECKSUM_SIZE, CacheRef, Replay,
-    read::PageReader,
+    read::{Malformed, PageReader},
     view::{Tail, View},
 };
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs, ReadOptions};
@@ -208,7 +208,9 @@ impl<B: Blob> Sealed<B> {
             self.inner.partial_page.clone(),
             prefetch_pages,
             page_size_nz,
+            None,
             read_options,
+            Malformed::Fail,
         );
         Ok(Replay::new(reader))
     }
@@ -954,6 +956,45 @@ mod tests {
                 replay.advance(copy_len);
             }
             assert_eq!(out, data);
+        });
+    }
+
+    /// `Sealed::replay` reads each page once, so it must leave the page cache cold.
+    #[test_traced("DEBUG")]
+    fn test_sealed_replay_leaves_page_cache_cold() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"sealed_replay_cold_cache")
+                .await
+                .unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let total = page_size * 2 + 25;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
+            let (sealed, sync) = append.seal().await.unwrap();
+            sync.await.unwrap();
+
+            // Clear whatever the write path cached so only the replay below could populate it.
+            cache_ref.clear();
+            let mut probe = vec![0u8; page_size];
+            assert!(!sealed.try_read_sync_into(&mut probe, 0));
+
+            let mut replay = sealed
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::DONT_CACHE)
+                .unwrap();
+            assert!(replay.ensure(total).await.unwrap());
+            assert_eq!(replay.copy_to_bytes(total).as_ref(), data.as_slice());
+
+            assert!(!sealed.try_read_sync_into(&mut probe, 0));
+            assert!(!sealed.try_read_sync_into(&mut probe, page_size as u64));
         });
     }
 
