@@ -2660,9 +2660,9 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    // Instantiate the prefetch test for one variant over a page cache the test can clear, with
-    // room for every page the test warms. Small caches admit new pages through a single slot,
-    // so a warmed page would be evicted by the next.
+    // Instantiate the prefetch test for one variant over a page cache the test can clear. The test
+    // expects prefetched keys to be served from the cache, so the cache's Main section must hold
+    // every page the test warms.
     macro_rules! prefetch_test {
         ($name:ident, $db:ty, $cfg:ident) => {
             #[test_traced("WARN")]
