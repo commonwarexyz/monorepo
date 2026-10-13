@@ -253,16 +253,7 @@ impl<B: Blob> View<'_, B> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
-        let ranges = || offsets.iter().map(|&o| (o, item_size.get()));
-        super::validate_read_ranges(buf.len(), ranges(), self.size)?;
-        if offsets.is_empty() {
-            return Ok(0);
-        }
-
-        let mut cache_ranges = split_read_ranges(buf, ranges(), self.tail_offset, self.tail);
-
-        // Fast path: try the page cache for all ranges in a single lock acquisition.
-        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+        let cache_ranges = self.prepare_read_many(buf, offsets, item_size)?;
         let blob_reads = cache_ranges.len();
         if cache_ranges.is_empty() {
             return Ok(offsets.len());
@@ -274,6 +265,49 @@ impl<B: Blob> View<'_, B> {
             .read_after_misses(self.blob, self.id, cache_ranges)
             .await?;
         Ok(offsets.len() - blob_reads)
+    }
+
+    /// Like [`Self::read_many_into`], but cache misses read from the blob without
+    /// admitting pages into the page cache (see `CacheRef::read_uncached_many`).
+    pub async fn read_many_into_uncached(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<usize, Error> {
+        let mut cache_ranges = self.prepare_read_many(buf, offsets, item_size)?;
+        let blob_reads = cache_ranges.len();
+        if cache_ranges.is_empty() {
+            return Ok(offsets.len());
+        }
+
+        // Read the remaining misses from the blob concurrently without
+        // admitting their pages. Each distinct page covered by the misses is read once.
+        self.cache_ref
+            .read_uncached_many(self.blob, &mut cache_ranges)
+            .await?;
+
+        Ok(offsets.len() - blob_reads)
+    }
+
+    /// Validate a batch, copy tail and cache hits, and return ranges that need blob reads.
+    fn prepare_read_many<'b>(
+        &self,
+        buf: &'b mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<Vec<(&'b mut [u8], u64)>, Error> {
+        let ranges = || offsets.iter().map(|&o| (o, item_size.get()));
+        super::validate_read_ranges(buf.len(), ranges(), self.size)?;
+        if offsets.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut cache_ranges = split_read_ranges(buf, ranges(), self.tail_offset, self.tail);
+
+        // Try the page cache for all ranges in a single lock acquisition.
+        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+        Ok(cache_ranges)
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only.
