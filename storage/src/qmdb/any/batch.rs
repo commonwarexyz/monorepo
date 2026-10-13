@@ -1483,7 +1483,11 @@ where
         } = walked;
         let total_active_keys = self.base_active_keys as isize + active_keys_delta;
         assert!(total_active_keys >= 0, "active_keys underflow");
-        if total_active_keys == 0 {
+
+        // Whether the floor snapped to the tip without scanning; a snap's floor movement is
+        // excluded from the prefetch estimator sample.
+        let snapped = total_active_keys == 0;
+        if snapped {
             // DB is empty after this batch; raise floor to tip.
             floor = self.base_state.size + Widen::widen(ops.len());
             debug!(tip = ?floor, "db is empty, raising floor to tip");
@@ -1569,6 +1573,11 @@ where
                 tip: Commitment::new(commit_loc + 1, root),
                 ancestors,
                 inactivity_floor: floor,
+                scan_advance: if snapped {
+                    0
+                } else {
+                    (*floor).saturating_sub(*self.base_inactivity_floor_loc)
+                },
             },
         });
         Ok((batch, self.ancestors))
@@ -3520,6 +3529,29 @@ where
         self.active_keys = batch.total_active_keys;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root();
+
+        // Warm the next floor raise's candidate window: its scan starts at the new floor
+        // and reads cold regions of the log on large databases. The window tracks the
+        // applied batch's own scanned floor advance, the per-merkleize quantity the next
+        // raise repeats. Snap-to-tip floor jumps (a fresh database's first commit, an
+        // emptied database anywhere in the applied chain) sample as zero by construction,
+        // so they never poison the estimate.
+        let advance = batch.bounds.scan_advance;
+        if advance > 0 {
+            let prior = self.floor_prefetch_target;
+            let smoothed = if prior == 0 {
+                advance
+            } else {
+                prior - prior / 4 + advance / 4
+            };
+            self.floor_prefetch_target = smoothed;
+            // Cover at least the latest observed span: a smoothed estimate alone lags a
+            // step increase in batch size, leaving the next scan partially cold.
+            let window = smoothed.max(advance).saturating_mul(2);
+            if let Some(fut) = self.start_floor_prefetch(window) {
+                self.floor_prefetch_spawn.submit(fut);
+            }
+        }
 
         // Return range of operations that were written to the log.
         let range = start_loc..batch.bounds.tip.size;

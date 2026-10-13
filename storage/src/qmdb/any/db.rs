@@ -18,12 +18,154 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
-use commonware_utils::bitmap;
+use commonware_utils::{bitmap, sync::Mutex};
 use core::{
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
+    task::Poll,
 };
+use futures::future::BoxFuture;
 use std::sync::Arc;
+
+/// Runs best-effort warming tasks (see the floor prefetch armed by [`Db::apply_batch`]). Built
+/// at init, where the runtime's spawner is available.
+///
+/// Warming tasks are supervised children of the captured context. If the task that owned
+/// that context exits, later spawns are silent no-ops (mandatory supervision aborts the
+/// subtree); [`Db::set_floor_prefetch_context`] re-arms under a live context.
+///
+/// Dropping the spawner drops any running or stashed warming future before returning, so the
+/// blob handles those futures hold are released by the time the database is dropped.
+pub(crate) struct WarmSpawner {
+    state: Arc<Mutex<WarmState>>,
+    spawn: Box<dyn Fn(Arc<Mutex<WarmState>>) -> Handle<()> + Send + Sync>,
+}
+
+/// Coalesced single-flight state for the warming task.
+struct WarmState {
+    /// A warming pass is running.
+    running: bool,
+    /// The newest stashed request, drained by the running pass.
+    pending: Option<BoxFuture<'static, ()>>,
+    /// The request the running pass is driving. It is polled only under this lock, so the
+    /// spawner's drop can take and drop it between polls.
+    current: Option<BoxFuture<'static, ()>>,
+    /// The running pass's task, aborted when the spawner is dropped.
+    task: Option<Handle<()>>,
+    /// The spawner was dropped: no further requests are accepted or driven.
+    closed: bool,
+}
+
+impl WarmSpawner {
+    /// Run `fut` on the warming task, coalescing with any request already stashed.
+    pub(crate) fn submit(&self, fut: BoxFuture<'static, ()>) {
+        // Stash the newest request and claim the runner slot in one critical section.
+        {
+            let mut state = self.state.lock();
+            if state.closed {
+                return;
+            }
+            state.pending = Some(fut);
+            if state.running {
+                return;
+            }
+            state.running = true;
+        }
+        let task = (self.spawn)(Arc::clone(&self.state));
+        self.state.lock().task = Some(task);
+    }
+}
+
+impl Drop for WarmSpawner {
+    fn drop(&mut self) {
+        let (current, pending, task) = {
+            let mut state = self.state.lock();
+            state.closed = true;
+            (
+                state.current.take(),
+                state.pending.take(),
+                state.task.take(),
+            )
+        };
+        if let Some(task) = task {
+            task.abort();
+        }
+        drop(current);
+        drop(pending);
+    }
+}
+
+/// Build a [`WarmSpawner`] whose tasks are supervised children of `context`.
+///
+/// At most one warming pass runs at a time. The newest request stashed while a pass runs
+/// is coalesced: the running task drains it next, so a window that advanced past the
+/// active pass is still warmed rather than dropped. Requests stashed while a pass is
+/// aborted mid-flight are picked up by the next arm.
+pub(crate) fn warm_spawner<E: Spawner + 'static>(context: E) -> WarmSpawner {
+    /// Marks the pass not-running if it is aborted mid-flight. Disarmed on voluntary
+    /// release, so a successor's claim is never erased by this guard's drop.
+    struct InFlight(Option<Arc<Mutex<WarmState>>>);
+    impl InFlight {
+        fn disarm(&mut self) {
+            self.0 = None;
+        }
+    }
+    impl Drop for InFlight {
+        fn drop(&mut self) {
+            if let Some(state) = self.0.take() {
+                state.lock().running = false;
+            }
+        }
+    }
+
+    let state = Arc::new(Mutex::new(WarmState {
+        running: false,
+        pending: None,
+        current: None,
+        task: None,
+        closed: false,
+    }));
+    let spawn = move |state: Arc<Mutex<WarmState>>| {
+        let mut guard = InFlight(Some(Arc::clone(&state)));
+        context.child("warm").spawn(move |_| async move {
+            loop {
+                // Take the next request or release the slot, atomically: a stash landing
+                // after the release claims the slot itself.
+                {
+                    let mut state = state.lock();
+                    if state.closed {
+                        return;
+                    }
+                    let Some(next) = state.pending.take() else {
+                        state.running = false;
+                        guard.disarm();
+                        return;
+                    };
+                    state.current = Some(next);
+                }
+
+                // Drive the request under the lock, so a concurrent drop of the spawner
+                // waits out at most one poll before taking it.
+                futures::future::poll_fn(|cx| {
+                    let mut state = state.lock();
+                    let Some(current) = state.current.as_mut() else {
+                        return Poll::Ready(());
+                    };
+                    let result = current.as_mut().poll(cx);
+                    if result.is_ready() {
+                        state.current = None;
+                    }
+                    result
+                })
+                .await;
+            }
+        })
+    };
+    WarmSpawner {
+        state,
+        spawn: Box::new(spawn),
+    }
+}
 
 /// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
 /// keys plus `(global key index, position)` pairs for page-cache misses.
@@ -82,6 +224,13 @@ pub struct Db<
 
     /// The number of active keys in the snapshot.
     pub(crate) active_keys: usize,
+
+    /// Spawns detached best-effort work armed by [`Self::apply_batch`] (floor prefetch).
+    pub(crate) floor_prefetch_spawn: WarmSpawner,
+
+    /// Adaptive floor-prefetch window: an EWMA of the per-batch inactivity-floor advance,
+    /// in operations. Zero until the first advance is observed.
+    pub(crate) floor_prefetch_target: u64,
 
     /// Activity bitmap over the applied operations. Rebuilt from the journal on init and never
     /// persisted. The floor walk draws its candidates below the database's size from its set
@@ -531,6 +680,12 @@ where
     /// from grafted metadata). `init_concurrency` is the index's snapshot-build concurrency
     /// (see [crate::qmdb::SnapshotBuild::Concurrency]).
     ///
+    /// # Supervision
+    ///
+    /// `floor_prefetch_spawn` must be built (see [`warm_spawner`]) from a context whose
+    /// node is never spawn-consumed, and whose owning task outlives the database;
+    /// otherwise its spawns become silent no-ops (mandatory supervision).
+    ///
     /// # Panics
     ///
     /// Panics if the last operation is not a commit floor operation. Empty logs are handled
@@ -545,9 +700,10 @@ where
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
         metrics: Metrics<E>,
+        floor_prefetch_spawn: WarmSpawner,
     ) -> Result<Self, crate::qmdb::Error<F>>
     where
-        E: Spawner,
+        E: Spawner + 'static,
         I: crate::qmdb::SnapshotBuild<F>,
         C: 'static,
     {
@@ -623,12 +779,38 @@ where
             inactivity_floor_loc,
             snapshot: index,
             active_keys,
+            floor_prefetch_spawn,
+            floor_prefetch_target: 0,
             bitmap,
             metrics,
             _update: core::marker::PhantomData,
         };
         db.update_metrics();
         Ok(db)
+    }
+
+    /// Re-arm the automatic floor prefetch under `context`'s supervision.
+    ///
+    /// Prefetch tasks are supervised children of the context captured at init. If the
+    /// initializing task has exited (for example, the database was built on a setup or
+    /// sync task and handed to a long-lived owner), those spawns become silent no-ops. The
+    /// long-lived owner calls this once to adopt the prefetch under its own context.
+    pub fn set_floor_prefetch_context(&mut self, context: E)
+    where
+        E: Spawner + 'static,
+    {
+        self.floor_prefetch_spawn = warm_spawner(context.child("floor_prefetch"));
+    }
+
+    /// Return a future that warms caches for up to `max_items` operations starting at the
+    /// inactivity floor, or None when none of that range is prefetchable. Floor-raise
+    /// candidate scans begin at the floor, so running this ahead of the next merkleize
+    /// keeps their reads warm. The future is owned and best effort: the caller chooses
+    /// where to run it.
+    pub fn start_floor_prefetch(&self, max_items: u64) -> Option<BoxFuture<'static, ()>> {
+        use crate::journal::contiguous::Contiguous as _;
+        self.log
+            .start_prefetch(*self.inactivity_floor_loc, max_items)
     }
 
     /// Sync all database state to disk.
