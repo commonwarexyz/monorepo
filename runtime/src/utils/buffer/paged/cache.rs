@@ -1931,6 +1931,61 @@ mod tests {
         }
     }
 
+    impl GatedBlob {
+        /// Wait until at least `count` reads have started.
+        async fn wait_reads(&self, context: &deterministic::Context, count: usize) {
+            while self.reads.lock().len() < count {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+        }
+    }
+
+    /// Open every gate in `opens`.
+    fn open(opens: &mut [Option<oneshot::Sender<()>>]) {
+        for open in opens {
+            open.take().unwrap().send(()).unwrap();
+        }
+    }
+
+    /// Spawn a reader of the first byte of page `page` of `blob` (cache id 0) that starts at a
+    /// cache miss.
+    fn spawn_read(
+        context: &deterministic::Context,
+        name: &'static str,
+        blob: &Arc<GatedBlob>,
+        cache_ref: &CacheRef,
+        page: u64,
+    ) -> Handle<[u8; 1]> {
+        let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+        context.child(name).spawn(move |_| async move {
+            let mut buf = [0u8; 1];
+            cache_ref
+                .read_after_miss(&blob, 0, &mut buf, page * PAGE_SIZE_U64)
+                .await
+                .unwrap();
+            buf
+        })
+    }
+
+    /// Spawn a batched read of the first byte of each of `pages` of `blob` (cache id 0).
+    fn spawn_batch(
+        context: &deterministic::Context,
+        name: &'static str,
+        blob: &Arc<GatedBlob>,
+        cache_ref: &CacheRef,
+        pages: Vec<u64>,
+    ) -> Handle<Result<Vec<u8>, Error>> {
+        let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+        context.child(name).spawn(move |_| async move {
+            let offsets: Vec<u64> = pages.iter().map(|page| page * PAGE_SIZE_U64).collect();
+            let mut buf = vec![0u8; pages.len()];
+            full_view(&blob, &cache_ref, 0, blob.pages.len() as u64)
+                .read_many_into(&mut buf, &offsets, NZUsize!(1))
+                .await?;
+            Ok(buf)
+        })
+    }
+
     #[test_traced]
     fn test_overlapping_batched_reads_fetch_each_page_once() {
         let executor = deterministic::Runner::default();
@@ -1938,51 +1993,24 @@ mod tests {
             const PAGES: usize = 6;
             let (blob, mut opens) = gated_blob(PAGES);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
-            let batch = |name: &'static str, pages: Vec<u64>| {
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                context.child(name).spawn(move |_| async move {
-                    let offsets: Vec<u64> = pages.iter().map(|page| page * PAGE_SIZE_U64).collect();
-                    let mut buf = vec![0u8; pages.len()];
-                    full_view(&blob, &cache_ref, 0, PAGES as u64)
-                        .read_many_into(&mut buf, &offsets, NZUsize!(1))
-                        .await
-                        .unwrap();
-                    buf
-                })
-            };
+            let batch = |name, pages| spawn_batch(&context, name, &blob, &cache_ref, pages);
 
             // A batch of pages 0-3 starts reading. An overlapping batch of pages 2-5 reads only
             // pages 4 and 5.
             let first = batch("first", (0..4).collect());
-            while blob.reads.lock().len() < 4 {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            blob.wait_reads(&context, 4).await;
             let second = batch("second", (2..6).collect());
-            while blob.reads.lock().len() < 6 {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            blob.wait_reads(&context, 6).await;
 
             // A batch of pages 1 and 5 joins both batches, and a single-page read of page 3 joins
             // the first.
             let third = batch("third", vec![1, 5]);
-            let single = context.child("single").spawn({
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                move |_| async move {
-                    let mut buf = [0u8; 1];
-                    cache_ref
-                        .read_after_miss(&blob, 0, &mut buf, 3 * PAGE_SIZE_U64)
-                        .await
-                        .unwrap();
-                    buf
-                }
-            });
+            let single = spawn_read(&context, "single", &blob, &cache_ref, 3);
             context.sleep(Duration::from_millis(10)).await;
-            for open in &mut opens {
-                open.take().unwrap().send(()).unwrap();
-            }
-            assert_eq!(first.await.unwrap(), [0, 1, 2, 3]);
-            assert_eq!(second.await.unwrap(), [2, 3, 4, 5]);
-            assert_eq!(third.await.unwrap(), [1, 5]);
+            open(&mut opens);
+            assert_eq!(first.await.unwrap().unwrap(), [0, 1, 2, 3]);
+            assert_eq!(second.await.unwrap().unwrap(), [2, 3, 4, 5]);
+            assert_eq!(third.await.unwrap().unwrap(), [1, 5]);
             assert_eq!(single.await.unwrap(), [3]);
             let mut reads = blob.reads.lock().clone();
             reads.sort_unstable();
@@ -2001,33 +2029,11 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
 
             // A batched read of both pages blocks in its read.
-            let batch = context.child("batch").spawn({
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                move |_| async move {
-                    let mut buf = [0u8; PAGES];
-                    full_view(&blob, &cache_ref, 0, PAGES as u64)
-                        .read_many_into(&mut buf, &[0, PAGE_SIZE_U64], NZUsize!(1))
-                        .await
-                        .unwrap();
-                    buf
-                }
-            });
-            while blob.reads.lock().len() < PAGES {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            let batch = spawn_batch(&context, "batch", &blob, &cache_ref, vec![0, 1]);
+            blob.wait_reads(&context, PAGES).await;
 
             // A read joins the batch's fetch of page 1, then the batch is dropped.
-            let read = context.child("read").spawn({
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                move |_| async move {
-                    let mut buf = [0u8; 1];
-                    cache_ref
-                        .read_after_miss(&blob, 0, &mut buf, PAGE_SIZE_U64)
-                        .await
-                        .unwrap();
-                    buf
-                }
-            });
+            let read = spawn_read(&context, "read", &blob, &cache_ref, 1);
             context.sleep(Duration::from_millis(10)).await;
             assert_eq!(blob.reads.lock().len(), PAGES);
             batch.abort();
@@ -2035,9 +2041,7 @@ mod tests {
 
             // The read completes the batch's read rather than reading page 1 again, and the cache
             // keeps no stale registration.
-            for open in &mut opens {
-                open.take().unwrap().send(()).unwrap();
-            }
+            open(&mut opens);
             assert_eq!(read.await.unwrap(), [1]);
             assert_eq!(blob.reads.lock().len(), PAGES);
             assert!(cache_ref.cache.read().page_fetches.is_empty());
@@ -2055,38 +2059,16 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
 
             // A batched read of both pages blocks in its read, which returns page 1 corrupted.
-            let batch = context.child("batch").spawn({
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                move |_| async move {
-                    let mut buf = [0u8; PAGES];
-                    full_view(&blob, &cache_ref, 0, PAGES as u64)
-                        .read_many_into(&mut buf, &[0, PAGE_SIZE_U64], NZUsize!(1))
-                        .await
-                }
-            });
-            while blob.reads.lock().len() < PAGES {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            let batch = spawn_batch(&context, "batch", &blob, &cache_ref, vec![0, 1]);
+            blob.wait_reads(&context, PAGES).await;
 
             // A read joins the batch's fetch of page 1 instead of reading it.
-            let read = context.child("read").spawn({
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                move |_| async move {
-                    let mut buf = [0u8; 1];
-                    cache_ref
-                        .read_after_miss(&blob, 0, &mut buf, PAGE_SIZE_U64)
-                        .await
-                        .unwrap();
-                    buf
-                }
-            });
+            let read = spawn_read(&context, "read", &blob, &cache_ref, 1);
             context.sleep(Duration::from_millis(10)).await;
             assert_eq!(blob.reads.lock().len(), PAGES);
 
             // The batch fails, and the read fetches page 1 itself.
-            for open in &mut opens {
-                open.take().unwrap().send(()).unwrap();
-            }
+            open(&mut opens);
             assert!(matches!(batch.await.unwrap(), Err(Error::InvalidChecksum)));
             assert_eq!(read.await.unwrap(), [1]);
             assert_eq!(
@@ -2108,40 +2090,17 @@ mod tests {
 
             // A batched read of both pages blocks in its read, and a read joins its fetch of
             // page 1.
-            let batch = context.child("batch").spawn({
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                move |_| async move {
-                    let mut buf = [0u8; PAGES];
-                    full_view(&blob, &cache_ref, 0, PAGES as u64)
-                        .read_many_into(&mut buf, &[0, PAGE_SIZE_U64], NZUsize!(1))
-                        .await
-                        .unwrap();
-                    buf
-                }
-            });
-            while blob.reads.lock().len() < PAGES {
-                context.sleep(Duration::from_millis(1)).await;
-            }
-            let read = context.child("read").spawn({
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                move |_| async move {
-                    let mut buf = [0u8; 1];
-                    cache_ref
-                        .read_after_miss(&blob, 0, &mut buf, PAGE_SIZE_U64)
-                        .await
-                        .unwrap();
-                }
-            });
+            let batch = spawn_batch(&context, "batch", &blob, &cache_ref, vec![0, 1]);
+            blob.wait_reads(&context, PAGES).await;
+            let read = spawn_read(&context, "read", &blob, &cache_ref, 1);
             context.sleep(Duration::from_millis(10)).await;
             assert!(cache_ref.cache.read().page_fetches.contains_key(&(0, 1)));
 
             // The joiner is cancelled. The batch still completes and removes its registrations.
             read.abort();
             assert!(read.await.is_err());
-            for open in &mut opens {
-                open.take().unwrap().send(()).unwrap();
-            }
-            assert_eq!(batch.await.unwrap(), [0, 1]);
+            open(&mut opens);
+            assert_eq!(batch.await.unwrap().unwrap(), [0, 1]);
             assert_eq!(blob.reads.lock().len(), PAGES);
             assert!(cache_ref.cache.read().page_fetches.is_empty());
             assert!(cache_ref.cache.read().batches.is_empty());
@@ -2158,29 +2117,9 @@ mod tests {
 
             // A batched read of both pages blocks in its read, and a read joins its fetch of
             // page 1.
-            let batch = context.child("batch").spawn({
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                move |_| async move {
-                    let mut buf = [0u8; PAGES];
-                    full_view(&blob, &cache_ref, 0, PAGES as u64)
-                        .read_many_into(&mut buf, &[0, PAGE_SIZE_U64], NZUsize!(1))
-                        .await
-                        .unwrap();
-                }
-            });
-            while blob.reads.lock().len() < PAGES {
-                context.sleep(Duration::from_millis(1)).await;
-            }
-            let read = context.child("read").spawn({
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                move |_| async move {
-                    let mut buf = [0u8; 1];
-                    cache_ref
-                        .read_after_miss(&blob, 0, &mut buf, PAGE_SIZE_U64)
-                        .await
-                        .unwrap();
-                }
-            });
+            let batch = spawn_batch(&context, "batch", &blob, &cache_ref, vec![0, 1]);
+            blob.wait_reads(&context, PAGES).await;
+            let read = spawn_read(&context, "read", &blob, &cache_ref, 1);
             context.sleep(Duration::from_millis(10)).await;
             assert!(cache_ref.cache.read().page_fetches.contains_key(&(0, 1)));
 
@@ -2221,9 +2160,7 @@ mod tests {
                 Box::pin(view.read_many_into(&mut buf, &[0, PAGE_SIZE_U64], NZUsize!(1)));
             assert!(poll!(batch.as_mut()).is_pending());
             assert_eq!(blob.reads.lock().len(), PAGES);
-            for open in &mut opens {
-                open.take().unwrap().send(()).unwrap();
-            }
+            open(&mut opens);
 
             // A read of page 1 joins the batch and completes without reading the page again.
             let mut page = [0u8; 1];
@@ -2256,52 +2193,21 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
 
             // Another reader starts fetching page 0.
-            let first = context.child("first").spawn({
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                move |_| async move {
-                    let mut buf = [0u8; 1];
-                    cache_ref
-                        .read_after_miss(&blob, 0, &mut buf, 0)
-                        .await
-                        .unwrap();
-                    buf
-                }
-            });
-            while blob.reads.lock().is_empty() {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            let first = spawn_read(&context, "first", &blob, &cache_ref, 0);
+            blob.wait_reads(&context, 1).await;
 
             // A batch over every page joins that fetch rather than reading page 0 again, although
             // its own insertions evict page 0 once that fetch completes.
-            let second = context.child("second").spawn({
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                move |_| async move {
-                    let size = PAGES as u64 * PAGE_SIZE_U64;
-                    let view = View {
-                        blob: &blob,
-                        cache_ref: &cache_ref,
-                        id: 0,
-                        size,
-                        tail_offset: size,
-                        tail: Tail::Sealed(&[]),
-                    };
-                    let offsets: Vec<u64> = (0..PAGES as u64).map(|p| p * PAGE_SIZE_U64).collect();
-                    let mut buf = vec![0u8; PAGES];
-                    view.read_many_into(&mut buf, &offsets, NZUsize!(1))
-                        .await
-                        .unwrap();
-                    buf
-                }
-            });
-            while blob.reads.lock().len() < PAGES {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            let pages = (0..PAGES as u64).collect();
+            let second = spawn_batch(&context, "second", &blob, &cache_ref, pages);
+            blob.wait_reads(&context, PAGES).await;
             opens[0].take().unwrap().send(()).unwrap();
             assert_eq!(first.await.unwrap(), [0]);
-            for open in &mut opens[1..] {
-                open.take().unwrap().send(()).unwrap();
-            }
-            assert_eq!(second.await.unwrap(), (0..PAGES as u8).collect::<Vec<_>>());
+            open(&mut opens[1..]);
+            assert_eq!(
+                second.await.unwrap().unwrap(),
+                (0..PAGES as u8).collect::<Vec<_>>()
+            );
             assert_eq!(
                 blob.reads.lock().iter().filter(|&&page| page == 0).count(),
                 1
