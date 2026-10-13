@@ -1230,6 +1230,13 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Ok((journal, handle))
     }
 
+    /// See [Journal::flush].
+    pub(crate) async fn flush(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.metrics.flush_calls.inc();
+        self.blobs = self.blobs.flush().await?;
+        Ok(self)
+    }
+
     /// See [Journal::commit].
     pub(crate) async fn commit(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         let _timer = self.metrics.commit_timer();
@@ -1620,6 +1627,15 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(mut self, new_size: u64) -> Result<Self, Error> {
         self.0 = self.0.clear_to_size(new_size).await?;
+        Ok(self)
+    }
+
+    /// Flush buffered appends to storage without guaranteeing durability.
+    ///
+    /// Flushed state is not guaranteed to survive a crash until a later durability operation
+    /// (e.g. `sync()`) completes. Does not advance the recovery watermark.
+    pub async fn flush(mut self) -> Result<Self, Error> {
+        self.0 = self.0.flush().await?;
         Ok(self)
     }
 
@@ -2060,6 +2076,10 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
         Self::start_sync(self).await
+    }
+
+    async fn flush(self) -> Result<Self, Error> {
+        Self::flush(self).await
     }
 
     async fn commit(self) -> Result<Self, Error> {
@@ -4845,6 +4865,118 @@ mod tests {
                 journal.read(7).await,
                 Err(Error::ItemOutOfRange(7))
             ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A flush does not advance durability; a crash may retain or discard its writes.
+    #[test_traced]
+    fn test_fixed_flush_crash() {
+        for retain in [false, true] {
+            let (_, checkpoint) =
+                deterministic::Runner::default().start_and_recover(|context| async move {
+                    let cfg = test_cfg(&context, NZU64!(128));
+                    let (recording, writes) = RecordingContext::new(context.child("recording"));
+                    let mut journal = Journal::<_, Digest>::init(recording.child("first"), cfg)
+                        .await
+                        .unwrap();
+                    for i in 0..3 {
+                        (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+                    }
+                    journal = journal.sync().await.unwrap();
+                    assert_eq!(journal.0.recovery_watermark(), 3);
+
+                    *context.storage_fault_config().write() = deterministic::FaultConfig {
+                        write_rate: Some(deterministic::WriteConfig {
+                            failure_rate: probability!(0.0),
+                            retention_rate: if retain {
+                                probability!(1.0)
+                            } else {
+                                probability!(0.0)
+                            },
+                            mode: deterministic::PartialWriteMode::Prefix,
+                        }),
+                        ..Default::default()
+                    };
+                    for i in 3..6 {
+                        (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+                    }
+                    writes.clear();
+                    journal = journal.flush().await.unwrap();
+                    assert_eq!(journal.0.recovery_watermark(), 3);
+                    assert_eq!(journal.0.barrier.boundary(), 3);
+                    let writes = writes.snapshot().writes;
+                    assert_eq!(writes.len(), 1);
+                    assert!(
+                        writes
+                            .iter()
+                            .all(|options| !options.contains(WriteOptions::SYNC))
+                    );
+                    assert_eq!(journal.read(5).await.unwrap(), test_digest(5));
+                });
+
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                let cfg = test_cfg(&context, NZU64!(128));
+                let journal = Journal::<_, Digest>::init(context.child("recover"), cfg)
+                    .await
+                    .unwrap();
+                let end = if retain { 6 } else { 3 };
+                assert_eq!(journal.bounds(), 0..end);
+                for i in 0..end {
+                    assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+                }
+                journal.destroy().await.unwrap();
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_flush() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            for i in 0..3u64 {
+                (journal, _) = journal
+                    .append(&test_digest(i))
+                    .await
+                    .expect("failed to append data");
+            }
+
+            // Flush leaves the journal fully usable: reads, appends, and a later sync.
+            let mut journal = journal.flush().await.expect("failed to flush journal");
+            assert_eq!(journal.bounds(), 0..3);
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(0));
+
+            // Appends after a flush become durable through a later sync.
+            for i in 3..6u64 {
+                (journal, _) = journal
+                    .append(&test_digest(i))
+                    .await
+                    .expect("failed to append data");
+            }
+            let mut journal = journal.flush().await.expect("failed to flush journal");
+            for i in 6..9u64 {
+                (journal, _) = journal
+                    .append(&test_digest(i))
+                    .await
+                    .expect("failed to append data");
+            }
+            let journal = journal.sync().await.expect("failed to sync journal");
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("third"), cfg.clone())
+                .await
+                .expect("failed to re-initialize journal");
+            assert_eq!(journal.bounds(), 0..9);
+            for i in 0..9u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
 
             journal.destroy().await.unwrap();
         });
@@ -7755,6 +7887,7 @@ mod tests {
             let items: Vec<_> = (0..5).map(test_digest).collect();
             (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
             (journal, _) = journal.append(&test_digest(5)).await.unwrap();
+            journal = journal.flush().await.unwrap();
             journal = journal.commit().await.unwrap();
             journal = journal.sync().await.unwrap();
             let handle;
@@ -7780,6 +7913,7 @@ mod tests {
                 "fixed_metrics_read_many_calls_total 1",
                 "fixed_metrics_items_read_total 5",
                 "fixed_metrics_start_sync_calls_total 1",
+                "fixed_metrics_flush_calls_total 1",
                 "fixed_metrics_commit_calls_total 1",
                 "fixed_metrics_sync_calls_total 1",
                 "fixed_metrics_append_duration_count 1",

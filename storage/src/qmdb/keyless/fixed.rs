@@ -503,6 +503,7 @@ mod tests {
             let floor = db.inactivity_floor_loc();
             (db, loc) = apply_append(db, value.clone(), floor).await;
 
+            db = db.flush().await.unwrap();
             let handle;
             (db, handle) = db.start_sync().await.unwrap();
             handle.await.unwrap();

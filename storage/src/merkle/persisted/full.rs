@@ -690,6 +690,14 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         self.flush_internal().await
     }
 
+    /// Flush cached nodes and the journal's write buffer without guaranteeing durability.
+    /// Appending nodes can seal journal blobs and trigger their normal sync behavior.
+    pub(crate) async fn flush_storage(mut self) -> Result<Self, Error<F>> {
+        self = self.flush_internal().await?;
+        self.journal = self.journal.flush().await.map_err(Error::Journal)?;
+        Ok(self)
+    }
+
     /// Flush all nodes cached in the in-memory structure to the journal and make them durable.
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         self = self.flush_internal().await?;
