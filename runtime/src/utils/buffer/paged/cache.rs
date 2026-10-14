@@ -9,13 +9,10 @@ use ahash::AHashMap;
 use commonware_utils::{
     Widen, cache,
     channel::oneshot,
+    futures::{Shared, WeakShared},
     sync::{Mutex, RwLock},
 };
-use futures::{
-    FutureExt, StreamExt as _,
-    future::{BoxFuture, Shared, WeakShared},
-    stream::FuturesUnordered,
-};
+use futures::{FutureExt, StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
 use std::{
     collections::{VecDeque, hash_map::Entry},
     future::poll_fn,
@@ -32,7 +29,7 @@ use tracing::{debug, error, trace};
 /// Shared future for one logical page fetch. The cache keeps one clone in `page_fetches` and
 /// each waiter holds another while it is still interested in the result. The `IoBuf` contains
 /// only the logical, validated page bytes. `None` means the batched read the waiter joined
-/// withdrew the page without reading it (see [BatchFetches]), and the waiter must fetch it again.
+/// withdrew the page without serving it (see [BatchFetches]), and the waiter must fetch it again.
 type PageFetch = Shared<PageFetchFuture>;
 
 /// A page fetch before it is shared (see [PageFetch]).
@@ -63,6 +60,9 @@ struct BatchJoin {
     pages: Arc<[u64]>,
     /// Resolves the entry's `fetch` with the page. Dropping it resolves `fetch` with `None`.
     sender: oneshot::Sender<IoBuf>,
+    /// The batch's driver, which readers waiting on the page upgrade and poll while they wait.
+    /// The entry itself never keeps the batch alive (see [BatchFetches]).
+    driver: WeakShared<BoxFuture<'static, ()>>,
 }
 
 /// Removes a stale in-flight page fetch when the last unresolved waiter is dropped.
@@ -100,30 +100,29 @@ impl Drop for PageFetchGuard<'_> {
         // waiters so they cannot decrement or remove a newer generation. A surviving waiter keeps
         // the current generation installed, which lets the shared future finish and cache the page
         // on success.
-        let removed = {
-            let mut cache = self.cache.write();
-            let Entry::Occupied(mut current) = cache.page_fetches.entry(self.key) else {
-                return;
-            };
-            // Neither stored clone is ever polled, so `ptr_eq` never sees a terminated future.
-            if !current.get().fetch.ptr_eq(&self.fetch) {
-                return;
-            }
-            if current.get().waiters > 1 {
-                current.get_mut().waiters -= 1;
-                return;
-            }
-            current.remove()
+        let mut cache = self.cache.write();
+        let Entry::Occupied(mut current) = cache.page_fetches.entry(self.key) else {
+            return;
         };
-        // The entry may hold the last handle to a batched read, whose drop takes the cache lock
-        // (see [BatchFetches]).
-        drop(removed);
+        if !current.get().fetch.ptr_eq(&self.fetch) {
+            return;
+        }
+        if current.get().waiters == 1 {
+            current.remove();
+        } else {
+            current.get_mut().waiters -= 1;
+        }
     }
 }
 
 /// Reads the pages of one batched read, validating, caching, and serving each as it arrives (see
 /// [BatchFetches::drive]). Its output is empty: pages reach the reader that started the batch
 /// through its [BatchOutput] and joined readers through their [BatchJoin]s.
+///
+/// Every reader waiting on the batch polls a clone, and whichever is polled drives the batch.
+/// A [Shared] keeps every waiting reader's waker registered and wakes the others again when a
+/// completion arrives while one of them drives it, so a reader may stop polling, once served or
+/// dropped, without stranding the rest.
 type BatchDriver = Shared<BoxFuture<'static, ()>>;
 
 /// The results of a batched read for the reader that started it, in completion order: each
@@ -135,9 +134,12 @@ type BatchOutput = Arc<Mutex<VecDeque<Result<(usize, IoBuf), Error>>>>;
 ///
 /// A reader joins a pending page by installing a [BatchJoin] entry in `page_fetches` under the
 /// cache write lock, which other readers then join like any single-page fetch. Registering the
-/// batch therefore costs one list insertion regardless of its size, and its pages cost nothing
-/// more until a reader joins one of them. A joined page's fetch polls the batch's [BatchDriver]
-/// while it waits, so the batch progresses whenever any of its readers is polled.
+/// batch therefore takes one list insertion and two per-batch arrays, with no per-page map entry
+/// or allocation, and a page's join state is created only when a reader joins it. Readers waiting
+/// on a joined page poll the batch's [BatchDriver], so the batch progresses whenever any of its
+/// readers is polled, without depending on any one of them being polled again. A reader polls
+/// each driver once however many of its pages joined that batch, so a completion wakes each
+/// waiting reader once rather than once per joined page.
 ///
 /// Every field but `pages` changes only under the cache write lock.
 struct BatchRead {
@@ -147,8 +149,6 @@ struct BatchRead {
     /// Whether each page is resolved: cached or withdrawn. A resolved page may already be
     /// evicted, so readers never join it.
     resolved: Box<[bool]>,
-    /// Count of pages not yet resolved. The batch is registered while it is non-zero.
-    unresolved: usize,
     /// Whether any reader joined a page, so resolving one must look for its [BatchJoin].
     joined: bool,
     /// The batch's driver. The registration alone never keeps it alive (see [BatchFetches]).
@@ -197,9 +197,13 @@ impl BatchReads {
 
     /// Join page `page_num` of the in-flight batched read of `blob_id` that has it pending, if
     /// any. The future resolves with the page once the batch caches it, or with `None` if the
-    /// batch withdraws it, and drives the batch while it waits. The caller installs the
-    /// [BatchJoin] in `page_fetches` under the cache write lock.
-    fn join(&mut self, blob_id: u64, page_num: u64) -> Option<(PageFetchFuture, BatchJoin)> {
+    /// batch withdraws it. It does not drive the batch: the caller polls the returned driver while
+    /// it waits. The caller installs the [BatchJoin] in `page_fetches` under the cache write lock.
+    fn join(
+        &mut self,
+        blob_id: u64,
+        page_num: u64,
+    ) -> Option<(PageFetchFuture, BatchJoin, BatchDriver)> {
         let batch = self
             .0
             .get_mut(&blob_id)?
@@ -207,25 +211,16 @@ impl BatchReads {
             .find(|batch| batch.is_pending(page_num))?;
         // A driver that cannot be upgraded is being dropped, and withdraws its pages once it
         // acquires the cache lock.
-        let mut driver = batch.driver.upgrade()?;
+        let driver = batch.driver.upgrade()?;
         batch.joined = true;
-        let (sender, mut receiver) = oneshot::channel::<IoBuf>();
-        let fetch = poll_fn(move |cx| {
-            if let Poll::Ready(page) = receiver.poll_unpin(cx) {
-                return Poll::Ready(page.ok().map(Ok));
-            }
-            // A completed batch has resolved or withdrawn every page.
-            if driver.poll_unpin(cx).is_ready() {
-                return Poll::Ready(receiver.try_recv().ok().map(Ok));
-            }
-            Poll::Pending
-        })
-        .boxed();
+        let (sender, receiver) = oneshot::channel::<IoBuf>();
+        let fetch = receiver.map(|page| page.ok().map(Ok)).boxed();
         let join = BatchJoin {
             pages: batch.pages.clone(),
             sender,
+            driver: batch.driver.clone(),
         };
-        Some((fetch, join))
+        Some((fetch, join, driver))
     }
 
     #[cfg(test)]
@@ -245,14 +240,15 @@ impl BatchReads {
 /// or when dropped.
 ///
 /// The driver lives while a reader waiting on the batch holds it: the reader that started the
-/// batch, or a [BatchJoin] entry's `fetch`. The last waiter of a joined page removes that
-/// entry when it cancels, so a batch that no reader waits on is dropped and withdraws its pages.
-/// Dropping the last handle to the driver takes the cache lock, so handles are dropped only
-/// outside it.
+/// batch, or a reader waiting on one of its pages. The registration and [BatchJoin] entries hold
+/// it weakly, so a batch that no reader waits on is dropped and withdraws its pages. Dropping the
+/// last handle to the driver takes the cache lock, so readers drop their handles only outside it.
 struct BatchFetches {
     cache: Arc<RwLock<Cache>>,
     blob_id: u64,
     pages: Arc<[u64]>,
+    /// Count of pages resolved. The batch is registered while it is below `pages.len()`.
+    resolved: usize,
 }
 
 impl BatchFetches {
@@ -261,13 +257,12 @@ impl BatchFetches {
     /// error reported while the other pages continue. A read error, or a batch that ends with
     /// pages left, stops the batch and withdraws the rest.
     async fn drive<B: Blob>(
-        self,
+        mut self,
         blob: Arc<B>,
         physical: Vec<(u64, usize)>,
         page_size: NonZeroU16,
         output: BatchOutput,
     ) {
-        let mut resolved = 0;
         let mut stream = pin!(blob.read_many(&physical, ReadOptions::DONT_CACHE));
         while let Some(item) = stream.next().await {
             let (index, bufs) = match item {
@@ -297,10 +292,10 @@ impl BatchFetches {
                 output.lock().push_back(Err(Error::ReadFailed));
                 return;
             };
-            resolved += 1;
+            self.resolved += 1;
             output.lock().push_back(result);
         }
-        if resolved < self.pages.len() {
+        if self.resolved < self.pages.len() {
             output.lock().push_back(Err(Error::ReadFailed));
         }
     }
@@ -327,8 +322,9 @@ impl BatchFetches {
     }
 
     /// Mark the pending `index`th page resolved and remove its [BatchJoin] entry, returning that
-    /// entry for the caller to drop after releasing the lock. Unregisters the batch once no page
-    /// is left. Fails if the page is not pending.
+    /// entry for the caller to drop after releasing the lock. Unregisters the batch if this is
+    /// its last page. Fails if the page is not pending; on success the caller counts the page in
+    /// [Self::resolved].
     fn finish(&self, cache: &mut Cache, index: usize) -> Result<Option<PageFetchEntry>, Error> {
         let batch = cache
             .batches
@@ -338,9 +334,8 @@ impl BatchFetches {
             return Err(Error::ReadFailed);
         }
         batch.resolved[index] = true;
-        batch.unresolved -= 1;
         let joined = batch.joined;
-        if batch.unresolved == 0 {
+        if self.resolved + 1 == self.pages.len() {
             cache.batches.unregister(self.blob_id, &self.pages);
         }
         if !joined {
@@ -364,14 +359,18 @@ impl BatchFetches {
 
 impl Drop for BatchFetches {
     fn drop(&mut self) {
-        let mut joined = Vec::new();
-        let mut cache = self.cache.write();
-        if cache.batches.get_mut(self.blob_id, &self.pages).is_none() {
+        // A batch that resolved every page has already unregistered.
+        if self.resolved == self.pages.len() {
             return;
         }
+        let mut joined = Vec::new();
+        let mut cache = self.cache.write();
         for index in 0..self.pages.len() {
-            // Resolved pages are skipped.
-            joined.extend(self.finish(&mut cache, index).ok().flatten());
+            // Resolved pages, and every page of a batch that is no longer registered, are skipped.
+            if let Ok(entry) = self.finish(&mut cache, index) {
+                self.resolved += 1;
+                joined.extend(entry);
+            }
         }
         // Wake the joiners of withdrawn pages only after the lock is released.
         drop(cache);
@@ -426,6 +425,10 @@ struct Cache {
 /// A reference to a page cache that can be shared across threads via cloning, along with the page
 /// size that will be used with it. Provides the API for interacting with the page cache in a
 /// thread-safe manner.
+///
+/// A read that misses a page another read is already fetching waits on that fetch instead of
+/// reading the page again, and drives it, so it completes even if the read that started the fetch
+/// is never polled again. Dropping a read does not cancel a fetch another read is waiting on.
 #[derive(Clone)]
 pub struct CacheRef {
     /// The logical size of each page in the underlying blobs managed by this page cache. A page
@@ -602,7 +605,7 @@ impl CacheRef {
         while !buf.is_empty() {
             // Resolve the missing page, rechecking for a concurrent fill before fetching.
             let count = self
-                .read_after_page_fault(blob, blob_id, buf, offset)
+                .read_after_page_fault(blob, blob_id, buf, offset, None)
                 .await?;
             offset += count as u64;
             buf = &mut buf[count..];
@@ -626,10 +629,10 @@ impl CacheRef {
     /// reader is fetching it, and otherwise read with one batched blob read that validates,
     /// caches, and serves each page as it arrives. Serving never depends on the cache still
     /// holding a page, so no page this call reads is read again to serve it. Other readers that
-    /// miss a page in the batch join it and drive the batch while they wait, so they complete even
-    /// if this call is not polled (see [BatchRead]). A page failing validation returns an error,
-    /// like a single fetch, and its joiners fetch it themselves. Pages cached before it remain,
-    /// subject to normal eviction.
+    /// miss a page in the batch join it and drive the batch while they wait, so this call and its
+    /// joiners each complete whether or not the others are polled again (see [BatchDriver]). A
+    /// page failing validation returns an error, like a single fetch, and its joiners fetch it
+    /// themselves. Pages cached before it remain, subject to normal eviction.
     ///
     /// The probe runs under the read lock and the batch registers under a later write lock, so a
     /// page another reader starts fetching in between is read by both. That is benign: both
@@ -643,7 +646,9 @@ impl CacheRef {
         // Split every range at page boundaries. Copy resident pieces now, before this call's own
         // insertions can evict their pages. Pieces whose page another reader is fetching join that
         // fetch, and the rest wait for the batched read. Pieces of one page are adjacent in offset
-        // order, so a page waits once and its later pieces never join another reader's fetch.
+        // order and see the same state under the read lock, so once a page waits its later pieces
+        // skip the lookups.
+        let drivers = Mutex::new(Vec::new());
         let mut waiting: Vec<(u64, usize, &mut [u8])> = Vec::new();
         let mut joins = FuturesUnordered::new();
         {
@@ -661,7 +666,13 @@ impl CacheRef {
                         } else if cache.page_fetches.contains_key(&(blob_id, page_num))
                             || batches.iter().any(|batch| batch.is_pending(page_num))
                         {
-                            joins.push(self.read_after_page_fault(blob, blob_id, piece, offset));
+                            joins.push(self.read_after_page_fault(
+                                blob,
+                                blob_id,
+                                piece,
+                                offset,
+                                Some(&drivers),
+                            ));
                         } else {
                             waiting.push((page_num, offset_in_page, piece));
                         }
@@ -713,12 +724,21 @@ impl CacheRef {
             })
             .await
         };
-        let joined = async {
-            while let Some(result) = joins.next().await {
+        // The joins leave the batched reads they join to this call, which polls each once and
+        // releases them once the joins finish.
+        let joined = poll_fn(|cx| {
+            while let Poll::Ready(result) = joins.poll_next_unpin(cx) {
+                let Some(result) = result else {
+                    drivers.lock().clear();
+                    return Poll::Ready(Ok(()));
+                };
                 result?;
             }
-            Ok(())
-        };
+            drivers
+                .lock()
+                .retain_mut(|driver| driver.poll_unpin(cx).is_pending());
+            Poll::Pending
+        });
 
         // Poll the joins first so each registers with the fetch it joins before this call's
         // insertions can evict that page.
@@ -750,12 +770,14 @@ impl CacheRef {
             cache: Arc::clone(&self.cache),
             blob_id,
             pages: pages.clone(),
+            resolved: 0,
         };
-        let driver = fetches
-            .drive(blob.clone(), physical, self.page_size, output.clone())
-            .boxed()
-            .shared();
-        let weak = driver.downgrade().expect("driver was never polled");
+        let driver = Shared::new(
+            fetches
+                .drive(blob.clone(), physical, self.page_size, output.clone())
+                .boxed(),
+        );
+        let weak = driver.downgrade();
         self.cache
             .write()
             .batches
@@ -764,7 +786,6 @@ impl CacheRef {
             .or_default()
             .push(BatchRead {
                 resolved: vec![false; pages.len()].into_boxed_slice(),
-                unresolved: pages.len(),
                 pages,
                 joined: false,
                 driver: weak,
@@ -775,12 +796,16 @@ impl CacheRef {
     /// Fetch the requested page after encountering a page fault, which may involve retrieving it
     /// from `blob` & caching the result in the page cache. Returns the number of bytes read, which
     /// should always be non-zero.
+    ///
+    /// A fetch that joins a batched read polls that read's driver while it waits, unless the
+    /// caller passes `drivers`: the driver is then added there for the caller to poll.
     pub(super) async fn read_after_page_fault<B: Blob>(
         &self,
         blob: &Arc<B>,
         blob_id: u64,
         buf: &mut [u8],
         offset: u64,
+        drivers: Option<&Mutex<Vec<BatchDriver>>>,
     ) -> Result<usize, Error> {
         assert!(!buf.is_empty());
 
@@ -791,11 +816,12 @@ impl CacheRef {
         // requires a write lock on the page cache since we may need to modify `page_fetches` if
         // this task is the first fetcher. A page an in-flight batched read has pending is joined
         // instead of fetched. If that batch withdraws the page, it resolves the waiters with
-        // `None` after marking the page resolved, so the next pass caches, joins, or starts a
-        // fresh fetch.
+        // `None` after marking the page resolved, and the next pass caches, joins an existing
+        // fetch, or starts one, without looking for another batch with the page pending.
         let key = (blob_id, page_num);
+        let mut withdrawn = false;
         let page_buf = loop {
-            let fetch = {
+            let (mut fetch, mut driver) = {
                 let mut guard = self.cache.write();
                 let cache = &mut *guard;
 
@@ -810,40 +836,66 @@ impl CacheRef {
                 match cache.page_fetches.entry(key) {
                     Entry::Occupied(o) => {
                         // Another thread is already fetching this page, so clone its existing
-                        // future.
+                        // future. A batch whose driver cannot be upgraded is being dropped, and
+                        // withdraws the page once it acquires the cache lock.
                         let entry = o.into_mut();
                         entry.waiters += 1;
-                        entry.fetch.clone()
+                        let driver = entry.batch.as_ref().and_then(|join| join.driver.upgrade());
+                        (entry.fetch.clone(), driver)
                     }
                     Entry::Vacant(v) => {
                         // Wait for an in-flight batched read that has the page pending, or else
                         // fetch the page.
-                        let (fetch, batch) = match cache.batches.join(blob_id, page_num) {
-                            Some((fetch, join)) => (fetch, Some(join)),
-                            None => (self.fetch_page(blob, blob_id, page_num), None),
+                        let joined = if withdrawn {
+                            None
+                        } else {
+                            cache.batches.join(blob_id, page_num)
+                        };
+                        let (fetch, batch, driver) = match joined {
+                            Some((fetch, join, driver)) => (fetch, Some(join), Some(driver)),
+                            None => (self.fetch_page(blob, blob_id, page_num), None, None),
                         };
 
                         // Make the future shareable and insert it into the map.
-                        let fetch = fetch.shared();
+                        let fetch = Shared::new(fetch);
                         v.insert(PageFetchEntry {
                             fetch: fetch.clone(),
                             waiters: 1,
                             batch,
                         });
-                        fetch
+                        (fetch, driver)
                     }
                 }
             };
             let mut fetch_guard = PageFetchGuard::new(&self.cache, key, fetch.clone());
+            if let Some(drivers) = drivers
+                && let Some(joined) = driver.take()
+            {
+                let mut drivers = drivers.lock();
+                if !drivers.iter().any(|driver| driver.ptr_eq(&joined)) {
+                    drivers.push(joined);
+                }
+            }
 
-            // Await the shared fetch. Whoever resolves it caches the page and removes the
-            // in-flight marker before waking waiters, so waiters only need cancellation cleanup
-            // while the fetch is still unresolved.
-            let fetch_result = fetch.await;
+            // Await the shared fetch, driving the batched read it joined. Whoever resolves it
+            // caches the page and removes the in-flight marker before waking waiters, so waiters
+            // only need cancellation cleanup while the fetch is still unresolved. A batch resolves
+            // or withdraws every page before its driver completes.
+            let fetch_result = poll_fn(|cx| {
+                if driver
+                    .as_mut()
+                    .is_some_and(|driver| driver.poll_unpin(cx).is_ready())
+                {
+                    driver = None;
+                }
+                fetch.poll_unpin(cx)
+            })
+            .await;
             fetch_guard.disarm();
             if let Some(result) = fetch_result {
                 break result?;
             }
+            withdrawn = true;
         };
 
         // Copy the requested portion of the page into the buffer.
@@ -1071,15 +1123,29 @@ mod tests {
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::{select, test_traced};
-    use commonware_utils::{NZU16, NZUsize, channel::oneshot, sync::Mutex};
-    use futures::{future::pending, poll};
+    use commonware_utils::{
+        NZU16, NZUsize,
+        channel::{
+            mpsc::{UnboundedReceiver, unbounded_channel},
+            oneshot,
+        },
+        sync::Mutex,
+    };
+    use futures::{
+        future::pending,
+        poll,
+        task::{ArcWake, waker},
+    };
     use rstest::rstest;
     use std::{
         num::NonZeroU16,
+        pin::Pin,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
+            mpsc,
         },
+        task::{Context, Waker},
         time::Duration,
     };
 
@@ -1827,6 +1893,8 @@ mod tests {
         reads: Mutex<Vec<usize>>,
         /// A page whose next read returns corrupted bytes.
         corrupt: Mutex<Option<usize>>,
+        /// Polls of the streams returned by [Blob::read_many].
+        polls: AtomicUsize,
     }
 
     impl Blob for GatedBlob {
@@ -1865,6 +1933,18 @@ mod tests {
             Ok(IoBufsMut::from(bytes))
         }
 
+        fn read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+            let mut reads = crate::read_each(self, ranges, options);
+            futures::stream::poll_fn(move |cx| {
+                self.polls.fetch_add(1, Ordering::Relaxed);
+                reads.poll_next_unpin(cx)
+            })
+        }
+
         async fn write_at(
             &self,
             _offset: u64,
@@ -1887,6 +1967,15 @@ mod tests {
         }
     }
 
+    /// A checksummed physical page whose logical bytes all hold `value`.
+    fn checksummed_page(value: u8) -> Vec<u8> {
+        let logical = vec![value; PAGE_SIZE.get() as usize];
+        let crc = Crc32::checksum(&logical);
+        let mut page = logical;
+        page.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc).to_bytes());
+        page
+    }
+
     /// A [GatedBlob] of `pages` checksummed pages, each holding the value of its index, with the
     /// senders that open each page's gate.
     fn gated_blob(pages: usize) -> (Arc<GatedBlob>, Vec<Option<oneshot::Sender<()>>>) {
@@ -1896,20 +1985,13 @@ mod tests {
                 (Some(open), Some(gate))
             })
             .unzip();
-        let pages = (0..pages)
-            .map(|i| {
-                let logical = vec![i as u8; PAGE_SIZE.get() as usize];
-                let crc = Crc32::checksum(&logical);
-                let mut page = logical;
-                page.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc).to_bytes());
-                page
-            })
-            .collect();
+        let pages = (0..pages).map(|i| checksummed_page(i as u8)).collect();
         let blob = Arc::new(GatedBlob {
             pages,
             gates: Mutex::new(gates),
             reads: Mutex::new(Vec::new()),
             corrupt: Mutex::new(None),
+            polls: AtomicUsize::new(0),
         });
         (blob, opens)
     }
@@ -2145,8 +2227,10 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_read_joining_unpolled_batch_completes() {
+    #[rstest]
+    #[case::single_page(false)]
+    #[case::batched(true)]
+    fn test_read_joining_unpolled_batch_completes(#[case] batched: bool) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const PAGES: usize = 2;
@@ -2165,8 +2249,19 @@ mod tests {
 
             // A read of page 1 joins the batch and completes without reading the page again.
             let mut page = [0u8; 1];
+            let read = async {
+                if batched {
+                    view.read_many_into(&mut page, &[PAGE_SIZE_U64], NZUsize!(1))
+                        .await
+                        .map(drop)
+                } else {
+                    cache_ref
+                        .read_after_miss(&blob, 0, &mut page, PAGE_SIZE_U64)
+                        .await
+                }
+            };
             select! {
-                result = cache_ref.read_after_miss(&blob, 0, &mut page, PAGE_SIZE_U64) => {
+                result = read => {
                     result.unwrap();
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {
@@ -2179,6 +2274,566 @@ mod tests {
             // The batch completes from the pages already read.
             assert_eq!(batch.await.unwrap(), 0);
             assert_eq!(buf, [0, 1]);
+            assert_eq!(blob.reads.lock().len(), PAGES);
+            assert!(cache_ref.cache.read().page_fetches.is_empty());
+            assert!(cache_ref.cache.read().batches.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_batch_joiner_polls_driver_once_per_completion() {
+        const PAGES: usize = 64;
+
+        // Stream polls while each page's read completes on its own, with an optional second
+        // batched read of the same pages that joins the first.
+        let polls = |joiner: bool| {
+            deterministic::Runner::default().start(|context| async move {
+                let (blob, mut opens) = gated_blob(PAGES);
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2 * PAGES));
+                let pages: Vec<u64> = (0..PAGES as u64).collect();
+                let first = spawn_batch(&context, "first", &blob, &cache_ref, pages.clone());
+                blob.wait_reads(&context, PAGES).await;
+                let second =
+                    joiner.then(|| spawn_batch(&context, "second", &blob, &cache_ref, pages));
+                context.sleep(Duration::from_millis(10)).await;
+                let before = blob.polls.load(Ordering::Relaxed);
+                for open in &mut opens {
+                    open.take().unwrap().send(()).unwrap();
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                let expected: Vec<u8> = (0..PAGES as u8).collect();
+                assert_eq!(first.await.unwrap().unwrap(), expected);
+                if let Some(second) = second {
+                    assert_eq!(second.await.unwrap().unwrap(), expected);
+                }
+                assert_eq!(blob.reads.lock().len(), PAGES);
+                blob.polls.load(Ordering::Relaxed) - before
+            })
+        };
+
+        // Joining every page of the batch adds a constant factor of work per completion (each
+        // wakes both reads), not work per joined page.
+        let alone = polls(false);
+        let joined = polls(true);
+        assert!(
+            joined <= 4 * alone,
+            "{joined} stream polls with a joining batch, {alone} alone"
+        );
+    }
+
+    /// Counts the wakes of a read polled by hand.
+    struct WakeCount(AtomicUsize);
+
+    impl WakeCount {
+        fn get(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A read polled by hand.
+    type HandRead = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+
+    /// A page a batched blob read yields (see [Blob::read_many]).
+    type Completion = Result<(usize, IoBufsMut), Error>;
+
+    /// A blob whose batched read serves copies of `page` at fixed polls of its stream (see
+    /// [test_completion_during_joiner_poll_wakes_starter]).
+    struct ScheduledBlob {
+        page: Vec<u8>,
+        /// Whether the batch has a second page, served after the joined first one.
+        two_pages: bool,
+        /// Polls of the stream returned by [Blob::read_many].
+        polls: AtomicUsize,
+        /// The waker of the stream's first poll.
+        waker: Mutex<Option<Waker>>,
+        /// The batch's starter, polled while the joiner polls the stream.
+        starter: Mutex<Option<HandRead>>,
+        /// Counts the starter's wakes.
+        starter_wakes: Arc<WakeCount>,
+        /// The starter's wakes when that poll of it returned.
+        parked: AtomicUsize,
+    }
+
+    impl ScheduledBlob {
+        /// Deliver a completion while the stream is polled, after it decided to wait: wake the
+        /// stream, then poll the starter as its own thread would after that wake.
+        fn complete_during_poll(&self) {
+            self.waker.lock().as_ref().unwrap().wake_by_ref();
+            let mut starter = self.starter.lock().take().unwrap();
+            let starter_waker = waker(self.starter_wakes.clone());
+            assert!(
+                starter
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&starter_waker))
+                    .is_pending()
+            );
+            self.parked
+                .store(self.starter_wakes.get(), Ordering::SeqCst);
+            *self.starter.lock() = Some(starter);
+        }
+    }
+
+    impl Blob for ScheduledBlob {
+        async fn read_at(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            unreachable!("pages are read in batches")
+        }
+
+        async fn read_at_buf(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _bufs: impl Into<IoBufsMut> + Send,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            unreachable!("pages are read in batches")
+        }
+
+        fn read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            _options: ReadOptions,
+        ) -> impl futures::Stream<Item = Completion> + Send {
+            assert_eq!(ranges.len(), 1 + usize::from(self.two_pages));
+            futures::stream::poll_fn(move |cx| {
+                let serve =
+                    |index| Poll::Ready(Some(Ok((index, IoBufsMut::from(self.page.clone())))));
+                match (self.polls.fetch_add(1, Ordering::SeqCst), self.two_pages) {
+                    // The stream waits for its first completion.
+                    (0, _) => {
+                        *self.waker.lock() = Some(cx.waker().clone());
+                        Poll::Pending
+                    }
+                    // The joiner polls the stream: the joined page arrives if the batch has two,
+                    // then the last completion arrives after the stream decided to wait.
+                    (1, true) => serve(0),
+                    (2, true) | (1, false) => {
+                        self.complete_during_poll();
+                        Poll::Pending
+                    }
+                    // Whoever polls the stream next is served the last page.
+                    (3, true) => serve(1),
+                    (2, false) => serve(0),
+                    _ => Poll::Ready(None),
+                }
+            })
+        }
+
+        async fn write_at(
+            &self,
+            _offset: u64,
+            _bufs: impl Into<IoBufs> + Send,
+            _options: WriteOptions,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn resize(&self, _len: u64) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
+        }
+    }
+
+    /// Hand-polls a batched read whose last completion arrives while a single-page read that joined
+    /// it polls the batch, and whose starter, woken by an earlier completion, is polled meanwhile
+    /// and finds the batch busy. The joiner then leaves without polling the batch again: it is
+    /// served the page it joined (`two_pages`), or dropped. The starter must be woken again, and
+    /// polling it completes the batch.
+    #[rstest]
+    #[case::joiner_served(true)]
+    #[case::joiner_dropped(false)]
+    fn test_completion_during_joiner_poll_wakes_starter(#[case] two_pages: bool) {
+        deterministic::Runner::default().start(|context| async move {
+            let blob = Arc::new(ScheduledBlob {
+                page: checksummed_page(7),
+                two_pages,
+                polls: AtomicUsize::new(0),
+                waker: Mutex::new(None),
+                starter: Mutex::new(None),
+                starter_wakes: Arc::new(WakeCount(AtomicUsize::new(0))),
+                parked: AtomicUsize::new(0),
+            });
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+
+            // The starter batches page 0, and page 1 if `two_pages`, and its stream waits. An
+            // earlier completion then wakes it.
+            let mut starter: HandRead = {
+                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                Box::pin(async move {
+                    let mut buf = [0u8; 2];
+                    let (first, second) = buf.split_at_mut(1);
+                    let mut ranges = vec![(first, 0)];
+                    if two_pages {
+                        ranges.push((second, PAGE_SIZE_U64));
+                    }
+                    cache_ref.read_after_misses(&blob, 0, ranges).await?;
+                    assert_eq!(buf, [7, if two_pages { 7 } else { 0 }]);
+                    Ok(())
+                })
+            };
+            let starter_waker = waker(blob.starter_wakes.clone());
+            let mut starter_cx = Context::from_waker(&starter_waker);
+            assert!(starter.as_mut().poll(&mut starter_cx).is_pending());
+            *blob.starter.lock() = Some(starter);
+            blob.waker.lock().as_ref().unwrap().wake_by_ref();
+
+            // A read of page 0 joins the batch and polls it, during which the last completion
+            // arrives and the starter is polled (see [ScheduledBlob::complete_during_poll]).
+            let mut buf = [0u8; 1];
+            let mut joiner = Box::pin(cache_ref.read_after_miss(&blob, 0, &mut buf, 0));
+            let mut joiner_cx = Context::from_waker(futures::task::noop_waker_ref());
+            let mut joined = joiner.as_mut().poll(&mut joiner_cx);
+            assert_eq!(
+                blob.polls.load(Ordering::SeqCst),
+                2 + usize::from(two_pages)
+            );
+            // A joiner served during its poll of the batch may observe its page on its next poll.
+            if two_pages && joined.is_pending() {
+                joined = joiner.as_mut().poll(&mut joiner_cx);
+            }
+            assert_eq!(joined.is_ready(), two_pages);
+            drop(joiner);
+            if two_pages {
+                assert_eq!(buf, [7]);
+            }
+
+            // Nothing polls the batch now, so the starter must have been woken after it found the
+            // batch busy.
+            assert!(
+                blob.starter_wakes.get() > blob.parked.load(Ordering::SeqCst),
+                "starter was not woken after finding the batch busy"
+            );
+            let mut starter = blob.starter.lock().take().unwrap();
+            assert!(matches!(
+                starter.as_mut().poll(&mut starter_cx),
+                Poll::Ready(Ok(()))
+            ));
+            assert!(cache_ref.cache.read().page_fetches.is_empty());
+            assert!(cache_ref.cache.read().batches.is_empty());
+        });
+    }
+
+    /// Bounds each wait in the multi-threaded schedule of
+    /// [test_completion_during_joiner_poll_completes_starter]. Every step normally completes
+    /// immediately, so the bound only turns a stall into a failure.
+    const SCHEDULE_DEADLINE: Duration = Duration::from_secs(30);
+
+    /// A blob whose batched read of two pages yields completions sent from another thread (see
+    /// [test_completion_during_joiner_poll_completes_starter]).
+    struct CompletionBlob {
+        completions: Mutex<Option<UnboundedReceiver<Completion>>>,
+        /// Signals that the stream paused.
+        paused: mpsc::Sender<()>,
+        /// Resumes the paused stream.
+        resume: Mutex<mpsc::Receiver<()>>,
+        /// Completions the stream yielded.
+        yielded: AtomicUsize,
+    }
+
+    impl Blob for CompletionBlob {
+        async fn read_at(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            unreachable!("pages are read in batches")
+        }
+
+        async fn read_at_buf(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _bufs: impl Into<IoBufsMut> + Send,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            unreachable!("pages are read in batches")
+        }
+
+        fn read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            _options: ReadOptions,
+        ) -> impl futures::Stream<Item = Completion> + Send {
+            assert_eq!(ranges.len(), 2);
+            let mut completions = self.completions.lock().take().unwrap();
+            let mut paused = false;
+            futures::stream::poll_fn(move |cx| {
+                if self.yielded.load(Ordering::SeqCst) == 2 {
+                    return Poll::Ready(None);
+                }
+                let result = completions.poll_recv(cx);
+                if result.is_ready() {
+                    self.yielded.fetch_add(1, Ordering::SeqCst);
+                }
+
+                // Once the first completion was yielded, pause the first poll that finds no
+                // completion, keeping the waker it registered, so the last completion can arrive
+                // before it returns, as when its thread is preempted.
+                if result.is_pending() && self.yielded.load(Ordering::SeqCst) == 1 && !paused {
+                    paused = true;
+                    self.paused.send(()).unwrap();
+                    self.resume.lock().recv_timeout(SCHEDULE_DEADLINE).unwrap();
+                }
+                result
+            })
+        }
+
+        async fn write_at(
+            &self,
+            _offset: u64,
+            _bufs: impl Into<IoBufs> + Send,
+            _options: WriteOptions,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn resize(&self, _len: u64) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
+        }
+    }
+
+    /// On a multi-threaded runtime, a two-page batched read's last completion arrives while a
+    /// single-page read that joined the batch polls it, and the batch's starter, woken by the first
+    /// completion, is polled meanwhile and finds the batch busy. The joiner is served its page and
+    /// leaves without polling the batch again. The starter must still complete, with nothing
+    /// waking it from outside the batch.
+    #[test]
+    fn test_completion_during_joiner_poll_completes_starter() {
+        let runner = crate::tokio::Runner::new(crate::tokio::Config::new().with_worker_threads(4));
+        runner.start(|context| async move {
+            for _ in 0..20 {
+                let (completions, receiver) = unbounded_channel();
+                let (paused_tx, paused_rx) = mpsc::channel();
+                let (resume_stream_tx, resume_stream_rx) = mpsc::channel();
+                let blob = Arc::new(CompletionBlob {
+                    completions: Mutex::new(Some(receiver)),
+                    paused: paused_tx,
+                    resume: Mutex::new(resume_stream_rx),
+                    yielded: AtomicUsize::new(0),
+                });
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+
+                // The starter batches pages 0 and 1, and its first poll finds no completion. Its
+                // second poll, after the first completion woke it, holds its thread until the last
+                // completion has arrived, then finds the joiner polling the batch.
+                let (first_polled_tx, first_polled_rx) = mpsc::channel();
+                let (second_poll_tx, second_poll_rx) = mpsc::channel();
+                let (resume_starter_tx, resume_starter_rx) = mpsc::channel();
+                let (second_polled_tx, second_polled_rx) = mpsc::channel();
+                let starter = context.child("starter").spawn({
+                    let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                    move |_| async move {
+                        let view = full_view(&blob, &cache_ref, 0, 2);
+                        let mut buf = [0u8; 2];
+                        {
+                            let mut read = pin!(view.read_many_into(
+                                &mut buf,
+                                &[0, PAGE_SIZE_U64],
+                                NZUsize!(1)
+                            ));
+                            let mut polls = 0;
+                            poll_fn(move |cx| {
+                                polls += 1;
+                                if polls == 2 {
+                                    second_poll_tx.send(()).unwrap();
+                                    resume_starter_rx.recv_timeout(SCHEDULE_DEADLINE).unwrap();
+                                }
+                                let result = read.as_mut().poll(cx);
+                                if polls <= 2 {
+                                    assert!(result.is_pending());
+                                    let polled = if polls == 1 {
+                                        &first_polled_tx
+                                    } else {
+                                        &second_polled_tx
+                                    };
+                                    polled.send(()).unwrap();
+                                }
+                                result
+                            })
+                            .await
+                            .unwrap();
+                        }
+                        buf
+                    }
+                });
+
+                // Deliver each completion at its point in the schedule, starting the joiner once
+                // the starter's second poll holds its thread, and resume the paused stream only
+                // after the starter found the batch busy.
+                let (start_joiner_tx, start_joiner_rx) = oneshot::channel();
+                let page = checksummed_page(7);
+                let schedule = std::thread::spawn(move || {
+                    first_polled_rx.recv_timeout(SCHEDULE_DEADLINE).unwrap();
+                    completions
+                        .send(Ok((0, IoBufsMut::from(page.clone()))))
+                        .unwrap();
+                    second_poll_rx.recv_timeout(SCHEDULE_DEADLINE).unwrap();
+                    start_joiner_tx.send(()).unwrap();
+                    paused_rx.recv_timeout(SCHEDULE_DEADLINE).unwrap();
+                    completions.send(Ok((1, IoBufsMut::from(page)))).unwrap();
+                    resume_starter_tx.send(()).unwrap();
+                    second_polled_rx.recv_timeout(SCHEDULE_DEADLINE).unwrap();
+                    resume_stream_tx.send(()).unwrap();
+                });
+                select! {
+                    result = start_joiner_rx => result.unwrap(),
+                    _ = context.sleep(SCHEDULE_DEADLINE) => panic!("starter was not polled again"),
+                }
+
+                // The joiner reads page 0, joining the batch and polling its stream until it pauses.
+                let joiner = context.child("joiner").spawn({
+                    let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                    move |_| async move {
+                        let mut buf = [0u8; 1];
+                        full_view(&blob, &cache_ref, 0, 2)
+                            .read_into(&mut buf, 0)
+                            .await
+                            .unwrap();
+                        buf
+                    }
+                });
+                let joined = select! {
+                    result = joiner => result.unwrap(),
+                    _ = context.sleep(SCHEDULE_DEADLINE) => panic!("joiner stalled"),
+                };
+                assert_eq!(joined, [7]);
+                schedule.join().unwrap();
+
+                // Nothing outside the batch wakes the starter again.
+                let started = select! {
+                    result = starter => result.unwrap(),
+                    _ = context.sleep(SCHEDULE_DEADLINE) => panic!("starter stalled after the joiner left"),
+                };
+                assert_eq!(started, [7, 7]);
+                assert_eq!(blob.yielded.load(Ordering::SeqCst), 2);
+                assert!(cache_ref.cache.read().page_fetches.is_empty());
+                assert!(cache_ref.cache.read().batches.is_empty());
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_cancelled_last_joiner_releases_dropped_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const PAGES: usize = 2;
+            let (blob, opens) = gated_blob(PAGES);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+
+            // A read joins the batch's fetch of page 1, then the batch is dropped, leaving the
+            // read as its only reader.
+            let batch = spawn_batch(&context, "batch", &blob, &cache_ref, vec![0, 1]);
+            blob.wait_reads(&context, PAGES).await;
+            let read = spawn_read(&context, "read", &blob, &cache_ref, 1);
+            context.sleep(Duration::from_millis(10)).await;
+            batch.abort();
+            assert!(batch.await.is_err());
+            assert!(!cache_ref.cache.read().batches.is_empty());
+
+            // Cancelling the read releases the batch, which withdraws its pages and unregisters.
+            read.abort();
+            assert!(read.await.is_err());
+            assert!(cache_ref.cache.read().page_fetches.is_empty());
+            assert!(cache_ref.cache.read().batches.is_empty());
+            drop(opens);
+        });
+    }
+
+    #[test_traced]
+    fn test_withdrawn_page_waiter_fetches_it_itself() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, mut opens) = gated_blob(2);
+            *blob.corrupt.lock() = Some(1);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let page_reads = || blob.reads.lock().iter().filter(|&&page| page == 1).count();
+
+            // A read joins a batch's fetch of page 1, which fails validation.
+            let first = spawn_batch(&context, "first", &blob, &cache_ref, vec![0, 1]);
+            blob.wait_reads(&context, 2).await;
+            let mut buf = [0u8; 1];
+            let mut read = Box::pin(cache_ref.read_after_miss(&blob, 0, &mut buf, PAGE_SIZE_U64));
+            assert!(poll!(read.as_mut()).is_pending());
+            open(&mut opens);
+            assert!(matches!(first.await.unwrap(), Err(Error::InvalidChecksum)));
+
+            // Another batch of page 1 starts before the read resumes. The read fetches page 1
+            // itself instead of waiting on that batch, which could fail it again.
+            let (open_second, gate) = oneshot::channel::<()>();
+            blob.gates.lock()[1] = Some(gate);
+            let second = spawn_batch(&context, "second", &blob, &cache_ref, vec![1]);
+            blob.wait_reads(&context, 3).await;
+            assert!(matches!(poll!(read.as_mut()), Poll::Ready(Ok(()))));
+            drop(read);
+            assert_eq!(buf, [1]);
+            assert_eq!(page_reads(), 3);
+            open_second.send(()).unwrap();
+            assert_eq!(second.await.unwrap().unwrap(), [1]);
+        });
+    }
+
+    #[rstest]
+    #[case::distinct_pages(false)]
+    #[case::same_page_pieces(true)]
+    fn test_joined_batch_survives_eviction(#[case] same_page_pieces: bool) {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const PAGES: usize = 4;
+            let (blob, mut opens) = gated_blob(PAGES);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
+            let view = full_view(&blob, &cache_ref, 0, PAGES as u64);
+            let offsets: Vec<_> = (0..PAGES as u64).map(|page| page * PAGE_SIZE_U64).collect();
+            let mut first_buf = [0u8; PAGES];
+            let mut first = Box::pin(view.read_many_into(&mut first_buf, &offsets, NZUsize!(1)));
+            assert!(poll!(first.as_mut()).is_pending());
+            assert_eq!(blob.reads.lock().len(), PAGES);
+
+            // A follower must retain every page it joins even when driving the batch evicts
+            // earlier pages before the initiating reader is polled again.
+            let mut joined_offsets = offsets.clone();
+            if same_page_pieces {
+                joined_offsets.insert(1, 1);
+            }
+            let mut joined_buf = vec![0u8; joined_offsets.len()];
+            open(&mut opens);
+            view.read_many_into(&mut joined_buf, &joined_offsets, NZUsize!(1))
+                .await
+                .unwrap();
+            assert_eq!(
+                joined_buf,
+                joined_offsets
+                    .iter()
+                    .map(|offset| (offset / PAGE_SIZE_U64) as u8)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(first.await.unwrap(), 0);
+            assert_eq!(first_buf, [0, 1, 2, 3]);
             assert_eq!(blob.reads.lock().len(), PAGES);
             assert!(cache_ref.cache.read().page_fetches.is_empty());
             assert!(cache_ref.cache.read().batches.is_empty());
