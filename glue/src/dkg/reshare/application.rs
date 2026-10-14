@@ -88,16 +88,23 @@ where
         self.epocher.containing(height).map(|info| info.phase())
     }
 
-    /// Returns the dealer logs to carry in a non-final block at `height`, or
-    /// `None` before the midpoint or when no log is pending.
-    async fn dealer_logs(&mut self, height: Height) -> Option<Payload<V, C, B::Directory>> {
+    /// Returns the dealer logs to carry in a non-final block extending
+    /// `parent`, or `None` before the midpoint or when no log is pending.
+    ///
+    /// Logs that `parent` carries are left out: any block extending `parent`
+    /// finalizes only together with it.
+    async fn dealer_logs(&mut self, parent: &B) -> Option<Payload<V, C, B::Directory>> {
+        let height = parent.height().next();
         if !matches!(
             self.phase(height),
             Some(EpochPhase::Midpoint | EpochPhase::Late)
         ) {
             return None;
         }
-        let logs = self.reshare.dealer_logs(height).await;
+        let mut logs = self.reshare.dealer_logs(height).await;
+        if let Some(Payload::DealerLogs(carried)) = parent.payload() {
+            logs.retain(|log| !carried.contains(log));
+        }
         (!logs.is_empty()).then_some(Payload::DealerLogs(logs))
     }
 }
@@ -168,7 +175,7 @@ where
         span.record("height", height.traced());
         span.record("phase", field::debug(phase));
 
-        let payload = self.dealer_logs(height).await;
+        let payload = self.dealer_logs(parent.inner()).await;
         self.inner
             .prepare(
                 context,
@@ -229,7 +236,7 @@ where
                 }
             }
         } else {
-            self.dealer_logs(height).await
+            self.dealer_logs(parent.inner()).await
         };
         span.record("has_payload", payload.is_some());
         self.inner
@@ -463,6 +470,7 @@ mod tests {
         context: &deterministic::Context,
         logs: Vec<TestLog>,
         inner: RecordingApp,
+        blocks_per_epoch: NonZeroU64,
     ) -> TestWrapper {
         let (sender, mut receiver) = mailbox::new::<Message<TestBlock, TestBlsVariant, PrivateKey>>(
             context.child("mailbox"),
@@ -484,7 +492,7 @@ mod tests {
             }
         });
 
-        Application::new(inner, Mailbox::new(sender), NZU64!(4))
+        Application::new(inner, Mailbox::new(sender), blocks_per_epoch)
     }
 
     /// Returns one signed dealer log from each of the first `count` signers.
@@ -598,7 +606,7 @@ mod tests {
                 let Payload::DealerLogs(logs) = payload.clone() else {
                     unreachable!("payload carries dealer logs");
                 };
-                let mut app = log_wrapper(&context, logs, inner.clone());
+                let mut app = log_wrapper(&context, logs, inner.clone(), NZU64!(4));
 
                 let prepared = app
                     .prepare(
@@ -648,7 +656,7 @@ mod tests {
         executor.start(|context| async move {
             let parent = midpoint_parent();
             let inner = RecordingApp::accepting();
-            let mut app = log_wrapper(&context, Vec::new(), inner.clone());
+            let mut app = log_wrapper(&context, Vec::new(), inner.clone(), NZU64!(4));
 
             let proposed = app
                 .propose(
@@ -660,6 +668,56 @@ mod tests {
                 .expect("proposal should be built");
             assert!(proposed.inner().payload().is_none());
             assert!(inner.proposed() == vec![None]);
+        });
+    }
+
+    /// A block extending a parent finalizes only with that parent, so proposals
+    /// leave out the pending logs the parent already carries.
+    #[test]
+    fn proposals_leave_out_dealer_logs_carried_by_parent() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Epoch zero spans heights 0..=7 with its midpoint at 4.
+            let logs = signed_logs(3);
+            let mut parent = mocks::genesis_block(leader().public_key());
+            while parent.height() < Height::new(4) {
+                parent = mocks::child(&parent);
+            }
+            let parent = parent.with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                NZU32!(16),
+                Payload::DealerLogs(logs[..2].to_vec()),
+            );
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
+
+            for (pending, expected) in [
+                (logs.clone(), Some(Payload::DealerLogs(logs[2..].to_vec()))),
+                (logs[..2].to_vec(), None),
+            ] {
+                let inner = RecordingApp {
+                    handoff: Handoff::Vote(()),
+                    ..RecordingApp::accepting()
+                };
+                let mut app = log_wrapper(&context, pending, inner.clone(), NZU64!(8));
+                let prepared = app
+                    .prepare(
+                        (context.child("prepare"), block_context(&parent, 5)),
+                        ancestry::from_iter([parent.clone()]),
+                        (),
+                    )
+                    .await;
+                assert!(
+                    !prepared.is_wait(),
+                    "the wrapper must forward the inner decision"
+                );
+                app.propose(
+                    (context.child("propose"), block_context(&parent, 5)),
+                    ancestry::from_iter([parent.clone()]),
+                    (),
+                )
+                .await
+                .expect("proposal should be built");
+                assert!(inner.proposed() == vec![expected.clone(), expected]);
+            }
         });
     }
 
