@@ -211,8 +211,9 @@ pub trait ParticipantsProvider: Send + Sync + 'static {
     /// fixed before any honest node proposes or verifies that block.
     ///
     /// The set must be non-empty and contain at most `max_participants` entries. Its
-    /// `3f + 1` quorum (`n - f` of `n` members) must fit in one epoch's dealer-log inclusion
-    /// window. The reshare actor panics on a violation.
+    /// `3f + 1` quorum (`n - f` of `n` members) must not exceed the number of blocks in one
+    /// epoch's dealer-log inclusion window, so that window has room for proposals by honest
+    /// dealers. The reshare actor panics on a violation.
     fn participants(&mut self, epoch: Epoch) -> impl Future<Output = Set<Self::PublicKey>> + Send;
 
     /// Returns the transport directory embedded in the [`EpochInfo`](types::EpochInfo)

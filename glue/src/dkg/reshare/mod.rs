@@ -52,10 +52,13 @@
 //! 2. **Dealing** runs in the first half of the epoch. Dealers send private
 //!    dealings directly to players, and players verify them and return signed
 //!    acknowledgements.
-//! 3. **Inclusion** runs from the midpoint through the final block. Dealers
-//!    publish signed dealer logs, the application includes them in blocks, and
-//!    the final block carries the next epoch's
-//!    [`EpochInfo`](crate::dkg::types::EpochInfo).
+//! 3. **Inclusion** runs from the midpoint through the final block. Each dealer
+//!    sends its signed dealer log directly to the epoch's other dealers (the
+//!    epoch's block proposers), resending on each finalized block until a
+//!    finalized block includes it. Every proposal carries all logs its
+//!    proposer holds that are not yet finalized, so one block led by an honest
+//!    dealer can publish every honest log. The final block carries the next
+//!    epoch's [`EpochInfo`](crate::dkg::types::EpochInfo).
 //!
 //! ```text
 //! boundary EpochInfo(E)
@@ -88,18 +91,22 @@
 //! # Application Contract
 //!
 //! Application blocks implement [`ReshareBlock`](crate::dkg::ReshareBlock) and
-//! carry at most one [`Payload`](crate::dkg::types::Payload). [`Application`]
-//! implements the following rules. An application that calls [`Mailbox`]
-//! directly must follow them itself:
+//! carry at most one [`Payload`](crate::dkg::types::Payload). A
+//! [`Payload::DealerLogs`](crate::dkg::types::Payload::DealerLogs) batch can
+//! hold one log from each dealer, so the application's block size limit must
+//! admit up to `max_participants` dealer logs, and the P2P channel passed to
+//! [`Actor::start`] must admit a message carrying one dealer log.
+//! [`Application`] implements the following rules. An application that calls
+//! [`Mailbox`] directly must follow them itself:
 //!
 //! - Before the midpoint, blocks carry no payload, and verifiers reject a block
 //!   that carries one.
 //! - From the midpoint until the final block, proposers call
-//!   [`Mailbox::next_log`], include the returned dealer log (if any), and call
-//!   [`LogReservation::included`] only after a block is built with it.
-//!   Verifiers reject a block that carries a payload other than a dealer log but
-//!   do not check dealer logs: an invalid dealer log in a finalized block is
-//!   ignored.
+//!   [`Mailbox::dealer_logs`] and include the returned logs, if any, as one
+//!   [`Payload::DealerLogs`](crate::dkg::types::Payload::DealerLogs) batch.
+//!   Verifiers reject a block that carries a payload other than dealer logs but
+//!   do not check the logs: an invalid or repeated dealer log in a finalized
+//!   block is ignored.
 //! - At the final block, proposers call [`Mailbox::epoch_info`], include the
 //!   payload from [`EpochInfoResponse::Available`], and do not propose on any
 //!   other response. Verifiers call it too and must reject a block whose
@@ -178,6 +185,9 @@
 //! from the [`state_sync::Plan`](crate::dkg::state_sync::Plan) after state sync.
 //! If neither is available locally, the actor follows that epoch.
 //!
+//! Dealer logs received from other dealers are held only in memory. Their
+//! dealers resend them on each finalized block until they are included.
+//!
 //! A player records a dealing before acknowledging it. Before acknowledging a
 //! finalized inclusion-window block, a participating actor records any dealer log
 //! it accepts and, at an epoch's final block, stores the next epoch's share and
@@ -202,15 +212,16 @@
 //! # Failures
 //!
 //! The actor exits without error when the runtime stops, when its mailbox
-//! closes, or when its P2P channel closes during a dealing window. It panics on
-//! recovery-journal failures, on a boundary or final block without a valid
+//! closes, or when its P2P channel closes during a dealing or inclusion
+//! window. It panics on recovery-journal failures, on a boundary or final
+//! block without a valid
 //! [`EpochInfo`](crate::dkg::types::EpochInfo) for the expected epoch, on a
 //! finalized block that conflicts with its applied tip or sits above it without
 //! extending it, on
 //! [`ParticipantsProvider`](crate::dkg::ParticipantsProvider) contract
-//! violations, on a P2P channel that closed outside a dealing window (when it
-//! registers the next epoch it participates in), and on otherwise inconsistent
-//! recovered local state.
+//! violations, on a P2P channel that closed outside a dealing or inclusion
+//! window (when it registers the next epoch it participates in), and on
+//! otherwise inconsistent recovered local state.
 //!
 //! # One-Shot DKG
 //!
@@ -224,7 +235,7 @@
 //! [`EpochInfoResponse::Following`].
 
 mod mailbox;
-pub use mailbox::{EpochInfoResponse, LogReservation, Mailbox, Message};
+pub use mailbox::{EpochInfoResponse, Mailbox, Message};
 
 mod actor;
 pub(crate) use actor::DkgConfig;

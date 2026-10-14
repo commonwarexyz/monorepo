@@ -12,8 +12,9 @@
 //!   its scheme, and restoring this node's dealer and player state.
 //! - `dealing` is responsible for exchanging private dealings and
 //!   acknowledgements during the first half of the epoch.
-//! - `inclusion` is responsible for offering this node's dealer log, recording
-//!   finalized logs, and deriving the next [`EpochInfo`].
+//! - `inclusion` is responsible for sending this node's dealer log to the
+//!   epoch's dealers, collecting their logs for proposals, recording finalized
+//!   logs, and deriving the next [`EpochInfo`].
 //! - `follower` is responsible for following the chain without participating
 //!   until the next final block of an epoch is applied.
 //! - `dkg` is responsible for the one-shot DKG mode used by
@@ -304,7 +305,7 @@ where
     /// Spawns the actor with its P2P channel `chan`.
     ///
     /// The task exits when the runtime stops, when the mailbox closes, or when
-    /// `chan` closes during a dealing window. See the
+    /// `chan` closes during a dealing or inclusion window. See the
     /// [module docs](crate::dkg::reshare#failures) for the conditions under
     /// which it panics.
     pub fn start<SE, RE>(mut self, chan: (SE, RE)) -> Handle<()>
@@ -395,7 +396,7 @@ where
             };
             let mut prepared = *prepared;
 
-            let chan = dealing_mux
+            let (mut sender, mut receiver) = dealing_mux
                 .register(prepared.epoch.get())
                 .await
                 .expect("failed to register reshare epoch channel");
@@ -404,7 +405,14 @@ where
                 let dealer = prepared.dealer.as_mut();
                 let player = prepared.player.as_mut();
                 if self
-                    .dealing(prepared.epoch, &mut store, dealer, player, chan)
+                    .dealing(
+                        prepared.epoch,
+                        &mut store,
+                        dealer,
+                        player,
+                        &mut sender,
+                        &mut receiver,
+                    )
                     .await
                     .is_break()
                 {
@@ -418,6 +426,8 @@ where
                     &prepared.info,
                     &mut store,
                     prepared.dealer.as_mut(),
+                    &mut sender,
+                    &mut receiver,
                 )
                 .await
                 .is_break()

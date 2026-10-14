@@ -1,5 +1,6 @@
 use super::harness::{
-    CommitteeSchedule, Registration, RegistrationRole, ValidatorState, final_height,
+    CommitteeSchedule, EPOCH_LENGTH, Registration, RegistrationRole, ValidatorState,
+    epoch_final_height, final_height,
 };
 use crate::{
     dkg::{
@@ -15,7 +16,7 @@ use commonware_codec::{Encode as _, FixedSize};
 use commonware_consensus::types::{Epoch, Height};
 use commonware_cryptography::{bls12381::primitives::variant::MinPk, ed25519, transcript::Summary};
 use commonware_utils::sync::Mutex;
-use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
+use std::{collections::BTreeMap, future::Future, num::NonZeroU64, pin::Pin, sync::Arc};
 
 #[derive(Clone)]
 pub(super) struct AllActiveProcessedHeight {
@@ -93,6 +94,7 @@ impl Property<ed25519::PublicKey, ValidatorState> for SignerRegistered {
 #[derive(Clone)]
 pub(super) struct BoundaryEpochInfos {
     epochs: u64,
+    blocks_per_epoch: NonZeroU64,
     no_reveals: bool,
     min_successes: u64,
     expected_failures: Vec<u64>,
@@ -102,10 +104,16 @@ impl BoundaryEpochInfos {
     pub(super) const fn new(epochs: u64) -> Self {
         Self {
             epochs,
+            blocks_per_epoch: EPOCH_LENGTH,
             no_reveals: false,
             min_successes: epochs,
             expected_failures: Vec::new(),
         }
+    }
+
+    pub(super) const fn with_blocks_per_epoch(mut self, blocks_per_epoch: NonZeroU64) -> Self {
+        self.blocks_per_epoch = blocks_per_epoch;
+        self
     }
 
     pub(super) const fn with_no_reveals(mut self) -> Self {
@@ -144,7 +152,7 @@ impl Property<ed25519::PublicKey, ValidatorState> for BoundaryEpochInfos {
                 let mut expected_failures = 0;
                 let state_sync_height = state.state_sync_height();
                 for epoch in 0..self.epochs {
-                    let height = final_height(epoch);
+                    let height = epoch_final_height(self.blocks_per_epoch, epoch);
                     if state_sync_height.is_some_and(|synced| height.get() < synced) {
                         continue;
                     }

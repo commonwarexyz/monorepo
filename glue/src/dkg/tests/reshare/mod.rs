@@ -3,12 +3,14 @@ use commonware_consensus::types::{Epoch, Epocher, FixedEpocher, Height};
 use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519};
 use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
-use commonware_utils::probability;
+use commonware_utils::{NZU64, probability};
 use rstest::rstest;
-use std::time::Duration;
+use std::{num::NonZeroU64, time::Duration};
 
 mod harness;
-use harness::{EPOCH_LENGTH, Network, ReshareEngine, final_height, height_round};
+use harness::{
+    EPOCH_LENGTH, Network, ReshareEngine, epoch_final_height, final_height, height_round,
+};
 
 mod properties;
 use properties::{
@@ -337,6 +339,29 @@ fn reshare_e2e_four_epochs_changing_size(#[case] network: Network) {
     )
     .run()
     .unwrap();
+}
+
+/// Every ceremony succeeds when the inclusion window has fewer heights than
+/// participants and `f` Byzantine proposers leave dealer logs out of every
+/// block they propose, so honest dealers cannot rely on leading a block to
+/// publish their own logs.
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_byzantine_proposers_omit_dealer_logs() {
+    const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(13);
+    const FINAL_EPOCH: u64 = 3;
+    let engine = ReshareEngine::with_committee(Network::Discovery, 7, 7)
+        .with_blocks_per_epoch(BLOCKS_PER_EPOCH)
+        .with_log_omitters([0, 1]);
+    PlanBuilder::new(engine)
+        .seed(0)
+        .exit_condition(ProcessedHeightAtLeast::new(
+            epoch_final_height(BLOCKS_PER_EPOCH, FINAL_EPOCH).get(),
+        ))
+        .property(BoundaryEpochInfos::new(FINAL_EPOCH + 1).with_blocks_per_epoch(BLOCKS_PER_EPOCH))
+        .timeout(Duration::from_secs(120))
+        .run()
+        .unwrap();
 }
 
 fn crash_storm_plan(

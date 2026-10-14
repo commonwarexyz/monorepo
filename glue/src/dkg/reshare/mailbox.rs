@@ -16,7 +16,8 @@ use commonware_consensus::{
     types::Height,
 };
 use commonware_cryptography::{
-    Digested, Digestible as _, Signer, bls12381::primitives::variant::Variant,
+    Digested, Digestible as _, Signer,
+    bls12381::{dkg::feldman_desmedt::SignedDealerLog, primitives::variant::Variant},
 };
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::oneshot, sequence::Unit};
@@ -51,74 +52,6 @@ where
     Unavailable,
 }
 
-/// A dealer log reserved for one proposal attempt.
-///
-/// Dropping the reservation releases the log back to the reshare actor. Call
-/// [`included`](Self::included) only after the application returns a block
-/// built with this payload.
-#[must_use = "dropping a log reservation releases it for another proposal"]
-pub struct LogReservation<B, V, C, A = Exact>
-where
-    B: ReshareBlock<Variant = V, Signer = C>,
-    V: Variant,
-    C: Signer,
-    A: Acknowledgement,
-{
-    height: Height,
-    payload: Option<Payload<V, C, B::Directory>>,
-    release: Option<ActorSender<Message<B, V, C, A>>>,
-}
-
-impl<B, V, C, A> LogReservation<B, V, C, A>
-where
-    B: ReshareBlock<Variant = V, Signer = C>,
-    V: Variant,
-    C: Signer,
-    A: Acknowledgement,
-{
-    pub(crate) const fn new(
-        height: Height,
-        payload: Payload<V, C, B::Directory>,
-        release: ActorSender<Message<B, V, C, A>>,
-    ) -> Self {
-        Self {
-            height,
-            payload: Some(payload),
-            release: Some(release),
-        }
-    }
-
-    /// Takes the reserved dealer log payload.
-    ///
-    /// Returns `None` if the payload was already taken.
-    pub const fn take_payload(&mut self) -> Option<Payload<V, C, B::Directory>> {
-        self.payload.take()
-    }
-
-    /// Keeps the log reserved: no other proposal receives it unless
-    /// finalization reaches this height without including it.
-    pub fn included(mut self) {
-        self.release = None;
-    }
-}
-
-impl<B, V, C, A> Drop for LogReservation<B, V, C, A>
-where
-    B: ReshareBlock<Variant = V, Signer = C>,
-    V: Variant,
-    C: Signer,
-    A: Acknowledgement,
-{
-    fn drop(&mut self) {
-        let Some(release) = self.release.take() else {
-            return;
-        };
-        let _ = release.enqueue(Message::ReleaseLog {
-            height: self.height,
-        });
-    }
-}
-
 /// A message that can be sent to the [`Actor`].
 ///
 /// [`Actor`]: super::Actor
@@ -130,22 +63,13 @@ where
     C: Signer,
     A: Acknowledgement,
 {
-    /// A request for this node's dealer log to include in a block before the
-    /// final block of the epoch.
-    ///
-    /// `height` is the height of the block being proposed. Once a log is served
-    /// at `height`, later requests receive no log until its reservation is
-    /// released or finalization reaches `height` without including it.
-    NextLog {
+    /// A request for the dealer logs to include in the block being proposed at
+    /// `height` (see [`Mailbox::dealer_logs`]).
+    DealerLogs {
         span: Span,
         height: Height,
-        release: ActorSender<Self>,
-        response: oneshot::Sender<Option<LogReservation<B, V, C, A>>>,
+        response: oneshot::Sender<Vec<SignedDealerLog<V, C>>>,
     },
-
-    /// A proposal attempt was canceled or returned no block after receiving a
-    /// dealer log.
-    ReleaseLog { height: Height },
 
     /// A request for the payload of an epoch's final block (see
     /// [`Mailbox::epoch_info`]).
@@ -173,8 +97,7 @@ where
 {
     fn response_closed(&self) -> bool {
         match self {
-            Self::NextLog { response, .. } => response.is_closed(),
-            Self::ReleaseLog { .. } => false,
+            Self::DealerLogs { response, .. } => response.is_closed(),
             Self::EpochInfo { response, .. } => response.is_closed(),
             Self::Finalized { .. } => false,
         }
@@ -224,34 +147,36 @@ where
         Self { sender }
     }
 
-    /// Requests this node's dealer log for the block being proposed at `height`.
+    /// Requests the dealer logs to include in the block being proposed at
+    /// `height`.
     ///
-    /// Returns `None` if no log is available (when this node does not deal this
-    /// epoch, outside the inclusion window, while an earlier reservation is
-    /// outstanding, or once the log is included) or if the actor has stopped.
-    /// See [`Message::NextLog`] for reservation behavior.
-    pub async fn next_log(&mut self, height: Height) -> Option<LogReservation<B, V, C, A>> {
+    /// Returns every log this node holds for the epoch's inclusion window (its
+    /// own and those received from other dealers) whose dealer has no log in a
+    /// finalized block yet. Logs carried by unfinalized ancestors may be
+    /// returned again. Returns no logs for a height outside the actor's
+    /// current epoch, while the actor is not in an inclusion window, or if the
+    /// actor has stopped.
+    pub async fn dealer_logs(&mut self, height: Height) -> Vec<SignedDealerLog<V, C>> {
         let (response_tx, response_rx) = oneshot::channel();
-        let span = info_span!("dkg.reshare.mailbox.next_log", height = height.traced());
+        let span = info_span!("dkg.reshare.mailbox.dealer_logs", height = height.traced());
         if !self
             .sender
-            .enqueue(Message::NextLog {
+            .enqueue(Message::DealerLogs {
                 span,
                 height,
-                release: self.sender.clone(),
                 response: response_tx,
             })
             .accepted()
         {
-            error!("failed to send request for next dealer log");
-            return None;
+            error!("failed to send request for dealer logs");
+            return Vec::new();
         }
 
         match response_rx.await {
-            Ok(outcome) => outcome,
+            Ok(logs) => logs,
             Err(err) => {
-                error!(?err, "failed to receive payload response");
-                None
+                error!(?err, "failed to receive dealer logs response");
+                Vec::new()
             }
         }
     }
@@ -357,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn next_log_returns_none_when_actor_gone() {
+    fn dealer_logs_returns_empty_when_actor_gone() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (sender, receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
@@ -365,7 +290,7 @@ mod tests {
 
             let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
 
-            assert!(mailbox.next_log(Height::new(1)).await.is_none());
+            assert!(mailbox.dealer_logs(Height::new(1)).await.is_empty());
         });
     }
 

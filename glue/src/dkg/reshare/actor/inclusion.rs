@@ -4,13 +4,12 @@ use crate::dkg::{
     reshare::{
         Actor, EpochInfoResponse, Message,
         actor::{FinalizedTip, Mode},
-        mailbox::LogReservation,
         metrics::Phase,
         store::{Dealer, Player, Store},
     },
-    types::{EpochInfo, EpochOutcome, Participants, Payload},
+    types::{EpochInfo, EpochOutcome, Message as WireMessage, Participants, Payload},
 };
-use commonware_actor::mailbox::Sender as ActorSender;
+use commonware_codec::{Decode as _, Encode as _};
 use commonware_consensus::{
     Block as _, Heightable as _,
     marshal::{ancestry::BoxedAncestry, core::Variant as MarshalVariant},
@@ -21,13 +20,14 @@ use commonware_cryptography::{
     BatchVerifier, Digested, Digestible as _, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::{
-            DealerLog, FinalizeError as DkgFinalizeError, Info, Logs, Output, observe,
+            DealerLog, FinalizeError as DkgFinalizeError, Info, Logs, Output, SignedDealerLog,
+            observe,
         },
         primitives::{group::Share, variant::Variant as BlsVariant},
     },
 };
 use commonware_macros::{select, select_loop};
-use commonware_p2p::Blocker;
+use commonware_p2p::{Blocker, Message as NetworkMessage, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, Error as RuntimeError, Handle, Metrics, Spawner,
@@ -54,6 +54,9 @@ use tracing::{Instrument as _, Span, debug, info, info_span, warn};
 
 /// Dealer logs indexed by dealer for an epoch-info request or verification.
 type PendingLogs<V, P> = BTreeMap<P, DealerLog<V, P>>;
+
+/// Signed dealer logs this node can include in proposals, indexed by dealer.
+type KnownLogs<V, C> = BTreeMap<<C as Signer>::PublicKey, SignedDealerLog<V, C>>;
 
 /// One interruptible pending-log scan.
 type ArtifactScanTask<'a, V, P> = OptionFuture<BoxFuture<'a, Option<PendingLogs<V, P>>>>;
@@ -601,14 +604,16 @@ where
     let mut logs = BTreeMap::new();
     for block in blocks.into_iter().rev() {
         let height = block.height();
-        let Some(Payload::DealerLog(log)) = block.inner().payload() else {
+        let Some(Payload::DealerLogs(batch)) = block.inner().payload() else {
             continue;
         };
-        let Some((dealer, log)) = log.check(scan.info) else {
-            warn!(epoch = ?scan.epoch, ?height, "ignoring invalid pending dealer log");
-            continue;
-        };
-        logs.entry(dealer).or_insert(log);
+        for log in batch {
+            let Some((dealer, log)) = log.check(scan.info) else {
+                warn!(epoch = ?scan.epoch, ?height, "ignoring invalid pending dealer log");
+                continue;
+            };
+            logs.entry(dealer).or_insert(log);
+        }
     }
     Some(logs)
 }
@@ -632,31 +637,48 @@ where
 {
     /// Runs the inclusion window of `epoch`.
     ///
-    /// Offers this node's signed dealer log until a finalized block includes it,
-    /// records valid dealer logs from finalized blocks, and answers final-block
-    /// [`EpochInfo`] requests.
+    /// Sends this node's signed dealer log to the epoch's other dealers, and
+    /// again on each finalized block until a finalized block includes it. Offers
+    /// it, with the logs other dealers send, to proposals until each is
+    /// finalized. Records valid dealer logs from finalized blocks and answers
+    /// final-block [`EpochInfo`] requests.
     ///
     /// Returns `Continue` once the epoch's final block is applied (see
     /// [`Self::handle_finalized_epoch_info`]). Returns `Break` on shutdown, when
-    /// the mailbox closes, or when the runtime closes a verification task.
+    /// the mailbox or the epoch's P2P channel closes, or when the runtime closes
+    /// a verification task.
     ///
     /// Panics if an unapplied finalized block lies outside the inclusion window
     /// of `epoch`. Also panics as described on [`Self::covered`],
     /// [`Self::artifact`], and [`Self::handle_finalized_epoch_info`].
-    pub(super) async fn inclusion(
+    pub(super) async fn inclusion<SE, RE>(
         &mut self,
         epoch: Epoch,
         info: &Info<V, C::PublicKey>,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
-        mut dealer: Option<&mut Dealer<V, C>>,
-    ) -> ControlFlow<()> {
+        dealer: Option<&mut Dealer<V, C>>,
+        sender: &mut SE,
+        receiver: &mut RE,
+    ) -> ControlFlow<()>
+    where
+        SE: Sender<PublicKey = C::PublicKey>,
+        RE: Receiver<PublicKey = C::PublicKey>,
+    {
         self.metrics.set_phase(Phase::Inclusion);
 
-        if let Some(dealer) = dealer.as_deref_mut() {
+        // Any dealer may propose a block in this window, so each dealer sends
+        // its log to all of them rather than waiting to lead a block itself.
+        let public_key = self.signer.public_key();
+        let dealers = self.epoch_dealers(store);
+        let mut logs = KnownLogs::<V, C>::new();
+        if let Some(dealer) = dealer {
             dealer.finalize::<N3f1>();
+            if let Some(log) = dealer.finalized() {
+                logs.insert(public_key.clone(), log);
+            }
         }
+        Self::send_dealer_log(&public_key, epoch, store, &dealers, &logs, sender);
 
-        let mut served_at: Option<Height> = None;
         let mut work = ArtifactWork::default();
         let mut scan = ArtifactScan::default();
 
@@ -682,29 +704,12 @@ where
                 return ControlFlow::Break(());
             } => {
                 match message {
-                Message::NextLog {
+                Message::DealerLogs {
                     span,
                     height,
-                    release,
                     response,
                 } => {
-                    Self::handle_next_log(
-                        dealer.as_deref(),
-                        &mut served_at,
-                        span,
-                        height,
-                        release,
-                        response,
-                    );
-                }
-                Message::ReleaseLog { height } => {
-                    if served_at == Some(height)
-                        && dealer
-                            .as_ref()
-                            .is_some_and(|dealer| dealer.finalized().is_some())
-                    {
-                        served_at = None;
-                    }
+                    self.handle_dealer_logs(epoch, store, &logs, span, height, response);
                 }
                 Message::EpochInfo {
                     span,
@@ -753,13 +758,11 @@ where
                             work.requests.push_front(request);
                         }
 
-                        let public_key = self.signer.public_key();
-                        Self::observe_dealer_log(
+                        Self::observe_dealer_logs(
                             &public_key,
                             info,
                             store,
                             epoch,
-                            dealer.as_deref_mut(),
                             block.inner().payload(),
                         )
                         .await;
@@ -779,15 +782,15 @@ where
                         {
                             return ControlFlow::Break(());
                         }
-
-                        // A log still held once finalization reaches its served height
-                        // was not included, so it becomes available to the next request.
-                        if served_at.is_some_and(|served| block.height() >= served)
-                            && dealer
-                                .as_ref()
-                                .is_some_and(|dealer| dealer.finalized().is_some())
-                        {
-                            served_at = None;
+                        if !done {
+                            Self::send_dealer_log(
+                                &public_key,
+                                epoch,
+                                store,
+                                &dealers,
+                                &logs,
+                                sender,
+                            );
                         }
 
                         self.advance(&block);
@@ -828,40 +831,148 @@ where
                 advance = None.into();
                 self.advance_artifact_requests(epoch, info, &mut scan, &mut work);
             },
+            Ok(message) = receiver.recv() else {
+                debug!("inclusion channel closed, shutting down");
+                return ControlFlow::Break(());
+            } => {
+                self.handle_dealer_log(epoch, info, store, &dealers, &mut logs, message);
+            },
         };
 
         ControlFlow::Break(())
     }
 
-    /// Answers a dealer-log request with this node's signed log unless one is
-    /// already served, recording `height` once the reservation is delivered.
-    fn handle_next_log(
-        dealer: Option<&Dealer<V, C>>,
-        served_at: &mut Option<Height>,
+    /// Returns the epoch's dealers: the committed epoch's output players during
+    /// resharing, and the configured participants during one-shot DKG.
+    fn epoch_dealers(
+        &self,
+        store: &Store<E, SS, V, C::PublicKey, B::Directory>,
+    ) -> Set<C::PublicKey> {
+        store.current().map_or_else(
+            || {
+                self.dkg_participants()
+                    .expect("inclusion must have current epoch or DKG participants")
+            },
+            |current| current.output.players().clone(),
+        )
+    }
+
+    /// Sends this node's log in `logs` to the epoch's other dealers unless a
+    /// finalized block already includes it.
+    fn send_dealer_log<SE>(
+        public_key: &C::PublicKey,
+        epoch: Epoch,
+        store: &Store<E, SS, V, C::PublicKey, B::Directory>,
+        dealers: &Set<C::PublicKey>,
+        logs: &KnownLogs<V, C>,
+        sender: &mut SE,
+    ) where
+        SE: Sender<PublicKey = C::PublicKey>,
+    {
+        let Some(log) = logs.get(public_key) else {
+            return;
+        };
+        if store.has_log(epoch, public_key) {
+            return;
+        }
+        let recipients: Vec<_> = dealers
+            .iter()
+            .filter(|dealer| *dealer != public_key)
+            .cloned()
+            .collect();
+        if recipients.is_empty() {
+            return;
+        }
+        let sent = sender.send(
+            Recipients::Some(recipients),
+            WireMessage::Log(log.clone()).encode(),
+            true,
+        );
+        debug!(?epoch, sent = sent.len(), "sent dealer log");
+    }
+
+    /// Records the first valid dealer log each other dealer sends directly.
+    ///
+    /// Blocks the sender of a message that does not decode, and of a new log
+    /// from outside the epoch's dealers or not signed by the sender for this
+    /// round. Logs are not relayed, so only a log's own dealer may send it.
+    /// Ignores repeated logs, logs whose dealer already has a finalized log, and
+    /// dealings or acknowledgements from peers still in the dealing window.
+    fn handle_dealer_log(
+        &mut self,
+        epoch: Epoch,
+        info: &Info<V, C::PublicKey>,
+        store: &Store<E, SS, V, C::PublicKey, B::Directory>,
+        dealers: &Set<C::PublicKey>,
+        logs: &mut KnownLogs<V, C>,
+        (from, bytes): NetworkMessage<C::PublicKey>,
+    ) {
+        let message = match WireMessage::<V, C>::decode_cfg(bytes, &self.max_participants) {
+            Ok(message) => message,
+            Err(error) => {
+                commonware_p2p::block!(
+                    self.blocker,
+                    from,
+                    ?epoch,
+                    ?error,
+                    "failed to decode inclusion message"
+                );
+                return;
+            }
+        };
+        let WireMessage::Log(log) = message else {
+            return;
+        };
+
+        // Dealers resend their log on each finalized block until it is included.
+        if logs.contains_key(&from) || store.has_log(epoch, &from) {
+            return;
+        }
+        if dealers.position(&from).is_none() {
+            commonware_p2p::block!(self.blocker, from, ?epoch, "dealer log from non-dealer");
+            return;
+        }
+        match log.clone().check(info) {
+            Some((dealer, _)) if dealer == from => {
+                debug!(?epoch, ?dealer, "received dealer log");
+                logs.insert(from, log);
+            }
+            _ => {
+                commonware_p2p::block!(self.blocker, from, ?epoch, "invalid dealer log");
+            }
+        }
+    }
+
+    /// Answers a dealer-log request with every log in `logs` whose dealer has no
+    /// finalized log, or with none if `height` is outside `epoch`.
+    fn handle_dealer_logs(
+        &self,
+        epoch: Epoch,
+        store: &Store<E, SS, V, C::PublicKey, B::Directory>,
+        logs: &KnownLogs<V, C>,
         span: Span,
         height: Height,
-        release: ActorSender<Message<B, V, C, A>>,
-        response: oneshot::Sender<Option<LogReservation<B, V, C, A>>>,
+        response: oneshot::Sender<Vec<SignedDealerLog<V, C>>>,
     ) {
         let process = info_span!(
             parent: &span,
-            "dkg.reshare.actor.inclusion.next_log",
+            "dkg.reshare.actor.inclusion.dealer_logs",
             height = height.traced()
         );
         process.in_scope(|| {
-            let payload = served_at
-                .is_none()
-                .then(|| {
-                    dealer
-                        .and_then(|dealer| dealer.finalized())
-                        .map(Payload::DealerLog)
-                })
-                .flatten();
-            let has_payload = payload.is_some();
-            let reservation = payload.map(|payload| LogReservation::new(height, payload, release));
-            if response.send_lossy(reservation) && has_payload {
-                *served_at = Some(height);
-            }
+            let in_epoch = self
+                .epocher
+                .containing(height)
+                .is_some_and(|bounds| bounds.epoch() == epoch);
+            let pending = if in_epoch {
+                logs.iter()
+                    .filter(|(dealer, _)| !store.has_log(epoch, dealer))
+                    .map(|(_, log)| log.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let _ = response.send_lossy(pending);
         });
     }
 
@@ -987,50 +1098,47 @@ where
         );
     }
 
-    /// Durably records a correctly signed log carried by a finalized block.
+    /// Durably records each correctly signed log carried by a finalized block.
     ///
     /// Block validity does not check dealer logs. Invalid signatures and,
-    /// during resharing, non-dealers are ignored. Once this node's own log is
-    /// observed, `dealer` drops its signed log.
-    pub(super) async fn observe_dealer_log(
+    /// during resharing, non-dealers are ignored.
+    pub(super) async fn observe_dealer_logs(
         public_key: &C::PublicKey,
         info: &Info<V, C::PublicKey>,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         epoch: Epoch,
-        dealer: Option<&mut Dealer<V, C>>,
         payload: Option<Payload<V, C, B::Directory>>,
     ) {
-        let Some(Payload::DealerLog(log)) = payload else {
+        let Some(Payload::DealerLogs(batch)) = payload else {
             return;
         };
-        let Some((dealer_key, log)) = log.check(info) else {
-            warn!(?epoch, "ignoring invalid dealer log");
-            return;
-        };
+        let current = store.current();
+        for log in batch {
+            let Some((dealer, log)) = log.check(info) else {
+                warn!(?epoch, "ignoring invalid dealer log");
+                continue;
+            };
 
-        // `check` authenticates the signature but not dealer membership. Once a
-        // current epoch is committed, drop logs from outside its dealer set so a
-        // Byzantine leader cannot grow storage with logs that selection ignores.
-        if store
-            .current()
-            .is_some_and(|current| current.output.players().position(&dealer_key).is_none())
-        {
-            warn!(?epoch, "ignoring dealer log from non-dealer");
-            return;
-        }
+            // `check` authenticates the signature but not dealer membership. Once a
+            // current epoch is committed, drop logs from outside its dealer set so a
+            // Byzantine leader cannot grow storage with logs that selection ignores.
+            if current
+                .as_ref()
+                .is_some_and(|current| current.output.players().position(&dealer).is_none())
+            {
+                warn!(?epoch, "ignoring dealer log from non-dealer");
+                continue;
+            }
 
-        let ours = dealer_key == *public_key;
-        let stored = store.append_log(epoch, dealer_key.clone(), log).await;
-        info!(
-            ?epoch,
-            dealer = ?dealer_key,
-            ours,
-            stored,
-            "observed dealer log on chain"
-        );
-
-        if ours && let Some(dealer) = dealer {
-            dealer.clear_finalized();
+            let ours = dealer == *public_key;
+            let stored = store.append_log(epoch, dealer.clone(), log).await;
+            info!(
+                ?epoch,
+                ?dealer,
+                ours,
+                stored,
+                "observed dealer log on chain"
+            );
         }
     }
 
@@ -1475,7 +1583,7 @@ mod tests {
         state_sync::Plan as StateSyncPlan,
         tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant, child},
     };
-    use commonware_actor::Feedback;
+    use commonware_actor::{Feedback, Unreliable};
     use commonware_consensus::{Reporter, marshal};
     use commonware_cryptography::{
         Signer,
@@ -1493,22 +1601,23 @@ mod tests {
     use commonware_macros::boxed;
     use commonware_math::algebra::Random as _;
     use commonware_p2p::{
+        CheckedSender, LimitedSender,
         simulated::{Config as NetworkConfig, Network},
         utils::mocks::inert_channel,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{ContextCell, Runner, Spawner, Supervisor, deterministic};
+    use commonware_runtime::{ContextCell, IoBufs, Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
         Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
         channel::oneshot, ordered::Set, sequence::Unit, sync::Mutex, test_rng,
     };
     use futures::{FutureExt, stream};
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, BTreeSet},
         pin::Pin,
         sync::Arc,
         task::{Context, Poll},
-        time::Duration,
+        time::{Duration, SystemTime},
     };
 
     const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_INCLUSION_TEST";
@@ -1827,6 +1936,7 @@ mod tests {
                 public_key,
                 ..
             } = setup_inclusion_harness(&mut context, "redelivered-receipts", NZU64!(4)).await;
+            let (mut sender, mut receiver) = inert_channel::<PublicKey>([]);
 
             // Epoch zero spans heights 0..=3 and epoch one spans 4..=7. Each early phase ends one
             // block before its epoch midpoint.
@@ -1844,7 +1954,8 @@ mod tests {
                         &mut store,
                         None,
                         None,
-                        inert_channel([public_key.clone()]),
+                        &mut sender,
+                        &mut receiver,
                     )
                     .await
                     .is_continue()
@@ -1858,7 +1969,14 @@ mod tests {
             let receipts = [1, 2, 2, 3].map(|height| deliver(&mut mailbox, &blocks[height]));
             assert!(
                 actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(
+                        Epoch::zero(),
+                        &info,
+                        &mut store,
+                        None,
+                        &mut sender,
+                        &mut receiver
+                    )
                     .await
                     .is_continue()
             );
@@ -1878,7 +1996,8 @@ mod tests {
                         &mut store,
                         None,
                         None,
-                        inert_channel([public_key]),
+                        &mut sender,
+                        &mut receiver,
                     )
                     .await
                     .is_continue()
@@ -1907,6 +2026,7 @@ mod tests {
                 public_key,
                 ..
             } = setup_inclusion_harness(&mut context, "inclusion-entry", NZU64!(4)).await;
+            let (mut sender, mut receiver) = inert_channel::<PublicKey>([]);
 
             // Epoch zero spans heights 0..=3 with its midpoint at 2.
             let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
@@ -1923,7 +2043,8 @@ mod tests {
                         &mut store,
                         None,
                         None,
-                        inert_channel([public_key]),
+                        &mut sender,
+                        &mut receiver,
                     )
                     .await
                     .is_continue()
@@ -1936,7 +2057,14 @@ mod tests {
             // any block of its own.
             let _inclusion = context.child("inclusion").spawn(|_| async move {
                 actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(
+                        Epoch::zero(),
+                        &info,
+                        &mut store,
+                        None,
+                        &mut sender,
+                        &mut receiver,
+                    )
                     .await
             });
             let response = mailbox
@@ -1963,6 +2091,7 @@ mod tests {
                 public_key,
                 ..
             } = setup_inclusion_harness(&mut context, "conflicting-redelivery", NZU64!(4)).await;
+            let (mut sender, mut receiver) = inert_channel::<PublicKey>([]);
 
             // Dealing covers genesis and its canonical child, the last block before the midpoint.
             let genesis = ready(mocks::genesis_block(public_key.clone()));
@@ -1975,7 +2104,8 @@ mod tests {
                         &mut store,
                         None,
                         None,
-                        inert_channel([public_key]),
+                        &mut sender,
+                        &mut receiver,
                     )
                     .await
                     .is_continue()
@@ -1996,7 +2126,14 @@ mod tests {
             // Inclusion receives the sibling at the covered tip's height.
             let _receipt = deliver(&mut mailbox, &sibling);
             let _ = actor
-                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .inclusion(
+                    Epoch::zero(),
+                    &info,
+                    &mut store,
+                    None,
+                    &mut sender,
+                    &mut receiver,
+                )
                 .await;
         });
     }
@@ -2019,6 +2156,7 @@ mod tests {
                 public_key,
                 ..
             } = setup_inclusion_harness(&mut context, "skipped-inclusion", NZU64!(6)).await;
+            let (mut sender, mut receiver) = inert_channel::<PublicKey>([]);
 
             // Epoch zero spans heights 0..=5 with its midpoint at 3.
             let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
@@ -2035,7 +2173,8 @@ mod tests {
                         &mut store,
                         None,
                         None,
-                        inert_channel([public_key]),
+                        &mut sender,
+                        &mut receiver,
                     )
                     .await
                     .is_continue()
@@ -2048,7 +2187,14 @@ mod tests {
             // block at height four between them.
             let _receipts = [3, 5].map(|height| deliver(&mut mailbox, &blocks[height]));
             let _ = actor
-                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .inclusion(
+                    Epoch::zero(),
+                    &info,
+                    &mut store,
+                    None,
+                    &mut sender,
+                    &mut receiver,
+                )
                 .await;
         });
     }
@@ -2070,6 +2216,7 @@ mod tests {
                 public_key,
                 ..
             } = setup_inclusion_harness(&mut context, "unlinked-inclusion", NZU64!(6)).await;
+            let (mut sender, mut receiver) = inert_channel::<PublicKey>([]);
 
             // Epoch zero spans heights 0..=5 with its midpoint at 3.
             let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
@@ -2086,7 +2233,8 @@ mod tests {
                         &mut store,
                         None,
                         None,
-                        inert_channel([public_key]),
+                        &mut sender,
+                        &mut receiver,
                     )
                     .await
                     .is_continue()
@@ -2104,7 +2252,14 @@ mod tests {
             ));
             let _receipt = deliver(&mut mailbox, &unlinked);
             let _ = actor
-                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .inclusion(
+                    Epoch::zero(),
+                    &info,
+                    &mut store,
+                    None,
+                    &mut sender,
+                    &mut receiver,
+                )
                 .await;
         });
     }
@@ -2125,6 +2280,7 @@ mod tests {
                 public_key,
                 ..
             } = setup_inclusion_harness(&mut context, "follower-redelivery", NZU64!(4)).await;
+            let (mut sender, mut receiver) = inert_channel::<PublicKey>([]);
 
             // Epoch zero's final block carries epoch one's public info.
             let participants = Set::from_iter_dedup([public_key.clone()]);
@@ -2183,7 +2339,8 @@ mod tests {
                         &mut store,
                         None,
                         None,
-                        inert_channel([public_key]),
+                        &mut sender,
+                        &mut receiver,
                     )
                     .await
                     .is_continue()
@@ -2284,6 +2441,7 @@ mod tests {
                 signed_log: _,
                 public_key,
             } = setup_inclusion_harness(&mut context, "closed-verification", NZU64!(6)).await;
+            let (mut sender, mut receiver) = inert_channel::<PublicKey>([]);
 
             // A task context whose owning task has exited rejects descendants
             // with Error::Closed.
@@ -2303,7 +2461,14 @@ mod tests {
             ));
             let inclusion = context.child("inclusion").spawn(|_| async move {
                 let result = actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(
+                        Epoch::zero(),
+                        &info,
+                        &mut store,
+                        None,
+                        &mut sender,
+                        &mut receiver,
+                    )
                     .await;
                 (result, store)
             });
@@ -2357,6 +2522,7 @@ mod tests {
                 signed_log,
                 public_key,
             } = setup_inclusion_harness(&mut context, "inclusion-actor", NZU64!(6)).await;
+            let (mut sender, mut receiver) = inert_channel::<PublicKey>([]);
 
             // Build canonical and detached histories over the same pre-midpoint
             // prefix. Only the detached midpoint carries the dealer log.
@@ -2401,7 +2567,7 @@ mod tests {
                 )
                 .with_payload::<Sha256, TestBlsVariant, PrivateKey>(
                     NZU32!(16),
-                    Payload::DealerLog(signed_log),
+                    Payload::DealerLogs(vec![signed_log]),
                 ),
             );
             let detached_four = ready(TestBlock::new::<Sha256>(
@@ -2422,7 +2588,14 @@ mod tests {
 
             let inclusion = context.child("inclusion").spawn(|_| async move {
                 let result = actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(
+                        Epoch::zero(),
+                        &info,
+                        &mut store,
+                        None,
+                        &mut sender,
+                        &mut receiver,
+                    )
                     .await;
                 (result, store)
             });
@@ -2533,6 +2706,7 @@ mod tests {
                 signed_log,
                 public_key,
             } = setup_inclusion_harness(&mut context, "ready-scan", NZU64!(8)).await;
+            let (mut sender, mut receiver) = inert_channel::<PublicKey>([]);
 
             // Build canonical and competing inclusion histories. Only the
             // competing history carries a valid dealer log.
@@ -2588,7 +2762,7 @@ mod tests {
                 )
                 .with_payload::<Sha256, TestBlsVariant, PrivateKey>(
                     NZU32!(16),
-                    Payload::DealerLog(signed_log),
+                    Payload::DealerLogs(vec![signed_log]),
                 ),
             );
             let losing_six = ready(TestBlock::new::<Sha256>(
@@ -2602,7 +2776,14 @@ mod tests {
             // artifacts so scans can anchor to the canonical durable prefix.
             let inclusion = context.child("inclusion").spawn(|_| async move {
                 let result = actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(
+                        Epoch::zero(),
+                        &info,
+                        &mut store,
+                        None,
+                        &mut sender,
+                        &mut receiver,
+                    )
                     .await;
                 (result, store)
             });
@@ -3414,6 +3595,328 @@ mod tests {
                 actor.verification_task(Epoch::zero(), &finalized.info, &store, log_map.as_ref());
 
             task.run(context.child("verification"));
+        });
+    }
+
+    /// A received dealer log is kept only when its dealer sends it directly,
+    /// belongs to the epoch's dealers, and signs it for this round. Each
+    /// authenticated violation blocks its sender. Kept logs are offered to
+    /// proposals in the epoch until their dealer has a finalized log.
+    #[test]
+    fn received_dealer_logs_are_authenticated_and_offered() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signers = signers();
+            let outsider = PrivateKey::from_seed(4);
+            let peers: Vec<_> = signers
+                .iter()
+                .chain([&outsider])
+                .map(Signer::public_key)
+                .collect();
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024,
+                    max_peers_per_set: NZUsize!(peers.len()),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                peers,
+            )
+            .await;
+            let _network = network.start();
+            let target = signers[0].clone();
+            let (mut actor, _mailbox) = utils::new_actor(
+                context.child("actor_fixture"),
+                target.clone(),
+                players(),
+                &oracle,
+                TEST_NAMESPACE,
+                "received-dealer-logs",
+                NZU64!(4),
+            )
+            .await;
+            let mut store = mocks::store(
+                context.child("store"),
+                "received-dealer-logs-store",
+                MemorySecretStore::default(),
+            )
+            .await;
+            let info = info();
+            let sign = |signer: &PrivateKey, info: &Info<TestBlsVariant, PublicKey>| {
+                let (dealer, _, _) = CryptoDealer::start::<N3f1>(
+                    TestRng::new(0),
+                    info.clone(),
+                    signer.clone(),
+                    None,
+                )
+                .expect("dealer should start");
+                dealer.finalize::<N3f1>()
+            };
+            let log = sign(&signers[1], &info);
+            let other_round = Info::new::<N3f1>(
+                TEST_NAMESPACE,
+                1,
+                None,
+                SharingMode::NonZeroCounter,
+                Reveal::V1,
+                players(),
+                players(),
+            )
+            .expect("valid info");
+            let mut logs = KnownLogs::new();
+            let receive =
+                |actor: &mut mocks::TestReshareActor,
+                 logs: &mut KnownLogs<TestBlsVariant, PrivateKey>,
+                 store: &Store<_, _, _, _, _>,
+                 from: &PrivateKey,
+                 log: SignedDealerLog<TestBlsVariant, PrivateKey>| {
+                    actor.handle_dealer_log(
+                        Epoch::zero(),
+                        &info,
+                        store,
+                        &players(),
+                        logs,
+                        (from.public_key(), WireMessage::Log(log).encode().into()),
+                    );
+                };
+
+            // The dealer's own log is kept, and its resends are ignored.
+            receive(&mut actor, &mut logs, &store, &signers[1], log.clone());
+            receive(&mut actor, &mut logs, &store, &signers[1], log.clone());
+            // A dealer relaying another dealer's log is blocked.
+            receive(&mut actor, &mut logs, &store, &signers[2], log.clone());
+            // A non-dealer is blocked.
+            receive(&mut actor, &mut logs, &store, &outsider, log.clone());
+            // A dealer's log signed for another round is blocked.
+            receive(
+                &mut actor,
+                &mut logs,
+                &store,
+                &signers[3],
+                sign(&signers[3], &other_round),
+            );
+
+            assert_eq!(
+                logs.keys().cloned().collect::<Vec<_>>(),
+                vec![signers[1].public_key()]
+            );
+            assert_eq!(
+                oracle
+                    .blocked()
+                    .await
+                    .expect("network remains available")
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([
+                    (target.public_key(), signers[2].public_key()),
+                    (target.public_key(), outsider.public_key()),
+                    (target.public_key(), signers[3].public_key()),
+                ])
+            );
+
+            // The kept log is offered for heights in the epoch until its dealer
+            // has a finalized log.
+            let offered =
+                |actor: &mocks::TestReshareActor, store: &Store<_, _, _, _, _>, height: u64| {
+                    let (response, mut offered) = oneshot::channel();
+                    actor.handle_dealer_logs(
+                        Epoch::zero(),
+                        store,
+                        &logs,
+                        Span::none(),
+                        Height::new(height),
+                        response,
+                    );
+                    offered
+                        .try_recv()
+                        .expect("dealer logs request must be answered")
+                };
+            assert!(offered(&actor, &store, 2) == vec![log.clone()]);
+            assert!(offered(&actor, &store, 6).is_empty());
+            let (dealer, checked) = log.check(&info).expect("valid dealer log");
+            assert!(store.append_log(Epoch::zero(), dealer, checked).await);
+            assert!(offered(&actor, &store, 2).is_empty());
+        });
+    }
+
+    /// Records the recipients of every message sent through it.
+    #[derive(Clone, Default)]
+    struct RecordingSender {
+        sent: Arc<Mutex<Vec<Vec<PublicKey>>>>,
+    }
+
+    struct RecordingCheckedSender {
+        sent: Arc<Mutex<Vec<Vec<PublicKey>>>>,
+        recipients: Vec<PublicKey>,
+    }
+
+    impl LimitedSender for RecordingSender {
+        type PublicKey = PublicKey;
+        type Checked<'a> = RecordingCheckedSender;
+
+        fn check(
+            &mut self,
+            recipients: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'_>, SystemTime> {
+            let recipients = match recipients {
+                Recipients::All => Vec::new(),
+                Recipients::Some(recipients) => recipients,
+                Recipients::One(recipient) => vec![recipient],
+            };
+            Ok(RecordingCheckedSender {
+                sent: self.sent.clone(),
+                recipients,
+            })
+        }
+    }
+
+    impl CheckedSender for RecordingCheckedSender {
+        type PublicKey = PublicKey;
+
+        fn recipients(&self) -> Vec<Self::PublicKey> {
+            self.recipients.clone()
+        }
+
+        fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Unreliable<Feedback> {
+            self.sent.lock().push(self.recipients);
+            Unreliable::new(Feedback::Ok)
+        }
+    }
+
+    /// A dealer sends its log to the epoch's other dealers when inclusion
+    /// starts, resends it after each finalized block that does not include it,
+    /// and stops once a finalized block includes it.
+    #[test]
+    fn dealer_log_is_resent_until_finalized() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let target = signers()[0].clone();
+            let peer = signers()[1].public_key();
+            let dealers = Set::from_iter_dedup([target.public_key(), peer.clone()]);
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024,
+                    max_peers_per_set: NZUsize!(dealers.len()),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                dealers.iter().cloned(),
+            )
+            .await;
+            let _network = network.start();
+            let (mut actor, mut mailbox) = utils::new_actor(
+                context.child("actor_fixture"),
+                target.clone(),
+                dealers.clone(),
+                &oracle,
+                TEST_NAMESPACE,
+                "dealer-log-resend",
+                NZU64!(8),
+            )
+            .await;
+            let mut store = mocks::store(
+                context.child("store"),
+                "dealer-log-resend-store",
+                MemorySecretStore::default(),
+            )
+            .await;
+
+            // Commit epoch zero with the two dealers as its output players.
+            let (output, shares) = deal::<TestBlsVariant, _, N3f1>(
+                TestRng::new(0),
+                SharingMode::NonZeroCounter,
+                dealers.clone(),
+            )
+            .expect("trusted deal");
+            let share = shares.get_value(&target.public_key()).cloned();
+            let seed = store.seed_or_random(Epoch::zero(), TestRng::new(1)).await;
+            store
+                .commit_epoch(
+                    EpochInfo {
+                        outcome: EpochOutcome::Success,
+                        epoch: Epoch::zero(),
+                        output: output.clone(),
+                        players: dealers.clone(),
+                        next_players: Set::default(),
+                        directory: Unit,
+                    },
+                    seed,
+                    share.clone(),
+                )
+                .await;
+            let info = Info::new::<N3f1>(
+                TEST_NAMESPACE,
+                0,
+                Some(output),
+                SharingMode::NonZeroCounter,
+                Reveal::V1,
+                dealers.clone(),
+                dealers,
+            )
+            .expect("valid info");
+            let mut dealer = store
+                .create_dealer::<PrivateKey, N3f1>(
+                    Epoch::zero(),
+                    target.clone(),
+                    info.clone(),
+                    share,
+                    seed,
+                )
+                .expect("dealer");
+
+            let recorder = RecordingSender::default();
+            let sent = recorder.sent.clone();
+            let _inclusion = context.child("inclusion").spawn(move |_| async move {
+                let mut sender = recorder;
+                let (_, mut receiver) = inert_channel::<PublicKey>([]);
+                actor
+                    .inclusion(
+                        Epoch::zero(),
+                        &info,
+                        &mut store,
+                        Some(&mut dealer),
+                        &mut sender,
+                        &mut receiver,
+                    )
+                    .await
+            });
+
+            // Epoch zero spans heights 0..=7 with its midpoint at 4. Answering
+            // a request shows inclusion started and offers this node's log.
+            let mut logs = mailbox.dealer_logs(Height::new(4)).await;
+            assert_eq!(logs.len(), 1);
+            let log = logs.pop().expect("own log");
+            assert_eq!(*sent.lock(), vec![vec![peer.clone()]]);
+
+            let mut blocks = vec![mocks::genesis_block(target.public_key())];
+            while blocks.len() < 5 {
+                blocks.push(child(blocks.last().unwrap()));
+            }
+            blocks.push(
+                child(&blocks[4]).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                    NZU32!(16),
+                    Payload::DealerLogs(vec![log]),
+                ),
+            );
+            blocks.push(child(&blocks[5]));
+
+            // A finalized block without the log triggers a resend.
+            deliver(&mut mailbox, &ready(blocks[4].clone()))
+                .await
+                .expect("block should be acknowledged");
+            assert_eq!(sent.lock().len(), 2);
+
+            // Once a finalized block includes the log, it is neither resent
+            // nor offered.
+            for height in [5, 6] {
+                deliver(&mut mailbox, &ready(blocks[height].clone()))
+                    .await
+                    .expect("block should be acknowledged");
+            }
+            assert_eq!(sent.lock().len(), 2);
+            assert!(mailbox.dealer_logs(Height::new(6)).await.is_empty());
         });
     }
 }

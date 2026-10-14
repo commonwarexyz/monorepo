@@ -87,7 +87,7 @@ where
         };
         let mut prepared = self.setup_dkg(store, snapshot).await;
 
-        let chan = dealing_mux
+        let (mut sender, mut receiver) = dealing_mux
             .register(epoch.get())
             .await
             .expect("failed to register DKG channel");
@@ -99,7 +99,8 @@ where
                     store,
                     prepared.dealer.as_mut(),
                     prepared.player.as_mut(),
-                    chan,
+                    &mut sender,
+                    &mut receiver,
                 )
                 .await
                 .is_break()
@@ -108,7 +109,14 @@ where
         }
 
         if self
-            .inclusion(epoch, &prepared.info, store, prepared.dealer.as_mut())
+            .inclusion(
+                epoch,
+                &prepared.info,
+                store,
+                prepared.dealer.as_mut(),
+                &mut sender,
+                &mut receiver,
+            )
             .await
             .is_continue()
         {
@@ -202,14 +210,14 @@ where
         match block.inner().payload() {
             Some(Payload::EpochInfo(info)) => Some(info),
             None => None,
-            Some(Payload::DealerLog(_)) => unreachable!("final DKG block carries a dealer log"),
+            Some(Payload::DealerLogs(_)) => unreachable!("final DKG block carries dealer logs"),
         }
     }
 
     /// Serves requests and acknowledges finalized blocks once the ceremony's
     /// outcome is reported, until shutdown or the mailbox closes.
     ///
-    /// No payload is derived here, so a dealer-log request receives no log and
+    /// No payload is derived here, so a dealer-log request receives no logs and
     /// a final-block request receives [`EpochInfoResponse::Following`]. A
     /// finalized block has no effects here, so it is acknowledged without
     /// checking it against the tip.
@@ -224,16 +232,15 @@ where
                 debug!("mailbox closed, shutting down");
                 return;
             } => match message {
-                Message::NextLog { span, response, .. } => {
+                Message::DealerLogs { span, response, .. } => {
                     let process = info_span!(
                         parent: &span,
-                        "dkg.reshare.actor.dkg_terminal.next_log"
+                        "dkg.reshare.actor.dkg_terminal.dealer_logs"
                     );
                     process.in_scope(|| {
-                        let _ = response.send(None);
+                        let _ = response.send(Vec::new());
                     });
                 }
-                Message::ReleaseLog { .. } => {}
                 Message::EpochInfo { span, response, .. } => {
                     let process = info_span!(
                         parent: &span,

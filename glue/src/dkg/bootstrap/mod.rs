@@ -689,7 +689,7 @@ where
         _ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         // reshare::Application already rejects a mismatched final block and an
-        // earlier block carrying any payload except a dealer log from the
+        // earlier block carrying any payload except dealer logs from the
         // midpoint onward. The chain has no other state.
         true
     }

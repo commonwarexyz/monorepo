@@ -616,16 +616,9 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         true
     }
 
-    /// Returns the signed log (`None` before [`Self::finalize`] or after
-    /// [`Self::clear_finalized`]).
+    /// Returns the signed log (`None` before [`Self::finalize`]).
     pub fn finalized(&self) -> Option<SignedDealerLog<V, C>> {
         self.finalized.clone()
-    }
-
-    /// Drops the signed log. Callers invoke this once the log is included in a
-    /// finalized block.
-    pub fn clear_finalized(&mut self) {
-        self.finalized = None;
     }
 
     /// Returns the dealing for each player whose acknowledgement is not yet

@@ -65,13 +65,13 @@ where
                 debug!("mailbox closed, shutting down");
                 return ControlFlow::Break(());
             } => match message {
-                Message::NextLog { span, response, .. } => {
-                    let process = info_span!(parent: &span, "dkg.reshare.actor.follower.next_log");
+                Message::DealerLogs { span, response, .. } => {
+                    let process =
+                        info_span!(parent: &span, "dkg.reshare.actor.follower.dealer_logs");
                     process.in_scope(|| {
-                        let _ = response.send_lossy(None);
+                        let _ = response.send_lossy(Vec::new());
                     });
                 }
-                Message::ReleaseLog { .. } => {}
                 Message::EpochInfo { span, response, .. } => {
                     let process =
                         info_span!(parent: &span, "dkg.reshare.actor.follower.epoch_info");

@@ -603,9 +603,9 @@ where
 /// A public reshare artifact carried by an application block.
 #[allow(clippy::large_enum_variant)]
 pub enum Payload<V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
-    /// A signed dealer log, carried from the epoch midpoint up to, but not including, the
-    /// final block.
-    DealerLog(SignedDealerLog<V, C>),
+    /// A non-empty batch of signed dealer logs, carried from the epoch midpoint up to, but not
+    /// including, the final block.
+    DealerLogs(Vec<SignedDealerLog<V, C>>),
     /// An epoch's [`EpochInfo`]: epoch zero's in genesis (and in a one-shot DKG's final
     /// block), and otherwise the next epoch's in the final block of the current epoch.
     EpochInfo(EpochInfo<V, C::PublicKey, D>),
@@ -614,7 +614,7 @@ pub enum Payload<V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Clone for Payload<V, C, D> {
     fn clone(&self) -> Self {
         match self {
-            Self::DealerLog(log) => Self::DealerLog(log.clone()),
+            Self::DealerLogs(logs) => Self::DealerLogs(logs.clone()),
             Self::EpochInfo(info) => Self::EpochInfo(info.clone()),
         }
     }
@@ -623,7 +623,7 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Clone for Payload<V, C, 
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> PartialEq for Payload<V, C, D> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::DealerLog(a), Self::DealerLog(b)) => a == b,
+            (Self::DealerLogs(a), Self::DealerLogs(b)) => a == b,
             (Self::EpochInfo(a), Self::EpochInfo(b)) => a == b,
             _ => false,
         }
@@ -635,9 +635,9 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Eq for Payload<V, C, D> 
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Write for Payload<V, C, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Self::DealerLog(log) => {
+            Self::DealerLogs(logs) => {
                 0u8.write(writer);
-                log.write(writer);
+                logs.write(writer);
             }
             Self::EpochInfo(info) => {
                 1u8.write(writer);
@@ -650,20 +650,23 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Write for Payload<V, C, 
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> EncodeSize for Payload<V, C, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::DealerLog(log) => log.encode_size(),
+            Self::DealerLogs(logs) => logs.encode_size(),
             Self::EpochInfo(info) => info.encode_size(),
         }
     }
 }
 
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D> {
-    /// Maximum entries accepted in each participant set and maximum supported
-    /// sharing mode version.
+    /// Maximum entries accepted in each participant set (and dealer-log batch)
+    /// and maximum supported sharing mode version.
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(reader)? {
-            0 => Ok(Self::DealerLog(SignedDealerLog::read_cfg(reader, &cfg.0)?)),
+            0 => Ok(Self::DealerLogs(Vec::read_cfg(
+                reader,
+                &(RangeCfg::new(1..=cfg.0.get() as usize), cfg.0),
+            )?)),
             1 => Ok(Self::EpochInfo(EpochInfo::read_cfg(reader, cfg)?)),
             n => Err(CodecError::InvalidEnum(n)),
         }
@@ -679,7 +682,9 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(if u.arbitrary::<bool>()? {
-            Self::DealerLog(u.arbitrary()?)
+            let mut logs = vec![u.arbitrary()?];
+            logs.extend(u.arbitrary::<Vec<_>>()?);
+            Self::DealerLogs(logs)
         } else {
             Self::EpochInfo(u.arbitrary()?)
         })
@@ -687,14 +692,17 @@ where
 }
 
 /// Point-to-point message of a DKG or reshare ceremony.
-pub enum Message<V: Variant, P: PublicKey> {
+pub enum Message<V: Variant, C: Signer> {
     /// A dealer's public and private messages for one player.
     Dealer(DealerPubMsg<V>, DealerPrivMsg),
     /// A player's acknowledgement to a dealer.
-    Ack(PlayerAck<P>),
+    Ack(PlayerAck<C::PublicKey>),
+    /// A dealer's signed log, sent by that dealer to the epoch's other dealers
+    /// so any of them can include it in a block.
+    Log(SignedDealerLog<V, C>),
 }
 
-impl<V: Variant, P: PublicKey> Write for Message<V, P> {
+impl<V: Variant, C: Signer> Write for Message<V, C> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Self::Dealer(pub_msg, priv_msg) => {
@@ -706,20 +714,26 @@ impl<V: Variant, P: PublicKey> Write for Message<V, P> {
                 1u8.write(writer);
                 ack.write(writer);
             }
+            Self::Log(log) => {
+                2u8.write(writer);
+                log.write(writer);
+            }
         }
     }
 }
 
-impl<V: Variant, P: PublicKey> EncodeSize for Message<V, P> {
+impl<V: Variant, C: Signer> EncodeSize for Message<V, C> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Dealer(pub_msg, priv_msg) => pub_msg.encode_size() + priv_msg.encode_size(),
             Self::Ack(ack) => ack.encode_size(),
+            Self::Log(log) => log.encode_size(),
         }
     }
 }
 
-impl<V: Variant, P: PublicKey> Read for Message<V, P> {
+impl<V: Variant, C: Signer> Read for Message<V, C> {
+    /// Maximum number of participants in a round.
     type Cfg = NonZeroU32;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -734,22 +748,24 @@ impl<V: Variant, P: PublicKey> Read for Message<V, P> {
                 let ack = PlayerAck::read(reader)?;
                 Ok(Self::Ack(ack))
             }
+            2 => Ok(Self::Log(SignedDealerLog::read_cfg(reader, cfg)?)),
             n => Err(CodecError::InvalidEnum(n)),
         }
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant, P: PublicKey> arbitrary::Arbitrary<'_> for Message<V, P>
+impl<V: Variant, C: Signer> arbitrary::Arbitrary<'_> for Message<V, C>
 where
     DealerPubMsg<V>: for<'a> arbitrary::Arbitrary<'a>,
-    PlayerAck<P>: for<'a> arbitrary::Arbitrary<'a>,
+    PlayerAck<C::PublicKey>: for<'a> arbitrary::Arbitrary<'a>,
+    SignedDealerLog<V, C>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(if u.arbitrary::<bool>()? {
-            Self::Dealer(u.arbitrary()?, u.arbitrary()?)
-        } else {
-            Self::Ack(u.arbitrary()?)
+        Ok(match u.int_in_range(0..=2u8)? {
+            0 => Self::Dealer(u.arbitrary()?, u.arbitrary()?),
+            1 => Self::Ack(u.arbitrary()?),
+            _ => Self::Log(u.arbitrary()?),
         })
     }
 }
@@ -768,6 +784,6 @@ mod conformance {
         CodecConformance<EpochInfo<MinSig, ed25519::PublicKey, Addresses<ed25519::PublicKey>>> => 8192,
         CodecConformance<Payload<MinSig, ed25519::PrivateKey>> => 8192,
         CodecConformance<Payload<MinSig, ed25519::PrivateKey, Addresses<ed25519::PublicKey>>> => 8192,
-        CodecConformance<Message<MinSig, ed25519::PublicKey>>,
+        CodecConformance<Message<MinSig, ed25519::PrivateKey>>,
     }
 }

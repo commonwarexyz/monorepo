@@ -38,11 +38,11 @@ pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = U
 /// [`EpochInfoResponse::Pending`] or [`EpochInfoResponse::Following`] (for
 /// example, while the actor follows an epoch), it stays unresolved until
 /// consensus cancels it. Before the final block, verification rejects a block
-/// that carries any payload except a dealer log from the midpoint onward.
+/// that carries any payload except dealer logs from the midpoint onward.
 ///
-/// Proposals from the midpoint onward carry this node's dealer log when one is
-/// available, and the final block carries the payload returned by
-/// [`Mailbox::epoch_info`]. No block is proposed at the final height when the
+/// Proposals from the midpoint onward carry the dealer logs returned by
+/// [`Mailbox::dealer_logs`], if any, and the final block carries the payload
+/// returned by [`Mailbox::epoch_info`]. No block is proposed at the final height when the
 /// actor cannot supply that payload. The inner application does not need to
 /// call the reshare [`Mailbox`] or track epoch boundaries.
 ///
@@ -87,6 +87,19 @@ where
     fn phase(&self, height: Height) -> Option<EpochPhase> {
         self.epocher.containing(height).map(|info| info.phase())
     }
+
+    /// Returns the dealer logs to carry in a non-final block at `height`, or
+    /// `None` before the midpoint or when no log is pending.
+    async fn dealer_logs(&mut self, height: Height) -> Option<Payload<V, C, B::Directory>> {
+        if !matches!(
+            self.phase(height),
+            Some(EpochPhase::Midpoint | EpochPhase::Late)
+        ) {
+            return None;
+        }
+        let logs = self.reshare.dealer_logs(height).await;
+        (!logs.is_empty()).then_some(Payload::DealerLogs(logs))
+    }
 }
 
 impl<A, B, V, C> Clone for Application<A, B, V, C>
@@ -120,25 +133,17 @@ where
     type Block = A::Block;
     type Input = I;
 
-    /// Prepares a term-start block on an uncertified parent unless this node's dealer log is
-    /// due at that height or the block is the epoch's final block.
+    /// Prepares a term-start block on an uncertified parent unless the block is the epoch's
+    /// final block.
     ///
-    /// Whether the dealer log is due depends on the parent's height, so it is checked before the
-    /// inner application is asked, and an inner application that declines still costs that check
-    /// (a dealer-log request from the midpoint on). A forwarded request carries no reshare
-    /// payload.
+    /// From the midpoint on, the forwarded request carries the pending dealer logs, so an inner
+    /// application that declines still costs that request.
     ///
     /// The final block is left to [`Self::propose`] without asking the inner application. Its
     /// epoch info is derived from the parent's ancestry, and deriving it on an uncertified parent
     /// can start a ceremony verification that a replacement parent or the ordinary proposal
     /// would then wait behind. The ordinary proposal at that height requests it once the parent
     /// certifies.
-    ///
-    /// A height that would carry this node's dealer log is left to [`Self::propose`] without
-    /// asking the inner application, and the reservation is released. Consensus can discard a
-    /// prepared block without notice, as when its parent fails to certify or consensus cancels the
-    /// request, and a reservation kept for it would withhold the log from later proposals until
-    /// finalization reaches that height.
     #[tracing::instrument(
         name = "dkg.reshare.application.prepare",
         level = "info",
@@ -163,26 +168,21 @@ where
         span.record("height", height.traced());
         span.record("phase", field::debug(phase));
 
-        // Dropping a returned reservation releases the dealer log for later proposals.
-        if matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late))
-            && self.reshare.next_log(height).await.is_some()
-        {
-            return Handoff::Wait;
-        }
+        let payload = self.dealer_logs(height).await;
         self.inner
             .prepare(
                 context,
                 ancestry,
                 Input {
                     upstream: input,
-                    payload: None,
+                    payload,
                 },
             )
             .await
     }
 
-    /// Selects the reshare payload for the block that extends `ancestry`, with the dealer-log
-    /// reservation it was taken from, and asks the inner application to build on it.
+    /// Selects the reshare payload for the block that extends `ancestry` and asks the inner
+    /// application to build on it.
     ///
     /// Returns `None` without asking the inner application when the parent is missing or the
     /// final block's epoch info is not available.
@@ -212,9 +212,9 @@ where
         span.record("height", height.traced());
         span.record("phase", field::debug(phase));
 
-        let (payload, log_reservation) = if self.final_block(height) {
+        let payload = if self.final_block(height) {
             match self.reshare.epoch_info(ancestry.clone()).await {
-                EpochInfoResponse::Available(payload) => (payload, None),
+                EpochInfoResponse::Available(payload) => payload,
                 EpochInfoResponse::Pending => {
                     debug!("proposal skipped: final block epoch info is not ready");
                     return None;
@@ -228,18 +228,11 @@ where
                     return None;
                 }
             }
-        } else if matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late)) {
-            let mut reservation = self.reshare.next_log(height).await;
-            let payload = reservation
-                .as_mut()
-                .and_then(|reservation| reservation.take_payload());
-            (payload, reservation)
         } else {
-            (None, None)
+            self.dealer_logs(height).await
         };
         span.record("has_payload", payload.is_some());
-        let proposed = self
-            .inner
+        self.inner
             .propose(
                 context,
                 ancestry,
@@ -248,13 +241,7 @@ where
                     payload,
                 },
             )
-            .await;
-        if proposed.is_some()
-            && let Some(reservation) = log_reservation
-        {
-            reservation.included();
-        }
-        proposed
+            .await
     }
 
     #[tracing::instrument(
@@ -307,12 +294,12 @@ where
                 }
             }
         } else {
-            // Before the final block, only a dealer log may be carried, and only
+            // Before the final block, only dealer logs may be carried, and only
             // from the midpoint onward. A height outside every supported epoch
             // has no midpoint, so no payload is allowed there.
             let allowed = match tip_payload {
                 None => true,
-                Some(Payload::DealerLog(_)) => {
+                Some(Payload::DealerLogs(_)) => {
                     matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late))
                 }
                 Some(Payload::EpochInfo(_)) => false,
@@ -330,7 +317,7 @@ where
 mod tests {
     use super::*;
     use crate::dkg::{
-        reshare::{LogReservation, Message},
+        reshare::Message,
         tests::mocks::{self, TestBlock, TestBlsVariant, TestContext, TestScheme},
         types::{EpochInfo, EpochOutcome},
     };
@@ -338,12 +325,12 @@ mod tests {
     use commonware_consensus::{
         CertifiableBlock, Heightable,
         marshal::ancestry,
-        types::{Epoch, Height, Round, View},
+        types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
         Digestible, Signer,
         bls12381::{
-            dkg::feldman_desmedt::{Dealer, Info, Reveal, deal},
+            dkg::feldman_desmedt::{Dealer, Info, Reveal, SignedDealerLog, deal},
             primitives::{sharing::Mode, variant::MinPk},
         },
         ed25519::{PrivateKey, PublicKey},
@@ -351,18 +338,14 @@ mod tests {
     };
     use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
-        Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, ordered::Set,
-        sync::Mutex,
+        Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, ordered::Set, sync::Mutex,
     };
-    use futures::{
-        FutureExt, StreamExt,
-        future::{Either, select},
-        pin_mut,
-    };
+    use futures::{FutureExt, StreamExt};
     use rand_core::Rng;
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
 
     type TestPayload = Payload<TestBlsVariant, PrivateKey>;
+    type TestLog = SignedDealerLog<TestBlsVariant, PrivateKey>;
     type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
     type TestWrapper = Application<RecordingApp, TestBlock, TestBlsVariant, PrivateKey>;
 
@@ -374,18 +357,9 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum ProposalBehavior {
-        Accept,
-        Reject,
-        Pending,
-    }
-
     #[derive(Clone)]
     struct RecordingApp {
         proposed: Arc<Mutex<Vec<Option<TestPayload>>>>,
-        proposal_behavior: ProposalBehavior,
-        proposal_entered: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         verify_count: Arc<Mutex<usize>>,
         verify_result: bool,
         handoff: Handoff<()>,
@@ -395,26 +369,9 @@ mod tests {
         fn accepting() -> Self {
             Self {
                 proposed: Arc::new(Mutex::new(Vec::new())),
-                proposal_behavior: ProposalBehavior::Accept,
-                proposal_entered: Arc::new(Mutex::new(None)),
                 verify_count: Arc::new(Mutex::new(0)),
                 verify_result: true,
                 handoff: Handoff::Wait,
-            }
-        }
-
-        fn rejecting() -> Self {
-            Self {
-                proposal_behavior: ProposalBehavior::Reject,
-                ..Self::accepting()
-            }
-        }
-
-        fn pending(proposal_entered: oneshot::Sender<()>) -> Self {
-            Self {
-                proposal_behavior: ProposalBehavior::Pending,
-                proposal_entered: Arc::new(Mutex::new(Some(proposal_entered))),
-                ..Self::accepting()
             }
         }
 
@@ -459,18 +416,6 @@ mod tests {
         ) -> Option<Digested<Self::Block>> {
             let parent = ancestry.peek()?.clone();
             self.proposed.lock().push(input.payload.clone());
-            if let Some(entered) = self.proposal_entered.lock().take() {
-                let _ = entered.send(());
-            }
-
-            if self.proposal_behavior == ProposalBehavior::Reject {
-                return None;
-            }
-
-            if self.proposal_behavior == ProposalBehavior::Pending {
-                future::pending().await
-            }
-
             let block =
                 TestBlock::new::<Sha256>(context, parent.digest(), parent.height().next(), 0);
             let block = match input.payload {
@@ -516,38 +461,18 @@ mod tests {
 
     fn log_wrapper(
         context: &deterministic::Context,
-        payload: TestPayload,
+        logs: Vec<TestLog>,
         inner: RecordingApp,
-    ) -> (TestWrapper, oneshot::Receiver<Height>) {
+    ) -> TestWrapper {
         let (sender, mut receiver) = mailbox::new::<Message<TestBlock, TestBlsVariant, PrivateKey>>(
             context.child("mailbox"),
             NZUsize!(4),
         );
-        let (release_tx, release_rx) = oneshot::channel();
         context.child("fake_actor").spawn(|_| async move {
-            let mut served_at = None;
-            let mut release_tx = Some(release_tx);
             while let Some(message) = receiver.recv().await {
                 match message {
-                    Message::NextLog {
-                        height,
-                        release,
-                        response,
-                        ..
-                    } => {
-                        let reservation = served_at.is_none().then(|| {
-                            served_at = Some(height);
-                            LogReservation::new(height, payload.clone(), release)
-                        });
-                        let _ = response.send(reservation);
-                    }
-                    Message::ReleaseLog { height } => {
-                        if served_at == Some(height) {
-                            served_at = None;
-                        }
-                        if let Some(release_tx) = release_tx.take() {
-                            let _ = release_tx.send(height);
-                        }
+                    Message::DealerLogs { response, .. } => {
+                        let _ = response.send(logs.clone());
                     }
                     Message::EpochInfo { response, .. } => {
                         let _ = response.send(EpochInfoResponse::Unavailable);
@@ -559,10 +484,32 @@ mod tests {
             }
         });
 
-        (
-            Application::new(inner, Mailbox::new(sender), NZU64!(4)),
-            release_rx,
+        Application::new(inner, Mailbox::new(sender), NZU64!(4))
+    }
+
+    /// Returns one signed dealer log from each of the first `count` signers.
+    fn signed_logs(count: usize) -> Vec<TestLog> {
+        let info = Info::<TestBlsVariant, PublicKey>::new::<N3f1>(
+            b"_COMMONWARE_GLUE_DKG_RESHARE_APPLICATION_TEST",
+            0,
+            None,
+            Mode::NonZeroCounter,
+            Reveal::V1,
+            players(),
+            players(),
         )
+        .expect("valid info");
+        signers()
+            .into_iter()
+            .take(count)
+            .enumerate()
+            .map(|(seed, signer)| {
+                let (dealer, _, _) =
+                    Dealer::start::<N3f1>(TestRng::new(seed as u64), info.clone(), signer, None)
+                        .expect("dealer should start");
+                dealer.finalize::<N3f1>()
+            })
+            .collect()
     }
 
     fn leader() -> PrivateKey {
@@ -631,84 +578,88 @@ mod tests {
         )
     }
 
-    /// Consensus can abandon a prepared block without notice, so a prepare request whose
-    /// height would carry this node's dealer log declines without asking the inner application
-    /// and releases the reservation for the ordinary proposal. Otherwise the wrapper forwards
-    /// the inner application's decision.
+    /// From the midpoint on, prepared and ordinary proposals both carry the
+    /// pending dealer logs, and the wrapper forwards the inner application's
+    /// decision. Before the midpoint, a prepared proposal carries no payload.
     #[test]
-    fn prepare_leaves_dealer_log_to_propose() {
+    fn proposals_carry_pending_dealer_logs() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let midpoint = midpoint_parent();
+            let midpoint = Digested::precomputed(midpoint.clone(), midpoint.digest());
             let genesis = mocks::genesis_block(leader().public_key());
-            let payload = epoch_payload(10);
-            for decision in [Handoff::Vote(()), Handoff::Stage(()), Handoff::Wait] {
+            let genesis = Digested::precomputed(genesis.clone(), genesis.digest());
+            let payload = Payload::DealerLogs(signed_logs(2));
+            for decision in [Handoff::Vote(()), Handoff::Stage(())] {
                 let inner = RecordingApp {
                     handoff: decision,
                     ..RecordingApp::accepting()
                 };
-                let (mut app, release_rx) = log_wrapper(&context, payload.clone(), inner.clone());
+                let Payload::DealerLogs(logs) = payload.clone() else {
+                    unreachable!("payload carries dealer logs");
+                };
+                let mut app = log_wrapper(&context, logs, inner.clone());
+
                 let prepared = app
                     .prepare(
                         (context.child("app"), block_context(&midpoint, 2)),
-                        ancestry::from_iter([Digested::precomputed(
-                            midpoint.clone(),
-                            midpoint.digest(),
-                        )]),
+                        ancestry::from_iter([midpoint.clone()]),
                         (),
                     )
                     .await;
-                assert!(prepared.is_wait(), "a dealer log is left to propose");
-                assert!(
-                    inner.proposed().is_empty(),
-                    "a declined prepare builds nothing"
-                );
-                assert_eq!(
-                    release_rx.await.expect("reservation should be released"),
-                    midpoint.height().next()
-                );
+                let (Handoff::Vote(block) | Handoff::Stage(block)) = prepared else {
+                    panic!("the wrapper must forward the inner decision");
+                };
+                assert!(block.inner().payload() == Some(payload.clone()));
 
-                // The released log is served to the ordinary proposal at the same height.
                 let proposed = app
                     .propose(
                         (context.child("propose"), block_context(&midpoint, 2)),
-                        ancestry::from_iter([Digested::precomputed(
-                            midpoint.clone(),
-                            midpoint.digest(),
-                        )]),
+                        ancestry::from_iter([midpoint.clone()]),
                         (),
                     )
                     .await
                     .expect("the ordinary proposal builds");
                 assert!(proposed.inner().payload() == Some(payload.clone()));
-                assert!(inner.proposed() == vec![Some(payload.clone())]);
 
-                // Before the midpoint no dealer log is reserved, so the decision is forwarded.
                 let prepared = app
                     .prepare(
                         (context.child("early"), block_context(&genesis, 1)),
-                        ancestry::from_iter([Digested::precomputed(
-                            genesis.clone(),
-                            genesis.digest(),
-                        )]),
+                        ancestry::from_iter([genesis.clone()]),
                         (),
                     )
                     .await;
-                match (decision, prepared) {
-                    (Handoff::Vote(()), Handoff::Vote(block))
-                    | (Handoff::Stage(()), Handoff::Stage(block)) => {
-                        assert!(inner.proposed() == vec![Some(payload.clone()), None]);
-                        assert!(block.inner().payload().is_none());
-                    }
-                    (Handoff::Wait, Handoff::Wait) => {
-                        assert!(
-                            inner.proposed() == vec![Some(payload.clone())],
-                            "a declined prepare builds nothing"
-                        );
-                    }
-                    _ => panic!("the wrapper must forward the inner decision"),
-                }
+                let (Handoff::Vote(block) | Handoff::Stage(block)) = prepared else {
+                    panic!("the wrapper must forward the inner decision");
+                };
+                assert!(block.inner().payload().is_none());
+                assert!(
+                    inner.proposed() == vec![Some(payload.clone()), Some(payload.clone()), None]
+                );
             }
+        });
+    }
+
+    /// A proposal from the midpoint on carries no payload when no dealer log is
+    /// pending.
+    #[test]
+    fn proposal_without_pending_dealer_logs_carries_no_payload() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = midpoint_parent();
+            let inner = RecordingApp::accepting();
+            let mut app = log_wrapper(&context, Vec::new(), inner.clone());
+
+            let proposed = app
+                .propose(
+                    (context.child("app"), block_context(&parent, 2)),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
+                    (),
+                )
+                .await
+                .expect("proposal should be built");
+            assert!(proposed.inner().payload().is_none());
+            assert!(inner.proposed() == vec![None]);
         });
     }
 
@@ -784,134 +735,6 @@ mod tests {
                 assert!(proposed.inner().payload() == Some(payload.clone()));
                 assert!(inner.proposed() == vec![Some(payload.clone())]);
                 assert_eq!(*requests.lock(), 1);
-            }
-        });
-    }
-
-    #[test]
-    fn proposal_none_releases_dealer_log_reservation() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let parent = midpoint_parent();
-            let payload = epoch_payload(10);
-            let inner = RecordingApp::rejecting();
-            let (mut app, release_rx) = log_wrapper(&context, payload.clone(), inner.clone());
-
-            let proposed = app
-                .propose(
-                    (context.child("app"), block_context(&parent, 2)),
-                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
-                    (),
-                )
-                .await;
-            assert!(proposed.is_none());
-            assert_eq!(
-                release_rx.await.expect("reservation should be released"),
-                Height::new(2)
-            );
-
-            let proposed = app
-                .propose(
-                    (context.child("app_retry"), block_context(&parent, 3)),
-                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
-                    (),
-                )
-                .await;
-            assert!(proposed.is_none());
-            let proposed_payloads = inner.proposed();
-            assert_eq!(proposed_payloads.len(), 2);
-            assert!(proposed_payloads[0] == Some(payload.clone()));
-            assert!(proposed_payloads[1] == Some(payload));
-        });
-    }
-
-    #[test]
-    fn dropped_proposal_future_releases_dealer_log_reservation() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let parent = midpoint_parent();
-            let payload = epoch_payload(11);
-            let (entered_tx, entered_rx) = oneshot::channel();
-            let mut entered_rx = entered_rx;
-            let inner = RecordingApp::pending(entered_tx);
-            let (sender, mut receiver) = mailbox::new::<
-                Message<TestBlock, TestBlsVariant, PrivateKey>,
-            >(context.child("mailbox"), NZUsize!(4));
-            let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(4));
-
-            let mut propose = Box::pin(app.propose(
-                (context.child("app"), block_context(&parent, 2)),
-                ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
-                (),
-            ));
-            assert!(propose.as_mut().now_or_never().is_none());
-
-            let Some(Message::NextLog {
-                height,
-                release,
-                response,
-                ..
-            }) = receiver.recv().await
-            else {
-                panic!("proposal should request a dealer log");
-            };
-            assert_eq!(height, Height::new(2));
-            let reservation = LogReservation::new(height, payload.clone(), release);
-            assert!(
-                response.send(Some(reservation)).is_ok(),
-                "proposal should still be waiting for log"
-            );
-
-            assert!(propose.as_mut().now_or_never().is_none());
-            entered_rx
-                .try_recv()
-                .expect("proposal should enter inner application");
-            drop(propose);
-
-            let Some(Message::ReleaseLog { height }) = receiver.recv().await else {
-                panic!("dropped proposal should release reservation");
-            };
-            assert_eq!(height, Height::new(2));
-
-            if let Ok(Message::ReleaseLog { height }) = receiver.try_recv() {
-                panic!("reservation released more than once at {height:?}");
-            }
-            let proposed_payloads = inner.proposed();
-            assert_eq!(proposed_payloads.len(), 1);
-            assert!(proposed_payloads[0] == Some(payload));
-        });
-    }
-
-    #[test]
-    fn successful_proposal_keeps_dealer_log_reserved() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let parent = midpoint_parent();
-            let payload = epoch_payload(12);
-            let inner = RecordingApp::accepting();
-            let (mut app, release_rx) = log_wrapper(&context, payload.clone(), inner.clone());
-
-            let proposed = app
-                .propose(
-                    (context.child("app"), block_context(&parent, 2)),
-                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
-                    (),
-                )
-                .await
-                .expect("proposal should be built");
-            assert!(proposed.inner().payload() == Some(payload.clone()));
-            let proposed_payloads = inner.proposed();
-            assert_eq!(proposed_payloads.len(), 1);
-            assert!(proposed_payloads[0] == Some(payload));
-
-            let timeout = context.sleep(Duration::from_millis(1));
-            pin_mut!(release_rx);
-            pin_mut!(timeout);
-            match select(release_rx, timeout).await {
-                Either::Left((released, _)) => {
-                    panic!("successful proposal released reservation: {released:?}");
-                }
-                Either::Right(((), _)) => {}
             }
         });
     }
@@ -1195,21 +1018,7 @@ mod tests {
             let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(6));
             let mut parent = mocks::child(&mocks::genesis_block(leader().public_key()));
 
-            // Build one signed dealer log for the epoch.
-            let info = Info::<TestBlsVariant, PublicKey>::new::<N3f1>(
-                b"_COMMONWARE_GLUE_DKG_RESHARE_APPLICATION_TEST",
-                0,
-                None,
-                Mode::NonZeroCounter,
-                Reveal::V1,
-                players(),
-                players(),
-            )
-            .expect("valid info");
-            let (dealer, _, _) =
-                Dealer::start::<N3f1>(TestRng::new(0), info, signers()[0].clone(), None)
-                    .expect("dealer should start");
-            let payload: TestPayload = Payload::DealerLog(dealer.finalize::<N3f1>());
+            let payload: TestPayload = Payload::DealerLogs(signed_logs(1));
 
             // Each candidate extends the previous one and carries the log. Only
             // the early candidate is rejected before the inner application.

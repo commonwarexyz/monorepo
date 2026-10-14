@@ -30,7 +30,7 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{
-    Buf, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Buf, Decode as _, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
@@ -61,7 +61,9 @@ use commonware_cryptography::{
 };
 use commonware_formatting::hex;
 use commonware_math::algebra::Random;
-use commonware_p2p::{Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, simulated};
+use commonware_p2p::{
+    Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, simulated, utils::mux,
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufMut, BufferPooler, Clock, Handle, IoBuf, Metrics, Quota, Spawner, Storage, Supervisor as _,
@@ -266,6 +268,36 @@ impl<R: Receiver> Receiver for Swap<R> {
     }
 }
 
+/// DKG receiver that drops dealer logs sent by `withheld` peers, as if those
+/// dealers never sent them.
+#[derive(Debug)]
+struct WithheldLogs<R: Receiver> {
+    inner: R,
+    withheld: Arc<HashSet<R::PublicKey>>,
+}
+
+impl<R: Receiver> Receiver for WithheldLogs<R> {
+    type Error = R::Error;
+    type PublicKey = R::PublicKey;
+
+    async fn recv(&mut self) -> Result<P2pMessage<Self::PublicKey>, Self::Error> {
+        loop {
+            let (peer, message) = self.inner.recv().await?;
+            if self.withheld.contains(&peer) {
+                let (_, payload) =
+                    mux::parse(message.clone()).expect("failed to parse mux message");
+                let log =
+                    Message::<MinPk, ed25519::PrivateKey>::decode_cfg(payload, &MAX_PARTICIPANTS)
+                        .is_ok_and(|message| matches!(message, Message::Log(_)));
+                if log {
+                    continue;
+                }
+            }
+            return Ok((peer, message));
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Block {
     context: Context<sha256::Digest, ed25519::PublicKey>,
@@ -379,6 +411,9 @@ struct App {
     genesis: Block,
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     public_key: ed25519::PublicKey,
+    // Whether this node proposes inclusion-window blocks without dealer logs,
+    // as a Byzantine proposer would.
+    omit_logs: bool,
     // Participant and processed height at which its app parks until crashed
     // (cleared on restart), so a processed-height crash window cannot be
     // raced past.
@@ -419,7 +454,10 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         let parent = ancestry.peek()?.clone();
         let height = Height::new(parent.height().get() + 1);
         // The reshare::Application wrapper selected and fetched the payload.
-        let payload = input.upstream.payload;
+        let payload = input
+            .upstream
+            .payload
+            .filter(|payload| !self.omit_logs || matches!(payload, Payload::EpochInfo(_)));
         let merkleized = Self::execute(height, batches).await;
         let bounds = merkleized.bounds();
         let block = Block {
@@ -626,6 +664,8 @@ pub(super) struct ReshareEngine {
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     marshals: Arc<Mutex<BTreeMap<ed25519::PublicKey, Marshal>>>,
     failures: Arc<HashSet<u64>>,
+    blocks_per_epoch: NonZeroU64,
+    log_omitters: Arc<HashSet<ed25519::PublicKey>>,
 }
 
 pub(super) struct ValidatorEngine {
@@ -743,11 +783,31 @@ impl ReshareEngine {
             processed: Arc::new(Mutex::new(BTreeMap::new())),
             marshals: Arc::new(Mutex::new(BTreeMap::new())),
             failures: Arc::new(HashSet::new()),
+            blocks_per_epoch: EPOCH_LENGTH,
+            log_omitters: Arc::new(HashSet::new()),
         }
     }
 
     pub(super) fn with_failures(mut self, failures: impl IntoIterator<Item = u64>) -> Self {
         self.failures = Arc::new(failures.into_iter().collect());
+        self
+    }
+
+    pub(super) const fn with_blocks_per_epoch(mut self, blocks_per_epoch: NonZeroU64) -> Self {
+        self.blocks_per_epoch = blocks_per_epoch;
+        self
+    }
+
+    /// Makes the participants at `indices` withhold their dealer logs: they
+    /// propose every inclusion-window block without dealer logs, and other nodes
+    /// drop the logs they send.
+    pub(super) fn with_log_omitters(mut self, indices: impl IntoIterator<Item = usize>) -> Self {
+        self.log_omitters = Arc::new(
+            indices
+                .into_iter()
+                .map(|index| self.participants[index].clone())
+                .collect(),
+        );
         self
     }
 
@@ -971,7 +1031,7 @@ impl EngineDefinition for ReshareEngine {
             genesis: self.initial.info.clone(),
             strategy: Sequential,
             blocker: oracle.control(public_key.clone()),
-            blocks_per_epoch: EPOCH_LENGTH,
+            blocks_per_epoch: self.blocks_per_epoch,
             retry_timeout: NZDuration!(Duration::from_millis(500)),
             mailbox_size: NZUsize!(100),
             block_codec_config: (),
@@ -1013,7 +1073,7 @@ impl EngineDefinition for ReshareEngine {
                 committee.position(public_key).is_none(),
                 "delayed node must not be a sampled-committee member for the epoch-cross hold"
             );
-            let target = FixedEpocher::new(EPOCH_LENGTH)
+            let target = FixedEpocher::new(self.blocks_per_epoch)
                 .first(artifact.info.epoch.next())
                 .expect("next epoch must be supported")
                 .get();
@@ -1062,7 +1122,7 @@ impl EngineDefinition for ReshareEngine {
                     NAMESPACE,
                     *self.initial.info.output.public().public(),
                 )),
-                epocher: FixedEpocher::new(EPOCH_LENGTH),
+                epocher: FixedEpocher::new(self.blocks_per_epoch),
                 start: plan.marshal_start(genesis.clone()),
                 partition_prefix: partition_prefix.clone(),
                 mailbox_size: NZUsize!(100),
@@ -1182,12 +1242,15 @@ impl EngineDefinition for ReshareEngine {
                 write_buffer: IO_BUFFER_SIZE,
                 replay_buffer: IO_BUFFER_SIZE,
                 max_participants: MAX_PARTICIPANTS,
-                blocks_per_epoch: EPOCH_LENGTH,
+                blocks_per_epoch: self.blocks_per_epoch,
             },
         );
         let dkg_network = (
             dkg_network.0,
-            FilteredReceiver::epochs(dkg_network.1, self.failures.clone()),
+            WithheldLogs {
+                inner: FilteredReceiver::epochs(dkg_network.1, self.failures.clone()),
+                withheld: self.log_omitters.clone(),
+            },
         );
         let reshare_handle = reshare_actor.start(dkg_network);
 
@@ -1198,6 +1261,7 @@ impl EngineDefinition for ReshareEngine {
                     genesis: genesis.inner().clone(),
                     processed: self.processed.clone(),
                     public_key: public_key.clone(),
+                    omit_logs: self.log_omitters.contains(public_key),
                     hold: self.processed_hold.clone(),
                 },
                 db_config,
@@ -1223,10 +1287,10 @@ impl EngineDefinition for ReshareEngine {
             reshare::Application::new(
                 stateful_mailbox.clone(),
                 reshare_mailbox.clone(),
-                EPOCH_LENGTH,
+                self.blocks_per_epoch,
             ),
             marshal.clone(),
-            FixedEpocher::new(EPOCH_LENGTH),
+            FixedEpocher::new(self.blocks_per_epoch),
         );
 
         let (orchestrator_actor, orchestrator_mailbox) = orchestrator::Actor::new(
@@ -1258,7 +1322,7 @@ impl EngineDefinition for ReshareEngine {
                 },
                 gate,
                 state_sync,
-                blocks_per_epoch: EPOCH_LENGTH,
+                blocks_per_epoch: self.blocks_per_epoch,
                 muxer_size: 128,
                 mailbox_size: NZUsize!(100),
                 partition_prefix: format!("{partition_prefix}-orchestrator"),
@@ -1441,7 +1505,11 @@ fn u64_to_digest(v: u64) -> sha256::Digest {
 }
 
 pub(super) fn final_height(epoch: u64) -> Height {
-    FixedEpocher::new(EPOCH_LENGTH)
+    epoch_final_height(EPOCH_LENGTH, epoch)
+}
+
+pub(super) fn epoch_final_height(blocks_per_epoch: NonZeroU64, epoch: u64) -> Height {
+    FixedEpocher::new(blocks_per_epoch)
         .last(Epoch::new(epoch))
         .expect("test epoch should be supported")
 }

@@ -56,8 +56,9 @@ where
     ///
     /// Exchanges dealings and acknowledgements with peers, resending this
     /// node's unacknowledged dealings on each finalized block. Dealer-log
-    /// requests receive no log and final-block requests receive
-    /// [`EpochInfoResponse::Pending`].
+    /// requests receive no logs and final-block requests receive
+    /// [`EpochInfoResponse::Pending`]. Dealer logs from peers that already
+    /// reached the inclusion window are dropped, since dealers resend them.
     ///
     /// Returns `Continue` after the last block before the midpoint is
     /// acknowledged, and `Break` on shutdown or when the mailbox or the epoch's
@@ -70,7 +71,8 @@ where
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         mut dealer: Option<&mut Dealer<V, C>>,
         mut player: Option<&mut Player<V, C>>,
-        (mut sender, mut receiver): (SE, RE),
+        sender: &mut SE,
+        receiver: &mut RE,
     ) -> ControlFlow<()>
     where
         SE: Sender<PublicKey = C::PublicKey>,
@@ -88,13 +90,13 @@ where
                 debug!("mailbox closed, shutting down");
                 return ControlFlow::Break(());
             } => match message {
-                MailboxMessage::NextLog { span, response, .. } => {
-                    let process = info_span!(parent: &span, "dkg.reshare.actor.dealing.next_log");
+                MailboxMessage::DealerLogs { span, response, .. } => {
+                    let process =
+                        info_span!(parent: &span, "dkg.reshare.actor.dealing.dealer_logs");
                     process.in_scope(|| {
-                        let _ = response.send_lossy(None);
+                        let _ = response.send_lossy(Vec::new());
                     });
                 }
-                MailboxMessage::ReleaseLog { .. } => {}
                 MailboxMessage::EpochInfo { span, response, .. } => {
                     let process = info_span!(parent: &span, "dkg.reshare.actor.dealing.epoch_info");
                     process.in_scope(|| {
@@ -134,7 +136,7 @@ where
                                 epoch,
                                 dealer,
                                 player.as_deref_mut(),
-                                &mut sender,
+                                sender,
                             )
                             .await;
                         }
@@ -164,7 +166,7 @@ where
                     store,
                     dealer.as_deref_mut(),
                     player.as_deref_mut(),
-                    &mut sender,
+                    sender,
                     message,
                 )
                 .await
@@ -185,7 +187,7 @@ where
     ) where
         SE: Sender<PublicKey = C::PublicKey>,
     {
-        let message = match Message::<V, C::PublicKey>::decode_cfg(bytes, &self.max_participants) {
+        let message = match Message::<V, C>::decode_cfg(bytes, &self.max_participants) {
             Ok(message) => message,
             Err(error) => {
                 commonware_p2p::block!(
@@ -244,7 +246,7 @@ where
                 info!(?epoch, dealer = ?from, "received dealing");
                 let sent = sender.send(
                     Recipients::One(from.clone()),
-                    Message::<V, C::PublicKey>::Ack(ack).encode(),
+                    Message::<V, C>::Ack(ack).encode(),
                     true,
                 );
                 if sent.is_empty() {
@@ -280,6 +282,9 @@ where
                     }
                 }
             }
+            Message::Log(_) => {
+                debug!(?epoch, dealer = ?from, "ignoring dealer log before inclusion");
+            }
         }
     }
 
@@ -311,7 +316,7 @@ where
 
             let sent = sender.send(
                 Recipients::One(recipient.clone()),
-                Message::<V, C::PublicKey>::Dealer(public, private).encode(),
+                Message::<V, C>::Dealer(public, private).encode(),
                 true,
             );
             if sent.is_empty() {
@@ -446,12 +451,12 @@ mod tests {
             )
             .await;
             let received = Arc::new(AtomicUsize::new(0));
-            let receiver = QueuedReceiver {
+            let mut receiver = QueuedReceiver {
                 peer: peer.clone(),
                 messages: (0..8).map(|_| IoBuf::from(vec![0xff])).collect(),
                 received: received.clone(),
             };
-            let (sender, _) = inert_channel([peer]);
+            let (mut sender, _) = inert_channel([peer]);
             let block = mocks::genesis_block(signer.public_key());
             let block = Digested::precomputed(block.clone(), block.digest());
             let (ack, waiter) = Exact::handle();
@@ -461,7 +466,14 @@ mod tests {
             );
 
             let result = actor
-                .dealing(Epoch::zero(), &mut store, None, None, (sender, receiver))
+                .dealing(
+                    Epoch::zero(),
+                    &mut store,
+                    None,
+                    None,
+                    &mut sender,
+                    &mut receiver,
+                )
                 .await;
 
             assert!(result.is_continue());
@@ -549,7 +561,7 @@ mod tests {
                     &mut sender,
                     (
                         dealer.public_key(),
-                        Message::<mocks::TestBlsVariant, mocks::TestPublicKey>::Dealer(
+                        Message::<mocks::TestBlsVariant, mocks::TestSigner>::Dealer(
                             public,
                             wrong_private,
                         )
@@ -599,7 +611,7 @@ mod tests {
                     &mut sender,
                     (
                         ack_player.public_key(),
-                        Message::<mocks::TestBlsVariant, mocks::TestPublicKey>::Ack(ack.clone())
+                        Message::<mocks::TestBlsVariant, mocks::TestSigner>::Ack(ack.clone())
                             .encode()
                             .into(),
                     ),
@@ -617,7 +629,7 @@ mod tests {
                     &mut sender,
                     (
                         outsider.public_key(),
-                        Message::<mocks::TestBlsVariant, mocks::TestPublicKey>::Ack(ack)
+                        Message::<mocks::TestBlsVariant, mocks::TestSigner>::Ack(ack)
                             .encode()
                             .into(),
                     ),
