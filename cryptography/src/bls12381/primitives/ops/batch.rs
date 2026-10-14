@@ -103,7 +103,7 @@ impl<V: Variant> SegmentTree<V> {
 ///
 /// Ranges follow the [`SegmentTree`] layout: `holds` receives a node index and the range of
 /// leaves under it. If `root_invalid` is true, the root is treated as failing without a check.
-fn bisect_ranges(
+pub(super) fn bisect_ranges(
     len: usize,
     root_invalid: bool,
     mut holds: impl FnMut(usize, Range<usize>) -> bool,
@@ -135,7 +135,7 @@ fn bisect_ranges(
 }
 
 /// Draws one random 128-bit scalar per entry (sufficient for batch verification security).
-fn random_scalars(rng: &mut impl CryptoRng, len: usize) -> Vec<SmallScalar> {
+pub(super) fn random_scalars(rng: &mut impl CryptoRng, len: usize) -> Vec<SmallScalar> {
     (0..len).map(|_| SmallScalar::random(&mut *rng)).collect()
 }
 

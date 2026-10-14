@@ -135,6 +135,12 @@ path = "src/bls12381/benches/bench.rs"
 required-features = [ "std" ]
 
 [[bench]]
+name = "bls12381_sas"
+harness = false
+path = "src/bls12381/benches/sas_vs_bls.rs"
+required-features = [ "std" ]
+
+[[bench]]
 name = "ed25519"
 harness = false
 path = "src/ed25519/benches/bench.rs"
