@@ -821,12 +821,12 @@ impl Drop for Pool {
             return;
         }
         assert_eq!(
-            self.wake.searching.load(Ordering::SeqCst),
+            self.wake.searching.load(Ordering::Relaxed),
             0,
             "search count left held"
         );
         assert_eq!(
-            self.wake.idle.load(Ordering::SeqCst),
+            self.wake.idle.load(Ordering::Relaxed),
             0,
             "idle bit left published"
         );
@@ -1309,12 +1309,12 @@ pub mod tests {
 
         /// Whether worker `index` is published in the idle set.
         pub fn is_idle(&self, index: u32) -> bool {
-            self.wake.idle.load(Ordering::SeqCst) & (1 << index) != 0
+            self.wake.idle.load(Ordering::Relaxed) & (1 << index) != 0
         }
 
         /// Search counts held.
         pub fn search_count(&self) -> usize {
-            self.wake.searching.load(Ordering::SeqCst)
+            self.wake.searching.load(Ordering::Relaxed)
         }
 
         /// Whether the global queue has closed.
