@@ -1296,7 +1296,7 @@ pub mod tests {
     }
 
     impl Ready {
-        /// A run queue over a local queue of its own, which no pool reads.
+        /// A run queue over a queue of its own, which no pool reads.
         pub fn private() -> Self {
             Self::new(LocalQueue::shared().owner())
         }
