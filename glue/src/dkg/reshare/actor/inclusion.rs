@@ -55,8 +55,14 @@ use tracing::{Instrument as _, Span, debug, info, info_span, warn};
 /// Dealer logs indexed by dealer for an epoch-info request or verification.
 type PendingLogs<V, P> = BTreeMap<P, DealerLog<V, P>>;
 
-/// Signed dealer logs this node can include in proposals, indexed by dealer.
-type KnownLogs<V, C> = BTreeMap<<C as Signer>::PublicKey, SignedDealerLog<V, C>>;
+/// A dealer log this node has verified, with the signed form it proposes.
+struct KnownLog<V: BlsVariant, C: Signer> {
+    signed: SignedDealerLog<V, C>,
+    log: DealerLog<V, C::PublicKey>,
+}
+
+/// Verified dealer logs this node can include in proposals, indexed by dealer.
+type KnownLogs<V, C> = BTreeMap<<C as Signer>::PublicKey, KnownLog<V, C>>;
 
 /// One interruptible pending-log scan.
 type ArtifactScanTask<'a, V, P> = OptionFuture<BoxFuture<'a, Option<PendingLogs<V, P>>>>;
@@ -681,8 +687,12 @@ where
         let mut logs = KnownLogs::<V, C>::new();
         if let Some(dealer) = dealer {
             dealer.finalize::<N3f1>();
-            if let Some(log) = dealer.finalized() {
-                logs.insert(public_key.clone(), log);
+            if let Some(signed) = dealer.finalized() {
+                let (_, log) = signed
+                    .clone()
+                    .check(info)
+                    .expect("own dealer log must verify");
+                logs.insert(public_key.clone(), KnownLog { signed, log });
             }
         }
         Self::send_dealer_log(&public_key, epoch, store, &dealers, &logs, sender);
@@ -772,6 +782,7 @@ where
                             store,
                             epoch,
                             block.inner().payload(),
+                            &logs,
                             &self.strategy,
                         )
                         .await;
@@ -878,7 +889,7 @@ where
     ) where
         SE: Sender<PublicKey = C::PublicKey>,
     {
-        let Some(log) = logs.get(public_key) else {
+        let Some(KnownLog { signed: log, .. }) = logs.get(public_key) else {
             return;
         };
         if store.has_log(epoch, public_key) {
@@ -942,9 +953,15 @@ where
             return;
         }
         match log.clone().check(info) {
-            Some((dealer, _)) if dealer == from => {
+            Some((dealer, checked)) if dealer == from => {
                 debug!(?epoch, ?dealer, "received dealer log");
-                logs.insert(from, log);
+                logs.insert(
+                    from,
+                    KnownLog {
+                        signed: log,
+                        log: checked,
+                    },
+                );
             }
             _ => {
                 commonware_p2p::block!(self.blocker, from, ?epoch, "invalid dealer log");
@@ -976,7 +993,7 @@ where
             let pending = if in_epoch {
                 logs.iter()
                     .filter(|(dealer, _)| !store.has_log(epoch, dealer))
-                    .map(|(_, log)| log.clone())
+                    .map(|(_, known)| known.signed.clone())
                     .collect()
             } else {
                 Vec::new()
@@ -1111,20 +1128,30 @@ where
     /// Durably records each correctly signed log carried by a finalized block.
     ///
     /// Block validity does not check dealer logs. Invalid signatures and,
-    /// during resharing, non-dealers are ignored.
-    pub(super) async fn observe_dealer_logs(
+    /// during resharing, non-dealers are ignored. A log identical to one in
+    /// `known` was already verified, so it is recorded without another check.
+    async fn observe_dealer_logs(
         public_key: &C::PublicKey,
         info: &Info<V, C::PublicKey>,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         epoch: Epoch,
         payload: Option<Payload<V, C, B::Directory>>,
+        known: &KnownLogs<V, C>,
         strategy: &T,
     ) {
         let Some(Payload::DealerLogs(batch)) = payload else {
             return;
         };
         let current = store.current();
-        let checked = strategy.map_collect_vec(batch, |log| log.check(info));
+        let checked = strategy.map_collect_vec(batch, |signed| {
+            known
+                .iter()
+                .find(|(_, known)| known.signed == signed)
+                .map_or_else(
+                    || signed.check(info),
+                    |(dealer, known)| Some((dealer.clone(), known.log.clone())),
+                )
+        });
         for checked in checked {
             let Some((dealer, log)) = checked else {
                 warn!(?epoch, "ignoring invalid dealer log");
@@ -3935,6 +3962,72 @@ mod tests {
             }
             assert_eq!(sent.lock().len(), 2);
             assert!(mailbox.dealer_logs(Height::new(6)).await.is_empty());
+        });
+    }
+
+    /// A finalized log identical to one this node already verified is recorded
+    /// without another check, and any other log is still checked.
+    #[test]
+    fn observed_dealer_logs_reuse_known_verification() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signers = signers();
+            let mut store = mocks::store(
+                context.child("store"),
+                "observed-dealer-logs-store",
+                MemorySecretStore::default(),
+            )
+            .await;
+
+            // Logs signed for another round fail a check against this round, so
+            // only a log reused from `known` can be recorded.
+            let other_round = Info::new::<N3f1>(
+                TEST_NAMESPACE,
+                1,
+                None,
+                SharingMode::NonZeroCounter,
+                Reveal::V1,
+                players(),
+                players(),
+            )
+            .expect("valid info");
+            let sign = |signer: &PrivateKey| {
+                let (dealer, _, _) = CryptoDealer::start::<N3f1>(
+                    TestRng::new(0),
+                    other_round.clone(),
+                    signer.clone(),
+                    None,
+                )
+                .expect("dealer should start");
+                dealer.finalize::<N3f1>()
+            };
+            let reused = sign(&signers[1]);
+            let unknown = sign(&signers[2]);
+            let (dealer, log) = reused
+                .clone()
+                .check(&other_round)
+                .expect("valid dealer log");
+            let known = KnownLogs::from([(
+                dealer,
+                KnownLog {
+                    signed: reused.clone(),
+                    log,
+                },
+            )]);
+
+            mocks::TestReshareActor::observe_dealer_logs(
+                &signers[0].public_key(),
+                &info(),
+                &mut store,
+                Epoch::zero(),
+                Some(Payload::DealerLogs(vec![reused, unknown])),
+                &known,
+                &Sequential,
+            )
+            .await;
+
+            assert!(store.has_log(Epoch::zero(), &signers[1].public_key()));
+            assert!(!store.has_log(Epoch::zero(), &signers[2].public_key()));
         });
     }
 }
