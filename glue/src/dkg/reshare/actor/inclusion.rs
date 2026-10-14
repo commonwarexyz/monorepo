@@ -9,6 +9,7 @@ use crate::dkg::{
     },
     types::{EpochInfo, EpochOutcome, Message as WireMessage, Participants, Payload},
 };
+use bytes::Bytes;
 use commonware_codec::{Decode as _, Encode as _};
 use commonware_consensus::{
     Block as _, Heightable as _,
@@ -680,10 +681,18 @@ where
     {
         self.metrics.set_phase(Phase::Inclusion);
 
-        // Any dealer may propose a block in this window, so each dealer sends
-        // its log to all of them rather than waiting to lead a block itself.
         let public_key = self.signer.public_key();
-        let dealers = self.epoch_dealers(store);
+        // During resharing, finalized logs from outside the epoch's dealers are
+        // ignored. One-shot DKG records them without that filter.
+        let (dealers, resharing) = match store.current() {
+            Some(current) => (current.output.players().clone(), true),
+            None => (
+                self.dkg_participants()
+                    .expect("inclusion must have current epoch or DKG participants"),
+                false,
+            ),
+        };
+        let members = resharing.then_some(&dealers);
         let mut logs = KnownLogs::<V, C>::new();
         if let Some(dealer) = dealer {
             dealer.finalize::<N3f1>();
@@ -695,7 +704,19 @@ where
                 logs.insert(public_key.clone(), KnownLog { signed, log });
             }
         }
-        Self::send_dealer_log(&public_key, epoch, store, &dealers, &logs, sender);
+        // Any dealer may propose a block in this window, so each dealer sends
+        // its log to all of them rather than waiting to lead a block itself.
+        let own_log = logs
+            .get(&public_key)
+            .map(|known| WireMessage::Log(known.signed.clone()).encode());
+        Self::send_dealer_log(
+            &public_key,
+            epoch,
+            store,
+            &dealers,
+            own_log.as_ref(),
+            sender,
+        );
 
         let mut work = ArtifactWork::default();
         let mut scan = ArtifactScan::default();
@@ -782,6 +803,7 @@ where
                             store,
                             epoch,
                             block.inner().payload(),
+                            members,
                             &logs,
                             &self.strategy,
                         )
@@ -808,7 +830,7 @@ where
                                 epoch,
                                 store,
                                 &dealers,
-                                &logs,
+                                own_log.as_ref(),
                                 sender,
                             );
                         }
@@ -862,34 +884,19 @@ where
         ControlFlow::Break(())
     }
 
-    /// Returns the epoch's dealers: the committed epoch's output players during
-    /// resharing, and the configured participants during one-shot DKG.
-    fn epoch_dealers(
-        &self,
-        store: &Store<E, SS, V, C::PublicKey, B::Directory>,
-    ) -> Set<C::PublicKey> {
-        store.current().map_or_else(
-            || {
-                self.dkg_participants()
-                    .expect("inclusion must have current epoch or DKG participants")
-            },
-            |current| current.output.players().clone(),
-        )
-    }
-
-    /// Sends this node's log in `logs` to the epoch's other dealers unless a
-    /// finalized block already includes it.
+    /// Sends this node's encoded log `message`, if any, to the epoch's other
+    /// dealers unless a finalized block already includes it.
     fn send_dealer_log<SE>(
         public_key: &C::PublicKey,
         epoch: Epoch,
         store: &Store<E, SS, V, C::PublicKey, B::Directory>,
         dealers: &Set<C::PublicKey>,
-        logs: &KnownLogs<V, C>,
+        message: Option<&Bytes>,
         sender: &mut SE,
     ) where
         SE: Sender<PublicKey = C::PublicKey>,
     {
-        let Some(KnownLog { signed: log, .. }) = logs.get(public_key) else {
+        let Some(message) = message else {
             return;
         };
         if store.has_log(epoch, public_key) {
@@ -903,11 +910,7 @@ where
         if recipients.is_empty() {
             return;
         }
-        let sent = sender.send(
-            Recipients::Some(recipients),
-            WireMessage::Log(log.clone()).encode(),
-            true,
-        );
+        let sent = sender.send(Recipients::Some(recipients), message.clone(), true);
         debug!(?epoch, sent = sent.len(), "sent dealer log");
     }
 
@@ -1127,22 +1130,23 @@ where
 
     /// Durably records each correctly signed log carried by a finalized block.
     ///
-    /// Block validity does not check dealer logs. Invalid signatures and,
-    /// during resharing, non-dealers are ignored. A log identical to one in
-    /// `known` was already verified, so it is recorded without another check.
+    /// Block validity does not check dealer logs. Invalid signatures and, when
+    /// `members` is set, dealers outside it are ignored. A log identical to one
+    /// in `known` was already verified, so it is recorded without another check.
+    #[allow(clippy::too_many_arguments)]
     async fn observe_dealer_logs(
         public_key: &C::PublicKey,
         info: &Info<V, C::PublicKey>,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         epoch: Epoch,
         payload: Option<Payload<V, C, B::Directory>>,
+        members: Option<&Set<C::PublicKey>>,
         known: &KnownLogs<V, C>,
         strategy: &T,
     ) {
         let Some(Payload::DealerLogs(batch)) = payload else {
             return;
         };
-        let current = store.current();
         let checked = strategy.map_collect_vec(batch, |signed| {
             known
                 .iter()
@@ -1158,13 +1162,10 @@ where
                 continue;
             };
 
-            // `check` authenticates the signature but not dealer membership. Once a
-            // current epoch is committed, drop logs from outside its dealer set so a
-            // Byzantine leader cannot grow storage with logs that selection ignores.
-            if current
-                .as_ref()
-                .is_some_and(|current| current.output.players().position(&dealer).is_none())
-            {
+            // `check` authenticates the signature but not dealer membership. Drop
+            // logs from outside the dealer set so a Byzantine leader cannot grow
+            // storage with logs that selection ignores.
+            if members.is_some_and(|members| members.position(&dealer).is_none()) {
                 warn!(?epoch, "ignoring dealer log from non-dealer");
                 continue;
             }
@@ -4021,6 +4022,7 @@ mod tests {
                 &mut store,
                 Epoch::zero(),
                 Some(Payload::DealerLogs(vec![reused, unknown])),
+                None,
                 &known,
                 &Sequential,
             )
