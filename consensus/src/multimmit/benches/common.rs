@@ -95,15 +95,24 @@ impl<V: Variant> Fixture<V> {
             .collect()
     }
 
-    pub fn certificates(&self) -> (Vqc<V, Digest>, Lqc<V, Digest>) {
+    /// Builds a V-QC and an L-QC whose votes carry `distinct` different bodies.
+    pub fn certificates_among(&self, distinct: usize) -> (Vqc<V, Digest>, Lqc<V, Digest>) {
         let leader = self.leader();
         let vqc = self
             .verifier
-            .assemble_vqc::<Sha256, _>(leader.clone(), &self.view_messages(&leader), &Sequential)
+            .assemble_vqc::<Sha256, _>(
+                leader.clone(),
+                &self.view_messages_among(&leader, distinct),
+                &Sequential,
+            )
             .unwrap();
         let lqc = self
             .verifier
-            .assemble_lqc::<Sha256, _>(leader.clone(), &self.votes(&leader), &Sequential)
+            .assemble_lqc::<Sha256, _>(
+                leader.clone(),
+                &self.votes_among(&leader, distinct),
+                &Sequential,
+            )
             .unwrap();
         (vqc, lqc)
     }
@@ -133,9 +142,17 @@ impl<V: Variant> Fixture<V> {
         .unwrap()
     }
 
-    pub fn vote_body(&self, leader: &LeaderBlock<V, Digest>, signer: usize) -> VoteBody<Digest> {
+    /// Returns the vote body of `signer` when voters split across `distinct` bodies.
+    ///
+    /// Signers `i` and `j` cast the same body exactly when `i % distinct == j % distinct`.
+    pub fn vote_body_among(
+        &self,
+        leader: &LeaderBlock<V, Digest>,
+        signer: usize,
+        distinct: usize,
+    ) -> VoteBody<Digest> {
         let mut positions = vec![Position::new(1); self.codec.participants()];
-        positions[signer] = Position::new(0);
+        positions[signer % distinct] = Position::new(0);
         VoteBody::for_leader(
             DigestedLeader::new::<Sha256>(leader),
             positions,
@@ -146,15 +163,37 @@ impl<V: Variant> Fixture<V> {
     }
 
     pub fn votes(&self, leader: &LeaderBlock<V, Digest>) -> Vec<Vote<V, Digest>> {
+        self.votes_among(leader, self.codec.participants())
+    }
+
+    /// Returns an L-QC quorum of votes over `distinct` different bodies.
+    pub fn votes_among(
+        &self,
+        leader: &LeaderBlock<V, Digest>,
+        distinct: usize,
+    ) -> Vec<Vote<V, Digest>> {
         self.signers
             .iter()
             .take(self.codec.view_quorum())
             .enumerate()
-            .map(|(index, signer)| signer.sign_vote(self.vote_body(leader, index)).unwrap())
+            .map(|(index, signer)| {
+                signer
+                    .sign_vote(self.vote_body_among(leader, index, distinct))
+                    .unwrap()
+            })
             .collect()
     }
 
     pub fn view_messages(&self, leader: &LeaderBlock<V, Digest>) -> Vec<ViewMessage<V, Digest>> {
+        self.view_messages_among(leader, self.codec.participants())
+    }
+
+    /// Returns a V-QC quorum of view messages whose votes carry `distinct` different bodies.
+    pub fn view_messages_among(
+        &self,
+        leader: &LeaderBlock<V, Digest>,
+        distinct: usize,
+    ) -> Vec<ViewMessage<V, Digest>> {
         let designation = self.codec.designation_quorum();
         self.signers
             .iter()
@@ -163,7 +202,9 @@ impl<V: Variant> Fixture<V> {
             .map(|(index, signer)| {
                 if index < designation {
                     return ViewMessage::Vote(
-                        signer.sign_vote(self.vote_body(leader, index)).unwrap(),
+                        signer
+                            .sign_vote(self.vote_body_among(leader, index, distinct))
+                            .unwrap(),
                     );
                 }
 
@@ -197,6 +238,16 @@ pub fn bench_strategies<W: Workload>(c: &mut Criterion, label: &str, mut new: im
         &Sequential,
     );
     measure(c, &format!("{label} strategy=rayon"), new(), &rayon());
+}
+
+/// Registers the workload sequentially only, labeled `label` followed by `strategy=sequential`.
+pub fn bench_sequential<W: Workload>(c: &mut Criterion, label: &str, workload: W) {
+    measure(
+        c,
+        &format!("{label} strategy=sequential"),
+        workload,
+        &Sequential,
+    );
 }
 
 fn measure<W: Workload, S: Strategy>(
