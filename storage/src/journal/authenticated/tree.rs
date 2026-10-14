@@ -768,7 +768,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
 mod tests {
     use super::*;
     use crate::{
-        journal::{Error as JournalError, authenticated::CacheConfig},
+        journal::{Error as JournalError, authenticated::CacheConfig, contiguous::Batch},
         merkle::{Bagging, hasher::Standard, mmb, mmr},
     };
     use commonware_cryptography::{Sha256, sha256::Digest as D};
@@ -846,20 +846,20 @@ mod tests {
         fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<u64>> {
             vec![None; positions.len()]
         }
-        async fn replay_range(
+        async fn replay(
             &self,
             range: Range<u64>,
             _: NonZeroUsize,
             _: ReadOptions,
         ) -> Result<
-            impl futures::Stream<Item = Result<(u64, u64), JournalError>> + Send,
+            impl futures::Stream<Item = Result<Batch<u64>, JournalError>> + Send,
             JournalError,
         > {
             assert!(range.start >= self.bounds.start && range.end <= self.bounds.end);
-            Ok(
-                stream::iter(range)
-                    .then(move |loc| async move { Ok((loc, self.read(loc).await?)) }),
-            )
+            Ok(stream::iter(range).then(move |start| async move {
+                let items = vec![self.read(start).await?];
+                Ok(Batch { start, items })
+            }))
         }
     }
 

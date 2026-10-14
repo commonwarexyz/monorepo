@@ -4,7 +4,9 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,8 +21,11 @@ env:
   NIGHTLY_VERSION: nightly-2026-06-21
 
 jobs:
+  # Draft pull requests skip this workflow; it runs once the pull request is ready for review.
+  # Use workflow_dispatch to run it on a draft branch.
   Benchmarks:
     name: "Benchmarks (${{ matrix.package }}${{ matrix.test_flags && format(', {0}', matrix.test_flags) }}${{ matrix.lint_flags && format(', {0}', matrix.lint_flags) }}) (partition: ${{ matrix.partition || '1/1' }})"
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -71,6 +76,7 @@ jobs:
 
   Fuzz:
     name: "Fuzz (${{ matrix.fuzz_dir }}) (partition: ${{ matrix.partition || '1/1' }})"
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -181,6 +187,7 @@ jobs:
 
   Unsafe:
     name: "Miri Tests (partition: ${{ matrix.partition }}/12)"
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -214,7 +221,7 @@ jobs:
     name: "Unsafe-Tests"
     runs-on: ubuntu-latest
     needs: Unsafe
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     steps:
       - name: Checkout swap action
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -234,6 +241,7 @@ jobs:
   # test, and archives the tests for the partitions below.
   Conformance-Build:
     name: "Breaking Changes (${{ matrix.name }}) (build)"
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -316,7 +324,7 @@ jobs:
     name: "Breaking Changes"
     runs-on: ubuntu-latest
     needs: conformance
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     steps:
       - name: Checkout swap action
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4

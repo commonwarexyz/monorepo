@@ -29,13 +29,13 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
 use commonware_consensus::{
-    Heightable as _,
+    Block as _, Heightable as _,
     marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{EpochPhase, FixedEpocher, Height},
 };
 use commonware_cryptography::{
-    BatchVerifier, PublicKey, Signer,
+    BatchVerifier, Digested, Digestible as _, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::Reveal,
         primitives::{sharing::Mode as SharingMode, variant::Variant as BlsVariant},
@@ -439,7 +439,7 @@ where
     /// Panics if `block` conflicts with the tip at the same height, skips
     /// heights above the tip, or is at the next height without the tip as its
     /// parent.
-    fn covered(&self, block: &B) -> bool {
+    fn covered(&self, block: &Digested<B>) -> bool {
         self.tip.is_some_and(|tip| {
             if block.height() == tip.height {
                 assert_eq!(block.digest(), tip.digest, "conflicting finalized block");
@@ -464,7 +464,7 @@ where
     /// # Panics
     ///
     /// Panics if `block` is not above the tip.
-    fn advance(&mut self, block: &B) {
+    fn advance(&mut self, block: &Digested<B>) {
         assert!(
             self.tip.is_none_or(|tip| block.height() > tip.height),
             "completed block must advance the tip"

@@ -34,8 +34,8 @@
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
-    Runner as _, Strategizer as _, Supervisor as _,
-    buffer::paged::CacheRef,
+    BLOB_PAGE_SIZE, Runner as _, Strategizer as _, Supervisor as _,
+    buffer::paged::{CacheRef, page_size},
     tokio::{Config as RConfig, Context, Runner},
 };
 use commonware_storage::{
@@ -51,7 +51,7 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+use commonware_utils::{NZU64, NZUsize, TestRng};
 use rand::Rng;
 use std::{
     collections::HashSet,
@@ -153,7 +153,7 @@ type AnyVarMerkleized = std::sync::Arc<
     >,
 >;
 
-const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
+const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 const PAGE_CACHE_PAGES: NonZeroUsize = NZUsize!(131_072);
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);

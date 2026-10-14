@@ -3,7 +3,11 @@
 
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
-use commonware_runtime::{BufferPooler, Strategizer, buffer::paged::CacheRef, tokio::Context};
+use commonware_runtime::{
+    BLOB_PAGE_SIZE, BufferPooler, Strategizer,
+    buffer::paged::{CacheRef, page_size},
+    tokio::Context,
+};
 use commonware_storage::{
     journal::{
         authenticated::Config as MerkleConfig,
@@ -38,7 +42,7 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+use commonware_utils::{NZU64, NZUsize, TestRng};
 use rand::{Rng, distr::Distribution};
 use rand_distr::Zipf;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
@@ -51,7 +55,7 @@ pub type Digest = DigestOf<Sha256>;
 pub const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
 pub const CHUNK_SIZE: usize = 32;
 pub const THREADS: NonZeroUsize = NZUsize!(8);
-pub const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
+pub const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
 pub const DELETE_FREQUENCY: u32 = 10;
 pub const VARIABLE_VALUE_MAX_LEN: usize = 256;

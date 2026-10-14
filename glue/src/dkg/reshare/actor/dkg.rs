@@ -6,6 +6,7 @@ use crate::dkg::{
     types::{EpochInfo, Participants, Payload},
 };
 use commonware_consensus::{
+    Heightable as _,
     marshal::{Identifier, core::Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher, Height},
@@ -198,7 +199,7 @@ where
             );
 
         // Final-block verification admits only the derived EpochInfo or no payload.
-        match block.payload() {
+        match block.inner().payload() {
             Some(Payload::EpochInfo(info)) => Some(info),
             None => None,
             Some(Payload::DealerLog(_)) => unreachable!("final DKG block carries a dealer log"),

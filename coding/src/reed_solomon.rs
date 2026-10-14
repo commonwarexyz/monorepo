@@ -174,6 +174,10 @@ impl<D: Digest> Write for Chunk<D> {
 
 impl<D: Digest> Read for Chunk<D> {
     /// The coding config and the maximum number of data bytes.
+    ///
+    /// A chunk decodes only if its shard is no wider than encoding that many bytes under the
+    /// config would produce. The bound shrinks as `minimum_shards` grows and is widest at one,
+    /// where a single shard holds the length prefix and all of the data.
     type Cfg = (Config, usize);
 
     fn read_cfg(
@@ -1189,9 +1193,12 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         commitment: &Self::Commitment,
         index: u16,
         shard: &Self::Shard,
+        strategy: &impl Strategy,
     ) -> Result<Self::CheckedShard, Self::Error> {
         let total = total_shards(config)?;
-        check_chunk::<H>(total, commitment, index, shard, || H::hash(&[&shard.shard]))
+        check_chunk::<H>(total, commitment, index, shard, || {
+            H::hash_across(&[&shard.shard], strategy)
+        })
     }
 
     fn check_many(
@@ -1203,7 +1210,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         let Ok(total) = total_shards(config) else {
             return shards
                 .iter()
-                .map(|&(index, shard)| Self::check(config, commitment, index, shard))
+                .map(|&(index, shard)| Self::check(config, commitment, index, shard, strategy))
                 .collect();
         };
 
@@ -1214,9 +1221,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
             shard.shard.len() != width || check_metadata(total, index, shard).is_err()
         }) {
             return strategy.map_collect_vec(shards, |&(index, shard)| {
-                check_chunk::<H>(total, commitment, index, shard, || {
-                    H::hash_across(&[&shard.shard], strategy)
-                })
+                Self::check(config, commitment, index, shard, strategy)
             });
         }
 
@@ -1399,8 +1404,14 @@ mod tests {
             requested
         );
         for (checked, &index) in checked.iter().zip(&requested) {
-            let scalar =
-                InstrumentedRS::check(&config, &root, index, &chunks[usize::from(index)]).unwrap();
+            let scalar = InstrumentedRS::check(
+                &config,
+                &root,
+                index,
+                &chunks[usize::from(index)],
+                &STRATEGY,
+            )
+            .unwrap();
             assert_eq!(checked, &scalar);
         }
     }
@@ -1496,7 +1507,9 @@ mod tests {
         ];
         let expected = shards
             .iter()
-            .map(|&(index, shard)| format!("{:?}", RS::check(&config, &root, index, shard)))
+            .map(|&(index, shard)| {
+                format!("{:?}", RS::check(&config, &root, index, shard, &STRATEGY))
+            })
             .collect::<Vec<_>>();
 
         reset_hash_many_calls();
@@ -1539,7 +1552,7 @@ mod tests {
             .collect::<Vec<_>>();
         let expected = shards
             .iter()
-            .map(|&(index, shard)| RS::check(&config, &root, index, shard).unwrap())
+            .map(|&(index, shard)| RS::check(&config, &root, index, shard, &STRATEGY).unwrap())
             .collect::<Vec<_>>();
         // Observe every hashing call on one thread while planning eight workers.
         let strategy = Rayon::new(NZUsize!(1))
@@ -1594,7 +1607,10 @@ mod tests {
         let scalar = shards
             .iter()
             .map(|&(index, shard)| {
-                format!("{:?}", InstrumentedRS::check(&config, &root, index, shard))
+                format!(
+                    "{:?}",
+                    InstrumentedRS::check(&config, &root, index, shard, &STRATEGY)
+                )
             })
             .collect::<Vec<_>>();
         let batched = InstrumentedRS::check_many(&config, &root, &shards, &STRATEGY)
@@ -1612,7 +1628,7 @@ mod tests {
             .map(|&(index, shard)| {
                 format!(
                     "{:?}",
-                    InstrumentedRS::check(&invalid_config, &root, index, shard)
+                    InstrumentedRS::check(&invalid_config, &root, index, shard, &STRATEGY)
                 )
             })
             .collect::<Vec<_>>();
@@ -1654,7 +1670,7 @@ mod tests {
         };
         let pieces = selected
             .iter()
-            .map(|&i| RS::check(&config, &root, i, &chunks[usize::from(i)]).unwrap())
+            .map(|&i| RS::check(&config, &root, i, &chunks[usize::from(i)], &STRATEGY).unwrap())
             .collect::<Vec<_>>();
 
         let Ok(decoded) = decode::<Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY) else {
@@ -1814,7 +1830,7 @@ mod tests {
 
         // Verify all proofs at invalid index
         for i in 0..total {
-            assert!(RS::check(&config, &root, i + 1, &chunks[i as usize]).is_err());
+            assert!(RS::check(&config, &root, i + 1, &chunks[i as usize], &STRATEGY).is_err());
         }
     }
 
@@ -2421,7 +2437,13 @@ mod tests {
 
             // Each shard is rejected individually.
             for chunk in &chunks {
-                assert!(invalid(&RS::check(&config, &root, chunk.index, chunk)));
+                assert!(invalid(&RS::check(
+                    &config,
+                    &root,
+                    chunk.index,
+                    chunk,
+                    &STRATEGY
+                )));
             }
 
             // The same shards are rejected as a batch.
@@ -2492,7 +2514,9 @@ mod tests {
 
         // Verify all proofs at incorrect root
         for i in 0..total {
-            assert!(RS::check(&config, &malicious_root, i, &chunks[i as usize]).is_err());
+            assert!(
+                RS::check(&config, &malicious_root, i, &chunks[i as usize], &STRATEGY).is_err()
+            );
         }
 
         // Collect valid pieces (these are legitimate fragments checked against
@@ -2525,7 +2549,7 @@ mod tests {
 
         // A proof generated under a different shard configuration is invalid
         // for this commitment.
-        let check_result = RS::check(&config_expected, &commitment, 0, &shards[0]);
+        let check_result = RS::check(&config_expected, &commitment, 0, &shards[0], &STRATEGY);
         assert!(matches!(check_result, Err(Error::InvalidProof)));
     }
 

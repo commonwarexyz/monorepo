@@ -113,7 +113,7 @@ pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
 /// Chain block carrying the QMDB state root and an optional reshare payload.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Block {
     pub(crate) context: Context<sha256::Digest, ed25519::PublicKey>,
     pub(crate) parent: sha256::Digest,
@@ -124,24 +124,41 @@ pub struct Block {
 }
 
 impl Block {
+    /// Construct a block.
+    pub(crate) const fn new(
+        context: Context<sha256::Digest, ed25519::PublicKey>,
+        parent: sha256::Digest,
+        height: Height,
+        target: Target<mmr::Family, sha256::Digest>,
+        payload: Option<Payload<MinSig, ed25519::PrivateKey>>,
+    ) -> Self {
+        Self {
+            context,
+            parent,
+            height,
+            state_root: target.root,
+            range: target.range,
+            payload,
+        }
+    }
+
     /// Construct the genesis block from the epoch-0 info and initial QMDB sync target.
     pub const fn genesis(
         leader: ed25519::PublicKey,
         info: dkg::types::EpochInfo<MinSig, ed25519::PublicKey>,
         target: Target<mmr::Family, sha256::Digest>,
     ) -> Self {
-        Self {
-            context: Context {
+        Self::new(
+            Context {
                 round: Round::new(Epoch::zero(), View::zero()),
                 leader,
                 parent: (View::zero(), sha256::Digest::EMPTY),
             },
-            parent: sha256::Digest::EMPTY,
-            height: Height::zero(),
-            state_root: target.root,
-            range: target.range,
-            payload: Some(Payload::EpochInfo(info)),
-        }
+            sha256::Digest::EMPTY,
+            Height::zero(),
+            target,
+            Some(Payload::EpochInfo(info)),
+        )
     }
 }
 
@@ -171,17 +188,16 @@ impl Read for Block {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            context: Context::read(buf)?,
-            parent: sha256::Digest::read(buf)?,
-            height: Height::read(buf)?,
-            state_root: sha256::Digest::read(buf)?,
-            range: NonEmptyRange::read(buf)?,
-            payload: Option::<Payload<MinSig, ed25519::PrivateKey>>::read_cfg(
+        Ok(Self::new(
+            Context::read(buf)?,
+            sha256::Digest::read(buf)?,
+            Height::read(buf)?,
+            Target::read(buf)?,
+            Option::<Payload<MinSig, ed25519::PrivateKey>>::read_cfg(
                 buf,
                 &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE),
             )?,
-        })
+        ))
     }
 }
 
