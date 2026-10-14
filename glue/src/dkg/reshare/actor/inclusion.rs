@@ -111,9 +111,9 @@ where
     /// Starts scanning a clone of `request`'s ancestry.
     ///
     /// Panics if a scan is active.
-    fn start(
+    fn start<T: Strategy>(
         &mut self,
-        scan: PendingLogScan<'a, V, C::PublicKey, B::Digest>,
+        scan: PendingLogScan<'a, V, C::PublicKey, B::Digest, T>,
         request: ArtifactRequest<B, V, C>,
         shutdown: signal::Signal,
     ) {
@@ -396,12 +396,13 @@ where
     }
 }
 
-struct PendingLogScan<'a, V: BlsVariant, P, D> {
+struct PendingLogScan<'a, V: BlsVariant, P, D, T> {
     epoch: Epoch,
     info: &'a Info<V, P>,
     epocher: FixedEpocher,
     finalized_tip: Option<FinalizedTip<D>>,
     final_height: Height,
+    strategy: T,
 }
 
 /// Owned inputs for one dealer-log verification.
@@ -502,8 +503,8 @@ fn validate_future_participants<V: BlsVariant, P: PublicKey>(
 ///
 /// Returns `None` if the runtime stops, or if `ancestry` ends early or does not
 /// extend the finalized tip.
-async fn pending_logs<B, V, C>(
-    scan: PendingLogScan<'_, V, C::PublicKey, B::Digest>,
+async fn pending_logs<B, V, C, T>(
+    scan: PendingLogScan<'_, V, C::PublicKey, B::Digest, T>,
     mut ancestry: impl Stream<Item = Digested<B>> + Send + Unpin,
     mut shutdown: signal::Signal,
 ) -> Option<PendingLogs<V, C::PublicKey>>
@@ -511,6 +512,7 @@ where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
+    T: Strategy,
 {
     // Scan only unfinalized blocks from the midpoint on, and require them to
     // extend the finalized tip.
@@ -601,19 +603,25 @@ where
 
     // Authenticate logs in chain order so each dealer's earliest valid log wins,
     // matching the journal's first-log rule.
+    let pending: Vec<_> = blocks
+        .into_iter()
+        .rev()
+        .filter_map(|block| match block.inner().payload() {
+            Some(Payload::DealerLogs(batch)) => Some((block.height(), batch)),
+            _ => None,
+        })
+        .flat_map(|(height, batch)| batch.into_iter().map(move |log| (height, log)))
+        .collect();
+    let checked = scan
+        .strategy
+        .map_collect_vec(pending, |(height, log)| (height, log.check(scan.info)));
     let mut logs = BTreeMap::new();
-    for block in blocks.into_iter().rev() {
-        let height = block.height();
-        let Some(Payload::DealerLogs(batch)) = block.inner().payload() else {
+    for (height, checked) in checked {
+        let Some((dealer, log)) = checked else {
+            warn!(epoch = ?scan.epoch, ?height, "ignoring invalid pending dealer log");
             continue;
         };
-        for log in batch {
-            let Some((dealer, log)) = log.check(scan.info) else {
-                warn!(epoch = ?scan.epoch, ?height, "ignoring invalid pending dealer log");
-                continue;
-            };
-            logs.entry(dealer).or_insert(log);
-        }
+        logs.entry(dealer).or_insert(log);
     }
     Some(logs)
 }
@@ -764,6 +772,7 @@ where
                             store,
                             epoch,
                             block.inner().payload(),
+                            &self.strategy,
                         )
                         .await;
 
@@ -1092,6 +1101,7 @@ where
                 epocher: self.epocher.clone(),
                 finalized_tip: self.tip,
                 final_height,
+                strategy: self.strategy.clone(),
             },
             request,
             self.context.stopped(),
@@ -1108,13 +1118,15 @@ where
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         epoch: Epoch,
         payload: Option<Payload<V, C, B::Directory>>,
+        strategy: &T,
     ) {
         let Some(Payload::DealerLogs(batch)) = payload else {
             return;
         };
         let current = store.current();
-        for log in batch {
-            let Some((dealer, log)) = log.check(info) else {
+        let checked = strategy.map_collect_vec(batch, |log| log.check(info));
+        for checked in checked {
+            let Some((dealer, log)) = checked else {
                 warn!(?epoch, "ignoring invalid dealer log");
                 continue;
             };
@@ -1752,13 +1764,14 @@ mod tests {
 
     fn scan(
         info: &Info<TestBlsVariant, PublicKey>,
-    ) -> PendingLogScan<'_, TestBlsVariant, PublicKey, mocks::TestDigest> {
+    ) -> PendingLogScan<'_, TestBlsVariant, PublicKey, mocks::TestDigest, Sequential> {
         PendingLogScan {
             epoch: Epoch::zero(),
             info,
             epocher: FixedEpocher::new(NZU64!(4)),
             finalized_tip: None,
             final_height: Height::new(3),
+            strategy: Sequential,
         }
     }
 
@@ -2963,6 +2976,7 @@ mod tests {
                 epocher: FixedEpocher::new(NZU64!(8)),
                 finalized_tip: None,
                 final_height: Height::new(7),
+                strategy: Sequential,
             };
 
             assert!(
@@ -3009,6 +3023,7 @@ mod tests {
                     digest: block_four.digest(),
                 }),
                 final_height: Height::new(7),
+                strategy: Sequential,
             };
 
             assert!(
@@ -3048,6 +3063,7 @@ mod tests {
                     digest,
                 }),
                 final_height: Height::new(7),
+                strategy: Sequential,
             };
 
             assert!(
@@ -3098,6 +3114,7 @@ mod tests {
                     digest: canonical.digest(),
                 }),
                 final_height: Height::new(7),
+                strategy: Sequential,
             };
 
             assert!(
@@ -3153,6 +3170,7 @@ mod tests {
                     digest: canonical_four.digest(),
                 }),
                 final_height: Height::new(7),
+                strategy: Sequential,
             };
 
             assert!(
