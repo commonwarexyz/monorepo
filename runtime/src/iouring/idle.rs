@@ -3,9 +3,9 @@
 //!
 //! [`Idle`] holds that state for a [`Pool`]. Each pool worker searches and
 //! parks through its [`Searcher`], whose [`Searcher::prepare_park`] returns a
-//! [`Park`] that says what the worker does after its last look. A push into
-//! the global queue and a kick from a run queue fence in [`Pool`], then wake a
-//! parked worker through [`Idle::notify_global`] and [`Idle::notify`].
+//! [`Park`] that says what the worker does after its last look. The pool's
+//! pushes into its global queue and [`Pool::kick`] fence, then wake a parked
+//! worker through [`Idle::notify_global`] and [`Idle::notify`].
 //!
 //! # Waking a parked worker
 //!
@@ -415,9 +415,9 @@ impl<'a> Searcher<'a> {
         // tail before this worker can enter user code. Every count modification
         // is an RMW, so a later last return reads this release sequence and its
         // following fence acquires both queue updates. That fence can be in
-        // `Pool::kick`, `Idle::undo_claim`, or `prepare_park`. If this is the
-        // last return, both updates already precede the kick's fence in this
-        // thread.
+        // `Pool::kick`, `Idle::undo_claim`, or `Searcher::prepare_park`. If
+        // this is the last return, both updates already precede the kick's
+        // fence in this thread.
         if pool.idle().searching.fetch_sub(1, Ordering::Release) == 1 {
             pool.kick();
         }
