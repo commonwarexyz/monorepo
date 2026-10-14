@@ -6,8 +6,8 @@ use std::num::NonZeroUsize;
 #[derive(Clone, Debug)]
 pub struct CacheConfig {
     /// Lowest node height kept in memory, at most eight. Resident memory is about `2 / 2^height`
-    /// digests per retained operation. Height zero keeps every node. Current databases lower it
-    /// to their grafting height.
+    /// digests per retained operation. Height zero keeps every node. Current databases cap it at
+    /// their grafting height.
     pub resident_height: u32,
     /// Budget for cached regions of rebuilt digests below the resident height. Zero disables the
     /// cache, and a nonzero budget must hold at least one region (see [Self::with_regions]).
@@ -46,11 +46,10 @@ impl Default for CacheConfig {
     }
 }
 
-/// Bytes charged for one region: its digest slots plus a validity bitmap. A resident height
-/// of at most eight gives at most 510 slots, so this cannot overflow.
+/// Bytes charged for one region of optional digest slots. A resident height of at most eight
+/// gives at most 510 slots, so this cannot overflow.
 const fn region_bytes<D: Digest>(resident_height: u32) -> usize {
-    let slots = (2usize << resident_height) - 2;
-    slots * size_of::<D>() + slots.div_ceil(64) * 8
+    ((2usize << resident_height) - 2) * size_of::<Option<D>>()
 }
 
 /// Configuration for an operation-backed authenticated journal.

@@ -370,7 +370,7 @@ impl<B: RBlob, A: CodecFixedShared> authenticated::EncodedReader for EncodedRead
                 .min(usize::try_from(state.end_pos - state.pos).unwrap_or(usize::MAX))
                 .min((max_bytes - bytes.len()).div_ceil(A::SIZE));
             let start = bytes.len();
-            state.replay.append_to(bytes, count * A::SIZE);
+            commonware_runtime::BufMut::put(bytes, Buf::take(&mut state.replay, count * A::SIZE));
             ends.extend((1..=count).map(|i| start + i * A::SIZE));
             state.pos += count as u64;
             read += count;
@@ -1498,15 +1498,16 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// Return the retained start that [Self::prune] would leave for `min_item_pos`.
-    fn prune_target(&self, min_item_pos: u64) -> Result<u64, Error> {
+    fn prune_target(&self, min_item_pos: u64) -> u64 {
         // Calculate the blob that would contain min_item_pos, capped to the tail (which is
         // guaranteed to exist by our invariant).
         let items_per_blob = self.items_per_blob.get();
         let target = super::position_to_blob(min_item_pos.min(self.bounds.end), items_per_blob);
         if target <= self.blobs.oldest_blob_index() {
-            return Ok(self.bounds.start);
+            return self.bounds.start;
         }
-        super::blob_first_position(target, items_per_blob)
+        // Cannot overflow: the target blob starts at or before the journal's end.
+        target * items_per_blob
     }
 
     /// See [Journal::prune].
@@ -1514,7 +1515,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         mut self: Box<Self>,
         min_item_pos: u64,
     ) -> Result<(Box<Self>, bool), Error> {
-        let new_boundary = self.prune_target(min_item_pos)?;
+        let new_boundary = self.prune_target(min_item_pos);
         if new_boundary <= self.bounds.start {
             return Ok((self, false));
         }
@@ -2127,7 +2128,7 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
         Self::prune(self, min_position).await
     }
 
-    fn prune_target(&self, min_position: u64) -> Result<u64, Error> {
+    fn prune_target(&self, min_position: u64) -> u64 {
         self.0.prune_target(min_position)
     }
 

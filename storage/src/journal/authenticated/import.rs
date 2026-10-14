@@ -12,7 +12,7 @@ use commonware_parallel::Strategy;
 pub(crate) enum Local<D> {
     /// They do, and these are the pinned nodes at the target's start.
     Authenticated(Vec<D>),
-    /// The staged boundary cannot rebuild the target, so the operations are unchecked.
+    /// The frontier's boundary cannot rebuild the target, so the operations are unchecked.
     Unchecked,
     /// They do not.
     Mismatch,
@@ -21,7 +21,8 @@ pub(crate) enum Local<D> {
 /// Durable state of an operation range being imported by synchronization.
 pub struct Import<F: Family, E: Context, D: Digest, S: Strategy> {
     pub(super) frontier: Frontier<F, E, D>,
-    pub(super) metrics: Metrics,
+    pub(super) config: Config<S>,
+    pub(super) metrics: Box<Metrics>,
     /// Digests rebuilt by [Self::authenticate], pruned to the boundary it returned pins for.
     pub(super) tree: Option<Tree<F, D, S>>,
 }
@@ -38,7 +39,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Import<F, E, D, S> {
         let merkle = context.child("merkle");
         Ok(Self {
             frontier,
-            metrics: Metrics::new(&merkle),
+            config: config.clone(),
+            metrics: Box::new(Metrics::new(&merkle)),
             tree: None,
         })
     }
@@ -73,10 +75,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Import<F, E, D, S> {
 
     /// Check whether `journal`, replayed from the staged boundary through `end`, rebuilds
     /// `expected` with `inactive` peaks.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn authenticate<C, H>(
         &mut self,
-        config: &Config<S>,
         journal: &C,
         hasher: &H,
         start: Location<F>,
@@ -98,8 +98,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Import<F, E, D, S> {
         let mut tree = Tree::new(
             boundary.location,
             boundary.digests.clone(),
-            config,
-            self.metrics.clone(),
+            &self.config,
+            Metrics::clone(&self.metrics),
         )?
         .replay(journal, hasher, end, APPLY_BATCH_SIZE)
         .await?;

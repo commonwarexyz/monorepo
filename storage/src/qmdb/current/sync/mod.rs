@@ -64,7 +64,6 @@ pub(crate) mod tests;
 #[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, J, const N: usize, S>(
     context: E,
-    merkle_config: authenticated::Config<S>,
     log: J,
     translator: I::Translator,
     state: authenticated::Import<F, E, H::Digest, S>,
@@ -88,11 +87,9 @@ where
     Operation<F, U>: Codec,
 {
     // Build authenticated log.
-    let merkle_config = super::merkle_config::<F, H::Digest, S, N>(&merkle_config)?;
     let index = I::new(context.child("index"), translator);
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
         state,
-        &merkle_config,
         log,
         qmdb::hasher::<H>(),
         range.start(),
@@ -239,7 +236,6 @@ where
         let strategy = config.merkle_config.strategy.clone();
         build_db::<F, _, U, _, H, _, N, _>(
             context,
-            config.merkle_config,
             log,
             config.translator,
             state,

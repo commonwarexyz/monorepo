@@ -34,7 +34,6 @@ pub(crate) mod tests;
 #[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, C, const N: usize, S>(
     context: E,
-    merkle_config: authenticated::Config<S>,
     log: C,
     translator: I::Translator,
     state: authenticated::Import<F, E, H::Digest, S>,
@@ -61,7 +60,6 @@ where
 
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
         state,
-        &merkle_config,
         log,
         hasher,
         range.start(),
@@ -141,7 +139,6 @@ where
     ) -> Result<Self, qmdb::Error<F>> {
         build_db::<F, _, U, _, H, _, N, _>(
             context,
-            config.merkle_config,
             log,
             config.translator,
             state,

@@ -8,7 +8,7 @@
 //! # Persistence and caching
 //!
 //! Only operations and the pruning frontier are durable. Recovery replays every retained
-//! operation to rebuild the Merkle digests kept in memory. No Merkle node journal is written.
+//! operation to rebuild the Merkle digests kept in memory.
 //!
 //! [`CacheConfig::resident_height`] selects the lowest height kept in memory (five by default).
 //! Lower nodes are rebuilt on demand from their operations, one aligned region of leaves at a
@@ -80,9 +80,6 @@ use tree::Tree;
 pub enum Error<F: Family> {
     #[error("invalid configuration: {0}")]
     InvalidConfig(&'static str),
-
-    #[error("unsupported authenticated journal format")]
-    UnsupportedFormat,
 
     #[error("operation journal has no durable frontier")]
     MissingFrontier,
@@ -687,7 +684,6 @@ where
     #[boxed]
     pub(crate) async fn from_components(
         import: Import<F, E, H::Digest, S>,
-        config: &Config<S>,
         journal: C,
         hasher: StandardHasher<H>,
         start: Location<F>,
@@ -699,11 +695,14 @@ where
     {
         let Import {
             frontier,
+            config,
             metrics,
             tree,
         } = import;
-        let boundary = frontier.boundary().ok_or(Error::MissingFrontier)?;
-        if boundary.location != start || boundary.digests != pins {
+        if frontier
+            .boundary()
+            .is_none_or(|boundary| boundary.location != start || boundary.digests != pins)
+        {
             return Err(merkle::Error::InvalidPinnedNodes.into());
         }
         // Reuse digests rebuilt while authenticating retained operations. The journal is only
@@ -714,7 +713,7 @@ where
             {
                 tree
             }
-            _ => Tree::new(start, pins, config, metrics)?,
+            _ => Tree::new(start, pins, &config, *metrics)?,
         };
         let merkle = Self::align(merkle, &journal, &hasher, apply_batch_size).await?;
         Ok(Self {
@@ -852,11 +851,12 @@ where
     ) -> Result<(Self, Location<F>, bool), Error<F>> {
         self.frontier.active_boundary()?;
         let old = self.merkle.bounds().start;
-        let target = Location::new(self.journal.prune_target(*prune_loc)?).max(old);
+        let target = Location::new(self.journal.prune_target(*prune_loc)).max(old);
         if target > old {
-            // Commit first: the prune target may be justified by a buffered append (e.g. a commit
-            // operation), and the frontier must never get ahead of durable operations.
             let pins = self.pinned_nodes_at(target).await?;
+            // Commit before the frontier: the prune target may be justified by a buffered append
+            // (e.g. a commit operation), and the frontier must never get ahead of durable
+            // operations.
             self.journal = self.journal.commit().await?;
             self.frontier = self.frontier.activate(target, pins.clone()).await?;
             self.merkle.prune(target, pins);
@@ -1071,9 +1071,6 @@ where
         // Operations below the frontier cannot be authenticated, so selection treats them as
         // deleted even while their blob remains.
         let floor = boundary.map_or(bounds.start, |boundary| *boundary);
-        if max_size.is_some_and(|size| size < floor) {
-            return Err(JournalError::ItemPruned(floor).into());
-        }
 
         // A fully pruned empty journal has no retained item to match, but its append position
         // remains the selected end.
@@ -1217,9 +1214,10 @@ where
         Ok((journal, pruned))
     }
 
-    fn prune_target(&self, min_position: u64) -> Result<u64, JournalError> {
-        let target = self.journal.prune_target(min_position)?;
-        Ok(target.max(*self.merkle.bounds().start))
+    fn prune_target(&self, min_position: u64) -> u64 {
+        self.journal
+            .prune_target(min_position)
+            .max(*self.merkle.bounds().start)
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), JournalError> {
@@ -2843,7 +2841,7 @@ mod tests {
             let mut import = Import::begin(context.child("import"), &cfg).await.unwrap();
             let end = Location::new(ops.bounds().end);
             let Local::Authenticated(authenticated) = import
-                .authenticate(&cfg, &ops, &hasher, start, end, root, 0)
+                .authenticate(&ops, &hasher, start, end, root, 0)
                 .await
                 .unwrap()
             else {
@@ -2855,7 +2853,6 @@ mod tests {
             let replayed = metrics.replayed_leaves.get();
             let journal = TestJournal::<F>::from_components(
                 import,
-                &cfg,
                 ops,
                 hasher,
                 staged,
@@ -2922,7 +2919,7 @@ mod tests {
                 ForwardFold,
             )
             .await,
-            Err(Error::Journal(JournalError::ItemPruned(45)))
+            Err(Error::Journal(JournalError::ItemPruned(44)))
         ));
 
         // Selection ignores matches below the frontier, as it would after their deletion.
@@ -3005,6 +3002,34 @@ mod tests {
     #[test]
     fn test_prepare_respects_frontier_mmb() {
         deterministic::Runner::default().start(prepare_respects_frontier::<mmb::Family>);
+    }
+
+    /// Operations without a frontier, such as those of a database written before frontiers
+    /// existed, do not open.
+    #[test]
+    fn test_operations_without_frontier() {
+        deterministic::Runner::default().start(|context| async move {
+            type F = mmr::Family;
+            drop(create_journal_with_ops::<F>(context.child("ops"), "no-frontier", 10).await);
+            Frontier::<F, _, Digest>::open(
+                context.child("frontier"),
+                merkle_config("no-frontier").metadata_partition,
+            )
+            .await
+            .unwrap()
+            .destroy()
+            .await
+            .unwrap();
+            let reopened = TestJournal::<F>::new(
+                context.child("reopen"),
+                merkle_config("no-frontier"),
+                journal_config("no-frontier", &context),
+                |op: &TestOp<F>| op.is_commit(),
+                ForwardFold,
+            )
+            .await;
+            assert!(matches!(reopened, Err(Error::MissingFrontier)));
+        });
     }
 
     #[test_traced("INFO")]

@@ -152,7 +152,6 @@ where
             Ok(floor) => {
                 import
                     .authenticate(
-                        config,
                         &journal,
                         &crate::qmdb::hasher::<H>(),
                         start,

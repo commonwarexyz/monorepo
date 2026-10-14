@@ -61,7 +61,7 @@ where
     /// A [Keyless] db populated with the state from the given range.
     async fn from_sync_result(
         context: Self::Context,
-        config: Self::Config,
+        _config: Self::Config,
         log: Self::Journal,
         state: Self::SyncState,
         pinned_nodes: Vec<Self::Digest>,
@@ -72,7 +72,6 @@ where
 
         let journal = authenticated::Journal::<F, _, _, _, S>::from_components(
             state,
-            &config.merkle,
             log,
             hasher,
             range.start(),

@@ -7,7 +7,7 @@ use crate::{
     metadata::{self, Metadata},
 };
 use bytes::BufMut;
-use commonware_codec::{Buf, Copying, DecodeExt, Encode, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
 use commonware_utils::sequence::prefixed_u64::U64;
 
@@ -118,42 +118,26 @@ impl<F: Family, D: Digest> Read for Record<F, D> {
 /// An importing frontier prevents ordinary recovery until synchronization authenticates and
 /// activates the replacement operation range.
 pub(crate) struct Frontier<F: Family, E: Context, D: Digest> {
-    metadata: Metadata<E, U64, Vec<u8>>,
-    record: Option<Record<F, D>>,
+    metadata: Metadata<E, U64, Record<F, D>>,
 }
 
 impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
     /// Open the frontier, rejecting foreign and legacy records.
     pub(crate) async fn open(context: E, partition: String) -> Result<Self, Error<F>> {
-        // MMB can pin two nodes at each of the at most 64 heights.
-        let max_size = 128 * D::SIZE + 32;
         let metadata = Metadata::init(
             context,
             metadata::Config {
                 partition,
-                codec_config: ((0..=max_size).into(), ()),
+                codec_config: (),
             },
         )
         .await?;
-        if metadata.keys().any(|key| key != &KEY) {
-            return Err(Error::UnsupportedFormat);
-        }
-        let record = metadata
-            .get(&KEY)
-            .map(|bytes: &Vec<u8>| {
-                if !bytes.starts_with(&MAGIC) {
-                    return Err(Error::UnsupportedFormat);
-                }
-                Record::decode(Copying(bytes.as_slice()))
-                    .map_err(|err| Error::Journal(super::JournalError::Codec(err)))
-            })
-            .transpose()?;
-        Ok(Self { metadata, record })
+        Ok(Self { metadata })
     }
 
     /// The boundary of an active frontier, or [Error::IncompleteSync] during an import.
-    pub(crate) const fn active_boundary(&self) -> Result<Option<&Boundary<F, D>>, Error<F>> {
-        match &self.record {
+    pub(crate) fn active_boundary(&self) -> Result<Option<&Boundary<F, D>>, Error<F>> {
+        match self.metadata.get(&KEY) {
             Some(Record {
                 status: Status::Active,
                 boundary,
@@ -165,20 +149,19 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
 
     /// Whether the last completed import failed root verification.
     pub(crate) fn rejected(&self) -> bool {
-        self.record
-            .as_ref()
+        self.metadata
+            .get(&KEY)
             .is_some_and(|record| record.status == Status::Rejected)
     }
 
     /// The recorded boundary, whatever the status.
     pub(crate) fn boundary(&self) -> Option<&Boundary<F, D>> {
-        self.record.as_ref()?.boundary.as_ref()
+        self.metadata.get(&KEY)?.boundary.as_ref()
     }
 
     async fn store(mut self, record: Record<F, D>) -> Result<Self, Error<F>> {
-        self.metadata.put(KEY, record.encode().to_vec());
+        self.metadata.put(KEY, record);
         self.metadata = self.metadata.sync().await?;
-        self.record = Some(record);
         Ok(self)
     }
 
@@ -269,6 +252,7 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
 mod tests {
     use super::*;
     use crate::merkle::{mmb, mmr};
+    use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::sha256::Digest as D;
     use commonware_runtime::{
         Runner as _, Supervisor as _, deterministic,
@@ -464,27 +448,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_oversized_metadata() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
-                context.child("oversized"),
-                metadata::Config {
-                    partition: "frontier".into(),
-                    codec_config: ((0..=8192).into(), ()),
-                },
-            )
-            .await
-            .unwrap();
-            metadata.put(KEY, vec![0; 8192]);
-            drop(metadata.sync().await.unwrap());
-            assert!(matches!(
-                Frontier::<mmr::Family, _, D>::open(context.child("open"), "frontier".into()).await,
-                Err(Error::Metadata(metadata::Error::Corruption(_)))
-            ));
-        });
-    }
-
-    #[test]
     fn rejects_legacy_metadata() {
         deterministic::Runner::default().start(|context| async move {
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
@@ -500,7 +463,7 @@ mod tests {
             drop(metadata.sync().await.unwrap());
             assert!(matches!(
                 Frontier::<mmr::Family, _, D>::open(context.child("open"), "frontier".into()).await,
-                Err(Error::UnsupportedFormat)
+                Err(Error::Metadata(metadata::Error::Corruption(_)))
             ));
         });
     }

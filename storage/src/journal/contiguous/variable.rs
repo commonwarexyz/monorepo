@@ -233,47 +233,6 @@ struct ReplayState<'a, B: RBlob, V: Codec> {
     _marker: PhantomData<V>,
 }
 
-impl<B: RBlob, V: Codec> ReplayState<'_, B, V> {
-    /// Buffer the next frame and read its header. Returns the payload size and the offset of the
-    /// following frame.
-    #[commonware_macros::stability(ALPHA)]
-    async fn next_frame(&mut self) -> Result<(usize, u64), Error> {
-        // A short read before a frame header is corruption for replay: bounds and offsets say
-        // this item exists, so EOF here means the data blob is shorter than expected.
-        if !self.replay.ensure(MAX_U32_VARINT_SIZE).await? && self.replay.remaining() == 0 {
-            return Err(Error::Corruption(format!(
-                "data blob {} ended before position {}",
-                self.blob, self.pos
-            )));
-        }
-
-        // Keep the initial byte count for classifying a failed header read.
-        let before_remaining = self.replay.remaining();
-        let (item_size, varint_len) = self.replay.read_length().map_err(|err| {
-            if self.replay.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
-                Error::Corruption(format!(
-                    "incomplete frame header in data blob {} at offset {}",
-                    self.blob, self.offset
-                ))
-            } else {
-                err
-            }
-        })?;
-        if !self.replay.ensure(item_size).await? {
-            return Err(Error::Corruption(format!(
-                "incomplete frame in data blob {} at offset {}",
-                self.blob, self.offset
-            )));
-        }
-        let next_offset = self
-            .offset
-            .checked_add(varint_len as u64)
-            .and_then(|offset| offset.checked_add(item_size as u64))
-            .ok_or(Error::OffsetOverflow)?;
-        Ok((item_size, next_offset))
-    }
-}
-
 impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V> {
     type Item = V;
 
@@ -290,7 +249,6 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
                 return (!batch.is_empty()).then_some((batch, self));
             }
 
-            // Inline rather than `next_frame`: awaiting it per item slowed every replay ~20%.
             // A short read before a frame header is corruption for replay: bounds and offsets say
             // this item exists, so EOF here means the data blob is shorter than expected.
             match self.replay.ensure(MAX_U32_VARINT_SIZE).await {
@@ -425,9 +383,40 @@ impl<B: RBlob, V: CodecShared> authenticated::EncodedReader for EncodedReader<'_
                 self.states.pop_front();
                 continue;
             }
-            let (item_size, next_offset) = state.next_frame().await?;
+            // A short read before a frame header is corruption for replay: bounds and offsets
+            // say this item exists, so EOF here means the data blob is shorter than expected.
+            if !state.replay.ensure(MAX_U32_VARINT_SIZE).await? && state.replay.remaining() == 0 {
+                return Err(Error::Corruption(format!(
+                    "data blob {} ended before position {}",
+                    state.blob, state.pos
+                )));
+            }
+
+            // Keep the initial byte count for classifying a failed header read.
+            let before_remaining = state.replay.remaining();
+            let (item_size, varint_len) = state.replay.read_length().map_err(|err| {
+                if state.replay.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
+                    Error::Corruption(format!(
+                        "incomplete frame header in data blob {} at offset {}",
+                        state.blob, state.offset
+                    ))
+                } else {
+                    err
+                }
+            })?;
+            if !state.replay.ensure(item_size).await? {
+                return Err(Error::Corruption(format!(
+                    "incomplete frame in data blob {} at offset {}",
+                    state.blob, state.offset
+                )));
+            }
+            let next_offset = state
+                .offset
+                .checked_add(varint_len as u64)
+                .and_then(|offset| offset.checked_add(item_size as u64))
+                .ok_or(Error::OffsetOverflow)?;
             let start = bytes.len();
-            state.replay.append_to(bytes, item_size);
+            commonware_runtime::BufMut::put(bytes, Buf::take(&mut state.replay, item_size));
             if state.compressed {
                 let item = decompress(&bytes[start..])?;
                 bytes.truncate(start);
@@ -1957,15 +1946,16 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// Return the retained start that [Self::prune] would leave for `min_position`.
-    fn prune_target(&self, min_position: u64) -> Result<u64, Error> {
+    fn prune_target(&self, min_position: u64) -> u64 {
         // Calculate the blob that would contain min_position, capped to the tail (which is
         // guaranteed to exist by our invariant).
         let items_per_blob = self.items_per_blob.get();
         let target = position_to_blob(min_position.min(self.bounds.end), items_per_blob);
         if target <= self.blobs.oldest_blob_index() {
-            return Ok(self.bounds.start);
+            return self.bounds.start;
         }
-        blob_first_position(target, items_per_blob)
+        // Cannot overflow: the target blob starts at or before the journal's end.
+        target * items_per_blob
     }
 
     /// See [Journal::prune].
@@ -1973,7 +1963,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         mut self: Box<Self>,
         min_position: u64,
     ) -> Result<(Box<Self>, bool), Error> {
-        let new_boundary = self.prune_target(min_position)?;
+        let new_boundary = self.prune_target(min_position);
         if new_boundary <= self.bounds.start {
             return Ok((self, false));
         }
@@ -2689,7 +2679,7 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
         Self::prune(self, min_position).await
     }
 
-    fn prune_target(&self, min_position: u64) -> Result<u64, Error> {
+    fn prune_target(&self, min_position: u64) -> u64 {
         self.0.prune_target(min_position)
     }
 

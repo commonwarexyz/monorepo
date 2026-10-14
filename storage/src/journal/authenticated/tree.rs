@@ -5,7 +5,7 @@
 //! a bounded cache of regions. Invariants:
 //!
 //! - `mem` retains no nodes: its pruning boundary equals its size. It pins the peaks at its size,
-//!   peaks at earlier sizes until [Tree::flush], and the digests at the pruning boundary.
+//!   peaks at earlier sizes until [Tree::flush], and the pins at the tree's boundary.
 //! - Each resident level holds every born node of its height at or past the boundary position.
 //! - Batches only append, so a cached digest never changes.
 //! - At most one fill of a region runs at a time.
@@ -20,7 +20,6 @@ use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::metrics::GaugeExt as _;
 use commonware_utils::{
-    bitmap::BitMap,
     cache::Cache,
     sync::{AsyncMutex, RwLock},
 };
@@ -32,7 +31,7 @@ use std::{
     sync::Arc,
 };
 
-/// Default for [`Tree::hash_batch_bytes`].
+/// Encoded bytes after which a replay batch ends.
 const HASH_BATCH_BYTES: usize = 8 << 20;
 
 /// Locks that serialize fills, shared by regions whose indices are congruent modulo this count.
@@ -143,10 +142,8 @@ impl<D: Copy> Resident<D> {
     }
 }
 
-/// The number of nodes of each height born by `size`, a size of the structure. These are the
-/// first ordinals of each height. Counting under the peaks (a peak of height `p` covers `2^(p - h)`
-/// nodes of height `h`) never places a node that is not born, which can lie past the supported
-/// range.
+/// The number of nodes of each height born by `size`. Counting under the peaks never places an
+/// unborn node, which can lie past the supported range.
 fn born<F: Family>(size: Position<F>) -> [u64; u64::BITS as usize] {
     let mut born = [0; u64::BITS as usize];
     for (_, peak) in F::peaks(size) {
@@ -158,30 +155,8 @@ fn born<F: Family>(size: Position<F>) -> [u64; u64::BITS as usize] {
 }
 
 /// Digests below the resident height for one aligned region of leaves, in height-major slots:
-/// leaves, then height-one nodes, and so on.
-#[derive(Clone)]
-struct Region<D> {
-    digests: Box<[D]>,
-    valid: BitMap,
-}
-
-impl<D: Digest> Region<D> {
-    fn new(slots: usize) -> Self {
-        Self {
-            digests: vec![D::EMPTY; slots].into_boxed_slice(),
-            valid: BitMap::zeroes(slots as u64),
-        }
-    }
-
-    fn get(&self, slot: usize) -> Option<D> {
-        self.valid.get(slot as u64).then(|| self.digests[slot])
-    }
-
-    fn put(&mut self, slot: usize, digest: D) {
-        self.digests[slot] = digest;
-        self.valid.set(slot as u64, true);
-    }
-}
+/// leaves, then height-one nodes, and so on. A slot is empty until rebuilt.
+type Region<D> = Box<[Option<D>]>;
 
 type RegionCache<D> = Cache<u64, Arc<Region<D>>>;
 
@@ -207,7 +182,7 @@ impl<D: Digest> Regions<D> {
     }
 
     fn empty(&self) -> Region<D> {
-        Region::new((2usize << self.height) - 2)
+        vec![None; (2usize << self.height) - 2].into_boxed_slice()
     }
 
     /// The first slot of height `h`.
@@ -295,15 +270,13 @@ impl<F: Family> Encoded<F> {
 /// Volatile operation-tree state. Only the working frontier is shared with batch snapshots.
 pub(crate) struct Tree<F: Family, D: Digest, S: Strategy> {
     mem: Arc<Mem<F, D>>,
-    metrics: Metrics,
+    metrics: Box<Metrics>,
     boundary: Location<F>,
     pins: BTreeMap<Position<F>, D>,
     resident: Resident<D>,
     regions: Regions<D>,
     strategy: S,
     replay_buffer: NonZeroUsize,
-    /// Encoded bytes after which a replay batch ends.
-    hash_batch_bytes: usize,
 }
 
 impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
@@ -325,14 +298,13 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         let _ = metrics.cached_regions.try_set(0);
         let tree = Self {
             mem: Arc::new(mem),
-            metrics,
+            metrics: Box::new(metrics),
             boundary,
             pins: F::nodes_to_pin(boundary).zip(pins).collect(),
             resident: Resident::new(config.cache.resident_height),
             regions: Regions::new(config.cache.resident_height, capacity),
             strategy: config.strategy.clone(),
             replay_buffer: config.replay_buffer,
-            hash_batch_bytes: HASH_BATCH_BYTES,
         };
         tree.update_metrics();
         Ok(tree)
@@ -373,16 +345,14 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             .replay_encoded(*self.leaves()..*end, self.replay_buffer)
             .await?;
         let max_items = usize::try_from(batch_size.get()).unwrap_or(usize::MAX);
-        let max_bytes = self.hash_batch_bytes;
         let mut loc = self.leaves();
-        let mut next = Self::read_encoded(&mut reader, loc, max_items, max_bytes).await?;
+        let mut next = Self::read_encoded(&mut reader, loc, max_items, HASH_BATCH_BYTES).await?;
         // Read each batch while the previous one hashes.
         while !next.leaves.is_empty() {
             loc += next.leaves.len() as u64;
-            let encoded = std::mem::replace(&mut next, Encoded::new());
             (self, next) = futures::try_join!(
-                self.apply_encoded(hasher, encoded),
-                Self::read_encoded(&mut reader, loc, max_items, max_bytes),
+                self.apply_encoded(hasher, next),
+                Self::read_encoded(&mut reader, loc, max_items, HASH_BATCH_BYTES),
             )?;
         }
         if self.leaves() != end {
@@ -424,9 +394,6 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     where
         H: Hasher<F, Digest = D> + 'static,
     {
-        if encoded.leaves.is_empty() {
-            return Ok(self);
-        }
         self.metrics
             .replayed_leaves
             .inc_by(encoded.leaves.len() as u64);
@@ -566,7 +533,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         }
         let (region, slot) = self.regions.locate(pos, h);
         Ok(cache
-            .and_then(|cache| cache.get(&region)?.get(slot))
+            .and_then(|cache| cache.get(&region)?[slot])
             .map_or(Lookup::Fill { region, slot }, Lookup::Cached))
     }
 
@@ -623,7 +590,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         futures::pin_mut!(fills);
         while let Some((filled, wanted)) = fills.try_next().await? {
             for (index, slot) in wanted {
-                result[index] = filled.get(slot).ok_or(merkle::Error::DataCorrupted(
+                result[index] = filled[slot].ok_or(merkle::Error::DataCorrupted(
                     "incomplete regional reconstruction",
                 ))?;
             }
@@ -665,25 +632,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         if !self.available(pos) {
             return Ok(None);
         }
-        let lookup = self.lookup(self.regions.cache.read().as_deref(), pos)?;
-        let digest = match lookup {
-            Lookup::Resident(digest) => {
-                self.metrics.resident_hits.inc();
-                digest
-            }
-            Lookup::Cached(digest) => {
-                self.metrics.region_hits.inc();
-                digest
-            }
-            Lookup::Fill { region, slot } => self
-                .fill_region(journal, hasher, region, &[slot])
-                .await?
-                .get(slot)
-                .ok_or(merkle::Error::DataCorrupted(
-                    "incomplete regional reconstruction",
-                ))?,
-        };
-        Ok(Some(digest))
+        Ok(self.get_nodes(journal, hasher, &[pos]).await?.pop())
     }
 
     /// Rebuild every born, available node of region `index` that it lacks, unless another fill
@@ -702,7 +651,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         let _guard = self.regions.fill_lock(index).lock().await;
         let old = self.regions.get(index);
         if let Some(region) = &old
-            && wanted.iter().all(|&slot| region.get(slot).is_some())
+            && wanted.iter().all(|&slot| region[slot].is_some())
         {
             self.metrics.region_hits.inc_by(wanted.len() as u64);
             return Ok(Arc::clone(region));
@@ -726,12 +675,12 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 break;
             }
             let slot = i as usize;
-            if region.get(slot).is_some() {
+            if region[slot].is_some() {
                 continue;
             }
             let pos = F::location_to_position(loc);
             if let Some(digest) = self.mem.get_node(pos) {
-                region.put(slot, digest);
+                region[slot] = Some(digest);
             } else if pos >= boundary {
                 reads.push((loc, pos, slot));
             }
@@ -755,12 +704,11 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 })
                 .await;
             for (&(.., slot), digest) in reads.iter().zip(digests) {
-                region.put(slot, digest);
+                region[slot] = Some(digest);
             }
         }
 
-        // Hash parents bottom-up. A parent at or past the boundary has children that are either
-        // also past it or pinned. A pinned parent with both children present checks them, which
+        // Hash parents bottom-up. A pinned parent with both children present checks them, which
         // covers regions whose root is unborn.
         let mut parents = 0;
         let born = born(size);
@@ -768,7 +716,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             let (row, below) = (self.regions.row(h), self.regions.row(h - 1));
             for i in 0..width >> h {
                 let slot = row + i as usize;
-                if region.get(slot).is_some() {
+                if region[slot].is_some() {
                     continue;
                 }
                 if (base >> h) + i >= born[h as usize] {
@@ -779,8 +727,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 if pinned.is_none() && pos < boundary {
                     continue;
                 }
-                let left = region.get(below + 2 * i as usize);
-                let right = region.get(below + 2 * i as usize + 1);
+                let left = region[below + 2 * i as usize];
+                let right = region[below + 2 * i as usize + 1];
                 let digest = match (left, right, pinned) {
                     (Some(left), Some(right), pinned) => {
                         let digest = hasher.node_digest(pos, &left, &right);
@@ -793,7 +741,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                     (_, _, Some(pinned)) => pinned,
                     _ => return Err(merkle::Error::MissingNode(pos)),
                 };
-                region.put(slot, digest);
+                region[slot] = Some(digest);
             }
         }
         self.metrics.reconstructed_parents.inc_by(parents);
@@ -802,7 +750,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         if let Some(root) = self.resident.region_root(index) {
             let pos = F::subtree_root_position(Location::new(base), height);
             let below = self.regions.row(height - 1);
-            if let (Some(left), Some(right)) = (region.get(below), region.get(below + 1))
+            if let (Some(left), Some(right)) = (region[below], region[below + 1])
                 && hasher.node_digest(pos, &left, &right) != root
             {
                 return Err(merkle::Error::RootMismatch);
@@ -962,18 +910,14 @@ mod tests {
         mem
     }
 
-    fn config(
-        resident_height: u32,
-        region_cache_bytes: usize,
-        replay_buffer: usize,
-    ) -> Config<Sequential> {
+    fn config(resident_height: u32, region_cache_bytes: usize) -> Config<Sequential> {
         Config {
             metadata_partition: String::new(),
             cache: CacheConfig {
                 resident_height,
                 region_cache_bytes,
             },
-            replay_buffer: NonZeroUsize::new(replay_buffer).unwrap(),
+            replay_buffer: NonZeroUsize::MIN,
             strategy: Sequential,
         }
     }
@@ -987,14 +931,13 @@ mod tests {
         for height in 0..=8 {
             for budget in [0, 8 * 1024 * 1024] {
                 ops.bounds.start = 0;
-                let mut tree = Tree::<F, D, _>::new(
+                let tree = Tree::<F, D, _>::new(
                     Location::new(0),
                     Vec::new(),
-                    &config(height, budget, 73),
+                    &config(height, budget),
                     Metrics::new(&context),
                 )
                 .unwrap();
-                tree.hash_batch_bytes = 73;
                 let mut tree = tree
                     .replay(&ops, &hasher, Location::new(513), NZU64!(17))
                     .await
@@ -1070,9 +1013,8 @@ mod tests {
             let boundary = Location::<F>::new(*F::MAX_LEAVES - 40);
             let ops = Operations::range(*boundary..*F::MAX_LEAVES - 1);
             let pins = F::nodes_to_pin(boundary).map(|_| Sha256::fill(7)).collect();
-            let tree =
-                Tree::<F, D, _>::new(boundary, pins, &config(5, 0, 73), Metrics::new(&context))
-                    .unwrap();
+            let tree = Tree::<F, D, _>::new(boundary, pins, &config(5, 0), Metrics::new(&context))
+                .unwrap();
             let mut batch = tree.new_batch();
             for loc in ops.bounds.clone() {
                 batch = batch.add(&hasher, &ops.item(loc).encode());
@@ -1099,14 +1041,13 @@ mod tests {
     async fn demand_cache<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::BackwardFold);
         let ops = Operations::new(128);
-        let mut tree = Tree::<F, D, _>::new(
+        let tree = Tree::<F, D, _>::new(
             Location::new(0),
             Vec::new(),
-            &config(5, 2048, 31),
+            &config(5, 2048),
             Metrics::new(&context),
         )
         .unwrap();
-        tree.hash_batch_bytes = 31;
         let mut tree = tree
             .replay(&ops, &hasher, Location::new(128), NZU64!(7))
             .await
@@ -1183,7 +1124,7 @@ mod tests {
         let tree = Tree::<F, D, _>::new(
             Location::new(0),
             Vec::new(),
-            &config(5, 8 * 1024 * 1024, 31),
+            &config(5, 8 * 1024 * 1024),
             Metrics::new(&context),
         )
         .unwrap();
@@ -1247,7 +1188,7 @@ mod tests {
             let tree = Tree::<F, D, _>::new(
                 Location::new(0),
                 Vec::new(),
-                &config(5, 0, 31),
+                &config(5, 0),
                 Metrics::new(&context),
             )
             .unwrap()

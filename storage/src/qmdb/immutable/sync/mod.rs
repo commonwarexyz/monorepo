@@ -79,7 +79,6 @@ where
 
         let journal = authenticated::Journal::<_, _, _, _, S>::from_components(
             state,
-            &db_config.merkle_config,
             log,
             hasher,
             range.start(),
