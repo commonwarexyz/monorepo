@@ -14,7 +14,7 @@
 //!   |     +-- Config, metrics, stop/panic signals
 //!   |     +-- Network, Storage
 //!   |     +-- Pool (each pool worker's mailbox and run queue, global queue,
-//!   |     |       wake word, shutdown barrier)
+//!   |     |       idle state, shutdown barrier)
 //!   |     |       ^-- task headers (Weak)
 //!   |     +-- Tasks (every live ordinary task, for teardown)
 //!   |     `-- Workers <------------------------ ActiveWorker
@@ -164,8 +164,9 @@
 
 use super::{
     driver::Driver,
+    idle::Searcher,
     mailbox::{Cancel, Forward, Mailbox, Message},
-    pool::{MAX_WORKERS, Pool, Searcher, Threads},
+    pool::{MAX_WORKERS, Pool, Threads},
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
