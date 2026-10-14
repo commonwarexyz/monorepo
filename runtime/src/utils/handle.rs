@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_utils::{
     channel::oneshot,
-    sync::{Mutex, Once},
+    sync::{Exclusive, Mutex, Once},
 };
 use futures::{
     future::{Either, poll_fn, select},
@@ -35,6 +35,9 @@ where
 {
     state: HandleState<T>,
 }
+
+/// A boxed future that completes a handle.
+type BoxedCompletion<T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'static>>;
 
 /// Distinguishes handles that own spawned work from handles that only wait on completion.
 enum HandleState<T>
@@ -131,7 +134,8 @@ where
     T: Send + 'static,
 {
     Receiver(oneshot::Receiver<Result<T, Error>>),
-    Future(Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'static>>),
+    /// The future is polled only through exclusive access, so the handle stays `Sync`.
+    Future(Exclusive<BoxedCompletion<T>>),
 }
 
 impl<T> Unpin for Completion<T> where T: Send + 'static {}
@@ -147,7 +151,7 @@ where
             Self::Receiver(receiver) => Pin::new(receiver)
                 .poll(cx)
                 .map(|result| result.unwrap_or(Err(Error::Closed))),
-            Self::Future(future) => future.as_mut().poll(cx),
+            Self::Future(future) => future.get_mut().as_mut().poll(cx),
         }
     }
 }
@@ -263,7 +267,10 @@ where
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Self {
             state: HandleState::Completion {
-                future: Abortable::new(Completion::Future(Box::pin(future)), abort_registration),
+                future: Abortable::new(
+                    Completion::Future(Exclusive::new(Box::pin(future))),
+                    abort_registration,
+                ),
                 abort_handle,
             },
         }
