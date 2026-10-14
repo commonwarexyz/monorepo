@@ -469,6 +469,7 @@ impl Pool {
     /// moved any runnable. The caller holds a search count and supplies worker
     /// `index`'s empty run queue, with `start` inside the pool. A pending claim
     /// can leave insufficient room even in an empty destination.
+    #[inline]
     pub fn steal(&self, index: u32, start: usize, ready: &mut Ready) -> bool {
         let workers = self.workers();
         (0..workers)
@@ -492,6 +493,7 @@ impl Pool {
     /// Whether a run queue other than worker `index`'s holds an unclaimed
     /// backlog that a steal would take from. This is a snapshot: another
     /// worker can pop or claim the backlog before a subsequent steal.
+    #[inline]
     pub fn has_stealable(&self, index: u32) -> bool {
         self.queues
             .iter()
