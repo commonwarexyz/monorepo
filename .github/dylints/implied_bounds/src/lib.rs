@@ -277,10 +277,11 @@ fn report<'tcx>(
 ) {
     let tcx = cx.tcx;
     // Removing a bound that carries an associated item constraint (`Trait<Assoc = X>`,
-    // `Fn(A) -> B`) also drops the constraint, whose clause lies within its span.
+    // `Trait<Assoc: Send>`, `Fn(A) -> B`) also drops clauses within its span.
     let constrained = |span: Span| {
         own.iter().any(|&(c, s)| {
-            matches!(c.kind().skip_binder(), ty::ClauseKind::Projection(_)) && span.contains(s)
+            span.contains(s)
+                && (span != s || matches!(c.kind().skip_binder(), ty::ClauseKind::Projection(_)))
         })
     };
     let trait_method = item.is_some_and(|item| {
