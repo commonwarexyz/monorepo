@@ -115,22 +115,22 @@
 //! returned this way hands the duty on: it fences and wakes a parked worker, as
 //! a kick does. A parking worker publishes its idle bit, returns its count
 //! without handing it on, fences, and looks once more. A global runnable sends
-//! it back to work. A stealable backlog in another run queue sends it to
-//! search, unless another worker holds a count, whose last return will find the
-//! backlog or wake a parked worker, this one included, so the parker waits. It
-//! waits as well when a thief's claim holds room its own run queue needs, since
-//! that thief holds a count. Every exit of the drive loop, unwinding included,
-//! withdraws a live publication and returns a held count before the worker
-//! destroys its root.
+//! it back to work. A held count makes it wait without reading the other run
+//! queues, since that count's last return will find a backlog or wake a parked
+//! worker, this one included. Otherwise a stealable backlog in another run
+//! queue sends it to search. It waits as well when a thief's claim holds room
+//! its own run queue needs, since that thief holds a count. Every exit of the
+//! drive loop, unwinding included, withdraws a live publication and returns a
+//! held count before the worker destroys its root.
 //!
 //! ```text
 //! push or kick                           parking worker i
 //!   publish work (or hand on a search)     set bit i, return a held count
 //!   fence(SeqCst)                          fence(SeqCst)
 //!   kick: a count is held, return          global nonempty: withdraw, run
-//!   no idle bit: return                    stealable backlog and room:
-//!   reserve a count                          take count if zero: withdraw, search
-//!     kick: only if still zero               count already held: wait
+//!   no idle bit: return                    no room, or a count held: wait
+//!   reserve a count                        stealable backlog: take the count
+//!     kick: only if still zero               if zero, withdraw, search
 //!   claim lowest bit                       otherwise: wait
 //!     success: signal its worker           wait: spin, or arm and attempt a wait,
 //!     failure: return the reserved count     then withdraw, keeping a claim's count
@@ -968,9 +968,10 @@ impl<'a> Searcher<'a> {
     }
 
     /// Publish the worker idle, return a held count, and look once more for
-    /// work: in the global queue, then in the other run queues while its own
-    /// has room to steal into. `ready` must belong to this worker. Panics if
-    /// already published or if `ready` is not empty.
+    /// work: in the global queue, then, while its own run queue has room to
+    /// steal into and no search count is held, in the other run queues.
+    /// `ready` must belong to this worker. Panics if already published or if
+    /// `ready` is not empty.
     ///
     /// [`Park::Wait`] leaves a live publication, which the caller ends through
     /// [`Self::finish_park`] after its wait, even if that wait does not block.
@@ -1010,19 +1011,27 @@ impl<'a> Searcher<'a> {
         // A steal goes only into a run queue with half of it free, and this one
         // can have less while a thief holds a claim on it, whose count then
         // covers the backlog.
-        if pool.workers() == 1 || ready.room() < HALF || !pool.has_stealable(self.index) {
+        if pool.workers() == 1 || ready.room() < HALF {
             return Park::Wait;
         }
 
         // A worker holding a count searches, or hands the duty on when it
         // returns the last count. A fence follows that return, a kick's, a
         // failed wake's, or the returning worker's own park's, and pairs with
-        // the fence above, so the backlog is found or a parked worker, this
-        // one included, is woken. Otherwise this worker takes the count and
-        // searches. The load and the exchange are relaxed: a nonzero value
-        // delegates through that later fence, and a count taken here is this
-        // worker's own, which carries nothing to another thread.
-        if pool.wake.searching.load(Ordering::Relaxed) != 0
+        // the fence above, so a backlog is found or a parked worker, this one
+        // included, is woken. A held count therefore settles the look without
+        // reading the other run queues. The load is relaxed: a nonzero value
+        // delegates through that later fence.
+        if pool.wake.searching.load(Ordering::Relaxed) != 0 {
+            return Park::Wait;
+        }
+
+        // Otherwise this worker takes the count and searches, if another run
+        // queue holds a backlog. A count taken here is this worker's own, which
+        // carries nothing to another thread, so the exchange is relaxed, and
+        // its failure means a count appeared since the load, which delegates
+        // the same way.
+        if !pool.has_stealable(self.index)
             || pool
                 .wake
                 .searching
