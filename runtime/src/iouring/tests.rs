@@ -5,8 +5,8 @@
 use super::{
     super::{
         driver::tests::fail_after_completion,
+        idle::tests::{WakePoint, on_wake_point},
         operation::Operation,
-        pool::tests::{WakePoint, on_wake_point},
         queue::CAPACITY,
         request::{RecvRequest, Request},
         task::{Task, tests::cancelled},
@@ -58,7 +58,7 @@ thread_local! {
 }
 
 /// Keeps a runner's pool past the runner, so that dropping it once the runner
-/// has returned or unwound runs the pool's checks of its wake word outside any
+/// has returned or unwound runs the checks of the pool's idle state outside any
 /// unwind.
 #[derive(Clone, Default)]
 struct KeptPool(Arc<Mutex<Option<Arc<Pool>>>>);
@@ -422,7 +422,7 @@ pub fn before_overflow(pool: &Pool) {
 fn is_waiting(pool: &Pool, index: u32) -> bool {
     // The two waiting bits of the wake state.
     const WAITING: u32 = 0b11;
-    pool.is_idle(index) && state_bits(&pool.mailbox(index).waker) & WAITING != 0
+    pool.idle().is_idle(index) && state_bits(&pool.mailbox(index).waker) & WAITING != 0
 }
 
 /// Block until every worker of `pool` waits for a wake, published idle with
@@ -435,7 +435,8 @@ fn is_waiting(pool: &Pool, index: u32) -> bool {
 /// returned, leaving each idle.
 fn wait_until_every_worker_waits(pool: &Pool) {
     let workers = pool.workers() as u32;
-    let parked = || (0..workers).all(|index| pool.is_idle(index)) && pool.search_count() == 0;
+    let parked =
+        || (0..workers).all(|index| pool.idle().is_idle(index)) && pool.idle().search_count() == 0;
     let deadline = Instant::now() + TEST_TIMEOUT;
     while !(parked() && (0..workers).all(|index| is_waiting(pool, index)) && parked()) {
         assert!(Instant::now() < deadline, "a worker never waited");
@@ -750,7 +751,7 @@ impl Drop for WakeOnDrop {
 /// zero unwind from `point` of its next park, with two idle tasks its root's
 /// destructor wakes into worker zero's run queue. Returns whether another
 /// worker ran one of them before the destructor's bounded wait ended, after
-/// checking the runner's failure and the pool's wake word.
+/// checking the runner's failure and the pool's idle state.
 fn root_destructor_after_an_unwind_at(point: ParkPoint) -> bool {
     let progressed = Arc::new(AtomicBool::new(false));
     let kept = KeptPool::default();
@@ -830,7 +831,7 @@ fn catch_up_callback_after_the_count_returns(catch_up: CatchUp) {
             .await;
         });
         spin_until(
-            || is_waiting(&pool, 1) && is_waiting(&pool, 2) && pool.search_count() == 0,
+            || is_waiting(&pool, 1) && is_waiting(&pool, 2) && pool.idle().search_count() == 0,
             "workers one and two never parked again",
         );
 
@@ -863,7 +864,7 @@ fn catch_up_callback_after_the_count_returns(catch_up: CatchUp) {
                 on_next_park(&pool, 1, ParkPoint::AfterMessages, {
                     let pool = pool.clone();
                     move || {
-                        assert_eq!(pool.search_count(), 1, "worker one holds no count");
+                        assert_eq!(pool.idle().search_count(), 1, "worker one holds no count");
                         register();
                         if let CatchUp::GoRound = catch_up {
                             assert!(pool.mailbox(1).send(Message::WakeRoot).is_ok());
@@ -883,7 +884,7 @@ fn catch_up_callback_after_the_count_returns(catch_up: CatchUp) {
                     let searching = searching.clone();
                     move || {
                         spin_until(
-                            || pool.search_count() == 1 && is_waiting(&pool, 2),
+                            || pool.idle().search_count() == 1 && is_waiting(&pool, 2),
                             "worker two never parked again",
                         );
                         searching.store(true, Ordering::SeqCst);
@@ -3479,7 +3480,7 @@ fn test_shutdown_destroys_tasks_on_a_worker() {
 
 /// A pool whose third worker fails to launch or to start fails the runner
 /// without building its root, releases the shared services and the workers
-/// that started, and leaves no task cell and a clean wake word.
+/// that started, and leaves no task cell and a clean idle state.
 #[test]
 fn test_partial_startup_failure_releases_all_workers() {
     for launch in [false, true] {
@@ -3535,7 +3536,7 @@ fn test_network_and_storage_on_multiple_workers() {
 
 /// A task panic on another pool worker fails the runner unless task panics
 /// are caught, and then only the task's handle sees it while the pool runs on.
-/// Either way the pool frees every task cell and leaves a clean wake word.
+/// Either way the pool frees every task cell and leaves a clean idle state.
 #[test]
 fn test_remote_task_panic_respects_policy() {
     for catch in [false, true] {
@@ -3610,7 +3611,7 @@ fn test_shutdown_drains_queued_writes_on_every_ring() {
 
 /// A driver failure on another pool worker interrupts the root, before its
 /// code resumes, even while task panics are caught. The pool still frees
-/// every task cell and leaves a clean wake word.
+/// every task cell and leaves a clean idle state.
 #[test]
 fn test_remote_driver_failure_interrupts_root_even_when_task_panics_are_caught() {
     let (socket, mut peer) = UnixStream::pair().unwrap();
@@ -3877,7 +3878,7 @@ fn test_push_racing_a_park_reaches_the_worker() {
                     move || {
                         thread::spawn(move || {
                             context.spawn(move |_| async move {
-                                idle.store(pool.is_idle(1), Ordering::SeqCst);
+                                idle.store(pool.idle().is_idle(1), Ordering::SeqCst);
                                 *started.lock() = Some(thread::current().id());
                             });
                         })
@@ -4390,9 +4391,9 @@ fn test_unwind_before_shutdown_stops_the_pool() {
 
 /// A worker that unwinds while published as idle, here from a hook just before
 /// it waits, withdraws its idle bit on the way out, so the runner fails with
-/// that panic and the pool's wake word is clean.
+/// that panic and the pool's idle state is clean.
 #[test]
-fn test_unwind_while_published_restores_the_wake_word() {
+fn test_unwind_while_published_restores_the_idle_state() {
     let kept = KeptPool::default();
     let keeper = kept.clone();
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -4681,7 +4682,7 @@ fn test_overflow_racing_a_thief_and_shutdown_accounts_for_every_runnable() {
     assert!(ran.load(Ordering::SeqCst) >= 1);
 
     // Every task cell was freed, so no runnable leaked in a run queue or a
-    // batch, and dropping the pool checks its wake word.
+    // batch, and dropping the pool checks its idle state.
     check_pool(retained.lock().take().unwrap());
 }
 
@@ -4750,7 +4751,10 @@ fn test_callback_waiting_for_a_stolen_task_makes_progress() {
             spin_until(|| Instant::now() >= expiry, "the timer never expired");
             spin_until(|| is_waiting(&pool, 2), "worker two never parked");
             kick.store(true, Ordering::SeqCst);
-            spin_until(|| !pool.is_idle(1), "the kick never claimed worker one");
+            spin_until(
+                || !pool.idle().is_idle(1),
+                "the kick never claimed worker one",
+            );
         });
     }
 
@@ -4894,7 +4898,10 @@ fn test_root_poll_returns_an_inherited_count() {
                 })
                 .join()
                 .unwrap();
-                assert!(!pool.is_idle(0), "the first push did not claim worker zero");
+                assert!(
+                    !pool.idle().is_idle(0),
+                    "the first push did not claim worker zero"
+                );
                 spin_until(
                     || foreign_ran.load(Ordering::SeqCst) == 2,
                     "worker one never ran the foreign spawns",
@@ -4980,7 +4987,11 @@ fn test_failed_search_after_the_last_look_publishes_again() {
             let drain = drain.clone();
             let ran = backlog.ran.clone();
             move || {
-                assert_eq!(pool.search_count(), 1, "a failed search returned its count");
+                assert_eq!(
+                    pool.idle().search_count(),
+                    1,
+                    "a failed search returned its count"
+                );
                 on_wake_point(WakePoint::BeforeParkSearch, move || {
                     drain.store(true, Ordering::SeqCst);
                     spin_until(
@@ -4999,8 +5010,12 @@ fn test_failed_search_after_the_last_look_publishes_again() {
             let pool = pool.clone();
             let checked = checked.clone();
             move || {
-                assert!(pool.is_idle(1), "worker one waits unpublished");
-                assert_eq!(pool.search_count(), 0, "worker one waits holding a count");
+                assert!(pool.idle().is_idle(1), "worker one waits unpublished");
+                assert_eq!(
+                    pool.idle().search_count(),
+                    0,
+                    "worker one waits holding a count"
+                );
                 checked.store(true, Ordering::SeqCst);
             }
         });
