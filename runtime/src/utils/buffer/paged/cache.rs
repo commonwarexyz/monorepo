@@ -1,24 +1,63 @@
 //! A page cache for caching _logical_ pages of [Blob] data in memory. The cache is unaware of the
 //! physical page format used by the blob, which is left to the blob implementation.
+//!
+//! # Shared Reads
+//!
+//! Concurrent readers often miss the same pages, for example a prefetch and the read it serves.
+//! Rather than read such a page again, a reader joins the read of it already in flight.
+//!
+//! A page fault reads its page with a standalone fetch: a shared future that every reader waiting
+//! on the page drives. A batched miss ([CacheRef::read_after_misses]) reads the pages nobody is
+//! reading with a batch: one [Blob::read_many] call, run by a shared future (the batch's driver),
+//! that validates and caches each page as it arrives and delivers it to the readers waiting on
+//! it. Caching and delivering a page is publishing it. The read that started a batch receives
+//! every page. Other readers join it by selecting the unpublished pages they need. Each holds a
+//! subscription: a channel for its pages and a handle on the driver, so the batch progresses
+//! while any of its readers is polled and never waits on a slow one. The read that started a
+//! batch also awaits the driver's end, so a read error after the last page still fails it.
+//!
+//! A reader joins every fetch and batch it needs before driving any of them. It examines its
+//! misses over several holds of the cache's write lock, letting waiting threads take the lock
+//! between holds, and registers its batch in the last hold, so a reader that misses one of those
+//! pages in between reads it too. A batch publishes a page, or fails, only under the cache's write
+//! lock, so a reader that finds a page unpublished can select it in the same hold.
+//!
+//! The cache registers batches weakly, so it never keeps a driver alive. A batch retires when its
+//! driver ends or is dropped. Retiring only queues the batch, and the cache unregisters it at its
+//! next lookup, so dropping a driver never takes the cache lock.
+//!
+//! Lock order: the cache lock, then a batch's state lock. The retirement queue's lock is
+//! innermost.
+//!
+//! Failures are shared like pages: a page failing validation fails every reader waiting on it, and
+//! a failed read fails the batch's starter and every reader still waiting on one of its pages.
+//! None of them retries.
 
 use super::{
     CHECKSUM_SIZE, get_page_with_checksum_from_blob, physical_page, validate_physical_page,
 };
 use crate::{BLOB_PAGE_SIZE, Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
-use ahash::AHashMap;
-use commonware_utils::{Widen, cache, sync::RwLock};
+use ahash::{AHashMap, AHashSet};
+use commonware_utils::{
+    Widen, cache,
+    channel::mpsc,
+    sync::{Mutex, RwLock, RwLockWriteGuard},
+};
 use futures::{
-    FutureExt, StreamExt as _,
-    future::{BoxFuture, Shared},
+    FutureExt, Stream, TryStreamExt as _,
+    future::{BoxFuture, Shared, WeakShared},
     stream::FuturesUnordered,
 };
 use std::{
     collections::hash_map::Entry,
+    future::poll_fn,
     num::{NonZeroU16, NonZeroUsize},
+    pin::{Pin, pin},
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicU64, Ordering},
     },
+    task::{Context, Poll, Waker, ready},
 };
 use tracing::{debug, error, trace};
 
@@ -42,6 +81,8 @@ struct PageFetchEntry {
 }
 
 /// Removes a stale in-flight page fetch when the last unresolved waiter is dropped.
+///
+/// Dropping an armed guard takes the cache lock, so it must not happen while the lock is held.
 struct PageFetchGuard<'a> {
     cache: &'a RwLock<Cache>,
     key: (u64, u64),
@@ -61,6 +102,15 @@ impl<'a> PageFetchGuard<'a> {
 
     const fn disarm(&mut self) {
         self.armed = false;
+    }
+
+    /// Await the shared fetch. The future itself logs failures, caches the resolved page, and
+    /// removes the in-flight marker before it returns, so waiters only need cancellation cleanup
+    /// while the fetch is still unresolved.
+    async fn wait(mut self) -> Result<IoBuf, Error> {
+        let result = self.fetch.clone().await;
+        self.disarm();
+        result
     }
 }
 
@@ -89,6 +139,450 @@ impl Drop for PageFetchGuard<'_> {
         } else {
             current.get_mut().waiters -= 1;
         }
+    }
+}
+
+/// The most missing pages a batched read examines per hold of the cache's write lock.
+const MISSES_PER_LOCK: usize = 64;
+
+/// The read of a [Batch]. It fails if the read fails or does not yield every page exactly once.
+type BatchFuture = BoxFuture<'static, Result<(), Error>>;
+
+/// A handle to a [BatchFuture] that any of the batch's readers can drive.
+type BatchDriver = Shared<BatchFuture>;
+
+/// A page delivered to a subscription: its tag, and its logical bytes or why it failed validation.
+type Delivery = (usize, Result<IoBuf, Error>);
+
+/// Where a page goes for one joiner: the tag the joiner selected it with, and the sender that
+/// delivers it.
+type Joiner = (usize, mpsc::UnboundedSender<Delivery>);
+
+/// What a [Batch] has yet to publish, and who joined it. `joiners` changes only while the cache
+/// lock is also held, so a reader that finds a page unpublished can select it in the same hold.
+struct BatchState {
+    /// The joiners of each page not yet published. `None` once the page is published, or the
+    /// batch fails.
+    joiners: Box<[Option<Vec<Joiner>>]>,
+    /// The waker the driver polls the batch's read with, once it has. Waking it wakes every reader
+    /// waiting on the driver.
+    notifier: Option<Waker>,
+    /// Why the batch failed, once it has.
+    error: Option<Error>,
+}
+
+/// An in-flight read of some pages of one blob with one [Blob::read_many] call.
+struct Batch {
+    blob_id: u64,
+    /// The page numbers, strictly increasing. A page's index in this list identifies it.
+    pages: Box<[u64]>,
+    state: Mutex<BatchState>,
+}
+
+impl Batch {
+    fn new(blob_id: u64, pages: Vec<u64>) -> Self {
+        let state = BatchState {
+            joiners: vec![Some(Vec::new()); pages.len()].into(),
+            notifier: None,
+            error: None,
+        };
+        Self {
+            blob_id,
+            pages: pages.into(),
+            state: Mutex::new(state),
+        }
+    }
+
+    /// Read the batch's pages from `physical` (their physical ranges in `blob`), publishing each
+    /// as it arrives to its joiners, and to the starter through `to_starter`, tagged with its
+    /// index. A page failing validation is published as failed while the others continue. A read
+    /// error, or a read that does not yield every page exactly once, fails the batch.
+    ///
+    /// The future owns `to_starter` and `_retire` from its creation, so the starter's channel
+    /// closes, and the batch retires, once the future ends or is dropped, polled or not.
+    async fn read<B: Blob>(
+        self: Arc<Self>,
+        cache: Arc<RwLock<Cache>>,
+        blob: Arc<B>,
+        physical: Vec<(u64, usize)>,
+        page_size: NonZeroU16,
+        to_starter: mpsc::UnboundedSender<Delivery>,
+        _retire: RetireGuard,
+    ) -> Result<(), Error> {
+        let notifier = poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
+        self.state.lock().notifier = Some(notifier);
+        let result = async {
+            // CacheRef retains the pages, so the source pages need not remain in the OS page
+            // cache.
+            let mut stream = pin!(blob.read_many(&physical, ReadOptions::DONT_CACHE));
+            while let Some((index, bufs)) = stream.try_next().await? {
+                // Each page is yielded exactly once (see Blob::read_many).
+                let Some(&page_num) = self.pages.get(index) else {
+                    return Err(Error::ReadFailed);
+                };
+                let page = validate_physical_page(bufs.coalesce())
+                    .and_then(|(page, _)| cacheable_page(page, page_num, page_size))
+                    .inspect_err(|err| error!(page_num, ?err, "Batched page failed validation"));
+                self.publish(&cache, index, &page)?;
+                let _ = to_starter.send((index, page));
+            }
+            if self.state.lock().joiners.iter().any(Option::is_some) {
+                return Err(Error::ReadFailed);
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(err) = &result {
+            self.fail(&cache, err);
+        }
+        result
+    }
+
+    /// Publish the outcome of the page at `index`: cache the page if it is valid, and deliver it to
+    /// the page's joiners. Fails if the page was already published.
+    fn publish(
+        &self,
+        cache: &RwLock<Cache>,
+        index: usize,
+        result: &Result<IoBuf, Error>,
+    ) -> Result<(), Error> {
+        let joiners = {
+            let mut cache = cache.write();
+            let Some(joiners) = self.state.lock().joiners[index].take() else {
+                return Err(Error::ReadFailed);
+            };
+            if let Ok(page) = result {
+                cache.cache(self.blob_id, page.as_ref(), self.pages[index]);
+            }
+            joiners
+        };
+        for (tag, sender) in joiners {
+            let _ = sender.send((tag, result.clone()));
+        }
+        Ok(())
+    }
+
+    /// Fail the batch: record why, and take its joiners, under the cache lock so no reader selects
+    /// a page the batch will never publish. Dropping the joiners' senders after the lock is
+    /// released closes each of their channels once drained.
+    fn fail(&self, cache: &RwLock<Cache>, err: &Error) {
+        error!(blob_id = self.blob_id, ?err, "Batched page read failed");
+        let joiners: Vec<_> = {
+            let _cache = cache.write();
+            let mut state = self.state.lock();
+            state.error = Some(err.clone());
+            state.joiners.iter_mut().filter_map(Option::take).collect()
+        };
+        drop(joiners);
+    }
+}
+
+/// Batches to unregister, with their blobs.
+type Retired = Arc<Mutex<Vec<(u64, Weak<Batch>)>>>;
+
+/// Queues its [Batch] for [BatchRegistry] to unregister when dropped. Dropping it takes only the
+/// queue's lock, never the cache lock.
+struct RetireGuard {
+    retired: Retired,
+    blob_id: u64,
+    batch: Weak<Batch>,
+}
+
+impl Drop for RetireGuard {
+    fn drop(&mut self) {
+        let batch = std::mem::take(&mut self.batch);
+        self.retired.lock().push((self.blob_id, batch));
+    }
+}
+
+/// A [Batch] and its driver, as registered.
+type Registration = (Weak<Batch>, WeakShared<BatchFuture>);
+
+/// The cache's batches, by blob, so readers that miss a page a batch has yet to publish join it.
+///
+/// Batches are registered weakly, so the registry never keeps a driver alive. A batch retires when
+/// its driver ends or is dropped: the batch's read drops its [RetireGuard], which queues the
+/// batch, and [Self::unregister_retired] removes it.
+#[derive(Default)]
+struct BatchRegistry {
+    by_blob: AHashMap<u64, Vec<Registration>>,
+    retired: Retired,
+}
+
+impl BatchRegistry {
+    /// A batch of `blob_id` that has yet to publish page `page_num`, with the page's index in it
+    /// and a handle that drives it.
+    fn find_unpublished(
+        &self,
+        blob_id: u64,
+        page_num: u64,
+    ) -> Option<(Arc<Batch>, usize, BatchDriver)> {
+        self.by_blob
+            .get(&blob_id)?
+            .iter()
+            .find_map(|(batch, driver)| {
+                let batch = batch.upgrade()?;
+                let index = batch.pages.binary_search(&page_num).ok();
+                let index = index.filter(|&index| batch.state.lock().joiners[index].is_some())?;
+                // A batch whose driver was dropped since the last unregistration never publishes.
+                Some((batch, index, driver.upgrade()?))
+            })
+    }
+
+    /// A guard that retires `batch` when dropped, for its read to own.
+    fn retire_on_drop(&self, batch: &Arc<Batch>) -> RetireGuard {
+        RetireGuard {
+            retired: self.retired.clone(),
+            blob_id: batch.blob_id,
+            batch: Arc::downgrade(batch),
+        }
+    }
+
+    /// Register `batch`, read by the unpolled `driver`.
+    fn register(&mut self, batch: &Arc<Batch>, driver: &BatchDriver) {
+        let driver = driver
+            .downgrade()
+            .expect("an unpolled driver can be downgraded");
+        self.by_blob
+            .entry(batch.blob_id)
+            .or_default()
+            .push((Arc::downgrade(batch), driver));
+    }
+
+    /// Unregister the batches retired since the last call, scanning each affected blob once.
+    fn unregister_retired(&mut self) {
+        let mut retired = std::mem::take(&mut *self.retired.lock());
+        if retired.is_empty() {
+            return;
+        }
+
+        // A registered batch's allocation outlives it while the registry holds its weak
+        // reference, so no other batch can share its address.
+        let batches: AHashSet<*const Batch> =
+            retired.iter().map(|(_, batch)| batch.as_ptr()).collect();
+        retired.sort_unstable_by_key(|(blob_id, _)| *blob_id);
+        retired.dedup_by_key(|(blob_id, _)| *blob_id);
+        for (blob_id, _) in retired {
+            if let Entry::Occupied(mut registered) = self.by_blob.entry(blob_id) {
+                registered
+                    .get_mut()
+                    .retain(|(batch, _)| !batches.contains(&batch.as_ptr()));
+                if registered.get().is_empty() {
+                    registered.remove();
+                }
+            }
+        }
+    }
+}
+
+/// A reader's handle on a batch's driver.
+///
+/// When the batch's read is woken, the driver wakes the readers waiting on it at that moment and
+/// relies on one of them to poll again. A reader that instead stops driving, because it has its
+/// pages or is dropped, may have taken that wake, so dropping a handle that has driven the batch
+/// wakes the readers still waiting on it.
+struct DriverHandle {
+    batch: Arc<Batch>,
+    driver: BatchDriver,
+    polled: bool,
+}
+
+impl DriverHandle {
+    const fn new(batch: Arc<Batch>, driver: BatchDriver) -> Self {
+        Self {
+            batch,
+            driver,
+            polled: false,
+        }
+    }
+
+    fn drive(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        self.polled = true;
+        self.driver.poll_unpin(cx)
+    }
+}
+
+impl Drop for DriverHandle {
+    fn drop(&mut self) {
+        if !self.polled {
+            return;
+        }
+        let notifier = self.batch.state.lock().notifier.clone();
+        if let Some(notifier) = notifier {
+            notifier.wake();
+        }
+    }
+}
+
+/// A read's interest in some pages of a [Batch]. Yields each selected page with its tag as the
+/// batch publishes it, or an error if the page fails validation or the batch fails first.
+struct Subscription {
+    batch: Arc<Batch>,
+    /// The sender a joiner's selections clone, dropped at its first poll, so the channel closes
+    /// once the batch has delivered or dropped every selection. The starter has none: the batch's
+    /// read owns its sender.
+    sender: Option<mpsc::UnboundedSender<Delivery>>,
+    receiver: mpsc::UnboundedReceiver<Delivery>,
+    /// Count of selected pages not yet delivered.
+    remaining: usize,
+    /// A handle on the batch's driver, released once every selected page is delivered.
+    driver: Option<DriverHandle>,
+}
+
+impl Subscription {
+    /// Subscribe the read that started `batch` to every page, which `receiver` delivers tagged
+    /// with the page's index.
+    fn starting(
+        batch: Arc<Batch>,
+        driver: BatchDriver,
+        receiver: mpsc::UnboundedReceiver<Delivery>,
+    ) -> Self {
+        Self {
+            remaining: batch.pages.len(),
+            driver: Some(DriverHandle::new(batch.clone(), driver)),
+            batch,
+            sender: None,
+            receiver,
+        }
+    }
+
+    /// Subscribe a joiner to `batch`, selecting no pages yet.
+    fn joining(batch: Arc<Batch>, driver: BatchDriver) -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        Self {
+            driver: Some(DriverHandle::new(batch.clone(), driver)),
+            batch,
+            sender: Some(sender),
+            receiver,
+            remaining: 0,
+        }
+    }
+
+    /// Select the page at `index` with `tag`. Call with the cache lock held, after finding the
+    /// page unpublished, and before the first poll.
+    fn select(&mut self, index: usize, tag: usize) {
+        let sender = self.sender.as_ref().expect("joiners select before polling");
+        let mut state = self.batch.state.lock();
+        let joiners = state.joiners[index]
+            .as_mut()
+            .expect("only unpublished pages are selected");
+
+        // Prune the joiners of dropped subscriptions only when the list is full, then leave as
+        // much room as there are live joiners, so each selection costs amortized constant time.
+        if joiners.len() == joiners.capacity() {
+            joiners.retain(|(_, sender)| !sender.is_closed());
+            joiners.reserve(joiners.len());
+        }
+        joiners.push((tag, sender.clone()));
+        self.remaining += 1;
+    }
+}
+
+impl Stream for Subscription {
+    type Item = Result<(usize, IoBuf), Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        this.sender = None;
+        if this.remaining == 0 {
+            return Poll::Ready(None);
+        }
+
+        // Take a queued delivery, or else drive the batch and look again: driving may deliver one
+        // of this subscription's pages while others stay pending. The first look uses a no-op
+        // waker, so a delivery made while driving does not wake this task again. A completed
+        // driver is never polled again.
+        let received = match this
+            .receiver
+            .poll_recv(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(received) => received,
+            Poll::Pending => {
+                let driver = this.driver.as_mut();
+                if driver.is_some_and(|driver| driver.drive(cx).is_ready()) {
+                    this.driver = None;
+                }
+                ready!(this.receiver.poll_recv(cx))
+            }
+        };
+
+        // A closed channel means the batch failed before delivering every selected page.
+        let Some((tag, result)) = received else {
+            this.remaining = 0;
+            let error = this.batch.state.lock().error.clone();
+            return Poll::Ready(Some(Err(error.unwrap_or(Error::ReadFailed))));
+        };
+        this.remaining -= 1;
+        if this.remaining == 0 {
+            this.driver = None;
+        }
+        Poll::Ready(Some(result.map(|page| (tag, page))))
+    }
+}
+
+/// The pieces of a read's buffers that one page fills, each `(page number, offset in page,
+/// piece)`.
+type Pieces<'a, 'b> = &'a mut [(u64, usize, &'b mut [u8])];
+
+/// A batched read's share of a [Batch]: a subscription to the pages it needs, and the pieces each
+/// fills.
+struct BatchRead<'a, 'b> {
+    subscription: Subscription,
+    /// The pieces each selected page fills, by tag.
+    pieces: Vec<Pieces<'a, 'b>>,
+    /// For the read that started the batch, a handle on the driver to await, so a read error after
+    /// the batch's last page still fails the read.
+    completion: Option<DriverHandle>,
+}
+
+impl<'a, 'b> BatchRead<'a, 'b> {
+    /// The share of the read that started `batch`, whose pages fill `pieces`, by index.
+    fn starting(
+        batch: Arc<Batch>,
+        driver: BatchDriver,
+        receiver: mpsc::UnboundedReceiver<Delivery>,
+        pieces: Vec<Pieces<'a, 'b>>,
+    ) -> Self {
+        Self {
+            completion: Some(DriverHandle::new(batch.clone(), driver.clone())),
+            subscription: Subscription::starting(batch, driver, receiver),
+            pieces,
+        }
+    }
+
+    /// The share of a read that joins `batch`, selecting no pages yet.
+    fn joining(batch: Arc<Batch>, driver: BatchDriver) -> Self {
+        Self {
+            subscription: Subscription::joining(batch, driver),
+            pieces: Vec::new(),
+            completion: None,
+        }
+    }
+
+    /// Select the page at `index` to fill `pieces`. Call with the cache lock held, after finding
+    /// the page unpublished, and before the first poll.
+    fn select(&mut self, index: usize, pieces: Pieces<'a, 'b>) {
+        self.subscription.select(index, self.pieces.len());
+        self.pieces.push(pieces);
+    }
+
+    /// Copy each selected page into its pieces as the batch delivers it, then, if this read
+    /// started the batch, await the driver's end.
+    async fn complete(mut self) -> Result<(), Error> {
+        while let Some((tag, page)) = self.subscription.try_next().await? {
+            copy_page(page.as_ref(), self.pieces[tag]);
+        }
+        match self.completion {
+            Some(mut driver) => poll_fn(|cx| driver.drive(cx)).await,
+            None => Ok(()),
+        }
+    }
+}
+
+/// Copy the bytes of each `(page number, offset in page, piece)` out of `page`.
+fn copy_page(page: &[u8], pieces: Pieces<'_, '_>) {
+    for (_, offset, piece) in pieces {
+        piece.copy_from_slice(&page[*offset..*offset + piece.len()]);
     }
 }
 
@@ -130,6 +624,9 @@ struct Cache {
     /// A map of currently executing page fetches to ensure only one task at a time is trying to
     /// fetch a specific page.
     page_fetches: AHashMap<(u64, u64), PageFetchEntry>,
+
+    /// The batches in flight, so readers that miss one of their unpublished pages join them.
+    batches: BatchRegistry,
 }
 
 /// A reference to a page cache that can be shared across threads via cloning, along with the page
@@ -332,11 +829,12 @@ impl CacheRef {
     /// `(destination, logical offset)`, non-empty, in ascending offset order).
     ///
     /// Each page the ranges touch is copied from the cache when resident, joined when another
-    /// reader is fetching it, and otherwise read with one batched blob read that validates,
-    /// caches, and serves each page as it arrives. Serving never depends on the cache still
-    /// holding a page, so no page this call reads is read again to serve it. Other readers do
-    /// not join the batched read. A page failing validation returns an error, like a single
-    /// fetch. Pages cached before it remain, subject to normal eviction.
+    /// reader is fetching it, alone or in a batch, and otherwise read with one batched blob read
+    /// that validates, caches, and serves each page as it arrives. Other readers that miss a page
+    /// of that batch join it. Serving never depends on the cache still holding a page, so no page
+    /// this call reads is read again to serve it. A page failing validation, or a failed read of
+    /// a batch this call depends on, returns an error, like a single fetch. Pages cached before it
+    /// remain, subject to normal eviction.
     pub(super) async fn read_after_misses<B: Blob>(
         &self,
         blob: &Arc<B>,
@@ -344,10 +842,8 @@ impl CacheRef {
         ranges: Vec<(&mut [u8], u64)>,
     ) -> Result<(), Error> {
         // Split every range at page boundaries. Copy resident pieces now, before this call's own
-        // insertions can evict their pages. Pieces whose page another reader is fetching join that
-        // fetch, and the rest wait for the batched read.
+        // insertions can evict their pages.
         let mut waiting = Vec::new();
-        let mut joins = FuturesUnordered::new();
         {
             let cache = self.cache.read();
             for (mut buf, mut offset) in ranges {
@@ -357,11 +853,7 @@ impl CacheRef {
                     let len = remaining.min(buf.len());
                     let (piece, rest) = std::mem::take(&mut buf).split_at_mut(len);
                     if cache.read_at(blob_id, piece, offset) == 0 {
-                        if cache.page_fetches.contains_key(&(blob_id, page_num)) {
-                            joins.push(self.read_after_page_fault(blob, blob_id, piece, offset));
-                        } else {
-                            waiting.push((page_num, offset_in_page, piece));
-                        }
+                        waiting.push((page_num, offset_in_page, piece));
                     }
                     offset += Widen::widen(len);
                     buf = rest;
@@ -369,61 +861,92 @@ impl CacheRef {
             }
         }
 
-        // Group the waiting pieces by page, which the ranges' offset order keeps adjacent, and
-        // collect each page's physical range for one batched read. A page's group is taken when
-        // its read completes.
+        // Group the waiting pieces by page, which the ranges' offset order keeps adjacent, each
+        // with its page's physical range, computed up front so starting a batch cannot fail.
         let page_size: u64 = self.page_size.widen();
-        let mut groups = Vec::new();
-        let mut physical = Vec::new();
-        for group in waiting.chunk_by_mut(|(a, _, _), (b, _, _)| a == b) {
-            physical.push(physical_page(group[0].0, page_size)?);
-            groups.push(Some(group));
+        let mut misses = Vec::new();
+        for pieces in waiting.chunk_by_mut(|(a, _, _), (b, _, _)| a == b) {
+            misses.push((physical_page(pieces[0].0, page_size)?, pieces));
         }
 
-        // Validate, cache, and serve each page as its read completes so this work overlaps the
-        // reads still in flight, while the joined fetches proceed. CacheRef retains the pages, so
-        // the source pages need not remain in the OS page cache.
-        let read = async {
-            let mut stream = std::pin::pin!(blob.read_many(&physical, ReadOptions::DONT_CACHE));
-            while let Some(item) = stream.next().await {
-                let (index, bufs) = item.inspect_err(|err| error!(?err, "Page fetch failed"))?;
-
-                // Each page is yielded exactly once (see Blob::read_many).
-                let Some(group) = groups.get_mut(index).and_then(Option::take) else {
-                    return Err(Error::ReadFailed);
-                };
-                let page_num = group[0].0;
-                let page = validate_physical_page(bufs.coalesce())
-                    .and_then(|(page, _)| cacheable_page(page, page_num, self.page_size))
-                    .inspect_err(|err| error!(page_num, ?err, "Page fetch failed"))?;
-                self.cache.write().cache(blob_id, page.as_ref(), page_num);
-                for (_, offset_in_page, piece) in group.iter_mut() {
-                    piece.copy_from_slice(
-                        &page.as_ref()[*offset_in_page..*offset_in_page + piece.len()],
-                    );
+        // Join a source for every page before driving any: copy pages that became resident, join
+        // the fetches and batches other readers have in flight, and read the rest with one batch
+        // of this call's own, registered so later readers join it.
+        let mut fetches = Vec::new();
+        let mut reads: Vec<BatchRead<'_, '_>> = Vec::new();
+        {
+            let mut unread = Vec::new();
+            let mut cache = self.cache.write();
+            cache.batches.unregister_retired();
+            for (i, (physical, pieces)) in misses.into_iter().enumerate() {
+                if i > 0 && i % MISSES_PER_LOCK == 0 {
+                    RwLockWriteGuard::bump(&mut cache);
+                }
+                let page_num = pieces[0].0;
+                let key = (blob_id, page_num);
+                if let Some(page) = cache.get_page(blob_id, page_num) {
+                    copy_page(page.as_ref(), pieces);
+                } else if let Some(entry) = cache.page_fetches.get_mut(&key) {
+                    entry.waiters += 1;
+                    let fetch = PageFetchGuard::new(&self.cache, key, entry.fetch.clone());
+                    fetches.push((fetch, pieces));
+                } else if let Some((batch, index, driver)) =
+                    cache.batches.find_unpublished(blob_id, page_num)
+                {
+                    let joined = reads
+                        .iter()
+                        .rposition(|read| Arc::ptr_eq(&read.subscription.batch, &batch));
+                    let joined = joined.unwrap_or_else(|| {
+                        reads.push(BatchRead::joining(batch, driver));
+                        reads.len() - 1
+                    });
+                    reads[joined].select(index, pieces);
+                } else {
+                    unread.push((physical, pieces));
                 }
             }
-            if groups.iter().any(Option::is_some) {
-                return Err(Error::ReadFailed);
+            if !unread.is_empty() {
+                let (physical, pieces): (Vec<_>, Vec<_>) = unread.into_iter().unzip();
+                let pages = pieces.iter().map(|pieces| pieces[0].0).collect();
+                let batch = Arc::new(Batch::new(blob_id, pages));
+                let (to_starter, receiver) = mpsc::unbounded_channel();
+                let retire = cache.batches.retire_on_drop(&batch);
+                let read = batch.clone().read(
+                    self.cache.clone(),
+                    blob.clone(),
+                    physical,
+                    self.page_size,
+                    to_starter,
+                    retire,
+                );
+                let driver = read.boxed().shared();
+                cache.batches.register(&batch, &driver);
+                reads.push(BatchRead::starting(batch, driver, receiver, pieces));
             }
-            Ok(())
-        };
-        let joined = async {
-            while let Some(result) = joins.next().await {
-                result?;
-            }
-            Ok(())
-        };
+        }
 
-        // Poll the joins first so each registers with the fetch it joins before this call's
-        // insertions can evict that page.
-        futures::try_join!(joined, read)?;
+        // Copy each page into its pieces as its source supplies it. Completing in any order lets
+        // the first error return at once.
+        let fetches = fetches
+            .into_iter()
+            .map(|(fetch, pieces)| async move {
+                copy_page(fetch.wait().await?.as_ref(), pieces);
+                Ok(())
+            })
+            .collect::<FuturesUnordered<_>>()
+            .try_collect::<()>();
+        let reads = reads
+            .into_iter()
+            .map(BatchRead::complete)
+            .collect::<FuturesUnordered<_>>()
+            .try_collect::<()>();
+        futures::try_join!(fetches, reads)?;
         Ok(())
     }
 
-    /// Fetch the requested page after encountering a page fault, which may involve retrieving it
-    /// from `blob` & caching the result in the page cache. Returns the number of bytes read, which
-    /// should always be non-zero.
+    /// Fetch the requested page after encountering a page fault, which may involve joining the
+    /// fetch or batch already reading it, or retrieving it from `blob` & caching the result in the
+    /// page cache. Returns the number of bytes read, which should always be non-zero.
     pub(super) async fn read_after_page_fault<B: Blob>(
         &self,
         blob: &Arc<B>,
@@ -431,16 +954,21 @@ impl CacheRef {
         buf: &mut [u8],
         offset: u64,
     ) -> Result<usize, Error> {
+        enum Source {
+            Fetch(PageFetch),
+            Batch(Subscription),
+        }
+
         assert!(!buf.is_empty());
 
         let (page_num, offset_in_page, _) = Cache::locate(self.page_size, offset);
         trace!(page_num, blob_id, "page fault");
 
-        // Create or clone a future that retrieves the desired page from the underlying blob. This
-        // requires a write lock on the page cache since we may need to modify `page_fetches` if
-        // this task is the first fetcher.
+        // Join the fetch or batch another reader has in flight for this page, or else create a
+        // future that retrieves it from the underlying blob. This requires a write lock on the
+        // page cache, since joining or creating either one updates the cache's in-flight state.
         let key = (blob_id, page_num);
-        let fetch = {
+        let source = {
             let mut cache = self.cache.write();
 
             // There's a (small) chance the page was fetched & buffered by another task before we
@@ -450,57 +978,74 @@ impl CacheRef {
                 return Ok(count);
             }
 
-            match cache.page_fetches.entry(key) {
+            let Cache {
+                page_fetches,
+                batches,
+                ..
+            } = &mut *cache;
+            match page_fetches.entry(key) {
                 Entry::Occupied(o) => {
                     // Another thread is already fetching this page, so clone its existing future.
                     let entry = o.into_mut();
                     entry.waiters += 1;
-                    entry.fetch.clone()
+                    Source::Fetch(entry.fetch.clone())
                 }
                 Entry::Vacant(v) => {
-                    // Nobody is currently fetching this page, so create a future that will do the
-                    // work. fetch_cacheable_page handles CRC validation and returns only logical
-                    // bytes.
-                    let blob = blob.clone();
-                    let cache = Arc::clone(&self.cache);
-                    let page_size = self.page_size;
-                    let future = async move {
-                        let result = fetch_cacheable_page(blob.as_ref(), page_num, page_size).await;
-                        if let Err(err) = &result {
-                            error!(page_num, ?err, "Page fetch failed");
-                        }
+                    batches.unregister_retired();
+                    if let Some((batch, index, driver)) =
+                        batches.find_unpublished(blob_id, page_num)
+                    {
+                        // Another reader's batch is reading this page, so join it.
+                        let mut subscription = Subscription::joining(batch, driver);
+                        subscription.select(index, 0);
+                        Source::Batch(subscription)
+                    } else {
+                        // Nobody is currently fetching this page, so create a future that will do
+                        // the work. fetch_cacheable_page handles CRC validation and returns only
+                        // logical bytes.
+                        let blob = blob.clone();
+                        let cache = Arc::clone(&self.cache);
+                        let page_size = self.page_size;
+                        let future = async move {
+                            let result =
+                                fetch_cacheable_page(blob.as_ref(), page_num, page_size).await;
+                            if let Err(err) = &result {
+                                error!(page_num, ?err, "Page fetch failed");
+                            }
 
-                        // This shared future still owns `page_fetches[key]`. As long as at least
-                        // one waiter remains armed, that entry pins this generation in place, so a
-                        // replacement fetch for the same page cannot be inserted before we cache
-                        // the successful result below. Only when every waiter cancels can the last
-                        // guard remove the entry and let a later reader start a new generation.
-                        let mut cache = cache.write();
-                        if let Ok(page) = &result {
-                            cache.cache(blob_id, page.as_ref(), page_num);
-                        }
-                        let _ = cache.page_fetches.remove(&key);
-                        result
-                    };
+                            // This shared future still owns `page_fetches[key]`. As long as at
+                            // least one waiter remains armed, that entry pins this generation in
+                            // place, so a replacement fetch for the same page cannot be inserted
+                            // before we cache the successful result below. Only when every waiter
+                            // cancels can the last guard remove the entry and let a later reader
+                            // start a new generation.
+                            let mut cache = cache.write();
+                            if let Ok(page) = &result {
+                                cache.cache(blob_id, page.as_ref(), page_num);
+                            }
+                            let _ = cache.page_fetches.remove(&key);
+                            result
+                        };
 
-                    // Make the future shareable and insert it into the map.
-                    let fetch = future.boxed().shared();
-                    v.insert(PageFetchEntry {
-                        fetch: fetch.clone(),
-                        waiters: 1,
-                    });
-                    fetch
+                        // Make the future shareable and insert it into the map.
+                        let fetch = future.boxed().shared();
+                        v.insert(PageFetchEntry {
+                            fetch: fetch.clone(),
+                            waiters: 1,
+                        });
+                        Source::Fetch(fetch)
+                    }
                 }
             }
         };
-        let mut fetch_guard = PageFetchGuard::new(&self.cache, key, fetch.clone());
-
-        // Await the shared fetch. The future itself logs failures, caches the resolved page, and
-        // removes the in-flight marker before it returns, so waiters only need cancellation
-        // cleanup while the fetch is still unresolved.
-        let fetch_result = fetch.await;
-        fetch_guard.disarm();
-        let page_buf = fetch_result?;
+        let page_buf = match source {
+            Source::Fetch(fetch) => PageFetchGuard::new(&self.cache, key, fetch).wait().await?,
+            Source::Batch(mut subscription) => {
+                let delivery = subscription.try_next().await?;
+                let (_, page) = delivery.expect("a subscription yields the page it selected");
+                page
+            }
+        };
 
         // Copy the requested portion of the page into the buffer.
         let bytes_to_copy = std::cmp::min(buf.len(), page_buf.len() - offset_in_page);
@@ -566,6 +1111,7 @@ impl Cache {
             page_size,
             pool,
             page_fetches: AHashMap::new(),
+            batches: BatchRegistry::default(),
         }
     }
 
@@ -647,6 +1193,7 @@ impl Cache {
     fn clear(&mut self) {
         self.cache.retain(|_, _| false);
         self.page_fetches.clear();
+        self.batches = BatchRegistry::default();
     }
 }
 
@@ -700,6 +1247,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_utils::{NZU16, NZUsize, channel::oneshot, sync::Mutex};
     use futures::{future::pending, poll};
+    use rand::{RngExt as _, seq::SliceRandom as _};
     use rstest::rstest;
     use std::{
         num::NonZeroU16,
@@ -1446,140 +1994,995 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_read_many_into_joins_fetch_in_flight() {
-        /// Serves checksummed pages from memory, holding each read until its page's gate opens.
-        struct GatedBlob {
-            pages: Vec<Vec<u8>>,
-            gates: Mutex<Vec<Option<oneshot::Receiver<()>>>>,
-            reads: Mutex<Vec<usize>>,
-        }
+    /// A physical page whose first `len` logical bytes equal `value` and are covered by its
+    /// checksum. The rest of its logical bytes are zero.
+    fn page_bytes(value: u8, len: u16) -> Vec<u8> {
+        let mut page = vec![value; usize::from(len)];
+        let crc = Crc32::checksum(&page);
+        page.resize(PAGE_SIZE.get() as usize, 0);
+        page.extend_from_slice(&Checksum::new(len, crc).to_bytes());
+        page
+    }
 
-        impl Blob for GatedBlob {
-            async fn read_at(
-                &self,
-                offset: u64,
-                len: usize,
-                options: ReadOptions,
-            ) -> Result<IoBufsMut, Error> {
-                self.read_at_buf(offset, len, IoBufsMut::default(), options)
-                    .await
-            }
+    /// Physical page `page` of a test blob, whose logical bytes all equal the page's index.
+    fn full_page(page: usize) -> Vec<u8> {
+        page_bytes(page as u8, PAGE_SIZE.get())
+    }
 
-            async fn read_at_buf(
-                &self,
-                offset: u64,
-                _len: usize,
-                _bufs: impl Into<IoBufsMut> + Send,
-                _options: ReadOptions,
-            ) -> Result<IoBufsMut, Error> {
-                let page = (offset / (PAGE_SIZE_U64 + CHECKSUM_SIZE)) as usize;
-                self.reads.lock().push(page);
-                let gate = self.gates.lock()[page].take();
-                if let Some(gate) = gate {
-                    let _ = gate.await;
-                }
-                Ok(IoBufsMut::from(self.pages[page].clone()))
-            }
+    /// [full_page] with a corrupted first byte, which fails validation.
+    fn corrupt_page(page: usize) -> Vec<u8> {
+        let mut bytes = full_page(page);
+        bytes[0] ^= 0xFF;
+        bytes
+    }
 
-            async fn write_at(
-                &self,
-                _offset: u64,
-                _bufs: impl Into<IoBufs> + Send,
-                _options: WriteOptions,
-            ) -> Result<(), Error> {
-                Ok(())
-            }
+    /// Serves [full_page]s, holding each page's first read until its gate opens.
+    struct GatedBlob {
+        gates: Mutex<Vec<Option<oneshot::Receiver<()>>>>,
+        reads: Mutex<Vec<usize>>,
+        /// A page whose next read returns corrupted bytes.
+        corrupt: Mutex<Option<usize>>,
+    }
 
-            async fn resize(&self, _len: u64) -> Result<(), Error> {
-                Ok(())
-            }
-
-            async fn sync(&self) -> Result<(), Error> {
-                Ok(())
-            }
-
-            async fn start_sync(&self) -> Handle<()> {
-                Handle::ready(self.sync().await)
-            }
-        }
-
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            const PAGES: usize = 10;
-            let (mut opens, gates): (Vec<_>, Vec<_>) = (0..PAGES)
+    impl GatedBlob {
+        /// A blob of `pages` pages, with the senders that open each page's gate.
+        fn new(pages: usize) -> (Arc<Self>, Vec<Option<oneshot::Sender<()>>>) {
+            let (opens, gates) = (0..pages)
                 .map(|_| {
-                    let (open, gate) = oneshot::channel::<()>();
+                    let (open, gate) = oneshot::channel();
                     (Some(open), Some(gate))
                 })
                 .unzip();
-            let pages = (0..PAGES)
-                .map(|i| {
-                    let logical = vec![i as u8; PAGE_SIZE.get() as usize];
-                    let crc = Crc32::checksum(&logical);
-                    let mut page = logical;
-                    page.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc).to_bytes());
-                    page
-                })
-                .collect();
-            let blob = Arc::new(GatedBlob {
-                pages,
+            let blob = Self {
                 gates: Mutex::new(gates),
                 reads: Mutex::new(Vec::new()),
-            });
+                corrupt: Mutex::new(None),
+            };
+            (Arc::new(blob), opens)
+        }
+
+        /// How many reads of `page` have started.
+        fn reads_of(&self, page: usize) -> usize {
+            self.reads
+                .lock()
+                .iter()
+                .filter(|&&read| read == page)
+                .count()
+        }
+    }
+
+    impl Blob for GatedBlob {
+        async fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.read_at_buf(offset, len, IoBufsMut::default(), options)
+                .await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            _len: usize,
+            _bufs: impl Into<IoBufsMut> + Send,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            let page = (offset / (PAGE_SIZE_U64 + CHECKSUM_SIZE)) as usize;
+            self.reads.lock().push(page);
+            let corrupted = self.corrupt.lock().take_if(|corrupt| *corrupt == page);
+            let bytes = if corrupted.is_some() {
+                corrupt_page(page)
+            } else {
+                full_page(page)
+            };
+            let gate = self.gates.lock()[page].take();
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
+            Ok(IoBufsMut::from(bytes))
+        }
+
+        async fn write_at(
+            &self,
+            _offset: u64,
+            _bufs: impl Into<IoBufs> + Send,
+            _options: WriteOptions,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn resize(&self, _len: u64) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
+        }
+    }
+
+    /// A step of a [ScriptedBlob]'s batched read that runs with the read's context.
+    type Hook = Box<dyn FnMut(&mut Context<'_>) -> Poll<()> + Send>;
+
+    /// One step of a [ScriptedBlob]'s batched read.
+    enum Step {
+        /// Yield these physical bytes as the read of the range at this index.
+        Yield(usize, Vec<u8>),
+        /// Fail the read.
+        Fail(Error),
+        /// Wait for the gate to open before taking the next step.
+        Wait(oneshot::Receiver<()>),
+        /// Poll this, with the context the read is polled with, until it is ready.
+        Call(Hook),
+    }
+
+    impl Step {
+        /// Yield [full_page] `index` as the read of the range at `index`.
+        fn page(index: usize) -> Self {
+            Self::Yield(index, full_page(index))
+        }
+    }
+
+    /// A blob whose first batched read yields its script, whatever ranges it is asked for. It
+    /// serves no other read.
+    struct ScriptedBlob(Mutex<Vec<Step>>);
+
+    impl ScriptedBlob {
+        fn new(script: Vec<Step>) -> Arc<Self> {
+            Arc::new(Self(Mutex::new(script)))
+        }
+    }
+
+    impl Blob for ScriptedBlob {
+        async fn read_at(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            unreachable!("only batched reads are scripted")
+        }
+
+        async fn read_at_buf(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _bufs: impl Into<IoBufsMut> + Send,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            unreachable!("only batched reads are scripted")
+        }
+
+        fn read_many(
+            &self,
+            _ranges: &[(u64, usize)],
+            _options: ReadOptions,
+        ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+            let steps = std::mem::take(&mut *self.0.lock());
+            futures::stream::unfold(steps.into_iter(), |mut steps| async move {
+                loop {
+                    match steps.next()? {
+                        Step::Yield(index, bytes) => {
+                            return Some((Ok((index, IoBufsMut::from(bytes))), steps));
+                        }
+                        Step::Fail(err) => return Some((Err(err), steps)),
+                        Step::Wait(gate) => {
+                            let _ = gate.await;
+                        }
+                        Step::Call(mut call) => poll_fn(|cx| call(cx)).await,
+                    }
+                }
+            })
+        }
+
+        async fn write_at(
+            &self,
+            _offset: u64,
+            _bufs: impl Into<IoBufs> + Send,
+            _options: WriteOptions,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn resize(&self, _len: u64) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
+        }
+    }
+
+    /// Open every gate in `opens` not yet opened.
+    fn open(opens: &mut [Option<oneshot::Sender<()>>]) {
+        for open in opens.iter_mut().filter_map(Option::take) {
+            let _ = open.send(());
+        }
+    }
+
+    /// Read the first byte of each of `pages` (ascending) of `blob` (cache id 0) with one batched
+    /// read.
+    async fn read_first_bytes<B: Blob>(
+        blob: &Arc<B>,
+        cache_ref: &CacheRef,
+        pages: &[u64],
+    ) -> Result<Vec<u8>, Error> {
+        let size = pages.last().map_or(0, |last| (last + 1) * PAGE_SIZE_U64);
+        let view = View {
+            blob,
+            cache_ref,
+            id: 0,
+            size,
+            tail_offset: size,
+            tail: Tail::Sealed(&[]),
+        };
+        let offsets: Vec<u64> = pages.iter().map(|page| page * PAGE_SIZE_U64).collect();
+        let mut buf = vec![0u8; pages.len()];
+        view.read_many_into(&mut buf, &offsets, NZUsize!(1)).await?;
+        Ok(buf)
+    }
+
+    /// Read the first byte of page `page` of `blob` (cache id 0), starting at a cache miss.
+    async fn read_first_byte<B: Blob>(
+        blob: &Arc<B>,
+        cache_ref: &CacheRef,
+        page: u64,
+    ) -> Result<u8, Error> {
+        let mut buf = [0u8; 1];
+        cache_ref
+            .read_after_miss(blob, 0, &mut buf, page * PAGE_SIZE_U64)
+            .await?;
+        Ok(buf[0])
+    }
+
+    /// Assert that the cache holds no standalone fetch and no live batch.
+    fn assert_idle(cache_ref: &CacheRef) {
+        let cache = cache_ref.cache.read();
+        assert!(cache.page_fetches.is_empty());
+        let mut batches = cache.batches.by_blob.values().flatten();
+        assert!(batches.all(|(batch, _)| batch.strong_count() == 0));
+    }
+
+    /// For each page of each live batch, how many joiners wait on it and how many of those are
+    /// still subscribed, or `None` once the page is published.
+    fn joiners(cache_ref: &CacheRef) -> Vec<Option<(usize, usize)>> {
+        let cache = cache_ref.cache.read();
+        let batches = cache.batches.by_blob.values().flatten();
+        let batches = batches.filter_map(|(batch, _)| batch.upgrade());
+        batches
+            .flat_map(|batch| {
+                let state = batch.state.lock();
+                let pages = state.joiners.iter().map(|joiners| {
+                    joiners.as_ref().map(|joiners| {
+                        let live = joiners.iter().filter(|(_, sender)| !sender.is_closed());
+                        (joiners.len(), live.count())
+                    })
+                });
+                pages.collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// The pages that subscribed joiners selected and have yet to receive.
+    fn selected(cache_ref: &CacheRef) -> usize {
+        let pages = joiners(cache_ref);
+        pages.iter().flatten().map(|(_, live)| live).sum()
+    }
+
+    /// Counts the wakes of a task polled by hand.
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+
+    impl std::task::Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test_traced]
+    fn test_read_many_into_joins_fetch_in_flight() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const PAGES: u64 = 10;
+            let (blob, mut opens) = GatedBlob::new(PAGES as usize);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
 
             // Another reader starts fetching page 0.
-            let first = context.child("first").spawn({
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                move |_| async move {
-                    let mut buf = [0u8; 1];
-                    cache_ref
-                        .read_after_miss(&blob, 0, &mut buf, 0)
-                        .await
-                        .unwrap();
-                    buf
-                }
-            });
-            while blob.reads.lock().is_empty() {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            let mut first = pin!(read_first_byte(&blob, &cache_ref, 0));
+            assert!(poll!(first.as_mut()).is_pending());
 
             // A batch over every page joins that fetch rather than reading page 0 again, although
             // its own insertions evict page 0 once that fetch completes.
-            let second = context.child("second").spawn({
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                move |_| async move {
-                    let size = PAGES as u64 * PAGE_SIZE_U64;
-                    let view = View {
-                        blob: &blob,
-                        cache_ref: &cache_ref,
-                        id: 0,
-                        size,
-                        tail_offset: size,
-                        tail: Tail::Sealed(&[]),
-                    };
-                    let offsets: Vec<u64> = (0..PAGES as u64).map(|p| p * PAGE_SIZE_U64).collect();
-                    let mut buf = vec![0u8; PAGES];
-                    view.read_many_into(&mut buf, &offsets, NZUsize!(1))
-                        .await
-                        .unwrap();
-                    buf
-                }
-            });
-            while blob.reads.lock().len() < PAGES {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            let pages: Vec<u64> = (0..PAGES).collect();
+            let mut second = pin!(read_first_bytes(&blob, &cache_ref, &pages));
+            assert!(poll!(second.as_mut()).is_pending());
             opens[0].take().unwrap().send(()).unwrap();
-            assert_eq!(first.await.unwrap(), [0]);
-            for open in &mut opens[1..] {
-                open.take().unwrap().send(()).unwrap();
-            }
+            assert_eq!(first.await.unwrap(), 0);
+            open(&mut opens);
             assert_eq!(second.await.unwrap(), (0..PAGES as u8).collect::<Vec<_>>());
+            assert_eq!(blob.reads_of(0), 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_overlapping_reads_read_each_page_once() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const PAGES: u64 = 7;
+            let (blob, mut opens) = GatedBlob::new(PAGES as usize);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+
+            // A batch of pages 0-3 starts reading. An overlapping batch of pages 2-5 joins it for
+            // pages 2 and 3 and reads only pages 4 and 5.
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2, 3]));
+            assert!(poll!(first.as_mut()).is_pending());
+            let mut second = pin!(read_first_bytes(&blob, &cache_ref, &[2, 3, 4, 5]));
+            assert!(poll!(second.as_mut()).is_pending());
+
+            // A batch of pages 1, 5, and 6 joins both batches and reads only page 6, and a single
+            // read of page 3 joins the first batch.
+            let mut third = pin!(read_first_bytes(&blob, &cache_ref, &[1, 5, 6]));
+            assert!(poll!(third.as_mut()).is_pending());
+            let mut single = pin!(read_first_byte(&blob, &cache_ref, 3));
+            assert!(poll!(single.as_mut()).is_pending());
+            assert_eq!(selected(&cache_ref), 2 + (1 + 1) + 1);
+
+            open(&mut opens);
+            assert_eq!(first.await.unwrap(), [0, 1, 2, 3]);
+            assert_eq!(second.await.unwrap(), [2, 3, 4, 5]);
+            assert_eq!(third.await.unwrap(), [1, 5, 6]);
+            assert_eq!(single.await.unwrap(), 3);
+            for page in 0..PAGES as usize {
+                assert_eq!(blob.reads_of(page), 1);
+            }
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
+    fn test_joining_many_pages_selects_all_before_driving() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const PAGES: u64 = 3 * MISSES_PER_LOCK as u64;
+            let (blob, mut opens) = GatedBlob::new(PAGES as usize);
+            let cache_ref =
+                CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2 * PAGES as usize));
+            let pages: Vec<u64> = (0..PAGES).collect();
+            let expected: Vec<u8> = pages.iter().map(|&page| page as u8).collect();
+
+            // A batch of every page starts reading and is left unpolled.
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &pages));
+            assert!(poll!(first.as_mut()).is_pending());
+
+            // A read of the same pages, examined over several holds of the lock, selects every
+            // page in its first poll.
+            let mut second = pin!(read_first_bytes(&blob, &cache_ref, &pages));
+            assert!(poll!(second.as_mut()).is_pending());
+            assert_eq!(selected(&cache_ref), PAGES as usize);
+
+            open(&mut opens);
+            assert_eq!(second.await.unwrap(), expected);
+            assert_eq!(first.await.unwrap(), expected);
+            assert_eq!(blob.reads.lock().len(), PAGES as usize);
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
+    fn test_read_joins_unpolled_batch_under_eviction() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Fill a 20-page cache, whose probation queue holds only 2 pages, with pages 20..40.
+            let (blob, mut opens) = GatedBlob::new(40);
+            open(&mut opens[20..]);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(20));
+            for page in 20..40 {
+                read_first_byte(&blob, &cache_ref, page).await.unwrap();
+            }
+            blob.reads.lock().clear();
+
+            // A batch of pages 0..10 starts reading and is left unpolled while its reads finish.
+            let pages: Vec<u64> = (0..10).collect();
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &pages));
+            assert!(poll!(first.as_mut()).is_pending());
+            open(&mut opens);
+
+            // A read of the same pages joins every page and drives the batch. Caching the pages
+            // evicts most of them before either read copies them, yet each is read only once.
+            let expected: Vec<u8> = (0..10).collect();
             assert_eq!(
-                blob.reads.lock().iter().filter(|&&page| page == 0).count(),
-                1
+                read_first_bytes(&blob, &cache_ref, &pages).await.unwrap(),
+                expected
             );
+            assert_eq!(first.await.unwrap(), expected);
+            assert_eq!(blob.reads.lock().len(), pages.len());
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
+    fn test_read_joining_batch_outlives_its_starter() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, mut opens) = GatedBlob::new(2);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+
+            // A batch of both pages starts reading, and a read of page 1 joins it.
+            let mut first = Box::pin(read_first_bytes(&blob, &cache_ref, &[0, 1]));
+            assert!(poll!(first.as_mut()).is_pending());
+            let mut second = pin!(read_first_byte(&blob, &cache_ref, 1));
+            assert!(poll!(second.as_mut()).is_pending());
+
+            // The read that started the batch is cancelled, and the joined read completes the
+            // batch without reading page 1 again.
+            drop(first);
+            open(&mut opens);
+            assert_eq!(second.await.unwrap(), 1);
+            assert_eq!(blob.reads.lock().len(), 2);
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
+    fn test_joined_read_finishes_before_its_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, mut opens) = GatedBlob::new(3);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2]));
+            assert!(poll!(first.as_mut()).is_pending());
+
+            // A read of page 1 completes once that page arrives, while the batch waits for the
+            // others.
+            let mut second = pin!(read_first_byte(&blob, &cache_ref, 1));
+            assert!(poll!(second.as_mut()).is_pending());
+            opens[1].take().unwrap().send(()).unwrap();
+            assert_eq!(second.await.unwrap(), 1);
+            assert_eq!(joiners(&cache_ref), [Some((0, 0)), None, Some((0, 0))]);
+
+            open(&mut opens);
+            assert_eq!(first.await.unwrap(), [0, 1, 2]);
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test]
+    fn test_reader_that_stops_driving_passes_on_its_wake() {
+        type Read = Pin<Box<dyn Future<Output = Result<Vec<u8>, Error>> + Send>>;
+        let starter: Arc<Mutex<Option<Read>>> = Arc::default();
+        let starter_wakes = Arc::new(Wakes::default());
+        let starter_waker = Waker::from(starter_wakes.clone());
+        let woken_before = Arc::new(AtomicUsize::new(0));
+        let stalled: Arc<Mutex<Option<Waker>>> = Arc::default();
+
+        // The batch's read stalls, keeping the waker it is polled with, then yields page 0. Next,
+        // its read is woken while it is still being polled, and in that window the starter, as if
+        // on another thread, takes page 0 and polls the driver. Last, it yields page 1.
+        let mut first_call = true;
+        let stall = {
+            let stalled = stalled.clone();
+            move |cx: &mut Context<'_>| {
+                if !std::mem::take(&mut first_call) {
+                    return Poll::Ready(());
+                }
+                *stalled.lock() = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        };
+        let mut first_call = true;
+        let race = {
+            let (starter, waker) = (starter.clone(), starter_waker.clone());
+            let (wakes, woken_before) = (starter_wakes.clone(), woken_before.clone());
+            move |cx: &mut Context<'_>| {
+                if !std::mem::take(&mut first_call) {
+                    return Poll::Ready(());
+                }
+                cx.waker().wake_by_ref();
+                let mut starter = starter.lock();
+                let read = starter.as_mut().unwrap().as_mut();
+                assert!(read.poll(&mut Context::from_waker(&waker)).is_pending());
+                woken_before.store(wakes.0.load(Ordering::SeqCst), Ordering::SeqCst);
+                Poll::Pending
+            }
+        };
+        let blob = ScriptedBlob::new(vec![
+            Step::Call(Box::new(stall)),
+            Step::page(0),
+            Step::Call(Box::new(race)),
+            Step::page(1),
+        ]);
+        let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(16));
+
+        // The starter reads both pages with one batch, which stalls.
+        *starter.lock() = Some(Box::pin({
+            let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+            async move { read_first_bytes(&blob, &cache_ref, &[0, 1]).await }
+        }));
+        let poll_starter = || {
+            let mut starter = starter.lock();
+            let read = starter.as_mut().unwrap().as_mut();
+            read.poll(&mut Context::from_waker(&starter_waker))
+        };
+        assert!(poll_starter().is_pending());
+
+        // The stalled read makes progress, which wakes the starter. Before the starter runs, a
+        // read of page 0 joins the batch and drives it, gets its page, and stops driving.
+        stalled.lock().take().unwrap().wake();
+        let mut joiner = pin!(read_first_byte(&blob, &cache_ref, 0));
+        let joined = joiner
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
+        assert!(matches!(joined, Poll::Ready(Ok(0))));
+
+        // The wake the joiner took is passed on, so the starter runs again and finishes.
+        assert!(starter_wakes.0.load(Ordering::SeqCst) > woken_before.load(Ordering::SeqCst));
+        assert!(matches!(poll_starter(), Poll::Ready(Ok(ref bytes)) if bytes == &[0, 1]));
+    }
+
+    #[rstest]
+    #[case::ends(false)]
+    #[case::fails(true)]
+    fn test_starting_read_waits_for_its_batch_to_end(#[case] fail: bool) {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (start, started) = oneshot::channel();
+            let (end, ended) = oneshot::channel();
+            let mut script = vec![
+                Step::Wait(started),
+                Step::page(0),
+                Step::page(1),
+                Step::Wait(ended),
+            ];
+            if fail {
+                script.push(Step::Fail(Error::ReadFailed));
+            }
+            let blob = ScriptedBlob::new(script);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+
+            // A read of both pages starts a batch, and a read of page 0 joins it.
+            let mut read = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1]));
+            assert!(poll!(read.as_mut()).is_pending());
+            let mut joiner = pin!(read_first_byte(&blob, &cache_ref, 0));
+            assert!(poll!(joiner.as_mut()).is_pending());
+
+            // The joiner finishes with its page. The starting read has both its pages, but waits
+            // for its batched read to end, which may still fail it.
+            start.send(()).unwrap();
+            assert_eq!(joiner.await.unwrap(), 0);
+            assert!(poll!(read.as_mut()).is_pending());
+            end.send(()).unwrap();
+            let result = read.await;
+            if fail {
+                assert!(matches!(result, Err(Error::ReadFailed)));
+            } else {
+                assert_eq!(result.unwrap(), [0, 1]);
+            }
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
+    fn test_failed_page_fails_its_readers() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, mut opens) = GatedBlob::new(2);
+            *blob.corrupt.lock() = Some(1);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+
+            // A batch of both pages starts reading, and a read of each page joins it.
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1]));
+            assert!(poll!(first.as_mut()).is_pending());
+            let mut zero = pin!(read_first_byte(&blob, &cache_ref, 0));
+            assert!(poll!(zero.as_mut()).is_pending());
+            let mut one = pin!(read_first_byte(&blob, &cache_ref, 1));
+            assert!(poll!(one.as_mut()).is_pending());
+
+            // Page 1 fails validation, which fails every read waiting on it.
+            open(&mut opens[1..]);
+            assert!(matches!(first.await, Err(Error::InvalidChecksum)));
+            assert!(matches!(one.await, Err(Error::InvalidChecksum)));
+
+            // A later read of page 1 reads it again rather than join the batch, which still reads
+            // page 0 for its other read.
+            assert_eq!(read_first_byte(&blob, &cache_ref, 1).await.unwrap(), 1);
+            open(&mut opens);
+            assert_eq!(zero.await.unwrap(), 0);
+            assert_eq!(blob.reads_of(1), 2);
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
+    fn test_failed_read_fails_readers_still_waiting() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (start, started) = oneshot::channel();
+            let (fail, failed) = oneshot::channel();
+            let blob = ScriptedBlob::new(vec![
+                Step::Wait(started),
+                Step::page(0),
+                Step::Wait(failed),
+                Step::Fail(Error::ReadFailed),
+            ]);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+
+            // A batch of pages 0-2 starts reading. A read of page 0, a read of page 2, and a read
+            // of pages 0 and 2 join it.
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2]));
+            assert!(poll!(first.as_mut()).is_pending());
+            let mut zero = pin!(read_first_byte(&blob, &cache_ref, 0));
+            assert!(poll!(zero.as_mut()).is_pending());
+            let mut two = pin!(read_first_byte(&blob, &cache_ref, 2));
+            assert!(poll!(two.as_mut()).is_pending());
+            let mut second = pin!(read_first_bytes(&blob, &cache_ref, &[0, 2]));
+            assert!(poll!(second.as_mut()).is_pending());
+
+            // The batch publishes page 0, which completes the read of page 0 alone. Then the
+            // batch's read fails, which fails every read still waiting on it, and no later read
+            // joins the failed batch.
+            start.send(()).unwrap();
+            assert_eq!(zero.await.unwrap(), 0);
+            fail.send(()).unwrap();
+            assert!(matches!(first.await, Err(Error::ReadFailed)));
+            assert!(
+                cache_ref
+                    .cache
+                    .read()
+                    .batches
+                    .find_unpublished(0, 2)
+                    .is_none()
+            );
+            assert!(matches!(two.await, Err(Error::ReadFailed)));
+            assert!(matches!(second.await, Err(Error::ReadFailed)));
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[rstest]
+    #[case::out_of_order(vec![Step::page(2), Step::page(0), Step::page(1)], None)]
+    #[case::out_of_range(vec![Step::page(0), Step::page(3)], Some(Error::ReadFailed))]
+    #[case::duplicate(
+        vec![Step::page(0), Step::page(0), Step::page(1), Step::page(2)],
+        Some(Error::ReadFailed)
+    )]
+    #[case::missing(vec![Step::page(0), Step::page(1)], Some(Error::ReadFailed))]
+    #[case::corrupt(
+        vec![Step::page(0), Step::Yield(1, corrupt_page(1)), Step::page(2)],
+        Some(Error::InvalidChecksum)
+    )]
+    #[case::partial(
+        vec![Step::page(0), Step::Yield(1, page_bytes(1, 100)), Step::page(2)],
+        Some(Error::InvalidChecksum)
+    )]
+    #[case::error(
+        vec![Step::page(0), Step::Fail(Error::BlobInsufficientLength)],
+        Some(Error::BlobInsufficientLength)
+    )]
+    fn test_batch_checks_read_many_output(
+        #[case] script: Vec<Step>,
+        #[case] expected: Option<Error>,
+    ) {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (start, started) = oneshot::channel();
+            let blob =
+                ScriptedBlob::new(std::iter::once(Step::Wait(started)).chain(script).collect());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+
+            // A batch of pages 0-2 starts reading, and a read of the same pages joins it.
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2]));
+            assert!(poll!(first.as_mut()).is_pending());
+            let mut second = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2]));
+            assert!(poll!(second.as_mut()).is_pending());
+
+            // Both reads see the batch's result.
+            start.send(()).unwrap();
+            let (first, second) = futures::join!(first, second);
+            for result in [first, second] {
+                match &expected {
+                    None => assert_eq!(result.unwrap(), [0, 1, 2]),
+                    Some(expected) => assert_eq!(
+                        std::mem::discriminant(&result.unwrap_err()),
+                        std::mem::discriminant(expected)
+                    ),
+                }
+            }
+            assert_idle(&cache_ref);
+        });
+    }
+
+    // 30 and 31 sources straddle the size above which `try_join_all` reports results in order,
+    // which would hold this error behind the first, blocked page.
+    #[rstest]
+    #[case::thirty_fetches(30, false)]
+    #[case::thirty_one_fetches(31, false)]
+    #[case::thirty_batches(30, true)]
+    #[case::thirty_one_batches(31, true)]
+    fn test_read_fails_as_soon_as_any_source_fails(#[case] count: usize, #[case] batched: bool) {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, mut opens) = GatedBlob::new(count);
+            *blob.corrupt.lock() = Some(count - 1);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+
+            // Other reads start reading each page, alone or in a batch of one.
+            let (blob, cache_ref) = (&blob, &cache_ref);
+            let mut sources: Vec<_> = (0..count as u64)
+                .map(|page| {
+                    Box::pin(async move {
+                        if batched {
+                            read_first_bytes(blob, cache_ref, &[page]).await.map(|_| ())
+                        } else {
+                            read_first_byte(blob, cache_ref, page).await.map(|_| ())
+                        }
+                    })
+                })
+                .collect();
+            for source in &mut sources {
+                assert!(poll!(source.as_mut()).is_pending());
+            }
+
+            // A read of every page joins them all. The last page fails validation while the
+            // first is still blocked, which fails the read at once.
+            let pages: Vec<u64> = (0..count as u64).collect();
+            let mut read = pin!(read_first_bytes(blob, cache_ref, &pages));
+            assert!(poll!(read.as_mut()).is_pending());
+            opens[count - 1].take().unwrap().send(()).unwrap();
+            assert!(matches!(
+                poll!(read.as_mut()),
+                Poll::Ready(Err(Error::InvalidChecksum))
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_each_page_routes_to_its_joiners_only() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const PAGES: u64 = 4;
+            let (blob, mut opens) = GatedBlob::new(PAGES as usize);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let pages: Vec<u64> = (0..PAGES).collect();
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &pages));
+            assert!(poll!(first.as_mut()).is_pending());
+
+            // A read of each page joins the batch, so each page waits on that read only.
+            let mut singles: Vec<_> = pages
+                .iter()
+                .map(|&page| Box::pin(read_first_byte(&blob, &cache_ref, page)))
+                .collect();
+            for single in &mut singles {
+                assert!(poll!(single.as_mut()).is_pending());
+            }
+            assert_eq!(joiners(&cache_ref), [Some((1, 1)); PAGES as usize]);
+
+            open(&mut opens);
+            for (page, single) in singles.into_iter().enumerate() {
+                assert_eq!(single.await.unwrap(), page as u8);
+            }
+            assert_eq!(first.await.unwrap(), [0, 1, 2, 3]);
+            assert_eq!(blob.reads.lock().len(), PAGES as usize);
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
+    fn test_many_reads_join_one_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const READS: usize = 128;
+            let (blob, mut opens) = GatedBlob::new(1);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0]));
+            assert!(poll!(first.as_mut()).is_pending());
+
+            // Many reads of the page join the batch, and every one stays selected.
+            let mut reads: Vec<_> = (0..READS)
+                .map(|_| Box::pin(read_first_byte(&blob, &cache_ref, 0)))
+                .collect();
+            for read in &mut reads {
+                assert!(poll!(read.as_mut()).is_pending());
+            }
+            assert_eq!(joiners(&cache_ref), [Some((READS, READS))]);
+
+            open(&mut opens);
+            for read in reads {
+                assert_eq!(read.await.unwrap(), 0);
+            }
+            assert_eq!(first.await.unwrap(), [0]);
+            assert_eq!(blob.reads.lock().len(), 1);
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
+    fn test_cancelled_joins_do_not_disturb_other_reads() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, mut opens) = GatedBlob::new(3);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2]));
+            assert!(poll!(first.as_mut()).is_pending());
+
+            // A read of pages 1 and 2 joins the stalled batch.
+            let mut kept = pin!(read_first_bytes(&blob, &cache_ref, &[1, 2]));
+            assert!(poll!(kept.as_mut()).is_pending());
+            assert_eq!(selected(&cache_ref), 2);
+
+            // Reads that join it and are cancelled stop counting as selections.
+            {
+                let mut joined = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2]));
+                assert!(poll!(joined.as_mut()).is_pending());
+                let mut single = pin!(read_first_byte(&blob, &cache_ref, 1));
+                assert!(poll!(single.as_mut()).is_pending());
+                assert_eq!(selected(&cache_ref), 2 + 3 + 1);
+            }
+            assert_eq!(selected(&cache_ref), 2);
+
+            // Their senders stay until a later join of the page prunes them, so 64 cancelled
+            // joins of page 1 leave only a few behind.
+            for _ in 0..64 {
+                let mut cancelled = pin!(read_first_byte(&blob, &cache_ref, 1));
+                assert!(poll!(cancelled.as_mut()).is_pending());
+            }
+            let (senders, subscribed) = joiners(&cache_ref)[1].unwrap();
+            assert_eq!(subscribed, 1);
+            assert!(senders < 8, "{senders} senders remain");
+
+            open(&mut opens);
+            assert_eq!(kept.await.unwrap(), [1, 2]);
+            assert_eq!(first.await.unwrap(), [0, 1, 2]);
+            assert_eq!(blob.reads.lock().len(), 3);
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
+    fn test_dropped_batches_are_unregistered() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, mut opens) = GatedBlob::new(8);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+
+            // Batches of four blobs, and four more of one of them, start reading and are dropped.
+            let started = (0..4)
+                .map(|id| (id, id))
+                .chain((4..8).map(|page| (0, page)));
+            for (id, page) in started {
+                let mut buf = [0u8; 1];
+                let ranges = vec![(buf.as_mut_slice(), page * PAGE_SIZE_U64)];
+                let mut read = pin!(cache_ref.read_after_misses(&blob, id, ranges));
+                assert!(poll!(read.as_mut()).is_pending());
+            }
+            assert_idle(&cache_ref);
+            open(&mut opens);
+
+            // A later read of a dropped batch's page reads it again, and its lookup unregisters
+            // every dropped batch.
+            assert_eq!(read_first_byte(&blob, &cache_ref, 0).await.unwrap(), 0);
+            assert_eq!(blob.reads_of(0), 2);
+            assert!(cache_ref.cache.read().batches.by_blob.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_batch_whose_driver_was_dropped_is_not_joined() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, mut opens) = GatedBlob::new(1);
+            open(&mut opens);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+
+            // A batch of page 0 outlives its driver, as when a read holding it already has its
+            // pages but every handle on the driver is dropped.
+            let batch = Arc::new(Batch::new(0, vec![0]));
+            let driver: BatchDriver = pending::<Result<(), Error>>().boxed().shared();
+            cache_ref.cache.write().batches.register(&batch, &driver);
+            drop(driver);
+
+            // A read of page 0 reads it itself rather than wait on the batch forever.
+            assert_eq!(read_first_byte(&blob, &cache_ref, 0).await.unwrap(), 0);
+            assert_eq!(blob.reads_of(0), 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_overlapping_reads_with_cancellations() {
+        for seed in 0..16 {
+            let executor = deterministic::Runner::seeded(seed);
+            executor.start(|mut context| async move {
+                const PAGES: u64 = MISSES_PER_LOCK as u64 + 8;
+                let (blob, mut opens) = GatedBlob::new(PAGES as usize);
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+
+                // Batched reads of every page or of random pages, and single reads, start at
+                // random times.
+                let mut readers = Vec::new();
+                for _ in 0..8 {
+                    let mut pages: Vec<u64> = if context.random_bool(0.25) {
+                        (0..PAGES).collect()
+                    } else {
+                        (0..PAGES).filter(|_| context.random_bool(0.3)).collect()
+                    };
+                    if pages.is_empty() {
+                        pages.push(context.random_range(0..PAGES));
+                    }
+                    let single = pages.len() == 1 && context.random_bool(0.5);
+                    let expected: Vec<u8> = pages.iter().map(|&page| page as u8).collect();
+                    let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                    let reader = context.child("reader").spawn(move |_| async move {
+                        if single {
+                            read_first_byte(&blob, &cache_ref, pages[0])
+                                .await
+                                .map(|byte| vec![byte])
+                        } else {
+                            read_first_bytes(&blob, &cache_ref, &pages).await
+                        }
+                    });
+                    readers.push((reader, expected));
+                    let delay = context.random_range(0..3);
+                    context.sleep(Duration::from_millis(delay)).await;
+                }
+
+                // Pages arrive in a random order while random reads are cancelled.
+                let mut order: Vec<usize> = (0..PAGES as usize).collect();
+                order.shuffle(&mut context);
+                for page in order {
+                    open(&mut opens[page..=page]);
+                    if context.random_bool(0.05) {
+                        readers[context.random_range(0..readers.len())].0.abort();
+                    }
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+
+                // Every read that was not cancelled returns its pages.
+                for (reader, expected) in readers {
+                    if let Ok(result) = reader.await {
+                        assert_eq!(result.unwrap(), expected);
+                    }
+                }
+                assert_idle(&cache_ref);
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_concurrent_reads_read_each_page_once() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Concurrent reads of every page of a blob that spans several holds of the lock,
+            // through a cache that holds every page.
+            const PAGES: u64 = 3 * MISSES_PER_LOCK as u64;
+            let (recording, recordings) = crate::mocks::RecordingContext::new(context);
+            let blob = checksummed_blob(&recording, PAGES).await;
+            let context = recording.inner;
+            recordings.clear();
+            let cache_ref =
+                CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2 * PAGES as usize));
+            let readers = (0..4).map(|_| {
+                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                context.child("reader").spawn(move |_| async move {
+                    let pages: Vec<u64> = (0..PAGES).collect();
+                    read_first_bytes(&blob, &cache_ref, &pages).await.unwrap()
+                })
+            });
+            let expected: Vec<u8> = (0..PAGES).map(|page| page as u8).collect();
+            for reader in futures::future::join_all(readers).await {
+                assert_eq!(reader.unwrap(), expected);
+            }
+
+            // On one thread, no read runs between another's lock holds, so each joins the batch
+            // of the first, and every page is read once.
+            assert_eq!(recordings.snapshot().reads.len(), PAGES as usize);
         });
     }
 
@@ -1618,6 +3021,54 @@ mod tests {
                 .flat_map(|&offset| (offset..offset + 4).map(|o| (o / PAGE_SIZE_U64) as u8))
                 .collect();
             assert_eq!(buf, expected);
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    fn test_concurrent_reads_with_eviction_and_cancellation<R: crate::Runner>(#[case] runner: R)
+    where
+        R::Context: crate::BufferPooler + crate::Clock + crate::Spawner + crate::Storage,
+    {
+        runner.start(|context| async move {
+            // Overlapping reads of a blob that spans several holds of the lock, through a 4-page
+            // cache, with every third read cancelled.
+            const PAGES: u64 = 3 * MISSES_PER_LOCK as u64;
+            let blob = checksummed_blob(&context, PAGES).await;
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+            let readers: Vec<_> = (0..8)
+                .map(|reader| {
+                    let pages: Vec<u64> = (reader * 8..PAGES).collect();
+                    let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                    let handle = context.child("reader").spawn(move |_| async move {
+                        read_first_bytes(&blob, &cache_ref, &pages).await
+                    });
+                    (reader, handle)
+                })
+                .collect();
+            context.sleep(Duration::from_millis(1)).await;
+            for (_, handle) in readers.iter().step_by(3) {
+                handle.abort();
+            }
+
+            // Every read that was not cancelled returns its pages.
+            for (reader, handle) in readers {
+                select! {
+                    result = handle => {
+                        if reader % 3 != 0 {
+                            let expected: Vec<u8> =
+                                (reader * 8..PAGES).map(|page| page as u8).collect();
+                            assert_eq!(result.unwrap().unwrap(), expected);
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(10)) => panic!("a read hung"),
+                }
+            }
         });
     }
 
