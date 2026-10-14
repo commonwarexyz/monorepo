@@ -54,11 +54,12 @@
 //! there is anything to take, so observing zero, the common case, avoids the
 //! lock. A nonzero observation can be stale by the time the lock is acquired.
 //! A take moves a share into the taking worker's run queue under one lock:
-//! one runnable more than an even split between the workers, at most
-//! [`GLOBAL_BATCH`], within the cap above. The mirror is stored only under
-//! the lock, after the take's pushes into the run queue, so its stores follow
-//! the queue's own order, and a worker that reads the length a take left also
-//! sees the runnables it moved.
+//! one runnable more than an even split between the workers, within the cap
+//! above, which also bounds a take's work under the lock to half a run queue
+//! and one runnable more. The mirror is stored only under the lock, after the
+//! take's pushes into the run queue, so its stores follow the queue's own
+//! order, and a worker that reads the length a take left also sees the
+//! runnables it moved.
 //!
 //! ```text
 //! push   lock, refuse if closed, append, store the length, unlock, fence,
@@ -253,10 +254,6 @@ cfg_if::cfg_if! {
         use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
     }
 }
-
-/// Maximum number of runnables one take removes from the global queue,
-/// including the one returned directly, bounding work under the pool-wide lock.
-const GLOBAL_BATCH: usize = 128;
 
 /// Half a run queue: what an overflow keeps, and what a take may fill one to.
 const HALF: usize = CAPACITY / 2;
@@ -468,10 +465,9 @@ impl Pool {
     }
 
     /// Take a share of the global queue: one runnable more than an even split
-    /// between the workers, at most [`GLOBAL_BATCH`]. Returns the oldest and
-    /// queues the rest in `ready`, no more than it has room for and no more
-    /// than fill it to half, so a take into a run queue already half full
-    /// returns only the oldest.
+    /// between the workers. Returns the oldest and queues the rest in `ready`,
+    /// no more than it has room for and no more than fill it to half, so a
+    /// take into a run queue already half full returns only the oldest.
     ///
     /// The caller owns `ready` for a worker in this pool and must poll or
     /// discard the returned runnable. Returns `None` if the mirrored length
@@ -491,12 +487,12 @@ impl Pool {
         // emptied the queue since the check above, so the share never exceeds
         // what is left.
         let len = queue.runnables.len();
-        let share = (len / self.workers() + 1).min(GLOBAL_BATCH).min(len);
+        let share = (len / self.workers() + 1).min(len);
 
         // The caller polls the first runnable next, and the run queue takes the
         // rest. Filling at most its oldest half keeps every taken runnable out
-        // of the half an overflow exports, and the room measured here only
-        // grows before the pushes below.
+        // of the half an overflow exports and bounds the work under the lock,
+        // and the room measured here only grows before the pushes below.
         let admitted = ready.room().min(HALF.saturating_sub(ready.len()));
         let count = share.min(admitted + 1);
 
@@ -1470,7 +1466,7 @@ pub mod tests {
     /// A take preserves FIFO order and bounds its share, including the returned runnable.
     #[test]
     fn test_take_moves_a_bounded_share_of_the_global_queue() {
-        for (workers, queued, taken) in [(4, 8, 3), (1, 129, 128)] {
+        for (workers, queued, taken) in [(4, 8, 3), (1, HALF + 2, HALF + 1)] {
             let pool = pool(workers);
             let set = Tasks::new(1);
             let tasks: Vec<Task> = (0..queued).map(|_| push(&pool, &set)).collect();
@@ -1517,7 +1513,7 @@ pub mod tests {
             let moved = ready.len() - held + 1;
             assert_eq!(
                 moved,
-                GLOBAL_BATCH.min(HALF.saturating_sub(held) + 1),
+                HALF.saturating_sub(held) + 1,
                 "run queue held {held}"
             );
 
