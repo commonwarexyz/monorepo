@@ -444,14 +444,18 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         }
 
         // Retire the pruned sections' entries from the key index. Each translated key is
-        // visited once so that colliding keys cannot make this quadratic, and the predicate
-        // keeps entries that share a translated key with a retained record.
+        // visited once (its list is sorted and repeats skipped) so that colliding keys cannot
+        // make this quadratic, and the predicate keeps entries that share a translated key
+        // with a retained record.
         let retained = self.section_keys.split_off(&min);
         for mut translated in std::mem::replace(&mut self.section_keys, retained).into_values() {
             translated.sort_unstable();
-            translated.dedup();
+            let mut previous = None;
             for key in translated {
-                self.keys.retain_translated(key, |index| *index >= min);
+                if previous != Some(key) {
+                    self.keys.retain_translated(key, |index| *index >= min);
+                    previous = Some(key);
+                }
             }
         }
 
