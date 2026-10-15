@@ -475,7 +475,7 @@ mod tests {
                 }
                 None => block,
             };
-            Some(Digested::precomputed(block.clone(), block.digest()))
+            Some(mocks::ready(block))
         }
 
         async fn verify(
@@ -620,7 +620,7 @@ mod tests {
             }
             None => block,
         };
-        Digested::precomputed(block.clone(), block.digest())
+        mocks::ready(block)
     }
 
     fn midpoint_parent() -> TestBlock {
@@ -653,7 +653,7 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("app"), block_context(&midpoint, 2)),
-                        Digested::precomputed(midpoint.clone(), midpoint.digest()),
+                        mocks::ready(midpoint.clone()),
                         mocks::blocks([mocks::ready(midpoint.clone())]),
                         (),
                     )
@@ -672,7 +672,7 @@ mod tests {
                 let proposed = app
                     .propose(
                         (context.child("propose"), block_context(&midpoint, 2)),
-                        Digested::precomputed(midpoint.clone(), midpoint.digest()),
+                        mocks::ready(midpoint.clone()),
                         mocks::blocks([mocks::ready(midpoint.clone())]),
                         (),
                     )
@@ -685,7 +685,7 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("early"), block_context(&genesis, 1)),
-                        Digested::precomputed(genesis.clone(), genesis.digest()),
+                        mocks::ready(genesis.clone()),
                         mocks::blocks([mocks::ready(genesis.clone())]),
                         (),
                     )
@@ -748,7 +748,7 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("app"), block_context(&parent, 1)),
-                        Digested::precomputed(parent.clone(), parent.digest()),
+                        mocks::ready(parent.clone()),
                         mocks::blocks([mocks::ready(parent.clone())]),
                         (),
                     )
@@ -767,7 +767,7 @@ mod tests {
                 let proposed = app
                     .propose(
                         (context.child("propose"), block_context(&parent, 1)),
-                        Digested::precomputed(parent.clone(), parent.digest()),
+                        mocks::ready(parent.clone()),
                         mocks::blocks([mocks::ready(parent.clone())]),
                         (),
                     )
@@ -792,7 +792,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
-                    Digested::precomputed(parent.clone(), parent.digest()),
+                    mocks::ready(parent.clone()),
                     mocks::blocks([mocks::ready(parent.clone())]),
                     (),
                 )
@@ -806,7 +806,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app_retry"), block_context(&parent, 3)),
-                    Digested::precomputed(parent.clone(), parent.digest()),
+                    mocks::ready(parent.clone()),
                     mocks::blocks([mocks::ready(parent)]),
                     (),
                 )
@@ -835,7 +835,7 @@ mod tests {
 
             let mut propose = Box::pin(app.propose(
                 (context.child("app"), block_context(&parent, 2)),
-                Digested::precomputed(parent.clone(), parent.digest()),
+                mocks::ready(parent.clone()),
                 mocks::blocks([mocks::ready(parent)]),
                 (),
             ));
@@ -889,7 +889,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
-                    Digested::precomputed(parent.clone(), parent.digest()),
+                    mocks::ready(parent.clone()),
                     mocks::blocks([mocks::ready(parent)]),
                     (),
                 )
@@ -923,7 +923,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    Digested::precomputed(parent.clone(), parent.digest()),
+                    mocks::ready(parent.clone()),
                     mocks::blocks([mocks::ready(parent)]),
                     (),
                 )
@@ -945,7 +945,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    Digested::precomputed(parent.clone(), parent.digest()),
+                    mocks::ready(parent.clone()),
                     mocks::blocks([mocks::ready(parent)]),
                     (),
                 )
@@ -974,7 +974,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    Digested::precomputed(parent.clone(), parent.digest()),
+                    mocks::ready(parent.clone()),
                     mocks::blocks([mocks::ready(parent)]),
                     (),
                 )
@@ -993,7 +993,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let parent = mocks::genesis_block(leader().public_key());
-            let parent = Digested::precomputed(parent.clone(), parent.digest());
+            let parent = mocks::ready(parent.clone());
             let tip = final_block(&parent, Some(epoch_payload(1)));
             let mut app = wrapper(&context, EpochInfoResponse::Unavailable);
             let inner = app.inner.clone();
@@ -1018,7 +1018,7 @@ mod tests {
         executor.start(|context| async move {
             for response in [EpochInfoResponse::Following, EpochInfoResponse::Pending] {
                 let parent = mocks::genesis_block(leader().public_key());
-                let parent = Digested::precomputed(parent.clone(), parent.digest());
+                let parent = mocks::ready(parent.clone());
                 let tip = final_block(&parent, Some(epoch_payload(1)));
                 let expected_parent = parent.digest();
                 let inner = RecordingApp::accepting();
@@ -1062,7 +1062,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let parent = mocks::genesis_block(leader().public_key());
-            let parent = Digested::precomputed(parent.clone(), parent.digest());
+            let parent = mocks::ready(parent.clone());
             let tip = final_block(&parent, None);
             let mut app = wrapper(&context, EpochInfoResponse::Available(None));
             let inner = app.inner.clone();
@@ -1086,7 +1086,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let parent = mocks::genesis_block(leader().public_key());
-            let parent = Digested::precomputed(parent.clone(), parent.digest());
+            let parent = mocks::ready(parent.clone());
             let payload = epoch_payload(2);
             let tip = final_block(&parent, Some(payload.clone()));
             let mut app = wrapper(&context, EpochInfoResponse::Available(Some(payload)));
@@ -1111,7 +1111,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let parent = mocks::genesis_block(leader().public_key());
-            let parent = Digested::precomputed(parent.clone(), parent.digest());
+            let parent = mocks::ready(parent.clone());
             let tip = final_block(&parent, Some(epoch_payload(3)));
             let response = EpochInfoResponse::Available(Some(epoch_payload(4)));
             let mut app = wrapper(&context, response);
@@ -1160,8 +1160,8 @@ mod tests {
                 let verified = app
                     .verify(
                         (context.child("app"), block_context(&parent_block, tip.height().get())),
-                        Digested::precomputed(tip.clone(), tip.digest()),
-                        Digested::precomputed(parent_block.clone(), parent_block.digest()),
+                        mocks::ready(tip.clone()),
+                        mocks::ready(parent_block.clone()),
                         mocks::blocks([mocks::ready(parent_block)]),
                     )
                     .await;
@@ -1225,8 +1225,8 @@ mod tests {
                 let verified = app
                     .verify(
                         (context.child("app"), block_context(&parent_block, tip.height().get())),
-                        Digested::precomputed(tip.clone(), tip.digest()),
-                        Digested::precomputed(parent_block.clone(), parent_block.digest()),
+                        mocks::ready(tip.clone()),
+                        mocks::ready(parent_block.clone()),
                         mocks::blocks([mocks::ready(parent_block)]),
                     )
                     .await;
