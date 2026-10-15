@@ -2749,7 +2749,8 @@ mod tests {
     /// Recovery never selects, validates or reads operations below a frontier written ahead of
     /// their deletion, and rejects a frontier the retained operations cannot rebuild.
     async fn recovery_frontier_ahead<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_journal_with_ops::<F>(context.child("initial"), "ahead", 100).await;
+        let mut journal =
+            create_journal_with_ops::<F>(context.child("initial"), "ahead", 100).await;
         let root = journal.root(0).unwrap();
         let boundary = Location::new(45);
         let pins = journal.pinned_nodes_at(boundary).await.unwrap();

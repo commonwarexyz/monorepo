@@ -842,7 +842,13 @@ pub(crate) mod tests {
         ) -> Result<((), Self::Journal, Option<Vec<Self::Digest>>), qmdb::Error<MmrFamily>>
         {
             let pins = (*journal_size >= *target.range.end()).then(Vec::new);
-            Ok(((), TestJournal { size: *journal_size }, pins))
+            Ok((
+                (),
+                TestJournal {
+                    size: *journal_size,
+                },
+                pins,
+            ))
         }
 
         async fn from_sync_result(

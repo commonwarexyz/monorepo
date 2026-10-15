@@ -93,7 +93,9 @@ impl<D: Copy> Resident<D> {
         node: impl Fn(Position<F>) -> Option<D>,
     ) -> Result<(), merkle::Error<F>> {
         let born = born(end);
-        let heights = born[self.height as usize..].iter().take_while(|&&to| to > 0);
+        let heights = born[self.height as usize..]
+            .iter()
+            .take_while(|&&to| to > 0);
         for (index, &to) in heights.enumerate() {
             if index == self.levels.len() {
                 self.levels.push(Level {
@@ -117,7 +119,9 @@ impl<D: Copy> Resident<D> {
     fn trim<F: Family>(&mut self, boundary: Position<F>) {
         let born = born(boundary);
         for (level, &end) in self.levels.iter_mut().zip(&born[self.height as usize..]) {
-            let stale = end.saturating_sub(level.first).min(level.nodes.len() as u64);
+            let stale = end
+                .saturating_sub(level.first)
+                .min(level.nodes.len() as u64);
             level.nodes.drain(..stale as usize);
             level.first += stale;
             if level.nodes.len() <= level.nodes.capacity() / 4 {

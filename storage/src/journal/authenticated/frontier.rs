@@ -275,12 +275,17 @@ mod tests {
             }
         }
         for record in [Record::<F, D>::Importing(None), Record::Rejected] {
-            assert_eq!(Record::<F, D>::decode(record.encode()).unwrap().tag(), record.tag());
+            assert_eq!(
+                Record::<F, D>::decode(record.encode()).unwrap().tag(),
+                record.tag()
+            );
         }
 
         // A status that disagrees with the boundary flag, or is unknown, is rejected.
         let without = Record::<F, D>::Importing(None).encode().to_vec();
-        let with = Record::<F, D>::Importing(Some(boundary(1))).encode().to_vec();
+        let with = Record::<F, D>::Importing(Some(boundary(1)))
+            .encode()
+            .to_vec();
         for (mut encoded, tag) in [(without.clone(), 0), (with, 2), (without, 3)] {
             encoded[8] = tag;
             assert!(Record::<F, D>::decode(encoded).is_err());
