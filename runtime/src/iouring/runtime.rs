@@ -1023,17 +1023,25 @@ impl Role {
     }
 }
 
+/// A pool worker's seat in the pool: its index and the task set whose tasks
+/// it polls. Dedicated workers have no seat.
+struct Seat {
+    /// Index of this worker in the pool, as in [`Role::Pool`].
+    index: u32,
+    /// Identity of the pool's task set, which [`Local::serves`] compares with a
+    /// task's owner.
+    tasks: NonZeroU64,
+}
+
 /// Mutable execution state accessed only by its owning worker thread.
 ///
 /// Polls and callbacks obtain this state through [`Self::current`] or
 /// [`Self::with_current`]. They release each borrow before running user code,
 /// including waker methods and destructors.
 pub struct Local {
-    /// Which work this worker runs.
-    pub role: Role,
-    /// Identity of the task set whose tasks this worker polls, or `None` on a
-    /// dedicated worker, which polls only its root.
-    serving: Option<NonZeroU64>,
+    /// This worker's seat, or `None` on a dedicated worker, which polls only
+    /// its root.
+    seat: Option<Seat>,
     /// Ring owner, taken only after kernel retirement so it can be dropped unborrowed.
     pub driver: Option<Driver>,
     /// FIFO runnables.
@@ -1076,10 +1084,15 @@ impl Local {
             now,
         )?;
 
-        let serving = role.is_pool().then(|| shared.tasks.id());
+        let seat = match role {
+            Role::Pool(index) => Some(Seat {
+                index,
+                tasks: shared.tasks.id(),
+            }),
+            Role::Dedicated => None,
+        };
         Ok(Self {
-            role,
-            serving,
+            seat,
             driver: Some(driver),
             ready: Ready::default(),
             timers: Timers::default(),
@@ -1143,7 +1156,15 @@ impl Local {
     /// closing. A closing worker polls nothing more, so it serves no task set.
     #[inline]
     pub fn serves(&self, owner: NonZeroU64) -> bool {
-        self.serving == Some(owner) && !self.closing
+        self.seat.as_ref().is_some_and(|seat| seat.tasks == owner) && !self.closing
+    }
+
+    /// Which work this worker runs.
+    pub const fn role(&self) -> Role {
+        match &self.seat {
+            Some(seat) => Role::Pool(seat.index),
+            None => Role::Dedicated,
+        }
     }
 
     /// Workers in this worker's pool.
@@ -1202,7 +1223,7 @@ impl Local {
         !self.ready.is_empty()
             || self.root_ready
             || !self.deferred.is_empty()
-            || (self.role.is_pool() && self.shared.pool.has_global())
+            || (self.seat.is_some() && self.shared.pool.has_global())
     }
 
     /// Earliest absolute deadline across driver requests and sleepers.
@@ -1428,7 +1449,7 @@ impl Worker {
     /// Install TLS only after constructing a cleanup owner. A pool worker
     /// counts itself in the pool's shutdown barrier, which its cleanup leaves.
     fn new(local: Local) -> Self {
-        if local.role.is_pool() {
+        if local.role().is_pool() {
             local.shared.pool.enter();
         }
         let global_queue_interval = local.shared.cfg.global_queue_interval;
@@ -1562,6 +1583,7 @@ impl Worker {
     fn begin_close(&mut self) {
         let mailbox = {
             let mut local = self.local.borrow_mut();
+            let role = local.role();
 
             // Worker zero shuts the runner down. It closes the task set, so a
             // spawn from then on is refused and disposed of on its caller,
@@ -1569,12 +1591,12 @@ impl Worker {
             // pool to close. The set closes first, so it retains the task of
             // every runnable a closed queue discards. Cleanup drains the set.
             // Closing again does nothing.
-            if local.role.owns_runner() {
+            if role.owns_runner() {
                 local.shared.tasks.close();
                 local.shared.pool.close();
             }
             local.closing = true;
-            if local.role.is_pool() {
+            if role.is_pool() {
                 return;
             }
             local.mailbox.clone()
@@ -1619,7 +1641,7 @@ impl Worker {
         // retains the task of every runnable it discards.
         let (role, shared) = {
             let local = self.local.borrow();
-            (local.role, local.shared.clone())
+            (local.role(), local.shared.clone())
         };
         if let Role::Pool(index) = role {
             // An unwind out of the park section can leave this worker's idle
@@ -1856,7 +1878,7 @@ impl Worker {
                 local.mailbox.clone(),
                 local.shared.clone(),
                 local.shared.cfg.idle_spinner.clone(),
-                local.role,
+                local.role(),
             )
         };
         let (pool, index) = match role {
