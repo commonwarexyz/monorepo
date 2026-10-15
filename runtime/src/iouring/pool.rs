@@ -255,6 +255,7 @@ impl Pool {
                 LocalQueue::shared()
             }
         };
+
         Self {
             idle: CachePadded::new(Idle::new()),
             mailboxes: mailboxes.into(),

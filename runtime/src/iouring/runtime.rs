@@ -1675,7 +1675,20 @@ impl Worker {
     }
 
     /// Detach one callback batch and run it outside the local borrow.
-    fn callbacks(&mut self) {
+    fn callbacks(&mut self, searcher: Option<&mut Searcher<'_>>) {
+        // An empty batch runs no user code, so a searching worker keeps its
+        // count rather than hand the search on.
+        if self.local.borrow().deferred.is_empty() {
+            return;
+        }
+
+        // A held count stops kicks from waking parked workers. Callbacks can
+        // wake work and then wait for a peer to run it, so return the count
+        // before they run.
+        if let Some(searcher) = searcher {
+            searcher.leave_search();
+        }
+
         // Reuse the emptied batch while callbacks collect more work in Local.
         mem::swap(&mut self.deferred, &mut self.local.borrow_mut().deferred);
         self.deferred.run(&mut self.panics);
@@ -1825,7 +1838,7 @@ impl Worker {
             timers.clear(deferred);
             local.update_pending();
         }
-        self.callbacks();
+        self.callbacks(None);
 
         // Retained writes and syncs still need to finish. Cancelled operations
         // retain their resources until their own completion arrives.
@@ -1833,7 +1846,7 @@ impl Worker {
             // A retained write may still be queued without an SQE in flight.
             // Service must stage that work before we consider waiting for a CQE.
             self.service(false);
-            self.callbacks();
+            self.callbacks(None);
 
             let mut local = self.local.borrow_mut();
 
@@ -1983,17 +1996,6 @@ impl Worker {
         pool.take(ready).or_else(|| ready.pop())
     }
 
-    /// Run one callback batch, first returning a held search count when the
-    /// batch is not empty, since callbacks run user code. The worker must have
-    /// withdrawn any idle publication and the caller must hold no Local borrow.
-    fn callbacks_after_search(&mut self, searcher: &mut Option<Searcher<'_>>) {
-        if self.local.borrow().deferred.is_empty() {
-            return;
-        }
-        leave_search(searcher);
-        self.callbacks();
-    }
-
     /// Look for work before a pool worker with nothing ready parks: steal from
     /// the other run queues, then publish the worker idle and look once more,
     /// searching again when the last look asks it to. Returns whether the
@@ -2074,7 +2076,7 @@ impl Worker {
             // Bound task polling so a self-waking task cannot starve the root,
             // mailbox, or io_uring service. A dedicated worker polls only its
             // root.
-            if let Some(pool) = pool {
+            if let (Some(pool), Some(searcher)) = (pool, &mut searcher) {
                 for _ in 0..BATCH_SIZE {
                     let Some(runnable) = self.next_runnable(pool) else {
                         break;
@@ -2082,7 +2084,7 @@ impl Worker {
 
                     // User code can wake a backlog and wait for a peer to run it.
                     // Return the count so those wakes can kick a parked peer.
-                    leave_search(&mut searcher);
+                    searcher.leave_search();
 
                     // The inner wrapper handles user polling policy. The poll also
                     // contains the destruction of a finished or cancelled future.
@@ -2106,7 +2108,10 @@ impl Worker {
             if poll_root {
                 // The root can wake work and block waiting for it just as a
                 // task can, so it must not suppress peers' kicks either.
-                leave_search(&mut searcher);
+                if let Some(searcher) = &mut searcher {
+                    searcher.leave_search();
+                }
+
                 let mut cx = TaskContext::from_waker(root_waker);
 
                 // A local wake during this poll sets root_ready again, and a
@@ -2120,7 +2125,7 @@ impl Worker {
             // Polls can leave cancelled observers behind. Run one batch before
             // deciding whether kernel service can wait until parking. Reentrant
             // work remains visible to the complete readiness checks below.
-            self.callbacks_after_search(&mut searcher);
+            self.callbacks(searcher.as_mut());
             if self.panics.first.is_some() {
                 return None;
             }
@@ -2138,11 +2143,14 @@ impl Worker {
             // below returns a held search count before it runs them. Returning
             // the count before a batch of messages as well bounds how long it
             // keeps kicks from waking a parked worker.
-            if !self.inbox.is_empty() || mailbox.waker.pending(self.processed_seq) {
-                leave_search(&mut searcher);
+            if (!self.inbox.is_empty() || mailbox.waker.pending(self.processed_seq))
+                && let Some(searcher) = &mut searcher
+            {
+                searcher.leave_search();
             }
+
             self.messages(&mailbox);
-            self.callbacks_after_search(&mut searcher);
+            self.callbacks(searcher.as_mut());
             if self.panics.first.is_some() {
                 return None;
             }
@@ -2173,13 +2181,17 @@ impl Worker {
                 || !self.inbox.is_empty()
                 || mailbox.waker.pending(self.processed_seq)
             {
-                leave_search(&mut searcher);
+                if let Some(searcher) = &mut searcher {
+                    searcher.leave_search();
+                }
+
                 if (kernel_deferred && needs_kernel) || (defer && pending_submissions) {
                     // An idle turn must stage work introduced by its callbacks.
                     // A wake alone needs catch-up only if GETEVENTS was deferred.
                     self.service(false);
-                    self.callbacks();
+                    self.callbacks(None);
                 }
+
                 continue;
             }
 
@@ -2189,11 +2201,15 @@ impl Worker {
             // search as well, and the catch-up's callbacks run user code.
             let now = Instant::now();
             if deadline.is_some_and(|deadline| deadline <= now) {
-                leave_search(&mut searcher);
+                if let Some(searcher) = &mut searcher {
+                    searcher.leave_search();
+                }
+
                 if kernel_deferred && needs_kernel {
                     self.service(false);
-                    self.callbacks();
+                    self.callbacks(None);
                 }
+
                 continue;
             }
 
@@ -2206,10 +2222,12 @@ impl Worker {
                 // Running again ends a search, and the catch-up's callbacks run
                 // user code.
                 searcher.leave_search();
+
                 if kernel_deferred && needs_kernel {
                     self.service(false);
-                    self.callbacks();
+                    self.callbacks(None);
                 }
+
                 continue;
             }
 
@@ -2239,7 +2257,7 @@ impl Worker {
                     // A rejected wait may not have entered the kernel. Complete
                     // its deferred service obligation before another polling turn.
                     self.service(false);
-                    self.callbacks_after_search(&mut searcher);
+                    self.callbacks(searcher.as_mut());
                 }
             } else {
                 // A future timer by itself uses a timed futex wait. Spinning
@@ -2265,15 +2283,6 @@ impl Worker {
                 }
             }
         }
-    }
-}
-
-/// Return a pool worker's held search count, as it must before it runs user
-/// code or goes round its loop again without parking. Any idle publication
-/// must already be withdrawn. Does nothing for a dedicated worker.
-fn leave_search(searcher: &mut Option<Searcher<'_>>) {
-    if let Some(searcher) = searcher {
-        searcher.leave_search();
     }
 }
 
