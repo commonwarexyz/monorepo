@@ -15,8 +15,8 @@
 //!
 //! Workers own task, request, timer, and result progress. Each open serializes
 //! its syncs and SYNC writes across workers until their results are recorded.
-//! Forwarded results, mailboxes, task handles, supervision, and metrics are
-//! synchronized across threads.
+//! Forwarded results, mailboxes, the task set, task handles, supervision, and
+//! metrics are synchronized across threads.
 //!
 //! # Storage
 //!
@@ -69,6 +69,7 @@ mod sleep;
 pub(crate) mod sockaddr;
 mod spinner;
 mod task;
+mod tasks;
 mod timeout;
 mod waiter;
 mod waker;

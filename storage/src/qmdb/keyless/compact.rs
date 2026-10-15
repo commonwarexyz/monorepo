@@ -13,8 +13,8 @@
 //! restores a retained applied state within its operation cap. [`Db::prune`] bounds the retained
 //! history. Initialization restores the db's in-memory state from an entry. The Merkle is rebuilt
 //! from the stored pinned nodes and operation, and the commit fields are decoded from the
-//! operation. An entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. The witness is
-//! also what lets compact nodes serve compact sync without retaining historical operations.
+//! operation. An entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. Each retained
+//! witness also serves compact sync at its size without retaining historical operations.
 //!
 //! # Inactivity floor
 //!
@@ -33,10 +33,7 @@ use crate::{
         self, Error,
         any::value::ValueEncoding,
         chain::{self, Bounds, Commitment},
-        compact::{
-            batch as compact_batch,
-            witness::{self, VerifiedWitness},
-        },
+        compact::{batch as compact_batch, witness},
         sync::{CompactTarget, Request, Source, source},
     },
 };
@@ -60,8 +57,6 @@ where
     C: Clone + Send + Sync + 'static,
 {
     merkle: compact_merkle::Merkle<F, H::Digest, S>,
-    root: H::Digest,
-    last_commit_loc: Location<F>,
     last_commit_metadata: Option<V::Value>,
     inactivity_floor_loc: Location<F>,
     commit_codec_config: C,
@@ -169,15 +164,13 @@ where
     {
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         let hasher = qmdb::hasher::<H>();
-        db.merkle
-            .with_mem(|base| {
-                self.merkle_batch.range_proof(
-                    base,
-                    &hasher,
-                    self.bounds.base.size..self.bounds.tip.size,
-                    inactive_peaks,
-                )
-            })
+        self.merkle_batch
+            .range_proof(
+                db.merkle.mem(),
+                &hasher,
+                self.bounds.base.size..self.bounds.tip.size,
+                inactive_peaks,
+            )
             .map_err(Into::into)
     }
 
@@ -202,17 +195,15 @@ where
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
     {
-        db.merkle
-            .with_mem(|base| {
-                F::nodes_to_pin(self.bounds.base.size)
-                    .map(|pos| {
-                        self.merkle_batch
-                            .get_node(pos)
-                            .or_else(|| base.get_node(pos))
-                            .ok_or(crate::merkle::Error::ElementPruned(pos))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
+        let base = db.merkle.mem();
+        F::nodes_to_pin(self.bounds.base.size)
+            .map(|pos| {
+                self.merkle_batch
+                    .get_node(pos)
+                    .or_else(|| base.get_node(pos))
+                    .ok_or(crate::merkle::Error::ElementPruned(pos))
             })
+            .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
 
@@ -296,7 +287,6 @@ where
         inactivity_floor: Location<F>,
     ) -> MerkleizeResult<F, H::Digest, V, S>
     where
-        F: Family,
         E: Context,
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
@@ -321,9 +311,7 @@ where
         )?;
 
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
-        for value in self.appends {
-            ops.push(Operation::Append(value));
-        }
+        ops.extend(self.appends.into_iter().map(Operation::Append));
         ops.push(Operation::Commit(metadata.clone(), inactivity_floor));
 
         let operations = Arc::new(ops);
@@ -399,17 +387,12 @@ where
         )
         .await?;
 
-        // Commit metadata, location, and root must all come from the same verified witness.
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
-        let last_commit_loc = witness.with(|w| w.size()) - 1;
-        let root = witness.with(|w| w.root);
 
         Ok(Self {
             merkle,
-            root,
-            last_commit_loc,
             last_commit_metadata,
             inactivity_floor_loc,
             commit_codec_config,
@@ -443,7 +426,7 @@ where
         witness::validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
 
         let op_bytes = Self::encode_commit_op(last_commit_metadata.clone(), inactivity_floor_loc);
-        let merkle =
+        let mut merkle =
             compact_merkle::Merkle::from_compact_state(strategy, last_commit_loc, pinned_nodes)?;
         let hasher = qmdb::hasher::<H>();
         merkle.append_leaf(&hasher, &op_bytes)?;
@@ -451,11 +434,8 @@ where
         merkle.prune_to_frontier();
 
         let witness = witness::Store::from_import(journal, imported);
-        let root = witness.with(|w| w.root);
         Ok(Self {
             merkle,
-            root,
-            last_commit_loc,
             last_commit_metadata,
             inactivity_floor_loc,
             commit_codec_config,
@@ -465,17 +445,7 @@ where
 
     /// Return the root of the db.
     pub const fn root(&self) -> H::Digest {
-        self.root
-    }
-
-    /// Return a reference to the merkleization strategy.
-    pub const fn strategy(&self) -> &S {
-        self.merkle.strategy()
-    }
-
-    /// Return the location of the last commit.
-    pub const fn last_commit_loc(&self) -> Location<F> {
-        self.last_commit_loc
+        self.witness.tip().root
     }
 
     /// Return the inactivity floor declared by the last committed batch.
@@ -484,8 +454,8 @@ where
     }
 
     /// Return the location of the next operation appended to this db.
-    pub fn size(&self) -> Location<F> {
-        self.last_commit_loc + 1
+    pub const fn size(&self) -> Location<F> {
+        self.witness.tip().size()
     }
 
     /// Get the metadata associated with the last commit.
@@ -497,13 +467,13 @@ where
     ///
     /// This reflects the most recently applied batch. The target remains non-durable until a
     /// covering [`Self::commit`], [`Self::sync`], or [`Self::start_sync`] completes.
-    pub fn target(&self) -> CompactTarget<F, H::Digest> {
-        self.witness.with(VerifiedWitness::target)
+    pub const fn target(&self) -> CompactTarget<F, H::Digest> {
+        self.witness.tip().target()
     }
 
     /// The [`Commitment`] for the database's current state.
-    pub(crate) fn commitment(&self) -> chain::Commitment<F, H::Digest> {
-        chain::Commitment::new(self.last_commit_loc + 1, self.root())
+    pub(crate) const fn commitment(&self) -> chain::Commitment<F, H::Digest> {
+        chain::Commitment::new(self.size(), self.root())
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -512,10 +482,7 @@ where
     }
 
     /// Create an owned merkleized batch representing the current applied state.
-    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, V, S>>
-    where
-        F: Family,
-    {
+    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, V, S>> {
         Arc::new(MerkleizedBatch {
             merkle_batch: self.merkle.to_batch(),
             operations: Arc::new(Vec::new()),
@@ -560,20 +527,19 @@ where
     ) -> Result<(Self, core::ops::Range<Location<F>>), Error<F>> {
         self.validate_batch(&batch)?;
 
-        let start_loc = self.last_commit_loc + 1;
+        let start_loc = self.size();
         self.merkle.apply_batch(&batch.merkle_batch)?;
-        self.root = batch.root();
-        self.last_commit_loc = batch.bounds.tip.size - 1;
         self.last_commit_metadata = batch.commit_metadata.clone();
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         let last_commit_metadata = self.last_commit_metadata.clone();
         let inactivity_floor_loc = self.inactivity_floor_loc;
         self.witness = self
             .witness
-            .apply::<H, S>(&self.merkle, inactivity_floor_loc, || {
+            .apply::<H, S>(&mut self.merkle, inactivity_floor_loc, || {
                 Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
             })
             .await?;
+        assert_eq!(self.commitment(), batch.bounds.tip);
         Ok((self, start_loc..batch.bounds.tip.size))
     }
 
@@ -591,7 +557,7 @@ where
         let handle;
         (self.witness, handle) = self
             .witness
-            .start_sync::<H, S>(&self.merkle, inactivity_floor_loc, || {
+            .start_sync::<H, S>(&mut self.merkle, inactivity_floor_loc, || {
                 Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
             })
             .await?;
@@ -606,7 +572,7 @@ where
         let inactivity_floor_loc = self.inactivity_floor_loc;
         self.witness = self
             .witness
-            .commit::<H, S>(&self.merkle, inactivity_floor_loc, || {
+            .commit::<H, S>(&mut self.merkle, inactivity_floor_loc, || {
                 Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
             })
             .await?;
@@ -621,7 +587,7 @@ where
         let inactivity_floor_loc = self.inactivity_floor_loc;
         self.witness = self
             .witness
-            .sync::<H, S>(&self.merkle, inactivity_floor_loc, || {
+            .sync::<H, S>(&mut self.merkle, inactivity_floor_loc, || {
                 Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
             })
             .await?;
@@ -631,8 +597,8 @@ where
     /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness
     /// below the boundary may survive.
     ///
-    /// Pruning bounds how far back bounded initialization can reach. The current commit's witness
-    /// always survives. The prune is made durable before this method returns.
+    /// Bounded initialization and compact sync can only use witnesses that survive. The current
+    /// commit's witness always survives. The prune is made durable before this method returns.
     ///
     /// # Errors
     ///
@@ -669,7 +635,12 @@ where
     async fn serve(&self, request: Request<F>) -> source::Result<Self> {
         let response = self
             .witness
-            .compact_state(&self.commit_codec_config, request)?;
+            .compact_state::<H, S, Self::Op>(
+                self.merkle.strategy(),
+                &self.commit_codec_config,
+                request,
+            )
+            .await?;
         Ok((response, None))
     }
 }
@@ -1119,8 +1090,8 @@ mod tests {
         witness::Journal::init(context, cfg).await.unwrap()
     }
 
-    /// The witness serves only the request matching its single committed state. Each mismatch
-    /// reports the same error a pruned operation log would.
+    /// The witness journal refuses requests that match no retained state. Each mismatch reports
+    /// the same error a pruned operation log would.
     #[test_traced("INFO")]
     fn test_serve_refuses_requests_outside_witness() {
         deterministic::Runner::default().start(|context| async move {
@@ -1185,6 +1156,85 @@ mod tests {
             assert_eq!(operations.len(), 1);
             let response = db.serve(boundary(n, n - 1)).await.unwrap().0;
             assert!(matches!(response, Response::Boundary { .. }));
+        });
+    }
+
+    /// The witness journal serves each retained applied state at its size and refuses a size with
+    /// no retained state.
+    #[test_traced("INFO")]
+    fn test_serve_retained_witnesses() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db =
+                open_db::<mmr::Family>(context.child("db"), "keyless-serve-retained").await;
+
+            // Apply two batches and record the target after each.
+            let mut targets = Vec::new();
+            for seed in [1, 2] {
+                let floor = db.inactivity_floor_loc();
+                let batch = db
+                    .new_batch()
+                    .append(U64::new(seed))
+                    .merkleize(&db, Some(U64::new(seed + 10)), floor)
+                    .await
+                    .unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+                targets.push(db.target());
+            }
+            let db = db.sync().await.unwrap();
+
+            // The earlier state is served at its size and verifies against its root.
+            let first = &targets[0];
+            let start = first.size - 1;
+            let request = Request::Boundary {
+                size: first.size,
+                start,
+            };
+            let Response::Boundary {
+                proof,
+                op,
+                pinned_nodes,
+            } = db.serve(request).await.unwrap().0
+            else {
+                panic!("boundary request should get a boundary response");
+            };
+            assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                &proof,
+                start,
+                std::slice::from_ref(&op),
+                &pinned_nodes,
+                &first.root
+            ));
+
+            // An operations request at the earlier size gets the same commit operation.
+            let Response::Operations { proof, operations } = db
+                .serve(Request::Operations {
+                    size: first.size,
+                    start,
+                    max_ops: NZU64!(1),
+                })
+                .await
+                .unwrap()
+                .0
+            else {
+                panic!("operations request should get an operations response");
+            };
+            assert_eq!(operations, vec![op]);
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof,
+                start,
+                &operations,
+                &first.root
+            ));
+
+            // A size between retained states is refused.
+            assert!(matches!(
+                db.serve(Request::Boundary {
+                    size: first.size + 1,
+                    start: first.size,
+                })
+                .await,
+                Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
+            ));
         });
     }
 
@@ -2860,7 +2910,6 @@ mod tests {
             let db = db.sync().await.unwrap();
             assert_eq!(db.size(), Location::new(4));
             assert_eq!(db.root(), root_after_first);
-            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });
@@ -2894,7 +2943,6 @@ mod tests {
             let db = db.sync().await.unwrap();
             assert_eq!(db.size(), Location::new(4));
             assert_eq!(db.root(), root_before_drop);
-            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });
@@ -2941,7 +2989,6 @@ mod tests {
             let db = db.sync().await.unwrap();
             assert_eq!(db.size(), Location::new(4));
             assert_eq!(db.root(), root_after_first);
-            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });

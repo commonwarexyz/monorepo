@@ -51,14 +51,15 @@
 //! - Uses plain code references for cfg-gated SIMD engine docs so rustdoc works on all targets.
 //! - Validates transform domains, shard ranges, and working-space sizes at their public boundaries.
 //! - Supports AVX-512 with GFNI multiplication and runtime CPU feature checks.
+//! - Removed the SSSE3 engine.
 //! - Adds [`Plan`] and plan-based decoding to reuse erasure coefficients across decoders.
 //! - Sizes decoder Walsh transforms to the decoding domain.
 //! - Fuses AVX-512 butterfly layers.
 //! - Fuses formal-derivative leaves in blocks of four shards for every engine. When the `Avx512`
 //!   engine's CPU features are present, blocks of 16 shards use an AVX-512 leaf for suitable shard
 //!   counts and sizes, regardless of the selected engine.
-//! - Builds the 128-bit multiplication tables in native byte order, since the Neon, Avx2, and
-//!   Ssse3 engines read each table as a vector of its in-memory bytes.
+//! - Builds the 128-bit multiplication tables in native byte order, since the Neon and Avx2
+//!   engines read each table as a vector of its in-memory bytes.
 //! - Includes independent field-arithmetic checks, lifecycle regressions, and differential fuzzing.
 //! - Rewrote comments in Commonware style: removed section banners and uppercase step headers,
 //!   and attached floating comments to the code they describe.

@@ -139,7 +139,7 @@ pub(super) fn chunk_aligned_inactive_peaks<F: Family>(
     inactivity_floor: Location<F>,
     grafting_height: u32,
 ) -> Result<usize, merkle::Error<F>> {
-    let size = F::location_to_position(leaves);
+    let size = Position::try_from(leaves)?;
     let chunk_size = 1u64 << grafting_height;
     let floor = *inactivity_floor;
     let mut leaf_end = 0u64;

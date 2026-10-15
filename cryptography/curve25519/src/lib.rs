@@ -5,7 +5,14 @@
 //!
 //! Cryptographic operations that accept an RNG require a cryptographically secure and
 //! unpredictable source unless documented otherwise. A weak or predictable RNG may compromise
-//! security.
+//! security. Pass the RNG by mutable reference: an RNG moved into a call is dropped without
+//! zeroization and may keep a copy of the secret bytes it produced.
+//!
+//! # Zeroization
+//!
+//! Secret key types zeroize themselves when dropped, and the operations on them keep secret
+//! values in buffers that are zeroized as well. Temporaries that the compiler spills on the
+//! stack during those operations are not cleared.
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 // Every public item here is currently ALPHA, so the `commonware_stability_BETA`+ builds (which

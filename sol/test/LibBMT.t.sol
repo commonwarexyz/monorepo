@@ -435,6 +435,89 @@ abstract contract LibBMTTest is HashTest {
         assertTrue(this.sliced(c, indices, elements, proof));
     }
 
+    /// @dev Build a single-element path for any size, including sizes the verifier must reject.
+    /// Leaf and root prefixes keep the verifier's four-byte encoding so bounds checks alone decide.
+    function path(uint256 size, uint256 index, bytes32 seed) internal pure returns (Case memory c) {
+        c.leaves = size;
+        c.start = index;
+        c.indices = consecutive(index, 1);
+        c.elements = new bytes32[](1);
+        c.elements[0] = keccak256(abi.encode(seed, index));
+        c.proof = new bytes32[](64);
+        bytes32 digest = _hash(abi.encodePacked(uint32(index), c.elements[0]));
+        uint256 used;
+        for (uint256 width = size; width > 1; width = (width + 1) / 2) {
+            bytes32 sibling = digest;
+            if ((index ^ 1) < width) {
+                sibling = keccak256(abi.encode(seed, width, used));
+                c.proof[used++] = sibling;
+            }
+            digest =
+                index & 1 == 0 ? _hash(abi.encodePacked(digest, sibling)) : _hash(abi.encodePacked(sibling, digest));
+            index >>= 1;
+        }
+        c.root = _hash(abi.encodePacked(uint32(size), digest));
+        bytes32[] memory proof = c.proof;
+        assembly ("memory-safe") { mstore(proof, used) }
+    }
+
+    /// @dev Accept every position in the largest supported tree.
+    function test_MaximumLeaves() public view {
+        uint256 size = type(uint32).max;
+        uint256[3] memory positions = [uint256(0), size / 2, size - 1];
+        for (uint256 i; i < positions.length; ++i) {
+            Case memory c = path(size, positions[i], bytes32(i));
+            assertTrue(verifyCase(c, ProofKind.Single));
+            assertTrue(verifyCase(c, ProofKind.Range));
+            assertTrue(verifyCase(c, ProofKind.Multi));
+        }
+    }
+
+    /// @dev Reject leaf counts and indices that alias a valid path after four-byte truncation.
+    function test_TruncatedBounds() public view {
+        Case memory c = path(uint256(type(uint32).max) + 6, 3, 0);
+        assertFalse(verifyCase(c, ProofKind.Single));
+        assertFalse(verifyCase(c, ProofKind.Range));
+        assertFalse(verifyCase(c, ProofKind.Multi));
+        c = path(uint256(type(uint32).max) + 1, 3, 0);
+        assertFalse(verifyCase(c, ProofKind.Single));
+        assertFalse(verifyCase(c, ProofKind.Range));
+        assertFalse(verifyCase(c, ProofKind.Multi));
+        c = path(3, 3, 0);
+        assertFalse(verifyCase(c, ProofKind.Single));
+        assertFalse(verifyCase(c, ProofKind.Range));
+        assertFalse(verifyCase(c, ProofKind.Multi));
+    }
+
+    /// @dev Reject repeated identical pairs even when every repeated sibling is supplied.
+    function test_DuplicateIdenticalPairs() public view {
+        Case memory c = fixture(2, consecutive(0, 1), 0);
+        assertTrue(verifyCase(c, ProofKind.Multi));
+        uint256[] memory indices = new uint256[](2);
+        bytes32[] memory elements = new bytes32[](2);
+        bytes32[] memory proof = new bytes32[](2);
+        (elements[0], elements[1]) = (c.elements[0], c.elements[0]);
+        (proof[0], proof[1]) = (c.proof[0], c.proof[0]);
+        (c.indices, c.elements, c.proof) = (indices, elements, proof);
+        assertFalse(verifyCase(c, ProofKind.Multi));
+    }
+
+    /// @dev Reject index lists longer than their elements.
+    function test_ExtraIndex() public view {
+        Case memory c = fixture(5, consecutive(1, 1), 0);
+        assertTrue(verifyCase(c, ProofKind.Multi));
+        c.indices = consecutive(1, 2);
+        assertFalse(verifyCase(c, ProofKind.Multi));
+    }
+
+    /// @dev The empty-tree digest does not authenticate an empty selection from a nonempty tree.
+    function test_EmptyRootWithLeaves() public view {
+        Case memory c = fixture(0, new uint256[](0), 0);
+        c.leaves = 1;
+        assertFalse(verifyCase(c, ProofKind.Range));
+        assertFalse(verifyCase(c, ProofKind.Multi));
+    }
+
     /// @dev Measure isolated calls with valid single, range and unsorted sparse proofs.
     function testGas_Verification() public {
         Case memory c = fixture(256, consecutive(127, 1), 0);

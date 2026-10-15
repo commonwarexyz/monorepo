@@ -380,7 +380,7 @@ where
             let finalizations = reporter.finalizations.lock();
             let finalization_data = finalizations
                 .iter()
-                .map(|(view, cert)| {
+                .map(|(view, (cert, _))| {
                     (
                         view.get(),
                         Finalization {

@@ -165,16 +165,15 @@ mod tests {
     use crate::authenticated::discovery::types;
     use commonware_actor::{Feedback, Unreliable, mailbox};
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::select;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
-        Handshake as _,
-        encrypted::{
-            Handshake as StreamHandshake, Receiver as EncryptedReceiver, Sender as EncryptedSender,
-        },
+        SakeCups, Upgrader,
+        cups::{self, Cups},
+        sake::{self, Sake},
         utils::Timeout,
     };
     use commonware_utils::{NZUsize, SystemTimeExt};
@@ -187,20 +186,23 @@ mod tests {
     const IP_NAMESPACE: &[u8] = b"test_discovery_spawner_actor_IP";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Connection = (
-        EncryptedSender<mocks::Sink>,
-        EncryptedReceiver<mocks::Stream>,
-    );
+    type Sender =
+        <SakeCups<PrivateKey, ChaCha20Poly1305> as Upgrader>::Sender<mocks::Stream, mocks::Sink>;
+    type Receiver =
+        <SakeCups<PrivateKey, ChaCha20Poly1305> as Upgrader>::Receiver<mocks::Stream, mocks::Sink>;
+    type Connection = (Sender, Receiver);
 
-    fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
-        Timeout::new(
-            StreamHandshake {
+    fn handshake(signer: PrivateKey) -> Timeout<SakeCups<PrivateKey, ChaCha20Poly1305>> {
+        let handshake = Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
                 signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
             },
-            Duration::from_secs(10),
-        )
+            cups::Version::V1,
+        );
+        Timeout::new(handshake, Duration::from_secs(10))
     }
 
     fn spawner_config(me: PublicKey) -> Config<PublicKey> {
@@ -274,7 +276,7 @@ mod tests {
         context: deterministic::Context,
         local: PublicKey,
     ) -> (
-        Mailbox<Message<EncryptedSender<mocks::Sink>, EncryptedReceiver<mocks::Stream>, PublicKey>>,
+        Mailbox<Message<Sender, Receiver, PublicKey>>,
         mailbox::Receiver<tracker::Message<PublicKey>>,
         mailbox::UnreliableReceiver<router::Message<PublicKey>>,
         tracker::ingress::Releaser<PublicKey>,
@@ -294,12 +296,10 @@ mod tests {
         let router_mailbox = router::Mailbox::new(router_sender);
 
         let (spawner, spawner_mailbox) =
-            Actor::<
-                deterministic::Context,
-                EncryptedSender<mocks::Sink>,
-                EncryptedReceiver<mocks::Stream>,
-                PublicKey,
-            >::new(context.child("spawner"), spawner_config(local));
+            Actor::<deterministic::Context, Sender, Receiver, PublicKey>::new(
+                context.child("spawner"),
+                spawner_config(local),
+            );
         let handle = spawner.start(tracker_mailbox, router_mailbox);
 
         (

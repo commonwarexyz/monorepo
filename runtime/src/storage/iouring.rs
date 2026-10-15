@@ -588,6 +588,54 @@ impl crate::Blob for Blob {
         }
     }
 
+    async fn start_read_many(
+        &self,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> Handle<Vec<IoBufsMut>> {
+        // Every range is checked before any read is registered, so a bad range leaves none
+        // behind. The checks are those of read_at_buf.
+        let mut offsets = Vec::with_capacity(ranges.len());
+        for &(offset, len) in ranges {
+            let Some(offset) = offset
+                .checked_add(self.data_offset)
+                .filter(|offset| offset.checked_add(len as u64).is_some())
+            else {
+                return Handle::ready(Err(Error::OffsetOverflow));
+            };
+            offsets.push((offset, len));
+        }
+        let reads = offsets
+            .into_iter()
+            .map(|(offset, len)| {
+                let (io_buf, _) = self.read_buffers(self.pool.alloc(len).into(), len);
+                if len == 0 {
+                    return Handle::ready(Ok(io_buf.into()));
+                }
+                let cache = if options.contains(ReadOptions::DONT_CACHE) {
+                    Cache::Disabled
+                } else {
+                    Cache::Enabled
+                };
+                let operation = Operation::register(Request::ReadAt(ReadAtRequest {
+                    file: self.shared.clone(),
+                    offset,
+                    read: 0,
+                    buf: io_buf,
+                    cache,
+                }));
+                Handle::from_future(async move {
+                    let output = operation.await.map_err(|_| Error::ReadFailed)?;
+                    let RequestOutput::ReadAt(result) = output else {
+                        unreachable!("read request returned another output kind");
+                    };
+                    Ok(result.map_err(|(_, error)| error)?.into())
+                })
+            })
+            .collect();
+        crate::join_reads(reads)
+    }
+
     async fn write_at(
         &self,
         offset: u64,
@@ -718,8 +766,8 @@ impl crate::Blob for Blob {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Runner as _, Storage as _,
-        iouring,
+        BLOB_PAGE_SIZE, Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Runner as _,
+        Storage as _, iouring,
         storage::{Header, Layout, shared, tests::run_storage_tests},
         telemetry::metrics::{Register, Registry},
     };
@@ -943,18 +991,17 @@ mod tests {
         assert!(released, "unpolled completion retained the directory hold");
     }
 
-    /// Verify the end-to-end storage-page alignment invariant on the io_uring backend: paged
-    /// data written to a V1 blob with a 4096-byte physical page size occupies exactly one
-    /// aligned 4096-byte disk page per physical page (header page included), so page reads
-    /// never straddle a page boundary.
+    /// Verify the end-to-end blob-page alignment invariant on the io_uring backend: paged data
+    /// written to a V1 blob with a 4096-byte physical page size occupies exactly one aligned
+    /// 4096-byte disk page per physical page (header page included), so page reads never straddle a
+    /// page boundary.
     #[test]
     fn test_v1_paged_alignment() {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();
 
-            // A logical page size whose physical page is exactly one 4096-byte storage page.
-            const PHYSICAL_PAGE_SIZE: u64 = 4096;
-            let logical = crate::buffer::paged::page_size(PHYSICAL_PAGE_SIZE as u32);
+            // A logical page size whose physical page is exactly one blob page.
+            let logical = crate::buffer::paged::page_size(BLOB_PAGE_SIZE);
             let mut registry = Registry::default();
             let cache = crate::buffer::paged::CacheRef::new(
                 test_pool(&mut registry.sub_registry("pool")),
@@ -969,7 +1016,7 @@ mod tests {
                 .unwrap();
             let item: Vec<u8> = (0..1000u32).flat_map(|i| i.to_be_bytes()).collect();
             for _ in 0..12 {
-                writer.append(&item).await.unwrap();
+                (writer, _) = writer.append(&item).await.unwrap();
             }
             let logical_size = writer.size();
             writer.sync().await.unwrap();
@@ -978,18 +1025,18 @@ mod tests {
             // physical page of data (the partial tail page is zero-padded to a full physical page).
             let file_path = storage_directory.join("partition").join(hex(b"aligned"));
             let raw = std::fs::read(&file_path).unwrap();
-            let pages = (logical_size as usize).div_ceil(logical.get() as usize);
-            assert_eq!(raw.len() as u64 % PHYSICAL_PAGE_SIZE, 0);
+            let raw_len: u64 = Widen::widen(raw.len());
+            let pages = logical_size.div_ceil(logical.widen());
+            assert_eq!(raw_len % u64::from(BLOB_PAGE_SIZE), 0);
             assert_eq!(
-                raw.len() as u64,
-                Layout::V1.data_offset() + pages as u64 * PHYSICAL_PAGE_SIZE
+                raw_len,
+                Layout::V1.data_offset() + pages * u64::from(BLOB_PAGE_SIZE)
             );
 
             // Every physical page sits exactly within one aligned 4096-byte disk page, with a valid
             // CRC record in its final 12 bytes.
-            for page in 0..pages {
-                let start = Layout::V1.data_offset() as usize + page * PHYSICAL_PAGE_SIZE as usize;
-                let physical = &raw[start..start + PHYSICAL_PAGE_SIZE as usize];
+            let data = &raw[usize::try_from(Layout::V1.data_offset()).unwrap()..];
+            for (page, physical) in data.chunks_exact(Widen::widen(BLOB_PAGE_SIZE)).enumerate() {
                 assert!(
                     crate::buffer::paged::validate_page_for_tests(physical),
                     "page {page} failed CRC validation at aligned boundary"

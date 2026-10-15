@@ -25,7 +25,6 @@ use tracing::debug;
 pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> {
     context: ContextCell<E>,
 
-    // ---------- Message-Passing ----------
     /// The mailbox for the actor.
     ///
     /// We use this to support sending a [`Message::Release`] message to the actor
@@ -35,7 +34,6 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// The mailbox for the listener.
     listener: listener::Mailbox,
 
-    // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
     directory: Directory<E, C>,
 

@@ -474,6 +474,44 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         }
     }
 
+    /// @dev An empty range authenticates only the empty operation root with no witnesses or inactive peaks.
+    function test_EmptyTreeRange() public view {
+        BatchCase memory c = operationsCase(1, sequence(0, 1), ProofKind.Range);
+        c.operations = new bytes[](0);
+        c.range.leaves = 0;
+        c.range.start = 0;
+        c.range.inactivePeaks = 0;
+        c.range.digests = new bytes32[](0);
+        c.root = _hash(abi.encodePacked(bytes8(0)));
+        assertTrue(this.checked(c), "empty tree");
+        c.range.inactivePeaks = 1;
+        assertFalse(this.checked(c), "empty tree inactive peaks");
+        c.range.inactivePeaks = 0;
+        c.range.digests = new bytes32[](1);
+        assertFalse(this.checked(c), "empty tree witness");
+        c.range.digests = new bytes32[](0);
+        c.range.start = 1;
+        assertFalse(this.checked(c), "empty tree start");
+        c.range.start = 0;
+        c.root ^= bytes32(uint256(1));
+        assertFalse(this.checked(c), "empty tree root");
+    }
+
+    /// @dev Current ranges and sparse historical proofs reject leaf counts above the family bound.
+    function test_CurrentOversizedTree() public view {
+        uint256[2] memory oversized =
+            [(uint256(1) << 62) + (_family() == LibMerkle.Family.MMB ? 31 : 1), type(uint256).max];
+        for (uint256 mode; mode < 2; ++mode) {
+            BatchCase memory c = currentCase32(257, 0, 1, mode == 0 ? ProofKind.Range : ProofKind.Multi, false);
+            assertTrue(this.checked(c), "current tree");
+            for (uint256 i; i < oversized.length; ++i) {
+                c.currentRange.leaves = oversized[i];
+                c.multi.leaves = oversized[i];
+                assertFalse(this.checked(c), "oversized current tree");
+            }
+        }
+    }
+
     /// @dev Isolate each materialized tree so boundary sweeps reuse EVM memory between cases.
     function currentBoundary(uint256 n, uint256 start, uint256 count, uint256 mode) external view {
         ProofKind proofKind = mode % 2 == 0 ? ProofKind.Range : ProofKind.Multi;

@@ -1,6 +1,6 @@
 use arbitrary::Arbitrary;
 use commonware_codec::codec::FixedSize;
-use commonware_cryptography::{Signer, ed25519};
+use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519};
 use commonware_p2p::{
     Address, AddressableManager as _, Blocker, Channel, Manager as _, Receiver, Recipients, Sender,
     authenticated::{
@@ -12,7 +12,10 @@ use commonware_runtime::{
     Clock, Handle, IoBuf, Quota, Runner, Supervisor as _,
     deterministic::{self, Context},
 };
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::{
+    cups::{self, Cups},
+    sake::{self, Sake},
+};
 use commonware_utils::{
     NZU32, NZUsize, TryCollect,
     ordered::{Map, Set},
@@ -164,13 +167,13 @@ pub struct Peer<S, R, O> {
 /// a common interface for network creation and peer registration.
 pub trait NetworkScheme: Send + 'static {
     /// The sender type for this network implementation.
-    type Sender: Sender<PublicKey = ed25519::PublicKey> + Send;
+    type Sender: Sender<PublicKey = ed25519::PublicKey>;
 
     /// The receiver type for this network implementation.
-    type Receiver: Receiver<PublicKey = ed25519::PublicKey> + Send;
+    type Receiver: Receiver<PublicKey = ed25519::PublicKey>;
 
     /// The oracle type for this network implementation.
-    type Oracle: Blocker<PublicKey = ed25519::PublicKey> + Send;
+    type Oracle: Blocker<PublicKey = ed25519::PublicKey>;
 
     /// Creates and initializes a network instance for a single peer.
     ///
@@ -235,7 +238,15 @@ impl NetworkScheme for Discovery {
 
         // Create config with recommended defaults
         let mut config = discovery::Config::recommended(
-            Handshake::new(peer.info.signer.clone()),
+            Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: peer.info.signer.clone(),
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            ),
             b"fuzz_namespace",
             peer.info.address,
             peer.info.address,
@@ -313,7 +324,15 @@ impl NetworkScheme for Lookup {
     ) -> PeerNetwork<Self::Sender, Self::Receiver, Self::Oracle> {
         // Create lookup config - no bootstrappers needed since we register addresses directly
         let mut config = lookup::Config::recommended(
-            Handshake::new(peer.info.signer.clone()),
+            Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: peer.info.signer.clone(),
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            ),
             b"fuzz_namespace",
             peer.info.address,
             peer.topo

@@ -56,18 +56,22 @@ mod handler;
 mod logger;
 
 use clap::{Arg, Command, value_parser};
-use commonware_cryptography::{Signer as _, ed25519};
+use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519};
 use commonware_p2p::{
     Manager as _,
     authenticated::{self, discovery},
 };
 use commonware_runtime::{Quota, Runner as _, Supervisor as _, tokio};
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::{
+    cups::{self, Cups},
+    sake::{self, Sake},
+};
 use commonware_utils::{NZU32, TryCollect, ordered::Set, sync::Mutex};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
     sync::Arc,
+    time::Duration,
 };
 use tracing::info;
 
@@ -159,7 +163,15 @@ fn main() {
     const MAX_MESSAGE_SIZE: u32 = 1024; // 1 KB
     let max_peers_per_set = authenticated::peer_set_limit(&recipients, &signer.public_key());
     let p2p_cfg = discovery::Config::local(
-        Handshake::new(signer.clone()),
+        Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
+                signer: signer.clone(),
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
+            },
+            cups::Version::V1,
+        ),
         APPLICATION_NAMESPACE,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),

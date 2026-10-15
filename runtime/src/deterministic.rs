@@ -1221,11 +1221,6 @@ impl crate::Spawner for Context {
         );
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
 
-        // Register the task on the parent
-        if let Some(aborter) = handle.aborter() {
-            parent.register(aborter);
-        }
-
         handle
     }
 

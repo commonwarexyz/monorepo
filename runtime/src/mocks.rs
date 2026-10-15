@@ -7,6 +7,7 @@ use crate::{
     telemetry::metrics::{Metric, Registered},
 };
 use bytes::{Bytes, BytesMut};
+use commonware_macros::boxed;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
@@ -1048,6 +1049,7 @@ pub fn release_pending_syncs(pending: &PendingSyncs) {
 }
 
 /// Drive `fut` to completion, releasing any parked syncs each time it stalls.
+#[boxed]
 pub async fn drive_pending_syncs<T>(pending: &PendingSyncs, fut: impl Future<Output = T>) -> T {
     let mut fut = std::pin::pin!(fut);
     poll_fn(|cx| match fut.as_mut().poll(cx) {

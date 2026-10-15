@@ -48,6 +48,7 @@ arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
 	"commonware-runtime/arbitrary",
+	"commonware-stream/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 	"num-bigint/arbitrary",

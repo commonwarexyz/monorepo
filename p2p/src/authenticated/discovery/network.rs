@@ -1,7 +1,7 @@
 //! Implementation of an `authenticated` network.
 
 use super::{
-    Handshake,
+    Upgrader,
     actors::{dialer, listener, spawner, tracker},
     config::Config,
 };
@@ -12,6 +12,7 @@ use crate::{
         channels::{self, Channels},
         discovery::types::{Info, InfoVerifier},
         max_size, router,
+        stream::Config as StreamConfig,
     },
     sizing::max_retained_peers,
 };
@@ -20,7 +21,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::{Config as StreamConfig, utils::Timeout};
+use commonware_stream::utils::Timeout;
 use commonware_utils::{SystemTimeExt, ordered::Set, union};
 use rand_core::CryptoRng;
 use std::sync::Arc;
@@ -38,21 +39,21 @@ const IP_SUFFIX: &[u8] = b"_IP";
 /// Implementation of an `authenticated` network.
 pub struct Network<
     E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-    H: Handshake,
+    U: Upgrader,
 > {
     context: ContextCell<E>,
-    cfg: Config<H>,
+    cfg: Config<U>,
     max_frame_size: u32,
     max_peer_set_size: u64,
 
-    channels: Channels<H::PublicKey>,
-    tracker: tracker::Actor<E, H::PublicKey>,
-    tracker_mailbox: tracker::Mailbox<H::PublicKey>,
-    info_verifier: InfoVerifier<H::PublicKey>,
+    channels: Channels<U::PublicKey>,
+    tracker: tracker::Actor<E, U::PublicKey>,
+    tracker_mailbox: tracker::Mailbox<U::PublicKey>,
+    info_verifier: InfoVerifier<U::PublicKey>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, H: Handshake>
-    Network<E, H>
+impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader>
+    Network<E, U>
 {
     /// Create a new instance of an `authenticated` network.
     ///
@@ -68,11 +69,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// # Panics
     ///
     /// Panics if the configured frame size exceeds the stream limit or capacity arithmetic overflows.
-    pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<H::PublicKey>) {
-        // `max_size` subtracts framing overhead from `H::MAX_SIZE`, so this bound guarantees
+    pub fn new(context: E, cfg: Config<U>) -> (Self, tracker::Oracle<U::PublicKey>) {
+        // `max_size` subtracts framing overhead from `U::MAX_SIZE`, so this bound guarantees
         // that adding the overhead back cannot overflow.
         assert!(
-            cfg.max_message_size <= max_size::<H>(),
+            cfg.max_message_size <= max_size::<U>(),
             "maximum message size exceeds stream limit"
         );
         let max_frame_size = cfg
@@ -192,8 +193,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         channel: Channel,
         rate: Quota,
     ) -> (
-        channels::Sender<H::PublicKey, E>,
-        channels::Receiver<H::PublicKey>,
+        channels::Sender<U::PublicKey, E>,
+        channels::Receiver<U::PublicKey>,
     ) {
         let context = self
             .context
@@ -225,8 +226,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
 
     async fn run(
         self,
-        router: router::Actor<E, H::PublicKey>,
-        router_mailbox: router::Mailbox<H::PublicKey>,
+        router: router::Actor<E, U::PublicKey>,
+        router_mailbox: router::Mailbox<U::PublicKey>,
     ) {
         // Start tracker
         let mut tracker_task = self.tracker.start();
@@ -315,9 +316,9 @@ mod tests {
     use super::*;
     use crate::{Ingress, Manager, authenticated::discovery::actors::peer};
     use commonware_codec::Encode;
-    use commonware_cryptography::{Signer, ed25519::PrivateKey};
+    use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_stream::encrypted::Handshake as StreamHandshake;
+    use commonware_stream::{cups, cups::Cups, sake, sake::Sake};
     use commonware_utils::NZUsize;
     use std::{net::SocketAddr, time::Duration};
 
@@ -331,7 +332,15 @@ mod tests {
             let peer = peer_signer.public_key();
             let address = SocketAddr::from(([127, 0, 0, 1], 7000));
             let cfg = Config::local(
-                StreamHandshake::new(signer.clone()),
+                Cups::<_, ChaCha20Poly1305>::new(
+                    Sake {
+                        signer: signer.clone(),
+                        synchrony_bound: Duration::from_secs(5),
+                        max_handshake_age: Duration::from_secs(10),
+                        version: sake::Version::V1,
+                    },
+                    cups::Version::V1,
+                ),
                 b"discovery-test",
                 address,
                 address,
@@ -359,7 +368,7 @@ mod tests {
                     .is_ok()
             );
 
-            // Check that the greeting uses the handshake's identity and the gossip namespace.
+            // Check that the greeting uses the upgrader's identity and the gossip namespace.
             network.tracker.start();
             oracle.track(0, Set::try_from([local.clone(), peer.clone()]).unwrap());
             let _reservation = network.tracker_mailbox.listen(peer.clone()).await.unwrap();

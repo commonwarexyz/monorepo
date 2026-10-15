@@ -18,24 +18,24 @@ use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{Metrics, Sink, Spawner, Stream};
-use commonware_stream::encrypted::{Receiver, Sender};
+use commonware_runtime::{Metrics, Spawner};
+use commonware_stream::{Receiver, Sender};
 use rand::RngExt as _;
 use rand_core::CryptoRng;
 use tracing::{debug, info};
 
 /// Application actor.
-pub struct Application<R: CryptoRng + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream> {
-    context: R,
-    indexer: (Sender<Si>, Receiver<St>),
+pub struct Application<E: CryptoRng + Spawner + Metrics, H: Hasher, S: Sender, R: Receiver> {
+    context: E,
+    indexer: (S, R),
     this_network: <MinSig as Variant>::Public,
     other_network: Scheme,
     mailbox: ActorReceiver<Message<H::Digest>>,
 }
 
-impl<R: CryptoRng + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
+impl<E: CryptoRng + Spawner + Metrics, H: Hasher, S: Sender, R: Receiver> Application<E, H, S, R> {
     /// Create a new application actor.
-    pub fn new(context: R, config: Config<Si, St>) -> (Self, Scheme, Mailbox<H::Digest>) {
+    pub fn new(context: E, config: Config<S, R>) -> (Self, Scheme, Mailbox<H::Digest>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let this_network = *config.this_network.identity();
         (

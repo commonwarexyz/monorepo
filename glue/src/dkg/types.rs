@@ -1,4 +1,4 @@
-//! Shared types for the DKG module.
+//! Epoch artifacts, participant sets, and wire messages of the DKG protocol.
 
 use crate::dkg::network::Directory;
 use bytes::BufMut;
@@ -20,35 +20,34 @@ use commonware_utils::{Faults as _, N3f1, ordered::Set, sequence::Unit};
 use std::num::{NonZeroU32, NonZeroU64};
 use thiserror::Error;
 
-/// Information required to construct an epoch-scoped threshold scheme that may
-/// or may not be capable of signing messages.
+/// Material for an epoch-scoped threshold scheme, with or without a signing share.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SchemeInfo<V: Variant, P: PublicKey> {
-    /// Information required for constructing a verifier scheme.
+    /// Material for a scheme that verifies but cannot sign.
     Verifier {
-        /// The participants.
+        /// Players of the epoch's threshold output.
         participants: Set<P>,
-        /// The public group polynomial.
+        /// Public group polynomial.
         sharing: Sharing<V>,
     },
-    /// Information required for constructing a signer scheme.
+    /// Material for a scheme that also signs with `share`.
     Signer {
-        /// The participants.
+        /// Players of the epoch's threshold output.
         participants: Set<P>,
-        /// The public group polynomial.
+        /// Public group polynomial.
         sharing: Sharing<V>,
-        /// A BLS [`Share`].
+        /// This node's secret share.
         share: Share,
     },
 }
 
-/// Result of a completed DKG/reshare epoch.
+/// Result of a DKG or reshare ceremony.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum EpochOutcome {
-    /// The epoch produced a new public output.
+    /// The ceremony produced a new public output.
     Success,
-    /// The epoch failed and carried the previous public state forward.
+    /// The ceremony failed, and the previous public output carries forward.
     Failure,
 }
 
@@ -91,22 +90,23 @@ pub struct Participants<P: PublicKey> {
     pub next_players: Set<P>,
 }
 
-/// Errors produced while validating DKG/reshare participants.
+/// Reasons [`Participants::validate`] rejects a participant set.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParticipantsError {
-    /// No dealers were provided.
+    /// The dealer set is empty.
     #[error("dealers must not be empty")]
     EmptyDealers,
-    /// No players were provided.
+    /// The player set is empty.
     #[error("players must not be empty")]
     EmptyPlayers,
-    /// A participant set exceeds the configured maximum.
+    /// A participant set (dealers, players, or next players) has `actual` members, more than
+    /// `max`.
     #[error("too many participants: {actual} > {max}")]
     TooManyParticipants { actual: usize, max: usize },
-    /// Round-zero reshare dealers differ from the previous output players.
+    /// In reshare round zero, the dealers are not exactly the previous output's players.
     #[error("round-zero reshare dealers must equal previous output players")]
     InitialReshareDealers,
-    /// A later reshare dealer does not own a previous share.
+    /// In a later reshare round, a dealer is not one of the previous output's players.
     #[error("reshare dealer is not a previous player")]
     UnknownReshareDealer,
 }
@@ -118,12 +118,11 @@ pub(crate) struct EpochCapacityError {
 }
 
 impl<P: PublicKey> Participants<P> {
-    /// Builds the peer set used by the DKG channel.
+    /// Returns the peers to activate for this epoch: the dealers as primary peers, and the
+    /// players and next players as secondary peers.
     ///
-    /// Dealers are the primary tracked peers because they send protocol data in the
-    /// current round. Current and next players are tracked as secondary peers so the
-    /// actor keeps enough connectivity to receive its own messages and prepare the
-    /// next epoch without allowing next players to act as dealers.
+    /// Dealers send the epoch's dealings. Players and next players are tracked for the
+    /// connectivity needed to receive dealings and to prepare the next epoch.
     pub fn tracked_peers(&self) -> TrackedPeers<P> {
         TrackedPeers::new(
             self.dealers.clone(),
@@ -131,12 +130,14 @@ impl<P: PublicKey> Participants<P> {
         )
     }
 
-    /// Checks that a participant snapshot is usable for the requested reshare round.
+    /// Checks that the participants are usable for `round`.
     ///
-    /// Reshare requires non-empty dealer and player sets, caps every participant set
-    /// at `max_participants`, and verifies that reshare dealers are authorized by the
-    /// previous epoch output. Round zero must start from exactly the previous player
-    /// set. Later rounds may use any subset of previous players as dealers.
+    /// Returns [`ParticipantsError::EmptyDealers`] or [`ParticipantsError::EmptyPlayers`]
+    /// for an empty set, and [`ParticipantsError::TooManyParticipants`] if any set exceeds
+    /// `max_participants`. With a `previous` output, round zero requires the dealers to
+    /// equal its players ([`ParticipantsError::InitialReshareDealers`]), and later rounds
+    /// require every dealer to be one of its players
+    /// ([`ParticipantsError::UnknownReshareDealer`]). Returns `Ok(())` otherwise.
     pub fn validate<V: Variant>(
         &self,
         max_participants: NonZeroU32,
@@ -476,27 +477,21 @@ where
     }
 }
 
-/// Canonical public epoch artifact.
+/// The public description of an epoch.
 ///
-/// This is the public truth needed to start an epoch: the latest public output,
-/// the participant sets not already carried by that output, and the transport
-/// [`Directory`] for every peer of the epoch. The genesis block carries the
-/// [`EpochInfo`] for epoch 0; the final block of each epoch carries the
-/// [`EpochInfo`] for the following epoch. The reshare actor never invents this;
-/// it reads it back from finalized block ancestry.
-///
-/// Because the directory rides in the artifact, a node recovering through a
-/// certificate-backed route (a finalized boundary block, a
-/// [`probe`](crate::dkg::probe) artifact, or persisted
-/// [`state_sync`](crate::dkg::state_sync) material) can activate the epoch's
-/// peers without access to application state.
+/// It holds the epoch's threshold output, the participant sets that output does not
+/// carry, and the transport [`Directory`] for every peer of the epoch. Genesis carries the
+/// [`EpochInfo`] for epoch 0, and the final block of each epoch carries the [`EpochInfo`]
+/// for the next. See [Peer Activation](crate::dkg#peer-activation) for how the directory is
+/// used.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
-    /// Whether or not the reshare ceremony in this epoch was successful.
+    /// Outcome of the ceremony that produced this artifact (on
+    /// [`EpochOutcome::Failure`], `output` is the previous output carried forward).
     pub outcome: EpochOutcome,
     /// Epoch this artifact describes.
     pub epoch: Epoch,
-    /// Latest public DKG output.
+    /// Public threshold output whose players are this epoch's dealers.
     pub output: Output<V, P>,
     /// Peers that receive shares in this epoch.
     pub players: Set<P>,
@@ -508,7 +503,7 @@ pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
 }
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> EpochInfo<V, P, D> {
-    /// Reconstructs the complete participant snapshot for this epoch.
+    /// Returns the epoch's participants, with the output's players as dealers.
     pub fn participants(&self) -> Participants<P> {
         Participants {
             dealers: self.output.players().clone(),
@@ -605,17 +600,14 @@ where
     }
 }
 
-/// A public artifact published by the reshare actor into a block.
-///
-/// During the dealing and inclusion window of an epoch the actor publishes
-/// finalized dealer logs. The final block of an epoch instead carries the
-/// canonical [`EpochInfo`] for the following epoch.
+/// A public reshare artifact carried by an application block.
 #[allow(clippy::large_enum_variant)]
 pub enum Payload<V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
-    /// A finalized signed dealer log for inclusion mid-epoch.
+    /// A signed dealer log, carried from the epoch midpoint up to, but not including, the
+    /// final block.
     DealerLog(SignedDealerLog<V, C>),
-    /// The canonical public epoch artifact for the next epoch, carried by the
-    /// final block of the current epoch.
+    /// An epoch's [`EpochInfo`]: epoch zero's in genesis (and in a one-shot DKG's final
+    /// block), and otherwise the next epoch's in the final block of the current epoch.
     EpochInfo(EpochInfo<V, C::PublicKey, D>),
 }
 
@@ -694,11 +686,11 @@ where
     }
 }
 
-/// Wire message type for DKG protocol communication.
+/// Point-to-point message of a DKG or reshare ceremony.
 pub enum Message<V: Variant, P: PublicKey> {
-    /// A dealer message containing public and private components for a player.
+    /// A dealer's public and private messages for one player.
     Dealer(DealerPubMsg<V>, DealerPrivMsg),
-    /// A player acknowledgment sent back to a dealer.
+    /// A player's acknowledgement to a dealer.
     Ack(PlayerAck<P>),
 }
 

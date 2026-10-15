@@ -234,6 +234,11 @@ impl<const N: usize> Prunable<N> {
         self.bitmap.push_chunk(chunk);
     }
 
+    /// Append every bit of `other`, in order. See [`BitMap::extend_from_bitmap`].
+    pub fn extend_from_bitmap<const M: usize>(&mut self, other: &BitMap<M>) {
+        self.bitmap.extend_from_bitmap(other);
+    }
+
     /// Remove and return the last complete chunk from the bitmap.
     ///
     /// # Warning
@@ -547,6 +552,35 @@ mod tests {
 
         let retrieved_chunk = prunable.get_chunk_containing(0);
         assert_eq!(retrieved_chunk, &chunk);
+    }
+
+    #[test]
+    fn test_extend_from_bitmap_after_pruning_matches_push() {
+        // Appending after pruned chunks and a zero-filled gap matches pushing bit by bit.
+        let mut src: BitMap = BitMap::new();
+        for i in 0..1000u64 {
+            src.push(i % 3 == 0 || i % 7 == 0);
+        }
+        for floor in [128, 129, 191, 255, 256, 300] {
+            let mut actual = Prunable::<16>::new();
+            actual.extend_to(128);
+            actual.prune_to_bit(128);
+            actual.extend_to(floor);
+            let mut expected = actual.clone();
+            for bit in src.iter() {
+                expected.push(bit);
+            }
+            actual.extend_from_bitmap(&src);
+            assert_eq!(actual.len(), expected.len());
+            assert_eq!(actual.pruned_bits(), expected.pruned_bits());
+            for bit in actual.pruned_bits()..actual.len() {
+                assert_eq!(
+                    actual.get_bit(bit),
+                    expected.get_bit(bit),
+                    "floor={floor} bit={bit}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1338,6 +1372,70 @@ mod tests {
             prunable.pop();
         }
         assert!(prunable.is_chunk_aligned()); // 0 bits
+    }
+
+    /// Compare the first bit `ones_iter_range` yields with a bit-by-bit scan for ranges over a
+    /// bitmap of `N`-byte chunks, with and without a pruned chunk.
+    fn check_ones_iter_ranges<const N: usize>() {
+        let len = 3 * Prunable::<N>::CHUNK_SIZE_BITS + 3;
+        for stride in [1, 7, 63, 65, len + 1] {
+            let mut bitmap = Prunable::<N>::new();
+            bitmap.extend_to(len);
+            for bit in (0..len).filter(|bit| bit % stride == 0) {
+                bitmap.set_bit(bit, true);
+            }
+            for pruned in [false, true] {
+                if pruned {
+                    bitmap.prune_to_bit(Prunable::<N>::CHUNK_SIZE_BITS);
+                }
+
+                // Wide chunks sample range bounds beside byte boundaries to bound the runtime.
+                for from in (0..=len + 1).filter(|bit| N <= 9 || bit % 8 <= 1 || bit % 8 == 7) {
+                    for end in (from..=len + 1).filter(|bit| N <= 9 || bit % 8 <= 1 || bit % 8 == 7)
+                    {
+                        let expected = (from.max(bitmap.pruned_bits())..end.min(len))
+                            .find(|&bit| bitmap.get_bit(bit));
+                        assert_eq!(
+                            bitmap.ones_iter_range(from..end).next(),
+                            expected,
+                            "N={N}, {from}..{end}"
+                        );
+                    }
+                    assert_eq!(
+                        bitmap.ones_iter_range(from..u64::MAX).next(),
+                        (from.max(bitmap.pruned_bits())..len).find(|&bit| bitmap.get_bit(bit))
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`check_ones_iter_ranges`] for chunks narrower than, equal to, and wider than eight bytes.
+    #[test]
+    fn test_ones_iter_range_matches_bit_scan() {
+        check_ones_iter_ranges::<1>();
+        check_ones_iter_ranges::<7>();
+        check_ones_iter_ranges::<8>();
+        check_ones_iter_ranges::<9>();
+        check_ones_iter_ranges::<32>();
+        check_ones_iter_ranges::<64>();
+    }
+
+    /// Ranges ending at or just below `u64::MAX` stop at their end without overflowing. The
+    /// bitmap's chunk index must fit a `usize`, so only 64-bit targets reach that end.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn test_ones_iter_range_near_max() {
+        let mut bitmap = Prunable::<8>::new_with_pruned_chunks((u64::MAX / 64) as usize).unwrap();
+        let from = bitmap.pruned_bits();
+        bitmap.extend_to(u64::MAX);
+        assert_eq!(bitmap.ones_iter_range(from..u64::MAX).next(), None);
+        bitmap.set_bit(u64::MAX - 1, true);
+        assert_eq!(bitmap.ones_iter_range(from..u64::MAX - 1).next(), None);
+        assert_eq!(
+            bitmap.ones_iter_range(from..u64::MAX).next(),
+            Some(u64::MAX - 1)
+        );
     }
 
     #[test]

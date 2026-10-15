@@ -22,14 +22,16 @@ where
 
                 let executor = R::default();
                 executor.start(|ctx| async move {
+                    // Prepare the writer and cache outside the timed operation.
                     let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
                     let mut append = create_append(&ctx, &name, cache_ref).await;
 
+                    // Measure append batches larger than the page cache.
                     let start = Instant::now();
                     for _ in 0..iters {
                         // Write double the bytes that can be held by the cache.
                         for _ in 0..(CACHE_SIZE * PAGE_SIZE.get() as usize / chunk_size) * 2 {
-                            append.append(&data).await.unwrap();
+                            (append, _) = append.append(&data).await.unwrap();
                         }
                     }
                     let elapsed = start.elapsed();

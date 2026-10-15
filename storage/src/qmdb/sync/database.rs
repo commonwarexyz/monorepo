@@ -205,7 +205,7 @@ mod tests {
             for i in 0u64..50 {
                 batch = batch.add(&hasher, &i.to_be_bytes());
             }
-            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(merkle.mem(), &hasher);
             merkle = merkle.apply_batch(&batch).unwrap();
             let merkle = merkle.sync().await.unwrap();
             let merkle = merkle.prune(Location::new(30)).await.unwrap();

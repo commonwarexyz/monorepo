@@ -24,8 +24,10 @@ use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
-use commonware_utils::{Array, Span};
+use commonware_parallel::Strategy;
+use commonware_utils::{Array, Span, sequence::FixedBytes};
 use core::{
+    cmp::Ordering,
     fmt::{Debug, Display},
     ops::Deref,
 };
@@ -55,7 +57,11 @@ impl Hasher for Keccak256 {
         hasher.finalize().1
     }
 
-    fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+    fn hash_pair(
+        left: &[&[u8]],
+        right: &[&[u8]],
+        _strategy: &impl Strategy,
+    ) -> (Self::Digest, Self::Digest) {
         (Self::hash(left), Self::hash(right))
     }
 
@@ -72,10 +78,24 @@ impl Hasher for Keccak256 {
 }
 
 /// Digest of a Keccak-256 hashing operation.
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, FixedArray)]
 #[fixed_array(infallible)]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
+
+impl Ord for Digest {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        FixedBytes::new(self.0).cmp(&FixedBytes::new(other.0))
+    }
+}
+
+impl PartialOrd for Digest {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 #[cfg(feature = "arbitrary")]
 impl<'a> arbitrary::Arbitrary<'a> for Digest {
@@ -157,6 +177,7 @@ mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
     use commonware_formatting::hex;
+    use commonware_parallel::Sequential;
 
     const EMPTY_DIGEST: [u8; DIGEST_LENGTH] =
         hex!("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470");
@@ -169,7 +190,7 @@ mod tests {
         assert_eq!(Keccak256::hash(&[b"abc"]).as_ref(), ABC_DIGEST);
         assert_eq!(Keccak256::hash(&[b"a", b"", b"bc"]).as_ref(), ABC_DIGEST);
         assert_eq!(
-            Keccak256::hash_pair(&[], &[b"a", b"bc"]),
+            Keccak256::hash_pair(&[], &[b"a", b"bc"], &Sequential),
             (Digest(EMPTY_DIGEST), Digest(ABC_DIGEST))
         );
 
@@ -216,6 +237,30 @@ mod tests {
         assert!(Digest::decode(Copying(&ABC_DIGEST[..31])).is_err());
         digest.zeroize();
         assert_eq!(digest, <Digest as crate::Digest>::EMPTY);
+    }
+
+    #[test]
+    fn test_digest_ord() {
+        let a = Digest([0; DIGEST_LENGTH]);
+        let mut b = a;
+        b.0[DIGEST_LENGTH - 1] = 1;
+
+        // The first byte decides even when the remaining bytes order the other way.
+        let mut c = a;
+        c.0[0] = 0x7f;
+        c.0[1..].fill(0xff);
+        let mut d = a;
+        d.0[0] = 0x80;
+        for (a, b, expected) in [
+            (a, a, Ordering::Equal),
+            (a, b, Ordering::Less),
+            (b, a, Ordering::Greater),
+            (c, d, Ordering::Less),
+            (d, c, Ordering::Greater),
+        ] {
+            assert_eq!(a.cmp(&b), expected);
+            assert_eq!(a.partial_cmp(&b), Some(expected));
+        }
     }
 
     #[cfg(feature = "arbitrary")]

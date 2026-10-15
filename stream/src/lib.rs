@@ -10,14 +10,17 @@
 )]
 
 commonware_macros::stability_scope!(BETA {
+    use commonware_cryptography::transcript::Transcript;
     use commonware_runtime::{BufferPooler, Clock, IoBufs, Sink, Stream};
     use rand_core::CryptoRng;
     use std::{error::Error, future::Future};
 
-    mod config;
-    pub use config::Config;
-    pub mod encrypted;
+    pub mod cups;
+    pub mod sake;
     pub mod utils;
+
+    /// [CUPS](cups::Cups) running a [SAKE](sake::Sake) handshake with cipher `C`.
+    pub type SakeCups<S, C> = cups::Cups<sake::Sake<S>, C>;
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
     ///
@@ -33,9 +36,10 @@ commonware_macros::stability_scope!(BETA {
     /// messages and enforce the limit before allocating for an inbound message. Protocol overhead
     /// does not count toward this limit.
     ///
-    /// Callers must enforce a deadline, for example with [utils::Timeout]. Dropping the handshake
-    /// future cancels the attempt, and implementations must release the underlying connection.
-    pub trait Handshake: Clone + Send + Sync + 'static {
+    /// Callers must enforce a deadline, for example with [utils::Timeout]. Dropping a [Self::dial]
+    /// or [Self::listen] future cancels the attempt, and implementations must release the
+    /// underlying connection.
+    pub trait Upgrader: Clone + Send + Sync + 'static {
         /// Largest plaintext message supported by the established streams, in bytes.
         const MAX_SIZE: u32;
 
@@ -53,7 +57,7 @@ commonware_macros::stability_scope!(BETA {
 
         /// Returns the local authenticated identity.
         ///
-        /// The identity must remain stable across attempts and clones of this handshake.
+        /// The identity must remain stable across attempts and clones of this upgrader.
         fn public_key(&self) -> Self::PublicKey;
 
         /// Authenticates an outbound connection to `peer`.
@@ -79,7 +83,7 @@ commonware_macros::stability_scope!(BETA {
         /// Authenticates an inbound connection accepted by `bouncer`.
         ///
         /// The bouncer may receive an unverified identity claim before authentication completes.
-        /// Accepting this claim permits authentication to continue. Only a successful handshake
+        /// Accepting this claim permits authentication to continue. Only a successful listen
         /// proves the returned peer's identity.
         ///
         /// # Panics
@@ -151,6 +155,68 @@ commonware_macros::stability_scope!(BETA {
 
         /// Receives one complete message within the connection's size limit.
         fn recv(&mut self) -> impl Future<Output = Result<IoBufs, Self::Error>> + Send;
+    }
+
+    /// Authenticates a raw connection and agrees on a secret [Transcript].
+    ///
+    /// Let `D` and `L` be the identities authenticated for the dialer and the listener. A
+    /// successful handshake returns the same transcript `T` to both peers, where:
+    ///
+    /// 1. `T` commits to `namespace`, to `D` as dialer, and to `L` as listener.
+    /// 2. `T` is fresh for each handshake and unpredictable to any party other than `D` and `L`.
+    /// 3. Each peer returns `T` only after verifying that the other peer holds `T`.
+    ///
+    /// A dial to `peer` succeeds only if `L` is `peer`. A listen succeeds only if `bouncer`
+    /// returns `true` for `D`, and returns `D`.
+    ///
+    /// Implementations must not read from `stream` beyond the final handshake message. Callers
+    /// must enforce a deadline. Dropping the returned future cancels the attempt.
+    pub trait Handshake: Clone + Send + Sync + 'static {
+        /// Public key identifying an authenticated peer.
+        type PublicKey: Send;
+
+        /// Error returned when authentication fails.
+        type Error: Error + Send + Sync + 'static;
+
+        /// Returns the local authenticated identity.
+        ///
+        /// The identity must remain stable across attempts and clones of this handshake.
+        fn public_key(&self) -> Self::PublicKey;
+
+        /// Authenticates an outbound connection to `peer` and returns its secret transcript.
+        fn dial<E, I, O>(
+            self,
+            context: E,
+            namespace: &[u8],
+            peer: Self::PublicKey,
+            stream: &mut I,
+            sink: &mut O,
+        ) -> impl Future<Output = Result<Transcript, Self::Error>> + Send
+        where
+            E: Clock + CryptoRng,
+            I: Stream,
+            O: Sink;
+
+        /// Authenticates an inbound connection accepted by `bouncer` and returns the peer with the
+        /// secret transcript.
+        ///
+        /// The bouncer may receive an unverified identity claim before authentication completes.
+        /// Accepting this claim permits authentication to continue. Only a successful handshake
+        /// proves the returned peer's identity.
+        fn listen<E, I, O, B, F>(
+            self,
+            context: E,
+            namespace: &[u8],
+            bouncer: B,
+            stream: &mut I,
+            sink: &mut O,
+        ) -> impl Future<Output = Result<(Self::PublicKey, Transcript), Self::Error>> + Send
+        where
+            E: Clock + CryptoRng,
+            I: Stream,
+            O: Sink,
+            B: FnOnce(Self::PublicKey) -> F + Send,
+            F: Future<Output = bool> + Send;
     }
 
     #[cfg(test)]
@@ -257,8 +323,8 @@ commonware_macros::stability_scope!(BETA {
             }
         }
 
-        impl Handshake for OpaqueHandshake {
-            const MAX_SIZE: u32 = encrypted::MAX_SIZE;
+        impl Upgrader for OpaqueHandshake {
+            const MAX_SIZE: u32 = u32::MAX;
 
             type PublicKey = OpaqueIdentity;
             type Error = Rejected;
@@ -326,8 +392,11 @@ commonware_macros::stability_scope!(BETA {
             }
         }
 
+        /// Checks that [Timeout] dial and listen futures remain Send when the handshake's identity
+        /// is not Send and its halves share one session, and that each call forwards its namespace
+        /// and maximum message size.
         #[test]
-        fn configured_handshake_supports_opaque_identity_and_shared_session() {
+        fn handshake_supports_opaque_identity_and_shared_session() {
             fn assert_send<T: Send>(_: T) {}
 
             deterministic::Runner::default().start(|context| async move {
@@ -339,21 +408,24 @@ commonware_macros::stability_scope!(BETA {
                     let received = handshake.received.clone();
                     let handshake = Timeout::new(handshake, Duration::from_secs(1));
                     let _: OpaqueIdentity = handshake.public_key();
-                    let config = Config::new(handshake, namespace.clone(), max_message_size);
 
-                    // Reuse one configuration for multiple connections in each direction.
+                    // Reuse one handshake for multiple connections in each direction.
                     for _ in 0..2 {
                         let (sink, stream) = mocks::Channel::init();
-                        assert_send(config.dial(
+                        assert_send(handshake.clone().dial(
                             context.child("dialer"),
+                            &namespace,
+                            max_message_size,
                             OpaqueIdentity(PhantomData),
                             stream,
                             sink,
                         ));
                         let (sink, stream) = mocks::Channel::init();
                         let accepted = true;
-                        assert_send(config.listen(
+                        assert_send(handshake.clone().listen(
                             context.child("listener"),
+                            &namespace,
+                            max_message_size,
                             |_| async { accepted },
                             stream,
                             sink,
@@ -370,44 +442,32 @@ commonware_macros::stability_scope!(BETA {
             });
         }
 
+        /// Starts the handshake deadline at the dial or listen call and releases the connection once
+        /// the attempt expires.
         #[test]
-        fn configured_handshake_message_size_bounds() {
-            for max_message_size in [0, OpaqueHandshake::MAX_SIZE] {
-                Config::new(OpaqueHandshake::new(Outcome::Success), b"", max_message_size);
-            }
-            assert!(std::panic::catch_unwind(|| {
-                Config::new(
-                    OpaqueHandshake::new(Outcome::Success),
-                    b"",
-                    OpaqueHandshake::MAX_SIZE + 1,
-                )
-            })
-            .is_err());
-        }
-
-        #[test]
-        fn configured_handshake_starts_timeout_when_called() {
+        fn handshake_starts_timeout_when_called() {
             for dialer in [false, true] {
                 deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
                     let (sink, mut peer_stream) = mocks::Channel::init();
                     let (mut peer_sink, stream) = mocks::Channel::init();
-                    let config = Config::new(
-                        Timeout::new(OpaqueHandshake::new(Outcome::Pending), Duration::from_millis(50)),
-                        b"timeout",
-                        1,
-                    );
+                    let handshake =
+                        Timeout::new(OpaqueHandshake::new(Outcome::Pending), Duration::from_millis(50));
                     let attempt = if dialer {
-                        Either::Left(config.dial(
+                        Either::Left(handshake.dial(
                             context.child("handshake"),
+                            b"timeout",
+                            1,
                             OpaqueIdentity(PhantomData),
                             stream,
                             sink,
                         ))
                     } else {
                         Either::Right(
-                            config
+                            handshake
                                 .listen(
                                     context.child("handshake"),
+                                    b"timeout",
+                                    1,
                                     |_| async { true },
                                     stream,
                                     sink,
@@ -469,7 +529,7 @@ commonware_macros::stability_scope!(BETA {
                                     Outcome::Success => assert!(result.is_ok()),
                                     Outcome::Error => assert!(matches!(
                                         result,
-                                        Err(TimeoutError::Handshake(Rejected))
+                                        Err(TimeoutError::Upgrade(Rejected))
                                     )),
                                     Outcome::Pending => {
                                         assert!(matches!(result, Err(TimeoutError::Timeout)));
@@ -531,28 +591,6 @@ commonware_macros::stability_scope!(BETA {
                     assert!(peer_stream.recv(1).await.is_err());
                 });
             }
-        }
-
-        #[test]
-        fn timeout_starts_when_called() {
-            deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
-                let (sink, stream) = mocks::Channel::init();
-                let handshake =
-                    Timeout::new(OpaqueHandshake::new(Outcome::Pending), Duration::from_millis(50));
-                let mut attempt = Box::pin(handshake.dial(
-                    context.child("handshake"),
-                    b"timeout",
-                    1,
-                    OpaqueIdentity(PhantomData),
-                    stream,
-                    sink,
-                ));
-                context.sleep(Duration::from_millis(100)).await;
-                assert!(matches!(
-                    futures::poll!(attempt.as_mut()),
-                    std::task::Poll::Ready(Err(TimeoutError::Timeout))
-                ));
-            });
         }
     }
 });

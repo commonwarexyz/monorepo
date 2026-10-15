@@ -15,9 +15,9 @@
 //!
 //! ## Authentication
 //!
-//! [`Config`] and [`Network`] use [`commonware_stream::Handshake`] to authenticate peers
-//! and supply their message streams. [`Network`] additionally requires [`Handshake`]
-//! to sign discovery gossip under the same identity.
+//! [`Config`] and [`Network`] are generic over [`commonware_stream::Upgrader`], which
+//! authenticates peers and supplies their message streams. [`Network`] also requires this
+//! module's [`Upgrader`], which signs discovery gossip under the same identity.
 //!
 //! ## Discovery
 //!
@@ -168,11 +168,11 @@
 //!
 //! ```rust
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
-//! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
+//! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::encrypted::Handshake;
+//! use commonware_stream::{cups::{self, Cups}, sake::{self, Sake}};
 //! use commonware_utils::{ordered::Set, NZU32, NZUsize};
-//! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+//! use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, time::Duration};
 //!
 //! // Configure context
 //! let runtime_cfg = deterministic::Config::default();
@@ -208,7 +208,15 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
-//!     Handshake::new(signer.clone()),
+//!     Cups::<_, ChaCha20Poly1305>::new(
+//!         Sake {
+//!             signer: signer.clone(),
+//!             synchrony_bound: Duration::from_secs(5),
+//!             max_handshake_age: Duration::from_secs(10),
+//!             version: sake::Version::V1,
+//!         },
+//!         cups::Version::V1,
+//!     ),
 //!     application_namespace,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000), // Use a specific dialable addr
@@ -245,8 +253,8 @@
 //! });
 //! ```
 
-use commonware_cryptography::{PublicKey, Signer, Verifier};
-use commonware_stream::encrypted::Handshake as StreamHandshake;
+use commonware_cryptography::{Cipher, PublicKey, Signer, Verifier};
+use commonware_stream::{cups::Cups, sake::Sake};
 
 mod actors;
 mod config;
@@ -262,16 +270,29 @@ pub use actors::tracker::Oracle;
 pub use config::{Bootstrapper, Config};
 pub use network::Network;
 
-/// Authenticates connections and signs discovery gossip under the same local identity.
+/// Authenticates connections under an identity that can also sign.
 pub trait Handshake: commonware_stream::Handshake<PublicKey: PublicKey> {
     /// Signs a namespaced message with the identity returned by
     /// [`public_key`](commonware_stream::Handshake::public_key).
     fn sign(&self, namespace: &[u8], message: &[u8]) -> <Self::PublicKey as Verifier>::Signature;
 }
 
-impl<S: Signer> Handshake for StreamHandshake<S> {
+impl<S: Signer> Handshake for Sake<S> {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
         self.signer.sign(namespace, message)
+    }
+}
+
+/// Authenticates connections and signs discovery gossip under the same local identity.
+pub trait Upgrader: commonware_stream::Upgrader<PublicKey: PublicKey> {
+    /// Signs a namespaced message with the identity returned by
+    /// [`public_key`](commonware_stream::Upgrader::public_key).
+    fn sign(&self, namespace: &[u8], message: &[u8]) -> <Self::PublicKey as Verifier>::Signature;
+}
+
+impl<H: Handshake, C: Cipher> Upgrader for Cups<H, C> {
+    fn sign(&self, namespace: &[u8], message: &[u8]) -> <H::PublicKey as Verifier>::Signature {
+        self.handshake.sign(namespace, message)
     }
 }
 
@@ -288,7 +309,7 @@ mod tests {
         },
     };
     use commonware_actor::{Feedback, Unreliable};
-    use commonware_cryptography::ed25519;
+    use commonware_cryptography::{ChaCha20Poly1305, ed25519};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
         BufferPooler, Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner,
@@ -296,7 +317,7 @@ mod tests {
         telemetry::metrics::{count_running_tasks, metric_samples},
         tokio,
     };
-    use commonware_stream::encrypted::Handshake;
+    use commonware_stream::SakeCups;
     use commonware_utils::{NZU32, NZUsize, TryCollect, channel::mpsc, hostname, ordered::Set};
     use rand_core::{CryptoRng, Rng};
     use std::{
@@ -748,7 +769,7 @@ mod tests {
 
     #[test]
     fn test_max_message_size_stream_boundary() {
-        let limit = max_size::<Handshake<ed25519::PrivateKey>>();
+        let limit = max_size::<SakeCups<ed25519::PrivateKey, ChaCha20Poly1305>>();
         for size in [0, limit] {
             deterministic::Runner::default().start(|context| async move {
                 let config = Config::test(
@@ -766,7 +787,7 @@ mod tests {
     #[should_panic(expected = "maximum message size exceeds stream limit")]
     fn test_max_message_size_above_stream_boundary() {
         deterministic::Runner::default().start(|context| async move {
-            let limit = max_size::<Handshake<ed25519::PrivateKey>>();
+            let limit = max_size::<SakeCups<ed25519::PrivateKey, ChaCha20Poly1305>>();
             let config = Config::test(
                 ed25519::PrivateKey::from_seed(0),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
