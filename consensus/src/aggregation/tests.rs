@@ -140,7 +140,6 @@ impl<R: P2pReceiver> ProcessingReceiver<R> {
 impl<R> P2pReceiver for ProcessingReceiver<R>
 where
     R: P2pReceiver,
-    R::PublicKey: Ord,
 {
     type Error = R::Error;
     type PublicKey = R::PublicKey;
