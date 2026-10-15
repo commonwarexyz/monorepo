@@ -1996,16 +1996,13 @@ impl Worker {
         pool.take(ready).or_else(|| ready.pop())
     }
 
-    /// Look for work before a pool worker with nothing ready parks: steal from
-    /// the other run queues, then publish the worker idle and look once more,
-    /// searching again when the last look asks it to. Returns whether the
-    /// worker found work and runs again instead of waiting. `searcher` must
-    /// belong to this worker, whose run queue is empty and Local unborrowed.
-    /// A true result leaves no idle publication but may hold a search count,
-    /// which the caller returns before user code or another service turn. A
-    /// false result leaves an idle publication, which the caller withdraws
-    /// through [`Searcher::finish_park`] once its wait or spin returns.
-    fn find_before_park(&self, searcher: &mut Searcher<'_>) -> bool {
+    /// Steal from the other run queues, then publish this worker idle and look
+    /// once more. Returns whether the search found work. `searcher` must be
+    /// this worker's, with its run queue empty and Local unborrowed. A true
+    /// result leaves no publication but may hold a search count. A false
+    /// result leaves a publication, which the caller withdraws through
+    /// [`Searcher::finish_park`] once its wait or spin returns.
+    fn search_before_park(&self, searcher: &mut Searcher<'_>) -> bool {
         if searcher.search(self.local.borrow_mut().ready_mut()) {
             return true;
         }
@@ -2217,7 +2214,7 @@ impl Worker {
             // push racing this look either shows up here or leaves some worker,
             // not necessarily this one, woken or running to take it.
             if let Some(searcher) = &mut searcher
-                && self.find_before_park(searcher)
+                && self.search_before_park(searcher)
             {
                 // Running again ends a search, and the catch-up's callbacks run
                 // user code.
