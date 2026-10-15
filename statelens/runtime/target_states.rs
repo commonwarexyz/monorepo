@@ -23,7 +23,8 @@
 //! [Watch] is the runner's observer, which only the thin target the script writes
 //! passes: it stamps what the runner's recorders record, publishes the compromised
 //! identity, prints the `release` line and the `actors` lines of the runner's actor
-//! check, and prints `done` after the base's last oracle. When the runner ended the
+//! check (ending ` base=<reason>` when the base's own fault model did not run), and
+//! prints `done` after the base's last oracle. When the runner ended the
 //! prefix at its budget, it closes the stages first: the first stage without an
 //! outcome misses and the handoff is lost.
 //!
@@ -32,7 +33,10 @@
 //! cap, what the prefix reads from that position on is incomplete, so the helper
 //! prints a `truncated` line with the earliest such position, at its first event
 //! after the cut, and neither a stage read at or after the cut nor a handoff whose
-//! mark follows it holds. A full log the prefix never reads cuts nothing.
+//! mark follows it holds. A full log the prefix never reads cuts nothing. A recorder
+//! the base does not feed (the activities of a coding marshal base, B's marshal inbox
+//! on a base without marshal channels) is cut at the read itself, so the stages read
+//! before it stand.
 //!
 //! Environment switches, each read once per process:
 //! - `STATELENS_REACH=1` prints the `[statelens-reach]` lines on stderr.
@@ -1121,14 +1125,24 @@ mod imp {
             let check = ActorCheck {
                 at: "release",
                 actors: Vec::new(),
+                base: None,
             };
             Watch.actors(&check);
+            Watch.actors(&ActorCheck {
+                at: "end",
+                actors: Vec::new(),
+                base: Some("omission-incomplete"),
+            });
             Watch.released(&Release::default());
             Watch.done();
             let lines = LINES.take();
             assert!(lines.contains(&format!("entry deliver[R=1,v=2]=notarize seq={seq}")));
             assert!(
                 lines.contains(&"actors release ok -".to_string()),
+                "{lines:#?}"
+            );
+            assert!(
+                lines.contains(&"actors end failed - base=omission-incomplete".to_string()),
                 "{lines:#?}"
             );
             assert!(
@@ -1230,7 +1244,10 @@ mod imp {
             );
             stages.handoff(|| Some(Witness::intrinsic("R=0@E3", later)));
             let lines = LINES.take();
-            assert!(lines.contains(&format!("truncated seq={seq}")), "{lines:#?}");
+            assert!(
+                lines.contains(&format!("truncated seq={seq}")),
+                "{lines:#?}"
+            );
             assert!(
                 lines.contains(&"E2/3 unverifiable (trace truncated)".to_string()),
                 "{lines:#?}"
@@ -1246,6 +1263,42 @@ mod imp {
             let lines = LINES.take();
             assert_eq!(find(&lines, "truncated"), None, "{lines:#?}");
             assert!(find(&lines, "handoff holds mark=").is_some(), "{lines:#?}");
+        }
+
+        #[test]
+        fn test_an_unfed_recorder_cuts_from_its_read() {
+            let mut stages = open("TS-9010", 3);
+            observe(1, 1);
+            let first = at(statelens::mark());
+            assert!(stages.held(1, Witness::intrinsic("R=0@E1", first)));
+            // The runner reads a recorder the base does not feed: it stamps the read and
+            // reports the drop at the read's own position.
+            let read = runner::Stamp::now(&Watch).seq();
+            Watch.dropped(read);
+            observe(1, 1);
+            let later = at(statelens::mark());
+            assert!(
+                !stages.held(2, Witness::intrinsic("R=0@E2", later)),
+                "a stage read after the read does not hold"
+            );
+            stages.handoff(|| Some(Witness::intrinsic("R=0@E3", later)));
+            let lines = LINES.take();
+            let held = find(&lines, "E1/3 held").expect("the stage read before stands");
+            let before: u64 = lines[held]
+                .rsplit_once(" read=")
+                .and_then(|(_, seq)| seq.parse().ok())
+                .expect("a held stage prints its read position");
+            assert!(before < read, "{lines:#?}");
+            let truncated = find(&lines, "truncated").expect("the cut is printed");
+            assert_eq!(lines[truncated], format!("truncated seq={read}"));
+            assert!(held < truncated, "{lines:#?}");
+            assert!(
+                lines.contains(&"E2/3 unverifiable (trace truncated)".to_string()),
+                "{lines:#?}"
+            );
+            assert!(find(&lines, "handoff lost mark=").is_some(), "{lines:#?}");
+            assert!(find(&lines, "reach 1/3 control=0").is_some(), "{lines:#?}");
+            assert_eq!(FEATURES.take(), vec![1]);
         }
 
         #[test]

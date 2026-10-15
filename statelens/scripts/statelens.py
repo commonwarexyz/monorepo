@@ -178,6 +178,11 @@ SPEC_PROMPT = re.compile(
     r"^### 13\.\d+ `(prompts/[^`]+)`\n\n~~~markdown\n(.*?)\n~~~\n(?=\n*(?:#|---\n|\Z))",
     re.M | re.S,
 )
+# Appendix H reproduces the scaffold helper template verbatim, and `lint-prompts` keeps it so.
+SPEC_HELPER = re.compile(
+    r"^## Appendix H: `(runtime/target_states\.rs)` \(verbatim\)\n.*?~~~rust\n(.*?)\n~~~\n",
+    re.M | re.S,
+)
 NOT_CODE = re.compile(r"<!--\s*statelens-lint:\s*not-code:\s*(.*?)\s*-->", re.S)
 CODE_WORD = re.compile(r"`([a-z_][a-z0-9_]*_[a-z0-9_]+)`")
 # Everything a campaign creates (deleted by `clean`) or edits (restored by `clean`).
@@ -5762,7 +5767,8 @@ def spec_prompt_blocks(text):
 
 
 def lint_prompts(repo, write=False):
-    """SPEC section 13 reproduces every prompt verbatim; checks that it still does.
+    """SPEC section 13 reproduces every prompt verbatim, and Appendix H the helper
+    template; checks that it still does.
 
     The claim is load-bearing: the prompts are what the agents actually read, and the
     SPEC is what a person reads to learn what the agents were told.
@@ -5772,6 +5778,7 @@ def lint_prompts(repo, write=False):
     text = spec_path.read_text()
     blocks = spec_prompt_blocks(text)
     sl_dir = repo / SL
+    # (span of the copy, content of the file) of every copy that differs.
     stale = []
     for path in sorted((sl_dir / "prompts").rglob("*.md")):
         relative = path.relative_to(sl_dir).as_posix()
@@ -5784,15 +5791,23 @@ def lint_prompts(repo, write=False):
             continue
         if blocks[relative][0] != content:
             problems.append((path, f"differs from its copy in {SPEC_DOC} section 13"))
-            stale.append((relative, content))
+            stale.append((blocks[relative][1], content))
     for relative in sorted(set(blocks) - {
         path.relative_to(sl_dir).as_posix() for path in (sl_dir / "prompts").rglob("*.md")
     }):
         problems.append((spec_path, f"section 13 copies `{relative}`, which does not exist"))
+    helper = SPEC_HELPER.search(text)
+    if helper is None:
+        problems.append((spec_path, "has no verbatim Appendix H of `runtime/target_states.rs`"))
+    else:
+        path = sl_dir / helper.group(1)
+        content = path.read_text().rstrip("\n")
+        if helper.group(2) != content:
+            problems.append((path, f"differs from its copy in {SPEC_DOC} Appendix H"))
+            stale.append((helper.span(2), content))
     if write and stale:
         # Back to front, so an earlier replacement does not move a later span.
-        for relative, content in sorted(stale, key=lambda item: blocks[item[0]][1][0], reverse=True):
-            start, end = blocks[relative][1]
+        for (start, end), content in sorted(stale, key=lambda item: item[0][0], reverse=True):
             text = text[:start] + content + text[end:]
         spec_path.write_text(text)
         say(f"lint-prompts: rewrote {len(stale)} block(s) in {SPEC_DOC}")
@@ -5800,7 +5815,8 @@ def lint_prompts(repo, write=False):
 
 
 def cmd_lint_prompts(args):
-    """SPEC section 13: the prompts and their copies in the specification must agree."""
+    """SPEC section 13 and Appendix H: the prompts and the helper template and their copies
+    in the specification must agree."""
     repo = repo_root()
     problems = lint_prompts(repo, args.write)
     if args.write:
@@ -5947,14 +5963,17 @@ def scaffold_bases(repo, profile):
 # SPEC section 18.7: the trusted continuation. A scaffold is a prefix the base's own
 # driver runs through a hook point; the profile's fuzz harness exposes it as a hook API,
 # found by the markers of `api`, whose absence refuses synthesis (`pub overran`: the
-# safety-only harness of D70, which the helper's `Release` needs). `entries` maps each base
-# entry the harness hooks to its trusted entry and the modes, the entry's second generic
-# argument, it takes (None: every one); a base with another entry has no runner adapter,
-# and synthesis refuses it. `cfg` is the attribute of the base targets' `mod fuzz`.
+# safety-only harness of D70, which the helper's `Release` needs; `pub base: Option`: the
+# base check of the actor lines, not `Release.base`). `entries` maps each base entry the harness hooks to its trusted
+# entry, the modes, the entry's second generic argument, it takes (None: every one), and
+# the scheme of an entry without generic arguments (None: its first one); a base with
+# another entry has no runner adapter, and synthesis refuses it. `cfg` is the attribute of
+# the base targets' `mod fuzz`.
 CONTINUATION = {
     "simplex": {
         "api": (
             ("consensus/fuzz/core/src/continuation.rs", "pub overran"),
+            ("consensus/fuzz/core/src/continuation.rs", "pub base: Option<&'static str>"),
             ("consensus/fuzz/simplex/src/trusted.rs", "pub fn fuzz_with_prefix<"),
         ),
         "crate": "commonware_consensus_fuzz_simplex",
@@ -5963,25 +5982,158 @@ CONTINUATION = {
             "fuzz": (
                 "fuzz_with_prefix",
                 ("Standard", "FaultyNet", "TwinsMutator", "TwinsCampaign"),
+                None,
             ),
-            "fuzz_audit": ("fuzz_audit_with_prefix", None),
-            "fuzz_twins_audit": ("fuzz_twins_audit_with_prefix", ("TwinsMutator", "TwinsCampaign")),
+            "fuzz_audit": ("fuzz_audit_with_prefix", None, None),
+            "fuzz_audit_notarize_omission": (
+                "fuzz_audit_notarize_omission_with_prefix",
+                None,
+                None,
+            ),
+            "fuzz_twins_audit": (
+                "fuzz_twins_audit_with_prefix",
+                ("TwinsMutator", "TwinsCampaign"),
+                None,
+            ),
+        },
+    },
+    "marshal": {
+        "api": (
+            ("consensus/fuzz/core/src/continuation.rs", "pub overran"),
+            ("consensus/fuzz/core/src/continuation.rs", "pub base: Option<&'static str>"),
+            ("consensus/fuzz/core/src/continuation.rs", "pub fn send_marshal("),
+            (
+                "consensus/fuzz/marshal/src/marshal/end_to_end/trusted.rs",
+                "pub fn fuzz_marshal_standard_disrupter_with_prefix<",
+            ),
+            (
+                "consensus/fuzz/marshal/src/marshal/end_to_end/trusted.rs",
+                "pub fn fuzz_marshal_coding_twins_with_prefix<",
+            ),
+        ),
+        "crate": "commonware_consensus_fuzz_marshal",
+        "cfg": '#[cfg(feature = "mocks")]',
+        "entries": {
+            "fuzz_marshal_standard_disrupter": (
+                "fuzz_marshal_standard_disrupter_with_prefix",
+                None,
+                None,
+            ),
+            "fuzz_marshal_standard_certificate_poison": (
+                "fuzz_marshal_standard_certificate_poison_with_prefix",
+                None,
+                None,
+            ),
+            "fuzz_marshal_standard_block_dissemination": (
+                "fuzz_marshal_standard_block_dissemination_with_prefix",
+                None,
+                None,
+            ),
+            "fuzz_marshal_coding_disrupter": (
+                "fuzz_marshal_coding_disrupter_with_prefix",
+                None,
+                None,
+            ),
+            "fuzz_marshal_coding_block_poison": (
+                "fuzz_marshal_coding_block_poison_with_prefix",
+                None,
+                None,
+            ),
+            "fuzz_marshal_standard_twins": (
+                "fuzz_marshal_standard_twins_with_prefix",
+                None,
+                "SimplexCertificateMock",
+            ),
+            "fuzz_marshal_standard_deferred_cert_mock_twins_split_header": (
+                "fuzz_marshal_standard_deferred_cert_mock_twins_split_header_with_prefix",
+                None,
+                "SimplexCertificateMock",
+            ),
+            "fuzz_marshal_standard_inline_cert_mock_twins_split_header": (
+                "fuzz_marshal_standard_inline_cert_mock_twins_split_header_with_prefix",
+                None,
+                "SimplexCertificateMock",
+            ),
+            "fuzz_marshal_coding_twins": ("fuzz_marshal_coding_twins_with_prefix", None, None),
         },
     },
 }
-# What the base's driver starts for the compromised identity B at the release, by mode
-# (the trusted runner's actor check requires exactly these, under N4F1C3).
+# What the base's driver starts for the compromised identity B at the release, by entry,
+# and by mode for an entry that takes modes (the trusted runner's actor check requires
+# exactly these, under N4F1C3).
 CONTINUATION_ACTORS = {
-    "Standard": "one Disrupter for participant 0 (none under N4F0C4)",
-    "FaultyNet": "one Disrupter for participant 0 (none under N4F0C4)",
-    "audit": "one Disrupter for participant 0 (none under N4F0C4)",
-    "TwinsCampaign": "the twin pair: a primary and a secondary engine under the case's B",
-    "TwinsMutator": "the twin pair: a primary engine and a Disrupter under the case's B",
+    "fuzz": {
+        "Standard": "one Disrupter for participant 0 (none under N4F0C4)",
+        "FaultyNet": "one Disrupter for participant 0 (none under N4F0C4)",
+        "TwinsCampaign": "the twin pair: a primary and a secondary engine under the case's B",
+        "TwinsMutator": "the twin pair: a primary engine and a Disrupter under the case's B",
+    },
+    "fuzz_audit": "one Disrupter for participant 0 (none under N4F0C4)",
+    "fuzz_audit_notarize_omission": (
+        "none: the base runs N4F0C4 only, and its fault is the omission model of the victim, "
+        "the first raw byte left after the knobs modulo 4; the end check fails with "
+        "`base=omission-incomplete` when the victim was crashed, or omitted no notarize vote "
+        "or no finalization certificate"
+    ),
+    "fuzz_twins_audit": {
+        "TwinsCampaign": "the twin pair: a primary and a secondary engine under the case's B",
+        "TwinsMutator": "the twin pair: a primary engine and a Disrupter under the case's B",
+    },
+    "fuzz_marshal_standard_disrupter": (
+        "one Disrupter for participant 0 on its engine channels, in epoch 0, its faulty views "
+        "moved past the highest view finalized at the release"
+    ),
+    "fuzz_marshal_standard_certificate_poison": (
+        "one Disrupter for participant 0, as on the disrupter base; the certificate poison, "
+        "disarmed during the prefix, is armed at the release and may then answer the last "
+        "participant's certificate backfill with a notarization it forges, as the base does"
+    ),
+    "fuzz_marshal_standard_block_dissemination": (
+        "the block disseminator for participant 0: a gossip engine on its broadcast channel "
+        "that, at the first view past the release that B leads at a term start, once B "
+        "receives an honest notarize or finalize vote for the view before it, disseminates a "
+        "block on that vote's block under the fault the raw bytes left after the knobs "
+        "sample, and announces it with B's notarize vote; it needs the release before the "
+        "cluster reaches height 19, the end of epoch 0, and the end check fails with "
+        "`base=no-dissemination` when the disseminator never disseminated, for example after "
+        "a release past height 19"
+    ),
+    "fuzz_marshal_coding_disrupter": (
+        "the coding disrupter for participant 0, in epoch 0: it signs conflicting coding "
+        "proposals on its engine channels, its sampled views moved past the highest view "
+        "finalized at the release, and on its broadcast channel re-sends mutated shards and "
+        "may propose coded blocks whose commitment does not describe them"
+    ),
+    "fuzz_marshal_coding_block_poison": (
+        "the backfill poisoner for participant 0 on its backfill channel, silent elsewhere: "
+        "it answers block requests with coded blocks that do not match the commitment, and "
+        "notarized-block requests under a notarization it forges, as the base does"
+    ),
+    "fuzz_marshal_standard_twins": (
+        "the twin pair under the case's B: a primary engine over B's own standard marshal, "
+        "whose actor starts at the release, and a Disrupter in epoch 0, its faulty views "
+        "moved past the highest view finalized at the release"
+    ),
+    "fuzz_marshal_standard_deferred_cert_mock_twins_split_header": (
+        "the twin pair under the case's B: a primary engine over B's own deferred marshal, "
+        "whose actor starts at the release, and a Disrupter in epoch 0 with the SplitHeader "
+        "strategy, its faulty views moved past the highest view finalized at the release"
+    ),
+    "fuzz_marshal_standard_inline_cert_mock_twins_split_header": (
+        "the twin pair under the case's B: a primary engine over B's own inline marshal, "
+        "whose actor starts at the release, and a Disrupter in epoch 0 with the SplitHeader "
+        "strategy, its faulty views moved past the highest view finalized at the release"
+    ),
+    "fuzz_marshal_coding_twins": (
+        "the twin pair under the case's B: a primary coding engine over B's own coding "
+        "marshal, which runs from the start, and the coding double-voter as its secondary, "
+        "its sampled views moved past the highest view finalized at the release"
+    ),
 }
-# The one statement of a base's `fuzz_target!`: its entry, with its generic arguments, on
-# the closure parameter; whitespace is dropped first (`statements`).
+# The one statement of a base's `fuzz_target!`: its entry, with its generic arguments if
+# any, on the closure parameter; whitespace is dropped first (`statements`).
 BASE_ENTRY = re.compile(
-    r"(?:[A-Za-z_][A-Za-z0-9_]*::)*([a-z_][a-z0-9_]*)::<(.+)>\(([a-z_][a-z0-9_]*),?\)"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*::)*([a-z_][a-z0-9_]*)(?:::<(.+)>)?\(([a-z_][a-z0-9_]*),?\)"
 )
 # Guard of SPEC section 18.7: what a scaffold module never holds, because the trusted runner
 # owns it: the runtime, a base driver or entry, an engine or validator spawn, the base's
@@ -5999,7 +6151,10 @@ DRIVER_CODE = (
         "a base driver or entry",
         re.compile(
             r"\brun_twins\w*|\brun_standard_once\b|\brun_audited_standard_once\w*"
-            r"|\bfuzz(?:_\w+)?\s*::\s*<"
+            r"|\bfuzz(?:_\w+)?\s*::\s*<|\bfuzz\w*_with_prefix\b|\bfuzz_marshal_\w+\s*\("
+            r"|\brun_(?:standard|coding)_disrupter\b|\brun_liveness_phases\b"
+            r"|\bwait_for_(?:targets|liveness)\b|\bFuzzScenario\w*Harness\b"
+            r"|\brun_(?:standard|split_header|coding)_twins\b|\bfuzz_marshal_twins_with\b"
         ),
     ),
     (
@@ -6007,17 +6162,24 @@ DRIVER_CODE = (
         re.compile(
             r"\bEngine\s*::\s*new\b|\bstart_validator_engine\b|\bspawn_\w*validator\w*"
             r"|\bbuild_validator\w*|\bspawn_(?:primary|secondary|honest|twin\w*)\b"
+            r"|\bsetup_validator\w*|\bstart_engine\w*|\bregister_engine_networks\b"
+            r"|\bActor\s*::\s*init\b|\bresolver\s*::\s*init\b"
+            r"|\b(?:buffered|shards)\s*::\s*Engine\b|\bMarshaled\s*::\s*new\b"
+            r"|\bcoding_marshaled\b"
         ),
     ),
     (
         "a Byzantine actor",
-        re.compile(r"\bDisrupter\b|\bstart_disrupter\w*|\b(?:Mock)?TwinsBackend\b"),
+        re.compile(
+            r"\bDisrupter\b|\bstart_disrupter\w*|\b\w*TwinsBackend\b|\bCertificatePoison\w*"
+        ),
     ),
     (
         "network setup",
         re.compile(
-            r"\bsetup_network\b|\blink_peers\b|\bapply_partition\b|\bNetwork\s*::\s*new\w*"
+            r"\bsetup_network\w*|\blink_peers\b|\bapply_partition\b|\bNetwork\s*::\s*new\w*"
             r"|\b(?:add|remove)_link\b|\.register\s*\(|\.control\s*\("
+            r"|\bapply_degraded_network\b"
         ),
     ),
     (
@@ -6028,7 +6190,9 @@ DRIVER_CODE = (
         "an oracle",
         re.compile(
             r"\binvariants\s*::|\bobserve_liveness\b|\bcheck_invariants\b"
-            r"|\bspawn_network_fault_scheduler\b"
+            r"|\bspawn_network_fault_scheduler\b|\bcheck_(?:all|local)_blocks\b"
+            r"|\bObservedMarshal\b|\b\w+Invariant\b|\bDeliveryReporter\b"
+            r"|\bBlockContextRegistry\b"
         ),
     ),
     (
@@ -6086,17 +6250,35 @@ def continuation_refusal(repo, profile, base):
     return None
 
 
+def trusted_files(profile):
+    """The files of `profile`'s trusted entries, the hook API's files but the core's, as
+    the synthesis prompt names them."""
+    core = CONTINUATION[profile]["api"][0][0]
+    files = dict.fromkeys(path for path, _marker in CONTINUATION[profile]["api"] if path != core)
+    return "`, `".join(files)
+
+
+def trusted_call(trusted, generics):
+    """The call of a trusted entry with a base's generic arguments, then the prefix's and
+    the observer's, which the compiler infers."""
+    return f"{trusted}::<{', '.join(generics)}, _, _>" if generics else trusted
+
+
 def continuation_text(repo, profile, base):
-    """The trusted entry of `base` and the actors its driver starts for B, for the agent."""
+    """The trusted entry of `base`, the actors its driver starts for B and the scheme the
+    thin target instantiates the prefix with, for the agent."""
     refusal = continuation_refusal(repo, profile, base)
     if refusal:
         return f"no trusted continuation: {refusal}"
     _params, function, generics = base_entry(repo, profile, base)
-    trusted = CONTINUATION[profile]["entries"][function][0]
-    mode = "audit" if function == "fuzz_audit" else generics[1]
+    trusted, _modes, scheme = CONTINUATION[profile]["entries"][function]
+    actors = CONTINUATION_ACTORS[function]
+    if isinstance(actors, dict):
+        actors = actors[generics[1]]
     return (
-        f"trusted entry `{trusted}::<{', '.join(generics)}, _, _>`; B's actors from the "
-        f"release: {CONTINUATION_ACTORS[mode]}"
+        f"trusted entry `{trusted_call(trusted, generics)}`; B's actors from the release: "
+        f"{actors}; the thin target instantiates `prefix` with "
+        f"`{generics[0] if generics else scheme}`"
     )
 
 
@@ -6108,13 +6290,13 @@ def thin_target_text(repo, profile, card, base):
         return None
     settings = CONTINUATION[profile]
     params, function, generics = base_entry(repo, profile, base)
-    trusted = settings["entries"][function][0]
+    trusted, _modes, scheme = settings["entries"][function]
+    scheme = generics[0] if generics else scheme
     module = pair_module(card, base)
     runtime = f"commonware_{PROFILES[profile]['crate']}::{PROFILES[profile]['module']}::statelens"
-    names = set(generics) | {trusted, "target_states"}
+    names = set(generics) | {trusted, scheme, "target_states"}
     names |= set(re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", params.split(":", 1)[-1]))
     imported = ", ".join(sorted(names, key=lambda name: (name[0].islower(), name)))
-    arguments = ", ".join(generics)
     return (
         "#![no_main]\n"
         "\n"
@@ -6128,9 +6310,9 @@ def thin_target_text(repo, profile, card, base):
         "\n"
         f"    fuzz_target!(|{params}| {{\n"
         f"        {runtime}::reset();\n"
-        f"        {trusted}::<{arguments}, _, _>(\n"
+        f"        {trusted_call(trusted, generics)}(\n"
         f"            {params.split(':', 1)[0].strip()},\n"
-        f"            target_states::{module}::prefix::<{generics[0]}>(),\n"
+        f"            target_states::{module}::prefix::<{scheme}>(),\n"
         "            target_states::Watch,\n"
         "        );\n"
         f"        {runtime}::clear_compromised();\n"
@@ -6323,7 +6505,11 @@ FEEDBACK_FIXES = {
     "continuation": (
         "Nothing in the module: the runner starts the base's actors at the release. Return "
         "from run at the handoff and stay within the budget; if the lines still fail, the "
-        "base's runner adapter is broken, which a human fixes"
+        "base's runner adapter is broken, which a human fixes. A failed base check "
+        "(`base=<reason>`) says the base's own fault model did not run: leave it what it "
+        "needs (`omission-incomplete`: never crash the omission victim, and do not cut it "
+        "off for the whole prefix; `no-dissemination`: release before the cluster reaches "
+        "height 19, about 5 s of an idle prefix, and keep the release delay small)"
     ),
 }
 
@@ -6395,13 +6581,17 @@ def reach_lines(text, card):
         elif group(23) is not None:
             item = {"type": "truncated", "seq": int(group(23))}
         elif group(24) is not None:
-            actors = [match.groups() for match in REACH_ACTOR.finditer(group(26))]
+            # The base check, when it failed, ends the line as ` base=<reason>`.
+            rest, separator, base = group(26).partition(" base=")
+            actors = [match.groups() for match in REACH_ACTOR.finditer(rest)]
             item = {
                 "type": "actors",
                 "at": group(24),
                 "ok": group(25) == "ok",
                 "actors": actors,
-                "parsed": group(26) == "-" or bool(actors),
+                "base": base or None,
+                "parsed": (rest == "-" or bool(actors))
+                and (not separator or bool(re.fullmatch(r"\S+", base))),
             }
         elif group(27) is not None:
             item = {"type": "release", "detail": group(27)}
@@ -6803,6 +6993,8 @@ def continuation_problem(replay):
             return f"no actors {at} line: the run did not go through the trusted runner"
         if not line["parsed"]:
             return f"the actors {at} line is malformed: {line['text']}"
+        if line["base"]:
+            return f"the base's {at} check failed ({line['base']}): {line['text']}"
         if not line["ok"]:
             return f"actor check failed at the {at}: {line['text']}"
     return None
@@ -7412,6 +7604,9 @@ def check_marshal_cert_mock(repo, stems):
     for stem in stems:
         text = (repo / MARSHAL_TARGETS / f"{stem}.rs").read_text()
         for argument in turbofish_arguments(text):
+            # A thin target leaves the prefix and observer types to the compiler.
+            if argument == "_":
+                continue
             if not types.get(argument):
                 raise Abort(
                     2,
@@ -10072,6 +10267,7 @@ class Synthesis:
             "BUILD": shlex.join(self.build_command(pair.name)),
             "THIN": self.thin_path(pair),
             "CONTINUATION": CONTINUATION[self.profile_name]["api"][0][0],
+            "TRUSTED": trusted_files(self.profile_name),
             "ATTEMPT": str(attempt),
             "FEEDBACK": feedback,
             "SUBSYSTEM_RULES": subsystem_prompt(self.sl_dir, self.profile_name, "synthesize"),
@@ -10183,10 +10379,14 @@ class Synthesis:
             if path != module_path and s0.get(relative) == content:
                 continue
             body = blank_inert(content.decode(errors="replace"), strings=True)
-            found = [name for name, pattern in DRIVER_CODE if pattern.search(body)]
+            found = [
+                f"{name} `{' '.join(match.group(0).split())}`"
+                for name, pattern in DRIVER_CODE
+                if (match := pattern.search(body))
+            ]
             if found:
                 vetoes.append(
-                    f"{relative} holds driver-level code ({', '.join(found)}): the base's "
+                    f"{relative} holds driver-level code ({'; '.join(found)}): the base's "
                     "trusted runner owns the runtime, the engines, the Byzantine actors, the "
                     "network, the deadline, the oracles and the compromised set; a prefix acts "
                     "only through its PrefixContext, so remove it"
@@ -11330,7 +11530,7 @@ class Synthesis:
                 f"supported {self.profile_name} entries are "
                 + ", ".join(
                     f"{entry} ({', '.join(modes) if modes else 'any mode'})"
-                    for entry, (_trusted, modes) in CONTINUATION[self.profile_name][
+                    for entry, (_trusted, modes, _scheme) in CONTINUATION[self.profile_name][
                         "entries"
                     ].items()
                 ),
@@ -11671,11 +11871,12 @@ def main(argv):
     lint_plan.add_argument("paths", nargs="*", metavar="PATH", help="a plan file")
     lint_prompts_parser = commands.add_parser(
         "lint-prompts",
-        help="check that the specification still quotes the prompts verbatim",
+        help="check that the specification still quotes the prompts and the helper verbatim",
         description=(
             "Compare every file in prompts/ with its copy in section 13 of the "
-            "specification, which claims to reproduce them verbatim (SPEC section 13). "
-            "Exit code 0 when clean, 3 on problems."
+            "specification, and runtime/target_states.rs with its copy in Appendix H, "
+            "which claim to reproduce them verbatim (SPEC section 13). Exit code 0 when "
+            "clean, 3 on problems."
         ),
     )
     lint_prompts_parser.add_argument(

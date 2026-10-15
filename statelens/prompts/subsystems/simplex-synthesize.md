@@ -11,8 +11,20 @@
   `_state_cov`, and `simplex_cert_mock_shuffled_twins_mutator`), whose B is the compromised
   participant the base's Twins case picks, under N4F1C3 always, with the twin pair from the
   release: a primary and a secondary engine for the campaign, a primary engine and a
-  Disrupter for the mutator. The script refuses every other base. The `_state_cov` and
-  `_hb` targets add coverage tables, which cost throughput.
+  Disrupter for the mutator; and the notarize-omission audit (below). The script refuses
+  every other base. The `_state_cov` and `_hb` targets add coverage tables, which cost
+  throughput.
+- The notarize-omission base (`simplex_cert_mock_audit_notarize_omission`) runs four honest
+  replicas (N4F0C4) on a connected network with single-view terms, at least four containers,
+  certify Always and Solo reporting, whatever you pin: `Pins::input` shows these fields,
+  `configuration` returns true only for N4F0C4, `term_length` pins nothing, and
+  `cx.byzantine()` is `None`, so there is no B and no actor at the release. Its victim is the first raw byte left after your
+  knobs, modulo 4: from spawn it drops every notarize vote and finalization certificate it
+  receives, below its gate, so its `deliveries` hold none. A run in which the victim was
+  crashed at any point, or omitted no notarize vote or no finalization certificate, fails
+  the base check (`actors end failed - base=omission-incomplete`), which is NO CONTINUATION:
+  never crash the victim, which restarts without the omission model, and do not cut it off
+  for the whole prefix.
 - Pins, through `Pins`: `term_length`, which cuts a lookahead the decoder would not draw for
   it; `lookahead`, at most the term length plus two; and `configuration`, N4F1C3 or N4F0C4
   (N4F1C3 only under Twins), which resets the certify choice, the degraded network and the

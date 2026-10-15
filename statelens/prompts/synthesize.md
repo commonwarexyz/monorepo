@@ -26,8 +26,9 @@ nothing after the release waits for progress.
   to ask which probes fired during its input. From the fuzz package it is
   `commonware_consensus::simplex::statelens`.
 - Read `{{CONTINUATION}}`, the hook API: `Prefix`, `Pins`, `Budget`, and `PrefixContext`,
-  the one object your prefix acts through, with its recorders; and
-  `{{FUZZ_PACKAGE}}/src/target_states/mod.rs`, the helper the script wrote, for the exact
+  the one object your prefix acts through, with its recorders; `{{TRUSTED}}`, the trusted
+  entries, whose docs say what each base forces, takes from the raw bytes and starts for B;
+  and `{{FUZZ_PACKAGE}}/src/target_states/mod.rs`, the helper the script wrote, for the exact
   signatures of the items this prompt names. Read `{{PLAN}}`, the campaign's plan, for what
   each probe records (its beacon table) and which invariants are bound where.
 - The probe labels and `sl_implies!` invariant IDs of this campaign, with where each is,
@@ -112,6 +113,11 @@ How it applies here:
 - Observation code is read-only code the scaffold calls: getters, accessors, recording
   wrappers, witness helpers. It never adds a counter feature, an assertion or ghost state;
   those come only from the campaign. Synthesis never instruments.
+- An edit gives the prefix something to read, never a way to act inside an honest replica:
+  the prefix calls no operation of an honest replica's engine, buffer, cache, marshal,
+  resolver, application or storage, even one an edit exposes or wraps, because such a call
+  is an event that neither the network nor a harness verb carries (see Fabrication and B).
+  A History that needs one is a missing capability (`cannot:`).
 
 The script checks every attempt against the tree as the campaign left it, so a change an
 earlier attempt made counts as if you made it now:
@@ -146,7 +152,8 @@ earlier attempt made counts as if you made it now:
 ## The prefix
 
 Your module defines `pub fn prefix<P: Simplex>() -> impl Prefix<P>`, which the thin target
-calls with the base's first generic argument. `Prefix` has two methods:
+calls with the scheme the base details name: the base's first generic argument, or the one
+its trusted entry runs. `Prefix` has two methods:
 
 - `plan(&mut self, pins: &mut Pins<'_>) -> Budget`, before the runtime starts: split the
   knobs from `pins.raw_bytes()`, pick them, pin the fields the History fixes through `pins`,
@@ -184,10 +191,16 @@ backend, network setup or an oracle link change, a runtime deadline, an oracle,
   queue keep at most 4096 entries (`LOG_CAP`): past it a log records nothing more and a gate
   drops what it would hold; once the prefix reads one that dropped an entry, the helper treats
   it as a cut trace (every later witness is `unverifiable (trace truncated)`), so a prefix never
-  depends on more;
+  depends on more. A recorder the base does not feed (the subsystem rules name any) reads as
+  cut from the read on: the stages read before it stand;
+- on a marshal base (the subsystem rules): `epoch`; B's marshal channels, `send_marshal` and
+  `marshal_inbox`; the honest replicas' marshal gates, `hold_marshal`, `pass_marshal` and
+  `held_marshal`, with `marshal_deliveries`; and the bounded marshal reads `finalized_block`
+  and `processed_height`, which return `None` for no answer and otherwise marshal's own;
 - changes the runner reverts at the release, as far as it can: `set_link`, `set_latency` (a
   replica's application latencies), `crash` and `restart` (from its journal, with its
-  reporter).
+  reporter). A refused `set_link`, `crash` or `restart` returns false and costs 1 ms of
+  simulated time.
 
 Pick one shape and record it in the module header.
 
@@ -208,7 +221,7 @@ The module opens with this header, which the script reads:
 //! Stages: E1 <witness kind and what it reads>; E2 ...; ...
 //! Control: withholds Ek | n/a
 //! Injections: <each injection, with the INV ids whose ghost history it bypasses> | none
-//! Missing: <each missing capability> | none
+//! Missing: <each missing capability, separated by `;`, none containing one> | none
 ```
 
 The module names no Simplex type with a scheme other than `cert_mock`.
@@ -358,10 +371,17 @@ helper prints `done` after the last oracle. Stage checks are not oracles.
 
 ## Fabrication and B
 
-- Events go through the network or the harness verbs. A scripted vote goes out only on its
+- Events go through the network or the harness verbs, never through a call into an honest
+  replica's components. A scripted vote goes out only on its
   signer's own channel (INV-0008): the prefix signs only as B, with `cx.scheme()`, and sends
-  only through `cx.send`. A certificate you build names an honest signer only for a proposal
-  that replica signed or would sign, from votes B received (`cx.inbox()`).
+  only as B, through `cx.send` (and `cx.send_marshal` on a marshal base), which send nothing
+  over `MAX_MESSAGE` (1 MiB), nor past `MAX_SENT` (64 MiB in a run, a message counted once
+  per recipient and at least `MIN_CHARGE`, 256 bytes, so a loop of empty or tiny sends ends),
+  and return 0. It never builds a vote or certificate under an
+  honest key: a certificate you build assembles votes B received (`cx.inbox()`) and its own.
+  B may relay what it received, also with a field changed: no key signs the change, and a
+  certificate verifies only for the subject its signers signed. A History that needs an honest signature on something that replica did not
+  sign is a missing capability (`cannot:`), never a finding.
 - List every injection, such as a resolver delivery, under `//! Injections:` with the INV ids
   whose ghost history it bypasses. The module never writes ghost state and never calls
   `record`.
@@ -428,7 +448,9 @@ What each signal asks for:
 - SCAFFOLD ERROR: the reason the helper named.
 - NO CONTINUATION (the runner's actor lines are missing or failed): nothing in the module
   starts or stops the base's actors; return from `run` at the handoff and stay within the
-  budget. A human fixes a runner adapter that still fails.
+  budget. A human fixes a runner adapter that still fails. A line that ends
+  `base=<reason>` says the base's own fault model did not run: leave the base what the
+  subsystem rules say it needs.
 
 Your earlier attempts' files are still in place: change them rather than start over, unless
 the feedback asks for another shape.

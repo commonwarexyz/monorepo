@@ -368,6 +368,6 @@ excerpts *args:
 check-plan *args:
     python3 scripts/statelens.py lint-plan "$@"
 
-# Check the prompt copies in the specification: just check-prompts [--write]
+# Check the prompt and helper copies in the specification: just check-prompts [--write]
 check-prompts *args:
     python3 scripts/statelens.py lint-prompts "$@"

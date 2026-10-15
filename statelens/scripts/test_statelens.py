@@ -2265,6 +2265,41 @@ class PromptPaths(unittest.TestCase):
                     )
 
 
+class SynthesisPromptRules(unittest.TestCase):
+    """An edit of the system under test may expose state, which the edit contract allows,
+    and a scaffold then called through it into honest replicas: an end-to-end marshal
+    Twins synthesis placed B's block in honest broadcast buffers through a registry it
+    added, in place of B's marshal channel, and reported the state reached. The prompts
+    say that an edit is for reading only and that such a block is `cannot:`."""
+
+    PROMPTS = HERE.parent / "prompts"
+
+    def test_an_edit_never_lets_the_prefix_act_inside_an_honest_replica(self):
+        text = " ".join((self.PROMPTS / "synthesize.md").read_text().split())
+        self.assertIn("never a way to act inside an honest replica", text)
+        self.assertIn("never through a call into an honest replica's components", text)
+
+    def test_the_missing_line_names_the_separator_the_script_splits_on(self):
+        # A reason with a `;` inside it was reported as two capabilities.
+        text = (self.PROMPTS / "synthesize.md").read_text()
+        self.assertIn(
+            "//! Missing: <each missing capability, separated by `;`, none containing one>",
+            text,
+        )
+        header = sl.module_header("//! Missing: a (b, c); d\n")
+        self.assertEqual(header["missing"], ["a (b, c)", "d"])
+
+    def test_a_block_placed_in_an_honest_buffer_is_missing_on_marshal(self):
+        text = " ".join(
+            (self.PROMPTS / "subsystems" / "marshal-synthesize.md").read_text().split()
+        )
+        self.assertIn(
+            "a block placed in an honest replica's buffer, cache or marshal other than by "
+            "B's sends on its marshal channels",
+            text,
+        )
+
+
 class AgentInvocation(unittest.TestCase):
     """A model or an effort that `config.env` sets has to reach the CLI. An option
     that is silently dropped looks exactly like one the CLI honoured, and the
@@ -3884,7 +3919,9 @@ class PromptCopies(unittest.TestCase):
     SPEC = (
         "# Spec\n\n## 13. Prompts (verbatim)\n\n"
         "### 13.1 `prompts/one.md`\n\n~~~markdown\nfirst\n~~~\n\n"
-        "### 13.2 `prompts/two.md`\n\n~~~markdown\nsecond\n~~~\n\n## 14. Next\n"
+        "### 13.2 `prompts/two.md`\n\n~~~markdown\nsecond\n~~~\n\n"
+        "## Appendix H: `runtime/target_states.rs` (verbatim)\n\nThe helper.\n\n"
+        "~~~rust\nfn helper() {}\n~~~\n\n## 14. Next\n"
     )
 
     def setUp(self):
@@ -3897,6 +3934,8 @@ class PromptCopies(unittest.TestCase):
         self.spec.write_text(self.SPEC)
         (self.sl_dir / "prompts/one.md").write_text("first\n")
         (self.sl_dir / "prompts/two.md").write_text("second\n")
+        (self.sl_dir / "runtime").mkdir()
+        (self.sl_dir / "runtime/target_states.rs").write_text("fn helper() {}\n")
         self.saved = sl.say
         sl.say = lambda *_args, **_kwargs: None
         self.addCleanup(lambda: setattr(sl, "say", self.saved))
@@ -3945,6 +3984,29 @@ class PromptCopies(unittest.TestCase):
         problems = sl.lint_prompts(self.repo)
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("which does not exist", problems[0][1])
+
+    def test_the_helper_template_is_checked_and_refreshed_with_the_prompts(self):
+        # Appendix H reproduces runtime/target_states.rs, which synthesis copies.
+        helper = self.sl_dir / "runtime/target_states.rs"
+        helper.write_text("fn helper() {\n    tick();\n}\n")
+        (self.sl_dir / "prompts/one.md").write_text("first, rewritten\n")
+        problems = sl.lint_prompts(self.repo)
+        self.assertEqual(
+            [(path.name, problem) for path, problem in problems],
+            [("one.md", f"differs from its copy in {sl.SPEC_DOC} section 13"),
+             ("target_states.rs", f"differs from its copy in {sl.SPEC_DOC} Appendix H")],
+        )
+        sl.lint_prompts(self.repo, write=True)
+        self.assertEqual(sl.lint_prompts(self.repo), [])
+        text = self.spec.read_text()
+        self.assertIn("~~~markdown\nfirst, rewritten\n~~~", text)
+        self.assertIn("The helper.\n\n~~~rust\nfn helper() {\n    tick();\n}\n~~~\n", text)
+        self.assertTrue(text.endswith("## 14. Next\n"))
+        # A specification without the appendix is reported.
+        self.spec.write_text(text.split("## Appendix H")[0] + "## 14. Next\n")
+        problems = sl.lint_prompts(self.repo)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("has no verbatim Appendix H", problems[0][1])
 
 
 
@@ -4461,6 +4523,289 @@ class SimplexProfile(unittest.TestCase):
         with self.assertRaises(sl.Abort) as caught:
             sl.check_simplex_cert_mock(repo, ["simplex_b"])
         self.assertIn("Real does not use the cert_mock certificate scheme", str(caught.exception))
+        # A thin target's inferred prefix and observer types are not schemes.
+        (targets / "simplex_c.rs").write_text(
+            "fuzz_audit_notarize_omission_with_prefix::<Mock, _, _>(input, p, w);\n"
+        )
+        sl.check_simplex_cert_mock(repo, ["simplex_c"])
+        marshal = repo / sl.MARSHAL_TARGETS
+        marshal.mkdir(parents=True)
+        (repo / sl.MARSHAL_SRC).mkdir(parents=True)
+        (marshal / "marshal_a.rs").write_text(
+            "fuzz_marshal_standard_disrupter_with_prefix::<Mock, _, _>(input, p, w);\n"
+        )
+        sl.check_marshal_cert_mock(repo, ["marshal_a"])
+        (marshal / "marshal_b.rs").write_text(
+            "fuzz_marshal_standard_disrupter_with_prefix::<Real, _, _>(input, p, w);\n"
+        )
+        with self.assertRaises(sl.Abort):
+            sl.check_marshal_cert_mock(repo, ["marshal_b"])
+
+    def test_every_base_has_a_continuation_text_or_a_refusal(self):
+        self.assertIsNone(sl.continuation_api_missing(self.REPO, "simplex"))
+        for base in sl.scaffold_bases(self.REPO, "simplex"):
+            text = sl.continuation_text(self.REPO, "simplex", base)
+            thin = sl.thin_target_text(self.REPO, "simplex", "TS-0001", base)
+            if sl.continuation_refusal(self.REPO, "simplex", base):
+                self.assertTrue(text.startswith("no trusted continuation: "), text)
+                self.assertIsNone(thin)
+            else:
+                self.assertIn("trusted entry `", text)
+                self.assertIn("target_states::Watch,", thin)
+
+    def test_the_notarize_omission_base_runs_its_trusted_entry(self):
+        base = "simplex_cert_mock_audit_notarize_omission"
+        self.assertIsNone(sl.continuation_refusal(self.REPO, "simplex", base))
+        text = sl.continuation_text(self.REPO, "simplex", base)
+        self.assertIn(
+            "trusted entry `fuzz_audit_notarize_omission_with_prefix::<SimplexCertificateMock, "
+            "_, _>`; B's actors from the release: none: the base runs N4F0C4 only",
+            text,
+        )
+        self.assertIn("`base=omission-incomplete`", text)
+        thin = sl.thin_target_text(self.REPO, "simplex", "TS-0001", base)
+        self.assertIn(
+            "use commonware_consensus_fuzz_simplex::{FuzzInput, SimplexCertificateMock, "
+            "fuzz_audit_notarize_omission_with_prefix, target_states};",
+            thin,
+        )
+        self.assertIn(
+            "        fuzz_audit_notarize_omission_with_prefix::<SimplexCertificateMock, _, _>(\n"
+            "            input,\n"
+            f"            target_states::{sl.pair_module('TS-0001', base)}::prefix::"
+            "<SimplexCertificateMock>(),\n",
+            thin,
+        )
+
+    def test_a_trusted_entry_in_a_module_is_driver_code(self):
+        # A prefix's scheme can be inferred, so a call needs no turbofish.
+        for code in (
+            "fuzz_audit_notarize_omission_with_prefix(input, prefix(), w);",
+            "fuzz_with_prefix::<P, Standard, CodeCoverage, _, _>(input, prefix(), w);",
+        ):
+            found = [name for name, pattern in sl.DRIVER_CODE if pattern.search(code)]
+            self.assertEqual(found, ["a base driver or entry"], code)
+
+    def test_an_entry_without_generic_arguments_is_parsed(self):
+        repo = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, repo, True)
+        targets = repo / sl.profile_fuzz_dir("simplex")
+        targets.mkdir(parents=True)
+        (targets / "simplex_a.rs").write_text(
+            "#![no_main]\nmod fuzz {\n    fuzz_target!(|input: FuzzInput| {\n"
+            "        fuzz_plain(input);\n    });\n}\n"
+        )
+        self.assertEqual(sl.base_entry(repo, "simplex", "simplex_a"),
+                         ("input: FuzzInput", "fuzz_plain", []))
+        self.assertEqual(sl.continuation_refusal(repo, "simplex", "simplex_a"),
+                         "its entry fuzz_plain has no runner adapter")
+        self.assertEqual(sl.trusted_call("fuzz_plain_with_prefix", []), "fuzz_plain_with_prefix")
+        self.assertEqual(sl.trusted_call("fuzz_with_prefix", ["P", "Standard"]),
+                         "fuzz_with_prefix::<P, Standard, _, _>")
+
+
+class MarshalContinuation(unittest.TestCase):
+    """The marshal profile's trusted continuation: the standard disrupter, poison and block
+    dissemination bases, the coding disrupter and block poison bases and the four Twins
+    bases run their trusted entries; every other marshal base is refused."""
+
+    REPO = HERE.parents[1]
+    # The Twins bases whose entry takes no generic argument: their trusted entry is called
+    # without a turbofish, with the scheme of the CONTINUATION table.
+    UNGENERIC = {
+        "marshal_e2e_standard_app_cert_mock_twins",
+        "marshal_e2e_standard_deferred_cert_mock_twins_split_header",
+        "marshal_e2e_standard_inline_cert_mock_twins_split_header",
+    }
+    TWINS = UNGENERIC | {"marshal_e2e_coding_app_cert_mock_twins"}
+    SUPPORTED = {
+        "marshal_e2e_standard_deferred_cert_mock_disrupter": (
+            "fuzz_marshal_standard_disrupter_with_prefix",
+            "SimplexCertificateMock",
+        ),
+        "marshal_e2e_standard_deferred_cert_mock_poison": (
+            "fuzz_marshal_standard_certificate_poison_with_prefix",
+            "SimplexCertificateMock",
+        ),
+        "marshal_e2e_standard_deferred_cert_mock_block_dissemination": (
+            "fuzz_marshal_standard_block_dissemination_with_prefix",
+            "SimplexCertificateMockByzantineFirstLeader",
+        ),
+        "marshal_e2e_coding_cert_mock_disrupter": (
+            "fuzz_marshal_coding_disrupter_with_prefix",
+            "SimplexCertificateMock",
+        ),
+        "marshal_e2e_coding_cert_mock_poison": (
+            "fuzz_marshal_coding_block_poison_with_prefix",
+            "SimplexCertificateMock",
+        ),
+        "marshal_e2e_standard_app_cert_mock_twins": (
+            "fuzz_marshal_standard_twins_with_prefix",
+            "SimplexCertificateMock",
+        ),
+        "marshal_e2e_standard_deferred_cert_mock_twins_split_header": (
+            "fuzz_marshal_standard_deferred_cert_mock_twins_split_header_with_prefix",
+            "SimplexCertificateMock",
+        ),
+        "marshal_e2e_standard_inline_cert_mock_twins_split_header": (
+            "fuzz_marshal_standard_inline_cert_mock_twins_split_header_with_prefix",
+            "SimplexCertificateMock",
+        ),
+        "marshal_e2e_coding_app_cert_mock_twins": (
+            "fuzz_marshal_coding_twins_with_prefix",
+            "SimplexCertificateMock",
+        ),
+    }
+
+    def test_the_marshal_harness_has_the_hook_api(self):
+        self.assertIsNone(sl.continuation_api_missing(self.REPO, "marshal"))
+        self.assertEqual(sl.continuation_api_missing(self.REPO, "qmdb"),
+                         "the qmdb fuzz harness has no trusted continuation")
+
+    def test_a_harness_without_the_twins_entries_lacks_the_hook_api(self):
+        repo = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, repo, True)
+        for relative, _marker in sl.CONTINUATION["marshal"]["api"]:
+            target = repo / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text((self.REPO / relative).read_text())
+        self.assertIsNone(sl.continuation_api_missing(repo, "marshal"))
+        relative = "consensus/fuzz/marshal/src/marshal/end_to_end/trusted.rs"
+        trusted = repo / relative
+        trusted.write_text(trusted.read_text().replace(
+            "pub fn fuzz_marshal_coding_twins_with_prefix<", "pub fn elsewhere<"))
+        self.assertEqual(
+            sl.continuation_api_missing(repo, "marshal"),
+            f"{relative} does not define `pub fn fuzz_marshal_coding_twins_with_prefix<...`",
+        )
+
+    def test_the_supported_bases_run_their_trusted_entries(self):
+        for base, (trusted, scheme) in self.SUPPORTED.items():
+            with self.subTest(base):
+                self.assertIsNone(sl.continuation_refusal(self.REPO, "marshal", base))
+                call = trusted if base in self.UNGENERIC else f"{trusted}::<{scheme}, _, _>"
+                kind = "MarshalTwinsInput" if base in self.TWINS else "MarshalDisrupterInput"
+                text = sl.continuation_text(self.REPO, "marshal", base)
+                self.assertIn(f"trusted entry `{call}`; B's actors from the release: ", text)
+                self.assertTrue(
+                    text.endswith(f"; the thin target instantiates `prefix` with `{scheme}`"),
+                    text,
+                )
+                if base in self.TWINS:
+                    self.assertIn("the twin pair under the case's B", text)
+                if base.endswith("_block_dissemination"):
+                    self.assertIn("`base=no-dissemination`", text)
+                thin = sl.thin_target_text(self.REPO, "marshal", "TS-0002", base)
+                self.assertIn(
+                    f"use commonware_consensus_fuzz_marshal::{{{kind}, {scheme}, "
+                    f"{trusted}, target_states}};",
+                    thin,
+                )
+                self.assertIn(
+                    f"        {call}(\n"
+                    "            input,\n"
+                    f"            target_states::{sl.pair_module('TS-0002', base)}::prefix::"
+                    f"<{scheme}>(),\n"
+                    "            target_states::Watch,\n",
+                    thin,
+                )
+                self.assertIn("        commonware_consensus::simplex::statelens::reset();\n", thin)
+                self.assertTrue(thin.startswith("#![no_main]\n"))
+                self.assertIn('#[cfg(feature = "mocks")]\nmod fuzz {', thin)
+
+    def test_the_prompt_names_the_trusted_entries_file(self):
+        self.assertEqual(sl.trusted_files("marshal"),
+                         "consensus/fuzz/marshal/src/marshal/end_to_end/trusted.rs")
+        self.assertEqual(sl.trusted_files("simplex"), "consensus/fuzz/simplex/src/trusted.rs")
+
+    def test_synthesis_can_declare_its_helper_in_each_crate_root(self):
+        # Synthesis inserts the declaration after exactly one anchor line (section 18.6.2).
+        for profile in ("simplex", "marshal"):
+            lib, anchor, _position, declaration = sl.PROFILES[profile]["scaffold"]
+            lines = (self.REPO / lib).read_text().split("\n")
+            self.assertEqual(lines.count(anchor), 1, profile)
+            self.assertNotIn("pub mod target_states;", lines, profile)
+            self.assertTrue(declaration.endswith("pub mod target_states;"), profile)
+
+    def test_every_other_marshal_base_is_refused(self):
+        bases = sl.scaffold_bases(self.REPO, "marshal")
+        self.assertTrue(set(self.SUPPORTED) <= set(bases))
+        for base in bases:
+            refusal = sl.continuation_refusal(self.REPO, "marshal", base)
+            text = sl.continuation_text(self.REPO, "marshal", base)
+            thin = sl.thin_target_text(self.REPO, "marshal", "TS-0001", base)
+            if base in self.SUPPORTED:
+                self.assertIsNone(refusal, base)
+                continue
+            self.assertIsNotNone(refusal, base)
+            self.assertRegex(refusal, r"^its entry \w+ has no runner adapter$", base)
+            self.assertTrue(text.startswith("no trusted continuation: "), text)
+            self.assertIsNone(thin, base)
+
+    def test_a_thin_target_passes_the_marshal_cryptography_check(self):
+        repo = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, repo, True)
+        core = repo / sl.CORE_SIMPLEX
+        core.parent.mkdir(parents=True)
+        core.write_text(
+            "impl Simplex for SimplexCertificateMock {\n"
+            "    type Scheme = cert_mock::Scheme<X>;\n}\n"
+        )
+        (repo / sl.MARSHAL_SRC).mkdir(parents=True)
+        targets = repo / sl.MARSHAL_TARGETS
+        targets.mkdir(parents=True)
+        for base in ("marshal_e2e_standard_deferred_cert_mock_disrupter",
+                     "marshal_e2e_coding_cert_mock_poison",
+                     "marshal_e2e_standard_app_cert_mock_twins",
+                     "marshal_e2e_coding_app_cert_mock_twins"):
+            source = (self.REPO / sl.MARSHAL_TARGETS / f"{base}.rs").read_text()
+            (targets / f"{base}.rs").write_text(source)
+            thin = sl.thin_target_text(repo, "marshal", "TS-0002", base)
+            (targets / f"{base}_ts0002_statelens.rs").write_text(thin)
+            sl.check_marshal_cert_mock(repo, [f"{base}_ts0002_statelens"])
+
+    def test_marshal_driver_code_in_a_module_is_vetoed(self):
+        for code, kind in (
+            ("fuzz_marshal_standard_disrupter(input);", "a base driver or entry"),
+            ("let _ = run_standard_disrupter::<P>;", "a base driver or entry"),
+            ("let (e, m) = buffered::Engine::new(c, cfg);", "an engine or validator spawn"),
+            ("setup_validator_tapped::<P>(c);", "an engine or validator spawn"),
+            ("let _ = resolver::init(c, cfg, b);", "an engine or validator spawn"),
+            ("let p = CertificatePoison::new();", "a Byzantine actor"),
+            ("setup_network_links::<P>(o, p);", "network setup"),
+            ("check_all_blocks(&apps, g, h, None);", "an oracle"),
+            ("let i = HeaderMismatchInvariant::new();", "an oracle"),
+            ("let _ = run_coding_disrupter::<P>(i, true, None);", "a base driver or entry"),
+            ("fuzz_marshal_coding_block_poison(input);", "a base driver or entry"),
+            ("setup_validator_coding::<P>(c);", "an engine or validator spawn"),
+            ("start_engine_coding_with_networks::<P, _, _, _, _>(c);",
+             "an engine or validator spawn"),
+            ("let m = coding_marshaled::<P, _>(&c, p, a, m, s);", "an engine or validator spawn"),
+            ("let _ = run_standard_twins(input, None);", "a base driver or entry"),
+            ("run_split_header_twins::<M>(i, c, None);", "a base driver or entry"),
+            ("let _ = run_coding_twins::<P>(input, None);", "a base driver or entry"),
+            ("fuzz_marshal_twins_with::<P, A, M>(i, p, s, e, None);", "a base driver or entry"),
+            ("fuzz_marshal_coding_twins::<P>(input);", "a base driver or entry"),
+            ("run_twins_with_backend_and_hook::<P, _>(c, b, e, h);", "a base driver or entry"),
+            ("let b = MarshalTwinsBackend::<P, A, M>::new();", "a Byzantine actor"),
+        ):
+            with self.subTest(code):
+                found = [name for name, pattern in sl.DRIVER_CODE if pattern.search(code)]
+                self.assertIn(kind, found, code)
+        # A prefix's own marshal verbs and wire types are no driver code.
+        for code in (
+            "cx.send_marshal(MarshalChannel::Backfill, &[r], message.encode());",
+            "let message = Message::<Key<Sha256Digest>>::decode(payload);",
+            "let digest = cx.finalized_block(r, 1).await;",
+            "cx.hold_marshal(r, |m| m.channel == MarshalChannel::Broadcast);",
+            "let shard = Shard::<CodingB<P>, ReedSolomon<Sha256>, Sha256>::decode_cfg(p, &m);",
+            "let vote = Vote::<P::Scheme, CommitmentOf<P>>::decode(payload);",
+            # Names of private harness items, which a module cannot reach, are its own.
+            "async fn serve_backfill<P: Simplex>(cx: &mut PrefixContext<P>) {}",
+            "mod block_disrupter {} mod coding_disrupter {} fn start_backfill_poison() {}",
+        ):
+            found = [name for name, pattern in sl.DRIVER_CODE if pattern.search(code)]
+            self.assertEqual(found, [], code)
 
 
 class QmdbProfile(unittest.TestCase):
@@ -5191,7 +5536,7 @@ class BareCampaign(unittest.TestCase):
         for relative, text in (
             ("consensus/src/simplex/mod.rs", "pub mod types;\n"),
             ("consensus/fuzz/core/src/continuation.rs",
-             "pub trait Prefix<P> {}\n\npub struct Release {\n    pub overran: bool,\n}\n"),
+             CONTINUATION_API),
             ("consensus/fuzz/simplex/src/trusted.rs", "pub fn fuzz_with_prefix<P>() {}\n"),
             ("statelens/.gitignore", "campaign/\n"),
             ("statelens/config.env", "STATELENS_AGENT=claude\n"),
@@ -6705,6 +7050,19 @@ E2. R: queues certification of a view.
                 ("actors release failed 0:disrupter=unpolled", ACTORS[2]),
                 "actor check failed at the release: actors release failed 0:disrupter=unpolled",
             ),
+            (
+                (ACTORS[0], "actors release ok -", "actors end failed - base=omission-incomplete"),
+                "the base's end check failed (omission-incomplete): actors end failed - "
+                "base=omission-incomplete",
+            ),
+            (
+                (ACTORS[1], "actors end failed 0:disrupter=running base=x"),
+                "the base's end check failed (x): actors end failed 0:disrupter=running base=x",
+            ),
+            ((ACTORS[1], "actors end failed - base="), "the actors end line is malformed: "
+             "actors end failed - base="),
+            ((ACTORS[1], "actors end failed - base=a b"), "the actors end line is malformed: "
+             "actors end failed - base=a b"),
         ):
             canonical = (0, replay_output(REACHED, actors=actors))
             result = sl.reach_verdict(card, MODULE, canonical, control)
@@ -7008,6 +7366,13 @@ doc = false
 bench = false
 required-features = ["mocks"]
 """
+# The hook API markers of the simplex harness (SPEC section 18.7), as a fixture's core
+# continuation module holds them.
+CONTINUATION_API = (
+    "pub trait Prefix<P> {}\n\n"
+    "pub struct Release {\n    pub base: u64,\n    pub overran: bool,\n}\n\n"
+    "pub struct ActorCheck {\n    pub base: Option<&'static str>,\n}\n"
+)
 BASE_TARGET = """\
 #![no_main]
 
@@ -7335,7 +7700,7 @@ class Synthesize(unittest.TestCase):
             ("consensus/src/simplex/voter.rs", VOTER_BASE),
             ("consensus/fuzz/core/src/simplex.rs", CORE),
             ("consensus/fuzz/core/src/continuation.rs",
-             "pub trait Prefix<P> {}\n\npub struct Release {\n    pub overran: bool,\n}\n"),
+             CONTINUATION_API),
             ("consensus/fuzz/simplex/src/trusted.rs", "pub fn fuzz_with_prefix<P>() {}\n"),
             ("consensus/fuzz/simplex/Cargo.toml", FUZZ_MANIFEST),
             ("consensus/fuzz/simplex/src/lib.rs", "pub mod state_cov;\n\npub fn fuzz() {}\n"),
@@ -7656,15 +8021,19 @@ class Synthesize(unittest.TestCase):
 
     def test_driver_level_code_in_the_module_is_vetoed(self):
         module = "consensus/fuzz/simplex/src/target_states/ts0004_simplex_a.rs"
+        # The veto names each kind with the text that matched it.
         for code, kind in (
-            ("let _ = run_twins_with_backend::<P, B>;", "a base driver or entry"),
-            ("let _ = deterministic::Runner::new(cfg);", "a runtime or the runner"),
-            ("spawn_filtered_honest_validator(x);", "an engine or validator spawn"),
-            ("let _ = Disrupter::new(x);", "a Byzantine actor"),
-            ("oracle.add_link(a, b, l);", "network setup"),
-            ("let _ = fuzz_runtime_timeout(1, 0);", "a runtime deadline"),
-            ("invariants::check(x);", "an oracle"),
-            ("let _ = target_states::Watch;", "the compromised set or the observer"),
+            ("let _ = run_twins_with_backend::<P, B>;",
+             "a base driver or entry `run_twins_with_backend`"),
+            ("let _ = deterministic ::\n    Runner::new(cfg);",
+             "a runtime or the runner `deterministic :: Runner`"),
+            ("spawn_filtered_honest_validator(x);",
+             "an engine or validator spawn `spawn_filtered_honest_validator`"),
+            ("let _ = Disrupter::new(x);", "a Byzantine actor `Disrupter`"),
+            ("oracle.add_link(a, b, l);", "network setup `add_link`"),
+            ("let _ = fuzz_runtime_timeout(1, 0);", "a runtime deadline `fuzz_runtime_timeout`"),
+            ("invariants::check(x);", "an oracle `invariants::`"),
+            ("let _ = target_states::Watch;", "the compromised set or the observer `Watch`"),
         ):
             with self.subTest(kind):
                 del self.prompts[:]
@@ -7686,8 +8055,8 @@ class Synthesize(unittest.TestCase):
         self.steps = [self.second_card(lambda: self.edit(
             self.FIRST_MODULE, "let _ = input;", "let _ = run_standard_once;"))]
         self.assertEqual(self.synthesize("--match", "TS-0005"), 3)
-        self.assertIn(f"{self.FIRST_MODULE} holds driver-level code (a base driver or entry)",
-                      self.feedback(2))
+        self.assertIn(f"{self.FIRST_MODULE} holds driver-level code (a base driver or entry "
+                      "`run_standard_once`)", self.feedback(2))
         self.assertEqual(self.read(self.FIRST_MODULE), SCAFFOLD_MODULE)
 
     def test_a_base_without_a_runner_adapter_is_refused(self):
@@ -7704,8 +8073,8 @@ class Synthesize(unittest.TestCase):
                          "its fuzz_target! is not one call of an entry the trusted continuation "
                          "hooks")
         self.assertIsNone(sl.continuation_refusal(self.repo, "simplex", "simplex_a"))
-        self.assertEqual(sl.continuation_refusal(self.repo, "marshal", "simplex_a"),
-                         "the marshal harness has no trusted continuation yet")
+        self.assertEqual(sl.continuation_refusal(self.repo, "qmdb", "simplex_a"),
+                         "the qmdb harness has no trusted continuation yet")
         self.assertEqual(self.synthesize("--match", "simplex_c"), 1)
         self.assertIn("refused    simplex_c: no trusted continuation (its Chaos driver has no hook "
                       "point); a follow-up", self.said)
@@ -7720,6 +8089,95 @@ class Synthesize(unittest.TestCase):
                       "point); a follow-up", self.said)
         self.assertEqual(self.line(), "TS-0004    REACHED 4/4   simplex_a_ts0004_statelens")
 
+    def marshal_campaign(self, bases):
+        """Turns the fixture into a marshal campaign's checkout: the marshal harness with its
+        hook API, `bases` as the repository has them, the marshal rules, and the card."""
+        repo = HERE.parents[1]
+        manifest = '[package]\nname = "fuzz"\n\n[dependencies]\nlibfuzzer-sys = "0.4"\n'
+        for base in bases:
+            self.put(f"{sl.MARSHAL_TARGETS}/{base}.rs",
+                     (repo / sl.MARSHAL_TARGETS / f"{base}.rs").read_text())
+            manifest += (f'\n[[bin]]\nname = "{base}"\npath = "fuzz_targets/{base}.rs"\n'
+                         'test = false\ndoc = false\nbench = false\n'
+                         'required-features = ["mocks"]\n')
+        self.put(sl.MARSHAL_MANIFEST, manifest)
+        self.put("consensus/fuzz/marshal/src/lib.rs",
+                 '#[cfg(feature = "mocks")]\npub mod marshal;\n'
+                 '#[cfg(feature = "mocks")]\npub mod scenarios;\n')
+        self.put("consensus/fuzz/core/src/continuation.rs",
+                 CONTINUATION_API + "\npub fn send_marshal() {}\n")
+        self.put("consensus/fuzz/marshal/src/marshal/end_to_end/trusted.rs",
+                 "pub fn fuzz_marshal_standard_disrupter_with_prefix<P>() {}\n"
+                 "pub fn fuzz_marshal_coding_twins_with_prefix<P>() {}\n")
+        self.put("statelens/prompts/subsystems/marshal-synthesize.md",
+                 (HERE.parent / "prompts/subsystems/marshal-synthesize.md").read_text())
+        (self.repo / "statelens/target-states/simplex/TS-0004.md").unlink()
+        self.put("statelens/target-states/marshal/TS-0004.md", state_card())
+        self.put("statelens/campaign/logs/test.log",
+                 campaign_log(gate_log(GATE_TESTS), profile="marshal"))
+        self.meta.update(profile="marshal", targets=[f"{base}_statelens" for base in bases])
+        self.put("statelens/campaign/meta.json", json.dumps(self.meta))
+
+    def test_a_marshal_campaign_synthesizes_its_supported_bases(self):
+        disrupter = "marshal_e2e_standard_deferred_cert_mock_disrupter"
+        twins = "marshal_e2e_standard_app_cert_mock_twins"
+        scenarios = "marshal_e2e_standard_deferred_cert_mock_scenarios"
+        self.marshal_campaign((disrupter, twins, scenarios))
+        package = "consensus/fuzz/marshal"
+
+        def write(base):
+            def step():
+                self.put(f"{package}/src/target_states/ts0004_{base}.rs", SCAFFOLD_MODULE.replace(
+                    "//! TS-0004 on simplex_a\n", f"//! TS-0004 on {base}\n", 1))
+            return step
+
+        # The pairs run in the order of the bases' files.
+        self.steps = [write(twins), write(disrupter)]
+        self.assertEqual(self.synthesize(), 0, self.said)
+        self.assertIn(f"refused    {scenarios}: no trusted continuation (its entry "
+                      "fuzz_marshal_standard_scenarios has no runner adapter); a follow-up",
+                      self.said)
+        self.assertEqual(len(self.prompts), 2, "one pair per supported base")
+        for prompt, base in zip(self.prompts, (twins, disrupter)):
+            self.assertNotIn("{{", prompt)
+            self.assertIn("### Marshal (`consensus/src/marshal/`", prompt)
+            self.assertIn("`consensus/fuzz/marshal/src/marshal/end_to_end/trusted.rs`", prompt)
+            self.assertIn(f"- `{base}`: closure", prompt)
+            self.assertIn(sl.continuation_text(self.repo, "marshal", base), prompt)
+            self.assertNotIn(f"`{scenarios}`", prompt)
+            scaffold = f"{base}_ts0004_statelens"
+            self.assertIn(f"TS-0004    REACHED 4/4   {scaffold}", self.said)
+            self.assertIn(scaffold, self.builds)
+            thin = self.read(f"{package}/fuzz_targets/{scaffold}.rs")
+            self.assertEqual(thin, sl.thin_target_text(self.repo, "marshal", "TS-0004", base))
+            self.assertIn(f'name = "{scaffold}"\npath = "fuzz_targets/{scaffold}.rs"',
+                          self.read(sl.MARSHAL_MANIFEST))
+            self.assertIn(f"\npub mod ts0004_{base};\n",
+                          self.read(f"{package}/src/target_states/mod.rs"))
+        self.assertIn("fuzz_marshal_standard_disrupter_with_prefix::<SimplexCertificateMock, _, _>(",
+                      self.read(f"{package}/fuzz_targets/{disrupter}_ts0004_statelens.rs"))
+        self.assertIn("        fuzz_marshal_standard_twins_with_prefix(\n",
+                      self.read(f"{package}/fuzz_targets/{twins}_ts0004_statelens.rs"))
+        self.assertIn('#[cfg(feature = "mocks")]\npub mod scenarios;\n'
+                      '#[cfg(feature = "mocks")]\npub mod target_states;\n',
+                      self.read(f"{package}/src/lib.rs"))
+        self.assertTrue(self.read(f"{package}/src/target_states/mod.rs")
+                        .startswith("//! The helper."))
+        self.assertEqual(self.gates, 0)
+
+    def test_a_marshal_thin_target_with_another_scheme_is_vetoed(self):
+        disrupter = "marshal_e2e_standard_deferred_cert_mock_disrupter"
+        self.marshal_campaign((disrupter,))
+        module = f"consensus/fuzz/marshal/src/target_states/ts0004_{disrupter}.rs"
+        self.steps = [lambda: self.put(module, SCAFFOLD_MODULE.replace(
+            "//! TS-0004 on simplex_a\n", f"//! TS-0004 on {disrupter}\n", 1).replace(
+            "let _ = input;", "let _ = SimplexEd25519::default();"))]
+        self.assertEqual(self.synthesize(), 3)
+        self.assertIn("cryptography check (D15)", self.feedback(1))
+        self.assertIn("names SimplexEd25519, whose Simplex impl does not use the cert_mock "
+                      "certificate scheme", self.feedback(1))
+        self.assertEqual(self.builds, [])
+
     def test_a_harness_that_predates_the_trusted_continuation_is_refused(self):
         self.put("consensus/fuzz/simplex/src/trusted.rs", "pub fn fuzz() {}\n")
         self.assertEqual(self.synthesize(), 2)
@@ -7732,12 +8190,22 @@ class Synthesize(unittest.TestCase):
         # The harness before D70 has both hooks but no `Release.overran`, which the helper reads.
         self.put("consensus/fuzz/simplex/src/trusted.rs", "pub fn fuzz_with_prefix<P>() {}\n")
         self.put("consensus/fuzz/core/src/continuation.rs",
-                 "pub trait Prefix<P> {}\n\npub struct Release {\n    pub largest: bool,\n}\n")
+                 CONTINUATION_API.replace("pub overran", "pub largest"))
         self.said.clear()
         self.assertEqual(self.synthesize(), 2)
         self.assertIn("the simplex fuzz harness predates the trusted continuation "
                       "(consensus/fuzz/core/src/continuation.rs does not define "
                       "`pub overran...`)", self.output + "\n".join(self.said))
+        self.assertEqual(self.prompts, [])
+        # The harness before the base check has no `ActorCheck.base`, which the helper's
+        # tests construct, though its `Release` has a `base`.
+        self.put("consensus/fuzz/core/src/continuation.rs",
+                 CONTINUATION_API.replace("pub base: Option", "pub reason: Option"))
+        self.said.clear()
+        self.assertEqual(self.synthesize(), 2)
+        self.assertIn("(consensus/fuzz/core/src/continuation.rs does not define "
+                      "`pub base: Option<&'static str>...`)",
+                      self.output + "\n".join(self.said))
         self.assertEqual(self.prompts, [])
 
     def test_a_standing_scaffold_of_the_old_contract_is_reported_not_revalidated(self):

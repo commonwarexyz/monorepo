@@ -397,12 +397,27 @@ a scaffold fuzzes the base's fault model, never a copy of it. The continuation c
 only, as the Twins mutator does: it never waits for progress, so a scaffold finds no liveness
 bug; the ordinary fuzz targets still check liveness. Synthesis needs a fuzz harness
 with that hook point and refuses one without it ("the simplex fuzz harness predates the trusted
-continuation ...": merge the harness, `just clean`, run a new campaign). Today the hook point
-exists for the simplex Standard family (`simplex_cert_mock`, `_state_cov`, `_hb`,
-`_hb_state_cov`, `_faulty_net`, `_byzantine_first_leader`, `_audit`) and the simplex Twins bases
-(`simplex_cert_mock_twins_campaign` and `_twins_mutator` with their `_audit`, `_hb` and
-`_state_cov` siblings, and `simplex_cert_mock_shuffled_twins_mutator`); synthesis refuses every
-other base, each marshal base included, with a `refused` line.
+continuation ...": merge the harness, `just clean`, run a new campaign). Since the revision of
+2026-10-14 the hook point exists for the simplex Standard family (`simplex_cert_mock`,
+`_state_cov`, `_hb`, `_hb_state_cov`, `_faulty_net`, `_byzantine_first_leader`, `_audit`), the
+notarize-omission audit (`simplex_cert_mock_audit_notarize_omission`, whose `actors end` line
+fails with `base=omission-incomplete` when the prefix crashed the victim or kept it from
+omitting) and the simplex Twins bases (`simplex_cert_mock_twins_campaign` and `_twins_mutator`
+with their `_audit`, `_hb` and `_state_cov` siblings, and
+`simplex_cert_mock_shuffled_twins_mutator`), and for the marshal
+standard disrupter, certificate poison and block dissemination bases
+(`marshal_e2e_standard_deferred_cert_mock_disrupter`, `_poison` and `_block_dissemination`,
+whose `actors end` line fails with `base=no-dissemination` when the release came too late,
+past height 19, for its disseminator to attack) and the coding disrupter and block poison
+bases (`marshal_e2e_coding_cert_mock_disrupter` and `_poison`), where B also holds its
+marshal channels, the prefix gates and reads the honest marshals, and no replica is crashed
+or restarted (a coding replica's activities and automaton calls are not recorded), and the
+marshal Twins bases (`marshal_e2e_standard_app_cert_mock_twins`,
+both `_twins_split_header` bases and `marshal_e2e_coding_app_cert_mock_twins`), where the twin
+pair starts at the release and B's marshal channels stay with B's own marshal; synthesis
+refuses every other base with a `refused` line. On every base a prefix signs only as B, on B's
+own channels, and never builds a vote or certificate under an honest key; a state that needs
+one is reported as `cannot:`, never as a finding.
 
 ### Cards
 
