@@ -590,8 +590,26 @@ impl Runner {
         let storage = context.storage.clone();
         let network_buffer_pool_cfg = context.network_buffer_pool.config().clone();
         let storage_buffer_pool_cfg = context.storage_buffer_pool.config().clone();
-        let mut root = Box::pin(panicked.interrupt(f(context)));
+        let root = Box::pin(panicked.interrupt(f(context)));
 
+        Self::run(
+            executor,
+            storage,
+            network_buffer_pool_cfg,
+            storage_buffer_pool_cfg,
+            root,
+        )
+    }
+
+    // Share the loop and cleanup across root futures with the same output type.
+    // Erase the root's type using its existing allocation without requiring Send or 'static.
+    fn run<TOutput>(
+        executor: Arc<Executor>,
+        storage: Arc<Storage>,
+        network_buffer_pool_cfg: BufferPoolConfig,
+        storage_buffer_pool_cfg: BufferPoolConfig,
+        mut root: Pin<Box<dyn Future<Output = TOutput> + '_>>,
+    ) -> (TOutput, Checkpoint) {
         // Register the root task
         Tasks::register_root(&executor.tasks);
 
@@ -1690,7 +1708,11 @@ mod tests {
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
     use futures::{FutureExt as _, stream::FuturesUnordered};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        cell::Cell,
+        rc::Rc,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     #[rstest::rstest]
     #[case::open_named(true, true)]
@@ -3102,5 +3124,26 @@ mod tests {
             let sum = strategy.fold(0..100u64, || 0u64, |acc, i| acc + i, |a, b| a + b);
             assert_eq!(sum, 4950);
         });
+    }
+
+    #[test]
+    fn test_borrowed_non_send_root() {
+        let value = String::from("borrowed output");
+        let calls = Rc::new(Cell::new(0));
+        let value = &value;
+        let calls = &calls;
+        let run = |context: Context| async move {
+            context.sleep(Duration::from_millis(1)).await;
+            calls.set(calls.get() + 1);
+            value.as_str()
+        };
+
+        let (output, checkpoint) = Runner::default().start_and_recover(run);
+        assert_eq!(output, value.as_str());
+        assert_eq!(calls.get(), 1);
+
+        let output = Runner::from(checkpoint).start(run);
+        assert_eq!(output, value.as_str());
+        assert_eq!(calls.get(), 2);
     }
 }
