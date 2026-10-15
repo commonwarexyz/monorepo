@@ -148,14 +148,10 @@ impl Metrics {
 type Digest = [u8; 32];
 
 /// Hashes an unambiguous sequence of fields for deterministic runtime auditing.
+#[derive(Default)]
 pub(crate) struct AuditHasher(Crc32);
 
 impl AuditHasher {
-    /// Creates an empty audit hasher.
-    pub(crate) fn new() -> Self {
-        Self(Crc32::default())
-    }
-
     /// Adds a length-prefixed field to the audit.
     pub(crate) fn update(&mut self, value: impl AsRef<[u8]>) {
         let value = value.as_ref();
@@ -203,7 +199,7 @@ impl Auditor {
     {
         let mut digest = self.digest.lock();
 
-        let mut hasher = AuditHasher::new();
+        let mut hasher = AuditHasher::default();
         hasher.update(digest.as_ref());
         hasher.update(label);
         payload(&mut hasher);
@@ -211,7 +207,7 @@ impl Auditor {
         *digest = hasher.finalize();
     }
 
-    /// Generate an eight-character hexadecimal fingerprint of the runtime's event history.
+    /// Generate a representation of the current state of the runtime.
     ///
     /// This can be used to ensure that logic running on top
     /// of the runtime is interacting deterministically.
