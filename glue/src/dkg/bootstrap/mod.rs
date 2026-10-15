@@ -134,6 +134,10 @@ pub struct Config<M, X, SS, T, D = Unit> {
     pub directory: D,
 
     /// Length of the one-shot consensus epoch.
+    ///
+    /// The second half of the epoch is the dealer-log inclusion window, subject to
+    /// the same [Inclusion Liveness](crate::dkg::reshare#inclusion-liveness)
+    /// requirement as resharing.
     pub blocks_per_epoch: NonZeroU64,
 }
 

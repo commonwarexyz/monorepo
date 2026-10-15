@@ -184,6 +184,13 @@ impl<P: PublicKey> Participants<P> {
         Ok(())
     }
 
+    /// Checks that one epoch's dealer-log inclusion window has at least as many
+    /// blocks as the dealer logs a ceremony needs.
+    ///
+    /// This is a lower bound only. Each log lands in a block its own dealer
+    /// proposes, so success also depends on the elector giving enough dealers a
+    /// turn in the window (see
+    /// [Inclusion Liveness](crate::dkg::reshare#inclusion-liveness)).
     pub(crate) fn validate_epoch_capacity<V: Variant>(
         &self,
         blocks_per_epoch: NonZeroU64,
