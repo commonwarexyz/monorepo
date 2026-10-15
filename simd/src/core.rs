@@ -573,8 +573,9 @@ pub trait Neon: Simd {
     /// `r[i] = high[i-8] mod 2^8` for `8 <= i < 16`.
     fn u16_narrow_pair(self, low: Self::U16, high: Self::U16) -> Self::U8;
 
-    /// Vector of [`Simd::U64_LANES`] unsigned 32-bit lanes, in matching lane order.
-    /// This is half the width of the common [`Simd::U32`] vector.
+    /// Vector of two unsigned 32-bit lanes, matching this profile's two
+    /// [`Simd::U64`] lanes in order. This is half the width of the common
+    /// [`Simd::U32`] vector.
     type U32Half: Copy;
 
     /// `r[i] = value[i] mod 2^32` for `0 <= i < 2`.
