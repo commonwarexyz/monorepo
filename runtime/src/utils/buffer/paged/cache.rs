@@ -485,6 +485,29 @@ impl Stream for Subscription {
     }
 }
 
+/// Where a page-fault read gets its page. It is chosen under the cache lock and awaited after the
+/// lock is released.
+enum PageSource {
+    /// A standalone fetch of the page.
+    Fetch(PageFetch),
+    /// A subscription to the page in another reader's batch.
+    Batch(Subscription),
+}
+
+impl PageSource {
+    /// Wait for the page, keyed by `key` in the cache's in-flight fetches.
+    async fn wait(self, cache: &RwLock<Cache>, key: (u64, u64)) -> Result<IoBuf, Error> {
+        match self {
+            Self::Fetch(fetch) => PageFetchGuard::new(cache, key, fetch).wait().await,
+            Self::Batch(mut subscription) => {
+                let delivery = subscription.try_next().await?;
+                let (_, page) = delivery.expect("a subscription yields the page it selected");
+                Ok(page)
+            }
+        }
+    }
+}
+
 /// The pieces of a read's buffers that one page fills, each `(page number, offset in page,
 /// piece)`.
 type Pieces<'a, 'b> = &'a mut [(u64, usize, &'b mut [u8])];
@@ -912,11 +935,6 @@ impl CacheRef {
         buf: &mut [u8],
         offset: u64,
     ) -> Result<usize, Error> {
-        enum Source {
-            Fetch(PageFetch),
-            Batch(Subscription),
-        }
-
         assert!(!buf.is_empty());
 
         let (page_num, offset_in_page, _) = Cache::locate(self.page_size, offset);
@@ -946,7 +964,7 @@ impl CacheRef {
                     // Another thread is already fetching this page, so clone its existing future.
                     let entry = o.into_mut();
                     entry.waiters += 1;
-                    Source::Fetch(entry.fetch.clone())
+                    PageSource::Fetch(entry.fetch.clone())
                 }
                 Entry::Vacant(v) => {
                     batches.unregister_retired();
@@ -956,7 +974,7 @@ impl CacheRef {
                         // Another reader's batch is reading this page, so join it.
                         let mut subscription = Subscription::joining(batch, driver);
                         subscription.select(index, 0);
-                        Source::Batch(subscription)
+                        PageSource::Batch(subscription)
                     } else {
                         // Nobody is currently fetching this page, so create a future that will do
                         // the work. fetch_cacheable_page handles CRC validation and returns only
@@ -991,19 +1009,12 @@ impl CacheRef {
                             fetch: fetch.clone(),
                             waiters: 1,
                         });
-                        Source::Fetch(fetch)
+                        PageSource::Fetch(fetch)
                     }
                 }
             }
         };
-        let page_buf = match source {
-            Source::Fetch(fetch) => PageFetchGuard::new(&self.cache, key, fetch).wait().await?,
-            Source::Batch(mut subscription) => {
-                let delivery = subscription.try_next().await?;
-                let (_, page) = delivery.expect("a subscription yields the page it selected");
-                page
-            }
-        };
+        let page_buf = source.wait(&self.cache, key).await?;
 
         // Copy the requested portion of the page into the buffer.
         let bytes_to_copy = std::cmp::min(buf.len(), page_buf.len() - offset_in_page);
