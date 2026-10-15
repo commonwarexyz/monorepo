@@ -264,6 +264,7 @@ macro_rules! impl_common {
                 }
             }
 
+            #[inline]
             fn u64_splat(self, value: u64) -> Self::U64 {
                 [value; $u64_lanes]
             }
