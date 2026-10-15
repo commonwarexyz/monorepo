@@ -35,6 +35,7 @@ use commonware_storage::{
             batch::{MerkleizedBatch, Staged, UnmerkleizedBatch},
             db::Db,
         },
+        floor::Proportional,
         operation::Key,
         sync::{self, Target as CurrentSyncTarget},
     },
@@ -276,7 +277,7 @@ where
     F: Graftable,
     E: Context,
     K: Key,
-    V: ValueEncoding + 'static,
+    V: ValueEncoding,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
@@ -305,7 +306,9 @@ where
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged.merkleize(updates, upserts, metadata, &guard).await?
+            staged
+                .merkleize(updates, upserts, metadata, &guard, &mut Proportional)
+                .await?
         };
         Ok(CurrentMerkleized { inner, db })
     }
@@ -317,7 +320,7 @@ where
     F: Graftable,
     E: Context,
     K: Key,
-    V: ValueEncoding + 'static,
+    V: ValueEncoding,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
     I: OrderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
@@ -346,7 +349,9 @@ where
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged.merkleize(updates, upserts, metadata, &guard).await?
+            staged
+                .merkleize(updates, upserts, metadata, &guard, &mut Proportional)
+                .await?
         };
         Ok(CurrentMerkleized { inner, db })
     }
@@ -384,7 +389,7 @@ where
     F: Graftable,
     E: Context,
     K: Key,
-    V: ValueEncoding + 'static,
+    V: ValueEncoding,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
@@ -396,7 +401,10 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&db, self.metadata).await?;
+        let merkleized = self
+            .batch
+            .merkleize(&db, self.metadata, &mut Proportional)
+            .await?;
         Ok(CurrentMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -410,7 +418,7 @@ where
     F: Graftable,
     E: Context,
     K: Key,
-    V: ValueEncoding + 'static,
+    V: ValueEncoding,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
     I: OrderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
@@ -422,7 +430,10 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&db, self.metadata).await?;
+        let merkleized = self
+            .batch
+            .merkleize(&db, self.metadata, &mut Proportional)
+            .await?;
         Ok(CurrentMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -474,8 +485,8 @@ where
     F: Graftable,
     E: Context + Spawner,
     K: Array,
-    V: value::FixedValue + 'static,
-    H: Hasher + 'static,
+    V: value::FixedValue,
+    H: Hasher,
     T: Translator,
     S: Strategy,
 {
@@ -577,8 +588,8 @@ where
     F: Graftable,
     E: Context + Spawner,
     K: Array,
-    V: value::FixedValue + 'static,
-    H: Hasher + 'static,
+    V: value::FixedValue,
+    H: Hasher,
     T: Translator,
     S: Strategy,
 {
@@ -706,7 +717,7 @@ mod open {
         F: Graftable,
         E: Context + Spawner,
         K: commonware_storage::qmdb::operation::Key,
-        V: VariableValue + 'static,
+        V: VariableValue,
         H: Hasher,
         T: commonware_storage::translator::Translator,
         S: Strategy,
@@ -724,7 +735,7 @@ mod open {
         F: Graftable,
         E: Context + Spawner,
         K: commonware_storage::qmdb::operation::Key,
-        V: VariableValue + 'static,
+        V: VariableValue,
         H: Hasher,
         T: commonware_storage::translator::Translator,
         S: Strategy,
@@ -749,7 +760,7 @@ where
     F: Graftable,
     E: Context + Spawner,
     K: Key,
-    V: value::VariableValue + 'static,
+    V: value::VariableValue,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -857,7 +868,7 @@ where
     F: Graftable,
     E: Context + Spawner,
     K: Key,
-    V: value::VariableValue + 'static,
+    V: value::VariableValue,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -965,7 +976,7 @@ where
     F: Graftable,
     E: Context + Spawner,
     K: Array,
-    V: value::FixedValue + 'static,
+    V: value::FixedValue,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -1012,7 +1023,7 @@ where
     F: Graftable,
     E: Context + Spawner,
     K: Array,
-    V: value::FixedValue + 'static,
+    V: value::FixedValue,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -1059,7 +1070,7 @@ where
     F: Graftable,
     E: Context + Spawner,
     K: Key,
-    V: value::VariableValue + 'static,
+    V: value::VariableValue,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -1107,7 +1118,7 @@ where
     F: Graftable,
     E: Context + Spawner,
     K: Key,
-    V: value::VariableValue + 'static,
+    V: value::VariableValue,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -1779,7 +1790,7 @@ mod tests {
                 let db = Shared::new("test", db);
 
                 // Apply over the discarded target's bytes, then crash without finalizing. The
-                // batch is one journal append of its updates, floor-raise moves, and commit: three
+                // batch is one journal append of its updates, floor walk moves, and commit: three
                 // operations for one key and six for four keys. Only the written case exceeds
                 // `CAPACITY`.
                 let merkleized = batch(&db, 3, writes).await;

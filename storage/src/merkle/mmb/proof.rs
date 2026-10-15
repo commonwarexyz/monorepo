@@ -80,13 +80,16 @@ mod tests {
             )
             .unwrap();
 
-            let total_digests = usize::from(!bp.fold_prefix.is_empty()) + bp.fetch_nodes.len();
+            let total_digests = usize::from(!bp.fold_prefix.is_empty())
+                + bp.individual_positions().count()
+                + bp.siblings.len();
             assert!(
                 total_digests <= 2,
                 "n={n}: expected <= 2 digests, got {total_digests} \
-                 (fold_prefix={}, fetch_nodes={})",
+                 (fold_prefix={}, individual_peaks={}, siblings={})",
                 bp.fold_prefix.len(),
-                bp.fetch_nodes.len(),
+                bp.individual_positions().count(),
+                bp.siblings.len(),
             );
 
             // Verify the proof actually works.

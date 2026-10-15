@@ -3,13 +3,15 @@ title: "Fast Block Dissemination with Immediate Guarantees"
 description: "You can come to consensus over a mere fingerprint of the block---a hash for example---but doing anything interesting with that fingerprint, like processing transactions or updating state, requires disseminating (a lot of) data."
 date: "November 4th, 2025"
 published-time: "2025-11-04T00:00:00Z"
-modified-time: "2025-11-04T00:00:00Z"
+modified-time: "2026-09-30T00:00:00Z"
 author: "Lucas Meier"
 author_twitter: "https://x.com/cronokirby"
 url: "https://commonware.xyz/blogs/zoda"
 image: "https://commonware.xyz/imgs/zoda-card.png"
 katex: true
 ---
+
+*Update (9/30/26): ZODA is no longer provided by the Commonware Library. Implementation links point to its last version.*
 
 You can come to consensus over a mere fingerprint of the block---a hash for example---
 but doing anything interesting with that fingerprint, like processing transactions or updating
@@ -27,7 +29,7 @@ ZODA is particularly exciting, because it achieves the guarantees of something l
 Reed-Solomon + KZG, without requiring a trusted setup, and while being more performant,
 and having less data transmission overhead.
 
-In a future post we will cover lower-level details of [our implementation](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs), like
+In a future post we will cover lower-level details of [our implementation](https://github.com/commonwarexyz/monorepo/blob/2747808cc1079fe9ce70586704fbc056076c129b/coding/src/zoda/mod.rs), like
 the field we use for Reed-Solomon coding, and the optimizations needed for
 fast fourier transforms, but this one will stick to an overview.
 
@@ -123,7 +125,7 @@ as forming our encoded message.
 With some algebra, any $n$ of these evaluations can be interpolated back into
 the original polynomial $d(X)$, whose coefficients spell out our message.
 
-We have an implementation of this scheme [here](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/reed_solomon/mod.rs).
+We have an implementation of this scheme [here](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/reed_solomon.rs).
 
 These details are not essential: what matters is that we take $n$ symbols,
 encode them into $m$, such that any $n$ of the encoded symbols are good enough
@@ -376,7 +378,7 @@ Some more advanced schemes, like [Ligerito](https://eprint.iacr.org/2025/1187)
 can pave the way for verifying arbitrary properties of the sharded data, which
 we're excited about.
 
-Our initial implementation of this scheme can be found [in the Commonware Library](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs).
+Our initial implementation of this scheme can be found [in the Commonware Library](https://github.com/commonwarexyz/monorepo/blob/2747808cc1079fe9ce70586704fbc056076c129b/coding/src/zoda/mod.rs).
 
 Looking to develop a better intuition for ZODA? Check out our [podcast](https://www.youtube.com/watch?v=eOGQOaqvgnI) with [Guillermo Angeris](https://x.com/GuilleAngeris) and
 [Alex Evans](https://x.com/alexhevans) from [Bain Capital Crypto](https://baincapitalcrypto.com/).

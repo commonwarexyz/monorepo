@@ -14,7 +14,7 @@ use std::{collections::HashSet, hash::Hash};
 
 const HASHSET_TYPE: &str = "HashSet";
 
-impl<K: Ord + Hash + Eq + Write> Write for HashSet<K> {
+impl<K: Ord + Write, S> Write for HashSet<K, S> {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
 
@@ -38,7 +38,7 @@ impl<K: Ord + Hash + Eq + Write> Write for HashSet<K> {
     }
 }
 
-impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for HashSet<K> {
+impl<K: EncodeSize, S> EncodeSize for HashSet<K, S> {
     fn encode_size(&self) -> usize {
         let mut size = self.len().encode_size();
 
@@ -60,7 +60,7 @@ impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for HashSet<K> {
     }
 }
 
-impl<K: Read + Ord + Hash + Eq> Read for HashSet<K> {
+impl<K: Read + Ord + Hash> Read for HashSet<K> {
     type Cfg = (RangeCfg<usize>, K::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
@@ -89,7 +89,7 @@ mod tests {
     // Generic round trip test function for HashSet
     fn round_trip_hash<K>(set: &HashSet<K>, range_cfg: RangeCfg<usize>, item_cfg: K::Cfg)
     where
-        K: Write + EncodeSize + Read + Ord + Hash + Eq + Debug + PartialEq,
+        K: Write + EncodeSize + Read + Ord + Hash + Debug,
         HashSet<K>: Read<Cfg = (RangeCfg<usize>, K::Cfg)>
             + Decode<Cfg = (RangeCfg<usize>, K::Cfg)>
             + Debug

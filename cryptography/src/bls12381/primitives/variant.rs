@@ -31,7 +31,6 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         + FixedSize
         + Write
         + Read<Cfg = ()>
-        + Debug
         + Hash
         + Copy;
 
@@ -41,7 +40,6 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         + FixedSize
         + Write
         + Read<Cfg = ()>
-        + Debug
         + Hash
         + Copy;
 

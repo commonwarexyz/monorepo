@@ -71,7 +71,7 @@ pub trait Cursor: Send + Sync {
 
     /// Retains only the values in the cursor for which `should_retain` returns `true`. All other
     /// values are removed.
-    fn retain(&mut self, should_retain: &impl Fn(&Self::Value) -> bool) {
+    fn retain(&mut self, mut should_retain: impl FnMut(&Self::Value) -> bool) {
         while let Some(old) = self.next() {
             if !should_retain(old) {
                 self.delete();
@@ -100,7 +100,7 @@ pub trait Cursor: Send + Sync {
     ///     cursor.update(100); // Update it to 100
     /// }
     /// ```
-    fn find(&mut self, predicate: impl Fn(&Self::Value) -> bool) -> bool {
+    fn find(&mut self, mut predicate: impl FnMut(&Self::Value) -> bool) -> bool {
         loop {
             match self.next() {
                 Some(value) if predicate(value) => return true,
@@ -169,14 +169,14 @@ pub trait Unordered: Send + Sync {
         &mut self,
         key: &[u8],
         value: Self::Value,
-        should_retain: impl Fn(&Self::Value) -> bool,
+        should_retain: impl FnMut(&Self::Value) -> bool,
     );
 
     /// Retain only the values associated with a translated key for which `should_retain` returns
     /// `true`. All other values are removed.
-    fn retain(&mut self, key: &[u8], should_retain: impl Fn(&Self::Value) -> bool) {
+    fn retain(&mut self, key: &[u8], should_retain: impl FnMut(&Self::Value) -> bool) {
         if let Some(mut cursor) = self.get_mut(key) {
-            cursor.retain(&should_retain);
+            cursor.retain(should_retain);
         }
     }
 

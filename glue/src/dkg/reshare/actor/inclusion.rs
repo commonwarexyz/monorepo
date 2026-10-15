@@ -12,19 +12,19 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox::Sender as ActorSender;
 use commonware_consensus::{
+    Block as _, Heightable as _,
     marshal::{ancestry::BoxedAncestry, core::Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::{
-    BatchVerifier, PublicKey, Signer,
+    BatchVerifier, Digested, Digestible as _, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::{
             DealerLog, FinalizeError as DkgFinalizeError, Info, Logs, Output, observe,
         },
         primitives::{group::Share, variant::Variant as BlsVariant},
     },
-    certificate::Scheme,
 };
 use commonware_macros::{select, select_loop};
 use commonware_p2p::Blocker;
@@ -427,13 +427,13 @@ where
     /// is a player, its share (`None` if the logs yield no output).
     ///
     /// Panics if the local player state is invalid.
-    fn run<E, BV>(self, mut context: E) -> Option<Ceremony<V, C>>
+    fn run<E>(self, mut context: E) -> Option<Ceremony<V, C>>
     where
         E: CryptoRng,
-        BV: BatchVerifier<PublicKey = C::PublicKey>,
+        C::PublicKey: BatchVerifier,
     {
         if let Some(player) = self.player {
-            match player.finalize::<N3f1, BV>(&mut context, self.logs, &self.strategy) {
+            match player.finalize::<N3f1>(&mut context, self.logs, &self.strategy) {
                 Ok((output, share)) => Some(Ceremony {
                     output,
                     share: Some(share),
@@ -447,7 +447,7 @@ where
                 }
             }
         } else {
-            match observe::<_, _, N3f1, BV>(&mut context, self.logs, &self.strategy) {
+            match observe::<_, _, N3f1>(&mut context, self.logs, &self.strategy) {
                 Ok(output) => Some(Ceremony {
                     output,
                     share: None,
@@ -501,7 +501,7 @@ fn validate_future_participants<V: BlsVariant, P: PublicKey>(
 /// extend the finalized tip.
 async fn pending_logs<B, V, C>(
     scan: PendingLogScan<'_, V, C::PublicKey, B::Digest>,
-    mut ancestry: impl Stream<Item = Arc<B>> + Send + Unpin,
+    mut ancestry: impl Stream<Item = Digested<B>> + Send + Unpin,
     mut shutdown: signal::Signal,
 ) -> Option<PendingLogs<V, C::PublicKey>>
 where
@@ -601,7 +601,7 @@ where
     let mut logs = BTreeMap::new();
     for block in blocks.into_iter().rev() {
         let height = block.height();
-        let Some(Payload::DealerLog(log)) = block.payload() else {
+        let Some(Payload::DealerLog(log)) = block.inner().payload() else {
             continue;
         };
         let Some((dealer, log)) = log.check(scan.info) else {
@@ -613,7 +613,7 @@ where
     Some(logs)
 }
 
-impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
+impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + RuntimeStorage,
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -624,8 +624,8 @@ where
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
-    BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
+    C::PublicKey: BatchVerifier,
+    S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
@@ -760,7 +760,7 @@ where
                             store,
                             epoch,
                             dealer.as_deref_mut(),
-                            block.payload(),
+                            block.inner().payload(),
                         )
                         .await;
 
@@ -772,7 +772,7 @@ where
                                 info,
                                 store,
                                 &mut work,
-                                block.as_ref(),
+                                block.inner(),
                             )
                             .await
                             .is_break()
@@ -1149,7 +1149,7 @@ where
                 .child("verification")
                 .shared(true)
                 .spawn(move |context| async move {
-                    let ceremony = task.run::<E, BV>(context);
+                    let ceremony = task.run(context);
                     VerifiedLogs {
                         logs: log_map,
                         ceremony,
@@ -1478,7 +1478,7 @@ mod tests {
     use commonware_actor::Feedback;
     use commonware_consensus::{Reporter, marshal};
     use commonware_cryptography::{
-        Digestible as _, Signer,
+        Signer,
         bls12381::{
             dkg::feldman_desmedt::{
                 Dealer as CryptoDealer, DealerPrivMsg, DealerPubMsg, Player as CryptoPlayer,
@@ -1490,6 +1490,7 @@ mod tests {
         sha256::Sha256,
         transcript::Summary,
     };
+    use commonware_macros::boxed;
     use commonware_math::algebra::Random as _;
     use commonware_p2p::{
         simulated::{Config as NetworkConfig, Network},
@@ -1504,7 +1505,6 @@ mod tests {
     use futures::{FutureExt, stream};
     use std::{
         collections::BTreeMap,
-        marker::PhantomData,
         pin::Pin,
         sync::Arc,
         task::{Context, Poll},
@@ -1516,7 +1516,8 @@ mod tests {
     type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
     type TestArtifacts = ArtifactCache<TestBlsVariant, PrivateKey, Unit>;
     type TestRequests = ArtifactRequests<TestBlock, TestBlsVariant, PrivateKey>;
-    type TestInclusionMailbox = crate::dkg::reshare::Mailbox<TestBlock, TestBlsVariant, PrivateKey>;
+    type TestInclusionMailbox =
+        crate::dkg::reshare::Mailbox<TestBlock, TestBlsVariant, PrivateKey, Exact>;
     type TestInclusionStore =
         Store<deterministic::Context, MemorySecretStore, TestBlsVariant, PublicKey>;
 
@@ -1535,7 +1536,7 @@ mod tests {
     struct StalledAncestry;
 
     impl futures::Stream for StalledAncestry {
-        type Item = Arc<TestBlock>;
+        type Item = Digested<TestBlock>;
 
         fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             Poll::Pending
@@ -1543,7 +1544,7 @@ mod tests {
     }
 
     impl marshal::ancestry::Ancestry<TestBlock> for StalledAncestry {
-        fn peek(&self) -> Option<&TestBlock> {
+        fn peek(&self) -> Option<&Digested<TestBlock>> {
             None
         }
     }
@@ -1551,7 +1552,7 @@ mod tests {
     /// Hides its head while a gate delays stream materialization.
     #[derive(Clone)]
     struct GatedAncestry {
-        blocks: VecDeque<Arc<TestBlock>>,
+        blocks: VecDeque<Digested<TestBlock>>,
         gate: futures::future::Shared<oneshot::Receiver<()>>,
         started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         released: bool,
@@ -1559,7 +1560,7 @@ mod tests {
 
     impl GatedAncestry {
         fn new(
-            blocks: impl IntoIterator<Item = Arc<TestBlock>>,
+            blocks: impl IntoIterator<Item = Digested<TestBlock>>,
             gate: oneshot::Receiver<()>,
         ) -> (Self, oneshot::Receiver<()>) {
             let (started, observed) = oneshot::channel();
@@ -1576,7 +1577,7 @@ mod tests {
     }
 
     impl futures::Stream for GatedAncestry {
-        type Item = Arc<TestBlock>;
+        type Item = Digested<TestBlock>;
 
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             if let Some(started) = self.started.lock().take() {
@@ -1593,10 +1594,8 @@ mod tests {
     }
 
     impl marshal::ancestry::Ancestry<TestBlock> for GatedAncestry {
-        fn peek(&self) -> Option<&TestBlock> {
-            self.released
-                .then(|| self.blocks.front().map(Arc::as_ref))
-                .flatten()
+        fn peek(&self) -> Option<&Digested<TestBlock>> {
+            self.released.then(|| self.blocks.front()).flatten()
         }
     }
 
@@ -1631,8 +1630,15 @@ mod tests {
         .expect("valid info")
     }
 
+    fn ready(block: TestBlock) -> Digested<TestBlock> {
+        let digest = block.digest();
+        Digested::precomputed(block, digest)
+    }
+
     fn empty_ancestry() -> BoxedAncestry<TestBlock> {
-        BoxedAncestry::new(marshal::ancestry::from_iter(Vec::<Arc<TestBlock>>::new()))
+        BoxedAncestry::new(marshal::ancestry::from_iter(
+            Vec::<Digested<TestBlock>>::new(),
+        ))
     }
 
     fn scan(
@@ -1658,6 +1664,7 @@ mod tests {
     }
 
     /// Builds a singleton inclusion actor with one authenticated local dealer log.
+    #[boxed]
     async fn setup_inclusion_harness(
         context: &mut deterministic::Context,
         partition_prefix: &str,
@@ -1771,7 +1778,6 @@ mod tests {
                 replay_buffer: mocks::IO_BUFFER,
                 max_participants: NZU32!(16),
                 blocks_per_epoch,
-                batch_verifier: PhantomData,
             },
             DkgConfig {
                 participants,
@@ -1794,7 +1800,7 @@ mod tests {
     /// Reports a finalized block and returns its acknowledgement waiter.
     fn deliver(
         mailbox: &mut TestInclusionMailbox,
-        block: &Arc<TestBlock>,
+        block: &Digested<TestBlock>,
     ) -> <Exact as Acknowledgement>::Waiter {
         let (ack, waiter) = Exact::handle();
         assert_eq!(
@@ -1824,9 +1830,9 @@ mod tests {
 
             // Epoch zero spans heights 0..=3 and epoch one spans 4..=7. Each early phase ends one
             // block before its epoch midpoint.
-            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
             while blocks.len() < 6 {
-                blocks.push(Arc::new(child(blocks.last().unwrap())));
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
 
             // Dealing completes epoch zero's early phase.
@@ -1903,9 +1909,9 @@ mod tests {
             } = setup_inclusion_harness(&mut context, "inclusion-entry", NZU64!(4)).await;
 
             // Epoch zero spans heights 0..=3 with its midpoint at 2.
-            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
             while blocks.len() < 3 {
-                blocks.push(Arc::new(child(blocks.last().unwrap())));
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
 
             // Dealing covers every block below the midpoint.
@@ -1959,8 +1965,8 @@ mod tests {
             } = setup_inclusion_harness(&mut context, "conflicting-redelivery", NZU64!(4)).await;
 
             // Dealing covers genesis and its canonical child, the last block before the midpoint.
-            let genesis = Arc::new(mocks::genesis_block(public_key.clone()));
-            let canonical = Arc::new(child(&genesis));
+            let genesis = ready(mocks::genesis_block(public_key.clone()));
+            let canonical = ready(child(genesis.inner()));
             let receipts = [&genesis, &canonical].map(|block| deliver(&mut mailbox, block));
             assert!(
                 actor
@@ -1979,8 +1985,8 @@ mod tests {
             }
 
             // A sibling shares the canonical block's parent and height but not its digest.
-            let sibling = Arc::new(TestBlock::new::<Sha256>(
-                genesis.context().clone(),
+            let sibling = ready(TestBlock::new::<Sha256>(
+                genesis.inner().context().clone(),
                 genesis.digest(),
                 Height::new(1),
                 u64::MAX,
@@ -2015,9 +2021,9 @@ mod tests {
             } = setup_inclusion_harness(&mut context, "skipped-inclusion", NZU64!(6)).await;
 
             // Epoch zero spans heights 0..=5 with its midpoint at 3.
-            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
             while blocks.len() < 6 {
-                blocks.push(Arc::new(child(blocks.last().unwrap())));
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
 
             // Dealing applies every block below the midpoint.
@@ -2066,9 +2072,9 @@ mod tests {
             } = setup_inclusion_harness(&mut context, "unlinked-inclusion", NZU64!(6)).await;
 
             // Epoch zero spans heights 0..=5 with its midpoint at 3.
-            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
             while blocks.len() < 3 {
-                blocks.push(Arc::new(child(blocks.last().unwrap())));
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
 
             // Dealing applies every block below the midpoint.
@@ -2090,8 +2096,8 @@ mod tests {
             }
 
             // Inclusion receives a midpoint that extends height one instead of the tip.
-            let unlinked = Arc::new(TestBlock::new::<Sha256>(
-                blocks[1].context().clone(),
+            let unlinked = ready(TestBlock::new::<Sha256>(
+                blocks[1].inner().context().clone(),
                 blocks[1].digest(),
                 Height::new(3),
                 u64::MAX,
@@ -2136,18 +2142,18 @@ mod tests {
                 next_players: participants,
                 directory: Unit,
             };
-            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
             while blocks.len() < 3 {
-                blocks.push(Arc::new(child(blocks.last().unwrap())));
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
-            blocks.push(Arc::new(
-                child(&blocks[2]).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+            blocks.push(ready(
+                child(blocks[2].inner()).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
                     NZU32!(16),
                     Payload::EpochInfo(next),
                 ),
             ));
             while blocks.len() < 6 {
-                blocks.push(Arc::new(child(blocks.last().unwrap())));
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
 
             // Following acknowledges a repeated block and commits epoch one at the boundary.
@@ -2223,12 +2229,12 @@ mod tests {
                 next_players: participants,
                 directory: Unit,
             };
-            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key))];
+            let mut blocks = vec![ready(mocks::genesis_block(public_key))];
             while blocks.len() < 3 {
-                blocks.push(Arc::new(child(blocks.last().unwrap())));
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
-            blocks.push(Arc::new(
-                child(&blocks[2]).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+            blocks.push(ready(
+                child(blocks[2].inner()).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
                     NZU32!(16),
                     Payload::EpochInfo(wrong),
                 ),
@@ -2289,7 +2295,7 @@ mod tests {
             actor.context = ContextCell::new(closed_context);
 
             let genesis = mocks::genesis_block(public_key);
-            let final_block = Arc::new(TestBlock::new::<Sha256>(
+            let final_block = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
                 Height::new(5),
@@ -2367,26 +2373,26 @@ mod tests {
                 Height::new(2),
                 2,
             );
-            let canonical_midpoint = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_midpoint = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_two.digest(),
                 Height::new(3),
                 3,
             ));
-            let canonical_four = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_four = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_midpoint.digest(),
                 Height::new(4),
                 4,
             ));
-            let final_block = Arc::new(TestBlock::new::<Sha256>(
+            let final_block = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_four.digest(),
                 Height::new(5),
                 5,
             ));
 
-            let detached_midpoint = Arc::new(
+            let detached_midpoint = ready(
                 TestBlock::new::<Sha256>(
                     genesis.context().clone(),
                     canonical_two.digest(),
@@ -2398,7 +2404,7 @@ mod tests {
                     Payload::DealerLog(signed_log),
                 ),
             );
-            let detached_four = Arc::new(TestBlock::new::<Sha256>(
+            let detached_four = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 detached_midpoint.digest(),
                 Height::new(4),
@@ -2549,31 +2555,31 @@ mod tests {
                 Height::new(3),
                 3,
             );
-            let canonical_midpoint = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_midpoint = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_three.digest(),
                 Height::new(4),
                 4,
             ));
-            let canonical_five = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_five = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_midpoint.digest(),
                 Height::new(5),
                 5,
             ));
-            let canonical_six = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_six = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_five.digest(),
                 Height::new(6),
                 6,
             ));
-            let canonical_final = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_final = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_six.digest(),
                 Height::new(7),
                 7,
             ));
-            let losing_five = Arc::new(
+            let losing_five = ready(
                 TestBlock::new::<Sha256>(
                     genesis.context().clone(),
                     canonical_midpoint.digest(),
@@ -2585,7 +2591,7 @@ mod tests {
                     Payload::DealerLog(signed_log),
                 ),
             );
-            let losing_six = Arc::new(TestBlock::new::<Sha256>(
+            let losing_six = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 losing_five.digest(),
                 Height::new(6),
@@ -2769,7 +2775,7 @@ mod tests {
                 Height::new(6),
                 6,
             );
-            let ancestry = Box::pin(stream::iter([Arc::new(block_six), Arc::new(block_five)]));
+            let ancestry = Box::pin(stream::iter([ready(block_six), ready(block_five)]));
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
                 info: &info,
@@ -2811,7 +2817,7 @@ mod tests {
                 6,
             );
             let ancestry = Box::pin(
-                stream::iter([Arc::new(block_six), Arc::new(block_five)]).chain(stream::pending()),
+                stream::iter([ready(block_six), ready(block_five)]).chain(stream::pending()),
             );
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
@@ -2838,13 +2844,13 @@ mod tests {
         executor.start(|context| async move {
             let info = info();
             let genesis = mocks::genesis_block(signers()[0].public_key());
-            let canonical = Arc::new(TestBlock::new::<Sha256>(
+            let canonical = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
                 Height::new(6),
                 6,
             ));
-            let detached = Arc::new(TestBlock::new::<Sha256>(
+            let detached = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
                 Height::new(6),
@@ -2890,13 +2896,13 @@ mod tests {
         executor.start(|context| async move {
             let info = info();
             let genesis = mocks::genesis_block(signers()[0].public_key());
-            let canonical = Arc::new(TestBlock::new::<Sha256>(
+            let canonical = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
                 Height::new(6),
                 6,
             ));
-            let candidate = Arc::new(TestBlock::new::<Sha256>(
+            let candidate = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical.digest(),
                 Height::new(7),
@@ -2956,7 +2962,7 @@ mod tests {
                 Height::new(6),
                 7,
             );
-            let ancestry = Box::pin(stream::iter([Arc::new(block_six), Arc::new(block_five)]));
+            let ancestry = Box::pin(stream::iter([ready(block_six), ready(block_five)]));
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
                 info: &info,
@@ -3258,9 +3264,7 @@ mod tests {
             let task =
                 actor.verification_task(Epoch::zero(), &fixture.info, &store, log_map.as_ref());
             let ceremony = task
-                .run::<deterministic::Context, commonware_cryptography::ed25519::Batch>(
-                    context.child("verification"),
-                )
+                .run(context.child("verification"))
                 .expect("observer should verify the public ceremony");
             assert!(ceremony.share.is_none());
             let expected = ceremony.output.clone();
@@ -3318,10 +3322,7 @@ mod tests {
             let log_map = Arc::new(BTreeMap::new());
             let task =
                 actor.verification_task(Epoch::zero(), &fixture.info, &store, log_map.as_ref());
-            let ceremony = task
-                .run::<deterministic::Context, commonware_cryptography::ed25519::Batch>(
-                    context.child("verification"),
-                );
+            let ceremony = task.run(context.child("verification"));
             assert!(ceremony.is_none());
             let mut artifacts = ArtifactCache::default();
 
@@ -3412,9 +3413,7 @@ mod tests {
             let task =
                 actor.verification_task(Epoch::zero(), &finalized.info, &store, log_map.as_ref());
 
-            task.run::<deterministic::Context, commonware_cryptography::ed25519::Batch>(
-                context.child("verification"),
-            );
+            task.run(context.child("verification"));
         });
     }
 }

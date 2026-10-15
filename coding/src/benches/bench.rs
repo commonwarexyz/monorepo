@@ -9,7 +9,6 @@ use shard_selection::{SELECTIONS, ShardSelection};
 
 mod reed_solomon;
 mod shard_selection;
-mod zoda;
 
 pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
@@ -112,7 +111,7 @@ pub(crate) fn bench_decode_generic<S: Scheme>(
                                     let checked_shards: Vec<_> = selected_shards
                                         .iter()
                                         .map(|(idx, shard)| {
-                                            S::check(&config, &commitment, *idx, shard).unwrap()
+                                            S::check(&config, &commitment, *idx, shard, &strategy).unwrap()
                                         })
                                         .collect();
 
@@ -148,4 +147,4 @@ pub(crate) fn bench_decode_generic<S: Scheme>(
     }
 }
 
-criterion_main!(reed_solomon::benches, zoda::benches);
+criterion_main!(reed_solomon::benches);

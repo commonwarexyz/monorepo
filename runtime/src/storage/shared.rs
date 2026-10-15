@@ -90,9 +90,9 @@ pub(crate) async fn check_remove_live_dirty_owner<S: crate::Storage>(
             let partition = "remove_live_dirty";
             let name = b"blob";
             let (blob, size) = storage.open(partition, name).await.unwrap();
-            let mut writer = Write::new(blob, size, NZUsize!(1), pool.clone());
-            writer.write_at(0, b"dirty").await.unwrap();
-            writer.wait_for_sync().await.unwrap();
+            let writer = Write::new(blob, size, NZUsize!(1), pool.clone());
+            let writer = writer.write_at(0, b"dirty").await.unwrap();
+            let writer = writer.wait_for_sync().await.unwrap();
             let completions = pending.completions();
             let target = by_name.then_some(name.as_slice());
 

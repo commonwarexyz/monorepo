@@ -3,13 +3,15 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-09-18T00:00:00Z"
+modified-time: "2026-10-01T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
 image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
+
+*Update (10/1/26): Restores continuous payments while the previous epoch's close is built, certified, and admitted. Each payment signature binds the payer's final vector root from that epoch, preventing retries from settling twice. Operators sign the final payer states once per close with their receipt key.*
 
 *Update (9/18/26): Settlement certificates require at least $f+1$ signatures: every signer validates and retains the complete close. The settlement chain selects the canonical close.*
 
@@ -103,10 +105,10 @@ Payments are grouped into settlement periods called **epochs**. Every signature 
 
 The payer tracks a balance $B_a$ and an epoch's total debit $D_a$, initially zero. It keeps a vector $V_a$ ordered by recipient, with one entry $(G,J)$ recording the cumulative amount and payment count for each. These entries form the leaves of a binary Merkle tree (BMT). Before the example payment, $B_a=100$, $D_a=0$, and $V_a$ is empty.
 
-To send $x>0$, $a$ updates $b$'s entry and signs the updated sequence number $n_a$ for the epoch, cumulative debit, and vector's Merkle root. The operator countersigns this updated payer state:
+To send $x>0$, $a$ updates $b$'s entry and signs its updated sequence number $n_a$ for the epoch, cumulative debit, vector root, and **predecessor root**. The predecessor root is the Merkle root of its final vector $V_a^{e-1}$ in the previous epoch. That vector is empty if $a$ made no payments. The operator countersigns this state to issue receipt $R$:
 
 $$
-S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with }b:(G+x,\,J+1))\bigr),
+S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with }b:(G+x,\,J+1)),\;\mathsf{root}(V_a^{e-1})\bigr),
 \qquad
 R=\mathsf{CounterSign}_{\mathsf{op}}(S).
 $$
@@ -187,9 +189,9 @@ Every validator keeps each live account's balance under its public key. Deposits
 
 When a payment names a new public key, the operator records a balance for it without an onchain registration transaction. The recipient can spend the balance after the close is admitted, or let payments from many senders accumulate across multiple closes before requesting a withdrawal of the full balance.
 
-At each close, the operator publishes a shared settlement record called the **dealing**. It contains active account keys, senders' final signed payer states, and cumulative payment entries. A CDN can cache this shared record for efficient distribution.
+At each close, the operator publishes a signed settlement record called the **dealing**, containing active account keys, senders' final signed payer states, and cumulative payment entries. A CDN can cache this shared record for efficient distribution.
 
-Each validator checks the payer signatures and the operator's countersignatures, derives incoming credits, and combines them with its stored balances and the deposits and withdrawals fixed at epoch registration.
+Each validator checks the payer signatures and the operator's batch signature, derives incoming credits, and combines them with its stored balances and the deposits and withdrawals fixed at epoch registration.
 
 From these results, every validator derives three roots:
 
@@ -222,7 +224,7 @@ The operator hashes the dealing with the epoch's registered parameters to identi
 The operator can then verify the certificate and check that the proposal hash matches, without rebuilding the validators' logs.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 34-of-100 certificate.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the canonical batch of final payer states for a, b, c, and d, which the operator signs once with its receipt key. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 34-of-100 certificate.">
 ```
 
 ::: {.image-caption}
@@ -263,9 +265,9 @@ Suppose $b$ has already served the API response, but the operator leaves $a$'s p
 
 ## A Deadline to Exit
 
-A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request when registering the next epoch. A censored user can instead queue it directly onchain, even during an active epoch. The next registration must include it.
+A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request in the next registration. A censored user can instead queue it directly onchain, requiring the operator to include it in a registration unless another signed request from the same account is registered first.
 
-Once a withdrawal request is queued onchain or included in an admitted close, the close that carries it must finalize before the signed deadline $T_w$ to avoid a hard fault. With challenge deadline $\Delta_e$,
+An outstanding withdrawal request, whether queued onchain or included in an admitted close, requires its close to finalize before the signed deadline $T_w$ to avoid a hard fault. With challenge deadline $\Delta_e$,
 
 $$
 \boxed{\Delta_e<t_{\mathrm{finalize}}<T_w.}
@@ -289,17 +291,19 @@ Each claim checks only its neighboring ranges. The chain also includes log posit
 
 ### Hard Fault
 
-If the operator misses an admission, deposit, or withdrawal deadline, or a holder proves a fault, the deployment permanently stops new work. Earlier pending closes that are not disputed may still finalize. Recovery then freezes the last finalized state root.
+A deposit must be registered within a fixed time of arrival. If the operator misses an admission, deposit, or withdrawal deadline, or a holder proves a fault, the deployment permanently stops new work. Earlier pending closes that are not disputed may still finalize. Recovery then freezes the last finalized state root.
 
-The recovery rules keep finalized payouts independently claimable, with no expiry, and refund unadmitted deposits. Accounts recover their balances with QMDB proofs against the frozen root, and each account can claim only once. A close that was never admitted or was invalidated changes neither the recoverable balances nor the finalized payouts.
+The recovery rules keep finalized payouts independently claimable, with no expiry, and refund deposits whose closes never finalize. Accounts recover their balances with QMDB proofs against the frozen root, and each account can claim only once. A close that was never admitted or was invalidated changes neither the recoverable balances nor the finalized payouts.
 
 Even if the operator disappears, recovery depends on a correct, live settlement chain and independently available balance and payout openings. The fault also freezes the last finalized payout root and count. Later claims must use proofs against them.
 
 ## Streamlined Epoch Transitions
 
-A payment reaches finality through an admitted close, after the challenge deadline fixed at epoch registration. Shorter epochs with earlier deadlines can reduce that wait, but require more frequent preparation and certification.
+More frequent closes can reduce the wait for admission, at the cost of more preparation and certification. Shorter challenge windows can reduce the wait for finality, but must leave receipt holders enough time to obtain public openings and get a challenge included.
 
-Once epoch $e$'s close is admitted, the operator can register $e+1$ against its state root and start payments before $e$ finalizes. Registration fixes deposits and signed withdrawal authorizations before the first payment is acknowledged.
+Whatever the epoch length, payments must continue across the boundary to avoid interrupting user flows. The operator can register $e+1$'s payment anchor onchain while still accepting payments in $e$. Once that registration is included onchain, it can begin accepting payments in $e+1$ while $e$'s close is built, certified, and admitted. The anchor $\mathcal A_{e+1}$ is independent of $e$'s close.
+
+Once $e+1$ is registered and $e$'s close is admitted, settlement binds $e+1$ to that close's state root and sets its admission and challenge deadlines from that time. Admission and finalization follow epoch order. A missed admission deadline discards every registration still awaiting admission.
 
 Accounts without deposits or withdrawals can start paying in the new epoch while the operator is still adding incoming credits from the previous one. At the transition, the starting spendable balance $\widetilde B_a$ is the previous epoch's starting balance minus accepted outgoing payments, plus incoming credits already added. Let $\rho_a$ be the remaining credit from that epoch:
 
@@ -316,8 +320,8 @@ $$
 $$
 
 ```{=html}
-<div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated balance update for account a after epoch e's close is admitted and epoch e+1 is registered. A payment in epoch e leaves a spendable balance of 80. Two connected rails branch from that balance. The admitted balance for epoch e is 85. The spendable balance in epoch e+1 falls to 60 after a payment of 20, rises to 65 when the remaining credit is added, and falls to 50 after a payment of 15. One vertical marker identifies the same incoming credit of 5 in both calculations. The admitted balance of 85 never replaces the spendable balance.">
-  <noscript>After epoch e's close is admitted and epoch e+1 is registered, the admitted balance is 80 plus 5, or 85. The spendable balance is 80 minus 20 plus the same 5 minus 15, or 50. Adding the remaining credit preserves the new payments instead of replacing the spendable balance with 85.</noscript>
+<div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated balance update for account a as payments begin in the registered epoch e+1. A payment in epoch e leaves a spendable balance of 80. Two connected rails branch from that balance. The closing balance for epoch e is 85. The spendable balance in epoch e+1 falls to 60 after a payment of 20, rises to 65 when the remaining credit is added, and falls to 50 after a payment of 15. One vertical marker identifies the same incoming credit of 5 in both calculations. The closing balance of 85 never replaces the spendable balance.">
+  <noscript>When payments begin in the registered epoch e+1, e's closing balance is 80 plus 5, or 85. The spendable balance is 80 minus 20 plus the same 5 minus 15, or 50. Adding the remaining credit preserves the new payments instead of replacing the spendable balance with 85.</noscript>
 </div>
 ```
 
@@ -325,7 +329,23 @@ $$
 Figure 6: Both calculations include the same incoming credit. Adding it to the spendable balance preserves payments already accepted in the new epoch.
 :::
 
-Deposits fixed at registration are available immediately. A new account funded only by incoming credit must wait for that close to be admitted before spending. A payer with an outstanding withdrawal authorization waits until its signed deadline before signing another payment.
+### Retrying Across the Boundary
+
+A request sent near the end of $e$ may arrive too late, or its acknowledgment may be lost. The payer then cannot tell whether $e$ includes it. An unconditional retry in $e+1$ could pay twice.
+
+The predecessor root binds the retry to the payer's final vector in $e$, including how its debit is split across recipients. The operator countersigns only if that root matches its record. Validators derive the root from $e$'s admitted account rows when checking $e+1$.
+
+After $e$ ends, the operator returns original receipts for accepted requests and rejects the rest with a report of the payer's final state. If that report matches the payer's verified receipt history, the payer signs the remaining payments in $e+1$ against the reported root. Otherwise, it waits for $e$'s admission.
+
+If the operator includes a rejected request in $e$, the payer's row has a different root and validators reject the retry. If the operator countersigned that retry, its receipt and a public proof establish a debit mismatch against $e+1$'s admitted close.
+
+```{=html}
+<img class="clearing-benchmark-plot" src="/imgs/clearing-retry.svg" alt="Payer a reaches state n-1 with vector root P in epoch e. If e's close omits the late request r, the final vector root remains P, and retry r' can settle in e+1. If the close includes r with root P', validators reject r' because it signs predecessor root P. An operator receipt for r' and a public proof establish a debit mismatch. At most one copy can settle.">
+```
+
+::: {.image-caption}
+Figure 7: $r'$ signs predecessor root $P$, so it is valid only if $a$'s final vector in $e$ has that root. The two copies cannot both settle.
+:::
 
 ## Atomic Batches and Collecting Fees
 
@@ -336,11 +356,11 @@ The operator checks the requested payments and the fee for the batch before coun
 The operator can price each transfer type or payer independently, including volume discounts or negotiated rates. Validators net the fee entry like any other payment, and settlement uses the same commitments and proofs. The fee schedule stays with the operator, so changing it requires no protocol change.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-fees.svg" alt="Payer a signs one batch paying 20 to b, 7 to c, and the operator's quoted fee of 2 to its designated fee recipient. The signed state binds the epoch, sequence 1, cumulative debit 29, and payment root. Recipient b's receipt contains the operator-countersigned payer state and an opening for b's entry, with amount 20 and payment count 1.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-fees.svg" alt="Payer a signs one batch paying 20 to b, 7 to c, and the operator's quoted fee of 2 to its designated fee recipient. The signed state binds the epoch, sequence 1, cumulative debit 29, payment root, and an empty predecessor root. Recipient b's receipt contains the operator-countersigned payer state and an opening for b's entry, with amount 20 and payment count 1.">
 ```
 
 ::: {.image-caption}
-Figure 7: The fee shares the same signed payment root as the recipient payments. Recipient $b$ receives the countersigned payer state and an opening for its own entry.
+Figure 8: The fee shares the same signed payment root as the recipient payments. Recipient $b$ receives the countersigned payer state and an opening for its own entry.
 :::
 
 ## The Cost of Settlement
@@ -374,7 +394,7 @@ We benchmarked the Commonware Library's [reference implementation](https://githu
 The close descriptor is 192 B, and the commitment with its 100-validator certificate is 101 B.
 
 ::: {.image-caption}
-Figure 8: Means of three runs with no warmup. The validator timer covers validation, sealing, signing, and durable writes to the public and private QMDBs. It starts with an encoded dealing and the previous close's databases already open and durably stored. Setup and reopen checks are excluded. Sizes use decimal KB and MB.
+Figure 9: Means of three runs with no warmup. The validator timer covers validation, sealing, signing, and durable writes to the public and private QMDBs. It starts with an encoded dealing and the previous close's databases already open and durably stored. Setup and reopen checks are excluded. Sizes use decimal KB and MB.
 
 AWS c8a.4xlarge: 16 AMD EPYC vCPUs, 32 GiB RAM, and a 160 GiB gp3 EBS SSD (6,000 IOPS, 250 MiB/s, ext4). Votes wait for the filesystem to confirm durable writes to network-attached EBS. Validation and the three public databases share 16 workers, with two I/O workers. The shared cache is 1 GiB with 4 KiB pages. State/activity write buffers are 256 MiB, other write and replay buffers 8 MiB. Full state/activity sections occupy 2.1–2.3 GiB, Merkle blobs about 2 GiB. Fixtures fit in RAM. All fixtures use benchmark limits, since one million accounts exceed the account limit set at deployment.
 :::
@@ -386,7 +406,7 @@ Repeated payments between the same pairs reuse these settlement records, spreadi
 ```
 
 ::: {.image-caption}
-Figure 9: Every account repeatedly pays one unit to its next neighbor. More payments share the byte cost of the operator's dealing and the 100-validator committee's certificate. The right plot includes the 101-byte commitment and certificate. The 192-byte close descriptor is separate.
+Figure 10: Every account repeatedly pays one unit to its next neighbor. More payments share the byte cost of the operator's dealing and the 100-validator committee's certificate. The right plot includes the 101-byte commitment and certificate. The 192-byte close descriptor is separate.
 :::
 
 ### Proof Sizes and Verification
@@ -409,16 +429,16 @@ Complete challenges include the signed receipts and any required Merkle openings
     </tr>
   </thead>
   <tbody>
-    <tr><td>Debit mismatch</td><td style="text-align:right;">622 B <small>present</small><br>657 B <small>omitted</small></td><td style="text-align:right;">751 B <small>present</small><br>786 B <small>omitted</small></td><td style="text-align:right;">847 B <small>present</small><br>882 B <small>omitted</small></td><td style="text-align:right;">943 B <small>present</small><br>978 B <small>omitted</small></td></tr>
-    <tr><td>Entry mismatch</td><td style="text-align:right;">673 B</td><td style="text-align:right;">802 B</td><td style="text-align:right;">898 B</td><td style="text-align:right;">994 B</td></tr>
-    <tr><td>Acknowledgment fork</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td></tr>
+    <tr><td>Debit mismatch</td><td style="text-align:right;">654 B <small>present</small><br>689 B <small>omitted</small></td><td style="text-align:right;">783 B <small>present</small><br>818 B <small>omitted</small></td><td style="text-align:right;">879 B <small>present</small><br>914 B <small>omitted</small></td><td style="text-align:right;">975 B <small>present</small><br>1,010 B <small>omitted</small></td></tr>
+    <tr><td>Entry mismatch</td><td style="text-align:right;">705 B</td><td style="text-align:right;">834 B</td><td style="text-align:right;">930 B</td><td style="text-align:right;">1,026 B</td></tr>
+    <tr><td>Acknowledgment fork</td><td style="text-align:right;">481 B</td><td style="text-align:right;">481 B</td><td style="text-align:right;">481 B</td><td style="text-align:right;">481 B</td></tr>
   </tbody>
 </table>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 10: All measured challenges fit in 1 KB. An omitted payer is the absence case of debit mismatch.
+Figure 11: All measured challenges fit in 1.1 KB. An omitted payer is the absence case of debit mismatch.
 :::
 
 A payout proof shows that a withdrawal output is included under the current finalized root.
@@ -446,7 +466,7 @@ A payout proof shows that a withdrawal output is included under the current fina
 ```
 
 ::: {.image-caption}
-Figure 11: Each proof includes a 30-byte output and its MMR opening, measured at the middle payout. Verification starts from decoded inputs, with times averaged over 20 samples. The trusted root and transaction framing are separate.
+Figure 12: Each proof includes a 30-byte output and its MMR opening, measured at the middle payout. Verification starts from decoded inputs, with times averaged over 20 samples. The trusted root and transaction framing are separate.
 :::
 
 Balance proofs authenticate withdrawal requests and recovery claims. With one million live accounts, all three measured payloads are under 1 KB.
@@ -467,7 +487,7 @@ Balance proofs authenticate withdrawal requests and recovery claims. With one mi
 ```
 
 ::: {.image-caption}
-Figure 12: Current Ordered QMDB proofs after updating all one million balances. Recovery includes the account identity as well as its balance proof. The trusted root and transaction framing are separate.
+Figure 13: Current Ordered QMDB proofs after updating all one million balances. Recovery includes the account identity as well as its balance proof. The trusted root and transaction framing are separate.
 :::
 
 Adjust the workload and committee size below to estimate the operator's traffic.
@@ -480,7 +500,7 @@ Adjust the workload and committee size below to estimate the operator's traffic.
 ```
 
 ::: {.image-caption}
-Figure 13: Modeled operator dealing per validator, with total operator traffic in parentheses. The dotted line shows all live account records at 40 bytes each, before database overhead and retained evidence. Both axes are logarithmic. The model excludes the close descriptor, certificate, and transport framing.
+Figure 14: Modeled operator dealing per validator, with total operator traffic in parentheses. The dotted line shows all live account records at 40 bytes each, before database overhead and retained evidence. Both axes are logarithmic. The model excludes the close descriptor, certificate, and transport framing.
 
 Each sender signs one batch of unit payments. Recipients per account is averaged over all live accounts. Below an average of one, the first senders pay the last recipients in key order. Otherwise, every account pays its next neighbors cyclically. All accounts stay live, with no deposits or withdrawals. Estimates beyond the prototype's per-close limits extrapolate the same encoding.
 :::

@@ -12,7 +12,7 @@
 //! | [`LogWalsh`] | 128 KiB | -                | yes              | all                |
 //! | Short Walsh  | < 128 KiB | -              | yes              | all                |
 //! | [`Mul16`]    | 8 MiB   | yes              | yes              | [`Scalar`]         |
-//! | [`Mul128`]   | 8 MiB   | yes              | yes              | `Neon` `Avx2` `Ssse3` |
+//! | [`Mul128`]   | 8 MiB   | yes              | yes              | `Neon` `Avx2`      |
 //! | `MulGfni`    | 2 MiB   | yes              | yes              | `Avx512` |
 //! | [`Skew`]     | 128 KiB | yes              | yes              | all                |
 //!
@@ -56,7 +56,7 @@ pub type Exp = [GfElement; GF_ORDER];
 /// [`Engine`]: crate::reed_solomon::engine
 pub type Log = [GfElement; GF_ORDER];
 
-/// Used by `Neon`, `Avx2`, and `Ssse3` engines for multiplications.
+/// Used by `Neon` and `Avx2` engines for multiplications.
 ///
 /// Indexed by multiplier logarithm.
 pub type Mul128 = [Multiply128lutT; GF_ORDER];
@@ -193,7 +193,7 @@ pub fn get_mul16() -> &'static Mul16 {
     }
 }
 
-/// Lazily initialized multiplication table for the `Neon`, `Avx2`, and `Ssse3` engines.
+/// Lazily initialized multiplication table for the `Neon` and `Avx2` engines.
 pub fn get_mul128() -> &'static Mul128 {
     #[cfg(feature = "std")]
     {

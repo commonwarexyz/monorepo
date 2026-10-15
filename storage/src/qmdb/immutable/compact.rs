@@ -13,8 +13,8 @@
 //! restores a retained applied state within its operation cap. [`Db::prune`] bounds the retained
 //! history. Initialization restores the db's in-memory state from an entry. The Merkle is rebuilt
 //! from the stored pinned nodes and operation, and the commit fields are decoded from the
-//! operation. An entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. The witness is
-//! also what lets compact nodes serve compact sync without retaining historical operations.
+//! operation. An entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. Each retained
+//! witness also serves compact sync at its size without retaining historical operations.
 //!
 //! # Inactivity floor
 //!
@@ -119,7 +119,6 @@ where
     pub(super) commit_metadata: Option<V::Value>,
     pub(super) parent: Option<Weak<Self>>,
     pub(super) bounds: chain::Bounds<F, D>,
-    pub(super) _key: PhantomData<K>,
 }
 
 impl<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, K, V, S>
@@ -299,7 +298,6 @@ where
         inactivity_floor: Location<F>,
     ) -> MerkleizeResult<F, H::Digest, K, V, S>
     where
-        F: Family,
         E: Context,
         C: Clone + Send + Sync + 'static,
         Operation<F, K, V>: Read<Cfg = C>,
@@ -356,7 +354,6 @@ where
                 ancestors,
                 inactivity_floor,
             },
-            _key: PhantomData,
         }))
     }
 }
@@ -501,17 +498,13 @@ where
     }
 
     /// Create an owned merkleized batch representing the current applied state.
-    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>>
-    where
-        F: Family,
-    {
+    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>> {
         Arc::new(MerkleizedBatch {
             merkle_batch: self.merkle.to_batch(),
             operations: Arc::new(Vec::new()),
             commit_metadata: self.last_commit_metadata.clone(),
             parent: None,
             bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
-            _key: PhantomData,
         })
     }
 
@@ -628,8 +621,8 @@ where
     /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness below
     /// the boundary may survive.
     ///
-    /// Pruning bounds how far back bounded initialization can reach. The current commit's witness
-    /// always survives. The prune is made durable before this method returns.
+    /// Bounded initialization and compact sync can only use witnesses that survive. The current
+    /// commit's witness always survives. The prune is made durable before this method returns.
     ///
     /// # Errors
     ///
@@ -667,7 +660,12 @@ where
     async fn serve(&self, request: Request<F>) -> source::Result<Self> {
         let response = self
             .witness
-            .compact_state(&self.commit_codec_config, request)?;
+            .compact_state::<H, S, Self::Op>(
+                self.merkle.strategy(),
+                &self.commit_codec_config,
+                request,
+            )
+            .await?;
         Ok((response, None))
     }
 }

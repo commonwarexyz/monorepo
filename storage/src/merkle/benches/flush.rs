@@ -13,13 +13,13 @@ use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufferPooler, Supervisor as _,
+    BLOB_PAGE_SIZE, BufferPooler, Supervisor as _,
     benchmarks::{context, tokio},
-    buffer::paged::CacheRef,
+    buffer::paged::{CacheRef, page_size},
     tokio::{Config, Context},
 };
 use commonware_storage::merkle::{self, Bagging::ForwardFold, Family, full};
-use commonware_utils::{NZU16, NZU64, NZUsize, test_rng};
+use commonware_utils::{NZU64, NZUsize, test_rng};
 use criterion::{Criterion, criterion_group};
 use std::{
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
@@ -29,7 +29,7 @@ use std::{
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
-const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
+const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);

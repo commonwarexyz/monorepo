@@ -6,16 +6,16 @@ use crate::dkg::{
     types::{EpochInfo, Participants, Payload},
 };
 use commonware_consensus::{
+    Heightable as _,
     marshal::{Identifier, core::Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher, Height},
 };
 use commonware_cryptography::{
     BatchVerifier, Signer, bls12381::primitives::variant::Variant as BlsVariant,
-    certificate::Scheme,
 };
 use commonware_macros::select_loop;
-use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::MuxHandle};
+use commonware_p2p::{Blocker, Sender, utils::mux::MuxHandle};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, Metrics, Spawner, Storage as RuntimeStorage,
@@ -25,7 +25,7 @@ use commonware_utils::{Acknowledgement, ordered::Set};
 use rand_core::CryptoRng;
 use tracing::{debug, info_span, warn};
 
-impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
+impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + RuntimeStorage,
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -36,19 +36,18 @@ where
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
-    BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
+    C::PublicKey: BatchVerifier,
+    S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
 {
-    pub(super) async fn run_dkg<SE, RE>(
+    pub(super) async fn run_dkg<SE>(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
-        dealing_mux: &mut MuxHandle<SE, RE>,
+        dealing_mux: &mut MuxHandle<SE>,
     ) where
         SE: Sender<PublicKey = C::PublicKey>,
-        RE: Receiver<PublicKey = C::PublicKey>,
     {
         let epoch = Epoch::zero();
         let completion = self.dkg_completion();
@@ -200,7 +199,7 @@ where
             );
 
         // Final-block verification admits only the derived EpochInfo or no payload.
-        match block.payload() {
+        match block.inner().payload() {
             Some(Payload::EpochInfo(info)) => Some(info),
             None => None,
             Some(Payload::DealerLog(_)) => unreachable!("final DKG block carries a dealer log"),

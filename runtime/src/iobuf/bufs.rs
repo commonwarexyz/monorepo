@@ -171,7 +171,7 @@ impl IoBufs {
     pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = &IoBuf> + Clone {
         (0..self.chunk_count()).map(|index| match &self.inner {
             IoBufsInner::Single(buf) => {
-                debug_assert_eq!(index, 0);
+                assert_eq!(index, 0);
                 buf
             }
             IoBufsInner::Pair(bufs) => &bufs[index],
@@ -1702,6 +1702,7 @@ pub trait EncodeExt: EncodeSize + Write {
 impl<T: EncodeSize + Write> EncodeExt for T {}
 
 #[cfg(all(test, not(feature = "loom")))]
+#[commonware_macros::test_group("miri")]
 mod tests {
     use super::{super::pool::BufferPoolConfig, *};
     use bytes::{Bytes, BytesMut};

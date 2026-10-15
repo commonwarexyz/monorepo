@@ -62,14 +62,14 @@ use std::{
 
 /// A guard that tracks message delivery. When dropped, the message is marked as delivered.
 #[derive(Clone)]
-pub struct Guard<B: Eq + Hash + Clone> {
+pub struct Guard<B: Eq + Hash> {
     sequence: u64,
     tracker: Arc<Mutex<State<B>>>,
 
     batch: Option<B>,
 }
 
-impl<B: Eq + Hash + Clone> Drop for Guard<B> {
+impl<B: Eq + Hash> Drop for Guard<B> {
     fn drop(&mut self) {
         // Get the state
         let mut state = self.tracker.lock();
@@ -104,7 +104,7 @@ impl<B: Eq + Hash + Clone> Drop for Guard<B> {
 }
 
 /// A message containing data and a [Guard] that tracks delivery.
-pub struct Message<T, B: Eq + Hash + Clone> {
+pub struct Message<T, B: Eq + Hash> {
     /// The data of the message.
     pub data: T,
     /// The [Guard] that tracks delivery.
@@ -227,11 +227,11 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
 }
 
 /// A receiver that wraps [mpsc::Receiver] and provides tracked messages.
-pub struct Receiver<T, B: Eq + Hash + Clone> {
+pub struct Receiver<T, B: Eq + Hash> {
     inner: mpsc::Receiver<Message<T, B>>,
 }
 
-impl<T, B: Eq + Hash + Clone> Receiver<T, B> {
+impl<T, B: Eq + Hash> Receiver<T, B> {
     /// Receives the next message.
     pub async fn recv(&mut self) -> Option<Message<T, B>> {
         self.inner.recv().await
@@ -243,7 +243,7 @@ impl<T, B: Eq + Hash + Clone> Receiver<T, B> {
     }
 }
 
-impl<T, B: Eq + Hash + Clone> Stream for Receiver<T, B> {
+impl<T, B: Eq + Hash> Stream for Receiver<T, B> {
     type Item = Message<T, B>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

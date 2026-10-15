@@ -46,6 +46,7 @@ tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { workspace = true, optional = true }
+once_cell = { workspace = true, features = ["std"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
 # Enable the JS backend for transitive dependencies that use getrandom on WASM.

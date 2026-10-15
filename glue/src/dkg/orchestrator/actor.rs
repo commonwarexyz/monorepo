@@ -10,16 +10,18 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox;
 use commonware_consensus::{
-    CertifiableAutomaton, Heightable, Relay,
+    CertifiableAutomaton, Heightable, Relay, Reporter,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::{
-        self, Floor, ForwardPolicy, Plan, SkipPolicy, elector::Config as Elector, scheme,
-        types::Context,
+        self, Floor, ForwardPolicy, Plan, SkipPolicy,
+        elector::Config as Elector,
+        scheme,
+        types::{Activity, Context},
     },
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest, PublicKey, Signer,
+    Digest, Digested, PublicKey, Signer,
     bls12381::primitives::variant::Variant as BlsVariant,
     certificate::{Provider, Verifier},
 };
@@ -40,22 +42,16 @@ use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
-    sync::Arc,
     time::Duration,
 };
 use tracing::{debug, info, warn};
 
-struct Channels<C, S, R>
-where
-    C: Verifier,
-    S: Sender<PublicKey = C::PublicKey>,
-    R: Receiver<PublicKey = C::PublicKey>,
-{
-    vote: MuxHandle<S, R>,
-    vote_backup: mpsc::Receiver<(Channel, P2pMessage<C::PublicKey>)>,
-    certificate: MuxHandle<S, R>,
-    certificate_backup: mpsc::Receiver<(Channel, P2pMessage<C::PublicKey>)>,
-    resolver: MuxHandle<S, R>,
+struct Channels<S: Sender> {
+    vote: MuxHandle<S>,
+    vote_backup: mpsc::Receiver<(Channel, P2pMessage<S::PublicKey>)>,
+    certificate: MuxHandle<S>,
+    certificate_backup: mpsc::Receiver<(Channel, P2pMessage<S::PublicKey>)>,
+    resolver: MuxHandle<S>,
 }
 
 struct ActiveEpoch {
@@ -164,7 +160,7 @@ where
     /// Marshal mailbox used to report consensus output and read finalized blocks.
     pub marshal: MarshalMailbox<P::Scheme, MV>,
 
-    /// Application automaton and relay used by each epoch consensus engine.
+    /// Application automaton, relay, and reporter used by each epoch consensus engine.
     pub application: A,
 
     /// Strategy for parallel verification and signing work.
@@ -220,7 +216,7 @@ where
             Digest = MV::Commitment,
             PublicKey = <P::Scheme as Verifier>::PublicKey,
             Plan = Plan<<P::Scheme as Verifier>::PublicKey>,
-        >,
+        > + Reporter<Activity = Activity<P::Scheme, MV::Commitment>>,
     L: Elector<P::Scheme>,
     T: Strategy,
     ACK: Acknowledgement,
@@ -245,7 +241,7 @@ where
     muxer_size: usize,
     partition_prefix: String,
     latest_epoch: Gauge,
-    _payload: PhantomData<(DV, C)>,
+    _payload: PhantomData<C>,
 }
 
 impl<E, B, M, P, MV, DV, C, A, L, T, ACK> Actor<E, B, M, P, MV, DV, C, A, L, T, ACK>
@@ -269,7 +265,7 @@ where
             Digest = MV::Commitment,
             PublicKey = <P::Scheme as Verifier>::PublicKey,
             Plan = Plan<<P::Scheme as Verifier>::PublicKey>,
-        >,
+        > + Reporter<Activity = Activity<P::Scheme, MV::Commitment>>,
     L: Elector<P::Scheme>,
     T: Strategy,
     ACK: Acknowledgement,
@@ -497,7 +493,7 @@ where
         };
         let commitment = MV::commitment(&boundary);
         let block = MV::into_shared(boundary);
-        let Some(Payload::EpochInfo(info)) = block.payload() else {
+        let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
             panic!("boundary block {height} missing epoch info");
         };
         if info.epoch != epoch {
@@ -520,7 +516,7 @@ where
         (vote_sender, vote_receiver): (S, R),
         (certificate_sender, certificate_receiver): (S, R),
         (resolver_sender, resolver_receiver): (S, R),
-    ) -> Channels<P::Scheme, S, R>
+    ) -> Channels<S>
     where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -601,17 +597,16 @@ where
     /// the block is above the active epoch's final block (marshal skipped the
     /// final block) or if the final block does not carry the next epoch's
     /// [`EpochInfo`].
-    async fn handle_finalized<S, R>(
+    async fn handle_finalized<S>(
         &mut self,
         epocher: &FixedEpocher,
         active: &mut ActiveEpoch,
-        block: Arc<MV::ApplicationBlock>,
+        block: Digested<MV::ApplicationBlock>,
         acknowledgement: ACK,
-        channels: &mut Channels<P::Scheme, S, R>,
+        channels: &mut Channels<S>,
     ) -> bool
     where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
-        R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         let height = block.height();
         let current = active.epoch;
@@ -628,7 +623,7 @@ where
         }
 
         let next_epoch = current.next();
-        let Some(Payload::EpochInfo(info)) = block.payload() else {
+        let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
             panic!("boundary block of epoch {current} missing EpochInfo");
         };
         if info.epoch != next_epoch {
@@ -677,7 +672,7 @@ where
     /// reaches `epoch`, if peer activation fails, or if a muxer has stopped.
     /// Panics if the provider has no scheme for `epoch`. The previous engine
     /// keeps running until the caller drops its [`ActiveEpoch`].
-    async fn enter_epoch<S, R>(
+    async fn enter_epoch<S>(
         &mut self,
         epoch: Epoch,
         floor: Floor<P::Scheme, MV::Commitment>,
@@ -686,11 +681,10 @@ where
             <P::Scheme as Verifier>::PublicKey,
             <MV::ApplicationBlock as ReshareBlock>::Directory,
         >,
-        channels: &mut Channels<P::Scheme, S, R>,
+        channels: &mut Channels<S>,
     ) -> Result<ActiveEpoch, EnterEpochError<M::Error>>
     where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
-        R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         // Shutdown is polled first so a stop signal wins over an
         // already-marked gate.
@@ -726,7 +720,7 @@ where
                 blocker: self.oracle.clone(),
                 automaton: self.application.clone(),
                 relay: self.application.clone(),
-                reporter: self.marshal.clone(),
+                reporter: self.application.clone(),
                 strategy: self.strategy.clone(),
                 partition: format!("{}_consensus_{epoch}", self.partition_prefix),
                 mailbox_size: self.simplex.mailbox_size,

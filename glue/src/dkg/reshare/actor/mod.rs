@@ -29,18 +29,17 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
 use commonware_consensus::{
-    Heightable as _,
+    Block as _, Heightable as _,
     marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{EpochPhase, FixedEpocher, Height},
 };
 use commonware_cryptography::{
-    BatchVerifier, PublicKey, Signer,
+    BatchVerifier, Digested, Digestible as _, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::Reveal,
         primitives::{sharing::Mode as SharingMode, variant::Variant as BlsVariant},
     },
-    certificate::Scheme,
 };
 use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::Muxer};
 use commonware_parallel::Strategy;
@@ -50,10 +49,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, ordered::Set};
 use rand_core::CryptoRng;
-use std::{
-    marker::PhantomData,
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 type DkgCompletion<V, P, D> = Box<dyn FnOnce(Option<EpochInfo<V, P, D>>) + Send>;
 
@@ -103,11 +99,11 @@ where
 }
 
 /// Configuration for [`Actor`].
-pub struct Config<C, M, X, P, SS, T, BV, S, MV, R>
+pub struct Config<C, M, X, P, SS, T, S, MV, R>
 where
     C: Signer,
     X: Blocker<PublicKey = C::PublicKey>,
-    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
+    S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant,
     MV::ApplicationBlock: ReshareBlock,
     <MV::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = C::PublicKey>,
@@ -184,15 +180,12 @@ where
 
     /// Epoch schedule used to interpret finalized block heights.
     pub blocks_per_epoch: NonZeroU64,
-
-    /// Batch verifier used to verify dealer logs.
-    pub batch_verifier: PhantomData<BV>,
 }
 
 /// Reshare actor for one node.
 ///
 /// See the [module docs](crate::dkg::reshare) for the protocol it runs.
-pub struct Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A = Exact>
+pub struct Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A = Exact>
 where
     E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -203,8 +196,7 @@ where
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
-    BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
+    S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
@@ -235,10 +227,9 @@ where
     metrics: ReshareMetrics<C::PublicKey>,
     mode: Mode<V, C::PublicKey, B::Directory>,
     tip: Option<FinalizedTip<B::Digest>>,
-    batch_verifier: PhantomData<BV>,
 }
 
-impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
+impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -249,8 +240,8 @@ where
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
-    BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
+    C::PublicKey: BatchVerifier,
+    S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
@@ -258,7 +249,7 @@ where
     /// Creates an actor from `config` and returns it with its [`Mailbox`].
     pub fn new(
         context: E,
-        config: Config<C, M, X, P, SS, T, BV, S, MV, R>,
+        config: Config<C, M, X, P, SS, T, S, MV, R>,
     ) -> (Self, Mailbox<B, V, C, A>) {
         let epocher = FixedEpocher::new(config.blocks_per_epoch);
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -291,7 +282,6 @@ where
                 metrics,
                 mode: Mode::Reshare,
                 tip: None,
-                batch_verifier: config.batch_verifier,
             },
             Mailbox::new(sender),
         )
@@ -299,7 +289,7 @@ where
 
     pub(crate) fn new_dkg(
         context: E,
-        config: Config<C, M, X, P, SS, T, BV, S, MV, R>,
+        config: Config<C, M, X, P, SS, T, S, MV, R>,
         dkg: DkgConfig<V, C::PublicKey, B::Directory>,
     ) -> (Self, Mailbox<B, V, C, A>) {
         let (mut actor, mailbox) = Self::new(context, config);
@@ -449,7 +439,7 @@ where
     /// Panics if `block` conflicts with the tip at the same height, skips
     /// heights above the tip, or is at the next height without the tip as its
     /// parent.
-    fn covered(&self, block: &B) -> bool {
+    fn covered(&self, block: &Digested<B>) -> bool {
         self.tip.is_some_and(|tip| {
             if block.height() == tip.height {
                 assert_eq!(block.digest(), tip.digest, "conflicting finalized block");
@@ -474,7 +464,7 @@ where
     /// # Panics
     ///
     /// Panics if `block` is not above the tip.
-    fn advance(&mut self, block: &B) {
+    fn advance(&mut self, block: &Digested<B>) {
         assert!(
             self.tip.is_none_or(|tip| block.height() > tip.height),
             "completed block must advance the tip"
