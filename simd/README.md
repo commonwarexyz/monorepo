@@ -50,8 +50,9 @@ By implementing the portable subset for your backend of choice, you can benefit
 from the cross-platform subset of SIMD, which is substantial!
 This does not require modifying the crate at all, or any algorithms written
 using the crate!
-The only downside is that algorithms may not be aware of particular instructions
-they could be using on your platform.
+Such a backend runs through `Simd::execute` rather than `dispatch`, which only
+selects the backends defined in this crate, and algorithms may not be aware of
+particular instructions they could be using on your platform.
 
 ## Usage
 
