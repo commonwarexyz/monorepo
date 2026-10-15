@@ -2,7 +2,7 @@
 
 use super::{
     Config, Operation, batch as compact_batch,
-    witness::{self, Rebuilt, VerifiedWitness, Witness},
+    witness::{self, Rebuilt, StoredWitness, VerifiedWitness, Witness},
 };
 use crate::{
     Context, SyncCompletion,
@@ -91,21 +91,27 @@ where
     }
 
     /// Binary search for the first retained position whose entry commits at least `size`
-    /// leaves, or the end of the journal if none does.
-    async fn first_at_or_above(&self, size: Location<F>) -> Result<u64, Error<F>> {
+    /// leaves, or the end of the journal if none does, with that position's entry if any.
+    async fn first_at_or_above(
+        &self,
+        size: Location<F>,
+    ) -> Result<(u64, Option<StoredWitness<F, D>>), Error<F>> {
         let bounds = self.journal.bounds();
         let (mut lo, mut hi) = (bounds.start, bounds.end);
+        let mut found = None;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if self.journal.read(mid).await?.size < size {
+            let witness = self.journal.read(mid).await?;
+            if witness.size < size {
                 // The entry at `mid` is below `size`, so the answer is after it.
                 lo = mid + 1;
             } else {
                 // The entry at `mid` qualifies, so the answer is `mid` or before it.
                 hi = mid;
+                found = Some(witness);
             }
         }
-        Ok(lo)
+        Ok((lo, found))
     }
 }
 
@@ -195,6 +201,9 @@ where
 
     /// The verified tip witness.
     tip: VerifiedWitness<F, H::Digest, O>,
+
+    /// Decodes the commits of retained witnesses below the tip when serving compact sync.
+    codec_cfg: O::Cfg,
 }
 
 impl<F, E, O, H, S: Strategy> std::fmt::Debug for Db<F, E, O, H, S>
@@ -294,6 +303,7 @@ where
                 pending_sync: None,
             }),
             tip,
+            codec_cfg,
         })
     }
 
@@ -334,6 +344,7 @@ where
                 cfg: journal_cfg,
             })),
             tip,
+            codec_cfg,
         })
     }
 
@@ -535,9 +546,9 @@ where
     /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness
     /// below the boundary may survive.
     ///
-    /// Pruning bounds how far back bounded initialization can reach; the current commit's witness
-    /// always survives. A pending compact-sync import is journaled first. The prune is made
-    /// durable before this method returns.
+    /// Bounded initialization and compact sync can only use witnesses that survive. The current
+    /// commit's witness always survives. A pending compact-sync import is journaled first. The
+    /// prune is made durable before this method returns.
     #[tracing::instrument(
         name = "qmdb.compact.db.prune",
         level = "info",
@@ -550,10 +561,8 @@ where
         let bounds = open.journal.bounds();
         debug_assert!(!bounds.is_empty(), "an open journal holds the tip");
         // Clamp below the tip so the journal never empties: the tip is the current state.
-        let pos = open
-            .first_at_or_above(pruning_boundary)
-            .await?
-            .min(bounds.end - 1);
+        let (pos, _) = open.first_at_or_above(pruning_boundary).await?;
+        let pos = pos.min(bounds.end - 1);
         (open.journal, _) = open.journal.prune(pos).await?;
         self.storage = Storage::Open(open.sync().await?);
         Ok(self)
@@ -574,9 +583,11 @@ where
         Ok(())
     }
 
-    /// Serve `request` from the single committed state the tip witness retains: the final
-    /// commit operation and the pinned nodes one operation below it. Anything else is refused
-    /// with the same errors a pruned operation log reports.
+    /// Serve `request` from a committed state the witness journal retains.
+    ///
+    /// Each retained witness holds exactly its commit operation and the pinned nodes one operation
+    /// below it. A request at a size with no retained witness, or for any other operation, is
+    /// refused with the same errors a pruned operation log reports.
     #[tracing::instrument(
         name = "qmdb.sync.serve",
         level = "info",
@@ -587,25 +598,31 @@ where
             max_ops = request.max_ops().get(),
         ),
     )]
-    fn compact_state(&self, request: Request<F>) -> Result<Response<F, O, H::Digest>, Error<F>> {
-        let size = self.tip.size();
-        let last_commit_loc = size - 1;
-        if request.size() > size || request.size() == 0 {
+    async fn compact_state(
+        &self,
+        request: Request<F>,
+    ) -> Result<Response<F, O, H::Digest>, Error<F>> {
+        if request.size() > self.tip.size() || request.size() == 0 {
             return Err(merkle::Error::RangeOutOfBounds(request.size()).into());
-        }
-        if request.size() < size {
-            return Err(crate::journal::Error::ItemPruned(*request.size() - 1).into());
         }
         if request.start() >= request.size() {
             return Err(merkle::Error::RangeOutOfBounds(request.start()).into());
         }
-        if request.start() < last_commit_loc {
+        if request.start() < request.size() - 1 {
             return Err(crate::journal::Error::ItemPruned(*request.start()).into());
         }
-        let op = self.tip.witness.commit.clone();
-        // After the checks above, `start == last_commit_loc`, so the stored pinned nodes are the
-        // pinned nodes for this request.
-        let proof = self.tip.proof.clone();
+
+        // After the checks above, `start` is the request's last commit location. The witness's
+        // pinned nodes are the pinned nodes for this request.
+        let retained;
+        let verified = if request.size() == self.tip.size() {
+            &self.tip
+        } else {
+            retained = self.retained(request.size()).await?;
+            &retained
+        };
+        let op = verified.witness.commit.clone();
+        let proof = verified.proof.clone();
         Ok(match request {
             Request::Operations { .. } => Response::Operations {
                 proof,
@@ -614,9 +631,29 @@ where
             Request::Boundary { .. } => Response::Boundary {
                 proof,
                 op,
-                pinned_nodes: self.tip.witness.pinned_nodes.clone(),
+                pinned_nodes: verified.witness.pinned_nodes.clone(),
             },
         })
+    }
+
+    /// Load and rebuild the retained witness below the tip that commits exactly `size` leaves.
+    async fn retained(
+        &self,
+        size: Location<F>,
+    ) -> Result<VerifiedWitness<F, H::Digest, O>, Error<F>> {
+        // A pending import is absent from the journal, which still holds the partition's
+        // previous contents.
+        let pruned = || Error::from(crate::journal::Error::ItemPruned(*size - 1));
+        let Storage::Open(open) = &self.storage else {
+            return Err(pruned());
+        };
+        let (_, entry) = open.first_at_or_above(size).await?;
+        let Some(entry) = entry.filter(|entry| entry.size == size) else {
+            return Err(pruned());
+        };
+        let Rebuilt { tip, .. } =
+            witness::rebuild::<F, O, H, S>(self.merkle.strategy().clone(), entry, &self.codec_cfg)?;
+        Ok(tip)
     }
 }
 
@@ -880,7 +917,7 @@ where
     type Error = qmdb::Error<F>;
 
     async fn serve(&self, request: Request<F>) -> source::Result<Self> {
-        Ok((self.compact_state(request)?, None))
+        Ok((self.compact_state(request).await?, None))
     }
 }
 
@@ -1033,8 +1070,8 @@ pub(crate) mod tests {
         witness::Journal::init(context, cfg).await.unwrap()
     }
 
-    /// The witness serves only the request matching its single committed state. Each mismatch
-    /// reports the same error a pruned operation log would.
+    /// The witness journal refuses requests that match no retained state. Each mismatch reports
+    /// the same error a pruned operation log would.
     pub(crate) fn test_serve_refuses_requests_outside_witness<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-serve-refusal").await;
@@ -1098,6 +1135,84 @@ pub(crate) mod tests {
             assert_eq!(operations.len(), 1);
             let (response, _) = db.serve(boundary(n, n - 1)).await.unwrap();
             assert!(matches!(response, Response::Boundary { .. }));
+        });
+    }
+
+    /// The witness journal serves each retained applied state at its size and refuses a size with
+    /// no retained state.
+    pub(crate) fn test_serve_retained_witnesses<O: TestOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db = open_db::<O>(context.child("db"), "compact-serve-retained").await;
+
+            // Apply two batches and record the target after each.
+            let mut targets = Vec::new();
+            for seed in [1, 2] {
+                let floor = db.inactivity_floor_loc();
+                let batch = db
+                    .new_batch()
+                    .mutate(seed)
+                    .merkleize(&db, Some(O::value(seed + 10)), floor)
+                    .await
+                    .unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+                targets.push(db.target());
+            }
+            let db = db.sync().await.unwrap();
+
+            // The earlier state is served at its size and verifies against its root.
+            let first = &targets[0];
+            let start = first.size - 1;
+            let request = Request::Boundary {
+                size: first.size,
+                start,
+            };
+            let Response::Boundary {
+                proof,
+                op,
+                pinned_nodes,
+            } = db.serve(request).await.unwrap().0
+            else {
+                panic!("boundary request should get a boundary response");
+            };
+            assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                &proof,
+                start,
+                std::slice::from_ref(&op),
+                &pinned_nodes,
+                &first.root
+            ));
+
+            // An operations request at the earlier size gets the same commit operation.
+            let Response::Operations { proof, operations } = db
+                .serve(Request::Operations {
+                    size: first.size,
+                    start,
+                    max_ops: NZU64!(1),
+                })
+                .await
+                .unwrap()
+                .0
+            else {
+                panic!("operations request should get an operations response");
+            };
+            assert_eq!(operations.len(), 1);
+            assert_eq!(operations[0].encode(), op.encode());
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof,
+                start,
+                &operations,
+                &first.root
+            ));
+
+            // A size between retained states is refused.
+            assert!(matches!(
+                db.serve(Request::Boundary {
+                    size: first.size + 1,
+                    start: first.size,
+                })
+                .await,
+                Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
+            ));
         });
     }
 
@@ -4000,6 +4115,7 @@ pub(crate) mod tests {
         ($operation:ty) => {
             $crate::qmdb::compact::db::tests::compact_db_tests!(@each $operation;
                 test_serve_refuses_requests_outside_witness,
+                test_serve_retained_witnesses,
                 test_compact_apply_overlaps_start_sync,
                 test_compact_start_sync_recovery,
                 test_compact_start_sync_failure_propagates,

@@ -83,7 +83,7 @@ stability_scope!(BETA {
         type PublicKey: PublicKey;
 
         /// The type of [`CheckedSender`] returned after checking recipients.
-        type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey> + Send
+        type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey>
         where
             Self: 'a;
 
@@ -185,7 +185,7 @@ stability_scope!(BETA {
     /// Interface for receiving messages from arbitrary recipients.
     pub trait Receiver: Debug + Send + 'static {
         /// Error that can occur when receiving a message.
-        type Error: Debug + StdError + Send + Sync;
+        type Error: StdError + Send + Sync;
 
         /// Public key type used to identify recipients.
         type PublicKey: PublicKey;

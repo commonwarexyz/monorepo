@@ -1001,7 +1001,7 @@ impl<'a, K, V> IntoIterator for &'a BiMap<K, V> {
 impl<K, V> arbitrary::Arbitrary<'_> for BiMap<K, V>
 where
     K: for<'a> arbitrary::Arbitrary<'a> + Ord,
-    V: for<'a> arbitrary::Arbitrary<'a> + Ord + Eq + Hash,
+    V: for<'a> arbitrary::Arbitrary<'a> + Ord + Hash,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let mut vec = Vec::<(K, V)>::arbitrary(u)?;

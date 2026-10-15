@@ -1,7 +1,7 @@
 use commonware_actor::{Feedback, Unreliable, mailbox};
 use commonware_runtime::{
     Metrics, Name, Supervisor,
-    telemetry::metrics::{Metric, Registered, Registration},
+    telemetry::metrics::{Metric, Registered},
 };
 use commonware_utils::NZUsize;
 use criterion::{BatchSize, Criterion, Throughput, criterion_group};
@@ -43,7 +43,7 @@ impl Metrics for NoopMetrics {
         _help: H,
         metric: M,
     ) -> Registered<M> {
-        Registered::with_registration(metric, Registration::from(()))
+        Registered::detached(metric)
     }
 
     fn encode(&self) -> String {

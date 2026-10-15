@@ -1,12 +1,11 @@
 use crate::{
-    BatchVerifier, Secret,
+    BatchEntry, BatchVerifier, Secret,
     ed25519::core::{self as ed_core, VerificationKey},
 };
 #[cfg(not(feature = "std"))]
-use alloc::{
-    borrow::{Cow, ToOwned},
-    vec::Vec,
-};
+use alloc::borrow::{Cow, ToOwned};
+#[cfg(all(not(feature = "std"), feature = "arbitrary"))]
+use alloc::vec::Vec;
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
@@ -125,6 +124,9 @@ impl PartialEq for PrivateKey {
 }
 
 /// Ed25519 Public Key.
+///
+/// Equality, ordering, and hashing use the original encoding. Distinct encodings of the same
+/// curve point are distinct keys.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
 pub struct PublicKey {
     key: ed_core::VerificationKey,
@@ -145,6 +147,36 @@ impl crate::Verifier for PublicKey {
 
     fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Self::Signature) -> bool {
         self.verify_inner(Some(namespace), msg, sig)
+    }
+}
+
+impl BatchVerifier for PublicKey {
+    fn verify_batch<'a, R, T, F>(
+        rng: &mut R,
+        items: &'a [T],
+        project: F,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: CryptoRng,
+        T: Sync,
+        F: Fn(usize, &'a T) -> BatchEntry<'a, Self> + Sync,
+    {
+        ed_core::batch::verify_projected(
+            rng,
+            items,
+            |i, item| {
+                let entry = project(i, item);
+                (
+                    &entry.public_key.key,
+                    ed_core::Signature::from(entry.signature.raw),
+                    Some(entry.namespace),
+                    entry.message,
+                )
+            },
+            strategy,
+        )
+        .is_ok()
     }
 }
 
@@ -320,66 +352,17 @@ impl arbitrary::Arbitrary<'_> for Signature {
     }
 }
 
-/// Ed25519 Batch Verifier.
-pub struct Batch {
-    verifier: ed_core::batch::Verifier<Vec<u8>>,
-}
-
-impl BatchVerifier for Batch {
-    type PublicKey = PublicKey;
-
-    fn new(capacity: usize) -> Self {
-        Self {
-            verifier: ed_core::batch::Verifier::new(capacity),
-        }
-    }
-
-    fn add(
-        &mut self,
-        namespace: &[u8],
-        message: &[u8],
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) -> bool {
-        // Keep argument construction here so the signature can be written directly into the queue.
-        self.verifier.queue(
-            public_key.key,
-            ed_core::Signature::from(signature.raw),
-            union_unique(namespace, message),
-        );
-        true
-    }
-
-    fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
-        self.verifier.verify(rng, strategy).is_ok()
-    }
-}
-
-impl<P: AsRef<[u8]> + Sync> ed_core::batch::Verifier<P> {
-    /// Queues a signature over its already-framed payload.
-    pub(super) fn add_payload(
-        &mut self,
-        payload: P,
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) {
-        self.queue(
-            public_key.key,
-            ed_core::Signature::from(signature.raw),
-            payload,
-        );
-    }
-}
-
 /// Test vectors sourced from https://datatracker.ietf.org/doc/html/rfc8032#section-7.1.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Signer as _, ed25519};
+    use crate::Signer as _;
+    #[cfg(not(feature = "std"))]
+    use alloc::vec::Vec;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
-    use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::{NZUsize, test_rng};
 
     fn test_sign_and_verify(
         private_key: PrivateKey,
@@ -701,62 +684,204 @@ mod tests {
         )
     }
 
+    fn verify_raw_vectors(items: &[(PrivateKey, PublicKey, Vec<u8>, Signature)]) -> bool {
+        ed_core::batch::verify_projected(
+            &mut test_rng(),
+            items,
+            |_, (_, public_key, message, signature)| {
+                (
+                    &public_key.key,
+                    ed_core::Signature::from(signature.raw),
+                    None,
+                    message.as_slice(),
+                )
+            },
+            &Sequential,
+        )
+        .is_ok()
+    }
+
     #[test]
     fn batch_verify_valid() {
-        let v1 = vector_1();
-        let v2 = vector_2();
-        let mut batch = ed25519::Batch::new(2);
-        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
-        batch.verifier.add_payload(v2.2, &v2.1, &v2.3);
-        assert!(batch.verify(&mut test_rng(), &Sequential));
+        assert!(verify_raw_vectors(&[vector_1(), vector_2()]));
     }
 
     #[test]
     fn batch_verify_invalid() {
-        let v1 = vector_1();
-        let v2 = vector_2();
-        let mut bad_signature = v2.3.to_vec();
-        bad_signature[3] = 0xff;
-
-        let mut batch = Batch::new(2);
-        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
-        batch
-            .verifier
-            .add_payload(v2.2, &v2.1, &Signature::decode(bad_signature).unwrap());
-        assert!(!batch.verify(&mut test_rng(), &Sequential));
+        let mut v2 = vector_2();
+        v2.3.raw[3] = 0xff;
+        assert!(!verify_raw_vectors(&[vector_1(), v2]));
     }
 
     #[test]
     fn batch_verify_empty() {
-        let batch = Batch::new(0);
-        assert!(!batch.verify(&mut test_rng(), &Sequential));
-    }
-
-    #[test]
-    fn batch_verify_capacity_hint() {
-        let v1 = vector_1();
-        let v2 = vector_2();
-        // The capacity is a hint: adding more items must still verify.
-        let mut batch = Batch::new(1);
-        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
-        batch.verifier.add_payload(v2.2, &v2.1, &v2.3);
-        assert!(batch.verify(&mut test_rng(), &Sequential));
+        let entries: [BatchEntry<'_, PublicKey>; 0] = [];
+        assert!(!PublicKey::verify_batch(
+            &mut test_rng(),
+            &entries,
+            |_, entry| *entry,
+            &Sequential
+        ));
     }
 
     #[test]
     fn batch_framing_matches_union_unique() {
-        // Namespaced batching must verify the same bytes as an explicitly framed raw signature.
+        // Check streamed framing against raw signatures across namespace-length
+        // encoding boundaries.
         let key = PrivateKey::random(test_rng());
-        let namespace = b"namespace";
+        let public_key = key.public_key();
         let message = b"message";
-        let signature = key.sign_inner(None, &union_unique(namespace, message));
-        for supplied_namespace in [namespace.as_slice(), b"other"] {
-            let mut batch = Batch::new(1);
-            batch.add(supplied_namespace, message, &key.public_key(), &signature);
-            assert_eq!(
-                batch.verify(&mut test_rng(), &Sequential),
-                supplied_namespace == namespace,
-            );
+        for len in [0, 1, 127, 128, 255, 16383, 16384] {
+            let namespace = vec![42; len];
+            let signature = key.sign_inner(None, &union_unique(&namespace, message));
+            for supplied_namespace in [namespace.as_slice(), b"other"] {
+                let entries = [BatchEntry {
+                    namespace: supplied_namespace,
+                    message,
+                    public_key: &public_key,
+                    signature: &signature,
+                }];
+                assert_eq!(
+                    PublicKey::verify_batch(
+                        &mut test_rng(),
+                        &entries,
+                        |_, entry| *entry,
+                        &Sequential
+                    ),
+                    supplied_namespace == namespace,
+                );
+            }
+
+            // Moving a byte across the namespace boundary must invalidate the signature.
+            if !namespace.is_empty() {
+                let moved_message = [&namespace[len - 1..], message].concat();
+                let entries = [BatchEntry {
+                    namespace: &namespace[..len - 1],
+                    message: &moved_message,
+                    public_key: &public_key,
+                    signature: &signature,
+                }];
+                assert!(!PublicKey::verify_batch(
+                    &mut test_rng(),
+                    &entries,
+                    |_, entry| *entry,
+                    &Sequential
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn projected_batch_borrows_records() {
+        fn verify(
+            records: &[(Vec<u8>, Signature, usize)],
+            namespace: &[u8],
+            publics: &[PublicKey; 2],
+            strategy: &impl Strategy,
+        ) -> bool {
+            PublicKey::verify_batch(
+                &mut test_rng(),
+                records,
+                |index, record| {
+                    assert!(core::ptr::eq(record, &records[index]));
+                    BatchEntry {
+                        namespace,
+                        message: &record.0,
+                        public_key: &publics[record.2],
+                        signature: &record.1,
+                    }
+                },
+                strategy,
+            )
+        }
+
+        // Mix empty and large messages from repeated signers in an uneven batch.
+        let mut rng = test_rng();
+        let keys = [PrivateKey::random(&mut rng), PrivateKey::random(&mut rng)];
+        let publics = keys.each_ref().map(|key| key.public_key());
+        let parallel = Rayon::new(NZUsize!(4)).unwrap();
+        let namespace = b"namespace";
+        let mut records: Vec<_> = (0..25)
+            .map(|i| {
+                let message = vec![i as u8; if i % 3 == 0 { 0 } else { 1024 }];
+                let signature = keys[i % 2].sign(namespace, &message);
+                (message, signature, i % 2)
+            })
+            .collect();
+
+        // Both strategies must verify the original borrowed records.
+        assert!(verify(&records, namespace, &publics, &Sequential));
+        assert!(verify(&records, namespace, &publics, &parallel.manual()));
+
+        // Every entry must be checked, including the uneven final shard.
+        for index in 0..records.len() {
+            records[index].0.push(0);
+            assert!(!verify(&records, namespace, &publics, &Sequential));
+            assert!(!verify(&records, namespace, &publics, &parallel.manual()));
+            records[index].0.pop();
+        }
+
+        // A noncanonical scalar in the final record must invalidate the batch.
+        let mut invalid = records;
+        invalid[24].1.raw[63] |= 0x80;
+        assert!(!verify(&invalid, namespace, &publics, &Sequential));
+        assert!(!verify(&invalid, namespace, &publics, &parallel.manual()));
+
+        // Empty input must fail verification.
+        let empty: [BatchEntry<'_, PublicKey>; 0] = [];
+        assert!(!PublicKey::verify_batch(
+            &mut rng,
+            &empty,
+            |_, entry| *entry,
+            &Sequential
+        ));
+    }
+
+    #[test]
+    fn projected_batch_indexes_zero_sized_items() {
+        fn verify(
+            messages: &[Vec<u8>],
+            signatures: &[Signature],
+            public_keys: &[PublicKey],
+            strategy: &impl Strategy,
+        ) -> bool {
+            let items = vec![(); messages.len()];
+            PublicKey::verify_batch(
+                &mut test_rng(),
+                &items,
+                |index, ()| BatchEntry {
+                    namespace: b"namespace",
+                    message: &messages[index],
+                    public_key: &public_keys[index % public_keys.len()],
+                    signature: &signatures[index],
+                },
+                strategy,
+            )
+        }
+
+        // Use an uneven batch whose unit items identify messages only by their original index.
+        let mut rng = test_rng();
+        let keys = [PrivateKey::random(&mut rng), PrivateKey::random(&mut rng)];
+        let public_keys = keys.each_ref().map(|key| key.public_key());
+        let mut messages: Vec<_> = (0..25).map(|i| vec![i as u8; 32]).collect();
+        let signatures: Vec<_> = messages
+            .iter()
+            .enumerate()
+            .map(|(i, message)| keys[i % keys.len()].sign(b"namespace", message))
+            .collect();
+        let rayon = Rayon::new(NZUsize!(4)).unwrap();
+        let parallel = rayon.manual();
+
+        // Both strategies must resolve each original index to the matching signed message.
+        assert!(verify(&messages, &signatures, &public_keys, &Sequential));
+        assert!(verify(&messages, &signatures, &public_keys, &parallel));
+
+        // Changing each indexed message in turn must fail the whole batch.
+        for index in 0..messages.len() {
+            messages[index][0] ^= 1;
+            assert!(!verify(&messages, &signatures, &public_keys, &Sequential));
+            assert!(!verify(&messages, &signatures, &public_keys, &parallel));
+            messages[index][0] ^= 1;
         }
     }
 

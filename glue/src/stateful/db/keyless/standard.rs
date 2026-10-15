@@ -261,8 +261,8 @@ impl<F, E, V, H, S> ManagedDb<E> for fixed::Db<F, E, V, H, S>
 where
     F: Family,
     E: Context,
-    V: FixedValue + 'static,
-    H: Hasher + 'static,
+    V: FixedValue,
+    H: Hasher,
     S: Strategy,
 {
     type Unmerkleized =
@@ -337,8 +337,8 @@ impl<F, E, V, H, S> ManagedDb<E> for variable::Db<F, E, V, H, S>
 where
     F: Family,
     E: Context,
-    V: VariableValue + 'static,
-    H: Hasher + 'static,
+    V: VariableValue,
+    H: Hasher,
     S: Strategy,
 {
     type Unmerkleized = KeylessUnmerkleized<
@@ -425,8 +425,8 @@ impl<F, E, V, H, S, R> StateSyncDb<E, R> for fixed::Db<F, E, V, H, S>
 where
     F: Family,
     E: Context,
-    V: FixedValue + 'static,
-    H: Hasher + 'static,
+    V: FixedValue,
+    H: Hasher,
     S: Strategy,
     R: sync::SourceFor<Self>,
 {
@@ -460,8 +460,8 @@ impl<F, E, V, H, S, R> StateSyncDb<E, R> for variable::Db<F, E, V, H, S>
 where
     F: Family,
     E: Context,
-    V: VariableValue + 'static,
-    H: Hasher + 'static,
+    V: VariableValue,
+    H: Hasher,
     S: Strategy,
     R: sync::SourceFor<Self>,
 {

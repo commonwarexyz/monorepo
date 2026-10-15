@@ -210,9 +210,9 @@ pub trait ParticipantsProvider: Send + Sync + 'static {
     /// Committed as `next_players` in the final block of epoch `epoch - 2`. The set must be
     /// fixed before any honest node proposes or verifies that block.
     ///
-    /// The set must be non-empty and contain at most `max_participants` entries. Its
-    /// `3f + 1` quorum (`n - f` of `n` members) must fit in one epoch's dealer-log inclusion
-    /// window. The reshare actor panics on a violation.
+    /// The set must be non-empty and contain at most `max_participants` entries. The reshare
+    /// actor panics on a violation. Ceremonies with this set succeed only if enough of its
+    /// members lead a block in each inclusion window (see [Liveness](reshare#liveness)).
     fn participants(&mut self, epoch: Epoch) -> impl Future<Output = Set<Self::PublicKey>> + Send;
 
     /// Returns the transport directory embedded in the [`EpochInfo`](types::EpochInfo)

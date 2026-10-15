@@ -2416,7 +2416,7 @@ mod tests {
 
     fn test_msm_parallel_impl<G>(points: Vec<G>, scalars: Vec<Scalar>)
     where
-        G: Space<Scalar> + PartialEq + Debug + Copy,
+        G: Space<Scalar> + Copy,
     {
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
         let seq = G::msm(&points, &scalars, &Sequential);
@@ -2430,7 +2430,7 @@ mod tests {
         single_scalar: Scalar,
         idx: usize,
     ) where
-        G: Space<Scalar> + Additive + PartialEq + Debug + Copy,
+        G: Space<Scalar> + Copy,
         for<'a> G: Mul<&'a Scalar, Output = G>,
     {
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();

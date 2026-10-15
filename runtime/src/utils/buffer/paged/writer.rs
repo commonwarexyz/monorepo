@@ -532,6 +532,18 @@ impl<B: Blob> Writer<B> {
         Ok((self, sealed))
     }
 
+    /// Capture an immutable [`Sealed`] view of the logical bytes without writing to the blob.
+    ///
+    /// This is [`Self::snapshot`] without its flush. It returns the same view when every full
+    /// page is already in the blob, and `None` while the write buffer holds a full page that has
+    /// not been written.
+    pub fn try_snapshot(&self) -> Option<Sealed<B>> {
+        if self.has_flush_work(false) {
+            return None;
+        }
+        Some(self.sealed_handle(self.id))
+    }
+
     /// Read and validate one page, returning its logical bytes and the range they cover.
     async fn read_page(
         blob: &B,
@@ -1194,7 +1206,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     ///
     /// Pages read from storage must have valid checksums covering their retained bytes.
     /// Buffered data is flushed as for [Self::replay], and the included partial tail is frozen
-    /// in memory. This does not establish durability.
+    /// in memory. This does not establish durability. Pages are read in batches as for
+    /// [`Sealed::replay`], which describes what `buffer_size` bounds.
     pub async fn replay_prefix(
         mut self,
         max_size: u64,
@@ -1210,7 +1223,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         let physical_size = pages
             .checked_mul(physical_page_size)
             .ok_or(Error::OffsetOverflow)?;
-        let prefetch = (buffer_size.get() / physical_page_size as usize).max(1);
+        let buffer_pages = (buffer_size.get() / physical_page_size as usize).max(1);
 
         // Freeze the included partial tail so later rewrites cannot shorten the replay's view.
         let partial_page = (logical_size > self.buffer.offset).then(|| {
@@ -1222,7 +1235,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             physical_size,
             logical_size,
             partial_page,
-            prefetch,
+            buffer_pages,
             page_size,
             read_options,
         ));
@@ -1234,6 +1247,9 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     /// The returned replay validates checksums for stored pages and retains a frozen copy of the
     /// current partial page. CRCs are not included in the output. Every underlying blob read
     /// performed by the returned replay uses `read_options`, including refills after seeking.
+    ///
+    /// Pages are read in batches as for [`Sealed::replay`], which describes what `buffer_size`
+    /// bounds.
     ///
     /// This does not establish durability. Use [`sync`](Self::sync) if the replayed bytes must
     /// survive a crash.
@@ -1382,6 +1398,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
 }
 
 #[cfg(test)]
+#[commonware_macros::test_group("miri")]
 mod tests {
     use super::*;
     use crate::{
@@ -3533,6 +3550,49 @@ mod tests {
         });
     }
 
+    /// A view without I/O is available only while every full page is already written.
+    #[test_traced]
+    fn test_try_snapshot_requires_written_full_pages() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = Arc::new(SyncTrackingBlob::new());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // A partial page alone is copied into the view without a write.
+            let (writer, _) = writer.append(b"hello").await.unwrap();
+            let view = writer.try_snapshot().expect("partial page needs no write");
+            assert_eq!(view.size(), 5);
+            let read = view.read_at(0, 5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
+            let (_, writes, _, _) = blob.snapshot();
+            assert_eq!(writes, 0);
+
+            // A buffered full page must be written before a view can be taken.
+            let page = vec![b'x'; PAGE_SIZE.get() as usize];
+            let (writer, _) = writer.append(&page).await.unwrap();
+            assert!(writer.try_snapshot().is_none());
+
+            // Once written, the view covers every byte and replays the full page from the blob.
+            let (writer, snapshot) = writer.snapshot().await.unwrap();
+            let (_, writes, _, _) = blob.snapshot();
+            assert_eq!(writes, 1);
+            let view = writer.try_snapshot().expect("full pages are written");
+            assert_eq!(view.size(), snapshot.size());
+            let mut replay = view
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                .unwrap();
+            let total = 5 + page.len();
+            assert!(replay.ensure(total).await.unwrap());
+            let bytes = replay.copy_to_bytes(total);
+            assert_eq!(&bytes[..5], b"hello");
+            assert!(bytes[5..].iter().all(|byte| *byte == b'x'));
+            assert!(!replay.ensure(1).await.unwrap());
+        });
+    }
+
     /// Verifies replay cannot flush buffered bytes before pending start_sync finishes.
     #[test_traced("DEBUG")]
     fn test_replay_waits_for_outstanding_start_sync_before_flushing() {
@@ -3787,17 +3847,17 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Every refill uses the replay's read options, including the refill after crossing a
-            // page boundary.
+            // The first fill reads page 0 and starts page 1 in flight, both with the replay's
+            // read options, so crossing the page boundary needs no further read.
             assert!(replay.ensure(1).await.unwrap());
             replay.advance(page_size);
             assert!(replay.ensure(1).await.unwrap());
+            assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE; 2]);
 
-            // Seeking discards buffered pages but preserves the read options for the next refill.
+            // Seeking discards the buffered pages and reads both again with the same options.
             replay.seek_to(0).unwrap();
             assert!(replay.ensure(1).await.unwrap());
-
-            assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE; 3]);
+            assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE; 4]);
         });
     }
 

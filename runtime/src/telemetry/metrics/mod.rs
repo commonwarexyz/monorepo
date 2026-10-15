@@ -74,7 +74,7 @@ pub trait GaugeExt {
     fn try_set<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error>;
 
     /// Atomically raise a gauge to at least the provided value.
-    fn try_set_max<T: TryInto<GaugeValue> + Copy>(&self, value: T) -> Result<GaugeValue, T::Error>;
+    fn try_set_max<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error>;
 }
 
 impl GaugeExt for raw::Gauge {
@@ -83,7 +83,7 @@ impl GaugeExt for raw::Gauge {
         Ok(self.set(value))
     }
 
-    fn try_set_max<T: TryInto<GaugeValue> + Copy>(&self, value: T) -> Result<GaugeValue, T::Error> {
+    fn try_set_max<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error> {
         let value = value.try_into()?;
         Ok(self.inner().fetch_max(value, Ordering::Relaxed))
     }
@@ -387,13 +387,18 @@ impl<M> Registered<M> {
     /// Create a metric handle with an explicit lifecycle registration.
     ///
     /// The provided [`Registration`] controls what happens when the last clone
-    /// of this handle is dropped. Use [`Registration::from`] with `()` for a
-    /// raw handle that is not exposed by a runtime registry.
+    /// of this handle is dropped. Use [`Self::detached`] when the handle needs no
+    /// registry entry or cleanup.
     pub fn with_registration(metric: M, registration: Registration) -> Self {
         Self {
             metric: Arc::new(metric),
             registration,
         }
+    }
+
+    /// Create a metric handle with no registry entry and no cleanup on drop.
+    pub fn detached(metric: M) -> Self {
+        Self::with_registration(metric, Registration::from(()))
     }
 
     pub fn metric(&self) -> &M {

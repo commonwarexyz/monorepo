@@ -167,13 +167,13 @@ pub struct Peer<S, R, O> {
 /// a common interface for network creation and peer registration.
 pub trait NetworkScheme: Send + 'static {
     /// The sender type for this network implementation.
-    type Sender: Sender<PublicKey = ed25519::PublicKey> + Send;
+    type Sender: Sender<PublicKey = ed25519::PublicKey>;
 
     /// The receiver type for this network implementation.
-    type Receiver: Receiver<PublicKey = ed25519::PublicKey> + Send;
+    type Receiver: Receiver<PublicKey = ed25519::PublicKey>;
 
     /// The oracle type for this network implementation.
-    type Oracle: Blocker<PublicKey = ed25519::PublicKey> + Send;
+    type Oracle: Blocker<PublicKey = ed25519::PublicKey>;
 
     /// Creates and initializes a network instance for a single peer.
     ///

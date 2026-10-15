@@ -22,8 +22,8 @@
 //! decoded. An entry the journal cannot decode, or a selected entry whose commit fails to decode,
 //! fails the open with [`Error::Journal`](crate::qmdb::Error::Journal). A selected entry that
 //! decodes but cannot rebuild fails it with
-//! [`Error::DataCorrupted`](crate::qmdb::Error::DataCorrupted). The witness is also what lets
-//! compact nodes serve compact sync without retaining historical operations. A compact-sync
+//! [`Error::DataCorrupted`](crate::qmdb::Error::DataCorrupted). Each retained witness also
+//! serves compact sync at its size without retaining historical operations. A compact-sync
 //! import is journaled by its first apply or durability operation, which replaces the
 //! partition's previous witnesses without decoding them.
 //!

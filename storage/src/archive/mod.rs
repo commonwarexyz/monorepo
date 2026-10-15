@@ -1233,10 +1233,11 @@ mod tests {
     // but the last needs its own key, so clippy's per-path analysis flags
     // the clones as redundant.
     #[allow(dead_code)]
-    fn assert_archive_futures_are_send<T: super::Archive>(archive: T, key: T::Key, value: T::Value)
-    where
-        T::Key: Clone,
-    {
+    fn assert_archive_futures_are_send<T: super::Archive>(
+        archive: T,
+        key: T::Key,
+        value: T::Value,
+    ) {
         assert_send(archive.get(Identifier::Index(1)));
         assert_send(archive.get(Identifier::Key(&key)));
         assert_send(archive.has(Identifier::Index(1)));
@@ -1257,9 +1258,7 @@ mod tests {
         archive: T,
         key: T::Key,
         value: T::Value,
-    ) where
-        T::Key: Clone,
-    {
+    ) {
         assert_send(archive.get_all(1));
         #[allow(clippy::redundant_clone)]
         match 0u8 {

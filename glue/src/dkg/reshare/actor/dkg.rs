@@ -6,13 +6,13 @@ use crate::dkg::{
     types::{EpochInfo, Participants, Payload},
 };
 use commonware_consensus::{
+    Heightable as _,
     marshal::{Identifier, core::Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher, Height},
 };
 use commonware_cryptography::{
     BatchVerifier, Signer, bls12381::primitives::variant::Variant as BlsVariant,
-    certificate::Scheme,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Sender, utils::mux::MuxHandle};
@@ -25,7 +25,7 @@ use commonware_utils::{Acknowledgement, ordered::Set};
 use rand_core::CryptoRng;
 use tracing::{debug, info_span, warn};
 
-impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
+impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + RuntimeStorage,
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -36,8 +36,8 @@ where
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
-    BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
+    C::PublicKey: BatchVerifier,
+    S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
@@ -157,8 +157,7 @@ where
     /// returning them as both dealers and players.
     ///
     /// Returns the manager's error if tracking fails. Panics outside DKG mode
-    /// or if the participants exceed `max_participants` or the epoch's
-    /// dealer-log capacity.
+    /// or if the participants exceed `max_participants`.
     fn track_dkg(&mut self) -> Result<Participants<C::PublicKey>, M::Error> {
         let participants = self
             .dkg_participants()
@@ -171,9 +170,6 @@ where
         snapshot
             .validate::<V>(self.max_participants, None, 0)
             .expect("DKG participants must be valid");
-        snapshot
-            .validate_epoch_capacity::<V>(self.blocks_per_epoch, None)
-            .expect("DKG epoch must have enough dealer-log slots");
         let directory = self.dkg_directory().expect("DKG setup requires DKG mode");
         self.manager
             .track(Epoch::zero(), snapshot.tracked_peers(), &directory)?;
@@ -199,7 +195,7 @@ where
             );
 
         // Final-block verification admits only the derived EpochInfo or no payload.
-        match block.payload() {
+        match block.inner().payload() {
             Some(Payload::EpochInfo(info)) => Some(info),
             None => None,
             Some(Payload::DealerLog(_)) => unreachable!("final DKG block carries a dealer log"),
