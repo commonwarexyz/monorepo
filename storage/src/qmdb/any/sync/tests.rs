@@ -58,6 +58,7 @@ async fn staged_state<H: SyncTestHarness>(
     drop(journal);
     state.stage(target.range.start(), pins).await.unwrap()
 }
+
 /// Trait for cleanup operations in tests.
 pub(crate) trait Destructible {
     type Family: merkle::Family;
@@ -73,6 +74,7 @@ impl<F: merkle::Family> Destructible
     for crate::journal::authenticated::Frontier<F, deterministic::Context, Digest>
 {
     type Family = F;
+
     async fn destroy(self) -> Result<(), qmdb::Error<F>> {
         self.destroy().await.map_err(Into::into)
     }

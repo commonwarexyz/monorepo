@@ -2953,12 +2953,11 @@ mod tests {
             authenticated::{self, BackingRecovery as _},
             contiguous::{
                 checkpoint::Checkpoint,
-                tests::{read_encoded, replay_items, run_contiguous_tests},
+                tests::{assert_replay_encoded, replay_items, run_contiguous_tests},
             },
         },
         utils::{codec::View, storage_pool_allocated_bytes},
     };
-    use commonware_codec::Encode as _;
     use commonware_macros::test_traced;
     use commonware_runtime::{
         BufferPoolConfig, BufferPooler, Metrics as _, ReadOptions, Runner, Spawner as _, Storage,
@@ -5625,27 +5624,7 @@ mod tests {
                     (journal, _) = journal.append(item).await.unwrap();
                 }
 
-                let start = 5;
-                let mut expected = Vec::new();
-                let mut expected_ends = Vec::new();
-                for item in &items[start..] {
-                    expected.extend_from_slice(&item.encode());
-                    expected_ends.push(expected.len());
-                }
-                for (max_items, max_bytes) in
-                    [(usize::MAX, usize::MAX), (2, usize::MAX), (usize::MAX, 1)]
-                {
-                    let mut reader = authenticated::ReplayEncoded::replay_encoded(
-                        &journal,
-                        start as u64..25,
-                        NZUsize!(64),
-                    )
-                    .await
-                    .unwrap();
-                    let (bytes, ends) = read_encoded(&mut reader, max_items, max_bytes).await;
-                    assert_eq!(bytes, expected);
-                    assert_eq!(ends, expected_ends);
-                }
+                assert_replay_encoded(&journal, 5..25, &items[5..]).await;
                 journal.destroy().await.unwrap();
             }
         });

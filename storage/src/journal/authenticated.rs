@@ -663,7 +663,7 @@ where
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
     /// Also tries to advance the recovery watermark to bound startup recovery. Use
-    /// [Self::sync] to guarantee no recovery is needed.
+    /// [Self::sync] to guarantee the bound.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         let handle;
         (self.journal, handle) = self.journal.start_sync().await?;
@@ -1052,25 +1052,18 @@ where
 
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
         let bounds = journal.bounds();
-        match boundary {
-            // A frontier is written before the first operation, so operations without one are
-            // corrupt.
-            None if bounds != (0..0) => return Err(Error::MissingFrontier),
-            None => {}
-            // A bounded open may end below the frontier, which the selection check reports.
-            Some(boundary)
-                if *boundary < bounds.start || (max_size.is_none() && *boundary > bounds.end) =>
-            {
-                return Err(
-                    merkle::Error::DataCorrupted("frontier outside operation journal").into(),
-                );
-            }
-            Some(_) => {}
+        // A frontier is written before the first operation, so operations without one are corrupt.
+        if boundary.is_none() && bounds != (0..0) {
+            return Err(Error::MissingFrontier);
         }
 
         // Operations below the frontier cannot be authenticated, so selection treats them as
-        // deleted even while their blob remains.
-        let floor = boundary.map_or(bounds.start, |boundary| *boundary);
+        // deleted even while their blob remains. A bounded open may end below the frontier, which
+        // the selection check reports.
+        let floor = *merkle.bounds().start;
+        if floor < bounds.start || (max_size.is_none() && floor > bounds.end) {
+            return Err(merkle::Error::DataCorrupted("frontier outside operation journal").into());
+        }
 
         // A fully pruned empty journal has no retained item to match, but its append position
         // remains the selected end.
@@ -2753,37 +2746,56 @@ mod tests {
         });
     }
 
+    /// Recovery never selects, validates or reads operations below a frontier written ahead of
+    /// their deletion, and rejects a frontier the retained operations cannot rebuild.
     async fn recovery_frontier_ahead<F: Family + PartialEq>(context: Context) {
-        let cfg = merkle_config("ahead");
-        let raw_cfg = journal_config("ahead", &context);
-        let mut journal = TestJournal::<F>::new(
-            context.child("initial"),
-            cfg.clone(),
-            raw_cfg.clone(),
-            |_| true,
-            ForwardFold,
-        )
-        .await
-        .unwrap();
-        for i in 0..100 {
-            (journal, _) = journal.append(&create_operation(i)).await.unwrap();
-        }
-        journal = journal.commit().await.unwrap();
+        let mut journal = create_journal_with_ops::<F>(context.child("initial"), "ahead", 100).await;
         let root = journal.root(0).unwrap();
         let boundary = Location::new(45);
         let pins = journal.pinned_nodes_at(boundary).await.unwrap();
         // Model interruption after the durable frontier write, before raw blob deletion.
         journal.frontier = journal.frontier.activate(boundary, pins).await.unwrap();
         drop(journal);
-        let journal = TestJournal::<F>::new(
-            context.child("recovered"),
-            cfg.clone(),
-            raw_cfg.clone(),
-            |_| true,
-            ForwardFold,
-        )
-        .await
-        .unwrap();
+        let prepare = |label: &'static str, max_size, predicate: fn(&TestOp<F>) -> bool| {
+            TestJournal::<F>::prepare(
+                context.child(label),
+                merkle_config("ahead"),
+                journal_config("ahead", &context),
+                max_size,
+                predicate,
+                ForwardFold,
+            )
+        };
+        let open = |label: &'static str| {
+            TestJournal::<F>::new(
+                context.child(label),
+                merkle_config("ahead"),
+                journal_config("ahead", &context),
+                |_| true,
+                ForwardFold,
+            )
+        };
+
+        // A cap below the frontier leaves nothing that can be authenticated, and selection ignores
+        // matches below the frontier, as it would after their deletion.
+        assert!(matches!(
+            prepare("below", Some(44), |_| true).await,
+            Err(Error::Journal(JournalError::ItemPruned(44)))
+        ));
+        assert!(matches!(
+            prepare("at", Some(45), |_| true).await,
+            Err(Error::Journal(JournalError::ItemPruned(45)))
+        ));
+        assert!(matches!(
+            prepare("unmatched", None, |op| op == &create_operation(44)).await,
+            Err(Error::Journal(JournalError::ItemPruned(45)))
+        ));
+
+        // A bounded selection starts at the frontier, and abandoning it discards nothing.
+        let recovery = prepare("bounded", Some(60), |_| true).await.unwrap();
+        assert_eq!(recovery.bounds(), 45..60);
+        drop(recovery);
+        let journal = open("recovered").await.unwrap();
         assert_eq!(journal.bounds(), 45..100);
         assert_eq!(journal.journal.bounds().start, 42);
         assert_eq!(journal.root(0).unwrap(), root);
@@ -2806,12 +2818,21 @@ mod tests {
         assert_eq!(boundary, Location::new(56));
         assert_eq!(journal.root(0).unwrap(), root);
         drop(journal);
-        let journal =
-            TestJournal::<F>::new(context.child("again"), cfg, raw_cfg, |_| true, ForwardFold)
-                .await
-                .unwrap();
+        let mut journal = open("again").await.unwrap();
         assert_eq!(journal.bounds(), 56..100);
         assert_eq!(journal.root(0).unwrap(), root);
+
+        // A frontier below the retained operations cannot be rebuilt.
+        journal.frontier = journal
+            .frontier
+            .activate(Location::new(0), Vec::new())
+            .await
+            .unwrap();
+        drop(journal);
+        assert!(matches!(
+            open("corrupt").await,
+            Err(Error::Merkle(merkle::Error::DataCorrupted(_)))
+        ));
     }
 
     #[test]
@@ -2885,126 +2906,6 @@ mod tests {
     fn test_from_components_reuses_authenticated_tree_mmb() {
         deterministic::Runner::default()
             .start(from_components_reuses_authenticated_tree::<mmb::Family>);
-    }
-
-    /// Initialization never selects or validates operations below the frontier, and rejects a
-    /// frontier the retained operations cannot rebuild.
-    async fn prepare_respects_frontier<F: Family + PartialEq>(context: Context) {
-        let cfg = merkle_config("prepare-frontier");
-        let raw_cfg = journal_config("prepare-frontier", &context);
-        let mut journal = TestJournal::<F>::new(
-            context.child("initial"),
-            cfg.clone(),
-            raw_cfg.clone(),
-            |_| true,
-            ForwardFold,
-        )
-        .await
-        .unwrap();
-        for i in 0..100 {
-            (journal, _) = journal.append(&create_operation(i)).await.unwrap();
-        }
-        journal = journal.commit().await.unwrap();
-        let boundary = Location::new(45);
-        let pins = journal.pinned_nodes_at(boundary).await.unwrap();
-        // Model interruption after the durable frontier write, before raw blob deletion.
-        journal.frontier = journal.frontier.activate(boundary, pins).await.unwrap();
-        drop(journal);
-
-        // A cap below the frontier leaves nothing that can be authenticated.
-        assert!(matches!(
-            TestJournal::<F>::prepare(
-                context.child("below"),
-                cfg.clone(),
-                raw_cfg.clone(),
-                Some(44),
-                |_| true,
-                ForwardFold,
-            )
-            .await,
-            Err(Error::Journal(JournalError::ItemPruned(44)))
-        ));
-
-        // Selection ignores matches below the frontier, as it would after their deletion.
-        assert!(matches!(
-            TestJournal::<F>::prepare(
-                context.child("at"),
-                cfg.clone(),
-                raw_cfg.clone(),
-                Some(45),
-                |_| true,
-                ForwardFold,
-            )
-            .await,
-            Err(Error::Journal(JournalError::ItemPruned(45)))
-        ));
-        assert!(matches!(
-            TestJournal::<F>::prepare(
-                context.child("unmatched"),
-                cfg.clone(),
-                raw_cfg.clone(),
-                None,
-                |op| op == &create_operation(44),
-                ForwardFold,
-            )
-            .await,
-            Err(Error::Journal(JournalError::ItemPruned(45)))
-        ));
-
-        // Retained operations below the frontier are not offered for validation, and abandoning
-        // the selection discards nothing.
-        let recovery = TestJournal::<F>::prepare(
-            context.child("bounded"),
-            cfg.clone(),
-            raw_cfg.clone(),
-            Some(60),
-            |_| true,
-            ForwardFold,
-        )
-        .await
-        .unwrap();
-        assert_eq!(recovery.bounds(), 45..60);
-        drop(recovery);
-        let journal = TestJournal::<F>::new(
-            context.child("reopen"),
-            cfg.clone(),
-            raw_cfg.clone(),
-            |_| true,
-            ForwardFold,
-        )
-        .await
-        .unwrap();
-        assert_eq!(journal.bounds(), 45..100);
-
-        // A frontier below the retained operations cannot be rebuilt.
-        let (mut journal, _) = journal.prune(Location::new(60)).await.unwrap();
-        journal.frontier = journal
-            .frontier
-            .activate(Location::new(0), Vec::new())
-            .await
-            .unwrap();
-        drop(journal);
-        assert!(matches!(
-            TestJournal::<F>::new(
-                context.child("corrupt"),
-                cfg,
-                raw_cfg,
-                |_| true,
-                ForwardFold
-            )
-            .await,
-            Err(Error::Merkle(merkle::Error::DataCorrupted(_)))
-        ));
-    }
-
-    #[test]
-    fn test_prepare_respects_frontier_mmr() {
-        deterministic::Runner::default().start(prepare_respects_frontier::<mmr::Family>);
-    }
-
-    #[test]
-    fn test_prepare_respects_frontier_mmb() {
-        deterministic::Runner::default().start(prepare_respects_frontier::<mmb::Family>);
     }
 
     /// Operations without a frontier, such as those of a database written before frontiers

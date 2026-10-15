@@ -62,13 +62,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Import<F, E, D, S> {
         location: Location<F>,
         pins: Vec<D>,
     ) -> Result<Self, Error<F>> {
-        if self
+        self.tree = self
             .tree
-            .as_ref()
-            .is_some_and(|tree| tree.bounds().start != location)
-        {
-            self.tree = None;
-        }
+            .take()
+            .filter(|tree| tree.bounds().start == location);
         self.frontier = self.frontier.stage(location, pins).await?;
         Ok(self)
     }

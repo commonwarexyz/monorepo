@@ -428,13 +428,12 @@ where
     /// Begin durably persisting the journal state published by prior [`Keyless::apply_batch`]
     /// calls.
     ///
-    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
-    /// The backing journal also attempts to advance its recovery watermark. Recovery always
-    /// replays retained operations to rebuild Merkle state.
-    ///
-    /// A new sync waits for the prior sync before starting. A failed data sync surfaces on the
-    /// returned handle and the next durability operation. A recovery-watermark failure surfaces
-    /// on the handle and the next [Self::sync], but is not observed by [Self::commit].
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
+    /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
+    /// guarantee the bound. A new sync waits for the prior sync before starting. Failures
+    /// of the deferred durability work surface on the returned handle. A failed data sync also
+    /// fails the next durability operation. A failed recovery-watermark sync is not observed by
+    /// [Self::commit]. It resurfaces on the next [Self::sync].
     #[tracing::instrument(name = "qmdb.keyless.db.start_sync", level = "info", skip_all)]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         self.metrics.start_sync_calls.inc();

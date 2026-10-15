@@ -777,11 +777,6 @@ pub(crate) mod tests {
     use commonware_utils::{NZU64, NZUsize, non_empty_range};
     use std::convert::Infallible;
 
-    #[derive(Clone)]
-    struct TestConfig {
-        journal_size: u64,
-    }
-
     struct TestJournal {
         size: u64,
     }
@@ -809,7 +804,7 @@ pub(crate) mod tests {
         }
 
         async fn resize(mut self, start: Location<MmrFamily>) -> Result<Self, Self::Error> {
-            self.size = self.size.max(*start);
+            self.size = *start;
             Ok(self)
         }
 
@@ -830,7 +825,7 @@ pub(crate) mod tests {
     struct TestDb;
 
     impl Database for TestDb {
-        type Config = TestConfig;
+        type Config = u64;
         type Context = deterministic::Context;
         type Digest = sha256::Digest;
         type Family = MmrFamily;
@@ -841,20 +836,13 @@ pub(crate) mod tests {
 
         /// A journal that reaches the target authenticates locally.
         async fn open_sync_journal(
-            context: &Self::Context,
-            config: &Self::Config,
+            _context: &Self::Context,
+            journal_size: &Self::Config,
             target: &Target<Self::Family, Self::Digest>,
         ) -> Result<((), Self::Journal, Option<Vec<Self::Digest>>), qmdb::Error<MmrFamily>>
         {
-            let journal = TestJournal::open(
-                context.child("journal"),
-                config.journal_size,
-                target.range.clone(),
-            )
-            .await?;
-            let pins = (journal.size() >= *target.range.end()).then(Vec::new);
-            let journal = journal.resize(target.range.start()).await?;
-            Ok(((), journal, pins))
+            let pins = (*journal_size >= *target.range.end()).then(Vec::new);
+            Ok(((), TestJournal { size: *journal_size }, pins))
         }
 
         async fn from_sync_result(
@@ -920,7 +908,7 @@ pub(crate) mod tests {
             max_outstanding_requests: NZUsize!(1),
             fetch_batch_size: NZU64!(1),
             apply_batch_size: NZU64!(1),
-            db_config: TestConfig { journal_size },
+            db_config: journal_size,
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,

@@ -51,6 +51,11 @@ impl<D: Copy> Level<D> {
         let index = usize::try_from(ordinal.checked_sub(self.first)?).ok()?;
         self.nodes.get(index).copied()
     }
+
+    /// The number of nodes of this height born so far.
+    fn end(&self) -> u64 {
+        self.first + self.nodes.len() as u64
+    }
 }
 
 /// Nodes at or above `height`. Nodes of one height are born in ordinal order, including delayed
@@ -62,51 +67,43 @@ struct Resident<D> {
 }
 
 impl<D: Copy> Resident<D> {
-    const fn new(height: u32) -> Self {
-        Self {
-            height,
-            levels: Vec::new(),
-        }
+    /// Empty levels for a tree pruned to `boundary`.
+    fn new<F: Family>(height: u32, boundary: Position<F>) -> Self {
+        let levels = born(boundary)[height as usize..]
+            .iter()
+            .take_while(|&&first| first > 0)
+            .map(|&first| Level {
+                first,
+                nodes: VecDeque::new(),
+            })
+            .collect();
+        Self { height, levels }
     }
 
-    /// The node at `pos`, whose height `h` is at least the resident height.
+    /// The node at `pos`, of height `h`.
     fn get<F: Family>(&self, pos: Position<F>, h: u32) -> Option<D> {
-        let level = self.levels.get((h - self.height) as usize)?;
+        let level = self.levels.get(h.checked_sub(self.height)? as usize)?;
         level.get(*F::leftmost_leaf(pos, h) >> h)
     }
 
-    /// The root of `region`, if born.
-    fn region_root(&self, region: u64) -> Option<D> {
-        self.levels.first()?.get(region)
-    }
-
-    /// Add the nodes born between sizes `start` and `end`, whose digests `node` returns.
+    /// Add the nodes born by size `end`, whose digests `node` returns.
     fn extend<F: Family>(
         &mut self,
-        start: Position<F>,
         end: Position<F>,
         node: impl Fn(Position<F>) -> Option<D>,
     ) -> Result<(), merkle::Error<F>> {
-        let (before, after) = (born(start), born(end));
-        for height in self.height..u64::BITS {
-            let (from, to) = (before[height as usize], after[height as usize]);
-            if to == 0 {
-                break;
-            }
-            let index = (height - self.height) as usize;
+        let born = born(end);
+        let heights = born[self.height as usize..].iter().take_while(|&&to| to > 0);
+        for (index, &to) in heights.enumerate() {
             if index == self.levels.len() {
                 self.levels.push(Level {
                     first: 0,
                     nodes: VecDeque::new(),
                 });
             }
+            let height = self.height + index as u32;
             let level = &mut self.levels[index];
-            if level.nodes.is_empty() {
-                level.first = from;
-            } else if level.first + level.nodes.len() as u64 != from {
-                return Err(merkle::Error::DataCorrupted("noncontiguous resident level"));
-            }
-            for ordinal in from..to {
+            for ordinal in level.end()..to {
                 let pos = F::subtree_root_position(Location::new(ordinal << height), height);
                 level
                     .nodes
@@ -118,16 +115,11 @@ impl<D: Copy> Resident<D> {
 
     /// Drop nodes before `boundary`.
     fn trim<F: Family>(&mut self, boundary: Position<F>) {
-        for (index, level) in self.levels.iter_mut().enumerate() {
-            let height = self.height + index as u32;
-            while !level.nodes.is_empty() {
-                let pos = F::subtree_root_position(Location::new(level.first << height), height);
-                if pos >= boundary {
-                    break;
-                }
-                level.nodes.pop_front();
-                level.first += 1;
-            }
+        let born = born(boundary);
+        for (level, &end) in self.levels.iter_mut().zip(&born[self.height as usize..]) {
+            let stale = end.saturating_sub(level.first).min(level.nodes.len() as u64);
+            level.nodes.drain(..stale as usize);
+            level.first += stale;
             if level.nodes.len() <= level.nodes.capacity() / 4 {
                 level.nodes.shrink_to_fit();
             }
@@ -154,8 +146,8 @@ fn born<F: Family>(size: Position<F>) -> [u64; u64::BITS as usize] {
     born
 }
 
-/// Digests below the resident height for one aligned region of leaves, in height-major slots:
-/// leaves, then height-one nodes, and so on. A slot is empty until rebuilt.
+/// Digests of one aligned region of leaves, in height-major slots: leaves, then height-one nodes,
+/// and so on up to the region root. A slot is empty until rebuilt.
 type Region<D> = Box<[Option<D>]>;
 
 type RegionCache<D> = Cache<u64, Arc<Region<D>>>;
@@ -182,7 +174,7 @@ impl<D: Digest> Regions<D> {
     }
 
     fn empty(&self) -> Region<D> {
-        vec![None; (2usize << self.height) - 2].into_boxed_slice()
+        vec![None; (2usize << self.height) - 1].into_boxed_slice()
     }
 
     /// The first slot of height `h`.
@@ -221,16 +213,6 @@ impl<D: Digest> Regions<D> {
         cache.retain(|region, _| (*region << height) >= *boundary);
         Some(cache.len())
     }
-}
-
-/// Where an available node's digest is.
-enum Lookup<D> {
-    /// Held in memory.
-    Resident(D),
-    /// Held in a cached region.
-    Cached(D),
-    /// Must be rebuilt in `region`, at `slot`.
-    Fill { region: u64, slot: usize },
 }
 
 /// Leaf encodings packed into one buffer, so hashing a batch allocates nothing per leaf.
@@ -301,7 +283,10 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             metrics: Box::new(metrics),
             boundary,
             pins: F::nodes_to_pin(boundary).zip(pins).collect(),
-            resident: Resident::new(config.cache.resident_height),
+            resident: Resident::new(
+                config.cache.resident_height,
+                F::location_to_position(boundary),
+            ),
             regions: Regions::new(config.cache.resident_height, capacity),
             strategy: config.strategy.clone(),
             replay_buffer: config.replay_buffer,
@@ -346,13 +331,13 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             .await?;
         let max_items = usize::try_from(batch_size.get()).unwrap_or(usize::MAX);
         let mut loc = self.leaves();
-        let mut next = Self::read_encoded(&mut reader, loc, max_items, HASH_BATCH_BYTES).await?;
+        let mut next = Self::read_encoded(&mut reader, loc, max_items).await?;
         // Read each batch while the previous one hashes.
         while !next.leaves.is_empty() {
             loc += next.leaves.len() as u64;
             (self, next) = futures::try_join!(
                 self.apply_encoded(hasher, next),
-                Self::read_encoded(&mut reader, loc, max_items, HASH_BATCH_BYTES),
+                Self::read_encoded(&mut reader, loc, max_items),
             )?;
         }
         if self.leaves() != end {
@@ -366,12 +351,11 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         reader: &mut impl EncodedReader,
         loc: Location<F>,
         max_items: usize,
-        max_bytes: usize,
     ) -> Result<Encoded<F>, super::Error<F>> {
         let mut encoded = Encoded::new();
         let mut ends = Vec::new();
         reader
-            .read(&mut encoded.bytes, &mut ends, max_items, max_bytes)
+            .read(&mut encoded.bytes, &mut ends, max_items, HASH_BATCH_BYTES)
             .await?;
         let mut start = 0;
         encoded.leaves = ends
@@ -474,7 +458,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             None
         };
         let end = batch.size();
-        self.resident.extend(start, end, node)?;
+        self.resident.extend(end, node)?;
 
         // Older peaks are already pinned as part of the previous frontier.
         let leaves = Location::try_from(end)?;
@@ -513,30 +497,12 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             && (pos >= F::location_to_position(self.boundary) || self.pins.contains_key(&pos))
     }
 
-    /// Find the available node at `pos` among resident and cached digests.
-    fn lookup(
-        &self,
-        cache: Option<&RegionCache<D>>,
-        pos: Position<F>,
-    ) -> Result<Lookup<D>, merkle::Error<F>> {
-        let h = F::pos_to_height(pos);
-        if h >= self.resident.height {
-            return self
-                .resident
-                .get(pos, h)
-                .or_else(|| self.mem.get_node(pos))
-                .map(Lookup::Resident)
-                .ok_or(merkle::Error::MissingNode(pos));
-        }
-        if let Some(digest) = self.mem.get_node(pos) {
-            return Ok(Lookup::Resident(digest));
-        }
-        let (region, slot) = self.regions.locate(pos, h);
-        Ok(cache
-            .and_then(|cache| cache.get(&region)?[slot])
-            .map_or(Lookup::Fill { region, slot }, Lookup::Cached))
+    /// The node at `pos`, of height `h`, if resident or pinned.
+    fn held(&self, pos: Position<F>, h: u32) -> Option<D> {
+        self.resident.get(pos, h).or_else(|| self.mem.get_node(pos))
     }
 
+    /// The digests at `positions`, which need not be sorted.
     pub(crate) async fn get_nodes<C, H>(
         &self,
         journal: &C,
@@ -547,10 +513,6 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         C: Contiguous<Item: EncodeShared>,
         H: Hasher<F, Digest = D> + 'static,
     {
-        assert!(
-            positions.is_sorted_by(|a, b| a < b),
-            "positions must be strictly increasing"
-        );
         let mut result = vec![D::EMPTY; positions.len()];
         let mut fills = BTreeMap::<u64, Vec<(usize, usize)>>::new();
         let (mut resident_hits, mut region_hits) = (0, 0);
@@ -560,18 +522,22 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 if !self.available(pos) {
                     return Err(merkle::Error::ElementPruned(pos));
                 }
-                match self.lookup(cache.as_deref(), pos)? {
-                    Lookup::Resident(digest) => {
-                        result[index] = digest;
-                        resident_hits += 1;
-                    }
-                    Lookup::Cached(digest) => {
+                let h = F::pos_to_height(pos);
+                if let Some(digest) = self.held(pos, h) {
+                    result[index] = digest;
+                    resident_hits += 1;
+                    continue;
+                }
+                if h >= self.resident.height {
+                    return Err(merkle::Error::MissingNode(pos));
+                }
+                let (region, slot) = self.regions.locate(pos, h);
+                match cache.as_deref().and_then(|cache| cache.get(&region)?[slot]) {
+                    Some(digest) => {
                         result[index] = digest;
                         region_hits += 1;
                     }
-                    Lookup::Fill { region, slot } => {
-                        fills.entry(region).or_default().push((index, slot));
-                    }
+                    None => fills.entry(region).or_default().push((index, slot)),
                 }
             }
         }
@@ -580,14 +546,13 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         if fills.is_empty() {
             return Ok(result);
         }
-        let fills = stream::iter(fills)
+        let mut fills = stream::iter(fills)
             .map(|(region, wanted)| async move {
                 let slots: Vec<usize> = wanted.iter().map(|&(_, slot)| slot).collect();
                 let filled = self.fill_region(journal, hasher, region, &slots).await?;
                 Ok::<_, merkle::Error<F>>((filled, wanted))
             })
             .buffer_unordered(CONCURRENT_FILLS);
-        futures::pin_mut!(fills);
         while let Some((filled, wanted)) = fills.try_next().await? {
             for (index, slot) in wanted {
                 result[index] = filled[slot].ok_or(merkle::Error::DataCorrupted(
@@ -610,13 +575,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         H: Hasher<F, Digest = D> + 'static,
     {
         let positions: Vec<_> = F::nodes_to_pin(location).collect();
-        let mut sorted = positions.clone();
-        sorted.sort_unstable();
-        let nodes = self.get_nodes(journal, hasher, &sorted).await?;
-        Ok(positions
-            .iter()
-            .map(|p| nodes[sorted.binary_search(p).expect("pin in request")])
-            .collect())
+        self.get_nodes(journal, hasher, &positions).await
     }
 
     pub(crate) async fn get_node<C, H>(
@@ -669,28 +628,23 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
 
         // Read the leaves that are neither cached, pinned nor pruned.
         let mut reads = Vec::new();
-        for i in 0..width {
-            let loc = Location::new(base + i);
-            if loc >= self.leaves() {
-                break;
-            }
-            let slot = i as usize;
+        for loc in base..(base + width).min(*self.leaves()) {
+            let slot = (loc - base) as usize;
             if region[slot].is_some() {
                 continue;
             }
-            let pos = F::location_to_position(loc);
+            let pos = F::location_to_position(Location::new(loc));
             if let Some(digest) = self.mem.get_node(pos) {
                 region[slot] = Some(digest);
             } else if pos >= boundary {
-                reads.push((loc, pos, slot));
+                reads.push(loc);
             }
         }
         if !reads.is_empty() {
-            let locations: Vec<u64> = reads.iter().map(|&(loc, ..)| *loc).collect();
-            let items = journal.read_many(&locations).await?;
+            let items = journal.read_many(&reads).await?;
             let mut encoded = Encoded::new();
-            for (&(_, pos, _), item) in reads.iter().zip(&items) {
-                encoded.push(pos, item);
+            for (&loc, item) in reads.iter().zip(&items) {
+                encoded.push(F::location_to_position(Location::new(loc)), item);
             }
             self.metrics.reconstructed_leaves.inc_by(reads.len() as u64);
             self.metrics
@@ -703,16 +657,16 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                     encoded.hash(&strategy, &hasher)
                 })
                 .await;
-            for (&(.., slot), digest) in reads.iter().zip(digests) {
-                region[slot] = Some(digest);
+            for (&loc, digest) in reads.iter().zip(digests) {
+                region[(loc - base) as usize] = Some(digest);
             }
         }
 
-        // Hash parents bottom-up. A pinned parent with both children present checks them, which
-        // covers regions whose root is unborn.
+        // Hash parents bottom-up through the region root. A held parent with both children
+        // present checks them.
         let mut parents = 0;
         let born = born(size);
-        for h in 1..height {
+        for h in 1..=height {
             let (row, below) = (self.regions.row(h), self.regions.row(h - 1));
             for i in 0..width >> h {
                 let slot = row + i as usize;
@@ -723,39 +677,28 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                     break;
                 }
                 let pos = F::subtree_root_position(Location::new(base + (i << h)), h);
-                let pinned = self.mem.get_node(pos);
-                if pinned.is_none() && pos < boundary {
+                let held = self.held(pos, h);
+                if held.is_none() && pos < boundary {
                     continue;
                 }
                 let left = region[below + 2 * i as usize];
                 let right = region[below + 2 * i as usize + 1];
-                let digest = match (left, right, pinned) {
-                    (Some(left), Some(right), pinned) => {
+                let digest = match (left, right, held) {
+                    (Some(left), Some(right), held) => {
                         let digest = hasher.node_digest(pos, &left, &right);
                         parents += 1;
-                        if pinned.is_some_and(|pinned| pinned != digest) {
+                        if held.is_some_and(|held| held != digest) {
                             return Err(merkle::Error::RootMismatch);
                         }
                         digest
                     }
-                    (_, _, Some(pinned)) => pinned,
+                    (_, _, Some(held)) => held,
                     _ => return Err(merkle::Error::MissingNode(pos)),
                 };
                 region[slot] = Some(digest);
             }
         }
         self.metrics.reconstructed_parents.inc_by(parents);
-
-        // A resident region root proves the region is born, even for MMB.
-        if let Some(root) = self.resident.region_root(index) {
-            let pos = F::subtree_root_position(Location::new(base), height);
-            let below = self.regions.row(height - 1);
-            if let (Some(left), Some(right)) = (region[below], region[below + 1])
-                && hasher.node_digest(pos, &left, &right) != root
-            {
-                return Err(merkle::Error::RootMismatch);
-            }
-        }
         let region = Arc::new(region);
         if let Some(len) = self.regions.insert(index, Arc::clone(&region)) {
             let _ = self.metrics.cached_regions.try_set(len);
@@ -922,6 +865,23 @@ mod tests {
         }
     }
 
+    /// A tree of `ops` replayed from genesis through `end`.
+    async fn replayed<F: Family>(
+        context: &deterministic::Context,
+        ops: &Operations,
+        hasher: &Standard<Sha256>,
+        resident_height: u32,
+        region_cache_bytes: usize,
+        end: u64,
+    ) -> Tree<F, D, Sequential> {
+        let cfg = config(resident_height, region_cache_bytes);
+        Tree::new(Location::new(0), Vec::new(), &cfg, Metrics::new(context))
+            .unwrap()
+            .replay(ops, hasher, Location::new(end), NZU64!(7))
+            .await
+            .unwrap()
+    }
+
     /// Every available node matches an in-memory oracle at each resident height and cache budget,
     /// as the boundary advances over one tree.
     async fn reconstruction<F: Family>(context: deterministic::Context) {
@@ -931,17 +891,7 @@ mod tests {
         for height in 0..=8 {
             for budget in [0, 8 * 1024 * 1024] {
                 ops.bounds.start = 0;
-                let tree = Tree::<F, D, _>::new(
-                    Location::new(0),
-                    Vec::new(),
-                    &config(height, budget),
-                    Metrics::new(&context),
-                )
-                .unwrap();
-                let mut tree = tree
-                    .replay(&ops, &hasher, Location::new(513), NZU64!(17))
-                    .await
-                    .unwrap();
+                let mut tree = replayed::<F>(&context, &ops, &hasher, height, budget, 513).await;
                 assert_eq!(
                     tree.root(&hasher, 0).unwrap(),
                     expected.root(&hasher, 0).unwrap()
@@ -1041,27 +991,13 @@ mod tests {
     async fn demand_cache<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::BackwardFold);
         let ops = Operations::new(128);
-        let tree = Tree::<F, D, _>::new(
-            Location::new(0),
-            Vec::new(),
-            &config(5, 2048),
-            Metrics::new(&context),
-        )
-        .unwrap();
-        let mut tree = tree
-            .replay(&ops, &hasher, Location::new(128), NZU64!(7))
-            .await
-            .unwrap();
+        let budget = CacheConfig::with_regions::<D>(5, 1).region_cache_bytes;
+        let mut tree = replayed::<F>(&context, &ops, &hasher, 5, budget, 128).await;
         ops.clear_reads();
         let region = 1 << 5;
         let pos = F::location_to_position(Location::new(0));
         let first = tree.get_node(&ops, &hasher, pos).await.unwrap().unwrap();
         assert_eq!(ops.reads(), region, "a cold fill reads its whole region");
-        assert_eq!(
-            tree.get_node(&ops, &hasher, pos).await.unwrap(),
-            Some(first)
-        );
-        assert_eq!(ops.reads(), region);
         let resident = (0..*tree.size())
             .map(Position::new)
             .find(|&p| F::pos_to_height(p) >= 5)
@@ -1121,17 +1057,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
         let mut ops = Operations::new(128);
         let expected = oracle::<F>(&ops, &hasher);
-        let tree = Tree::<F, D, _>::new(
-            Location::new(0),
-            Vec::new(),
-            &config(5, 8 * 1024 * 1024),
-            Metrics::new(&context),
-        )
-        .unwrap();
-        let mut tree = tree
-            .replay(&ops, &hasher, Location::new(40), NZU64!(7))
-            .await
-            .unwrap();
+        let mut tree = replayed::<F>(&context, &ops, &hasher, 5, 8 * 1024 * 1024, 40).await;
         let leaf = F::location_to_position(Location::new(32));
         assert_eq!(
             tree.get_node(&ops, &hasher, leaf).await.unwrap(),
@@ -1185,16 +1111,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
         for leaves in [128, 40, 70] {
             let ops = Operations::new(leaves);
-            let tree = Tree::<F, D, _>::new(
-                Location::new(0),
-                Vec::new(),
-                &config(5, 0),
-                Metrics::new(&context),
-            )
-            .unwrap()
-            .replay(&ops, &hasher, Location::new(leaves), NZU64!(7))
-            .await
-            .unwrap();
+            let tree = replayed::<F>(&context, &ops, &hasher, 5, 0, leaves).await;
             ops.corrupt.store(33, Ordering::Relaxed);
             let pos = F::location_to_position(Location::new(32));
             assert!(

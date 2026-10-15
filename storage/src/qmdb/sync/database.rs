@@ -246,49 +246,61 @@ mod tests {
         }
     }
 
+    /// Write the 50 operations of [op], prune to 30, and return the synced log and its root.
+    async fn write_log(context: &deterministic::Context) -> (Log, sha256::Digest) {
+        let mut log = Log::new(
+            context.child("init"),
+            merkle_config(),
+            journal_config(context),
+            |_| true,
+            crate::qmdb::ROOT_BAGGING,
+        )
+        .await
+        .unwrap();
+        for i in 0..50 {
+            (log, _) = log.append(&op(i)).await.unwrap();
+        }
+        let (log, boundary) = log.prune(Location::new(30)).await.unwrap();
+        assert_eq!(boundary, Location::new(28));
+        let inactive_peaks = F::inactive_peaks(Location::new(50), Location::new(0));
+        let root = log.root(inactive_peaks).unwrap();
+        (log.sync().await.unwrap(), root)
+    }
+
+    type Opened<E> = (
+        authenticated::Import<F, E, sha256::Digest, Sequential>,
+        Ops<E>,
+        Option<Vec<sha256::Digest>>,
+    );
+
+    async fn open<E: Context>(
+        context: &E,
+        target: &Target<F, sha256::Digest>,
+    ) -> Result<Opened<E>, crate::qmdb::Error<F>> {
+        open_sync_journal::<F, _, Sha256, _, Ops<_>>(
+            context,
+            context.child("log"),
+            &merkle_config(),
+            journal_config(context),
+            target,
+        )
+        .await
+    }
+
     #[test]
     fn open_sync_journal_keeps_only_authenticated_operations() {
         deterministic::Runner::default().start(|context| async move {
-            let mut log = Log::new(
-                context.child("init"),
-                merkle_config(),
-                journal_config(&context),
-                |_| true,
-                crate::qmdb::ROOT_BAGGING,
-            )
-            .await
-            .unwrap();
-            for i in 0..50 {
-                (log, _) = log.append(&op(i)).await.unwrap();
-            }
-            let (log, boundary) = log.prune(Location::new(30)).await.unwrap();
-            assert_eq!(boundary, Location::new(28));
+            let (log, root) = write_log(&context).await;
             let start = Location::new(35);
-            let inactive_peaks = F::inactive_peaks(Location::new(50), Location::new(0));
-            let root = log.root(inactive_peaks).unwrap();
             let expected = log.pinned_nodes_at(start).await.unwrap();
-            drop(log.sync().await.unwrap());
-            let open = |target: Target<F, sha256::Digest>| {
-                let context = &context;
-                async move {
-                    open_sync_journal::<F, _, Sha256, _, Ops<_>>(
-                        context,
-                        context.child("log"),
-                        &merkle_config(),
-                        journal_config(context),
-                        &target,
-                    )
-                    .await
-                    .unwrap()
-                }
+            drop(log);
+            let target = |root, end| Target {
+                root,
+                range: non_empty_range!(start, Location::new(end)),
             };
 
             // Operations from the frontier rebuild the target's pins, then are pruned to its start.
-            let (import, journal, pins) = open(Target {
-                root,
-                range: non_empty_range!(start, Location::new(50)),
-            })
-            .await;
+            let (import, journal, pins) = open(&context, &target(root, 50)).await.unwrap();
             assert_eq!(pins, Some(expected.clone()));
             assert_eq!(journal.bounds(), 35..50);
             drop((import, journal));
@@ -305,11 +317,7 @@ mod tests {
             drop(frontier);
 
             // A partial journal is kept for the engine to resume.
-            let (import, journal, pins) = open(Target {
-                root,
-                range: non_empty_range!(start, Location::new(60)),
-            })
-            .await;
+            let (import, journal, pins) = open(&context, &target(root, 60)).await.unwrap();
             assert!(pins.is_none());
             assert_eq!(journal.bounds(), 35..50);
             drop((import, journal));
@@ -317,11 +325,7 @@ mod tests {
             // Operations that cannot be the target's are discarded: those that do not rebuild its
             // root, and those whose last operation is not a commit.
             for (root, end) in [(sha256::Digest::from([1; 32]), 50), (root, 49)] {
-                let (_, mut journal, pins) = open(Target {
-                    root,
-                    range: non_empty_range!(start, Location::new(end)),
-                })
-                .await;
+                let (_, mut journal, pins) = open(&context, &target(root, end)).await.unwrap();
                 assert!(pins.is_none());
                 assert_eq!(journal.bounds(), 35..35);
                 for i in 35..50 {
@@ -337,23 +341,8 @@ mod tests {
     #[test]
     fn open_sync_journal_keeps_unchecked_operations() {
         deterministic::Runner::default().start(|context| async move {
-            let mut log = Log::new(
-                context.child("init"),
-                merkle_config(),
-                journal_config(&context),
-                |_| true,
-                crate::qmdb::ROOT_BAGGING,
-            )
-            .await
-            .unwrap();
-            for i in 0..50 {
-                (log, _) = log.append(&op(i)).await.unwrap();
-            }
-            let (log, boundary) = log.prune(Location::new(30)).await.unwrap();
-            assert_eq!(boundary, Location::new(28));
-            let inactive_peaks = F::inactive_peaks(Location::new(50), Location::new(0));
-            let root = log.root(inactive_peaks).unwrap();
-            drop(log.sync().await.unwrap());
+            let (log, root) = write_log(&context).await;
+            drop(log);
 
             // Reset the operations above the frontier, then download them again.
             let start = Location::new(42);
@@ -373,15 +362,7 @@ mod tests {
                 root,
                 range: non_empty_range!(start, Location::new(50)),
             };
-            let (_, journal, pins) = open_sync_journal::<F, _, Sha256, _, Ops<_>>(
-                &context,
-                context.child("log"),
-                &merkle_config(),
-                journal_config(&context),
-                &target,
-            )
-            .await
-            .unwrap();
+            let (_, journal, pins) = open(&context, &target).await.unwrap();
             assert!(pins.is_none());
             assert_eq!(journal.bounds(), 42..50);
         });
@@ -413,17 +394,7 @@ mod tests {
 
             // A failed reset must leave the rejection in place.
             faults.arm();
-            assert!(
-                open_sync_journal::<F, _, Sha256, _, Ops<_>>(
-                    &faulty,
-                    faulty.child("log"),
-                    &merkle_config(),
-                    journal_config(&context),
-                    &target,
-                )
-                .await
-                .is_err()
-            );
+            assert!(open(&faulty, &target).await.is_err());
             faults.disarm();
             let frontier = Frontier::open(faulty.child("reopened"), "frontier".into())
                 .await
@@ -431,15 +402,7 @@ mod tests {
             assert!(frontier.rejected());
             drop(frontier);
 
-            let (import, journal, pins) = open_sync_journal::<F, _, Sha256, _, Ops<_>>(
-                &faulty,
-                faulty.child("log"),
-                &merkle_config(),
-                journal_config(&context),
-                &target,
-            )
-            .await
-            .unwrap();
+            let (import, journal, pins) = open(&faulty, &target).await.unwrap();
             assert!(!import.rejected());
             assert_eq!(journal.bounds(), 0..0);
             assert_eq!(pins, Some(Vec::new()));

@@ -9,13 +9,13 @@ pub struct CacheConfig {
     /// digests per retained operation. Height zero keeps every node. Current databases cap it at
     /// their grafting height.
     pub resident_height: u32,
-    /// Budget for cached regions of rebuilt digests below the resident height. Zero disables the
-    /// cache, and a nonzero budget must hold at least one region (see [Self::with_regions]).
+    /// Budget for cached regions of digests rebuilt from operations. Zero disables the cache, and a
+    /// nonzero budget must hold at least one region (see [Self::with_regions]).
     pub region_cache_bytes: usize,
 }
 
 impl CacheConfig {
-    /// A cache holding `regions` regions of `D` digests below `resident_height`.
+    /// A cache holding `regions` regions of `D` digests for `resident_height`.
     pub fn with_regions<D: Digest>(resident_height: u32, regions: usize) -> Self {
         Self {
             resident_height,
@@ -27,11 +27,10 @@ impl CacheConfig {
         if self.resident_height > 8 {
             return Err("resident height exceeds eight");
         }
-        let bytes = region_bytes::<D>(self.resident_height);
-        if bytes == 0 || self.region_cache_bytes == 0 {
+        if self.resident_height == 0 || self.region_cache_bytes == 0 {
             return Ok(None);
         }
-        NonZeroUsize::new(self.region_cache_bytes / bytes)
+        NonZeroUsize::new(self.region_cache_bytes / region_bytes::<D>(self.resident_height))
             .map(Some)
             .ok_or("region cache cannot hold one region")
     }
@@ -47,9 +46,9 @@ impl Default for CacheConfig {
 }
 
 /// Bytes charged for one region of optional digest slots. A resident height of at most eight
-/// gives at most 510 slots, so this cannot overflow.
+/// gives at most 511 slots, so this cannot overflow.
 const fn region_bytes<D: Digest>(resident_height: u32) -> usize {
-    ((2usize << resident_height) - 2) * size_of::<Option<D>>()
+    ((2usize << resident_height) - 1) * size_of::<Option<D>>()
 }
 
 /// Configuration for an operation-backed authenticated journal.

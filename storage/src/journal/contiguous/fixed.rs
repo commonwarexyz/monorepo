@@ -2363,11 +2363,11 @@ mod tests {
     use crate::{
         journal::contiguous::{
             Contiguous as _,
-            tests::{read_encoded, replay_items},
+            tests::{assert_replay_encoded, replay_items},
         },
         utils::codec::View,
     };
-    use commonware_codec::{Encode as _, FixedSize};
+    use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -4448,25 +4448,8 @@ mod tests {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
 
-            let start = 12;
-            let expected: Vec<u8> = (start..45).flat_map(|i| test_digest(i).encode()).collect();
-            let size = Digest::SIZE;
-            for (max_items, max_bytes) in
-                [(usize::MAX, usize::MAX), (5, usize::MAX), (usize::MAX, 1)]
-            {
-                let mut reader =
-                    authenticated::ReplayEncoded::replay_encoded(&journal, start..45, NZUsize!(64))
-                        .await
-                        .unwrap();
-                let (bytes, ends) = read_encoded(&mut reader, max_items, max_bytes).await;
-                assert_eq!(bytes, expected);
-                assert_eq!(
-                    ends,
-                    (1..=expected.len() / size)
-                        .map(|i| i * size)
-                        .collect::<Vec<_>>()
-                );
-            }
+            let items: Vec<_> = (12..45).map(test_digest).collect();
+            assert_replay_encoded(&journal, 12..45, &items).await;
 
             // Positions below the pruning boundary are rejected.
             let err = authenticated::ReplayEncoded::replay_encoded(&journal, 0..45, NZUsize!(64))

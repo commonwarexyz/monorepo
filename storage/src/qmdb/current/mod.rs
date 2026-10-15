@@ -5094,8 +5094,6 @@ pub mod tests {
         });
     }
 
-    /// `merkle_config` validates the given config, then lowers its resident height to the
-    /// grafting height.
     #[test]
     fn merkle_config_clamps_resident_height_to_grafting_height() {
         let config = |resident_height| MerkleConfig {

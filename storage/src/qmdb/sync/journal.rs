@@ -251,7 +251,7 @@ mod tests {
     type VariableJournal = variable::Journal<deterministic::Context, u64>;
     type F = crate::merkle::mmr::Family;
 
-    /// Open a sync journal for `range` and prune below its start, as the sync engine does.
+    /// Open a sync journal for `range` and prune below its start, as `open_sync_journal` does.
     async fn open_range<J: Journal<F>>(
         context: J::Context,
         config: J::Config,

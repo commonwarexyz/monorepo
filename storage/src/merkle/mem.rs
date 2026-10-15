@@ -378,11 +378,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// Panics if a peak at the current size is neither retained nor pinned.
     #[cfg(any(feature = "std", test))]
     pub(crate) fn compact(&mut self, keep: &BTreeMap<Position<F>, D>) {
-        let mut pinned = self.nodes_to_pin(self.leaves());
-        pinned.extend(keep.iter().map(|(&pos, &digest)| (pos, digest)));
-        self.pruning_boundary = self.size();
-        self.nodes.clear();
-        self.pinned_nodes = pinned;
+        self.prune_to_loc(self.leaves());
+        self.pinned_nodes.extend(keep);
     }
 
     /// Pin extra nodes. It's up to the caller to ensure this set is valid.

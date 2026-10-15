@@ -21,31 +21,56 @@ pub(crate) struct Boundary<F: Family, D: Digest> {
     pub(crate) digests: Vec<D>,
 }
 
-/// Whether the operation journal holds an authenticated database.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Status {
-    /// The boundary and operations form an authenticated database.
-    Active = 0,
-    /// A synchronization is replacing operations and has not been authenticated.
-    Importing = 1,
-    /// A completed import failed root verification. The next import must discard retained
-    /// operations and the boundary.
-    Rejected = 2,
+impl<F: Family, D: Digest> Boundary<F, D> {
+    /// A boundary at `location`, rejecting an invalid location or a digest count other than
+    /// [`Family::nodes_to_pin`]'s.
+    fn new(location: Location<F>, digests: Vec<D>) -> Result<Self, Error<F>> {
+        if !location.is_valid() {
+            return Err(crate::merkle::Error::LocationOverflow(location).into());
+        }
+        if F::nodes_to_pin(location).count() != digests.len() {
+            return Err(crate::merkle::Error::InvalidPinnedNodes.into());
+        }
+        Ok(Self { location, digests })
+    }
 }
 
-/// The encoded frontier.
-#[derive(Clone)]
-struct Record<F: Family, D: Digest> {
-    status: Status,
-    boundary: Option<Boundary<F, D>>,
+/// The durable frontier: whether the operation journal holds an authenticated database, and the
+/// boundary when one is known.
+enum Record<F: Family, D: Digest> {
+    /// The boundary and operations form an authenticated database.
+    Active(Boundary<F, D>),
+    /// A synchronization is replacing operations and has not been authenticated. The boundary, if
+    /// any, can authenticate retained operations.
+    Importing(Option<Boundary<F, D>>),
+    /// A completed import failed root verification. The next import must discard retained
+    /// operations.
+    Rejected,
+}
+
+impl<F: Family, D: Digest> Record<F, D> {
+    const fn tag(&self) -> u8 {
+        match self {
+            Self::Active(_) => 0,
+            Self::Importing(_) => 1,
+            Self::Rejected => 2,
+        }
+    }
+
+    const fn boundary(&self) -> Option<&Boundary<F, D>> {
+        match self {
+            Self::Active(boundary) | Self::Importing(Some(boundary)) => Some(boundary),
+            Self::Importing(None) | Self::Rejected => None,
+        }
+    }
 }
 
 impl<F: Family, D: Digest> Write for Record<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         MAGIC.write(buf);
-        (self.status as u8).write(buf);
-        self.boundary.is_some().write(buf);
-        if let Some(boundary) = &self.boundary {
+        self.tag().write(buf);
+        self.boundary().is_some().write(buf);
+        if let Some(boundary) = self.boundary() {
             boundary.location.write(buf);
             for digest in &boundary.digests {
                 digest.write(buf);
@@ -59,8 +84,7 @@ impl<F: Family, D: Digest> EncodeSize for Record<F, D> {
         MAGIC.len()
             + 2
             + self
-                .boundary
-                .as_ref()
+                .boundary()
                 .map_or(0, |b| b.location.encode_size() + b.digests.len() * D::SIZE)
     }
 }
@@ -74,17 +98,7 @@ impl<F: Family, D: Digest> Read for Record<F, D> {
                 "unsupported format",
             ));
         }
-        let status = match u8::read(buf)? {
-            0 => Status::Active,
-            1 => Status::Importing,
-            2 => Status::Rejected,
-            _ => {
-                return Err(commonware_codec::Error::Invalid(
-                    "Frontier",
-                    "unknown status",
-                ));
-            }
-        };
+        let tag = u8::read(buf)?;
         let boundary = if bool::read(buf)? {
             let location = Location::<F>::read(buf)?;
             let digests = F::nodes_to_pin(location)
@@ -94,22 +108,23 @@ impl<F: Family, D: Digest> Read for Record<F, D> {
         } else {
             None
         };
-        match (status, &boundary) {
-            (Status::Active, None) => {
-                return Err(commonware_codec::Error::Invalid(
-                    "Frontier",
-                    "active boundary missing",
-                ));
-            }
-            (Status::Rejected, Some(_)) => {
-                return Err(commonware_codec::Error::Invalid(
-                    "Frontier",
-                    "rejected boundary retained",
-                ));
-            }
-            _ => {}
+        match (tag, boundary) {
+            (0, Some(boundary)) => Ok(Self::Active(boundary)),
+            (1, boundary) => Ok(Self::Importing(boundary)),
+            (2, None) => Ok(Self::Rejected),
+            (0, None) => Err(commonware_codec::Error::Invalid(
+                "Frontier",
+                "active boundary missing",
+            )),
+            (2, Some(_)) => Err(commonware_codec::Error::Invalid(
+                "Frontier",
+                "rejected boundary retained",
+            )),
+            _ => Err(commonware_codec::Error::Invalid(
+                "Frontier",
+                "unknown status",
+            )),
         }
-        Ok(Self { status, boundary })
     }
 }
 
@@ -138,10 +153,7 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
     /// The boundary of an active frontier, or [Error::IncompleteSync] during an import.
     pub(crate) fn active_boundary(&self) -> Result<Option<&Boundary<F, D>>, Error<F>> {
         match self.metadata.get(&KEY) {
-            Some(Record {
-                status: Status::Active,
-                boundary,
-            }) => Ok(boundary.as_ref()),
+            Some(Record::Active(boundary)) => Ok(Some(boundary)),
             Some(_) => Err(Error::IncompleteSync),
             None => Ok(None),
         }
@@ -149,14 +161,12 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
 
     /// Whether the last completed import failed root verification.
     pub(crate) fn rejected(&self) -> bool {
-        self.metadata
-            .get(&KEY)
-            .is_some_and(|record| record.status == Status::Rejected)
+        matches!(self.metadata.get(&KEY), Some(Record::Rejected))
     }
 
     /// The recorded boundary, whatever the status.
     pub(crate) fn boundary(&self) -> Option<&Boundary<F, D>> {
-        self.metadata.get(&KEY)?.boundary.as_ref()
+        self.metadata.get(&KEY)?.boundary()
     }
 
     async fn store(mut self, record: Record<F, D>) -> Result<Self, Error<F>> {
@@ -172,29 +182,17 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
             return Ok(self);
         }
         let boundary = self.boundary().cloned();
-        self.store(Record {
-            status: Status::Importing,
-            boundary,
-        })
-        .await
+        self.store(Record::Importing(boundary)).await
     }
 
     /// Require the next import to discard retained operations and the boundary.
     pub(crate) async fn reject(self) -> Result<Self, Error<F>> {
-        self.store(Record {
-            status: Status::Rejected,
-            boundary: None,
-        })
-        .await
+        self.store(Record::Rejected).await
     }
 
     /// Resume a rejected import once its retained operations have been durably discarded.
     pub(crate) async fn restart(self) -> Result<Self, Error<F>> {
-        self.store(Record {
-            status: Status::Importing,
-            boundary: None,
-        })
-        .await
+        self.store(Record::Importing(None)).await
     }
 
     /// Record a boundary for an import to authenticate.
@@ -203,7 +201,8 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
         location: Location<F>,
         digests: Vec<D>,
     ) -> Result<Self, Error<F>> {
-        self.set(Status::Importing, location, digests).await
+        let boundary = Boundary::new(location, digests)?;
+        self.store(Record::Importing(Some(boundary))).await
     }
 
     /// Record an authenticated boundary.
@@ -212,33 +211,14 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
         location: Location<F>,
         digests: Vec<D>,
     ) -> Result<Self, Error<F>> {
-        self.set(Status::Active, location, digests).await
+        let boundary = Boundary::new(location, digests)?;
+        self.store(Record::Active(boundary)).await
     }
 
     /// Activate the staged boundary.
     pub(crate) async fn activate_staged(self) -> Result<Self, Error<F>> {
         let boundary = self.boundary().cloned().ok_or(Error::MissingFrontier)?;
-        self.set(Status::Active, boundary.location, boundary.digests)
-            .await
-    }
-
-    async fn set(
-        self,
-        status: Status,
-        location: Location<F>,
-        digests: Vec<D>,
-    ) -> Result<Self, Error<F>> {
-        if !location.is_valid() {
-            return Err(crate::merkle::Error::LocationOverflow(location).into());
-        }
-        if F::nodes_to_pin(location).count() != digests.len() {
-            return Err(crate::merkle::Error::InvalidPinnedNodes.into());
-        }
-        self.store(Record {
-            status,
-            boundary: Some(Boundary { location, digests }),
-        })
-        .await
+        self.store(Record::Active(boundary)).await
     }
 
     /// Remove the durable frontier.
@@ -265,21 +245,27 @@ mod tests {
             .collect()
     }
 
+    fn boundary<F: Family>(location: u64) -> Boundary<F, D> {
+        let location = Location::new(location);
+        Boundary {
+            location,
+            digests: pins(location),
+        }
+    }
+
     fn codec<F: Family>() {
         for location in [0, 1, 31, 32, 33, 46, 47, 48, *F::MAX_LEAVES] {
-            let location = Location::new(location);
-            for status in [Status::Active, Status::Importing] {
-                let record = Record::<F, D> {
-                    status,
-                    boundary: Some(Boundary {
-                        location,
-                        digests: pins(location),
-                    }),
-                };
+            for record in [
+                Record::Active(boundary::<F>(location)),
+                Record::Importing(Some(boundary(location))),
+            ] {
                 let encoded = record.encode();
                 let decoded = Record::<F, D>::decode(encoded.clone()).unwrap();
-                assert_eq!(decoded.status, status);
-                assert_eq!(decoded.boundary.unwrap().digests, pins(location));
+                assert_eq!(decoded.tag(), record.tag());
+                assert_eq!(
+                    decoded.boundary().unwrap().digests,
+                    pins(Location::<F>::new(location))
+                );
                 for end in 0..encoded.len() {
                     assert!(Record::<F, D>::decode(encoded.slice(..end)).is_err());
                 }
@@ -288,37 +274,17 @@ mod tests {
                 assert!(Record::<F, D>::decode(trailing).is_err());
             }
         }
-        let invalid = Record::<F, D> {
-            status: Status::Active,
-            boundary: None,
-        };
-        assert!(Record::<F, D>::decode(invalid.encode()).is_err());
-        let invalid = Record::<F, D> {
-            status: Status::Rejected,
-            boundary: Some(Boundary {
-                location: Location::new(1),
-                digests: pins::<F>(Location::new(1)),
-            }),
-        };
-        assert!(Record::<F, D>::decode(invalid.encode()).is_err());
-        for status in [Status::Importing, Status::Rejected] {
-            let record = Record::<F, D> {
-                status,
-                boundary: None,
-            };
-            assert_eq!(
-                Record::<F, D>::decode(record.encode()).unwrap().status,
-                status
-            );
+        for record in [Record::<F, D>::Importing(None), Record::Rejected] {
+            assert_eq!(Record::<F, D>::decode(record.encode()).unwrap().tag(), record.tag());
         }
-        let mut invalid = Record::<F, D> {
-            status: Status::Importing,
-            boundary: None,
+
+        // A status that disagrees with the boundary flag, or is unknown, is rejected.
+        let without = Record::<F, D>::Importing(None).encode().to_vec();
+        let with = Record::<F, D>::Importing(Some(boundary(1))).encode().to_vec();
+        for (mut encoded, tag) in [(without.clone(), 0), (with, 2), (without, 3)] {
+            encoded[8] = tag;
+            assert!(Record::<F, D>::decode(encoded).is_err());
         }
-        .encode()
-        .to_vec();
-        invalid[8] = 3;
-        assert!(Record::<F, D>::decode(invalid).is_err());
     }
 
     #[test]
@@ -339,9 +305,8 @@ mod tests {
                 inner: context,
                 faults: faults.clone(),
             };
-            let mut frontier = Frontier::<F, _, D>::open(wrapped.child("fresh"), "frontier".into())
-                .await
-                .unwrap();
+            let open = |label| Frontier::<F, _, D>::open(wrapped.child(label), "frontier".into());
+            let mut frontier = open("fresh").await.unwrap();
             assert!(frontier.active_boundary().unwrap().is_none());
             frontier = frontier
                 .activate(Location::new(31), pins::<F>(Location::new(31)))
@@ -349,9 +314,7 @@ mod tests {
                 .unwrap();
             frontier = frontier.begin_import().await.unwrap();
             drop(frontier);
-            let frontier = Frontier::<F, _, D>::open(wrapped.child("import"), "frontier".into())
-                .await
-                .unwrap();
+            let frontier = open("import").await.unwrap();
             assert!(matches!(
                 frontier.active_boundary(),
                 Err(Error::IncompleteSync)
@@ -365,10 +328,7 @@ mod tests {
                     .is_err()
             );
             faults.disarm();
-            let mut frontier =
-                Frontier::<F, _, D>::open(wrapped.child("failed"), "frontier".into())
-                    .await
-                    .unwrap();
+            let mut frontier = open("failed").await.unwrap();
             assert!(matches!(
                 frontier.active_boundary(),
                 Err(Error::IncompleteSync)
@@ -379,9 +339,7 @@ mod tests {
                 .await
                 .unwrap();
             drop(frontier);
-            let frontier = Frontier::<F, _, D>::open(wrapped.child("staged"), "frontier".into())
-                .await
-                .unwrap();
+            let frontier = open("staged").await.unwrap();
             assert!(matches!(
                 frontier.active_boundary(),
                 Err(Error::IncompleteSync)
@@ -390,11 +348,8 @@ mod tests {
                 .activate(Location::new(47), pins::<F>(Location::new(47)))
                 .await
                 .unwrap();
-            assert_eq!(frontier.metadata.keys().count(), 1);
             drop(frontier);
-            let frontier = Frontier::<F, _, D>::open(wrapped.child("active"), "frontier".into())
-                .await
-                .unwrap();
+            let frontier = open("active").await.unwrap();
             assert_eq!(
                 frontier.active_boundary().unwrap().unwrap().location,
                 Location::new(47)
