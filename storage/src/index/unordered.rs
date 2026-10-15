@@ -75,6 +75,12 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         }
     }
 
+    /// Returns the bucket key used for an untranslated key.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn translate(&self, key: &[u8]) -> T::Key {
+        self.translator.transform(key)
+    }
+
     /// Create an empty index with this index's translator and metric handles. Parallel
     /// snapshot-build workers use it for their partition slots.
     #[commonware_macros::stability(ALPHA)]
@@ -252,6 +258,39 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         }
     }
 
+    fn retain(&mut self, key: &[u8], mut should_retain: impl FnMut(&V) -> bool) {
+        let k = self.translator.transform(key);
+        let Entry::Occupied(mut entry) = self.map.entry(k) else {
+            return;
+        };
+        let keep_head = should_retain(entry.get());
+        let mut removed = usize::from(!keep_head);
+        if let Some(chain) = self.overflow.get_mut(&k) {
+            let before = chain.len();
+            // Visit newest first, preserving predicate order and the surviving chain's order.
+            chain.reverse();
+            chain.retain(&mut should_retain);
+            chain.reverse();
+            removed += before - chain.len();
+            if !keep_head {
+                if let Some(head) = chain.pop() {
+                    *entry.get_mut() = head;
+                } else {
+                    entry.remove();
+                    self.keys.dec();
+                }
+            }
+            if chain.is_empty() {
+                self.overflow.remove(&k);
+            }
+        } else if !keep_head {
+            entry.remove();
+            self.keys.dec();
+        }
+        self.items.dec_by(removed as i64);
+        self.pruned.inc_by(removed as u64);
+    }
+
     fn remove(&mut self, key: &[u8]) {
         let k = self.translator.transform(key);
         if self.map.remove(&k).is_some() {
@@ -281,5 +320,71 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     #[cfg(test)]
     fn pruned(&self) -> usize {
         self.pruned.get() as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{index::storage::SHIFTED_ELEMENTS, translator::FourCap};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+
+    #[test]
+    fn retain_compacts_collisions_linearly() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = Index::new(context, FourCap);
+            for value in 0..128 {
+                index.insert(b"same", value);
+            }
+            let before = SHIFTED_ELEMENTS.with(|count| count.get());
+            let mut visited = Vec::new();
+            index.retain(b"same", |value| {
+                visited.push(*value);
+                *value >= 64
+            });
+            let shifted = SHIFTED_ELEMENTS.with(|count| count.get()) - before;
+            assert_eq!(visited, (0..128).rev().collect::<Vec<_>>());
+            assert_eq!(
+                index.get(b"same").copied().collect::<Vec<_>>(),
+                (64..128).rev().collect::<Vec<_>>()
+            );
+            assert_eq!((index.keys(), index.items(), index.pruned()), (1, 64, 64));
+            assert!(
+                shifted <= 128,
+                "retaining 128 entries shifted {shifted} elements"
+            );
+        });
+    }
+
+    #[test]
+    fn retain_preserves_order_and_metrics_for_every_small_subset() {
+        deterministic::Runner::default().start(|context| async move {
+            for mask in 0u8..32 {
+                let mut index =
+                    Index::new(context.child("mask").with_attribute("mask", mask), FourCap);
+                for value in 0..5 {
+                    index.insert(b"same", value);
+                }
+                let mut visited = Vec::new();
+                index.retain(b"same", |value| {
+                    visited.push(*value);
+                    mask & (1 << value) != 0
+                });
+                let expected = (0..5)
+                    .rev()
+                    .filter(|value| mask & (1 << value) != 0)
+                    .collect::<Vec<_>>();
+                assert_eq!(visited, (0..5).rev().collect::<Vec<_>>());
+                assert_eq!(index.get(b"same").copied().collect::<Vec<_>>(), expected);
+                assert_eq!(
+                    (index.keys(), index.items(), index.pruned()),
+                    (usize::from(mask != 0), expected.len(), 5 - expected.len())
+                );
+                index.insert(b"same", 5);
+                assert_eq!(index.get(b"same").next(), Some(&5));
+                index.retain(b"same", |_| false);
+                assert_eq!((index.keys(), index.items(), index.pruned()), (0, 0, 6));
+            }
+        });
     }
 }

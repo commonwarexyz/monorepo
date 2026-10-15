@@ -7,6 +7,11 @@ use std::{
     hash::{BuildHasher, Hash},
 };
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static SHIFTED_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Maps a translated key to the values that conflict with the value stored inline in the index's
 /// map, stored oldest first.
 ///
@@ -271,6 +276,10 @@ impl<
                 }
             }
             Position::Overflow(i) => {
+                #[cfg(test)]
+                SHIFTED_ELEMENTS.with(|count| {
+                    count.set(count.get() + self.chain.as_ref().unwrap().len() - i - 1);
+                });
                 self.chain.as_mut().unwrap().remove(i);
                 // Step from the deleted slot so next() returns the element after it.
                 self.state = State::NeedNext {

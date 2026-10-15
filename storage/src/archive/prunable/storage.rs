@@ -14,7 +14,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Array;
-use std::collections::{BTreeMap, BTreeSet, btree_map};
+use std::collections::{BTreeMap, BTreeSet, HashSet, btree_map};
 use tracing::debug;
 
 /// Index entry for the archive.
@@ -414,6 +414,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
         // Read only the index records being discarded, before their sections disappear.
         let mut previous_section = None;
+        let mut cleaned = HashSet::new();
         for index in self.indices.range(..min).map(|(index, _)| *index) {
             let section = self.section(index);
             if previous_section == Some(section) {
@@ -423,7 +424,9 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             let records = self.oversized.size(section)? / Record::<K>::SIZE as u64;
             for position in 0..records {
                 let entry = self.oversized.get(section, position).await?;
-                self.keys.retain(entry.key.as_ref(), |index| *index >= min);
+                if cleaned.insert(self.keys.translate(entry.key.as_ref())) {
+                    self.keys.retain(entry.key.as_ref(), |index| *index >= min);
+                }
             }
         }
 

@@ -221,7 +221,7 @@ mod tests {
     use crate::{
         archive::{Archive as _, Error, Identifier, MultiArchive as _},
         journal::{Error as JournalError, segmented::glob::corrupt_frame},
-        translator::{EightCap, FourCap, TwoCap},
+        translator::{EightCap, FourCap, TwoCap, UintIdentity},
     };
     use commonware_codec::{Error as CodecError, FixedSize};
     use commonware_cryptography::Crc32;
@@ -239,6 +239,7 @@ mod tests {
     use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
+        hash::{BuildHasher, Hasher},
         num::{NonZeroU16, NonZeroU64},
         sync::{
             Arc,
@@ -2997,5 +2998,58 @@ mod tests {
                 None,
             );
         });
+    }
+
+    #[test_traced]
+    fn test_prune_visits_each_translated_bucket_once() {
+        #[derive(Clone)]
+        struct CountedTranslator(Arc<AtomicUsize>);
+        struct CountedHasher(UintIdentity, Arc<AtomicUsize>);
+        impl Hasher for CountedHasher {
+            fn finish(&self) -> u64 {
+                self.1.fetch_add(1, Ordering::Relaxed);
+                self.0.finish()
+            }
+            fn write(&mut self, bytes: &[u8]) {
+                self.0.write(bytes);
+            }
+        }
+        impl BuildHasher for CountedTranslator {
+            type Hasher = CountedHasher;
+            fn build_hasher(&self) -> Self::Hasher {
+                CountedHasher(UintIdentity::default(), self.0.clone())
+            }
+        }
+        impl Translator for CountedTranslator {
+            type Key = u64;
+            fn transform(&self, _key: &[u8]) -> Self::Key {
+                0
+            }
+        }
+
+        for count in [8, 64, 256] {
+            for duplicate in [false, true] {
+                deterministic::Runner::default().start(|context| async move {
+                    let probes = Arc::new(AtomicUsize::new(0));
+                    let cfg = test_config_with_translator(
+                        &context, "test", NZU64!(4), CountedTranslator(probes.clone()),
+                    );
+                    let mut archive = Archive::init(context.child("storage"), cfg).await.unwrap();
+                    for index in 0..2 * count {
+                        let key = if duplicate { test_key("same") } else { test_key(&format!("{index:04x}")) };
+                        archive = archive.put(index, key, &(index as i32)).await.unwrap();
+                    }
+                    probes.store(0, Ordering::Relaxed);
+                    archive = archive.prune(count).await.unwrap();
+                    let pruning_probes = probes.load(Ordering::Relaxed);
+                    assert!(pruning_probes <= 8, "one affected bucket required {pruning_probes} probes for {count} discarded entries");
+                    assert!(has_metric_value(&context.encode(), "index_items", count));
+                    assert!(has_metric_value(&context.encode(), "index_pruned_total", count));
+                    for index in 0..2 * count {
+                        assert_eq!(archive.get(Identifier::Index(index)).await.unwrap(), (index >= count).then_some(index as i32));
+                    }
+                });
+            }
+        }
     }
 }
