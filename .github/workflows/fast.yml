@@ -141,7 +141,8 @@ jobs:
         retention-days: 1
         overwrite: true
 
-  # Fast and slow partitions of every configuration share one matrix, so the first failing
+  # Coverage runs every Linux test, slow ones included, for both Linux configurations, so the
+  # slow partitions here run only on macOS. All partitions share one matrix, so the first failing
   # partition cancels the others.
   Tests:
     name: "Tests (os: ${{ matrix.config.os }}${{ matrix.config.flags && format(', flags: \"{0}\"', matrix.config.flags) || '' }}, suite: ${{ matrix.shard.suite }}) (partition: ${{ matrix.shard.partition }}/${{ matrix.shard.partitions }})"
@@ -157,26 +158,27 @@ jobs:
         shard:
           - { suite: fast, profile: default, partition: 1, partitions: 2 }
           - { suite: fast, profile: default, partition: 2, partitions: 2 }
-          - { suite: slow, profile: slow, partition: 1, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 2, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 3, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 4, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 5, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 6, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 7, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 8, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 9, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 10, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 11, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 12, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 13, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 14, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 15, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 16, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 17, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 18, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 19, partitions: 20 }
-          - { suite: slow, profile: slow, partition: 20, partitions: 20 }
+        include:
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 1, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 2, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 3, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 4, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 5, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 6, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 7, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 8, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 9, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 10, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 11, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 12, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 13, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 14, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 15, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 16, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 17, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 18, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 19, partitions: 20 } }
+          - { config: { os: macos-latest, variant: default, flags: "" }, shard: { suite: slow, profile: slow, partition: 20, partitions: 20 } }
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -433,8 +435,8 @@ jobs:
           fi
           echo "All tests passed!"
 
-  # The slow tests run in the Tests job from the same builds as the fast tests. Branch protection
-  # requires this check alongside Fast-Tests.
+  # The macOS slow tests run in the Tests job from the same build as the fast tests, and Coverage
+  # runs the Linux slow tests. Branch protection requires this check alongside Fast-Tests.
   Slow-Tests-Gate:
     name: "Slow-Tests"
     runs-on: ubuntu-latest
