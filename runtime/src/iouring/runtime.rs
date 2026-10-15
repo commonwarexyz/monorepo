@@ -1946,17 +1946,14 @@ impl Worker {
     /// Take the next runnable to poll: a share of the pool's global queue every
     /// [`Config::with_global_queue_interval`] calls, otherwise the oldest
     /// runnable in this worker's run queue, otherwise a share of the global
-    /// queue. An empty global take falls back to the run queue. A dedicated
-    /// worker passes `None` and polls only its root. `pool`, when given, must
-    /// be this worker's pool, and the caller must hold no Local borrow.
+    /// queue. An empty global take falls back to the run queue. `pool` must be
+    /// this worker's pool, and the caller must hold no Local borrow.
     ///
     /// The drive loop is instantiated in the caller's crate, so the common
     /// case is inlined there and the global queue sits behind a call.
     #[inline]
     #[must_use]
-    fn next_runnable(&mut self, pool: Option<&Pool>) -> Option<Runnable> {
-        let pool = pool?;
-
+    fn next_runnable(&mut self, pool: &Pool) -> Option<Runnable> {
         // The interval counts every take, so runnables queued here cannot
         // keep the global queue waiting however fast they requeue. A
         // countdown keeps a division off this path.
@@ -2074,27 +2071,30 @@ impl Worker {
             }
 
             // Bound task polling so a self-waking task cannot starve the root,
-            // mailbox, or io_uring service.
-            for _ in 0..BATCH_SIZE {
-                let Some(runnable) = self.next_runnable(pool) else {
-                    break;
-                };
+            // mailbox, or io_uring service. A dedicated worker polls only its
+            // root.
+            if let Some(pool) = pool {
+                for _ in 0..BATCH_SIZE {
+                    let Some(runnable) = self.next_runnable(pool) else {
+                        break;
+                    };
 
-                // User code can wake a backlog and wait for a peer to run it.
-                // Return the count so those wakes can kick a parked peer.
-                leave_search(&mut searcher);
+                    // User code can wake a backlog and wait for a peer to run it.
+                    // Return the count so those wakes can kick a parked peer.
+                    leave_search(&mut searcher);
 
-                // The inner wrapper handles user polling policy. The poll also
-                // contains the destruction of a finished or cancelled future.
-                match runnable.poll(owner) {
-                    AfterPoll::Done => {}
-                    // Queue a self-wake behind this worker's other work instead
-                    // of polling it again at once. Overflow or stealing can
-                    // still move it elsewhere.
-                    AfterPoll::Requeue(runnable) => self.local.borrow_mut().enqueue(runnable),
-                    // The future is gone, so releasing the set's reference and
-                    // the runnable's runs no user code.
-                    AfterPoll::Retire(task) => drop(shared.tasks.remove(&task)),
+                    // The inner wrapper handles user polling policy. The poll also
+                    // contains the destruction of a finished or cancelled future.
+                    match runnable.poll(owner) {
+                        AfterPoll::Done => {}
+                        // Queue a self-wake behind this worker's other work instead
+                        // of polling it again at once. Overflow or stealing can
+                        // still move it elsewhere.
+                        AfterPoll::Requeue(runnable) => self.local.borrow_mut().enqueue(runnable),
+                        // The future is gone, so releasing the set's reference and
+                        // the runnable's runs no user code.
+                        AfterPoll::Retire(task) => drop(shared.tasks.remove(&task)),
+                    }
                 }
             }
 
