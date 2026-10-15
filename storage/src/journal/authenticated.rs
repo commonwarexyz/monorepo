@@ -637,9 +637,9 @@ where
 
     /// Align the Merkle structure with the journal.
     ///
-    /// The Merkle structure must not extend past the journal end. Missing leaves are added in
-    /// batches of `apply_batch_size` to bound peak memory use. Each batch's items are buffered
-    /// in memory so their leaves can be hashed across the strategy.
+    /// The Merkle structure must not extend past the journal end. Missing leaves are read and
+    /// added in batches of `apply_batch_size` to bound peak memory use. Each batch's items are
+    /// buffered in memory so their leaves can be hashed across the strategy.
     async fn align(
         mut merkle: Merkle<F, E, H::Digest, S>,
         journal: &C,
@@ -664,11 +664,9 @@ where
 
             while merkle_leaves < journal_size {
                 let count = apply_batch_size.get().min(journal_size - *merkle_leaves);
-                let mut items = Vec::with_capacity(count as usize);
-                for _ in 0..count {
-                    items.push(journal.read(*merkle_leaves).await?);
-                    merkle_leaves += 1;
-                }
+                let positions: Vec<u64> = (*merkle_leaves..*merkle_leaves + count).collect();
+                let items = journal.read_many(&positions).await?;
+                merkle_leaves += count;
 
                 let batch = merkle.new_batch().add_many(hasher, &items);
                 let batch = batch.merkleize(merkle.mem(), hasher);

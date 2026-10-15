@@ -6001,24 +6001,27 @@ mod tests {
         });
     }
 
-    /// Test the contiguous fixed journal with items_per_blob: 1.
-    ///
-    /// This is an edge case where each item creates its own blob, and the
-    /// tail blob is always empty after sync (because the item fills the blob
-    /// and a new empty one is created).
+    /// A config that stores one item per blob under the given partition.
+    fn single_item_per_blob_config(context: &deterministic::Context) -> Config {
+        Config {
+            partition: "single-item-per-blob".into(),
+            items_per_blob: NZU64!(1),
+            page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
+        }
+    }
+
+    /// With one item per blob, the tail blob is empty after every sync. Appends, tail reads,
+    /// pruning, appends past the prune, and a restart all keep every retained position readable
+    /// and the bounds intact.
     #[test_traced]
     fn test_single_item_per_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "single-item-per-blob".into(),
-                items_per_blob: NZU64!(1),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(2048),
-                replay_buffer: NZUsize!(2048),
-            };
+            let cfg = single_item_per_blob_config(&context);
 
-            // === Test 1: Basic single item operation ===
+            // A fresh journal starts empty, and its first synced item is readable at the tail.
             let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -6047,7 +6050,7 @@ mod tests {
                 .expect("failed to read");
             assert_eq!(value, test_digest(0));
 
-            // === Test 2: Multiple items with single item per blob ===
+            // Each further append fills its own blob, and the tail stays readable at size() - 1.
             for i in 1..10u64 {
                 let pos;
                 (journal, pos) = journal
@@ -6070,10 +6073,9 @@ mod tests {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
 
+            // Pruning the first five positions keeps the size but moves the start. Reads below the
+            // start report ItemPruned while the tail stays readable.
             journal = journal.sync().await.expect("failed to sync");
-
-            // === Test 3: Pruning with single item per blob ===
-            // Prune to position 5 (removes positions 0-4)
             (journal, _) = journal.prune(5).await.expect("failed to prune");
 
             // Size should still be 10
@@ -6099,7 +6101,7 @@ mod tests {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
 
-            // Append more items after pruning
+            // Appends after the prune continue at the old size, each readable at the tail.
             for i in 10..15u64 {
                 let pos;
                 (journal, pos) = journal
@@ -6116,9 +6118,8 @@ mod tests {
                 assert_eq!(value, test_digest(i));
             }
 
+            // A reopen recovers the size and pruned start, so every retained position reads back.
             journal.sync().await.expect("failed to sync");
-
-            // === Test 4: Restart persistence with single item per blob ===
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
@@ -6143,8 +6144,33 @@ mod tests {
 
             journal.destroy().await.expect("failed to destroy journal");
 
-            // === Test 5: Restart after pruning with non-zero index ===
-            // Fresh journal for this test
+            // Destroy removes the journal state, so the same config reopens empty and accepts new
+            // writes.
+            let mut journal = Journal::<_, Digest>::init(context.child("after_destroy"), cfg)
+                .await
+                .expect("failed to re-initialize journal");
+            assert!(journal.bounds().is_empty());
+            assert_eq!(journal.size(), 0);
+            for i in 0..10u64 {
+                (journal, _) = journal.append(&test_digest(i + 1000)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            assert_eq!(journal.bounds().end, 10);
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i + 1000));
+            }
+            journal.destroy().await.expect("failed to destroy journal");
+        });
+    }
+
+    /// A one-item-per-blob journal that is pruned and reopened keeps its bounds and reads every
+    /// retained position, including the tail.
+    #[test_traced]
+    fn test_single_item_per_blob_restart_after_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = single_item_per_blob_config(&context);
+
             let mut journal = Journal::init(context.child("third"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -6184,7 +6210,33 @@ mod tests {
 
             journal.destroy().await.expect("failed to destroy journal");
 
-            // === Test 6: Prune all items (edge case) ===
+            // Destroy removes the journal state, so the same config reopens empty and accepts new
+            // writes.
+            let mut journal = Journal::<_, Digest>::init(context.child("after_destroy"), cfg)
+                .await
+                .expect("failed to re-initialize journal");
+            assert!(journal.bounds().is_empty());
+            assert_eq!(journal.size(), 0);
+            for i in 0..10u64 {
+                (journal, _) = journal.append(&test_digest(i + 1000)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            assert_eq!(journal.bounds().end, 10);
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i + 1000));
+            }
+            journal.destroy().await.expect("failed to destroy journal");
+        });
+    }
+
+    /// Pruning every item of a one-item-per-blob journal keeps its size, empties its bounds, and
+    /// reports the tail position as pruned until a new append.
+    #[test_traced]
+    fn test_single_item_per_blob_prune_all() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = single_item_per_blob_config(&context);
+
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");

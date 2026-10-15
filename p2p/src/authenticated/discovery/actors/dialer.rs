@@ -61,18 +61,15 @@ where
 {
     context: ContextCell<E>,
 
-    // ---------- State ----------
     /// The list of peers to dial.
     queue: Vec<U::PublicKey>,
 
-    // ---------- Configuration ----------
     stream: Arc<StreamConfig<U>>,
     dial_timeout: Duration,
     dial_frequency: Duration,
     peer_connection_cooldown: Duration,
     allow_private_ips: bool,
 
-    // ---------- Metrics ----------
     /// The number of dial attempts made to each peer.
     attempts: CounterFamily<metrics::Peer<U::PublicKey>>,
 }

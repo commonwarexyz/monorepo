@@ -1,11 +1,11 @@
 //! Benchmarks for QMDB database generation (write-heavy workloads).
 //!
 //! Measures the time to seed a database and perform random updates/deletes across all keyed
-//! variants (fixed-value, variable-value) and the keyless variant.
+//! variants (fixed-value, variable-value), the unauthenticated store, and the keyless variant.
 
 use crate::common::{
-    Digest, define_fixed_variants, define_vec_variants, gen_random_kv, make_fixed_value,
-    make_var_value, open_keyless_db,
+    Digest, define_fixed_variants, define_vec_variants, gen_random_kv, gen_store_random_kv,
+    make_fixed_value, make_var_value, open_keyless_db, open_store_db,
 };
 use commonware_macros::boxed;
 use commonware_runtime::{
@@ -26,6 +26,19 @@ const NUM_ELEMENTS: u64 = 1_000;
 const NUM_OPERATIONS: u64 = 10_000;
 const COMMITS_PER_ITERATION: u64 = 100;
 const CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
+
+cfg_if::cfg_if! {
+    if #[cfg(not(full_bench))] {
+        const STORE_CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
+    } else {
+        /// The full run also measures the store at the init bench's population size, where the
+        /// log outgrows the page cache.
+        const STORE_CASES: [(u64, u64); 2] = [
+            (NUM_ELEMENTS, NUM_OPERATIONS),
+            (NUM_ELEMENTS * 100, NUM_OPERATIONS * 100),
+        ];
+    }
+}
 
 /// Benchmark a populated database: generate data, prune, sync. Returns elapsed time (excluding
 /// destroy).
@@ -57,8 +70,6 @@ async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
     db.destroy().await.unwrap();
     elapsed
 }
-
-// -- Fixed-value variants (16 = 8 db shapes x 2 merkle families) --
 
 define_fixed_variants! {
     enum FixedVariant;
@@ -96,8 +107,6 @@ fn bench_fixed_value_generate(c: &mut Criterion) {
     }
 }
 
-// -- Variable-value variants (8 = 4 db shapes x 2 merkle families) --
-
 define_vec_variants! {
     enum VarVariant;
     const VEC_VARIANTS;
@@ -134,7 +143,44 @@ fn bench_var_value_generate(c: &mut Criterion) {
     }
 }
 
-// -- Keyless variants --
+/// Benchmark seeding and churning an unauthenticated store, then pruning and syncing it, for each
+/// of [`STORE_CASES`].
+fn bench_store_generate(c: &mut Criterion) {
+    let runner = tokio::Runner::new(Config::default());
+    for (elements, operations) in STORE_CASES {
+        c.bench_function(
+            &format!(
+                "{}/variant=store::variable elements={elements} operations={operations}",
+                module_path!(),
+            ),
+            |b| {
+                b.to_async(&runner).iter_custom(|iters| async move {
+                    let ctx = context::get::<Context>();
+                    let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let db = open_store_db(ctx.child("storage")).await;
+                        let start = Instant::now();
+                        let db = gen_store_random_kv(
+                            db,
+                            elements,
+                            operations,
+                            commit_freq,
+                            make_var_value,
+                        )
+                        .await;
+                        let floor = db.inactivity_floor_loc();
+                        let db = db.prune(floor).await.unwrap();
+                        let db = db.sync().await.unwrap();
+                        total += start.elapsed();
+                        db.destroy().await.unwrap();
+                    }
+                    total
+                });
+            },
+        );
+    }
+}
 
 const KEYLESS_OPS: u64 = 10_000;
 const KEYLESS_COMMIT_FREQ: u32 = 25;
@@ -243,5 +289,9 @@ fn bench_keyless_generate(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_fixed_value_generate, bench_var_value_generate, bench_keyless_generate
+    targets =
+        bench_fixed_value_generate,
+        bench_var_value_generate,
+        bench_store_generate,
+        bench_keyless_generate
 }

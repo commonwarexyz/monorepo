@@ -426,13 +426,13 @@ where
     /// is a player, its share (`None` if the logs yield no output).
     ///
     /// Panics if the local player state is invalid.
-    fn run<E, BV>(self, mut context: E) -> Option<Ceremony<V, C>>
+    fn run<E>(self, mut context: E) -> Option<Ceremony<V, C>>
     where
         E: CryptoRng,
-        BV: BatchVerifier<PublicKey = C::PublicKey>,
+        C::PublicKey: BatchVerifier,
     {
         if let Some(player) = self.player {
-            match player.finalize::<N3f1, BV>(&mut context, self.logs, &self.strategy) {
+            match player.finalize::<N3f1>(&mut context, self.logs, &self.strategy) {
                 Ok((output, share)) => Some(Ceremony {
                     output,
                     share: Some(share),
@@ -446,7 +446,7 @@ where
                 }
             }
         } else {
-            match observe::<_, _, N3f1, BV>(&mut context, self.logs, &self.strategy) {
+            match observe::<_, _, N3f1>(&mut context, self.logs, &self.strategy) {
                 Ok(output) => Some(Ceremony {
                     output,
                     share: None,
@@ -583,7 +583,7 @@ where
     Some(logs)
 }
 
-impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
+impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + RuntimeStorage,
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -594,7 +594,7 @@ where
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
-    BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
+    C::PublicKey: BatchVerifier,
     S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
@@ -1119,7 +1119,7 @@ where
                 .child("verification")
                 .shared(true)
                 .spawn(move |context| async move {
-                    let ceremony = task.run::<E, BV>(context);
+                    let ceremony = task.run(context);
                     VerifiedLogs {
                         logs: log_map,
                         ceremony,
@@ -1472,7 +1472,7 @@ mod tests {
         channel::oneshot, ordered::Set, sequence::Unit, sync::Mutex, test_rng,
     };
     use futures::FutureExt;
-    use std::{collections::BTreeMap, marker::PhantomData, sync::Arc, time::Duration};
+    use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
     const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_INCLUSION_TEST";
 
@@ -1702,7 +1702,6 @@ mod tests {
                 replay_buffer: mocks::IO_BUFFER,
                 max_participants: NZU32!(16),
                 blocks_per_epoch,
-                batch_verifier: PhantomData,
             },
             DkgConfig {
                 participants,
@@ -3274,9 +3273,7 @@ mod tests {
             let task =
                 actor.verification_task(Epoch::zero(), &fixture.info, &store, log_map.as_ref());
             let ceremony = task
-                .run::<deterministic::Context, commonware_cryptography::ed25519::Batch>(
-                    context.child("verification"),
-                )
+                .run(context.child("verification"))
                 .expect("observer should verify the public ceremony");
             assert!(ceremony.share.is_none());
             let expected = ceremony.output.clone();
@@ -3334,10 +3331,7 @@ mod tests {
             let log_map = Arc::new(BTreeMap::new());
             let task =
                 actor.verification_task(Epoch::zero(), &fixture.info, &store, log_map.as_ref());
-            let ceremony = task
-                .run::<deterministic::Context, commonware_cryptography::ed25519::Batch>(
-                    context.child("verification"),
-                );
+            let ceremony = task.run(context.child("verification"));
             assert!(ceremony.is_none());
             let mut artifacts = ArtifactCache::default();
 
@@ -3428,9 +3422,7 @@ mod tests {
             let task =
                 actor.verification_task(Epoch::zero(), &finalized.info, &store, log_map.as_ref());
 
-            task.run::<deterministic::Context, commonware_cryptography::ed25519::Batch>(
-                context.child("verification"),
-            );
+            task.run(context.child("verification"));
         });
     }
 }
