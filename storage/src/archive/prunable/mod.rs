@@ -2595,7 +2595,7 @@ mod tests {
                 num_keys - removed
             ));
             assert!(has_metric_value(&buffer, "indices_pruned_total", removed));
-            assert!(has_metric_value(&buffer, "pruned_total", 0)); // have not lazily removed keys yet
+            assert!(has_metric_value(&buffer, "pruned_total", removed));
 
             context.auditor().state()
         })
