@@ -3048,6 +3048,75 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_subscription_dropped_unpolled_gets_no_pages() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, mut opens) = GatedBlob::new(2);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+
+            // A batch of pages 0 and 1 starts reading. A subscription selects page 0 and is
+            // dropped before it is ever polled.
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1]));
+            assert!(poll!(first.as_mut()).is_pending());
+            let batch = {
+                let cache = cache_ref.cache.write();
+                let (batch, index, driver) = cache.batches.find_unpublished(0, 0).unwrap();
+                let mut subscription = Subscription::joining(batch.clone(), driver);
+                subscription.select(index, 0);
+                let reader = subscription.reader;
+                drop(subscription);
+                assert!(batch.state.lock().inboxes[reader].is_none());
+                batch
+            };
+
+            // Publishing page 0 skips the dropped subscription, and the batch still serves its
+            // starting read.
+            open(&mut opens);
+            assert_eq!(first.await.unwrap(), [0, 1]);
+            let state = batch.state.lock();
+            assert!(state.inboxes[1..].iter().all(Option::is_none));
+            drop(state);
+            drop(batch);
+            assert_eq!(blob.reads_of(0), 1);
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
+    fn test_page_delivered_before_batch_fails_still_serves_its_reader() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (start, started) = oneshot::channel();
+            let blob = ScriptedBlob::new(vec![
+                Step::Wait(started),
+                Step::page(0),
+                Step::Fail(Error::ReadFailed),
+            ]);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+
+            // A batch of pages 0 and 1 starts reading. A read of page 0 and a read of pages 0
+            // and 1 join it.
+            let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1]));
+            assert!(poll!(first.as_mut()).is_pending());
+            let mut zero = pin!(read_first_byte(&blob, &cache_ref, 0));
+            assert!(poll!(zero.as_mut()).is_pending());
+            let mut both = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1]));
+            assert!(poll!(both.as_mut()).is_pending());
+
+            // Only the starting read drives the batch. It publishes page 0 to both joiners, which
+            // are not polled meanwhile, and then fails.
+            start.send(()).unwrap();
+            assert!(matches!(first.await, Err(Error::ReadFailed)));
+
+            // The joiner that already has its page finishes with it. The one still missing page 1
+            // fails with the batch.
+            assert_eq!(zero.await.unwrap(), 0);
+            assert!(matches!(both.await, Err(Error::ReadFailed)));
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
     fn test_cancelled_joins_do_not_disturb_other_reads() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
