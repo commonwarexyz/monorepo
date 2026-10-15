@@ -24,7 +24,7 @@ use super::{DIGEST_LENGTH, Digest, Sha256};
 use crate::Hasher;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use commonware_simd::{Operation, Simd, dispatch};
+use commonware_simd::{Operation, Simd, X86V4C, dispatch};
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
@@ -38,93 +38,102 @@ const POSITION_LEN: usize = 8;
 /// Independent messages in a full batch.
 const X16_LANES: usize = 16;
 
-cfg_if::cfg_if! {
-    if #[cfg(all(target_arch = "x86_64", feature = "std"))] {
-        /// Return whether the SHA extensions (SHA-NI) are available.
-        #[inline]
-        fn supports_sha_ni() -> bool {
-            std::arch::is_x86_feature_detected!("sha")
+/// Smallest run batched when serial hashing uses software SHA.
+const SOFTWARE_MINIMUM: usize = 2;
+
+/// Smallest run batched when serial hashing uses SHA-NI (ISA-L's shortage cutoff).
+const SHA_NI_MINIMUM: usize = 7;
+
+/// Selects the number of messages per share for the backend's profile.
+struct BatchLanes;
+
+impl<S: Simd> Operation<S> for BatchLanes {
+    type Output = usize;
+
+    // Software SHA always benefits from filling every lane.
+    #[inline(always)]
+    fn portable(self, _: S) -> Self::Output {
+        if S::U32_LANES >= X16_LANES {
+            X16_LANES
+        } else {
+            1
         }
-    } else {
-        /// Return whether the SHA extensions (SHA-NI) are available.
-        #[inline]
-        const fn supports_sha_ni() -> bool {
-            cfg!(all(target_arch = "x86_64", target_feature = "sha"))
-        }
+    }
+
+    // The profile includes SHA-NI, so single messages hash efficiently.
+    #[inline(always)]
+    fn x86_v4c(self, _: S) -> Self::Output
+    where
+        S: X86V4C,
+    {
+        1
     }
 }
 
 /// Number of messages per share when splitting batches across workers.
 #[inline]
 pub(super) fn batch_lanes() -> usize {
-    struct BatchLanes;
+    dispatch(BatchLanes)
+}
 
-    impl<S: Simd> Operation<S> for BatchLanes {
-        type Output = usize;
+/// Hash adjacent equal-length runs of at least `minimum` messages in batches.
+#[inline(always)]
+fn hash_runs<S: Simd, M: AsRef<[u8]>>(simd: S, messages: &[M], minimum: usize) -> Vec<Digest> {
+    if S::U32_LANES < X16_LANES {
+        return messages
+            .iter()
+            .map(|message| Sha256::hash(&[message.as_ref()]))
+            .collect();
+    }
 
-        #[inline(always)]
-        fn portable(self, _: S) -> Self::Output {
-            if S::U32_LANES >= X16_LANES && !supports_sha_ni() {
-                X16_LANES
+    // Adjacent equal-length runs preserve the kernel's length requirement
+    // and the resulting digests' input order.
+    let mut digests = Vec::with_capacity(messages.len());
+    for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
+        for messages in run.chunks(X16_LANES) {
+            if messages.len() >= minimum {
+                // Spare lanes borrow the first input; only active lanes contribute output.
+                let mut inputs = [messages[0].as_ref(); X16_LANES];
+                for (input, message) in inputs[1..].iter_mut().zip(&messages[1..]) {
+                    *input = message.as_ref();
+                }
+                let output = simd.execute(batch::hash::<S>(inputs));
+                digests.extend_from_slice(&output[..messages.len()]);
             } else {
-                1
+                digests.extend(
+                    messages
+                        .iter()
+                        .map(|message| Sha256::hash(&[message.as_ref()])),
+                );
             }
         }
     }
+    digests
+}
 
-    dispatch(BatchLanes)
+/// Hashes independent messages with the batching threshold of the backend's profile.
+struct HashMany<'a, M>(&'a [M]);
+
+impl<S: Simd, M: AsRef<[u8]>> Operation<S> for HashMany<'_, M> {
+    type Output = Vec<Digest>;
+
+    #[inline(always)]
+    fn portable(self, simd: S) -> Self::Output {
+        hash_runs(simd, self.0, SOFTWARE_MINIMUM)
+    }
+
+    #[inline(always)]
+    fn x86_v4c(self, simd: S) -> Self::Output
+    where
+        S: X86V4C,
+    {
+        hash_runs(simd, self.0, SHA_NI_MINIMUM)
+    }
 }
 
 /// Hash independent messages in input order using one selected backend.
 #[inline]
 pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Digest> {
-    struct HashMany<'a, M>(&'a [M]);
-
-    impl<S: Simd, M: AsRef<[u8]>> Operation<S> for HashMany<'_, M> {
-        type Output = Vec<Digest>;
-
-        #[inline(always)]
-        fn portable(self, simd: S) -> Self::Output {
-            if S::U32_LANES < X16_LANES {
-                return self
-                    .0
-                    .iter()
-                    .map(|message| Sha256::hash(&[message.as_ref()]))
-                    .collect();
-            }
-
-            // SHA-NI uses ISA-L's shortage cutoff; software SHA benefits from two lanes.
-            let minimum = if supports_sha_ni() { 7 } else { 2 };
-
-            // Adjacent equal-length runs preserve the kernel's length requirement
-            // and the resulting digests' input order.
-            let mut digests = Vec::with_capacity(self.0.len());
-            for run in self
-                .0
-                .chunk_by(|left, right| left.as_ref().len() == right.as_ref().len())
-            {
-                for messages in run.chunks(X16_LANES) {
-                    if messages.len() >= minimum {
-                        // Spare lanes borrow the first input; only active lanes contribute output.
-                        let mut inputs = [messages[0].as_ref(); X16_LANES];
-                        for (input, message) in inputs[1..].iter_mut().zip(&messages[1..]) {
-                            *input = message.as_ref();
-                        }
-                        let output = simd.execute(batch::hash::<S>(inputs));
-                        digests.extend_from_slice(&output[..messages.len()]);
-                    } else {
-                        digests.extend(
-                            messages
-                                .iter()
-                                .map(|message| Sha256::hash(&[message.as_ref()])),
-                        );
-                    }
-                }
-            }
-            digests
-        }
-    }
-
     dispatch(HashMany(messages))
 }
 
@@ -213,5 +222,76 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Dige
             right_b: (*right_b).try_into().ok()?,
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_simd::{
+        check_consistent,
+        emulated::{EmulatedArmV9, EmulatedNeon, EmulatedScalar, EmulatedX86V4C},
+        test_dispatch,
+    };
+    use sha2::Digest as _;
+
+    /// Equal-length runs on both sides of every batching threshold.
+    fn runs() -> Vec<Vec<u8>> {
+        let mut messages = Vec::new();
+        for (run, len) in [
+            (1, 0),
+            (2, 64),
+            (6, 65),
+            (7, 55),
+            (16, 128),
+            (17, 1),
+            (33, 200),
+        ] {
+            for lane in 0..run {
+                messages.push(
+                    (0..len)
+                        .map(|offset| (lane * 31 + offset * 7 + run) as u8)
+                        .collect(),
+                );
+            }
+        }
+        messages
+    }
+
+    fn expected(messages: &[Vec<u8>]) -> Vec<Digest> {
+        messages
+            .iter()
+            .map(|message| Digest(sha2::Sha256::digest(message).into()))
+            .collect()
+    }
+
+    #[test]
+    fn test_hash_many_profiles() {
+        let messages = runs();
+        assert_eq!(test_dispatch(HashMany(&messages)), expected(&messages));
+        check_consistent(|| HashMany(&messages));
+    }
+
+    #[test]
+    fn test_hash_runs_minimums() {
+        let messages = runs();
+        let expected = expected(&messages);
+        for minimum in [1, SOFTWARE_MINIMUM, SHA_NI_MINIMUM, X16_LANES + 1] {
+            assert_eq!(
+                hash_runs(EmulatedX86V4C, &messages, minimum),
+                expected,
+                "minimum {minimum}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_batch_lanes_profiles() {
+        assert_eq!(EmulatedScalar.execute(BatchLanes), 1);
+        assert_eq!(EmulatedNeon.execute(BatchLanes), 1);
+        assert_eq!(EmulatedArmV9.execute(BatchLanes), 1);
+        assert_eq!(EmulatedX86V4C.execute(BatchLanes), 1);
+        // A wide backend without SHA instructions fills every lane.
+        assert_eq!(BatchLanes.portable(EmulatedX86V4C), X16_LANES);
     }
 }
