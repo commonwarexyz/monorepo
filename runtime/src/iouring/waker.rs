@@ -1,6 +1,10 @@
-//! Hybrid futex/eventfd wake coordination for the io_uring loop.
+//! One worker's futex/eventfd wake source and mailbox publication sequence.
 //!
-//! This module implements the producer-to-worker mailbox wake protocol:
+//! [`Waker`] delivers signals to one worker. [`Idle`](super::idle::Idle)
+//! selects which pool worker to signal. See [`super::idle`] for the parking
+//! sequence.
+//!
+//! Mailbox producers and the worker use this wake protocol:
 //! - Producers call [`Waker::publish`] when enqueueing a new batch.
 //! - The loop calls [`Waker::park_idle`] when it is fully idle.
 //! - The loop acquires an [`ArmGuard`] from [`Waker::arm`] before
@@ -13,11 +17,9 @@
 //! Driver-owned permit waits use [`Waker::wake`] directly. Their readiness stays
 //! in the driver's acquisition queue and remains available after mailbox closure.
 //!
-//! The pool's idle state ([`Idle`](super::idle::Idle)) also wakes a parked
-//! worker it claimed, for a push into the global queue or a run queue's new
-//! backlog, with [`Waker::wake`] alone, publishing nothing. An idle spin
-//! therefore watches [`Waker::signalled`] as well as the sequence, and clears a
-//! wake it saw with [`Waker::consume_signal`].
+//! A successful pool claim calls [`Waker::wake`] without publishing a mailbox
+//! message. An idle spin therefore checks [`Waker::signalled`] as well as the
+//! sequence, then clears an observed signal with [`Waker::consume_signal`].
 //!
 //! The packed atomic state combines:
 //! - bit 0: waiting on futex
@@ -160,10 +162,11 @@ struct WakerInner {
     eventfd_waiters: Condvar,
 }
 
-/// Internal hybrid futex/eventfd wake source for the io_uring loop.
+/// One worker's wake source, shared by its mailbox and driver.
 ///
 /// - Publish submissions from producers via [`Waker::publish`]
-/// - Complete publication signaling after unlocking via [`Waker::wake`]
+/// - Signal the worker after mailbox publication, pool selection, or a driver
+///   permit notification via [`Waker::wake`]
 /// - Test whether published work is still pending via [`Waker::pending`]
 /// - Park in the fully-idle path via [`Waker::park_idle`]
 /// - Arm a `submit_and_wait` blocking section via [`Waker::arm`]

@@ -9,9 +9,9 @@
 //! [`Threads`] starts the workers after worker zero, each on a thread of its
 //! own, and joins them at shutdown.
 //!
-//! The idle state, [`Idle`], records which workers are parked and which
-//! search the other run queues. [`super::idle`] describes how workers park and
-//! search and how a push wakes a parked worker.
+//! [`Idle`] tracks idle publications and search responsibility, and selects
+//! pool workers to wake. Their mailbox wakers deliver the signals.
+//! [`super::idle`] describes the parking sequence and wake policy.
 //!
 //! # Placement
 //!
@@ -479,8 +479,9 @@ impl Pool {
             .any(|victim| self.queues[victim].steal_into(ready.queue()) > 0)
     }
 
-    /// Wake a parked worker for a run queue's new backlog, or for the search
-    /// the last returned count hands on.
+    /// Ask [`Idle::notify`] to wake a parked worker for a run queue's backlog
+    /// or to carry on the last returned count's search. A held search count
+    /// suppresses the request. See [`super::idle`] for the wake policy.
     #[inline]
     pub fn kick(&self) {
         // Pairs with the fence in `Searcher::prepare_park`: either the loads
