@@ -126,7 +126,10 @@ impl Drop for PageFetchGuard<'_> {
     }
 }
 
-/// The most missing pages a batched read examines per hold of the cache's write lock.
+/// The most missing pages a batched read examines per hold of the cache's write lock, which
+/// bounds how long a read with many misses keeps cache hits and publishes waiting. Another reader
+/// can start reading a page this read found unread in an earlier hold, so that page may be read
+/// twice.
 const MISSES_PER_LOCK: usize = 64;
 
 /// The read of a [Batch]. It fails if the read fails or does not yield every page exactly once.
