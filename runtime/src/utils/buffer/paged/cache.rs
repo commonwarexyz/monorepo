@@ -12,9 +12,10 @@
 //! that validates and caches each page as it arrives and delivers it to the readers waiting on
 //! it. Caching and delivering a page is publishing it. The read that started a batch receives
 //! every page. Other readers join it by selecting the unpublished pages they need. Each holds a
-//! subscription: a channel for its pages and a handle on the driver, so the batch progresses
-//! while any of its readers is polled and never waits on a slow one. The read that started a
-//! batch also awaits the driver's end, so a read error after the last page still fails it.
+//! subscription: an inbox in the batch for its pages and a handle on the driver, so the batch
+//! progresses while any of its readers is polled and never waits on a slow one. The read that
+//! started a batch also awaits the driver's end, so a read error after the last page still fails
+//! it.
 //!
 //! Fetches and drivers are [Shared] futures: a reader may stop polling one, because it has its
 //! page or was dropped, without stranding the readers still waiting, and the underlying read is
@@ -44,20 +45,20 @@ use crate::{BLOB_PAGE_SIZE, Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufM
 use ahash::{AHashMap, AHashSet};
 use commonware_utils::{
     Widen, cache,
-    channel::mpsc,
     futures::{Shared, WeakShared},
     sync::{Mutex, RwLock, RwLockWriteGuard},
 };
 use futures::{FutureExt, Stream, TryStreamExt as _, future::BoxFuture, stream::FuturesUnordered};
 use std::{
-    collections::hash_map::Entry,
+    collections::{VecDeque, hash_map::Entry},
+    mem,
     num::{NonZeroU16, NonZeroUsize},
     pin::{Pin, pin},
     sync::{
         Arc, Weak,
         atomic::{AtomicU64, Ordering},
     },
-    task::{Context, Poll, Waker, ready},
+    task::{Context, Poll},
 };
 use tracing::{debug, error, trace};
 
@@ -150,19 +151,25 @@ type BatchFuture = BoxFuture<'static, Result<(), Error>>;
 /// A handle to a [BatchFuture] that any of the batch's readers can drive.
 type BatchDriver = Shared<BatchFuture>;
 
-/// A page delivered to a subscription: its tag, and its logical bytes or why it failed validation.
+/// A page delivered to a reader: its tag, and its logical bytes or why it failed validation.
 type Delivery = (usize, Result<IoBuf, Error>);
 
-/// Where a page goes for one joiner: the tag the joiner selected it with, and the sender that
-/// delivers it.
-type Joiner = (usize, mpsc::UnboundedSender<Delivery>);
+/// The reader that started a [Batch], which receives every page tagged with its index.
+const STARTER: usize = 0;
 
-/// What a [Batch] has yet to publish, and who joined it. `joiners` changes only while the cache
-/// lock is also held, so a reader that finds a page unpublished can select it in the same hold.
+/// Where a page goes for one joiner: the tag the joiner selected it with, and the joiner's reader.
+type Joiner = (usize, usize);
+
+/// What a [Batch] has yet to publish, who joined it, and what it published to each reader.
+/// `joiners` changes only while the cache lock is also held, so a reader that finds a page
+/// unpublished can select it in the same hold.
 struct BatchState {
     /// The joiners of each page not yet published. `None` once the page is published, or the
     /// batch fails.
     joiners: Box<[Option<Vec<Joiner>>]>,
+    /// The pages published to each reader and not yet taken, by reader, starting with [STARTER].
+    /// `None` once the reader is dropped.
+    inboxes: Vec<Option<VecDeque<Delivery>>>,
     /// Why the batch failed, once it has.
     error: Option<Error>,
 }
@@ -179,6 +186,7 @@ impl Batch {
     fn new(blob_id: u64, pages: Vec<u64>) -> Self {
         let state = BatchState {
             joiners: vec![Some(Vec::new()); pages.len()].into(),
+            inboxes: vec![Some(VecDeque::new())],
             error: None,
         };
         Self {
@@ -189,19 +197,17 @@ impl Batch {
     }
 
     /// Read the batch's pages from `physical` (their physical ranges in `blob`), publishing each
-    /// as it arrives to its joiners, and to the starter through `to_starter`, tagged with its
-    /// index. A page failing validation is published as failed while the others continue. A read
-    /// error, or a read that does not yield every page exactly once, fails the batch.
+    /// as it arrives. A page failing validation is published as failed while the others continue.
+    /// A read error, or a read that does not yield every page exactly once, fails the batch.
     ///
-    /// The future owns `to_starter` and `_retire` from its creation, so the starter's channel
-    /// closes, and the batch retires, once the future ends or is dropped, polled or not.
+    /// The future owns `_retire` from its creation, so the batch retires once the future ends or
+    /// is dropped, polled or not.
     async fn read<B: Blob>(
         self: Arc<Self>,
         cache: Arc<RwLock<Cache>>,
         blob: Arc<B>,
         physical: Vec<(u64, usize)>,
         page_size: NonZeroU16,
-        to_starter: mpsc::UnboundedSender<Delivery>,
         _retire: RetireGuard,
     ) -> Result<(), Error> {
         let result = async {
@@ -216,8 +222,7 @@ impl Batch {
                 let page = validate_physical_page(bufs.coalesce())
                     .and_then(|(page, _)| cacheable_page(page, page_num, page_size))
                     .inspect_err(|err| error!(page_num, ?err, "Batched page failed validation"));
-                self.publish(&cache, index, &page)?;
-                let _ = to_starter.send((index, page));
+                self.publish(&cache, index, page)?;
             }
             if self.state.lock().joiners.iter().any(Option::is_some) {
                 return Err(Error::ReadFailed);
@@ -232,41 +237,44 @@ impl Batch {
     }
 
     /// Publish the outcome of the page at `index`: cache the page if it is valid, and deliver it to
-    /// the page's joiners. Fails if the page was already published.
+    /// the starter and the page's joiners. Fails if the page was already published.
     fn publish(
         &self,
         cache: &RwLock<Cache>,
         index: usize,
-        result: &Result<IoBuf, Error>,
+        result: Result<IoBuf, Error>,
     ) -> Result<(), Error> {
-        let joiners = {
-            let mut cache = cache.write();
-            let Some(joiners) = self.state.lock().joiners[index].take() else {
-                return Err(Error::ReadFailed);
-            };
-            if let Ok(page) = result {
-                cache.cache(self.blob_id, page.as_ref(), self.pages[index]);
-            }
-            joiners
+        let mut cache = cache.write();
+        let mut state = self.state.lock();
+        let BatchState {
+            joiners, inboxes, ..
+        } = &mut *state;
+        let Some(joiners) = joiners[index].take() else {
+            return Err(Error::ReadFailed);
         };
-        for (tag, sender) in joiners {
-            let _ = sender.send((tag, result.clone()));
+        if let Ok(page) = &result {
+            cache.cache(self.blob_id, page.as_ref(), self.pages[index]);
+        }
+        drop(cache);
+        for (tag, reader) in joiners {
+            if let Some(inbox) = &mut inboxes[reader] {
+                inbox.push_back((tag, result.clone()));
+            }
+        }
+        if let Some(inbox) = &mut inboxes[STARTER] {
+            inbox.push_back((index, result));
         }
         Ok(())
     }
 
     /// Fail the batch: record why, and take its joiners, under the cache lock so no reader selects
-    /// a page the batch will never publish. Dropping the joiners' senders after the lock is
-    /// released closes each of their channels once drained.
+    /// a page the batch will never publish.
     fn fail(&self, cache: &RwLock<Cache>, err: &Error) {
         error!(blob_id = self.blob_id, ?err, "Batched page read failed");
-        let joiners: Vec<_> = {
-            let _cache = cache.write();
-            let mut state = self.state.lock();
-            state.error = Some(err.clone());
-            state.joiners.iter_mut().filter_map(Option::take).collect()
-        };
-        drop(joiners);
+        let _cache = cache.write();
+        let mut state = self.state.lock();
+        state.error = Some(err.clone());
+        state.joiners.fill(None);
     }
 }
 
@@ -369,11 +377,10 @@ impl BatchRegistry {
 /// batch publishes it, or an error if the page fails validation or the batch fails first.
 struct Subscription {
     batch: Arc<Batch>,
-    /// The sender a joiner's selections clone, dropped at its first poll, so the channel closes
-    /// once the batch has delivered or dropped every selection. The starter has none: the batch's
-    /// read owns its sender.
-    sender: Option<mpsc::UnboundedSender<Delivery>>,
-    receiver: mpsc::UnboundedReceiver<Delivery>,
+    /// This reader's inbox in [BatchState::inboxes].
+    reader: usize,
+    /// Deliveries taken from the inbox and not yet yielded.
+    taken: VecDeque<Delivery>,
     /// Count of selected pages not yet delivered.
     remaining: usize,
     /// A handle on the batch's driver, released once every selected page is delivered.
@@ -381,30 +388,29 @@ struct Subscription {
 }
 
 impl Subscription {
-    /// Subscribe the read that started `batch` to every page, which `receiver` delivers tagged
-    /// with the page's index.
-    fn starting(
-        batch: Arc<Batch>,
-        driver: BatchDriver,
-        receiver: mpsc::UnboundedReceiver<Delivery>,
-    ) -> Self {
+    /// Subscribe the read that started `batch` to every page, delivered tagged with its index.
+    fn starting(batch: Arc<Batch>, driver: BatchDriver) -> Self {
         Self {
             remaining: batch.pages.len(),
             driver: Some(driver),
             batch,
-            sender: None,
-            receiver,
+            reader: STARTER,
+            taken: VecDeque::new(),
         }
     }
 
     /// Subscribe a joiner to `batch`, selecting no pages yet.
     fn joining(batch: Arc<Batch>, driver: BatchDriver) -> Self {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let reader = {
+            let mut state = batch.state.lock();
+            state.inboxes.push(Some(VecDeque::new()));
+            state.inboxes.len() - 1
+        };
         Self {
             driver: Some(driver),
             batch,
-            sender: Some(sender),
-            receiver,
+            reader,
+            taken: VecDeque::new(),
             remaining: 0,
         }
     }
@@ -412,20 +418,41 @@ impl Subscription {
     /// Select the page at `index` with `tag`. Call with the cache lock held, after finding the
     /// page unpublished, and before the first poll.
     fn select(&mut self, index: usize, tag: usize) {
-        let sender = self.sender.as_ref().expect("joiners select before polling");
         let mut state = self.batch.state.lock();
-        let joiners = state.joiners[index]
+        let BatchState {
+            joiners, inboxes, ..
+        } = &mut *state;
+        let joiners = joiners[index]
             .as_mut()
             .expect("only unpublished pages are selected");
 
         // Prune the joiners of dropped subscriptions only when the list is full, then leave as
         // much room as there are live joiners, so each selection costs amortized constant time.
         if joiners.len() == joiners.capacity() {
-            joiners.retain(|(_, sender)| !sender.is_closed());
+            joiners.retain(|&(_, reader)| inboxes[reader].is_some());
             joiners.reserve(joiners.len());
         }
-        joiners.push((tag, sender.clone()));
+        joiners.push((tag, self.reader));
         self.remaining += 1;
+    }
+
+    /// Take the next page delivered to this reader, if any.
+    fn take(&mut self) -> Option<Delivery> {
+        if self.taken.is_empty() {
+            let mut state = self.batch.state.lock();
+            if let Some(inbox) = &mut state.inboxes[self.reader] {
+                mem::swap(inbox, &mut self.taken);
+            }
+        }
+        self.taken.pop_front()
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        // Stop deliveries to this reader, and free those it never took after unlocking.
+        let inbox = self.batch.state.lock().inboxes[self.reader].take();
+        drop(inbox);
     }
 }
 
@@ -434,35 +461,35 @@ impl Stream for Subscription {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
-        this.sender = None;
         if this.remaining == 0 {
             return Poll::Ready(None);
         }
 
-        // Take a queued delivery, or else drive the batch and look again: driving may deliver one
-        // of this subscription's pages while others stay pending. The first look uses a no-op
-        // waker, so a delivery made while driving does not wake this task again. A completed
-        // driver is never polled again.
-        let received = match this
-            .receiver
-            .poll_recv(&mut Context::from_waker(Waker::noop()))
-        {
-            Poll::Ready(received) => received,
-            Poll::Pending => {
+        // Take a delivered page, or else drive the batch and look again: driving may deliver one
+        // of this reader's pages while others stay pending. Pages are delivered only while a
+        // reader drives the batch, and the driver wakes every reader that found it busy once that
+        // reader stops (see [Shared]), so the inbox needs no waker. A completed driver has made
+        // every delivery and is never polled again.
+        let delivery = match this.take() {
+            Some(delivery) => delivery,
+            None => {
                 let driver = this.driver.as_mut();
                 if driver.is_some_and(|driver| driver.poll_unpin(cx).is_ready()) {
                     this.driver = None;
                 }
-                ready!(this.receiver.poll_recv(cx))
+                match this.take() {
+                    Some(delivery) => delivery,
+                    None if this.driver.is_some() => return Poll::Pending,
+                    None => {
+                        // The batch ended before delivering every selected page, so it failed.
+                        this.remaining = 0;
+                        let error = this.batch.state.lock().error.clone();
+                        return Poll::Ready(Some(Err(error.unwrap_or(Error::ReadFailed))));
+                    }
+                }
             }
         };
-
-        // A closed channel means the batch failed before delivering every selected page.
-        let Some((tag, result)) = received else {
-            this.remaining = 0;
-            let error = this.batch.state.lock().error.clone();
-            return Poll::Ready(Some(Err(error.unwrap_or(Error::ReadFailed))));
-        };
+        let (tag, result) = delivery;
         this.remaining -= 1;
         if this.remaining == 0 {
             this.driver = None;
@@ -488,15 +515,10 @@ struct BatchRead<'a, 'b> {
 
 impl<'a, 'b> BatchRead<'a, 'b> {
     /// The share of the read that started `batch`, whose pages fill `pieces`, by index.
-    fn starting(
-        batch: Arc<Batch>,
-        driver: BatchDriver,
-        receiver: mpsc::UnboundedReceiver<Delivery>,
-        pieces: Vec<Pieces<'a, 'b>>,
-    ) -> Self {
+    fn starting(batch: Arc<Batch>, driver: BatchDriver, pieces: Vec<Pieces<'a, 'b>>) -> Self {
         Self {
             completion: Some(driver.clone()),
-            subscription: Subscription::starting(batch, driver, receiver),
+            subscription: Subscription::starting(batch, driver),
             pieces,
         }
     }
@@ -860,19 +882,17 @@ impl CacheRef {
                 let (physical, pieces): (Vec<_>, Vec<_>) = unread.into_iter().unzip();
                 let pages = pieces.iter().map(|pieces| pieces[0].0).collect();
                 let batch = Arc::new(Batch::new(blob_id, pages));
-                let (to_starter, receiver) = mpsc::unbounded_channel();
                 let retire = cache.batches.retire_on_drop(&batch);
                 let read = batch.clone().read(
                     self.cache.clone(),
                     blob.clone(),
                     physical,
                     self.page_size,
-                    to_starter,
                     retire,
                 );
                 let driver = Shared::new(read.boxed());
                 cache.batches.register(&batch, &driver);
-                reads.push(BatchRead::starting(batch, driver, receiver, pieces));
+                reads.push(BatchRead::starting(batch, driver, pieces));
             }
         }
 
@@ -1207,6 +1227,7 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        task::Waker,
         time::Duration,
     };
 
@@ -2230,7 +2251,9 @@ mod tests {
                 let state = batch.state.lock();
                 let pages = state.joiners.iter().map(|joiners| {
                     joiners.as_ref().map(|joiners| {
-                        let live = joiners.iter().filter(|(_, sender)| !sender.is_closed());
+                        let live = joiners
+                            .iter()
+                            .filter(|&&(_, reader)| state.inboxes[reader].is_some());
                         (joiners.len(), live.count())
                     })
                 });
@@ -2844,15 +2867,15 @@ mod tests {
             }
             assert_eq!(selected(&cache_ref), 2);
 
-            // Their senders stay until a later join of the page prunes them, so 64 cancelled
+            // Their selections stay until a later join of the page prunes them, so 64 cancelled
             // joins of page 1 leave only a few behind.
             for _ in 0..64 {
                 let mut cancelled = pin!(read_first_byte(&blob, &cache_ref, 1));
                 assert!(poll!(cancelled.as_mut()).is_pending());
             }
-            let (senders, subscribed) = joiners(&cache_ref)[1].unwrap();
+            let (selections, subscribed) = joiners(&cache_ref)[1].unwrap();
             assert_eq!(subscribed, 1);
-            assert!(senders < 8, "{senders} senders remain");
+            assert!(selections < 8, "{selections} selections remain");
 
             open(&mut opens);
             assert_eq!(kept.await.unwrap(), [1, 2]);
