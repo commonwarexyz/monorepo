@@ -6,38 +6,21 @@
 //! Concurrent readers often miss the same pages, for example a prefetch and the read it serves.
 //! Rather than read such a page again, a reader joins the read of it already in flight.
 //!
-//! A page fault reads its page with a standalone fetch, a shared future that every reader waiting
-//! on the page drives. A batched miss ([CacheRef::read_after_misses]) reads the pages nobody is
-//! reading with a batch. A batch is one [Blob::read_many] call, run by a shared future (the
-//! batch's driver) that validates and caches each page as it arrives and delivers it to the
-//! readers waiting on it. Caching and delivering a page is publishing it. The read that started a
-//! batch receives every page. Other readers join it by selecting the unpublished pages they need.
-//! Each holds a subscription with an inbox in the batch for its pages and a handle on the driver,
-//! so the batch progresses while any of its readers is polled and never waits on a slow one. The
-//! read that started a batch also awaits the driver's end, so a read error after the last page
-//! still fails it.
+//! A page fault reads its page with a standalone fetch. A batched miss
+//! ([CacheRef::read_after_misses]) reads every page nobody else is reading with one
+//! [Blob::read_many] call, a batch that validates and caches each page as it arrives and delivers
+//! it to the readers waiting on it. The read that started the batch receives every page and waits
+//! for the batch to end, so a late read error still fails it. Other readers join by selecting the
+//! pages the batch has yet to publish, which arrive in their own inbox. Fetches and batches run as
+//! [Shared] futures that every waiting reader drives, so no reader depends on a slow or dropped
+//! one, and each underlying read is polled about once per wake however many readers are waiting.
 //!
-//! Fetches and drivers are [Shared] futures. A reader may stop polling one, because it has its
-//! page or was dropped, without stranding the readers still waiting, and the underlying read is
-//! polled about once per wake however many readers wait on it.
-//!
-//! A reader joins every fetch and batch it needs before driving any of them. It examines its
-//! misses over several holds of the cache's write lock, letting waiting threads take the lock
-//! between holds, and registers its batch in the last hold, so a reader that misses one of those
-//! pages in between reads it too. A batch takes a page's joiners and caches the page, or fails,
-//! only under the cache's write lock, so a reader that finds a page unpublished can select it in
-//! the same hold, and then receives the page or the batch's failure.
-//!
-//! The cache registers batches weakly, so it never keeps a driver alive. A batch retires when its
-//! driver ends or is dropped. Retiring only queues the batch, and the cache unregisters it at its
-//! next lookup, so dropping a driver never takes the cache lock.
-//!
-//! The cache lock is taken before a batch's state lock, and the retirement queue's lock is taken
-//! last.
-//!
-//! Failures are shared like pages. A page failing validation fails every reader waiting on it, and
-//! a failed read fails the batch's starter and every reader still waiting on one of its pages.
-//! None of them retries.
+//! A reader joins everything it needs before driving any of it, examining its misses over a few
+//! holds of the cache's write lock and registering its own batch in the last, so a page another
+//! reader misses between those holds may still be read twice. A batch claims each page's selections
+//! under that lock, so a reader that selects an unpublished page always gets the page or the
+//! batch's error, and nothing is retried. The cache takes its lock before any batch's lock, and
+//! holds batches weakly so a finished or dropped batch never needs the cache lock.
 
 use super::{
     CHECKSUM_SIZE, get_page_with_checksum_from_blob, physical_page, validate_physical_page,
