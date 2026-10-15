@@ -35,8 +35,9 @@
 //! no request resources and may remain until later I/O service or ring teardown.
 //!
 //! Parking installs the wake poll if needed, then arms the mailbox waker and
-//! rechecks publication before blocking. A wake CQE without MORE requires rearm
-//! before the next blocking wait.
+//! checks for pending publication or a latched signal before blocking. A wake
+//! CQE without MORE requires rearm before the next blocking wait. See
+//! [`super::idle`] for how pool worker selection fits with this wait.
 //!
 //! # Cleanup
 //!

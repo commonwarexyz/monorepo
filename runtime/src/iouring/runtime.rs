@@ -102,20 +102,16 @@
 //! room for and no more than fill it to half. A pool worker that finds both
 //! queues empty after a service pass tries to steal before parking, or relies
 //! on workers already holding search counts when the search cap refuses it.
+//!
 //! Before parking, the worker checks readiness again because polls and
-//! callbacks can have produced more work, and a pool worker publishes itself in
-//! the idle set before its last look at the global queue and the other run
-//! queues. A pool worker that searches, or that a wake claimed, holds a search
-//! count, which keeps kicks from waking more workers. It returns the count
-//! before it runs user code, which can wake work and block waiting for a peer
-//! to run it: before each task or root poll and each nonempty callback batch,
-//! and whenever it goes round again without parking, since the catch-up service
-//! that can follow runs callbacks. It also returns the count before pending
-//! messages, which run no user code, to bound how long service turns can
-//! suppress kicks. A park returns the count before its final look. The last
-//! count returned outside a park wakes a parked worker, which carries on the
-//! search. The drive loop withdraws from the idle set and returns the count on
-//! every exit, unwinding included, before the root is destroyed.
+//! callbacks can produce more work. Pool workers coordinate through
+//! [`Searcher`], and all workers wait through their mailbox's
+//! [`Waker`](super::waker::Waker). See [`super::idle`] for parking order.
+//!
+//! A held search count suppresses kicks, so a worker returns it before user
+//! code, pending messages, and another turn without parking. Every drive-loop
+//! exit, including unwinding, withdraws any live idle publication and returns
+//! a held count before root destruction.
 //!
 //! ## Shutdown
 //!

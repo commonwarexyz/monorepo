@@ -1,25 +1,43 @@
-//! The pool's idle state: which pool workers are parked, which search the
-//! other run queues, and which parked worker a push wakes.
+//! The pool's idle state: idle publications, search counts, and which worker
+//! to wake for pool work.
 //!
 //! [`Idle`] holds that state for a [`Pool`]. Each pool worker searches and
 //! parks through its [`Searcher`], whose [`Searcher::prepare_park`] returns a
-//! [`Park`] that says what the worker does after its last look. The pool's
-//! pushes into its global queue and [`Pool::kick`] fence, then wake a parked
-//! worker through [`Idle::notify_global`] and [`Idle::notify`].
+//! [`Park`] that says what the worker does after its last look.
 //!
-//! The idle state decides whether a push needs a parked worker and which one,
-//! and claims it, but blocks and unblocks no thread itself. Each worker waits
-//! on the [`Waker`](super::waker::Waker) in its mailbox, which also wakes it
-//! for mailbox messages, and a claim signals that waker with
-//! [`Waker::wake`](super::waker::Waker::wake), which latches the signal if the
-//! worker has not blocked yet.
+//! # Idle state and waker
+//!
+//! On a kick, through [`Idle::notify`], or a push into the global queue,
+//! through [`Idle::notify_global`], [`Idle`] decides whether to wake a pool
+//! worker and which one. A successful claim clears that worker's idle bit and
+//! transfers a reserved search count, then calls [`Waker::wake`] on the
+//! worker's mailbox waker. The [`Waker`] delivers the signal to the worker's
+//! armed wait target, or latches it if none is armed. Mailbox messages and
+//! driver permit waits use the same waker without going through [`Idle`].
+//!
+//! A pool worker publishes its idle bit, returns any held search count, and
+//! fences before its last look for work. If it proceeds to wait, the
+//! publication stays live until withdrawal, even if a claim clears the bit.
+//!
+//! With unfinished I/O requests, [`Driver::park`] arms the waker's eventfd
+//! target before attempting the io_uring wait. Otherwise, [`Waker::park_idle`]
+//! arms its futex target after any unsuccessful spin. Both paths recheck for a
+//! latched signal or pending mailbox publication after arming, so an early wake
+//! can prevent blocking. After spinning or waiting, even if it did not block,
+//! the worker ends its publication through [`Searcher::finish_park`] before
+//! user code, keeping a claim's count.
+//!
+//! [`Driver::park`]: super::driver::Driver::park
+//! [`Waker`]: super::waker::Waker
+//! [`Waker::park_idle`]: super::waker::Waker::park_idle
+//! [`Waker::wake`]: super::waker::Waker::wake
 //!
 //! # Waking a parked worker
 //!
-//! [`Idle`] holds the idle set and the search count on one cache line,
-//! since every wake uses both. The idle set is one `u64` with a bit per
-//! worker, which is why a pool has at most [`MAX_WORKERS`] workers. A worker's
-//! bit is set while it is published as parked or about to park and no wake has
+//! [`Idle`] holds the idle set and the search count on one cache line for
+//! pool wake selection. The idle set is one `u64` with a bit per worker,
+//! which is why a pool has at most [`MAX_WORKERS`] workers. A worker's bit is
+//! set while it is published as parked or about to park and no wake has
 //! claimed it. Claiming a worker clears its bit, so each publication is claimed
 //! at most once. The search count tracks responsibility for finding work or
 //! handing the search on. A worker keeps its count across a search until it
