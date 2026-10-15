@@ -143,9 +143,9 @@
 //!
 //! When too few logs land, the ceremony fails and the next epoch keeps the
 //! previous threshold output, so committee changes and share refreshes stall
-//! until the configuration changes. The reshare actor only checks that the
-//! window has at least as many block heights as the quorum, which is necessary
-//! but not sufficient.
+//! until the configuration changes. The reshare actor does not check this
+//! requirement: it depends on the elector and term configuration, which the
+//! actor cannot see.
 //!
 //! # Secret Material
 //!
