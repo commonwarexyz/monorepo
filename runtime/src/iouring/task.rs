@@ -2045,7 +2045,10 @@ mod loom_tests {
         AfterPending, AfterPoll, Mailbox, Panics, Pool, REF_ONE, REFS, Ready, Runnable, State,
         Task, Tasks,
     };
-    use crate::iouring::{idle::Searcher, queue::STEALABLE};
+    use crate::iouring::{
+        idle::{Park, Searcher},
+        queue::{CAPACITY, STEALABLE},
+    };
     use loom::{
         sync::{
             Arc, Condvar, Mutex,
@@ -2443,6 +2446,95 @@ mod loom_tests {
             searching.join().unwrap();
             work(&pool, &set, &mut ready, 0, &completed, STEALABLE, false);
             parked.join().unwrap();
+            for task in handles {
+                assert_eq!(refs(&task.state), 1);
+            }
+        });
+    }
+
+    /// A parker that returns the last search count and runs because the
+    /// global queue has work hands the count on, so a parked peer still runs
+    /// the work that workers blocked in long polls wait for.
+    #[test]
+    fn test_run_after_the_last_count_wakes_a_parked_peer() {
+        // One more than a run queue holds, so the last push overflows.
+        const TASKS: usize = CAPACITY + 1;
+
+        let mut builder = loom::model::Builder::new();
+        builder.preemption_bound = Some(2);
+        builder.check(|| {
+            let pool = pool(4);
+            let set = Arc::new(Tasks::new(4));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
+            let gate: Gate = Arc::new((Mutex::new(0), Condvar::new()));
+
+            // Worker one parks with nothing queued anywhere, then runs once
+            // the other workers have set up their state.
+            let peer = thread::spawn({
+                let pool = pool.clone();
+                let set = set.clone();
+                let completed = completed.clone();
+                let gate = gate.clone();
+                move || {
+                    let mut ready = Ready::new(pool.queue(1).owner());
+                    {
+                        let mut searcher = Searcher::new(&pool, 1);
+                        assert_eq!(searcher.prepare_park(&ready), Park::Wait);
+                        reach(&gate, 1);
+
+                        pool.mailbox(1).waker.park_idle(0, None);
+                        await_stage(&gate, 2);
+                        searcher.finish_park();
+                        searcher.leave_search();
+                    }
+
+                    work(&pool, &set, &mut ready, 1, &completed, TASKS, false);
+                }
+            });
+
+            // This thread plays workers zero, two, and three. Worker zero
+            // parks, and worker two searches, finds nothing, and keeps its
+            // count.
+            await_stage(&gate, 1);
+            let mut r0 = Ready::new(pool.queue(0).owner());
+            let mut r2 = Ready::new(pool.queue(2).owner());
+            let mut r3 = Ready::new(pool.queue(3).owner());
+            let mut zero = Searcher::new(&pool, 0);
+            let mut two = Searcher::new(&pool, 2);
+            assert_eq!(zero.prepare_park(&r0), Park::Wait);
+            assert!(!two.search(&mut r2));
+
+            // Worker three overflows. Its kicks see worker two's count, and
+            // the overflow's push claims only worker zero.
+            let handles = enqueue_raising(&pool, &set, &mut r3, &ran, TASKS);
+
+            // Worker zero resumes with the claim's count, takes one runnable,
+            // and returns the count, which is not the last.
+            pool.mailbox(0).waker.consume_signal();
+            zero.finish_park();
+            let first_zero = pool.take(&mut r0).unwrap();
+            zero.leave_search();
+            assert!(r0.is_empty());
+
+            // Worker two returns the last count, sees the global queue, runs,
+            // and takes one runnable.
+            assert_eq!(two.prepare_park(&r2), Park::Run);
+            two.leave_search();
+            let first_two = pool.take(&mut r2).unwrap();
+            assert!(r2.is_empty());
+            drop((zero, two));
+            reach(&gate, 2);
+
+            // Workers zero, two, and three block in long polls until a task
+            // has run, which only worker one can do.
+            wait_ran(&ran);
+            complete(&pool, &set, first_zero, &completed, TASKS);
+            complete(&pool, &set, first_two, &completed, TASKS);
+            work(&pool, &set, &mut r3, 3, &completed, TASKS, false);
+            peer.join().unwrap();
+
+            assert_eq!(completed.load(Ordering::Acquire), TASKS);
             for task in handles {
                 assert_eq!(refs(&task.state), 1);
             }
