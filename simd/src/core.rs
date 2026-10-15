@@ -658,7 +658,7 @@ pub trait Neon: Simd {
 ///
 /// Register-capturing operations cannot execute on a different backend:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use commonware_simd::{IceLake, Operation, Simd, emulated::{EmulatedIceLake, EmulatedNeon}};
 ///
 /// fn foo<S: Simd>(value: S::U32) -> impl Operation<S, Output = S::U32> {
