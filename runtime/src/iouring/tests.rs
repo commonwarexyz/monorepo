@@ -3244,6 +3244,36 @@ fn test_wake_from_another_runtime_stays_in_its_own_pool() {
     assert_ne!(before, sender);
 }
 
+/// An ordinary task woken from a dedicated worker, which serves no task set,
+/// runs on a pool worker rather than on the dedicated thread, with one pool
+/// worker and with two.
+#[test]
+fn test_wake_from_a_dedicated_worker_goes_to_the_pool() {
+    for workers in [1, 2] {
+        Runner::new(config().with_worker_threads(workers)).start(|context| async move {
+            let (wake, waiter) = oneshot::channel::<()>();
+            let task = context.child("waiter").spawn(|_| async move {
+                let before = thread::current().id();
+                waiter.await.unwrap();
+                (before, thread::current().id())
+            });
+            reschedule().await;
+            let sender = context
+                .child("sender")
+                .dedicated()
+                .spawn(|_| async move {
+                    wake.send(()).unwrap();
+                    thread::current().id()
+                })
+                .await
+                .unwrap();
+            let (before, after) = task.await.unwrap();
+            assert_ne!(before, sender);
+            assert_ne!(after, sender, "ordinary task polled on a dedicated worker");
+        });
+    }
+}
+
 #[test]
 fn test_worker_count_scales_default_buffer_pools() {
     let cfg = config().with_worker_threads(4);
