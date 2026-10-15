@@ -29,8 +29,8 @@ instruction sets.
 For example, x86 has several iterations of SIMD, such as SSE2, AVX, and AVX-512,
 and some specialized instructions like GFNI, SHA-NI, etc. may not be available.
 Rather than trying to target all the possible combinations of these, we instead
-have a few "frontier" targets, which are platforms that are both widely available,
-and have all the gadgets you might want to use.
+have a few "frontier" targets, which are platforms that are both widely
+available, and have all the gadgets you might want to use.
 We also support NEON for platforms such as Apple silicon that lack SVE2.
 
 These platforms are:
@@ -39,8 +39,8 @@ These platforms are:
 - **NEON**: AArch64 with NEON and SHA2.
 - **Armv9**: AArch64 with NEON, SHA2, SVE, and SVE2.
 
-Being on this list means that we expose instructions beyond those which are supported
-on every platform.
+Being on this list means that we expose instructions beyond those which are
+supported on every platform.
 Algorithms can reasonably be expected to be optimized against these platforms,
 and make use of these instructions.
 
@@ -94,9 +94,9 @@ fn add_slices<S: Simd>(simd: S, a: &[u64], b: &[u64], output: &mut [u64]) {
 ```
 
 Slices need only their element type's alignment, not vector alignment. Aligning
-buffers to vector boundaries can help performance, but is not required for correctness.
-Use the lane count for each element type independently; backends need not use the
-same vector width for `u8`, `u32`, and `u64`.
+buffers to vector boundaries can help performance, but is not required for
+correctness. Use the lane count for each element type independently; backends
+need not use the same vector width for `u8`, `u32`, and `u64`.
 
 Functions that are generic over `Simd` compose naturally. The backend token is
 copied into each helper:
@@ -117,10 +117,11 @@ fn add_three<S: Simd>(simd: S, a: S::U64, b: S::U64, c: S::U64) -> S::U64 {
 
 ### Operations
 
-An `Operation` can define equivalent algorithms for different backends. Implement
-`portable` using the common instructions, then optionally override `ice_lake`, `neon`, or
-`arm_v9` to use that profile's extra instructions. `arm_v9` defaults to `neon`, and
-every other specialized path defaults to `portable`. Each path must produce the same result.
+An `Operation` can define equivalent algorithms for different backends.
+Implement `portable` using the common instructions, then optionally override
+`ice_lake`, `neon`, or `arm_v9` to use that profile's extra instructions.
+`arm_v9` defaults to `neon`, and every other specialized path defaults to
+`portable`. Each path must produce the same result.
 
 Our addition example needs only common instructions. A function returning
 `impl Operation<S>` can capture vector values such as `S::U64`:
@@ -142,8 +143,8 @@ fn kernel<S: Simd>(simd: S, a: S::U64, b: S::U64) -> S::U64 {
 The operation returned by `add::<S>` above remains tied to `S`, even when
 different backends share a register representation.
 
-At the outer boundary, `dispatch` selects a native backend supported by the host,
-falling back to scalar emulation.
+At the outer boundary, `dispatch` selects a native backend supported by the
+host, falling back to scalar emulation.
 The default `std` feature enables runtime CPU feature detection. Without `std`,
 native backends require their features to be enabled at compile time.
 Targets whose architecture is supported but which lack a required baseline
@@ -188,8 +189,9 @@ fn add_scalar<S: Simd>(simd: S, a: u64, b: u64) -> u64 {
 }
 ```
 
-Such a closure implements `Operation` for that particular backend; use the struct
-adapter above when runtime dispatch requires several backend implementations.
+Such a closure implements `Operation` for that particular backend; use the
+struct adapter above when runtime dispatch requires several backend
+implementations.
 Closures that only implement `FnOnce` are not supported.
 
 ### Testing
@@ -197,8 +199,8 @@ Closures that only implement `FnOnce` are not supported.
 When testing an operation, check both that it agrees across backends and that it
 matches an independent reference implementation.
 
-Use `check_consistent` in a fuzz test to compare all emulated backends. Using the
-`Add` operation above:
+Use `check_consistent` in a fuzz test to compare all emulated backends. Using
+the `Add` operation above:
 
 ```rust
 # use commonware_simd::{Operation, Simd};
@@ -257,9 +259,10 @@ check instruction implementations on supported hardware.
 
 ### Performance Footguns
 
-Enter a whole SIMD kernel through `simd.execute(#[inline(always)] |simd: S| ...)`.
-You can also define an `#[inline(always)]` function returning `impl Operation<S>`
-and pass its result to `simd.execute`. Annotate the returned operation's body with
+Enter a whole SIMD kernel through
+`simd.execute(#[inline(always)] |simd: S| ...)`. You can also define an
+`#[inline(always)]` function returning `impl Operation<S>` and pass its result
+to `simd.execute`. Annotate the returned operation's body with
 `#[inline(always)]` as well, as in the `add` example above.
 Native execution establishes the required CPU target features at this boundary.
 Passing a backend token to an ordinary helper does not give that helper the same
