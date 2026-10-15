@@ -21,7 +21,7 @@ letting you write performant and readable algorithms.
 ## Backends
 
 This crate does not aim to implement every SIMD instruction that exists.
-We focus on instructions that are useful in the rest of the codebase.
+We focus on instructions that are useful in the rest of the library.
 In particular, we don't imagine that floating-point instructions will be useful.
 
 We also don't try to track every possible subset or iteration of particular
