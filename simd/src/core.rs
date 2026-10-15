@@ -360,7 +360,7 @@ pub trait Simd: Copy {
     /// target-feature scope. Emulated implementations require no corresponding hardware
     /// features.
     ///
-    /// Enter a whole SIMD kernel with `simd.execute(#[inline(always)] |simd| ...)`.
+    /// Enter a whole SIMD kernel with `simd.execute(#[inline(always)] |simd: S| ...)`.
     /// A kernel is a substantial SIMD computation that keeps intermediates in registers.
     /// The closure body and hot shared SIMD helpers must inline into the target-feature scope;
     /// annotate both with `#[inline(always)]`. Receiving a token alone does not give an
@@ -386,7 +386,7 @@ pub trait Simd: Copy {
 ///
 /// This profile models 512-bit vectors with 64 unsigned byte lanes, 16 unsigned
 /// 32-bit lanes, and eight unsigned 64-bit lanes. Native implementations require
-/// AVX-512F, AVX-512BW, GFNI, AVX-512 IFMA, SHA, SSSE3, and SSE4.1.
+/// AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, and SHA-NI.
 /// The name identifies an instruction bundle, not a required CPU vendor or model.
 ///
 /// Instruction contracts use the [notation defined by `Simd`](Simd#instruction-notation).
@@ -609,7 +609,7 @@ pub trait Neon: Simd {
 ///
 /// Closures implementing `FnMut(S) -> R` are operations with output `R` and are invoked
 /// once per execution. They may own inputs and borrow mutable state; closures that only
-/// implement `FnOnce` are excluded. Use `simd.execute(#[inline(always)] |simd| ...)`
+/// implement `FnOnce` are excluded. Use `simd.execute(#[inline(always)] |simd: S| ...)`
 /// to enter a whole kernel: a substantial SIMD computation that keeps intermediates in
 /// registers. Ordinary generic functions can compose leaves and return results directly.
 /// The closure body and hot shared SIMD helpers must inline

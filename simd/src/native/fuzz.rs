@@ -70,6 +70,12 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
         )* };
     }
     blend!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    macro_rules! shuffle {
+        ($($mask:literal),*) => { $(
+            assert_eq!(fixed(n, n.u32x4_shuffle::<$mask>(na)), fixed(e, e.u32x4_shuffle::<$mask>(ea)));
+        )* };
+    }
+    shuffle!(0, 14, 27, 177, 255);
     let a: [u8; 65] = u.arbitrary()?;
     let b: [u8; 65] = u.arbitrary()?;
     let na = n.u8_load(&a[1..]);
@@ -331,10 +337,6 @@ pub fn ice_lake<N: IceLake, E: IceLake>(
     narrow!(sha256_rounds2(na, nb, nk); (ea, eb, ek));
     narrow!(sha256_msg1(na, nb); (ea, eb));
     narrow!(sha256_msg2(na, nb); (ea, eb));
-    macro_rules! shuffles128 { ($($m:literal),*) => { $(
-        assert_eq!(words128(n, n.u32x4_shuffle::<$m>(na)), words128(e, e.u32x4_shuffle::<$m>(ea)));
-    )* }; }
-    shuffles128!(0, 14, 27, 177, 255);
     let a: [u64; 8] = u.arbitrary()?;
     let b: [u64; 8] = u.arbitrary()?;
     let acc: [u64; 8] = u.arbitrary()?;

@@ -123,7 +123,7 @@ jobs:
           - fuzz_dir: storage/fuzz
             partition: "8/8"
           - fuzz_dir: simd/fuzz
-          # Apple Silicon executes the NEON/SHA2 backend on native hardware.
+          # Apple Silicon has SHA-2 without SVE.
           - fuzz_dir: simd/fuzz
             os: macos-15
             simd-backend: neon

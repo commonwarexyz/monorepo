@@ -218,18 +218,20 @@ jobs:
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             sde: icx
             simd-backend: ice_lake
-            cpu-features: "ssse3 sse4.1 avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma gfni vpclmulqdq"
+            cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma gfni vpclmulqdq"
           # Skylake-SP has AVX-512 without SHA-NI, IFMA, GFNI, or VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             sde: skx
+            simd-backend: scalar
             cpu-features: "avx2 bmi2 adx !sha avx512f avx512bw avx512vl !avx512ifma !gfni !vpclmulqdq"
           # Zen 2 has AVX2 and SHA-NI without AVX-512.
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: EPYC-Rome
+            simd-backend: scalar
             cpu-features: "avx2 bmi2 adx sha !avx512f"
           - os: ubuntu-latest
             package: commonware-cryptography
@@ -241,8 +243,9 @@ jobs:
           # Broadwell has AVX2, BMI2, and ADX without SHA-NI or AVX-512.
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: Broadwell
+            simd-backend: scalar
             cpu-features: "avx2 bmi2 adx !sha !avx512f"
           # Neoverse N2 has SHA-3 and SVE2.
           - os: ubuntu-24.04-arm
@@ -275,10 +278,10 @@ jobs:
           - os: ubuntu-latest
             package: commonware-simd
             flags: "--cargo-profile release --target x86_64-unknown-linux-gnu --no-default-features --lib"
-            rustflags: "-C target-feature=+avx512f,+avx512bw,+gfni,+avx512ifma,+sha,+ssse3,+sse4.1"
-            static-features: "avx512f avx512bw gfni avx512ifma sha ssse3 sse4.1"
+            rustflags: "-C target-feature=+avx512f,+avx512bw,+gfni,+avx512ifma,+sha"
+            static-features: "avx512f avx512bw gfni avx512ifma sha"
             sde: icx
-            cpu-features: "avx512f avx512bw gfni avx512ifma sha ssse3 sse4.1"
+            cpu-features: "avx512f avx512bw gfni avx512ifma sha"
             simd-backend: ice_lake
           - os: ubuntu-24.04-arm
             package: commonware-simd

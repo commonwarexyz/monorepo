@@ -5,9 +5,8 @@ use core::arch::x86_64::*;
 
 /// Native Ice Lake execution token with 64 byte, 16 u32, and eight u64 lanes.
 ///
-/// Construction checks AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, SHA, SSSE3,
-/// and SSE4.1. AVX-512BW
-/// supplies byte-masked memory operations, byte broadcasts, and word shifts used
+/// Construction checks AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, and SHA. AVX-512BW
+/// supplies byte-masked memory operations, byte shuffles, and word shifts used
 /// to implement independent byte shifts. Copies preserve the feature guarantee.
 /// No CPU vendor or model is required.
 #[derive(Clone, Copy, Debug)]
@@ -130,22 +129,18 @@ impl NativeIceLake {
             && std::arch::is_x86_feature_detected!("avx512bw")
             && std::arch::is_x86_feature_detected!("gfni")
             && std::arch::is_x86_feature_detected!("avx512ifma")
-            && std::arch::is_x86_feature_detected!("sha")
-            && std::arch::is_x86_feature_detected!("ssse3")
-            && std::arch::is_x86_feature_detected!("sse4.1");
+            && std::arch::is_x86_feature_detected!("sha");
         #[cfg(not(feature = "std"))]
         let supported = cfg!(target_feature = "avx512f")
             && cfg!(target_feature = "avx512bw")
             && cfg!(target_feature = "gfni")
             && cfg!(target_feature = "avx512ifma")
-            && cfg!(target_feature = "sha")
-            && cfg!(target_feature = "ssse3")
-            && cfg!(target_feature = "sse4.1");
+            && cfg!(target_feature = "sha");
         supported.then_some(Self(()))
     }
 
     #[inline]
-    #[target_feature(enable = "avx512f,avx512bw,gfni,avx512ifma,sha,ssse3,sse4.1")]
+    #[target_feature(enable = "avx512f,avx512bw,gfni,avx512ifma,sha")]
     unsafe fn execute_ice_lake<O: Operation<Self>>(self, operation: O) -> O::Output {
         operation.ice_lake(self)
     }
