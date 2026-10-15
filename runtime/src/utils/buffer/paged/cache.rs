@@ -1218,7 +1218,14 @@ mod tests {
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::{select, test_traced};
-    use commonware_utils::{NZU16, NZUsize, channel::oneshot, sync::Mutex};
+    use commonware_utils::{
+        NZU16, NZUsize,
+        channel::{
+            mpsc::{UnboundedReceiver, unbounded_channel},
+            oneshot,
+        },
+        sync::Mutex,
+    };
     use futures::{future::pending, poll};
     use rand::{RngExt as _, seq::SliceRandom as _};
     use rstest::rstest;
@@ -2567,6 +2574,201 @@ mod tests {
         // again and finishes.
         assert!(starter_wakes.0.load(Ordering::SeqCst) > woken_before.load(Ordering::SeqCst));
         assert!(matches!(poll_starter(), Poll::Ready(Ok(ref bytes)) if bytes == &[0, 1]));
+    }
+
+    /// Bounds each wait of [test_reader_that_stops_driving_rewakes_waiting_reader_on_tokio]'s
+    /// schedule. Every step normally completes at once, so the bound only turns a stall into a
+    /// failure.
+    const SCHEDULE_DEADLINE: Duration = Duration::from_secs(30);
+
+    /// A page a batched blob read yields (see [Blob::read_many]).
+    type Completion = Result<(usize, IoBufsMut), Error>;
+
+    /// A blob whose batched read of two pages yields the completions another thread sends it, and
+    /// pauses its first poll that finds none after the first, keeping the waker it registered.
+    struct CompletionBlob {
+        completions: Mutex<Option<UnboundedReceiver<Completion>>>,
+        /// Signals that the stream paused.
+        paused: std::sync::mpsc::Sender<()>,
+        /// Resumes the paused stream.
+        resume: Mutex<std::sync::mpsc::Receiver<()>>,
+        /// Completions the stream yielded.
+        yielded: AtomicUsize,
+    }
+
+    impl Blob for CompletionBlob {
+        async fn read_at(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            unreachable!("pages are read in batches")
+        }
+
+        async fn read_at_buf(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _bufs: impl Into<IoBufsMut> + Send,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            unreachable!("pages are read in batches")
+        }
+
+        fn read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            _options: ReadOptions,
+        ) -> impl futures::Stream<Item = Completion> + Send {
+            assert_eq!(ranges.len(), 2);
+            let mut completions = self.completions.lock().take().unwrap();
+            let mut paused = false;
+            futures::stream::poll_fn(move |cx| {
+                if self.yielded.load(Ordering::SeqCst) == 2 {
+                    return Poll::Ready(None);
+                }
+                let result = completions.poll_recv(cx);
+                if result.is_ready() {
+                    self.yielded.fetch_add(1, Ordering::SeqCst);
+                }
+
+                // Hold the first poll that finds no completion after the first was yielded, as
+                // when its thread is preempted, so the last completion arrives before it returns.
+                if result.is_pending() && self.yielded.load(Ordering::SeqCst) == 1 && !paused {
+                    paused = true;
+                    self.paused.send(()).unwrap();
+                    self.resume.lock().recv_timeout(SCHEDULE_DEADLINE).unwrap();
+                }
+                result
+            })
+        }
+
+        async fn write_at(
+            &self,
+            _offset: u64,
+            _bufs: impl Into<IoBufs> + Send,
+            _options: WriteOptions,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn resize(&self, _len: u64) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
+        }
+    }
+
+    /// The schedule of [test_reader_that_stops_driving_rewakes_waiting_reader], on worker threads
+    /// of the multi-threaded tokio runtime. A two-page batch's last completion arrives while a
+    /// read of page 0 that joined the batch drives it, and the batch's starter, woken by the first
+    /// completion, is polled meanwhile and finds the batch busy. The joiner gets its page and
+    /// stops driving. The starter must still finish, with nothing outside the batch to wake it.
+    #[test]
+    fn test_reader_that_stops_driving_rewakes_waiting_reader_on_tokio() {
+        let runner = crate::tokio::Runner::new(crate::tokio::Config::new().with_worker_threads(4));
+        runner.start(|context| async move {
+            for _ in 0..20 {
+                let (completions, receiver) = unbounded_channel();
+                let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+                let (resume_stream_tx, resume_stream_rx) = std::sync::mpsc::channel();
+                let blob = Arc::new(CompletionBlob {
+                    completions: Mutex::new(Some(receiver)),
+                    paused: paused_tx,
+                    resume: Mutex::new(resume_stream_rx),
+                    yielded: AtomicUsize::new(0),
+                });
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+
+                // The starter reads pages 0 and 1 with one batch, and its first poll finds no
+                // completion. Its second poll, after the first completion woke it, holds its
+                // thread until the last completion has arrived, then finds the joiner driving.
+                let (first_polled_tx, first_polled_rx) = std::sync::mpsc::channel();
+                let (second_poll_tx, second_poll_rx) = std::sync::mpsc::channel();
+                let (resume_starter_tx, resume_starter_rx) = std::sync::mpsc::channel();
+                let (second_polled_tx, second_polled_rx) = std::sync::mpsc::channel();
+                let starter = context.child("starter").spawn({
+                    let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                    move |_| async move {
+                        let mut read = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1]));
+                        let mut polls = 0;
+                        poll_fn(move |cx| {
+                            polls += 1;
+                            if polls == 2 {
+                                second_poll_tx.send(()).unwrap();
+                                resume_starter_rx.recv_timeout(SCHEDULE_DEADLINE).unwrap();
+                            }
+                            let result = read.as_mut().poll(cx);
+                            if polls <= 2 {
+                                assert!(result.is_pending());
+                                let polled = if polls == 1 {
+                                    &first_polled_tx
+                                } else {
+                                    &second_polled_tx
+                                };
+                                polled.send(()).unwrap();
+                            }
+                            result
+                        })
+                        .await
+                    }
+                });
+
+                // Deliver each completion at its point in the schedule, start the joiner once
+                // the starter's second poll holds its thread, and resume the paused stream only
+                // after the starter found the batch busy.
+                let (start_joiner_tx, start_joiner_rx) = oneshot::channel();
+                let schedule = std::thread::spawn(move || {
+                    first_polled_rx.recv_timeout(SCHEDULE_DEADLINE).unwrap();
+                    completions
+                        .send(Ok((0, IoBufsMut::from(full_page(0)))))
+                        .unwrap();
+                    second_poll_rx.recv_timeout(SCHEDULE_DEADLINE).unwrap();
+                    start_joiner_tx.send(()).unwrap();
+                    paused_rx.recv_timeout(SCHEDULE_DEADLINE).unwrap();
+                    completions
+                        .send(Ok((1, IoBufsMut::from(full_page(1)))))
+                        .unwrap();
+                    resume_starter_tx.send(()).unwrap();
+                    second_polled_rx.recv_timeout(SCHEDULE_DEADLINE).unwrap();
+                    resume_stream_tx.send(()).unwrap();
+                });
+                select! {
+                    result = start_joiner_rx => result.unwrap(),
+                    _ = context.sleep(SCHEDULE_DEADLINE) => panic!("starter was not polled again"),
+                }
+
+                // The joiner reads page 0, joining the batch and driving it until it pauses.
+                let joiner = context.child("joiner").spawn({
+                    let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
+                    move |_| async move { read_first_byte(&blob, &cache_ref, 0).await }
+                });
+                let joined = select! {
+                    result = joiner => result.unwrap(),
+                    _ = context.sleep(SCHEDULE_DEADLINE) => panic!("joiner stalled"),
+                };
+                assert_eq!(joined.unwrap(), 0);
+                schedule.join().unwrap();
+
+                // Nothing outside the batch wakes the starter again.
+                let started = select! {
+                    result = starter => result.unwrap(),
+                    _ = context.sleep(SCHEDULE_DEADLINE) => {
+                        panic!("starter stalled after the joiner left")
+                    },
+                };
+                assert_eq!(started.unwrap(), [0, 1]);
+                assert_eq!(blob.yielded.load(Ordering::SeqCst), 2);
+                assert_idle(&cache_ref);
+            }
+        });
     }
 
     #[rstest]
