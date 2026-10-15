@@ -2391,7 +2391,6 @@ dependencies = [
  "rayon",
  "rstest",
  "serde_json",
- "sha2 0.11.0",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",

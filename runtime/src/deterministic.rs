@@ -144,8 +144,8 @@ impl Metrics {
     }
 }
 
-/// A SHA-256 digest.
-type Digest = [u8; 32];
+/// A CRC32C digest.
+type Digest = [u8; 4];
 
 /// Hashes an unambiguous sequence of fields for deterministic runtime auditing.
 #[derive(Default)]
@@ -171,20 +171,20 @@ impl AuditHasher {
     }
 
     /// Returns the digest of all fields added to the audit.
-    pub(crate) fn finalize(self) -> [u8; 4] {
+    pub(crate) fn finalize(self) -> Digest {
         self.0.finalize().1.0
     }
 }
 
 /// Track the state of the runtime for determinism auditing.
 pub struct Auditor {
-    digest: Mutex<[u8; 4]>,
+    digest: Mutex<Digest>,
 }
 
 impl Default for Auditor {
     fn default() -> Self {
         Self {
-            digest: <[u8; 4]>::default().into(),
+            digest: Digest::default().into(),
         }
     }
 }
@@ -1127,7 +1127,7 @@ impl Context {
         self.executor().auditor.clone()
     }
 
-    /// Compute a [commonware_cryptography::Sha256] digest of all storage contents.
+    /// Compute a [Crc32] digest of all storage contents.
     pub fn storage_audit(&self) -> Digest {
         self.storage.inner().inner().inner().audit()
     }
@@ -2091,6 +2091,7 @@ mod tests {
 
     #[test]
     fn test_auditor_separates_events() {
+        // Event boundaries must distinguish separate events from fields of a single event.
         let split = Auditor::default();
         split.event(b"a", |hasher| hasher.update(b"x"));
         split.event(b"b", |_| {});
@@ -2110,12 +2111,14 @@ mod tests {
         let uninterrupted = Auditor::default();
         assert_eq!(observed.state(), "00000000");
 
+        // Reading the fingerprint repeatedly must neither reset nor advance the audit.
         observed.event(b"a", |hasher| hasher.update(b"x"));
         let before = observed.state();
         assert_eq!(before.len(), 8);
         assert_eq!(before, observed.state());
         observed.event(b"b", |hasher| hasher.update(b"y"));
 
+        // The same history must match even when no intermediate fingerprint was read.
         uninterrupted.event(b"a", |hasher| hasher.update(b"x"));
         uninterrupted.event(b"b", |hasher| hasher.update(b"y"));
         assert_ne!(observed.state(), before);
@@ -2124,6 +2127,7 @@ mod tests {
 
     #[test]
     fn test_auditor_ignores_buffer_chunking() {
+        // Physical buffer boundaries must not affect the audit of the same logical payload.
         let contiguous = Auditor::default();
         contiguous.event(b"send", |hasher| hasher.update(b"abcd"));
 
@@ -2136,6 +2140,7 @@ mod tests {
         chunked.event(b"send", |hasher| hasher.update_bufs(&bufs));
         assert_eq!(contiguous.state(), chunked.state());
 
+        // A content change must still be detected when the payload length is unchanged.
         let different = Auditor::default();
         different.event(b"send", |hasher| hasher.update(b"abce"));
         assert_ne!(contiguous.state(), different.state());

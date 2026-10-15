@@ -1,11 +1,10 @@
 use super::{Header, Layout};
 use crate::{
     BlobVersion, Buf, BufferPool, DEFAULT_BLOB_LAYOUT, Handle, IoBufs, IoBufsMut, ReadOptions,
-    WriteOptions,
+    WriteOptions, deterministic::AuditHasher,
 };
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
-use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 
 pub mod open;
@@ -99,28 +98,24 @@ impl Storage {
         Self::with_partitions(snapshot.0, pool)
     }
 
-    /// Compute a SHA-256 digest of all blob contents.
-    pub fn audit(&self) -> [u8; 32] {
+    /// Compute a CRC32C digest of all blob contents.
+    pub fn audit(&self) -> [u8; 4] {
         let partitions = self.partitions.lock();
-        let mut hasher = Sha256::new();
-        let mut field = |value: &[u8]| {
-            hasher.update((value.len() as u64).to_be_bytes());
-            hasher.update(value);
-        };
-        field(b"commonware-runtime-storage-audit-v1");
+        let mut hasher = AuditHasher::default();
+        hasher.update(b"commonware-runtime-storage-audit-v1");
 
         for (partition_name, blobs) in partitions.iter() {
             for (blob_name, content) in blobs.iter() {
-                field(b"partition");
-                field(partition_name.as_bytes());
-                field(b"blob");
-                field(blob_name);
-                field(b"content");
-                field(content);
+                hasher.update(b"partition");
+                hasher.update(partition_name.as_bytes());
+                hasher.update(b"blob");
+                hasher.update(blob_name);
+                hasher.update(b"content");
+                hasher.update(content);
             }
         }
 
-        hasher.finalize().into()
+        hasher.finalize()
     }
 
     fn open_inner(
