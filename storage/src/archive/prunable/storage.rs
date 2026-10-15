@@ -217,11 +217,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
                     extra_indices.entry(entry.index).or_default().push(position);
                 }
             }
-            keys.insert(&entry.key, entry.index);
-            section_keys
-                .entry(section)
-                .or_default()
-                .push(keys.translate(entry.key.as_ref()));
+            let translated = keys.insert_translated(&entry.key, entry.index);
+            section_keys.entry(section).or_default().push(translated);
             intervals.insert(entry.index);
         }
         let oversized = replay.finish_tracked().await?;
@@ -396,11 +393,11 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.intervals.insert(index);
 
         // Index the record by key and remember its translated key for pruning.
-        self.keys.insert(&key, index);
+        let translated = self.keys.insert_translated(&key, index);
         self.section_keys
             .entry(section)
             .or_default()
-            .push(self.keys.translate(key.as_ref()));
+            .push(translated);
 
         // Include this section in the next sync request.
         self.pending.insert(section);

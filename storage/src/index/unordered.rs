@@ -119,9 +119,23 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         }
     }
 
-    /// Translate `key` into the key its values are stored under.
-    pub(crate) fn translate(&self, key: &[u8]) -> T::Key {
-        self.translator.transform(key)
+    /// Insert `value` under `key` and return the translated key it is stored under, which
+    /// [Self::retain_translated] accepts.
+    pub(crate) fn insert_translated(&mut self, key: &[u8], value: V) -> T::Key {
+        let k = self.translator.transform(key);
+        match self.map.entry(k) {
+            Entry::Occupied(mut entry) => {
+                // The newest value is stored inline; the displaced value joins the end of the
+                // overflow chain.
+                let old = std::mem::replace(entry.get_mut(), value);
+                push_displaced(&mut self.overflow, k, old);
+                self.items.inc();
+            }
+            Entry::Vacant(entry) => {
+                Self::create(&self.keys, &self.items, entry, value);
+            }
+        }
+        k
     }
 
     /// Retain only the values stored under the translated key `k` for which `should_retain`
@@ -218,19 +232,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     }
 
     fn insert(&mut self, key: &[u8], v: V) {
-        let k = self.translator.transform(key);
-        match self.map.entry(k) {
-            Entry::Occupied(mut entry) => {
-                // The newest value is stored inline; the displaced value joins the end of the
-                // overflow chain.
-                let old = std::mem::replace(entry.get_mut(), v);
-                push_displaced(&mut self.overflow, k, old);
-                self.items.inc();
-            }
-            Entry::Vacant(entry) => {
-                Self::create(&self.keys, &self.items, entry, v);
-            }
-        }
+        self.insert_translated(key, v);
     }
 
     fn insert_and_retain(

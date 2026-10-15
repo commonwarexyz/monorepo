@@ -2606,11 +2606,12 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_unordered(context);
-            let k = index.translate(b"same");
-            let mut pruned = 0;
+            let k = index.insert_translated(b"same", 0);
+            index.retain_translated(k, |_| false);
+            let mut pruned = 1;
             for mask in 0u8..32 {
                 for value in 0..5 {
-                    index.insert(b"same", value);
+                    assert_eq!(index.insert_translated(b"same", value), k);
                 }
                 let before = index.pruned();
                 index.retain_translated(k, |value| mask & (1 << value) != 0);
