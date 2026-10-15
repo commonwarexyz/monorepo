@@ -1,8 +1,9 @@
 //! Backend-typed register composition.
 
-use crate::{
-    ArmV9, IceLake, Neon, Operation, Simd, check_consistent,
+use commonware_simd::{
+    ArmV9, IceLake, Neon, Operation, Simd, check_consistent, dispatch,
     emulated::{EmulatedArmV9, EmulatedIceLake, EmulatedNeon, EmulatedScalar},
+    test_dispatch,
 };
 
 #[derive(Debug, PartialEq)]
@@ -62,7 +63,7 @@ fn compose<S: Simd>(simd: S, input: u32, path: &mut Option<(Path, usize)>) -> S:
     simd.u32_add(value, simd.u32_splat(1))
 }
 
-fn expected(input: u32) -> u32 {
+const fn expected(input: u32) -> u32 {
     (input ^ 0xa5a5_a5a5).rotate_right(7).wrapping_add(1)
 }
 
@@ -87,15 +88,15 @@ fn typed_register_composition() {
     check(EmulatedNeon, Path::Neon);
 
     #[cfg(target_arch = "x86_64")]
-    if let Some(simd) = crate::native::NativeIceLake::new() {
+    if let Some(simd) = commonware_simd::native::NativeIceLake::new() {
         check(simd, Path::IceLake);
     }
     #[cfg(target_arch = "aarch64")]
     {
-        if let Some(simd) = crate::native::NativeArmV9::new() {
+        if let Some(simd) = commonware_simd::native::NativeArmV9::new() {
             check(simd, Path::ArmV9);
         }
-        if let Some(simd) = crate::native::NativeNeon::new() {
+        if let Some(simd) = commonware_simd::native::NativeNeon::new() {
             check(simd, Path::Neon);
         }
     }
@@ -118,15 +119,15 @@ fn normalize_at_outer_boundary() {
 
     for input in [0, 1, u32::MAX, 0xdead_beef] {
         check_consistent(|| Root(input));
-        assert_eq!(crate::dispatch(Root(input)), expected(input));
-        assert_eq!(crate::test_dispatch(Root(input)), expected(input));
+        assert_eq!(dispatch(Root(input)), expected(input));
+        assert_eq!(test_dispatch(Root(input)), expected(input));
     }
 }
 
 #[test]
 fn kernel_closure_owns_input_and_borrows_mutably() {
     fn check<S: Simd>(simd: S, expected_path: Path) {
-        let mut inputs = std::vec![0, 1, u32::MAX, 0xdead_beef];
+        let mut inputs = vec![0, 1, u32::MAX, 0xdead_beef];
         let mut path = None;
         let path_ref = &mut path;
         let mut calls = 0;
@@ -161,15 +162,15 @@ fn kernel_closure_owns_input_and_borrows_mutably() {
     check(EmulatedNeon, Path::Neon);
 
     #[cfg(target_arch = "x86_64")]
-    if let Some(simd) = crate::native::NativeIceLake::new() {
+    if let Some(simd) = commonware_simd::native::NativeIceLake::new() {
         check(simd, Path::IceLake);
     }
     #[cfg(target_arch = "aarch64")]
     {
-        if let Some(simd) = crate::native::NativeArmV9::new() {
+        if let Some(simd) = commonware_simd::native::NativeArmV9::new() {
             check(simd, Path::ArmV9);
         }
-        if let Some(simd) = crate::native::NativeNeon::new() {
+        if let Some(simd) = commonware_simd::native::NativeNeon::new() {
             check(simd, Path::Neon);
         }
     }

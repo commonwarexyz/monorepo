@@ -9,8 +9,6 @@
 extern crate std;
 
 commonware_macros::stability_scope!(ALPHA {
-    #[cfg(test)]
-    mod operation_tests;
     mod consistency;
     pub use consistency::check_consistent;
     mod core;
