@@ -33,13 +33,14 @@ const INLINE_WAKES: usize = 4;
 /// Exactly one clone polls the inner future at a time. A clone polled meanwhile registers its
 /// waker and returns [Poll::Pending] without waiting for that poll. A clone's waker stays
 /// registered until the clone completes or is dropped, and waking the inner future wakes every
-/// registered clone. If the inner future is woken while a clone polls it, that clone wakes every
-/// other clone again once it stops polling, so a clone that went back to sleep after finding the
-/// inner future busy polls it. Progress therefore never depends on any particular clone being
-/// polled again: a clone may stop polling, because it is dropped or finished through another
-/// path, without stranding the others. A clone polled when the inner future was not woken since
-/// its last poll only registers, so the inner future is polled about once per wake however many
-/// clones are woken.
+/// registered clone. If the inner future is woken while a clone polls it, or another clone finds
+/// it busy meanwhile, the polling clone wakes every other clone again once it stops polling, so a
+/// clone that went back to sleep after finding the inner future busy observes what that poll did
+/// and polls the inner future if it was woken. Progress therefore never depends on any particular
+/// clone being polled again: a clone may stop polling, because it is dropped or finished through
+/// another path, without stranding the others. A clone polled when the inner future was not woken
+/// since its last poll only registers, so the inner future is polled about once per wake however
+/// many clones are woken.
 ///
 /// # Panics
 ///
@@ -76,6 +77,8 @@ struct State<F: Future> {
     /// Whether the inner future was woken since a clone last started polling it, or was never
     /// polled. While it is unset, the inner future cannot make progress, so clones only register.
     woken: bool,
+    /// Whether a clone found the inner future busy since a clone last started polling it.
+    contended: bool,
     /// The waker of each clone waiting on the future, indexed by the clone's key. Completion
     /// takes them all.
     wakers: Vec<Option<Waker>>,
@@ -180,6 +183,7 @@ impl<F: Future> Shared<F> {
                 state: Mutex::new(State {
                     stage: Stage::Idle(future),
                     woken: true,
+                    contended: false,
                     wakers: Vec::new(),
                     free: Vec::new(),
                 }),
@@ -242,6 +246,7 @@ where
             match &state.stage {
                 Stage::Idle(_) if state.woken => {}
                 Stage::Idle(_) | Stage::Polling => {
+                    state.contended |= matches!(state.stage, Stage::Polling);
                     let replaced = state.register(&mut this.key, cx.waker());
                     drop(guard);
                     drop(replaced);
@@ -259,6 +264,7 @@ where
             }
             let replaced = state.register(&mut this.key, cx.waker());
             state.woken = false;
+            state.contended = false;
             let Stage::Idle(future) = mem::replace(&mut state.stage, Stage::Polling) else {
                 unreachable!("stage checked above");
             };
@@ -283,13 +289,13 @@ where
         match poll {
             Poll::Pending => {
                 state.stage = Stage::Idle(future);
-                if !state.woken {
+                if !state.woken && !state.contended {
                     return Poll::Pending;
                 }
 
-                // The inner future was woken during the poll. Clones that were polled meanwhile
-                // went back to sleep after that wake, so wake them to poll it now. This clone's
-                // own waker was registered when the wake happened, so its task is already woken.
+                // Clones that found the inner future busy went back to sleep without observing
+                // this poll or any wake during it, so wake them now. A wake during the poll also
+                // woke this clone's own waker.
                 let wakes = state.wakes(this.key);
                 drop(state);
                 wakes.wake();
@@ -545,6 +551,25 @@ mod tests {
         drop(b);
         assert_eq!(poll(&mut a.lock(), &a_waker), Poll::Ready(7));
         assert_eq!(control.polls.load(SeqCst), 3);
+    }
+
+    #[test]
+    fn test_clone_finding_future_busy_is_woken_after_poll() {
+        let control = Arc::new(Control::default());
+        let a = Arc::new(Mutex::new(Shared::new(control.future())));
+        let mut b = a.lock().clone();
+        let (a_wakes, a_waker) = counter();
+        let (b_wakes, b_waker) = counter();
+
+        // While B polls the inner future, which is not woken, A finds it busy and waits.
+        *control.hook.lock() = Some(Box::new({
+            let a = a.clone();
+            move || assert!(poll(&mut a.lock(), &a_waker).is_pending())
+        }));
+        assert!(poll(&mut b, &b_waker).is_pending());
+
+        // B's poll may have done what A waits for, so finishing it wakes A, but not B.
+        assert_eq!((a_wakes.count(), b_wakes.count()), (1, 0));
     }
 
     #[test]
