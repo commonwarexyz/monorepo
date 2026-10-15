@@ -18,6 +18,7 @@ use super::{
         },
         input::MarshalTwinsInput,
         invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant},
+        trusted::CodingReads,
     },
     DEEP_PENDING_ACKS, MAX_CASES, MarshalTwinsInputDebug, ObservedMarshal, PublicKeyOf, SchemeOf,
     VERIFY_PROBE, record_case_outcome,
@@ -28,19 +29,29 @@ use super::{
 };
 use commonware_consensus::{
     CertifiableBlock as _,
-    marshal::mocks::{application::Application, harness::NUM_VALIDATORS},
+    marshal::mocks::{
+        application::Application,
+        harness::{LINK, NUM_VALIDATORS},
+    },
     simplex::{mocks::twins, scheme::Scheme as SimplexScheme},
-    types::{TermLength, View},
+    types::{Epoch, TermLength, View},
 };
 use commonware_consensus_fuzz_core::{
     NAMESPACE, NetworkChannels, TwinsBackend, TwinsCase, TwinsDisrupter, TwinsSetup, TwinsTopology,
-    run_twins_with_backend, simplex::Simplex,
+    continuation::{Channel, Hook, ReplicaTap, Role, gate, tap_elector, tap_finalized},
+    run_twins_with_backend_and_hook,
+    simplex::Simplex,
 };
 use commonware_cryptography::{Committable as _, Digestible as _, certificate::ConstantProvider};
-use commonware_p2p::{Receiver, Sender, simulated::Oracle};
-use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-use commonware_utils::{FuzzRng, NZUsize};
-use std::{collections::HashMap, marker::PhantomData, num::NonZeroUsize, sync::Arc};
+use commonware_p2p::{
+    Receiver, Sender,
+    simulated::{Link, Oracle},
+};
+use commonware_runtime::{Clock as _, Handle, Runner as _, Supervisor as _, deterministic};
+use commonware_utils::{FuzzRng, NZUsize, SystemTimeExt as _};
+use std::{
+    collections::HashMap, marker::PhantomData, num::NonZeroUsize, sync::Arc, time::Duration,
+};
 
 type PrimaryApp<P> = AlwaysAcceptBlockBuilderApp<CodingCtx<P>, SchemeOf<P>, CodingB<P>>;
 type HonestApp<P> = SelectedBlockBuilderApp<CodingCtx<P>, SchemeOf<P>, CodingB<P>>;
@@ -65,6 +76,9 @@ struct CodingTwinsBackend<P: Simplex> {
     shards_mailbox_size: NonZeroUsize,
     probe_input: Arc<str>,
     stack_label: Arc<str>,
+    /// Views the secondary's sampled faulty views move by: past a trusted
+    /// continuation's release, 0 without one.
+    view_offset: u64,
     _marker: PhantomData<fn() -> P>,
 }
 
@@ -76,6 +90,10 @@ struct CodingTwinsState<P: Simplex> {
     block_contexts: BlockContextRegistry<CodingCtx<P>>,
     genesis_digest: commonware_cryptography::sha256::Digest,
     genesis_commitment: CommitmentOf<P>,
+    /// A trusted continuation's taps, by participant; empty without one.
+    taps: Vec<Option<Arc<ReplicaTap<P>>>>,
+    /// The twin pair's tasks, by role, kept only under a continuation.
+    actors: Vec<(Role, Handle<()>)>,
 }
 
 impl<P: Simplex> CodingTwinsBackend<P> {
@@ -96,6 +114,7 @@ impl<P: Simplex> CodingTwinsBackend<P> {
             shards_mailbox_size,
             probe_input,
             stack_label,
+            view_offset: 0,
             _marker: PhantomData,
         }
     }
@@ -148,6 +167,7 @@ where
                 idx,
                 self.stack_label.clone(),
                 self.shards_mailbox_size,
+                None,
             )
             .await;
             let networks = register_engine_networks::<P>(&oracle, validator.clone()).await;
@@ -170,6 +190,8 @@ where
                 block_contexts,
                 genesis_digest,
                 genesis_commitment,
+                taps: Vec::new(),
+                actors: Vec::new(),
             },
         }
     }
@@ -253,9 +275,9 @@ where
             node.mailbox.clone(),
             node.shards.clone(),
         );
-        start_engine_coding_with_networks::<P, _, _, _>(
+        let engine = start_engine_coding_with_networks::<P, _, _, _, _>(
             context,
-            oracle,
+            oracle.control(validator.clone()),
             validator,
             scheme,
             topology.elector.clone(),
@@ -268,6 +290,9 @@ where
             certificate,
             resolver,
         );
+        if !state.taps.is_empty() {
+            state.actors.push((Role::Primary, engine));
+        }
         state.primaries.push((idx, node.application.clone()));
     }
 
@@ -278,7 +303,7 @@ where
     fn spawn_secondary(
         &mut self,
         context: deterministic::Context,
-        _state: &mut Self::State,
+        state: &mut Self::State,
         _oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
         _participants: &Arc<[PublicKeyOf<P>]>,
         scheme: SchemeOf<P>,
@@ -298,7 +323,8 @@ where
             impl Receiver<PublicKey = PublicKeyOf<P>>,
         ),
     ) {
-        coding_disrupter::start::<P>(
+        // The core marks the vote receiver it hands the secondary.
+        let voter = coding_disrupter::start::<P>(
             context,
             scheme,
             self.input.strategy,
@@ -307,7 +333,12 @@ where
             certificate,
             resolver,
             CodingFaults::none(),
+            self.view_offset,
+            None,
         );
+        if !state.taps.is_empty() {
+            state.actors.push((Role::Secondary, voter));
+        }
     }
 
     fn spawn_honest(
@@ -322,7 +353,12 @@ where
         topology: &TwinsTopology<P, Self::Case>,
         channels: NetworkChannels<PublicKeyOf<P>>,
     ) {
+        let tap = state.taps.get(idx).cloned().flatten();
+        let tap = tap.as_ref();
         let node = &state.validators[idx];
+        if let Some(tap) = tap {
+            tap.set_reads(Arc::new(CodingReads::<P>::new(node.mailbox.clone())));
+        }
         let application = DigestLookups::<P, _>::new(
             HonestApp::<P>::new(self.selection.application, self.app_config, None)
                 .with_ancestry_depth(self.selection.ancestry_depth)
@@ -352,21 +388,30 @@ where
                 self.stack_label.clone(),
             ),
         };
-        start_engine_coding_with_networks::<P, _, _, _>(
+        let ((vote_sender, vote_receiver), (certificate_sender, certificate_receiver), resolver) =
+            channels;
+        let (resolver_sender, resolver_receiver) = resolver;
+        drop(start_engine_coding_with_networks::<P, _, _, _, _>(
             context,
-            oracle,
+            oracle.control(validator.clone()),
             validator,
             scheme,
-            topology.elector.clone(),
+            tap_elector(tap, topology.elector.clone()),
             observed,
             marshaled.clone(),
-            marshaled,
+            tap_finalized(tap, marshaled),
             state.genesis_commitment,
             self.input.forwarding,
-            channels.0,
-            channels.1,
-            channels.2,
-        );
+            (vote_sender, gate(tap, vote_receiver, Channel::Vote)),
+            (
+                certificate_sender,
+                gate(tap, certificate_receiver, Channel::Certificate),
+            ),
+            (
+                resolver_sender,
+                gate(tap, resolver_receiver, Channel::Resolver),
+            ),
+        ));
         state.honest.push((idx, node.application.clone()));
     }
 
@@ -407,6 +452,31 @@ where
             commonware_consensus::types::Height::zero(),
             Some(&self.stack_label),
         );
+    }
+
+    fn install_taps(
+        &mut self,
+        state: &mut Self::State,
+        taps: Vec<Option<Arc<ReplicaTap<P>>>>,
+    ) -> bool {
+        state.taps = taps;
+        true
+    }
+
+    fn take_actors(&mut self, state: &mut Self::State) -> Vec<(Role, Handle<()>)> {
+        std::mem::take(&mut state.actors)
+    }
+
+    fn link(&self) -> Link {
+        LINK
+    }
+
+    fn epoch(&self) -> Epoch {
+        Epoch::zero()
+    }
+
+    fn set_view_offset(&mut self, offset: u64) {
+        self.view_offset = offset;
     }
 }
 
@@ -461,6 +531,20 @@ where
     P: Simplex,
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
+    let _ = run_coding_twins::<P>(input, None);
+}
+
+/// Runs one coding Twins case, as a trusted continuation with `hook` (see
+/// [run_twins_with_backend_and_hook]); returns the runtime's auditor state and the
+/// simulated time at its end.
+pub(crate) fn run_coding_twins<P>(
+    input: MarshalTwinsInput,
+    hook: Option<Hook<P>>,
+) -> (String, Duration)
+where
+    P: Simplex,
+    SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
+{
     let (selection, entropy) = select_coding_stack(&input.raw_bytes);
     let stack_label: Arc<str> = format!(
         "application={} marshal=coding max_pending_acks={}",
@@ -480,8 +564,10 @@ where
         let scenario_entropy = entropy.clone();
         let mut backend =
             CodingTwinsBackend::<P>::new(input, selection, probe_input, stack_label, entropy);
-        run_twins_with_backend::<P, _>(&mut context, &mut backend, scenario_entropy).await;
-    });
+        run_twins_with_backend_and_hook::<P, _>(&mut context, &mut backend, scenario_entropy, hook)
+            .await;
+        (context.auditor().state(), context.current().epoch())
+    })
 }
 
 #[cfg(test)]

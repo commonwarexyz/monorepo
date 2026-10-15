@@ -299,12 +299,16 @@ pub const POISON_ACTOR: &str = "certificate_poison";
 /// Request ids are per-requester counters, so the ledger only ever holds the
 /// poisoned node's requests: mixing requesters into one `(responder, id)` key
 /// would let one node's request answer for another's.
+///
+/// A disarmed poison neither records nor rewrites anything: its receivers forward
+/// every message until it is armed.
 #[derive(Clone, Debug)]
 pub struct CertificatePoison<P: PublicKey> {
     view: Arc<Mutex<Option<View>>>,
     /// Requests seen in flight, keyed the way the resolver matches responses.
     requests: Arc<Mutex<BTreeMap<(P, u64), View>>>,
     retries_answered: Arc<AtomicUsize>,
+    armed: Arc<AtomicBool>,
 }
 
 impl<P: PublicKey> Default for CertificatePoison<P> {
@@ -313,13 +317,32 @@ impl<P: PublicKey> Default for CertificatePoison<P> {
             view: Arc::new(Mutex::new(None)),
             requests: Arc::new(Mutex::new(BTreeMap::new())),
             retries_answered: Arc::new(AtomicUsize::new(0)),
+            armed: Arc::new(AtomicBool::new(true)),
         }
     }
 }
 
 impl<P: PublicKey> CertificatePoison<P> {
+    /// An armed poison.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A poison that acts only once [Self::arm]ed.
+    pub fn disarmed() -> Self {
+        let poison = Self::default();
+        poison.armed.store(false, Ordering::Relaxed);
+        poison
+    }
+
+    /// Arms the poison and every receiver that shares it.
+    pub fn arm(&self) {
+        self.armed.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the poison is armed.
+    pub fn armed(&self) -> bool {
+        self.armed.load(Ordering::Relaxed)
     }
 
     /// View whose covering nullification was replaced, if the poison fired.
@@ -523,7 +546,7 @@ where
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
         let (peer, message) = self.inner.recv().await?;
-        let Some(poison) = self.poison.as_ref() else {
+        let Some(poison) = self.poison.as_ref().filter(|poison| poison.armed()) else {
             return Ok((peer, message));
         };
         if let Some(observer) = self.observer.as_ref() {
@@ -1681,6 +1704,76 @@ mod tests {
         assert_eq!(poison.retries_answered(), 0);
         futures::executor::block_on(receiver.recv()).unwrap();
         assert_eq!(poison.retries_answered(), 1);
+    }
+
+    #[test]
+    fn a_disarmed_poison_passes_everything_until_armed() {
+        let (participants, schemes) = fixture(b"certificate_poison_disarmed");
+        let view = View::new(3);
+        let nullifies: Vec<_> = schemes[..3]
+            .iter()
+            .map(|scheme| {
+                Nullify::sign::<Sha256Digest>(scheme, Round::new(Epoch::new(EPOCH), view)).unwrap()
+            })
+            .collect();
+        let nullification = Certificate::<MockScheme, Sha256Digest>::Nullification(
+            Nullification::from_nullifies(&schemes[0], non_empty![@&nullifies], &Sequential)
+                .unwrap(),
+        )
+        .encode();
+        let response = |id: u64| {
+            ResolverMessage::<U64> {
+                id,
+                payload: ResolverPayload::Response(nullification.clone()),
+            }
+            .encode()
+        };
+        let request = |id: u64| {
+            ResolverMessage::<U64> {
+                id,
+                payload: ResolverPayload::Request(U64::from(view.get())),
+            }
+            .encode()
+        };
+        let poison = CertificatePoison::disarmed();
+        assert!(!poison.armed());
+        let mut observer = CertificatePoisonReceiver::<MockScheme, Sha256Digest, _>::observer(
+            QueueReceiver {
+                messages: VecDeque::from([
+                    (participants[0].clone(), request(7).into()),
+                    (participants[0].clone(), request(9).into()),
+                ]),
+            },
+            participants[1].clone(),
+            participants[0].clone(),
+            Some(poison.clone()),
+        );
+        let mut receiver = CertificatePoisonReceiver::<MockScheme, Sha256Digest, _>::new(
+            QueueReceiver {
+                messages: VecDeque::from([
+                    (participants[1].clone(), response(7).into()),
+                    (participants[1].clone(), response(9).into()),
+                ]),
+            },
+            schemes.clone(),
+            Epoch::new(EPOCH),
+            Sha256Digest([0xEE; 32]),
+            Box::new(|_| true),
+            Some(poison.clone()),
+        );
+
+        // Disarmed, the observer records no request and the answer to it passes.
+        futures::executor::block_on(observer.recv()).unwrap();
+        let (_, received) = futures::executor::block_on(receiver.recv()).unwrap();
+        assert_eq!(received.as_ref(), response(7).as_ref());
+        assert_eq!(poison.view(), None);
+
+        // Armed, the next request is recorded and its answer is rewritten.
+        poison.arm();
+        futures::executor::block_on(observer.recv()).unwrap();
+        let (_, received) = futures::executor::block_on(receiver.recv()).unwrap();
+        assert_ne!(received.as_ref(), response(9).as_ref());
+        assert_eq!(poison.view(), Some(view));
     }
 
     #[test]

@@ -41,17 +41,20 @@ use commonware_consensus::{
     },
     types::{Delta, Epoch, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
 };
-use commonware_consensus_fuzz_core::simplex::Simplex;
+use commonware_consensus_fuzz_core::{
+    continuation::{MarshalChannel, ReplicaTap, marshal_gate, tap_blocker},
+    simplex::Simplex,
+};
 use commonware_cryptography::{
     Digest as _, Digestible, Hasher, Sha256,
     certificate::{ConstantProvider, Verifier as _},
     sha256::Digest as Sha256Digest,
 };
 use commonware_macros::select;
-use commonware_p2p::{Receiver, Sender, simulated::Oracle};
+use commonware_p2p::{Blocker, Receiver, Sender, simulated::Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock as _, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    Clock as _, Handle, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::{FuzzRng, NZU64, NZUsize};
@@ -195,7 +198,10 @@ pub(crate) struct CodingValidator<P: Simplex> {
 /// Builds one coding validator's marshal actor, resolver, and shard engine.
 ///
 /// Mirrors [`super::twins::stack::setup_validator`] except that the block
-/// channel carries shards rather than buffered blocks.
+/// channel carries shards rather than buffered blocks. With honest replica
+/// `tap`, the backfill and shard receivers sit behind its marshal gate and the
+/// resolver's and shard engine's blockers are recorded by it; without one the
+/// wrappers only forward.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn setup_validator_coding<P: Simplex>(
     context: deterministic::Context,
@@ -208,6 +214,7 @@ pub(crate) async fn setup_validator_coding<P: Simplex>(
     validator_idx: usize,
     stack: Arc<str>,
     shards_mailbox_size: NonZeroUsize,
+    tap: Option<&Arc<ReplicaTap<P>>>,
 ) -> CodingValidator<P>
 where
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
@@ -244,13 +251,17 @@ where
     };
 
     let control = oracle.control(validator.clone());
-    let backfill = control.register(1, TEST_QUOTA).await.unwrap();
+    let (backfill_sender, backfill_receiver) = control.register(1, TEST_QUOTA).await.unwrap();
+    let backfill = (
+        backfill_sender,
+        marshal_gate(tap, backfill_receiver, MarshalChannel::Backfill),
+    );
     let resolver = resolver::init(
         context.child("resolver"),
         resolver::Config {
             public_key: validator.clone(),
             peer_provider: oracle.manager(),
-            blocker: oracle.control(validator.clone()),
+            blocker: tap_blocker(tap, oracle.control(validator.clone())),
             mailbox_size: config.mailbox_size,
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
@@ -263,7 +274,7 @@ where
     // Coding disseminates shards on the block channel instead of whole blocks.
     let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
         scheme_provider: provider,
-        blocker: oracle.control(validator.clone()),
+        blocker: tap_blocker(tap, oracle.control(validator.clone())),
         max_block_size: MAX_BLOCK_SIZE,
         block_codec_cfg: (),
         strategy: Sequential,
@@ -274,8 +285,11 @@ where
         peer_provider: oracle.manager(),
     };
     let (shard_engine, shard_mailbox) = shards::Engine::new(context.child("shards"), shard_config);
-    let network = control.register(2, TEST_QUOTA).await.unwrap();
-    shard_engine.start(network);
+    let (shard_sender, shard_receiver) = control.register(2, TEST_QUOTA).await.unwrap();
+    shard_engine.start((
+        shard_sender,
+        marshal_gate(tap, shard_receiver, MarshalChannel::Broadcast),
+    ));
 
     let finalizations_by_height = immutable::Archive::init(
         context.child("finalizations_by_height"),
@@ -635,14 +649,15 @@ where
     }
 }
 
-/// Starts a coding Simplex engine on caller-supplied network channels.
+/// Starts a coding Simplex engine on caller-supplied network channels, with
+/// `blocker`; returns the engine's task.
 ///
 /// Twins uses this entry point after splitting the compromised validator's
 /// vote, certificate, and resolver channels.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn start_engine_coding_with_networks<P: Simplex, EC, A, R>(
+pub(crate) fn start_engine_coding_with_networks<P: Simplex, EC, A, R, X>(
     context: deterministic::Context,
-    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    blocker: X,
     validator: PublicKeyOf<P>,
     scheme: SchemeOf<P>,
     elector: EC,
@@ -663,16 +678,18 @@ pub(crate) fn start_engine_coding_with_networks<P: Simplex, EC, A, R>(
         impl Sender<PublicKey = PublicKeyOf<P>>,
         impl Receiver<PublicKey = PublicKeyOf<P>>,
     ),
-) where
+) -> Handle<()>
+where
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
     EC: ElectorConfig<SchemeOf<P>>,
     A: CertifiableAutomaton<Context = CodingCtx<P>, Digest = CommitmentOf<P>>,
     R: Relay<Digest = CommitmentOf<P>, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>,
+    X: Blocker<PublicKey = PublicKeyOf<P>>,
 {
     let engine = Engine::new(
         context.child("engine"),
         config::Config {
-            blocker: oracle.control(validator.clone()),
+            blocker,
             scheme,
             elector,
             automaton,
@@ -699,7 +716,7 @@ pub(crate) fn start_engine_coding_with_networks<P: Simplex, EC, A, R>(
             track_historical_votes: false,
         },
     );
-    engine.start(vote, certificate, resolver);
+    engine.start(vote, certificate, resolver)
 }
 
 /// Genesis coded block shared by every coding validator and by the consensus

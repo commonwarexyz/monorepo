@@ -50,7 +50,7 @@ use super::{
         AlwaysAcceptBlockBuilderApp, ApplicationChoice, BlockContextRegistry, DeliveryReporter,
         FaultyConfig,
     },
-    block_disrupter,
+    block_disrupter::{self, MarshalBroadcastFault},
     coding_disrupter::{self, CodingFaults},
     coding_stack::{
         CodingB, CodingCtx, CommitmentOf, DigestLookups, coding_genesis, coding_marshaled,
@@ -58,12 +58,13 @@ use super::{
     },
     input::{MAX_ANCESTRY_DEPTH, MarshalDisrupterInput},
     invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant},
+    trusted::{self, CodingActor, CodingReads, StandardActor, StandardReads},
     twins::{
         B, Ctx, ObservedMarshal, PublicKeyOf, SchemeOf,
         stack::{
             DeferredMarshal, MarshalChoice, TwinsBlockBuilder, TwinsMarshal, genesis_block,
-            register_engine_networks, setup_network, setup_network_links, setup_validator,
-            start_engine,
+            register_engine_networks, setup_network, setup_network_links, setup_validator_tapped,
+            start_engine_with,
         },
     },
 };
@@ -77,6 +78,7 @@ use commonware_consensus::{
         },
     },
     simplex::{
+        Floor,
         elector::{Config as ElectorConfig, Elector, Mode as _},
         scheme::Scheme as SimplexScheme,
     },
@@ -84,6 +86,9 @@ use commonware_consensus::{
 };
 use commonware_consensus_fuzz_core::{
     BYZANTINE_IDX, FAULT_PHASE, PINNED_OPTIMISTIC_VIEWS,
+    continuation::{
+        Channel, Hook, gate, tap_automaton, tap_blocker, tap_elector, tap_finalized, tap_reporter,
+    },
     network::{CertificatePoison, CertificatePoisonReceiver},
     simplex::Simplex,
     start_disrupter_with_epoch,
@@ -96,7 +101,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-use commonware_utils::{FuzzRng, NZUsize, probability, sync::Mutex};
+use commonware_utils::{FuzzRng, NZUsize, SystemTimeExt as _, probability, sync::Mutex};
 use rand::RngExt as _;
 use std::{
     fmt::{self, Write as _},
@@ -138,10 +143,10 @@ const UNAVAILABLE_PAYLOAD: Sha256Digest = Sha256Digest([0xEE; 32]);
 /// this aligned with the engines if the rotation, shuffle or term length
 /// changes; it assumes a certificate-independent schedule, which every elector
 /// in this harness has.
-fn byzantine_led<P: Simplex>(
+pub(super) fn byzantine_led<P: Simplex>(
     scheme: &SchemeOf<P>,
     term_length: TermLength,
-) -> impl Fn(View) -> bool + Send + 'static {
+) -> impl Fn(View) -> bool + Send + 'static + use<P> {
     let elector = P::elector(term_length, PINNED_OPTIMISTIC_VIEWS).build(scheme.participants());
     move |view| {
         let input = <<P::Elector as ElectorConfig<SchemeOf<P>>>::Elector as Elector<
@@ -174,6 +179,15 @@ fn always_accepts<C>(_choice: ApplicationChoice, _config: FaultyConfig, _context
     false
 }
 
+/// The lossy link a degraded network gives every edge of the last participant.
+pub(super) const fn degraded_link() -> Link {
+    Link {
+        latency: Duration::from_millis(50),
+        jitter: Duration::from_millis(50),
+        success_rate: probability!(0.6),
+    }
+}
+
 async fn apply_degraded_network<P: Simplex>(
     oracle: &mut commonware_p2p::simulated::Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
@@ -181,11 +195,7 @@ async fn apply_degraded_network<P: Simplex>(
     let Some(victim) = participants.last() else {
         return;
     };
-    let degraded = Link {
-        latency: Duration::from_millis(50),
-        jitter: Duration::from_millis(50),
-        success_rate: probability!(0.6),
-    };
+    let degraded = degraded_link();
     for peer in participants
         .iter()
         .take(participants.len().saturating_sub(1))
@@ -330,7 +340,7 @@ async fn run_liveness_phases<BL, KEY>(
 /// deferred. Cluster: `N4F1C3`, disrupter only (no Twins). Liveness: checked.
 /// App: fixed always-accept.
 pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput) {
-    run_standard_disrupter::<P>(input, None, None);
+    let _ = run_standard_disrupter::<P>(input, None, None, None);
 }
 
 /// The cluster of [`fuzz_marshal_standard_disrupter`] with the byzantine node
@@ -345,8 +355,8 @@ pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput)
 /// view 1 (see `SimplexCertificateMockByzantineFirstLeader`).
 pub fn fuzz_marshal_standard_block_dissemination<P: Simplex>(input: MarshalDisrupterInput) {
     let mut mode_rng = FuzzRng::new(input.raw_bytes.clone());
-    let fault = block_disrupter::MarshalBroadcastFault::sample(&mut mode_rng);
-    run_standard_disrupter::<P>(input, None, Some(fault));
+    let fault = MarshalBroadcastFault::sample(&mut mode_rng);
+    let _ = run_standard_disrupter::<P>(input, None, Some(fault), None);
 }
 
 /// The cluster of [`fuzz_marshal_standard_disrupter`] with one honest node's
@@ -363,19 +373,28 @@ pub fn fuzz_marshal_standard_block_dissemination<P: Simplex>(input: MarshalDisru
 /// against that view's leader, so poisoning an honest-led view would get an
 /// honest node blocked and break the fault budget the liveness check assumes.
 pub fn fuzz_marshal_standard_certificate_poison<P: Simplex>(mut input: MarshalDisrupterInput) {
-    // A backfill fetch needs a certificate gap at one node while the others
-    // move on. With n=4 every topology partition also breaks the quorum that
-    // would move on, so lossy links are the only fault that produces one.
-    input.partition = Partition::Connected;
-    input.degraded_network = true;
-    run_standard_disrupter::<P>(input, Some(CertificatePoison::new()), None);
+    force_poison(&mut input);
+    let _ = run_standard_disrupter::<P>(input, Some(CertificatePoison::new()), None, None);
 }
 
-fn run_standard_disrupter<P: Simplex>(
+/// The honest applications of a standard run, by participant index.
+pub(super) type HonestApps<P> = Vec<(usize, Application<B<P>>)>;
+
+/// Runs one standard disrupter case; returns the runtime's auditor state, the
+/// simulated time at its end and the honest applications.
+///
+/// With a `hook`, the case is a trusted continuation (see [trusted]): the honest
+/// replicas run behind the runner's taps, the prefix acts as the byzantine node on
+/// its engine and marshal channels, and the release applies the sampled partition,
+/// arms `poison` and starts the byzantine actor. The run then checks safety only:
+/// it holds the partition for a fixed fault phase, heals, runs one more window and
+/// runs its safety oracles, without waiting for progress.
+pub(super) fn run_standard_disrupter<P: Simplex>(
     input: MarshalDisrupterInput,
     poison: Option<CertificatePoison<PublicKeyOf<P>>>,
-    broadcast_fault: Option<block_disrupter::MarshalBroadcastFault>,
-) {
+    broadcast_fault: Option<MarshalBroadcastFault>,
+    hook: Option<Hook<P>>,
+) -> (String, Duration, HonestApps<P>) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
@@ -403,14 +422,28 @@ fn run_standard_disrupter<P: Simplex>(
         if input.degraded_network {
             apply_degraded_network::<P>(&mut oracle, &participants).await;
         }
+        let mut runner = hook.map(|hook| {
+            trusted::start_runner(
+                hook,
+                &context,
+                &participants,
+                &schemes,
+                &oracle,
+                term_length,
+                input.degraded_network,
+            )
+        });
 
         let required = input.required_containers;
 
         // Pre-GST network fault held for the bounded fault phase, applied via
         // the simulated-network topology (not byzzfuzz interceptors).
-        // `Connected` means no topology fault.
+        // `Connected` means no topology fault. A continuation applies it at its
+        // release.
         let pre_gst_partition: Option<SetPartition> = input.partition.set_partition().copied();
-        if let Some(partition) = pre_gst_partition.as_ref() {
+        if let Some(partition) = pre_gst_partition.as_ref()
+            && runner.is_none()
+        {
             apply_partition(&oracle, &participants, Some(partition), &LINK).await;
         }
 
@@ -434,7 +467,7 @@ fn run_standard_disrupter<P: Simplex>(
 
         // Spawned marshal actors run until the root future completes; their
         // handles detach on drop (they do not abort), so we don't retain them.
-        let mut honest_apps: Vec<(usize, Application<B<P>>)> = Vec::new();
+        let mut honest_apps: HonestApps<P> = Vec::new();
 
         for (idx, validator) in participants.iter().enumerate() {
             let scheme = schemes[idx].clone();
@@ -442,6 +475,18 @@ fn run_standard_disrupter<P: Simplex>(
                 register_engine_networks::<P>(&oracle, validator.clone()).await;
 
             if idx == BYZANTINE_IDX {
+                if let Some(runner) = runner.as_mut() {
+                    // The prefix acts as the byzantine node; its actor starts at the
+                    // release.
+                    trusted::adopt_byzantine(
+                        runner,
+                        &oracle,
+                        validator,
+                        (vote, certificate, resolver),
+                    )
+                    .await;
+                    continue;
+                }
                 let validator_ctx = context
                     .child("validator")
                     .with_attribute("public_key", validator);
@@ -484,7 +529,10 @@ fn run_standard_disrupter<P: Simplex>(
                 continue;
             }
 
-            // Honest validator: end-to-end marshal stack plus Simplex engine.
+            // Honest validator: end-to-end marshal stack plus Simplex engine, behind
+            // the runner's taps under a continuation.
+            let tap = runner.as_ref().and_then(|runner| runner.tap(idx));
+            let tap = tap.as_ref();
             let (resolver_sender, resolver_receiver) = resolver;
             let resolver = (
                 resolver_sender,
@@ -506,11 +554,12 @@ fn run_standard_disrupter<P: Simplex>(
                     )
                 },
             );
+            let resolver = (resolver.0, gate(tap, resolver.1, Channel::Resolver));
             let validator_ctx = context
                 .child("validator")
                 .with_attribute("public_key", validator);
             let provider = ConstantProvider::new(scheme.clone());
-            let mut node = setup_validator::<P>(
+            let mut node = setup_validator_tapped::<P>(
                 validator_ctx.child("marshal"),
                 &mut oracle,
                 validator.clone(),
@@ -519,8 +568,12 @@ fn run_standard_disrupter<P: Simplex>(
                 None,
                 MAX_PENDING_ACKS,
                 None,
+                tap,
             )
             .await;
+            if let Some(tap) = tap {
+                tap.set_reads(Arc::new(StandardReads::<P>::new(node.mailbox.clone())));
+            }
             honest_apps.push((idx, node.application.clone()));
 
             let application =
@@ -554,41 +607,72 @@ fn run_standard_disrupter<P: Simplex>(
                 ),
             };
 
-            start_engine::<P, _, _, _>(
+            let automaton = tap_automaton(tap, observed, &validator_ctx);
+            let (vote_sender, vote_receiver) = vote;
+            let (certificate_sender, certificate_receiver) = certificate;
+            drop(start_engine_with::<P, _, _, _, _>(
                 validator_ctx,
-                &oracle,
-                validator.clone(),
+                tap_blocker(tap, oracle.control(validator.clone())),
                 scheme,
-                P::elector(
-                    term_length,
-                    commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS,
-                ),
-                observed,
+                tap_elector(tap, P::elector(term_length, PINNED_OPTIMISTIC_VIEWS)),
+                automaton,
                 builder.clone(),
-                builder,
-                genesis_commitment,
+                tap_reporter(tap, builder),
+                Floor::Genesis(genesis_commitment),
                 format!("marshal-liveness-{idx}"),
                 input.forwarding,
-                vote,
-                certificate,
+                (vote_sender, gate(tap, vote_receiver, Channel::Vote)),
+                (
+                    certificate_sender,
+                    gate(tap, certificate_receiver, Channel::Certificate),
+                ),
                 resolver,
-            );
+            ));
         }
 
-        let on_stall = |missed: &[usize], diag: &str| {
-            if let Some(poison) = poison.as_ref().filter(|_| missed.contains(&POISON_IDX)) {
-                invariants::check_certificate_backfill_retry(poison, diag);
-            }
-        };
-        run_liveness_phases(
-            &context,
-            &oracle,
-            &participants,
-            &honest_apps,
-            required,
-            Some(&on_stall),
-        )
-        .await;
+        if let Some(runner) = runner.as_mut() {
+            // A continuation checks safety only and never waits for progress.
+            let actor = match broadcast_fault {
+                Some(fault) => StandardActor::Disseminator(fault),
+                None => StandardActor::Disrupter,
+            };
+            let attacked = trusted::release_standard(
+                runner,
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                &input,
+                term_length,
+                pre_gst_partition.as_ref(),
+                poison.as_ref(),
+                actor,
+            )
+            .await;
+            trusted::fixed_window(
+                runner,
+                &context,
+                &oracle,
+                &participants,
+                attacked.as_deref(),
+            )
+            .await;
+        } else {
+            let on_stall = |missed: &[usize], diag: &str| {
+                if let Some(poison) = poison.as_ref().filter(|_| missed.contains(&POISON_IDX)) {
+                    invariants::check_certificate_backfill_retry(poison, diag);
+                }
+            };
+            run_liveness_phases(
+                &context,
+                &oracle,
+                &participants,
+                &honest_apps,
+                required,
+                Some(&on_stall),
+            )
+            .await;
+        }
 
         invariants::check_all_blocks(
             &honest_apps,
@@ -596,7 +680,12 @@ fn run_standard_disrupter<P: Simplex>(
             commonware_consensus::types::Height::zero(),
             None,
         );
-    });
+        (
+            context.auditor().state(),
+            context.current().epoch(),
+            honest_apps,
+        )
+    })
 }
 
 /// Crypto: `P`. Marshal: coding. Cluster: `N4F1C3`,
@@ -614,7 +703,7 @@ where
     P: Simplex,
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
-    run_coding_disrupter::<P>(input, false);
+    let _ = run_coding_disrupter::<P>(input, false, None);
 }
 
 /// The cluster of [`fuzz_marshal_coding_disrupter`] with a Byzantine node that
@@ -633,12 +722,31 @@ where
     P: Simplex,
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
-    input.partition = Partition::Connected;
-    input.degraded_network = true;
-    run_coding_disrupter::<P>(input, true);
+    force_poison(&mut input);
+    let _ = run_coding_disrupter::<P>(input, true, None);
 }
 
-fn run_coding_disrupter<P>(input: MarshalDisrupterInput, poison: bool)
+/// The forced fields of the certificate-poison and block-poison bases.
+pub(super) fn force_poison(input: &mut MarshalDisrupterInput) {
+    // A backfill fetch needs a certificate gap at one node while the others
+    // move on. With n=4 every topology partition also breaks the quorum that
+    // would move on, so lossy links are the only fault that produces one.
+    input.partition = Partition::Connected;
+    input.degraded_network = true;
+}
+
+/// Runs one coding disrupter case; returns the runtime's auditor state and the
+/// simulated time at its end.
+///
+/// With a `hook`, the case is a trusted continuation, as for [run_standard_disrupter]:
+/// the prefix acts as the byzantine node on its engine and marshal channels, and the
+/// release applies the sampled partition and starts the byzantine actor (the backfill
+/// poisoner with `poison`, else the coding disrupter). The run then checks safety only.
+pub(super) fn run_coding_disrupter<P>(
+    input: MarshalDisrupterInput,
+    poison: bool,
+    hook: Option<Hook<P>>,
+) -> (String, Duration)
 where
     P: Simplex,
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
@@ -659,11 +767,25 @@ where
         if input.degraded_network {
             apply_degraded_network::<P>(&mut oracle, &participants).await;
         }
+        let mut runner = hook.map(|hook| {
+            trusted::start_runner(
+                hook,
+                &context,
+                &participants,
+                &schemes,
+                &oracle,
+                TermLength::ONE,
+                input.degraded_network,
+            )
+        });
 
         let required = input.required_containers;
 
+        // A continuation applies the partition at its release.
         let pre_gst_partition: Option<SetPartition> = input.partition.set_partition().copied();
-        if let Some(partition) = pre_gst_partition.as_ref() {
+        if let Some(partition) = pre_gst_partition.as_ref()
+            && runner.is_none()
+        {
             apply_partition(&oracle, &participants, Some(partition), &LINK).await;
         }
 
@@ -699,6 +821,15 @@ where
                 .child("validator")
                 .with_attribute("public_key", validator);
 
+            if idx == BYZANTINE_IDX
+                && let Some(runner) = runner.as_mut()
+            {
+                // The prefix acts as the byzantine node on every channel it has; its
+                // actor starts at the release with the fault sampler left in its slot.
+                let channels = register_engine_networks::<P>(&oracle, validator.clone()).await;
+                trusted::adopt_byzantine(runner, &oracle, validator, channels).await;
+                continue;
+            }
             if idx == BYZANTINE_IDX {
                 // The honest stacks register backfill=1 and shards=2. The
                 // poisoner holds only the backfill channel: honest resolvers
@@ -711,12 +842,13 @@ where
                         .register(1, TEST_QUOTA)
                         .await
                         .expect("byzantine backfill channel registration failed");
-                    coding_disrupter::start_backfill_poison::<P>(
+                    drop(coding_disrupter::start_backfill_poison::<P>(
                         validator_ctx.child("poisoner"),
                         schemes.clone(),
                         backfill,
                         rng,
-                    );
+                        None,
+                    ));
                     continue;
                 }
                 let shards = control
@@ -732,7 +864,7 @@ where
                     )),
                     rng,
                 };
-                coding_disrupter::start::<P>(
+                drop(coding_disrupter::start::<P>(
                     validator_ctx.child("disrupter"),
                     scheme,
                     input.strategy,
@@ -741,10 +873,17 @@ where
                     certificate,
                     resolver,
                     faults,
-                );
+                    0,
+                    None,
+                ));
                 continue;
             }
 
+            // Honest validator, behind the runner's taps under a continuation. Its
+            // activities and automaton carry coding commitments, which the taps do not
+            // record.
+            let tap = runner.as_ref().and_then(|runner| runner.tap(idx));
+            let tap = tap.as_ref();
             let (vote, certificate, resolver) =
                 register_engine_networks::<P>(&oracle, validator.clone()).await;
             let provider = ConstantProvider::new(scheme.clone());
@@ -759,8 +898,12 @@ where
                 idx,
                 stack_label.clone(),
                 shards_mailbox_size,
+                tap,
             )
             .await;
+            if let Some(tap) = tap {
+                tap.set_reads(Arc::new(CodingReads::<P>::new(node.mailbox.clone())));
+            }
             honest_apps.push((idx, node.application.clone()));
 
             let application = DigestLookups::<P, _>::new(
@@ -791,35 +934,63 @@ where
                         stack_label.clone(),
                     ),
             };
-            start_engine_coding_with_networks::<P, _, _, _>(
+            let (vote_sender, vote_receiver) = vote;
+            let (certificate_sender, certificate_receiver) = certificate;
+            let (resolver_sender, resolver_receiver) = resolver;
+            drop(start_engine_coding_with_networks::<P, _, _, _, _>(
                 validator_ctx,
-                &oracle,
+                tap_blocker(tap, oracle.control(validator.clone())),
                 validator.clone(),
                 scheme,
-                P::elector(
-                    TermLength::ONE,
-                    commonware_consensus_fuzz_core::PINNED_OPTIMISTIC_VIEWS,
-                ),
+                tap_elector(tap, P::elector(TermLength::ONE, PINNED_OPTIMISTIC_VIEWS)),
                 observed,
                 marshaled.clone(),
-                marshaled,
+                tap_finalized(tap, marshaled),
                 genesis_commitment,
                 input.forwarding,
-                vote,
-                certificate,
-                resolver,
-            );
+                (vote_sender, gate(tap, vote_receiver, Channel::Vote)),
+                (
+                    certificate_sender,
+                    gate(tap, certificate_receiver, Channel::Certificate),
+                ),
+                (
+                    resolver_sender,
+                    gate(tap, resolver_receiver, Channel::Resolver),
+                ),
+            ));
         }
 
-        run_liveness_phases(
-            &context,
-            &oracle,
-            &participants,
-            &honest_apps,
-            required,
-            None,
-        )
-        .await;
+        if let Some(runner) = runner.as_mut() {
+            // A continuation checks safety only and never waits for progress.
+            let actor = if poison {
+                CodingActor::Poisoner
+            } else {
+                CodingActor::Disrupter
+            };
+            trusted::release_coding(
+                runner,
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                &input,
+                pre_gst_partition.as_ref(),
+                actor,
+                disrupter_rng.take().expect("one byzantine node"),
+            )
+            .await;
+            trusted::fixed_window(runner, &context, &oracle, &participants, None).await;
+        } else {
+            run_liveness_phases(
+                &context,
+                &oracle,
+                &participants,
+                &honest_apps,
+                required,
+                None,
+            )
+            .await;
+        }
 
         invariants::check_all_blocks(
             &honest_apps,
@@ -827,7 +998,8 @@ where
             commonware_consensus::types::Height::zero(),
             None,
         );
-    });
+        (context.auditor().state(), context.current().epoch())
+    })
 }
 
 #[cfg(test)]

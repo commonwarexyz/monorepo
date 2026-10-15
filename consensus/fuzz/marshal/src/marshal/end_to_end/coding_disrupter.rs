@@ -30,6 +30,7 @@ use commonware_consensus::{
 use commonware_consensus_fuzz_core::{
     BYZANTINE_IDX,
     byzantine::Counting,
+    continuation::{MarkedReceiver, Marker},
     simplex::Simplex,
     strategy::{AnyScope, FutureScope, SmallScope, Strategy as _, StrategyChoice},
 };
@@ -40,7 +41,7 @@ use commonware_cryptography::{
 use commonware_p2p::{Receiver, Recipients, Sender, simulated};
 use commonware_parallel::Sequential;
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
-use commonware_runtime::{Spawner as _, Supervisor as _, deterministic};
+use commonware_runtime::{Handle, Spawner as _, Supervisor as _, deterministic};
 use commonware_utils::{FuzzRng, non_empty};
 use rand::RngExt as _;
 use rand_core::Rng as _;
@@ -469,7 +470,8 @@ async fn poison_backfill<P: Simplex>(
 }
 
 /// Starts a Byzantine identity that only poisons block backfill on `backfill`,
-/// its marshal backfill channel.
+/// its marshal backfill channel; returns its task. `marker` is set when the task
+/// first polls its receiver.
 ///
 /// It is silent on the consensus channels: honest resolvers skip blocked peers,
 /// and an equivocating peer is blocked before anyone asks it for a block.
@@ -478,7 +480,9 @@ pub(crate) fn start_backfill_poison<P: Simplex>(
     schemes: Vec<SchemeOf<P>>,
     backfill: MarshalNetwork<P>,
     rng: FuzzRng,
-) where
+    marker: Option<Marker>,
+) -> Handle<()>
+where
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
     let leader = own_key::<P>(&schemes[BYZANTINE_IDX]);
@@ -488,10 +492,10 @@ pub(crate) fn start_backfill_poison<P: Simplex>(
             schemes,
             leader,
             Counting::new(sender, BACKFILL_POISON_ACTOR),
-            receiver,
+            MarkedReceiver::new(receiver, marker),
             rng,
         )
-    });
+    })
 }
 
 /// Shards of a coded block the Byzantine leader proposes for `view` under a
@@ -558,7 +562,10 @@ where
 }
 
 /// Start an actor that signs conflicting coding proposals with a Byzantine
-/// identity's real key, plus the shard and backfill faults in `faults`.
+/// identity's real key, plus the shard and backfill faults in `faults`; returns
+/// the task that votes. Its sampled views are moved `view_offset` views later, so
+/// an actor started after a continuation's prefix targets the views that follow;
+/// `marker` is set when the voting task first polls its vote receiver.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start<P: Simplex>(
     mut context: deterministic::Context,
@@ -578,7 +585,10 @@ pub(crate) fn start<P: Simplex>(
         impl Receiver<PublicKey = PublicKeyOf<P>>,
     ),
     faults: CodingFaults<P>,
-) where
+    view_offset: u64,
+    marker: Option<Marker>,
+) -> Handle<()>
+where
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
     let CodingFaults { shards, mut rng } = faults;
@@ -588,10 +598,14 @@ pub(crate) fn start<P: Simplex>(
         Sha256::hash(&[b"coding-disrupter-seed-context"]),
         GENESIS_CODING_CONFIG,
     ));
-    let faulty_views = fault_views(strategy, required_containers, &mut context);
-    let proactive_views = faulty_views
-        .clone()
-        .unwrap_or_else(|| (1..=required_containers.max(1)).map(View::new).collect());
+    let shift = |view: View| View::new(view.get().saturating_add(view_offset));
+    let faulty_views = fault_views(strategy, required_containers, &mut context)
+        .map(|views| views.into_iter().map(shift).collect::<Vec<_>>());
+    let proactive_views = faulty_views.clone().unwrap_or_else(|| {
+        (1..=required_containers.max(1))
+            .map(|view| shift(View::new(view)))
+            .collect()
+    });
     let (_, certificate_receiver) = certificate_network;
     context
         .child("certificate_drain")
@@ -618,7 +632,8 @@ pub(crate) fn start<P: Simplex>(
         }
     }
 
-    let (vote_sender, mut vote_receiver) = vote_network;
+    let (vote_sender, vote_receiver) = vote_network;
+    let mut vote_receiver = MarkedReceiver::new(vote_receiver, marker);
     let mut vote_sender = Counting::new(vote_sender, ACTOR);
     context.spawn(move |_| async move {
         let mut emitted = HashSet::new();
@@ -710,7 +725,7 @@ pub(crate) fn start<P: Simplex>(
                 }
             }
         }
-    });
+    })
 }
 
 #[cfg(test)]
