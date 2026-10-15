@@ -5,6 +5,24 @@ pub mod marshal;
 #[cfg(feature = "mocks")]
 pub mod scenarios;
 
+// What a scaffold's thin target imports from the crate root: the trusted entries, the
+// base inputs and the schemes the bases run.
+#[cfg(feature = "mocks")]
+pub use commonware_consensus_fuzz_core::{
+    SimplexCertificateMock, SimplexCertificateMockByzantineFirstLeader,
+};
+#[cfg(feature = "mocks")]
+pub use marshal::{
+    MarshalDisrupterInput, MarshalTwinsInput, fuzz_marshal_coding_block_poison_with_prefix,
+    fuzz_marshal_coding_disrupter_with_prefix, fuzz_marshal_coding_twins_with_prefix,
+    fuzz_marshal_standard_block_dissemination_with_prefix,
+    fuzz_marshal_standard_certificate_poison_with_prefix,
+    fuzz_marshal_standard_deferred_cert_mock_twins_split_header_with_prefix,
+    fuzz_marshal_standard_disrupter_with_prefix,
+    fuzz_marshal_standard_inline_cert_mock_twins_split_header_with_prefix,
+    fuzz_marshal_standard_twins_with_prefix,
+};
+
 /// Runs one target under a fixed input and requires each of `actors` to have
 /// acted.
 #[cfg(all(test, feature = "mocks"))]

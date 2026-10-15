@@ -49,7 +49,8 @@ use commonware_runtime::{
     telemetry::traces::collector::{CollectingLayer, TraceStorage},
 };
 use commonware_utils::{
-    FuzzRng, NZUsize, channel::mpsc::Receiver, probability, sequence::U64, sync::Once,
+    FuzzRng, NZUsize, SystemTimeExt as _, channel::mpsc::Receiver, probability, sequence::U64,
+    sync::Once,
 };
 use futures::future::join_all;
 use std::{
@@ -65,7 +66,10 @@ use std::{
 };
 use tracing::{Dispatch, Level, dispatcher};
 use tracing_subscriber::{Layer as _, filter::filter_fn, layer::SubscriberExt};
-pub use trusted::{fuzz_audit_with_prefix, fuzz_twins_audit_with_prefix, fuzz_with_prefix};
+pub use trusted::{
+    fuzz_audit_notarize_omission_with_prefix, fuzz_audit_with_prefix, fuzz_twins_audit_with_prefix,
+    fuzz_with_prefix,
+};
 
 fn configure_block_filter<P: simplex::Simplex>(
     relay: &Arc<block_relay::Relay<PublicKeyOf<P>>>,
@@ -719,12 +723,8 @@ fn run_standard_once<P: simplex::Simplex>(
     })
 }
 
-/// Run the Standard harness with append-only Simplex activity and automaton
-/// recording enabled.
-///
-/// This path exists only for the dedicated Standard audit fuzz targets. The
-/// shared [`run_standard_once`] path continues to use the consensus mock
-/// reporter and application automaton directly.
+/// The omission model of [`fuzz_audit_notarize_omission`]: the victim drops every
+/// notarize vote and finalization certificate it receives, counted here.
 #[derive(Clone)]
 struct NotarizeOmission {
     victim: usize,
@@ -740,17 +740,68 @@ impl NotarizeOmission {
             omitted_finalizations: Arc::new(AtomicUsize::new(0)),
         }
     }
+
+    /// `omission-incomplete` when the victim omitted no notarize vote or no
+    /// finalization certificate, so the model never acted.
+    fn incomplete(&self) -> Option<&'static str> {
+        (self.omitted_notarizes.load(Ordering::Relaxed) == 0
+            || self.omitted_finalizations.load(Ordering::Relaxed) == 0)
+            .then_some("omission-incomplete")
+    }
+}
+
+/// Forces the fields [`fuzz_audit_notarize_omission`] runs with: four correct
+/// nodes on a connected network, single-view terms, at least four containers,
+/// and certification and reporting as the omission model expects.
+fn force_notarize_omission(input: &mut FuzzInput) {
+    input.configuration = N4F0C4;
+    input.partition = Partition::Connected;
+    input.degraded_network = false;
+    input.block_filter = BlockFilterChoice::None;
+    input.required_containers = input.required_containers.max(4);
+    input.term_length = TermLength::ONE;
+    input.certify = CertifyChoice::Always;
+    input.reporting = ReporterWiring::Solo;
+}
+
+/// The node that omits: the first raw byte modulo the node count, node 0 without one.
+fn notarize_omission_victim(input: &FuzzInput) -> usize {
+    usize::from(input.raw_bytes.first().copied().unwrap_or_default())
+        % usize::try_from(input.configuration.n).expect("node count exceeds usize")
+}
+
+/// How an audited Standard run ended.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "the auditor state and time are for tests")
+)]
+struct AuditRun {
+    /// Whether the configuration was valid, so the oracles ran.
+    valid: bool,
+    /// Whether an honest application rejected a certification.
+    rejected: bool,
+    /// The runtime's auditor state at the end.
+    auditor: String,
+    /// The simulated time at the end.
+    end: Duration,
 }
 
 fn run_audited_standard_once<P: simplex::Simplex>(input: FuzzInput) -> (bool, bool) {
-    run_audited_standard_once_with::<P>(input, None, None)
+    let run = run_audited_standard_once_with::<P>(input, None, None);
+    (run.valid, run.rejected)
 }
 
+/// Run the Standard harness with append-only Simplex activity and automaton
+/// recording enabled.
+///
+/// This path exists only for the dedicated Standard audit fuzz targets. The
+/// shared [`run_standard_once`] path continues to use the consensus mock
+/// reporter and application automaton directly.
 fn run_audited_standard_once_with<P: simplex::Simplex>(
     mut input: FuzzInput,
     notarize_omission: Option<NotarizeOmission>,
     hook: Option<continuation::Hook<P>>,
-) -> (bool, bool) {
+) -> AuditRun {
     let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0);
     let executor = deterministic::Runner::new(cfg);
 
@@ -987,11 +1038,25 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
             context.sleep(MAX_SLEEP_DURATION).await;
         }
         if let Some(runner) = &runner {
-            runner.check("end");
+            // The omission model is the base's fault: a run without it is not the base's. A
+            // crashed victim restarts without it.
+            let base = notarize_omission.as_ref().and_then(|omission| {
+                omission.incomplete().or_else(|| {
+                    runner
+                        .was_crashed(omission.victim)
+                        .then_some("omission-incomplete")
+                })
+            });
+            runner.check_with("end", base);
         }
 
         if !config.is_valid() {
-            return (false, false);
+            return AuditRun {
+                valid: false,
+                rejected: false,
+                auditor: context.auditor().state(),
+                end: context.current().epoch(),
+            };
         }
 
         let omitted_reporter = notarize_omission.as_ref().and_then(|omission| {
@@ -1044,7 +1109,9 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
             input.optimistic_views,
             reporter_only.as_slice(),
         );
-        if let Some(index) = omitted_reporter {
+        // A recovery the victim leaves pending is a progress property, which a
+        // continuation does not check.
+        if let Some(index) = omitted_reporter.filter(|_| runner.is_none()) {
             // The finalizer wait excludes the victim, so a recovery whose
             // trigger is already in its log can still be in flight between
             // batcher and voter. Recovery is message-driven: one quiescing
@@ -1056,7 +1123,12 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                 invariants::check_finalize_recoveries_drained(&reporter_only[index], &earlier);
             }
         }
-        (true, rejected_certification_observed)
+        AuditRun {
+            valid: true,
+            rejected: rejected_certification_observed,
+            auditor: context.auditor().state(),
+            end: context.current().epoch(),
+        }
     })
 }
 
@@ -2285,30 +2357,17 @@ pub fn fuzz_audit<P: simplex::Simplex>(mut input: FuzzInput) {
 /// non-notarize votes remain connected, as do notarization and nullification
 /// certificates on both the certificate and resolver channels.
 pub fn fuzz_audit_notarize_omission<P: simplex::Simplex>(mut input: FuzzInput) {
-    input.configuration = N4F0C4;
-    input.partition = Partition::Connected;
-    input.degraded_network = false;
-    input.block_filter = BlockFilterChoice::None;
-    input.required_containers = input.required_containers.max(4);
-    input.term_length = TermLength::ONE;
-    input.certify = CertifyChoice::Always;
-    input.reporting = ReporterWiring::Solo;
-
-    let victim = usize::from(input.raw_bytes.first().copied().unwrap_or_default())
-        % usize::try_from(input.configuration.n).expect("node count exceeds usize");
-    let omission = NotarizeOmission::new(victim);
-    let omitted_notarizes = omission.omitted_notarizes.clone();
-    let omitted_finalizations = omission.omitted_finalizations.clone();
+    force_notarize_omission(&mut input);
+    let omission = NotarizeOmission::new(notarize_omission_victim(&input));
 
     print_fuzz_input::<P>(Mode::Standard, &input);
     let raw_bytes = input.raw_bytes.clone();
     let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        run_audited_standard_once_with::<P>(input, Some(omission), None)
+        run_audited_standard_once_with::<P>(input, Some(omission.clone()), None)
     }));
     match run_result {
         Ok(_) => assert!(
-            omitted_notarizes.load(Ordering::Relaxed) > 0
-                && omitted_finalizations.load(Ordering::Relaxed) > 0,
+            omission.incomplete().is_none(),
             "omission model did not omit both notarize votes and finalization certificates"
         ),
         Err(payload) => {

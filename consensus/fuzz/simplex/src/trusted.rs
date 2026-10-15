@@ -13,12 +13,13 @@
 //! finalized at the release.
 
 use crate::{
-    Coverage, FuzzMode, TwinsRole, configure_block_filter, run, run_audited_standard_once_with,
+    Coverage, FuzzMode, NotarizeOmission, TwinsRole, configure_block_filter,
+    force_notarize_omission, notarize_omission_victim, run, run_audited_standard_once_with,
     run_twins,
 };
-use commonware_consensus::types::View;
+use commonware_consensus::types::{Epoch, View};
 use commonware_consensus_fuzz_core::{
-    BlockFilterChoice, FuzzInput, Mode, PublicKeyOf, block_relay,
+    BlockFilterChoice, EPOCH, FuzzInput, Mode, PublicKeyOf, block_relay,
     continuation::{self, Hook, Observer, Prefix, Role, Runner, Topology},
     default_link, print_fuzz_input, scheduled_partition, simplex,
     utils::{Partition, SetPartition, apply_partition},
@@ -100,6 +101,38 @@ where
     finish(result, raw_bytes, observer.as_ref());
 }
 
+/// [crate::fuzz_audit_notarize_omission] with a prefix. The base's forced fields
+/// (N4F0C4, a connected network, single-view terms, at least four containers, certify
+/// Always, Solo reporting) hold whatever the prefix pins: a configuration pin keeps to
+/// N4F0C4 and a term-length pin pins nothing. The victim is the first raw byte the prefix
+/// leaves, modulo the node count. The omission model wraps the victim's receivers below its
+/// gates from spawn; a victim the prefix crashes restarts without it.
+/// A run in which the victim was crashed, or omitted no notarize vote or no finalization
+/// certificate, fails the `end` actor check with `base=omission-incomplete` instead of
+/// panicking.
+pub fn fuzz_audit_notarize_omission_with_prefix<P, X, O>(
+    mut input: FuzzInput,
+    prefix: X,
+    observer: O,
+) where
+    P: simplex::Simplex,
+    X: Prefix<P>,
+    O: Observer,
+{
+    let observer: Arc<dyn Observer> = Arc::new(observer);
+    // Forced before the plan, so the prefix's pins see the base's fields; Domain::Omission
+    // keeps any pin from changing them.
+    force_notarize_omission(&mut input);
+    let hook = Hook::plan_omission(Box::new(prefix), observer.clone(), &mut input);
+    let omission = NotarizeOmission::new(notarize_omission_victim(&input));
+    print_fuzz_input::<P>(Mode::Standard, &input);
+    let raw_bytes = input.raw_bytes.clone();
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let _ = run_audited_standard_once_with::<P>(input, Some(omission), Some(hook));
+    }));
+    finish(result, raw_bytes, observer.as_ref());
+}
+
 /// [crate::fuzz_twins_audit] with a prefix.
 pub fn fuzz_twins_audit_with_prefix<P, M, X, O>(input: FuzzInput, prefix: X, observer: O)
 where
@@ -159,7 +192,8 @@ pub(crate) fn start_standard<P: simplex::Simplex>(
             term_length,
             optimistic_views: input.optimistic_views,
             scripted_views: 0,
-            relay: relay.clone(),
+            epoch: Epoch::new(EPOCH),
+            relay: Some(relay.clone()),
             oracle: oracle.clone(),
             base_link: Box::new(move |from, to| continuation::standard_link(&links, n, from, to)),
         },
@@ -206,6 +240,7 @@ pub(crate) async fn release_standard<P: simplex::Simplex>(
             Some(relay.clone()),
             base,
             registry.marker(index, Role::Disrupter),
+            Epoch::new(EPOCH),
         );
         registry.register(index, Role::Disrupter, handle);
     }
@@ -232,14 +267,19 @@ mod tests {
         CodeCoverage, HappensBeforeCoverage, MockTwinsBackend, Standard, TwinsCampaign,
         TwinsMutator, run_standard_once,
     };
+    use commonware_codec::DecodeExt as _;
     use commonware_consensus::{
         Handoff, Viewable,
-        simplex::{ForwardPolicy, types::Activity},
+        simplex::{
+            ForwardPolicy,
+            types::{Activity, Vote},
+        },
         types::{Epoch, Round, TermLength, ViewDelta},
     };
     use commonware_consensus_fuzz_core::{
-        CertifyChoice, Configuration, DEFAULT_MAILBOX_SIZE, EPOCH, FAULT_PHASE, N4F0C4, N4F1C3,
-        ReporterWiring, SimplexCertificateMock, bounded_fuzz_runtime_config, byzantine,
+        CertifyChoice, Configuration, DEFAULT_MAILBOX_SIZE, EPOCH, FAULT_PHASE, MAX_SLEEP_DURATION,
+        N4F0C4, N4F1C3, ReporterWiring, SimplexCertificateMock, bounded_fuzz_runtime_config,
+        byzantine,
         continuation::{
             ActorCheck, ActorState, Budget, Channel, LOG_CAP, Latencies, MAX_PREFIX_BUDGET, Pins,
             PrefixContext, PrefixFuture, Release,
@@ -769,6 +809,287 @@ mod tests {
                 context.auditor().state()
             });
             assert_eq!(state, expected);
+        }
+    }
+
+    /// The auditor states of ordinary notarize-omission runs on the harness before its
+    /// entry had a prefix hook.
+    #[test]
+    fn ordinary_omission_runs_are_unchanged() {
+        for (raw_bytes, expected) in [
+            (
+                vec![0, 7, 7],
+                "5a38a98f6c638b49d991702738a963b25ca891634a7e1201a8681933404a1f0b",
+            ),
+            (
+                vec![2, 9, 9],
+                "ebb4d7071f0343858d7ce4c3c91215b0183f60da001155329bd6ef5d576455e6",
+            ),
+        ] {
+            let mut input = input(0, 4, N4F0C4);
+            let victim = usize::from(raw_bytes[0]);
+            input.raw_bytes = raw_bytes;
+            let omission = crate::NotarizeOmission::new(victim);
+            let run = run_audited_standard_once_with::<SimplexCertificateMock>(
+                input,
+                Some(omission.clone()),
+                None,
+            );
+            assert!(run.valid);
+            assert!(omission.omitted_notarizes.load(Ordering::Relaxed) > 0);
+            assert!(omission.omitted_finalizations.load(Ordering::Relaxed) > 0);
+            assert_eq!(run.auditor, expected);
+        }
+    }
+
+    /// What [Repin] saw: the input its plan was shown, what its pins returned and left,
+    /// the run's compromised identity and term length, and the replicas whose engine
+    /// received no notarize vote.
+    #[derive(Default)]
+    struct Repinned {
+        planned: Option<FuzzInput>,
+        pinned: Option<(bool, bool, FuzzInput)>,
+        byzantine: Option<Option<usize>>,
+        term_length: Option<TermLength>,
+        deaf: Vec<usize>,
+    }
+
+    /// A prefix that splits one knob byte off, tries to pin N4F1C3, N4F0C4 and a
+    /// three-view term, and notes what [Repinned] holds.
+    struct Repin(Arc<Mutex<Repinned>>);
+
+    impl<P: simplex::Simplex> Prefix<P> for Repin {
+        fn plan(&mut self, pins: &mut Pins<'_>) -> Budget {
+            self.0.lock().planned = Some(pins.input().clone());
+            pins.raw_bytes().remove(0);
+            let byzantine = pins.configuration(N4F1C3);
+            let omission = pins.configuration(N4F0C4);
+            pins.term_length(TermLength::new(commonware_utils::NZU32!(3)));
+            self.0.lock().pinned = Some((byzantine, omission, pins.input().clone()));
+            Budget {
+                prefix: Duration::from_secs(3),
+                release: Duration::from_secs(1),
+            }
+        }
+
+        fn run(self: Box<Self>, cx: PrefixContext<P>) -> PrefixFuture {
+            Box::pin(async move {
+                cx.sleep(Duration::from_secs(2)).await;
+                let deaf = cx
+                    .honest()
+                    .into_iter()
+                    .filter(|r| {
+                        !cx.deliveries(*r).iter().any(|entry| {
+                            entry.value.channel == Channel::Vote
+                                && matches!(
+                                    Vote::<P::Scheme, commonware_cryptography::sha256::Digest>::decode(
+                                        entry.value.payload.clone()
+                                    ),
+                                    Ok(Vote::Notarize(_))
+                                )
+                        })
+                    })
+                    .collect();
+                let mut seen = self.0.lock();
+                seen.byzantine = Some(cx.byzantine());
+                seen.term_length = Some(cx.term_length());
+                seen.deaf = deaf;
+            })
+        }
+    }
+
+    /// Runs the notarize-omission continuation with [Repin] on `raw_bytes`, from an
+    /// input whose fields are all ones the base does not run.
+    fn repinned(raw_bytes: Vec<u8>) -> (Watch, Repinned) {
+        let mut input = input(41, 2, N4F1C3);
+        input.raw_bytes = raw_bytes;
+        input.partition = Partition::Static(SetPartition::n4(5));
+        input.degraded_network = true;
+        input.block_filter = BlockFilterChoice::DropRecipient {
+            view: View::new(3),
+            target_idx: 1,
+        };
+        input.term_length = TermLength::new(commonware_utils::NZU32!(2));
+        input.certify = CertifyChoice::SingleCancel { target_idx: 1 };
+        input.reporting = ReporterWiring::SecondSlot;
+        let seen = Arc::new(Mutex::new(Repinned::default()));
+        let watch = Watch::default();
+        fuzz_audit_notarize_omission_with_prefix::<SimplexCertificateMock, _, _>(
+            input,
+            Repin(seen.clone()),
+            watch.clone(),
+        );
+        let seen = std::mem::take(&mut *seen.lock());
+        (watch, seen)
+    }
+
+    #[test]
+    fn the_omission_base_forces_its_fields_after_the_pins() {
+        let (watch, seen) = repinned(vec![1, 2, 7, 7, 7]);
+        // The plan was shown the fields the base runs.
+        let planned = seen.planned.expect("the prefix was planned");
+        assert_eq!(planned.configuration, N4F0C4);
+        assert_eq!(planned.partition, Partition::Connected);
+        assert!(!planned.degraded_network);
+        assert_eq!(planned.block_filter, BlockFilterChoice::None);
+        assert_eq!(planned.required_containers, 4);
+        assert_eq!(planned.term_length, TermLength::ONE);
+        assert_eq!(planned.certify, CertifyChoice::Always);
+        assert_eq!(planned.reporting, ReporterWiring::Solo);
+        // The pins refused what the base does not run and left its fields.
+        let (byzantine, omission, pinned) = seen.pinned.expect("the prefix pinned");
+        assert!(!byzantine);
+        assert!(omission);
+        assert_eq!(pinned.configuration, N4F0C4);
+        assert_eq!(pinned.term_length, TermLength::ONE);
+        // The run kept the configuration and term the base forces.
+        assert_eq!(seen.byzantine, Some(None));
+        assert_eq!(seen.term_length, Some(TermLength::ONE));
+        assert_eq!(watch.seen.lock().compromised, vec![Vec::<usize>::new()]);
+        let (release, end) = last_two(&watch);
+        assert!(release.ok() && end.ok(), "{release} / {end}");
+    }
+
+    #[test]
+    fn the_omission_victim_comes_from_the_bytes_after_the_knobs() {
+        // The knob byte would make node 1 the victim; the first byte after it makes 2.
+        let (_, seen) = repinned(vec![1, 2, 7, 7, 7]);
+        assert_eq!(seen.deaf, vec![2]);
+        let (_, seen) = repinned(vec![2, 7, 7, 7, 7]);
+        assert_eq!(seen.deaf, vec![3]);
+    }
+
+    #[test]
+    fn notarize_omission_continuation_requires_no_actor() {
+        let watch = Watch::default();
+        let mut input = input(42, 2, N4F0C4);
+        input.raw_bytes = vec![1, 9, 9];
+        fuzz_audit_notarize_omission_with_prefix::<SimplexCertificateMock, _, _>(
+            input,
+            Idle,
+            watch.clone(),
+        );
+        let (release, end) = last_two(&watch);
+        assert_eq!(release.to_string(), "release ok -");
+        assert_eq!(end.to_string(), "end ok -");
+        assert_eq!(watch.seen.lock().compromised, vec![Vec::<usize>::new()]);
+    }
+
+    /// A prefix that crashes the omission victim, replica 3, at once and leaves it to
+    /// the release, which restarts it without the omission model.
+    struct CrashVictim;
+
+    impl<P: simplex::Simplex> Prefix<P> for CrashVictim {
+        fn plan(&mut self, _pins: &mut Pins<'_>) -> Budget {
+            Budget {
+                prefix: Duration::from_secs(2),
+                release: Duration::from_secs(1),
+            }
+        }
+
+        fn run(self: Box<Self>, cx: PrefixContext<P>) -> PrefixFuture {
+            Box::pin(async move {
+                assert!(cx.crash(3).await);
+                cx.sleep(Duration::from_secs(1)).await;
+            })
+        }
+    }
+
+    #[test]
+    fn a_prefix_that_stops_the_omissions_fails_the_end_check() {
+        let watch = Watch::default();
+        let mut input = input(43, 4, N4F0C4);
+        input.raw_bytes = vec![3, 9, 9];
+        fuzz_audit_notarize_omission_with_prefix::<SimplexCertificateMock, _, _>(
+            input,
+            CrashVictim,
+            watch.clone(),
+        );
+        let (release, end) = last_two(&watch);
+        assert_eq!(release.to_string(), "release ok -");
+        assert_eq!(end.base, Some("omission-incomplete"));
+        assert_eq!(end.to_string(), "end failed - base=omission-incomplete");
+        assert_eq!(watch.seen.lock().releases[0].restarted, vec![3]);
+    }
+
+    /// A prefix that lets the omission victim, replica 3, omit for 10 s, then crashes it
+    /// and leaves it to the release, which restarts it without the omission model.
+    struct CrashVictimLate;
+
+    impl<P: simplex::Simplex> Prefix<P> for CrashVictimLate {
+        fn plan(&mut self, _pins: &mut Pins<'_>) -> Budget {
+            Budget {
+                prefix: Duration::from_secs(12),
+                release: Duration::from_secs(1),
+            }
+        }
+
+        fn run(self: Box<Self>, cx: PrefixContext<P>) -> PrefixFuture {
+            Box::pin(async move {
+                cx.sleep(Duration::from_secs(10)).await;
+                assert!(cx.crash(3).await);
+            })
+        }
+    }
+
+    #[test]
+    fn a_prefix_that_crashes_the_victim_after_omissions_fails_the_end_check() {
+        let watch = Watch::default();
+        let mut input = input(43, 4, N4F0C4);
+        input.raw_bytes = vec![3, 9, 9];
+        fuzz_audit_notarize_omission_with_prefix::<SimplexCertificateMock, _, _>(
+            input,
+            CrashVictimLate,
+            watch.clone(),
+        );
+        let (release, end) = last_two(&watch);
+        assert_eq!(release.to_string(), "release ok -");
+        assert_eq!(end.to_string(), "end failed - base=omission-incomplete");
+        assert_eq!(watch.seen.lock().releases[0].restarted, vec![3]);
+    }
+
+    #[test]
+    fn omission_end_check_fails_only_when_an_omission_is_missing() {
+        for (notarizes, finalizations, incomplete) in
+            [(0, 0, true), (1, 0, true), (0, 1, true), (1, 1, false)]
+        {
+            let omission = NotarizeOmission::new(0);
+            omission
+                .omitted_notarizes
+                .fetch_add(notarizes, Ordering::Relaxed);
+            omission
+                .omitted_finalizations
+                .fetch_add(finalizations, Ordering::Relaxed);
+            assert_eq!(
+                omission.incomplete(),
+                incomplete.then_some("omission-incomplete")
+            );
+        }
+    }
+
+    #[test]
+    fn a_hooked_omission_run_has_no_recovery_sleep() {
+        // The prefix, the release delay and the release check, then the base's window:
+        // a quiescing sleep for the victim's recoveries would add another window. Some
+        // of these seeds (17 when written) leave a recovery pending at the window's end.
+        let bound = Duration::from_secs(2 + 1 + 1) + MAX_SLEEP_DURATION;
+        for seed in 0..32u8 {
+            let mut input = input(44, 4, N4F0C4);
+            input.raw_bytes = vec![seed, seed, 5];
+            force_notarize_omission(&mut input);
+            let hook = Hook::plan(
+                Box::new(Idle),
+                Arc::new(Watch::default()),
+                &mut input,
+                false,
+            );
+            let omission = NotarizeOmission::new(notarize_omission_victim(&input));
+            let run = run_audited_standard_once_with::<SimplexCertificateMock>(
+                input,
+                Some(omission),
+                Some(hook),
+            );
+            assert!(run.end < bound, "seed {seed} ended at {:?}", run.end);
         }
     }
 

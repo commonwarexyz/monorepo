@@ -45,8 +45,8 @@ fn sample_fault_rounds(
 
 /// Largest term length the block-dissemination target explores. Bounds how many
 /// consecutive views a byzantine stable leader holds; the "views 1 and 2" case
-/// is `term_length == 2`.
-const MAX_TERM_LENGTH: u32 = 4;
+/// is `term_length == 2`. A trusted continuation's term pin keeps to it.
+const MAX_TERM_LENGTH: u32 = commonware_consensus_fuzz_core::continuation::MARSHAL_MAX_TERM_LENGTH;
 
 #[derive(Debug, Clone)]
 pub struct MarshalDisrupterInput {

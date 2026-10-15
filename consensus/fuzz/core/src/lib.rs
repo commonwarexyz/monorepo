@@ -600,7 +600,7 @@ pub async fn setup_network<P: simplex::Simplex>(
     let (network, mut oracle) = Network::new_with_peers(
         context.child("network"),
         NetworkConfig {
-            max_size: 1024 * 1024,
+            max_size: continuation::MAX_MESSAGE,
             max_peers_per_set: NZUsize!(participants.len()),
             disconnect_on_block: false,
             tracked_peer_sets: NZUsize!(1),
@@ -1969,6 +1969,15 @@ pub trait TwinsBackend<P: simplex::Simplex> {
     fn link(&self) -> Link {
         default_link()
     }
+
+    /// The epoch the backend's honest engines run.
+    fn epoch(&self) -> Epoch {
+        Epoch::new(EPOCH)
+    }
+
+    /// Moves the faulty views of a secondary the backend starts itself `offset` views
+    /// later, past a trusted continuation's release; called before the pair starts.
+    fn set_view_offset(&mut self, _offset: u64) {}
 }
 
 /// Run one Twins scenario over a stack supplied by `backend`.
@@ -2037,9 +2046,8 @@ pub async fn run_twins_with_backend_and_hook<P, B>(
             1,
             "a trusted continuation runs one compromised identity"
         );
-        let relay = backend
-            .disrupter_block_relay(&setup.state)
-            .expect("a trusted continuation needs the backend's block relay");
+        let relay = backend.disrupter_block_relay(&setup.state);
+        let epoch = backend.epoch();
         let link = backend.link();
         let required = if backend.disrupter().is_some() {
             vec![continuation::Role::Primary, continuation::Role::Disrupter]
@@ -2057,6 +2065,7 @@ pub async fn run_twins_with_backend_and_hook<P, B>(
                 term_length,
                 optimistic_views,
                 scripted_views: prefix_end.get(),
+                epoch,
                 relay,
                 oracle: setup.oracle.clone(),
                 base_link: Box::new(move |_, _| Some(link.clone())),
@@ -2127,6 +2136,7 @@ pub async fn run_twins_with_backend_and_hook<P, B>(
         let idx = runner
             .byzantine()
             .expect("a Twins continuation has a compromised identity");
+        backend.set_view_offset(release.base);
         if let Some(channels) = channels
             && let Some(disrupter) = spawn_twin_pair::<P, B>(
                 context,

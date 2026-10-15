@@ -15,9 +15,15 @@
 //! A prefix can leave the system in any state a fault can (crashed or slow replicas,
 //! cut links, held messages), so nothing after the release depends on the release
 //! reverting everything. Drivers called without a prefix run unchanged.
+//!
+//! A marshal base also hands B its marshal channels ([MarshalChannel]), gates the honest
+//! replicas' marshal channels apart from their engine channels, and answers bounded,
+//! read-only queries of their marshal ([MarshalReads]). It has no block relay, and its
+//! replicas cannot be crashed. A recorder that no wrapper of the base feeds reads as cut
+//! from the read on ([Observer::dropped]).
 
 use crate::{
-    CertifyChoice, Configuration, EPOCH, FAULT_PHASE, FuzzInput, HarnessReporter, N4F0C4, N4F1C3,
+    CertifyChoice, Configuration, FAULT_PHASE, FuzzInput, HarnessReporter, N4F0C4, N4F1C3,
     NetworkChannels, PublicKeyOf, ReporterWiring, block_relay, simplex::Simplex,
     start_validator_engine, utils,
 };
@@ -32,11 +38,12 @@ use commonware_consensus::{
     },
     types::{Epoch, Round, TermLength, View, ViewDelta},
 };
-use commonware_cryptography::sha256::Digest as Sha256Digest;
+use commonware_cryptography::{Digest, sha256::Digest as Sha256Digest};
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver as _, Recipients, simulated::Link};
 use commonware_runtime::{Clock, Handle, IoBuf, Spawner, Supervisor as _, deterministic};
 use commonware_utils::{
+    SystemTimeExt as _,
     channel::{
         fallible::{FallibleExt as _, OneshotExt as _},
         mpsc, oneshot,
@@ -48,14 +55,15 @@ use futures::FutureExt as _;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
-    future::Future,
+    future::{Future, poll_fn},
     num::NonZeroUsize,
     pin::Pin,
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime},
+    task::Poll,
+    time::Duration,
 };
 
 /// How long the release check waits for the actors it just started to run.
@@ -70,6 +78,29 @@ pub const LOG_CAP: usize = 1 << 12;
 /// Most simulated time a prefix may ask for; the runner ends one that has not returned
 /// by then. A longer budget is cut to it, and a longer release delay to [FAULT_PHASE].
 pub const MAX_PREFIX_BUDGET: Duration = Duration::from_secs(60);
+
+/// Most simulated time a marshal read waits for its answer.
+pub const MARSHAL_READ_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// What a marshal read that cannot be answered, or a refused crash, restart or link change,
+/// costs, so a loop of them advances time.
+const NO_ANSWER: Duration = Duration::from_millis(1);
+
+/// The harness networks' largest message: B sends nothing larger.
+pub const MAX_MESSAGE: u32 = 1 << 20;
+
+/// Most bytes B's sends deliver in a run, each message counted once per recipient (at
+/// least one) and at no less than [MIN_CHARGE] bytes, so what the network, the recorders
+/// and the gates keep of them stays bounded.
+pub const MAX_SENT: u64 = 64 << 20;
+
+/// Fewest bytes a message B sends counts toward [MAX_SENT] per recipient, so a loop of
+/// empty or tiny sends ends within MAX_SENT / MIN_CHARGE deliveries.
+pub const MIN_CHARGE: u64 = 256;
+
+/// Longest term a marshal base that honors a term-length pin runs (the block
+/// dissemination decoder's bound).
+pub const MARSHAL_MAX_TERM_LENGTH: u32 = 4;
 
 // A continuation ends within the prefix budget, the release delay, the release check
 // and the base's fixed window, so the base's runtime deadline never needs extending.
@@ -101,6 +132,103 @@ impl Channel {
             Self::Certificate => 1,
             Self::Resolver => 2,
         }
+    }
+}
+
+/// A marshal channel of a replica: backfill (channel 1), or broadcast (channel 2),
+/// which carries blocks on the standard stack and shards on the coding stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MarshalChannel {
+    Backfill,
+    Broadcast,
+}
+
+impl MarshalChannel {
+    const ALL: [Self; 2] = [Self::Backfill, Self::Broadcast];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Backfill => 0,
+            Self::Broadcast => 1,
+        }
+    }
+}
+
+/// Most channels of one kind a gate serves.
+const LANES: usize = 3;
+
+/// A kind of gated channel: the engine's ([Channel]) or marshal's ([MarshalChannel]).
+/// Each kind has its own gate and deliveries log on a [ReplicaTap].
+trait Lane: Copy + fmt::Debug + Send + Sync + 'static {
+    /// What a filter and the deliveries log see of a message on this kind of channel.
+    type Inbound: Clone + Send + Sync + 'static;
+
+    const ALL: &'static [Self];
+
+    /// The recorder a wrapper of this kind of channel feeds.
+    const RECORDER: Recorder;
+
+    /// The channel's index among its kind, below [LANES].
+    fn index(self) -> usize;
+
+    fn inbound(self, from: Option<usize>, payload: IoBuf) -> Self::Inbound;
+
+    fn gate<P: Simplex>(tap: &ReplicaTap<P>) -> &Mutex<Gate<PublicKeyOf<P>, Self>>;
+
+    fn deliveries<P: Simplex>(tap: &ReplicaTap<P>) -> &Mutex<Log<Recorded<Self::Inbound>>>;
+}
+
+impl Lane for Channel {
+    type Inbound = Inbound;
+
+    const ALL: &'static [Self] = &Self::ALL;
+    const RECORDER: Recorder = Recorder::Gate;
+
+    fn index(self) -> usize {
+        Self::index(self)
+    }
+
+    fn inbound(self, from: Option<usize>, payload: IoBuf) -> Inbound {
+        Inbound {
+            from,
+            channel: self,
+            payload,
+        }
+    }
+
+    fn gate<P: Simplex>(tap: &ReplicaTap<P>) -> &Mutex<Gate<PublicKeyOf<P>, Self>> {
+        &tap.gate
+    }
+
+    fn deliveries<P: Simplex>(tap: &ReplicaTap<P>) -> &Mutex<Log<Recorded<Inbound>>> {
+        &tap.deliveries
+    }
+}
+
+impl Lane for MarshalChannel {
+    type Inbound = MarshalInbound;
+
+    const ALL: &'static [Self] = &Self::ALL;
+    const RECORDER: Recorder = Recorder::MarshalGate;
+
+    fn index(self) -> usize {
+        Self::index(self)
+    }
+
+    fn inbound(self, from: Option<usize>, payload: IoBuf) -> MarshalInbound {
+        MarshalInbound {
+            from,
+            channel: self,
+            payload,
+        }
+    }
+
+    fn gate<P: Simplex>(tap: &ReplicaTap<P>) -> &Mutex<Gate<PublicKeyOf<P>, Self>> {
+        &tap.marshal_gate
+    }
+
+    fn deliveries<P: Simplex>(tap: &ReplicaTap<P>) -> &Mutex<Log<Recorded<MarshalInbound>>> {
+        &tap.marshal_deliveries
     }
 }
 
@@ -221,6 +349,41 @@ pub struct Inbound {
     pub from: Option<usize>,
     pub channel: Channel,
     pub payload: IoBuf,
+}
+
+/// A message a replica received, or held, on one of its marshal channels.
+#[derive(Clone, Debug)]
+pub struct MarshalInbound {
+    /// The sender's index among the participants, `None` for an unknown key.
+    pub from: Option<usize>,
+    pub channel: MarshalChannel,
+    pub payload: IoBuf,
+}
+
+/// B's marshal channels as the base registered them: (backfill, broadcast).
+pub type MarshalChannels<K> = (
+    (
+        commonware_p2p::simulated::Sender<K, deterministic::Context>,
+        commonware_p2p::simulated::Receiver<K>,
+    ),
+    (
+        commonware_p2p::simulated::Sender<K, deterministic::Context>,
+        commonware_p2p::simulated::Receiver<K>,
+    ),
+);
+
+/// Read-only queries of an honest replica's marshal, which a marshal base installs on
+/// its tap ([ReplicaTap::set_reads]). Each future asks the replica's marshal actor
+/// through its mailbox and resolves to marshal's answer, `None` when marshal has none;
+/// these bases never set a floor or prune, so a request reaches the actor and is
+/// answered, or is dropped before the future is first polled. An implementation
+/// answers only through the actor: an answer ready at the first poll counts as none.
+pub trait MarshalReads: Send + Sync + 'static {
+    /// The digest of the block marshal finalized at `height`.
+    fn finalized(&self, height: u64) -> Pin<Box<dyn Future<Output = Option<Sha256Digest>> + Send>>;
+
+    /// The height of the last block marshal's application acknowledged.
+    fn processed(&self) -> Pin<Box<dyn Future<Output = Option<u64>> + Send>>;
 }
 
 /// How an automaton request ended: answered, closed by the automaton, or canceled by
@@ -374,23 +537,29 @@ pub struct ActorCheck {
     /// `release` (the handoff plus the release delay) or `end` (after the base's fixed window).
     pub at: &'static str,
     pub actors: Vec<ActorStatus>,
+    /// Why the base's own fault model did not run, as one token without whitespace, or
+    /// `None` when it did.
+    pub base: Option<&'static str>,
 }
 
 impl ActorCheck {
-    /// Whether every required actor runs.
+    /// Whether every required actor runs and the base's fault model ran.
     pub fn ok(&self) -> bool {
-        self.actors
-            .iter()
-            .all(|actor| actor.state == ActorState::Running)
+        self.base.is_none()
+            && self
+                .actors
+                .iter()
+                .all(|actor| actor.state == ActorState::Running)
     }
 }
 
 impl fmt::Display for ActorCheck {
-    /// `<at> ok|failed <identity>:<role>=<state> ...`, or `-` when nothing is required.
+    /// `<at> ok|failed <identity>:<role>=<state> ...`, or `-` when nothing is required,
+    /// then ` base=<reason>` when the base's fault model did not run.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {}", self.at, if self.ok() { "ok" } else { "failed" })?;
         if self.actors.is_empty() {
-            return write!(f, " -");
+            write!(f, " -")?;
         }
         for actor in &self.actors {
             write!(
@@ -400,6 +569,9 @@ impl fmt::Display for ActorCheck {
                 actor.role.name(),
                 actor.state.name()
             )?;
+        }
+        if let Some(reason) = self.base {
+            write!(f, " base={reason}")?;
         }
         Ok(())
     }
@@ -480,7 +652,11 @@ impl ActorRegistry {
                 }
             })
             .collect();
-        ActorCheck { at, actors }
+        ActorCheck {
+            at,
+            actors,
+            base: None,
+        }
     }
 }
 
@@ -505,7 +681,9 @@ pub trait Observer: Send + Sync + 'static {
     /// Reports, when the prefix reads a recorder log, B's inbox, or a replica's held
     /// messages, the position of the first entry it dropped at its cap. From that
     /// position on what the prefix read misses entries, so a check over it, in
-    /// particular one for the absence of an entry, decides nothing.
+    /// particular one for the absence of an entry, decides nothing. A recorder or gate
+    /// the base does not feed reports the position of the read itself, which it takes
+    /// from [Self::position]: what was read before it stands.
     fn dropped(&self, _seq: u64) {}
 }
 
@@ -518,16 +696,30 @@ pub struct Budget {
     pub release: Duration,
 }
 
+/// The decoder whose domain a [Pins] keeps to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Domain {
+    Simplex,
+    Twins,
+    /// The notarize-omission base: N4F0C4 and single-view terms only.
+    Omission,
+    /// A marshal base: N4F1C3 and a zero lookahead only, and a term length only when
+    /// the base honors one.
+    Marshal {
+        term: bool,
+    },
+}
+
 /// The decoded input fields a prefix may pin before the runtime starts. Each setter
 /// keeps the fields that depend on it as the decoder sets them.
 pub struct Pins<'a> {
     input: &'a mut FuzzInput,
-    twins: bool,
+    domain: Domain,
 }
 
 impl<'a> Pins<'a> {
-    pub(crate) const fn new(input: &'a mut FuzzInput, twins: bool) -> Self {
-        Self { input, twins }
+    const fn new(input: &'a mut FuzzInput, domain: Domain) -> Self {
+        Self { input, domain }
     }
 
     /// The input as decoded so far.
@@ -541,7 +733,19 @@ impl<'a> Pins<'a> {
     }
 
     /// Pins the term length; a lookahead beyond what the decoder samples for it is cut.
+    /// A marshal base that honors a term length pins one up to
+    /// [MARSHAL_MAX_TERM_LENGTH]; another marshal base and the notarize-omission base
+    /// pin nothing.
     pub fn term_length(&mut self, term_length: TermLength) {
+        if self.domain == Domain::Omission {
+            return;
+        }
+        if let Domain::Marshal { term } = self.domain {
+            if term && term_length.get() <= u64::from(MARSHAL_MAX_TERM_LENGTH) {
+                self.input.term_length = term_length;
+            }
+            return;
+        }
         self.input.term_length = term_length;
         let most = term_length.get() + 2;
         if self.input.optimistic_views.get() > most {
@@ -550,9 +754,13 @@ impl<'a> Pins<'a> {
     }
 
     /// Pins the optimistic lookahead; returns false, and pins nothing, beyond the
-    /// decoder's domain (the term length plus two).
+    /// decoder's domain (the term length plus two; zero on a marshal base).
     pub fn lookahead(&mut self, views: ViewDelta) -> bool {
-        if views.get() > self.input.term_length.get() + 2 {
+        let most = match self.domain {
+            Domain::Marshal { .. } => 0,
+            Domain::Simplex | Domain::Twins | Domain::Omission => self.input.term_length.get() + 2,
+        };
+        if views.get() > most {
             return false;
         }
         self.input.optimistic_views = views;
@@ -560,13 +768,20 @@ impl<'a> Pins<'a> {
     }
 
     /// Pins N4F1C3 or N4F0C4; returns false, and pins nothing, for another
-    /// configuration, and for N4F0C4 under Twins, which runs N4F1C3 only.
+    /// configuration, for N4F0C4 under Twins and on a marshal base, which run N4F1C3
+    /// only, and for N4F1C3 on the notarize-omission base, which runs N4F0C4 only.
     pub fn configuration(&mut self, configuration: Configuration) -> bool {
         if configuration != N4F1C3 && configuration != N4F0C4 {
             return false;
         }
-        if self.twins && configuration != N4F1C3 {
+        if self.domain == Domain::Omission {
+            return configuration == N4F0C4;
+        }
+        if self.domain != Domain::Simplex && configuration != N4F1C3 {
             return false;
+        }
+        if matches!(self.domain, Domain::Marshal { .. }) {
+            return true;
         }
         self.input.configuration = configuration;
         if configuration == N4F1C3 {
@@ -607,12 +822,48 @@ impl<P: Simplex> Hook<P> {
     /// Plans `prefix` against `input` and binds it to `observer`. The budget is cut to
     /// [MAX_PREFIX_BUDGET] and the release delay to [FAULT_PHASE].
     pub fn plan(
-        mut prefix: Box<dyn Prefix<P>>,
+        prefix: Box<dyn Prefix<P>>,
         observer: Arc<dyn Observer>,
         input: &mut FuzzInput,
         twins: bool,
     ) -> Self {
-        let asked = prefix.plan(&mut Pins::new(input, twins));
+        let domain = if twins {
+            Domain::Twins
+        } else {
+            Domain::Simplex
+        };
+        Self::plan_in(prefix, observer, input, domain)
+    }
+
+    /// [Self::plan] for a marshal base, whose scratch `input` mirrors the base's own: a
+    /// pin keeps to N4F1C3 and a zero lookahead, and pins a term length only when the
+    /// base honors one (`term`).
+    pub fn plan_marshal(
+        prefix: Box<dyn Prefix<P>>,
+        observer: Arc<dyn Observer>,
+        input: &mut FuzzInput,
+        term: bool,
+    ) -> Self {
+        Self::plan_in(prefix, observer, input, Domain::Marshal { term })
+    }
+
+    /// [Self::plan] for the notarize-omission base, whose `input` already carries the
+    /// base's forced fields: a pin keeps to N4F0C4 and pins no term length.
+    pub fn plan_omission(
+        prefix: Box<dyn Prefix<P>>,
+        observer: Arc<dyn Observer>,
+        input: &mut FuzzInput,
+    ) -> Self {
+        Self::plan_in(prefix, observer, input, Domain::Omission)
+    }
+
+    fn plan_in(
+        mut prefix: Box<dyn Prefix<P>>,
+        observer: Arc<dyn Observer>,
+        input: &mut FuzzInput,
+        domain: Domain,
+    ) -> Self {
+        let asked = prefix.plan(&mut Pins::new(input, domain));
         let budget = Budget {
             prefix: asked.prefix.min(MAX_PREFIX_BUDGET),
             release: asked.release.min(FAULT_PHASE),
@@ -661,23 +912,25 @@ pub struct Release {
     /// The highest view any honest replica finalized at the release; the base's
     /// view-indexed faults are re-based on it.
     pub base: u64,
+    /// The highest view any honest replica's elector was asked for by the release.
+    pub view: u64,
 }
 
-type HoldFilter = Arc<dyn Fn(&Inbound) -> bool + Send + Sync>;
+type HoldFilter<L> = Arc<dyn Fn(&<L as Lane>::Inbound) -> bool + Send + Sync>;
 type ActivityOf<P> = Activity<<P as Simplex>::Scheme, Sha256Digest>;
 type BlockFilter = Arc<dyn Fn(Option<View>, &Sha256Digest) -> bool + Send + Sync>;
 
-/// The gate on an honest replica's receivers.
-struct Gate<K> {
-    hold: Option<HoldFilter>,
-    held: VecDeque<(Channel, K, IoBuf)>,
+/// The gate on one kind of an honest replica's receivers.
+struct Gate<K, L: Lane> {
+    hold: Option<HoldFilter<L>>,
+    held: VecDeque<(L, K, IoBuf)>,
     /// The position of the first message the full gate dropped.
     dropped: Option<u64>,
-    ready: [VecDeque<(K, IoBuf)>; 3],
-    wake: [Option<mpsc::UnboundedSender<()>>; 3],
+    ready: [VecDeque<(K, IoBuf)>; LANES],
+    wake: [Option<mpsc::UnboundedSender<()>>; LANES],
 }
 
-impl<K> Gate<K> {
+impl<K, L: Lane> Gate<K, L> {
     const fn new() -> Self {
         Self {
             hold: None,
@@ -690,10 +943,10 @@ impl<K> Gate<K> {
 
     /// Moves the held messages `select` accepts to their channels, in arrival order,
     /// and wakes those channels. Returns how many moved.
-    fn pass(&mut self, mut select: impl FnMut(Channel, &K, &IoBuf) -> bool) -> usize {
+    fn pass(&mut self, mut select: impl FnMut(L, &K, &IoBuf) -> bool) -> usize {
         let mut moved = 0;
         let mut kept = VecDeque::with_capacity(self.held.len());
-        let mut woken = [false; 3];
+        let mut woken = [false; LANES];
         for (channel, sender, payload) in self.held.drain(..) {
             if select(channel, &sender, &payload) {
                 self.ready[channel.index()].push_back((sender, payload));
@@ -704,7 +957,7 @@ impl<K> Gate<K> {
             }
         }
         self.held = kept;
-        for channel in Channel::ALL {
+        for channel in L::ALL {
             if woken[channel.index()]
                 && let Some(wake) = &self.wake[channel.index()]
             {
@@ -713,6 +966,30 @@ impl<K> Gate<K> {
         }
         moved
     }
+
+    /// Stops holding and delivers what the gate holds, in arrival order.
+    fn open(&mut self) -> usize {
+        self.hold = None;
+        self.pass(|_, _, _| true)
+    }
+
+    /// Whether the release has anything to open: a filter or held messages.
+    fn engaged(&self) -> bool {
+        self.hold.is_some() || !self.held.is_empty()
+    }
+}
+
+/// A recorder of a [ReplicaTap], as a bit of the set the base's wrappers feed.
+#[derive(Clone, Copy, Debug)]
+enum Recorder {
+    /// The engine gate: its held messages and the deliveries log.
+    Gate = 1,
+    /// The marshal gate: its held messages and the marshal deliveries log.
+    MarshalGate = 1 << 1,
+    Activities = 1 << 2,
+    Automaton = 1 << 3,
+    Elections = 1 << 4,
+    Blocks = 1 << 5,
 }
 
 /// The tasks of one incarnation of an honest replica, and how to build the next one.
@@ -725,22 +1002,32 @@ struct Incarnation<P: Simplex> {
 type Respawn<P> =
     Box<dyn FnMut(NetworkChannels<PublicKeyOf<P>>) -> (Handle<()>, Handle<()>) + Send>;
 
-/// The runner's view of one honest replica: the gate on its receivers and the
+/// The runner's view of one honest replica: the gates on its receivers and the
 /// recorders wrapped around its reporter, automaton, elector and blocker at spawn.
 pub struct ReplicaTap<P: Simplex> {
     index: usize,
     participants: Arc<[PublicKeyOf<P>]>,
     observer: Arc<dyn Observer>,
     recording: Arc<AtomicBool>,
-    gate: Mutex<Gate<PublicKeyOf<P>>>,
+    gate: Mutex<Gate<PublicKeyOf<P>, Channel>>,
     deliveries: Mutex<Log<Recorded<Inbound>>>,
+    marshal_gate: Mutex<Gate<PublicKeyOf<P>, MarshalChannel>>,
+    marshal_deliveries: Mutex<Log<Recorded<MarshalInbound>>>,
     activities: Mutex<Log<Recorded<ActivityOf<P>>>>,
     automaton: Mutex<Log<Recorded<AutomatonEvent>>>,
     elections: Mutex<Log<Recorded<(View, usize)>>>,
     blocks: Mutex<Log<Recorded<usize>>>,
+    /// The [Recorder]s a wrapper feeds.
+    fed: AtomicU8,
     /// The highest view this replica reported a finalization of, kept past the logs' cap.
     finalized: AtomicU64,
+    /// The highest view this replica's elector was asked for, kept past the logs' cap.
+    elected: AtomicU64,
+    reads: Mutex<Option<Arc<dyn MarshalReads>>>,
     incarnation: Mutex<Incarnation<P>>,
+    /// Whether this replica was ever crashed: a restarted incarnation runs without the
+    /// wrappers the base gave it at spawn.
+    crashed_once: AtomicBool,
     /// Held while this replica crashes or restarts: a concurrent crash or restart of it
     /// returns false, so two incarnations never run on its partition at once.
     busy: AsyncMutex<()>,
@@ -760,18 +1047,42 @@ impl<P: Simplex> ReplicaTap<P> {
             recording,
             gate: Mutex::new(Gate::new()),
             deliveries: Mutex::default(),
+            marshal_gate: Mutex::new(Gate::new()),
+            marshal_deliveries: Mutex::default(),
             activities: Mutex::default(),
             automaton: Mutex::default(),
             elections: Mutex::default(),
             blocks: Mutex::default(),
+            fed: AtomicU8::new(0),
             finalized: AtomicU64::new(0),
+            elected: AtomicU64::new(0),
+            reads: Mutex::new(None),
             incarnation: Mutex::new(Incarnation {
                 app: None,
                 engine: None,
                 respawn: None,
             }),
+            crashed_once: AtomicBool::new(false),
             busy: AsyncMutex::new(()),
         }
+    }
+
+    /// Installs the queries of this replica's marshal the prefix reads through.
+    pub fn set_reads(&self, reads: Arc<dyn MarshalReads>) {
+        *self.reads.lock() = Some(reads);
+    }
+
+    fn reads(&self) -> Option<Arc<dyn MarshalReads>> {
+        self.reads.lock().clone()
+    }
+
+    /// Marks `recorder` as fed by a wrapper of the base.
+    fn feed(&self, recorder: Recorder) {
+        self.fed.fetch_or(recorder as u8, Ordering::Relaxed);
+    }
+
+    fn fed(&self, recorder: Recorder) -> bool {
+        self.fed.load(Ordering::Relaxed) & recorder as u8 != 0
     }
 
     fn recording(&self) -> bool {
@@ -789,31 +1100,27 @@ impl<P: Simplex> ReplicaTap<P> {
         self.participants.iter().position(|known| known == key)
     }
 
-    /// The next message ready for `channel`, as the gate passed or released it.
-    fn take_ready(&self, channel: Channel) -> Option<(PublicKeyOf<P>, IoBuf)> {
-        self.gate.lock().ready[channel.index()].pop_front()
+    /// The next message ready for `lane`, as its gate passed or released it.
+    fn take_ready<L: Lane>(&self, lane: L) -> Option<(PublicKeyOf<P>, IoBuf)> {
+        L::gate(self).lock().ready[lane.index()].pop_front()
     }
 
-    /// Whether the gate holds `message`, which it then keeps.
-    fn hold(&self, channel: Channel, sender: &PublicKeyOf<P>, payload: &IoBuf) -> bool {
+    /// Whether the gate of `lane` holds `message`, which it then keeps.
+    fn hold<L: Lane>(&self, lane: L, sender: &PublicKeyOf<P>, payload: &IoBuf) -> bool {
+        let gate = L::gate(self);
         // The filter runs with the gate unlocked, so it may call the context.
-        let Some(hold) = self.gate.lock().hold.clone() else {
+        let Some(hold) = gate.lock().hold.clone() else {
             return false;
         };
-        let inbound = Inbound {
-            from: self.position(sender),
-            channel,
-            payload: payload.clone(),
-        };
+        let inbound = lane.inbound(self.position(sender), payload.clone());
         if !hold(&inbound) {
             return false;
         }
         let full = {
-            let mut gate = self.gate.lock();
+            let mut gate = gate.lock();
             let full = gate.held.len() >= LOG_CAP;
             if !full {
-                gate.held
-                    .push_back((channel, sender.clone(), payload.clone()));
+                gate.held.push_back((lane, sender.clone(), payload.clone()));
             }
             full
         };
@@ -821,34 +1128,28 @@ impl<P: Simplex> ReplicaTap<P> {
         if full {
             let seq = Stamp::now(&*self.observer).seq();
             if seq != 0 {
-                self.gate.lock().dropped.get_or_insert(seq);
+                gate.lock().dropped.get_or_insert(seq);
             }
         }
         true
     }
 
-    fn delivered(&self, channel: Channel, sender: &PublicKeyOf<P>, payload: &IoBuf) {
+    fn delivered<L: Lane>(&self, lane: L, sender: &PublicKeyOf<P>, payload: &IoBuf) {
         if self.recording() {
-            let inbound = Inbound {
-                from: self.position(sender),
-                channel,
-                payload: payload.clone(),
-            };
-            self.record(&self.deliveries, inbound);
+            let inbound = lane.inbound(self.position(sender), payload.clone());
+            self.record(L::deliveries(self), inbound);
         }
     }
 
-    fn wake(&self, channel: Channel) -> mpsc::UnboundedReceiver<()> {
+    fn wake<L: Lane>(&self, lane: L) -> mpsc::UnboundedReceiver<()> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        self.gate.lock().wake[channel.index()] = Some(sender);
+        L::gate(self).lock().wake[lane.index()] = Some(sender);
         receiver
     }
 
-    /// Opens the gate: every held message goes to its channel, in arrival order.
+    /// Opens both gates: every held message goes to its channel, in arrival order.
     fn open(&self) -> usize {
-        let mut gate = self.gate.lock();
-        gate.hold = None;
-        gate.pass(|_, _, _| true)
+        self.gate.lock().open() + self.marshal_gate.lock().open()
     }
 
     fn crashed(&self) -> bool {
@@ -857,32 +1158,67 @@ impl<P: Simplex> ReplicaTap<P> {
     }
 }
 
-/// A receiver behind an honest replica's gate: it holds what the gate's filter
-/// accepts, delivers what the prefix passes, and records every delivery.
-pub struct GateReceiver<P: Simplex, R> {
+/// A receiver behind the gate of an honest replica's channel `L`: it holds what the
+/// gate's filter accepts, delivers what the prefix passes, and records every delivery.
+/// Without a tap it only forwards.
+pub struct GateReceiver<P: Simplex, R, L = Channel> {
     inner: R,
-    tap: Arc<ReplicaTap<P>>,
-    channel: Channel,
-    wake: mpsc::UnboundedReceiver<()>,
+    tap: Option<Arc<ReplicaTap<P>>>,
+    lane: L,
+    /// Wakes the receiver when the prefix passes a message to its channel; `None`
+    /// without a tap, or once a newer receiver of the channel took the wake-ups.
+    wake: Option<mpsc::UnboundedReceiver<()>>,
 }
 
-impl<P: Simplex, R> GateReceiver<P, R> {
-    fn new(inner: R, tap: Arc<ReplicaTap<P>>, channel: Channel) -> Self {
-        let wake = tap.wake(channel);
-        Self {
-            inner,
-            tap,
-            channel,
-            wake,
-        }
+/// A receiver of honest replica `tap`'s engine `channel`, behind its engine gate.
+pub fn gate<P: Simplex, R>(
+    tap: Option<&Arc<ReplicaTap<P>>>,
+    inner: R,
+    channel: Channel,
+) -> GateReceiver<P, R> {
+    gated(tap, inner, channel)
+}
+
+/// A receiver of honest replica `tap`'s marshal `channel`, behind its marshal gate.
+pub fn marshal_gate<P: Simplex, R>(
+    tap: Option<&Arc<ReplicaTap<P>>>,
+    inner: R,
+    channel: MarshalChannel,
+) -> GateReceiver<P, R, MarshalChannel> {
+    gated(tap, inner, channel)
+}
+
+fn gated<P: Simplex, R, L: Lane>(
+    tap: Option<&Arc<ReplicaTap<P>>>,
+    inner: R,
+    lane: L,
+) -> GateReceiver<P, R, L> {
+    let tap = fed(tap, L::RECORDER);
+    let wake = tap.as_ref().map(|tap| tap.wake(lane));
+    GateReceiver {
+        inner,
+        tap,
+        lane,
+        wake,
     }
 }
 
-impl<P: Simplex, R> fmt::Debug for GateReceiver<P, R> {
+/// `tap`, marked as feeding `recorder`.
+fn fed<P: Simplex>(
+    tap: Option<&Arc<ReplicaTap<P>>>,
+    recorder: Recorder,
+) -> Option<Arc<ReplicaTap<P>>> {
+    tap.map(|tap| {
+        tap.feed(recorder);
+        tap.clone()
+    })
+}
+
+impl<P: Simplex, R, L: fmt::Debug> fmt::Debug for GateReceiver<P, R, L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GateReceiver")
-            .field("replica", &self.tap.index)
-            .field("channel", &self.channel)
+            .field("replica", &self.tap.as_ref().map(|tap| tap.index))
+            .field("channel", &self.lane)
             .finish()
     }
 }
@@ -896,30 +1232,86 @@ where
     type PublicKey = PublicKeyOf<P>;
 
     async fn recv(&mut self) -> Result<commonware_p2p::Message<Self::PublicKey>, Self::Error> {
-        loop {
-            if let Some((sender, payload)) = self.tap.take_ready(self.channel) {
-                self.tap.delivered(self.channel, &sender, &payload);
-                return Ok((sender, payload));
-            }
-            select! {
-                message = self.inner.recv() => {
-                    let (sender, payload) = message?;
-                    if self.tap.hold(self.channel, &sender, &payload) {
-                        continue;
-                    }
-                    self.tap.delivered(self.channel, &sender, &payload);
-                    return Ok((sender, payload));
-                },
-                _ = self.wake.recv() => {},
-            }
-        }
+        gated_recv(self).await
     }
 }
 
-/// Records every activity an honest replica's engine reports.
+impl<P, R> commonware_p2p::Receiver for GateReceiver<P, R, MarshalChannel>
+where
+    P: Simplex,
+    R: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+{
+    type Error = R::Error;
+    type PublicKey = PublicKeyOf<P>;
+
+    async fn recv(&mut self) -> Result<commonware_p2p::Message<Self::PublicKey>, Self::Error> {
+        gated_recv(self).await
+    }
+}
+
+/// The next message `receiver` delivers: one the prefix passed, or one its gate's
+/// filter does not hold.
+async fn gated_recv<P, R, L>(
+    receiver: &mut GateReceiver<P, R, L>,
+) -> Result<commonware_p2p::Message<PublicKeyOf<P>>, R::Error>
+where
+    P: Simplex,
+    R: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    L: Lane,
+{
+    let GateReceiver {
+        inner,
+        tap,
+        lane,
+        wake,
+    } = receiver;
+    let Some(tap) = tap.as_ref() else {
+        return inner.recv().await;
+    };
+    loop {
+        if let Some((sender, payload)) = tap.take_ready(*lane) {
+            tap.delivered(*lane, &sender, &payload);
+            return Ok((sender, payload));
+        }
+        let message = match wake.as_mut() {
+            Some(signal) => select! {
+                message = inner.recv() => message,
+                woken = signal.recv() => {
+                    // A closed wake channel means a newer receiver of this channel
+                    // took its wake-ups: this one waits for its own messages only.
+                    if woken.is_none() {
+                        *wake = None;
+                    }
+                    continue;
+                },
+            },
+            None => inner.recv().await,
+        };
+        let (sender, payload) = message?;
+        if tap.hold(*lane, &sender, &payload) {
+            continue;
+        }
+        tap.delivered(*lane, &sender, &payload);
+        return Ok((sender, payload));
+    }
+}
+
+/// Records every activity an honest replica's engine reports; without a tap it only
+/// forwards.
 pub struct TapReporter<P: Simplex, R> {
     inner: R,
-    tap: Arc<ReplicaTap<P>>,
+    tap: Option<Arc<ReplicaTap<P>>>,
+}
+
+/// A reporter that records into honest replica `tap`'s activities log.
+pub fn tap_reporter<P: Simplex, R>(
+    tap: Option<&Arc<ReplicaTap<P>>>,
+    inner: R,
+) -> TapReporter<P, R> {
+    TapReporter {
+        inner,
+        tap: fed(tap, Recorder::Activities),
+    }
 }
 
 impl<P: Simplex, R: Clone> Clone for TapReporter<P, R> {
@@ -939,22 +1331,76 @@ where
     type Activity = R::Activity;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        if let Activity::Finalization(finalization) = &activity {
-            self.tap
-                .finalized
-                .fetch_max(finalization.view().get(), Ordering::Relaxed);
-        }
-        if self.tap.recording() {
-            self.tap.record(&self.tap.activities, activity.clone());
+        if let Some(tap) = &self.tap {
+            if let Activity::Finalization(finalization) = &activity {
+                tap.finalized
+                    .fetch_max(finalization.view().get(), Ordering::Relaxed);
+            }
+            if tap.recording() {
+                tap.record(&tap.activities, activity.clone());
+            }
         }
         self.inner.report(activity)
     }
 }
 
-/// Records every leader an honest replica's voter elects.
+/// Raises the release's base with every finalization an honest replica's engine
+/// reports, whatever its payload, and records nothing; without a tap it only forwards.
+pub struct TapFinalized<P: Simplex, R> {
+    inner: R,
+    tap: Option<Arc<ReplicaTap<P>>>,
+}
+
+/// A reporter that raises honest replica `tap`'s finalized view.
+pub fn tap_finalized<P: Simplex, R>(
+    tap: Option<&Arc<ReplicaTap<P>>>,
+    inner: R,
+) -> TapFinalized<P, R> {
+    TapFinalized {
+        inner,
+        tap: tap.cloned(),
+    }
+}
+
+impl<P: Simplex, R: Clone> Clone for TapFinalized<P, R> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            tap: self.tap.clone(),
+        }
+    }
+}
+
+impl<P, R, D> Reporter for TapFinalized<P, R>
+where
+    P: Simplex,
+    D: Digest,
+    R: Reporter<Activity = Activity<P::Scheme, D>>,
+{
+    type Activity = R::Activity;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        if let (Some(tap), Activity::Finalization(finalization)) = (&self.tap, &activity) {
+            tap.finalized
+                .fetch_max(finalization.view().get(), Ordering::Relaxed);
+        }
+        self.inner.report(activity)
+    }
+}
+
+/// Records every leader an honest replica's voter elects; without a tap it only
+/// forwards.
 pub struct TapElector<P: Simplex, C> {
     inner: C,
-    tap: Arc<ReplicaTap<P>>,
+    tap: Option<Arc<ReplicaTap<P>>>,
+}
+
+/// An elector config whose elector records into honest replica `tap`'s elections log.
+pub fn tap_elector<P: Simplex, C>(tap: Option<&Arc<ReplicaTap<P>>>, inner: C) -> TapElector<P, C> {
+    TapElector {
+        inner,
+        tap: fed(tap, Recorder::Elections),
+    }
 }
 
 impl<P: Simplex, C: Clone> Clone for TapElector<P, C> {
@@ -969,7 +1415,7 @@ impl<P: Simplex, C: Clone> Clone for TapElector<P, C> {
 /// The elector [TapElector] builds.
 pub struct TapElectorState<P: Simplex, E> {
     inner: E,
-    tap: Arc<ReplicaTap<P>>,
+    tap: Option<Arc<ReplicaTap<P>>>,
 }
 
 impl<P: Simplex, E: Clone> Clone for TapElectorState<P, E> {
@@ -1013,16 +1459,26 @@ where
         input: Input<'_, P::Scheme, Self>,
     ) -> commonware_consensus::types::Participant {
         let leader = self.inner.elect(round, input);
-        self.tap
-            .record(&self.tap.elections, (round.view(), leader.get() as usize));
+        if let Some(tap) = &self.tap {
+            tap.elected.fetch_max(round.view().get(), Ordering::Relaxed);
+            tap.record(&tap.elections, (round.view(), leader.get() as usize));
+        }
         leader
     }
 }
 
-/// Records every peer an honest replica blocks.
+/// Records every peer an honest replica blocks; without a tap it only forwards.
 pub struct TapBlocker<P: Simplex, B> {
     inner: B,
-    tap: Arc<ReplicaTap<P>>,
+    tap: Option<Arc<ReplicaTap<P>>>,
+}
+
+/// A blocker that records into honest replica `tap`'s blocks log.
+pub fn tap_blocker<P: Simplex, B>(tap: Option<&Arc<ReplicaTap<P>>>, inner: B) -> TapBlocker<P, B> {
+    TapBlocker {
+        inner,
+        tap: fed(tap, Recorder::Blocks),
+    }
 }
 
 impl<P: Simplex, B: Clone> Clone for TapBlocker<P, B> {
@@ -1046,8 +1502,10 @@ where
         reason = "a recording blocker forwards the engine's block, which logged it"
     )]
     fn block(&mut self, peer: Self::PublicKey) -> Feedback {
-        if let Some(index) = self.tap.position(&peer) {
-            self.tap.record(&self.tap.blocks, index);
+        if let Some(tap) = &self.tap
+            && let Some(index) = tap.position(&peer)
+        {
+            tap.record(&tap.blocks, index);
         }
         self.inner.block(peer)
     }
@@ -1057,11 +1515,30 @@ where
     }
 }
 
-/// Records what an honest replica's automaton is asked, and what it answers.
+/// Records what an honest replica's automaton is asked, and what it answers; without
+/// a tap it only forwards.
 pub struct TapAutomaton<P: Simplex, A> {
     inner: A,
-    tap: Arc<ReplicaTap<P>>,
-    context: Arc<Mutex<deterministic::Context>>,
+    tap: Option<Arc<ReplicaTap<P>>>,
+    context: Option<Arc<Mutex<deterministic::Context>>>,
+}
+
+/// An automaton that records into honest replica `tap`'s automaton log, with a child
+/// of `context` for the tasks that watch the answers.
+pub fn tap_automaton<P: Simplex, A>(
+    tap: Option<&Arc<ReplicaTap<P>>>,
+    inner: A,
+    context: &deterministic::Context,
+) -> TapAutomaton<P, A> {
+    let tap = fed(tap, Recorder::Automaton);
+    let context = tap
+        .as_ref()
+        .map(|_| Arc::new(Mutex::new(context.child("tap"))));
+    TapAutomaton {
+        inner,
+        tap,
+        context,
+    }
 }
 
 impl<P: Simplex, A: Clone> Clone for TapAutomaton<P, A> {
@@ -1075,6 +1552,13 @@ impl<P: Simplex, A: Clone> Clone for TapAutomaton<P, A> {
 }
 
 impl<P: Simplex, A> TapAutomaton<P, A> {
+    /// Records the event `event` builds for the tap.
+    fn record(&self, event: impl FnOnce(&ReplicaTap<P>) -> AutomatonEvent) {
+        if let Some(tap) = &self.tap {
+            tap.record(&tap.automaton, event(tap));
+        }
+    }
+
     /// Forwards `receiver`'s answer and records how the request ended with `done`. When
     /// consensus drops the receiver it was given, the proxy drops `receiver` too, so the
     /// automaton sees the cancellation as it would without the recorder.
@@ -1083,12 +1567,15 @@ impl<P: Simplex, A> TapAutomaton<P, A> {
         receiver: oneshot::Receiver<T>,
         done: impl FnOnce(Completion<T>) -> AutomatonEvent + Send + 'static,
     ) -> oneshot::Receiver<T> {
-        if !self.tap.recording() {
+        let (Some(tap), Some(context)) = (&self.tap, &self.context) else {
+            return receiver;
+        };
+        if !tap.recording() {
             return receiver;
         }
         let (mut sender, output) = oneshot::channel();
-        let tap = self.tap.clone();
-        self.context
+        let tap = tap.clone();
+        context
             .lock()
             .child("tap_automaton")
             .spawn(move |_| async move {
@@ -1125,13 +1612,10 @@ where
 
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let round = context.round;
-        self.tap.record(
-            &self.tap.automaton,
-            AutomatonEvent::Propose {
-                round,
-                parent: context.parent,
-            },
-        );
+        self.record(|_| AutomatonEvent::Propose {
+            round,
+            parent: context.parent,
+        });
         let receiver = self.inner.propose(context).await;
         self.proxy(receiver, move |payload| AutomatonEvent::Proposed {
             round,
@@ -1145,15 +1629,12 @@ where
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let round = context.round;
-        self.tap.record(
-            &self.tap.automaton,
-            AutomatonEvent::Verify {
-                round,
-                leader: self.tap.position(&context.leader),
-                parent: context.parent,
-                payload,
-            },
-        );
+        self.record(|tap| AutomatonEvent::Verify {
+            round,
+            leader: tap.position(&context.leader),
+            parent: context.parent,
+            payload,
+        });
         let receiver = self.inner.verify(context, payload).await;
         self.proxy(receiver, move |valid| AutomatonEvent::Verified {
             round,
@@ -1176,13 +1657,10 @@ where
         context: Self::Context,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let round = context.round;
-        self.tap.record(
-            &self.tap.automaton,
-            AutomatonEvent::Prepare {
-                round,
-                parent: context.parent,
-            },
-        );
+        self.record(|_| AutomatonEvent::Prepare {
+            round,
+            parent: context.parent,
+        });
         let receiver = self.inner.prepare(context).await;
         self.proxy(receiver, move |decision| AutomatonEvent::Prepared {
             round,
@@ -1191,10 +1669,7 @@ where
     }
 
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
-        self.tap.record(
-            &self.tap.automaton,
-            AutomatonEvent::Certify { round, payload },
-        );
+        self.record(|_| AutomatonEvent::Certify { round, payload });
         let receiver = self.inner.certify(round, payload).await;
         self.proxy(receiver, move |certified| AutomatonEvent::Certified {
             round,
@@ -1371,23 +1846,15 @@ where
             block_relay::Application::new(self.context.child("application"), app_cfg);
         actor.set_handoff(self.handoff);
         let app = actor.start();
-        let automaton = TapAutomaton {
-            inner: self.reporter.automaton(&self.context, application.clone()),
-            tap: tap.clone(),
-            context: Arc::new(Mutex::new(self.context.child("tap"))),
-        };
-        let reporter = TapReporter {
-            inner: self.reporter.clone(),
-            tap: tap.clone(),
-        };
-        let elector = TapElector {
-            inner: self.elector.clone(),
-            tap: tap.clone(),
-        };
-        let blocker = TapBlocker {
-            inner: self.oracle.control(self.validator.clone()),
-            tap: tap.clone(),
-        };
+        let tap = Some(tap);
+        let automaton = tap_automaton(
+            tap,
+            self.reporter.automaton(&self.context, application.clone()),
+            &self.context,
+        );
+        let reporter = tap_reporter(tap, self.reporter.clone());
+        let elector = tap_elector(tap, self.elector.clone());
+        let blocker = tap_blocker(tap, self.oracle.control(self.validator.clone()));
         let engine = start_validator_engine::<P, _, _, _, _, _, _, _, _, _, _, _>(
             &self.context,
             blocker,
@@ -1401,17 +1868,14 @@ where
             self.certification_timeout,
             self.mailbox_size,
             self.forwarding,
-            (
-                vote_sender,
-                GateReceiver::new(vote_receiver, tap.clone(), Channel::Vote),
-            ),
+            (vote_sender, gate(tap, vote_receiver, Channel::Vote)),
             (
                 certificate_sender,
-                GateReceiver::new(certificate_receiver, tap.clone(), Channel::Certificate),
+                gate(tap, certificate_receiver, Channel::Certificate),
             ),
             (
                 resolver_sender,
-                GateReceiver::new(resolver_receiver, tap.clone(), Channel::Resolver),
+                gate(tap, resolver_receiver, Channel::Resolver),
             ),
         );
         (app, engine)
@@ -1436,6 +1900,16 @@ type Receivers<K> = (
     commonware_p2p::simulated::Receiver<K>,
 );
 
+/// The compromised identity's marshal channels while the prefix acts as it.
+type MarshalSenders<K> = (
+    commonware_p2p::simulated::Sender<K, deterministic::Context>,
+    commonware_p2p::simulated::Sender<K, deterministic::Context>,
+);
+type MarshalReceivers<K> = (
+    commonware_p2p::simulated::Receiver<K>,
+    commonware_p2p::simulated::Receiver<K>,
+);
+
 /// The runner's state, which the [PrefixContext] reaches only while it is valid.
 struct Shared<P: Simplex> {
     observer: Arc<dyn Observer>,
@@ -1444,16 +1918,23 @@ struct Shared<P: Simplex> {
     term_length: TermLength,
     optimistic_views: ViewDelta,
     scripted_views: u64,
+    epoch: Epoch,
     leader: Box<dyn Fn(View) -> usize + Send + Sync>,
     oracle: commonware_p2p::simulated::Oracle<PublicKeyOf<P>, deterministic::Context>,
-    relay: Arc<block_relay::Relay<PublicKeyOf<P>>>,
+    relay: Option<Arc<block_relay::Relay<PublicKeyOf<P>>>>,
     taps: Vec<Option<Arc<ReplicaTap<P>>>>,
     revoked: AtomicBool,
     scheme: Option<P::Scheme>,
     senders: Mutex<Option<Senders<PublicKeyOf<P>>>>,
     inbox: Mutex<Log<Recorded<Inbound>>>,
+    /// Whether the base handed the runner B's marshal channels.
+    lanes: AtomicBool,
+    marshal_senders: Mutex<Option<MarshalSenders<PublicKeyOf<P>>>>,
+    marshal_inbox: Mutex<Log<Recorded<MarshalInbound>>>,
     made: Mutex<BTreeMap<Sha256Digest, Bytes>>,
     nonce: AtomicU64,
+    /// The bytes B's sends delivered so far, toward [MAX_SENT].
+    sent: AtomicU64,
     links: Mutex<BTreeSet<(usize, usize)>>,
     latencies: Mutex<BTreeSet<usize>>,
     block_gate: Arc<Mutex<BlockGate<PublicKeyOf<P>>>>,
@@ -1476,6 +1957,20 @@ impl<P: Simplex> Shared<P> {
     fn key(&self, index: usize) -> Option<PublicKeyOf<P>> {
         self.participants.get(index).cloned()
     }
+
+    /// Charges a send of `len` bytes, at least [MIN_CHARGE], to `recipients`, at least
+    /// one, against [MAX_SENT]; false, and nothing charged, past it.
+    fn charge(&self, len: usize, recipients: usize) -> bool {
+        let cost = (len as u64)
+            .max(MIN_CHARGE)
+            .saturating_mul(recipients.max(1) as u64);
+        let sent = self.sent.load(Ordering::Relaxed);
+        if sent.saturating_add(cost) > MAX_SENT {
+            return false;
+        }
+        self.sent.store(sent + cost, Ordering::Relaxed);
+        true
+    }
 }
 
 /// The base driver's handle on a continuation: it hands out the taps of the honest
@@ -1490,6 +1985,9 @@ pub struct Runner<P: Simplex> {
     registry: ActorRegistry,
     required: Vec<(usize, Role)>,
     receivers: Option<Receivers<PublicKeyOf<P>>>,
+    marshal_receivers: Option<MarshalReceivers<PublicKeyOf<P>>>,
+    /// B's marshal channels, returned once the release took them back.
+    marshal: Option<MarshalChannels<PublicKeyOf<P>>>,
     base_link: Box<dyn Fn(usize, usize) -> Option<Link> + Send>,
 }
 
@@ -1505,7 +2003,11 @@ pub struct Topology<P: Simplex> {
     pub optimistic_views: ViewDelta,
     /// The last view of a scripted Twins prefix, 0 outside Twins.
     pub scripted_views: u64,
-    pub relay: Arc<block_relay::Relay<PublicKeyOf<P>>>,
+    /// The epoch the honest engines run.
+    pub epoch: Epoch,
+    /// The base's block relay; `None` for a base without one (marshal), which leaves
+    /// the block and latency capabilities inert.
+    pub relay: Option<Arc<block_relay::Relay<PublicKeyOf<P>>>>,
     pub oracle: commonware_p2p::simulated::Oracle<PublicKeyOf<P>, deterministic::Context>,
     /// The link the base set up between two participants, `None` for no link.
     pub base_link: Box<dyn Fn(usize, usize) -> Option<Link> + Send>,
@@ -1533,11 +2035,12 @@ impl<P: Simplex> Runner<P> {
             .try_into()
             .expect("public keys are unique");
         let leaders = Mutex::new(elector.build(&set));
+        let epoch = topology.epoch;
         let leader: Box<dyn Fn(View) -> usize + Send + Sync> = Box::new(move |view| {
             leaders
                 .lock()
                 .elect(
-                    Round::new(Epoch::new(EPOCH), view),
+                    Round::new(epoch, view),
                     <EC::Elector as Elector<P::Scheme>>::Mode::input(None),
                 )
                 .get() as usize
@@ -1575,6 +2078,7 @@ impl<P: Simplex> Runner<P> {
             term_length: topology.term_length,
             optimistic_views: topology.optimistic_views,
             scripted_views: topology.scripted_views,
+            epoch,
             leader,
             oracle: topology.oracle,
             relay: topology.relay,
@@ -1583,8 +2087,12 @@ impl<P: Simplex> Runner<P> {
             scheme,
             senders: Mutex::new(None),
             inbox: Mutex::default(),
+            lanes: AtomicBool::new(false),
+            marshal_senders: Mutex::new(None),
+            marshal_inbox: Mutex::default(),
             made: Mutex::new(BTreeMap::new()),
             nonce: AtomicU64::new(0),
+            sent: AtomicU64::new(0),
             links: Mutex::new(BTreeSet::new()),
             latencies: Mutex::new(BTreeSet::new()),
             block_gate: Arc::new(Mutex::new(BlockGate {
@@ -1601,6 +2109,8 @@ impl<P: Simplex> Runner<P> {
             registry: ActorRegistry::default(),
             required,
             receivers: None,
+            marshal_receivers: None,
+            marshal: None,
             base_link: topology.base_link,
         }
     }
@@ -1608,6 +2118,12 @@ impl<P: Simplex> Runner<P> {
     /// The tap of honest replica `index`; `None` for the compromised identity.
     pub fn tap(&self, index: usize) -> Option<Arc<ReplicaTap<P>>> {
         self.shared.taps.get(index).cloned().flatten()
+    }
+
+    /// Whether honest replica `index` was ever crashed.
+    pub fn was_crashed(&self, index: usize) -> bool {
+        self.tap(index)
+            .is_some_and(|tap| tap.crashed_once.load(Ordering::Relaxed))
     }
 
     /// The compromised identity, if the base runs one.
@@ -1632,10 +2148,28 @@ impl<P: Simplex> Runner<P> {
         self.receivers = Some((vote_receiver, cert_receiver, res_receiver));
     }
 
+    /// Keeps the compromised identity's registered marshal channels as [Self::adopt]
+    /// keeps its engine channels; [Self::marshal_channels] returns them after the
+    /// release.
+    pub fn adopt_marshal(&mut self, channels: MarshalChannels<PublicKeyOf<P>>) {
+        let ((backfill_sender, backfill_receiver), (broadcast_sender, broadcast_receiver)) =
+            channels;
+        *self.shared.marshal_senders.lock() = Some((backfill_sender, broadcast_sender));
+        self.marshal_receivers = Some((backfill_receiver, broadcast_receiver));
+        self.shared.lanes.store(true, Ordering::Relaxed);
+    }
+
+    /// The compromised identity's marshal channels, once [Self::run] stopped recording
+    /// them; `None` before, after the first call, and when the base adopted none.
+    pub fn marshal_channels(&mut self) -> Option<MarshalChannels<PublicKeyOf<P>>> {
+        self.marshal.take()
+    }
+
     /// Runs the prefix, ending it once its budget has passed, then performs the
     /// release: revokes the prefix's capabilities, waits the release delay, reverts the
     /// changes the prefix made, and returns the compromised identity's channels with
-    /// what was reverted. The caller then starts the base's actors for it.
+    /// what was reverted; its marshal channels wait in [Self::marshal_channels]. The
+    /// caller then starts the base's actors for it.
     pub async fn run(&mut self) -> (Option<NetworkChannels<PublicKeyOf<P>>>, Release) {
         // The compromised identity's inbox: recorded until the release, then returned.
         let (stop, stopped) = oneshot::channel::<()>();
@@ -1644,6 +2178,13 @@ impl<P: Simplex> Runner<P> {
             self.context
                 .child("inbox")
                 .spawn(move |_| inbox_task::<P>(receivers, shared, stopped))
+        });
+        let (stop_marshal, stopped_marshal) = oneshot::channel::<()>();
+        let marshal_inbox = self.marshal_receivers.take().map(|receivers| {
+            let shared = self.shared.clone();
+            self.context
+                .child("marshal_inbox")
+                .spawn(move |_| marshal_inbox_task::<P>(receivers, shared, stopped_marshal))
         });
         self.install_block_gate();
         let mut overran = false;
@@ -1671,7 +2212,12 @@ impl<P: Simplex> Runner<P> {
         release.overran = overran;
         self.recording.store(false, Ordering::Relaxed);
         stop.send_lossy(());
+        stop_marshal.send_lossy(());
         let receivers = match inbox {
+            Some(handle) => handle.await.ok(),
+            None => None,
+        };
+        let marshal_receivers = match marshal_inbox {
             Some(handle) => handle.await.ok(),
             None => None,
         };
@@ -1680,14 +2226,27 @@ impl<P: Simplex> Runner<P> {
             (Some((vs, cs, rs)), Some((vr, cr, rr))) => Some(((vs, vr), (cs, cr), (rs, rr))),
             _ => None,
         };
+        let marshal_senders = self.shared.marshal_senders.lock().take();
+        self.marshal = match (marshal_senders, marshal_receivers) {
+            (Some((bs, ss)), Some((br, sr))) => Some(((bs, br), (ss, sr))),
+            _ => None,
+        };
         release.base = self.finalized();
+        release.view = self.elected();
         self.shared.observer.released(&release);
         (channels, release)
     }
 
     /// Checks that the compromised identity's required actors run, and reports it.
     pub fn check(&self, at: &'static str) -> ActorCheck {
-        let check = self.registry.check(at, &self.required);
+        self.check_with(at, None)
+    }
+
+    /// [Self::check], failed by `base` when it names why the base's own fault model did
+    /// not run (one token without whitespace).
+    pub fn check_with(&self, at: &'static str, base: Option<&'static str>) -> ActorCheck {
+        let mut check = self.registry.check(at, &self.required);
+        check.base = base;
         self.shared.observer.actors(&check);
         check
     }
@@ -1714,13 +2273,27 @@ impl<P: Simplex> Runner<P> {
             .unwrap_or(0)
     }
 
+    /// The highest view any honest replica's elector was asked for.
+    fn elected(&self) -> u64 {
+        self.shared
+            .taps
+            .iter()
+            .flatten()
+            .map(|tap| tap.elected.load(Ordering::Relaxed))
+            .max()
+            .unwrap_or(0)
+    }
+
     fn install_block_gate(&self) {
+        let Some(relay) = &self.shared.relay else {
+            return;
+        };
         let gate = self.shared.block_gate.clone();
         let participants = self.shared.participants.clone();
         // Set while a filter runs: a block the filter sends is delivered, not filtered,
         // so a filter that sends a block it accepts cannot recurse.
         let filtering = AtomicBool::new(false);
-        self.shared.relay.set_gate(
+        relay.set_gate(
             move |sender, sender_tag, recipient, _tag, payload, contents| {
                 let Some(index) = participants.iter().position(|key| key == recipient) else {
                     return false;
@@ -1763,8 +2336,8 @@ impl<P: Simplex> Runner<P> {
         let mut release = Release::default();
         let latencies = std::mem::take(&mut *self.shared.latencies.lock());
         for replica in latencies {
-            if let Some(key) = self.shared.key(replica) {
-                self.shared.relay.set_latency(&key, None);
+            if let (Some(relay), Some(key)) = (&self.shared.relay, self.shared.key(replica)) {
+                relay.set_latency(&key, None);
             }
             release.latencies.push(replica);
         }
@@ -1801,24 +2374,22 @@ impl<P: Simplex> Runner<P> {
             release.restarted.push(tap.index);
         }
         for tap in self.shared.taps.iter().flatten() {
-            let held = tap.gate.lock().held.len();
-            let has_filter = tap.gate.lock().hold.is_some();
-            if held > 0 || has_filter {
+            let engaged = tap.gate.lock().engaged();
+            if engaged || tap.marshal_gate.lock().engaged() {
                 release.gates.push(tap.index);
             }
             release.delivered += tap.open();
         }
-        self.shared.relay.clear_gate();
         let held = {
             let mut gate = self.shared.block_gate.lock();
             gate.filters.clear();
             std::mem::take(&mut gate.held)
         };
-        for (sender, tag, recipient, payload, contents) in held {
-            release.blocks +=
-                self.shared
-                    .relay
-                    .redeliver(&sender, tag, recipient, (payload, contents));
+        if let Some(relay) = &self.shared.relay {
+            relay.clear_gate();
+            for (sender, tag, recipient, payload, contents) in held {
+                release.blocks += relay.redeliver(&sender, tag, recipient, (payload, contents));
+            }
         }
         release
     }
@@ -1858,6 +2429,39 @@ async fn inbox_task<P: Simplex>(
     (votes, certificates, resolver)
 }
 
+/// Records what the compromised identity receives on its marshal channels until
+/// `stop`, then returns its receivers.
+async fn marshal_inbox_task<P: Simplex>(
+    (mut backfill, mut broadcast): MarshalReceivers<PublicKeyOf<P>>,
+    shared: Arc<Shared<P>>,
+    mut stop: oneshot::Receiver<()>,
+) -> MarshalReceivers<PublicKeyOf<P>> {
+    loop {
+        let (channel, message) = select! {
+            _ = &mut stop => break,
+            message = backfill.recv() => (MarshalChannel::Backfill, message),
+            message = broadcast.recv() => (MarshalChannel::Broadcast, message),
+        };
+        let Ok((sender, payload)) = message else {
+            break;
+        };
+        let stamp = Stamp::now(&*shared.observer);
+        let from = shared.participants.iter().position(|key| key == &sender);
+        shared.marshal_inbox.lock().push(
+            Recorded {
+                value: MarshalInbound {
+                    from,
+                    channel,
+                    payload,
+                },
+                stamp,
+            },
+            stamp.seq(),
+        );
+    }
+    (backfill, broadcast)
+}
+
 /// Crash-stops honest replica `tap`: aborts and awaits its tasks.
 async fn crash<P: Simplex>(tap: &ReplicaTap<P>) -> bool {
     let Ok(_busy) = tap.busy.try_lock() else {
@@ -1871,6 +2475,9 @@ async fn crash<P: Simplex>(tap: &ReplicaTap<P>) -> bool {
         (incarnation.app.take(), incarnation.engine.take())
     };
     let crashed = engine.is_some();
+    if crashed {
+        tap.crashed_once.store(true, Ordering::Relaxed);
+    }
     // Both tasks are aborted before either is awaited, so a caller dropped while
     // awaiting leaves no half of the replica running.
     let handles: Vec<_> = [engine, app].into_iter().flatten().collect();
@@ -1904,7 +2511,9 @@ async fn restart<P: Simplex>(shared: &Shared<P>, tap: &Arc<ReplicaTap<P>>) -> bo
         return false;
     };
     // The aborted application's relay registration is closed; the new one replaces it.
-    shared.relay.forget_closed(&key);
+    if let Some(relay) = &shared.relay {
+        relay.forget_closed(&key);
+    }
     let (app, engine) = respawn(channels);
     let mut incarnation = tap.incarnation.lock();
     incarnation.app = Some(app);
@@ -1956,6 +2565,11 @@ impl<P: Simplex> PrefixContext<P> {
         self.shared.scripted_views
     }
 
+    /// The epoch the honest engines run.
+    pub fn epoch(&self) -> Epoch {
+        self.shared.epoch
+    }
+
     /// The leader of `view` under the honest engines' elector.
     pub fn leader(&self, view: View) -> usize {
         (self.shared.leader)(view)
@@ -1972,10 +2586,7 @@ impl<P: Simplex> PrefixContext<P> {
 
     /// The simulated time since the start of the run.
     pub fn now(&self) -> Duration {
-        self.context
-            .current()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
+        self.context.current().epoch()
     }
 
     /// The position a query takes now, for a witness that names a moment.
@@ -1989,9 +2600,15 @@ impl<P: Simplex> PrefixContext<P> {
     }
 
     /// Sends `message` as B on its own `channel` to the participants `recipients`;
-    /// returns how many it went to. Nothing goes out after the handoff.
+    /// returns how many it went to. Nothing goes out after the handoff, over
+    /// [MAX_MESSAGE], or past [MAX_SENT], where each message counts at least
+    /// [MIN_CHARGE] bytes per recipient.
     pub fn send(&self, channel: Channel, recipients: &[usize], message: impl Into<IoBuf>) -> usize {
         if self.shared.revoked.load(Ordering::Relaxed) {
+            return 0;
+        }
+        let message = message.into();
+        if message.len() > MAX_MESSAGE as usize {
             return 0;
         }
         let keys: Vec<_> = recipients
@@ -2002,17 +2619,69 @@ impl<P: Simplex> PrefixContext<P> {
         let Some((votes, certificates, resolver)) = senders.as_mut() else {
             return 0;
         };
+        if !self.shared.charge(message.len(), keys.len()) {
+            return 0;
+        }
         let sender = match channel {
             Channel::Vote => votes,
             Channel::Certificate => certificates,
             Channel::Resolver => resolver,
         };
-        commonware_p2p::Sender::send(sender, Recipients::Some(keys), message.into(), true).len()
+        commonware_p2p::Sender::send(sender, Recipients::Some(keys), message, true).len()
     }
 
     /// Everything B received so far, stamped.
     pub fn inbox(&self) -> Log<Recorded<Inbound>> {
         self.snapshot(&self.shared.inbox)
+    }
+
+    /// Whether B holds its marshal channels: only a marshal base hands them over.
+    pub fn marshal_lanes(&self) -> bool {
+        self.shared.lanes.load(Ordering::Relaxed)
+    }
+
+    /// Sends `message` as B on its own marshal `channel` to the participants
+    /// `recipients`; returns how many it went to. Nothing goes out without B's marshal
+    /// channels, after the handoff, over [MAX_MESSAGE], or past [MAX_SENT], where each
+    /// message counts at least [MIN_CHARGE] bytes per recipient.
+    pub fn send_marshal(
+        &self,
+        channel: MarshalChannel,
+        recipients: &[usize],
+        message: impl Into<IoBuf>,
+    ) -> usize {
+        if self.shared.revoked.load(Ordering::Relaxed) {
+            return 0;
+        }
+        let message = message.into();
+        if message.len() > MAX_MESSAGE as usize {
+            return 0;
+        }
+        let keys: Vec<_> = recipients
+            .iter()
+            .filter_map(|index| self.shared.key(*index))
+            .collect();
+        let mut senders = self.shared.marshal_senders.lock();
+        let Some((backfill, broadcast)) = senders.as_mut() else {
+            return 0;
+        };
+        if !self.shared.charge(message.len(), keys.len()) {
+            return 0;
+        }
+        let sender = match channel {
+            MarshalChannel::Backfill => backfill,
+            MarshalChannel::Broadcast => broadcast,
+        };
+        commonware_p2p::Sender::send(sender, Recipients::Some(keys), message, false).len()
+    }
+
+    /// Everything B received on its marshal channels so far, stamped. Without B's
+    /// marshal channels the read is cut ([Observer::dropped]).
+    pub fn marshal_inbox(&self) -> Log<Recorded<MarshalInbound>> {
+        if !self.marshal_lanes() {
+            self.cut();
+        }
+        self.snapshot(&self.shared.marshal_inbox)
     }
 
     /// A snapshot of `log`; reports the position of the first entry it dropped.
@@ -2027,6 +2696,32 @@ impl<P: Simplex> PrefixContext<P> {
         if let Some(seq) = dropped {
             self.shared.observer.dropped(seq);
         }
+    }
+
+    /// Reports a cut at this read, for a recorder or gate no wrapper of the base feeds:
+    /// from here on what the prefix reads decides nothing.
+    fn cut(&self) {
+        let seq = self.stamp().seq();
+        if seq != 0 {
+            self.shared.observer.dropped(seq);
+        }
+    }
+
+    /// A snapshot of the log of honest `replica`'s `recorder`; cut at this read when no
+    /// wrapper of the base feeds it.
+    fn recorded<T>(
+        &self,
+        replica: usize,
+        recorder: Recorder,
+        log: impl FnOnce(&ReplicaTap<P>) -> &Mutex<Log<T>>,
+    ) -> Log<T> {
+        let Some(tap) = self.shared.read(replica) else {
+            return Log::default();
+        };
+        if !tap.fed(recorder) {
+            self.cut();
+        }
+        self.snapshot(log(tap))
     }
 
     /// Builds a mock block for `round` on `parent` as B would, without sending it;
@@ -2048,6 +2743,9 @@ impl<P: Simplex> PrefixContext<P> {
         if self.shared.revoked.load(Ordering::Relaxed) {
             return false;
         }
+        let Some(relay) = &self.shared.relay else {
+            return false;
+        };
         let (Some(byzantine), Some(contents)) = (
             self.shared
                 .byzantine
@@ -2060,9 +2758,7 @@ impl<P: Simplex> PrefixContext<P> {
             .iter()
             .filter_map(|index| self.shared.key(*index))
             .collect();
-        self.shared
-            .relay
-            .broadcast(&byzantine, Recipients::Some(keys), (digest, contents));
+        relay.broadcast(&byzantine, Recipients::Some(keys), (digest, contents));
         true
     }
 
@@ -2070,52 +2766,94 @@ impl<P: Simplex> PrefixContext<P> {
     /// it is passed or the release; replaces an earlier filter. Past [LOG_CAP] held
     /// messages the gate drops what it would hold. `hold` may call the context.
     pub fn hold(&self, replica: usize, hold: impl Fn(&Inbound) -> bool + Send + Sync + 'static) {
-        if let Some(tap) = self.shared.tap(replica) {
-            tap.gate.lock().hold = Some(Arc::new(hold));
-        }
+        self.hold_in::<Channel>(replica, Arc::new(hold));
     }
 
     /// Delivers to honest `replica` the held messages `select` accepts, in arrival
     /// order; returns how many. `select` may call the context; while it runs,
     /// [Self::held] for `replica` is empty.
     pub fn pass(&self, replica: usize, select: impl Fn(&Inbound) -> bool) -> usize {
+        self.pass_in::<Channel>(replica, select)
+    }
+
+    /// The messages held for honest `replica`, in arrival order.
+    pub fn held(&self, replica: usize) -> Vec<Inbound> {
+        self.held_in::<Channel>(replica)
+    }
+
+    /// Stops holding for honest `replica`, on its engine and marshal channels, and
+    /// delivers what it holds.
+    pub fn open(&self, replica: usize) -> usize {
+        self.shared.tap(replica).map_or(0, |tap| tap.open())
+    }
+
+    /// [Self::hold] on honest `replica`'s marshal channels, which have their own gate,
+    /// filter and cap. False, and holds nothing, when the base does not gate them, and
+    /// after the handoff.
+    pub fn hold_marshal(
+        &self,
+        replica: usize,
+        hold: impl Fn(&MarshalInbound) -> bool + Send + Sync + 'static,
+    ) -> bool {
+        self.hold_in::<MarshalChannel>(replica, Arc::new(hold))
+    }
+
+    /// [Self::pass] on honest `replica`'s marshal gate.
+    pub fn pass_marshal(&self, replica: usize, select: impl Fn(&MarshalInbound) -> bool) -> usize {
+        self.pass_in::<MarshalChannel>(replica, select)
+    }
+
+    /// The messages held for honest `replica` on its marshal channels, in arrival
+    /// order. Without a marshal gate the read is cut ([Observer::dropped]).
+    pub fn held_marshal(&self, replica: usize) -> Vec<MarshalInbound> {
+        self.held_in::<MarshalChannel>(replica)
+    }
+
+    fn hold_in<L: Lane>(&self, replica: usize, hold: HoldFilter<L>) -> bool {
+        let Some(tap) = self.shared.tap(replica) else {
+            return false;
+        };
+        if !tap.fed(L::RECORDER) {
+            return false;
+        }
+        L::gate(tap).lock().hold = Some(hold);
+        true
+    }
+
+    fn pass_in<L: Lane>(&self, replica: usize, select: impl Fn(&L::Inbound) -> bool) -> usize {
         let Some(tap) = self.shared.tap(replica) else {
             return 0;
         };
+        let gate = L::gate(tap);
         // The selector runs with the gate unlocked; what is held meanwhile stays held.
-        let held = std::mem::take(&mut tap.gate.lock().held);
+        let held = std::mem::take(&mut gate.lock().held);
         let mut selected = held
             .iter()
-            .map(|(channel, sender, payload)| {
-                select(&Inbound {
-                    from: tap.position(sender),
-                    channel: *channel,
-                    payload: payload.clone(),
-                })
+            .map(|(lane, sender, payload)| {
+                select(&lane.inbound(tap.position(sender), payload.clone()))
             })
             .collect::<Vec<_>>()
             .into_iter();
-        let mut gate = tap.gate.lock();
+        let mut gate = gate.lock();
         let added = std::mem::replace(&mut gate.held, held);
         gate.held.extend(added);
         gate.pass(|_, _, _| selected.next().unwrap_or(false))
     }
 
-    /// The messages held for honest `replica`, in arrival order.
-    pub fn held(&self, replica: usize) -> Vec<Inbound> {
+    fn held_in<L: Lane>(&self, replica: usize) -> Vec<L::Inbound> {
         let Some(tap) = self.shared.read(replica) else {
             return Vec::new();
         };
+        if !tap.fed(L::RECORDER) {
+            self.cut();
+            return Vec::new();
+        }
         let (held, dropped) = {
-            let gate = tap.gate.lock();
+            let gate = L::gate(tap).lock();
             let held = gate
                 .held
                 .iter()
-                .map(|(channel, sender, payload)| Inbound {
-                    from: tap.position(sender),
-                    channel: *channel,
-                    payload: payload.clone(),
-                })
+                .map(|(lane, sender, payload)| lane.inbound(tap.position(sender), payload.clone()))
                 .collect();
             (held, gate.dropped)
         };
@@ -2123,21 +2861,31 @@ impl<P: Simplex> PrefixContext<P> {
         held
     }
 
-    /// Stops holding for honest `replica` and delivers what it holds.
-    pub fn open(&self, replica: usize) -> usize {
-        self.shared.tap(replica).map_or(0, |tap| tap.open())
+    fn deliveries_in<L: Lane>(&self, replica: usize) -> Log<Recorded<L::Inbound>> {
+        let Some(tap) = self.shared.read(replica) else {
+            return Log::default();
+        };
+        if !tap.fed(L::RECORDER) {
+            self.cut();
+        } else {
+            // What the full gate dropped never reaches the deliveries either.
+            let dropped = L::gate(tap).lock().dropped;
+            self.report(dropped);
+        }
+        self.snapshot(L::deliveries(tap))
     }
 
     /// Holds, from now on, every block to honest `replica` whose view and digest `hold`
     /// accepts, until passed or the release. Past [LOG_CAP] held blocks, for all
     /// replicas together, the gate drops what it would hold. `hold` may call the context;
-    /// a block it sends is delivered without filtering.
+    /// a block it sends is delivered without filtering. Holds nothing on a base without a
+    /// block relay.
     pub fn hold_blocks(
         &self,
         replica: usize,
         hold: impl Fn(Option<View>, &Sha256Digest) -> bool + Send + Sync + 'static,
     ) {
-        if self.shared.tap(replica).is_some() {
+        if self.shared.relay.is_some() && self.shared.tap(replica).is_some() {
             self.shared
                 .block_gate
                 .lock()
@@ -2154,6 +2902,9 @@ impl<P: Simplex> PrefixContext<P> {
         replica: usize,
         select: impl Fn(Option<View>, &Sha256Digest) -> bool,
     ) -> usize {
+        let Some(relay) = &self.shared.relay else {
+            return 0;
+        };
         let Some(key) = self.shared.tap(replica).and(self.shared.key(replica)) else {
             return 0;
         };
@@ -2172,51 +2923,96 @@ impl<P: Simplex> PrefixContext<P> {
         passed
             .into_iter()
             .map(|(sender, tag, recipient, payload, contents)| {
-                self.shared
-                    .relay
-                    .redeliver(&sender, tag, recipient, (payload, contents))
+                relay.redeliver(&sender, tag, recipient, (payload, contents))
             })
             .sum()
     }
 
     /// What honest `replica`'s engine received through its gate, stamped.
     pub fn deliveries(&self, replica: usize) -> Log<Recorded<Inbound>> {
-        self.shared.read(replica).map_or_else(Log::default, |tap| {
-            // What the full gate dropped never reaches the deliveries either.
-            let dropped = tap.gate.lock().dropped;
-            self.report(dropped);
-            self.snapshot(&tap.deliveries)
-        })
+        self.deliveries_in::<Channel>(replica)
     }
 
-    /// What honest `replica`'s engine reported, stamped.
+    /// What honest `replica`'s marshal received through its marshal gate, stamped.
+    /// Without a marshal gate the read is cut ([Observer::dropped]).
+    pub fn marshal_deliveries(&self, replica: usize) -> Log<Recorded<MarshalInbound>> {
+        self.deliveries_in::<MarshalChannel>(replica)
+    }
+
+    /// What honest `replica`'s engine reported, stamped. A base that does not record
+    /// it (coding marshal) cuts the read ([Observer::dropped]).
     pub fn activities(&self, replica: usize) -> Log<Recorded<ActivityOf<P>>> {
-        self.shared
-            .read(replica)
-            .map_or_else(Log::default, |tap| self.snapshot(&tap.activities))
+        self.recorded(replica, Recorder::Activities, |tap| &tap.activities)
     }
 
-    /// What honest `replica`'s automaton was asked and answered, stamped.
+    /// What honest `replica`'s automaton was asked and answered, stamped. A base that
+    /// does not record it (coding marshal) cuts the read ([Observer::dropped]).
     pub fn automaton(&self, replica: usize) -> Log<Recorded<AutomatonEvent>> {
-        self.shared
-            .read(replica)
-            .map_or_else(Log::default, |tap| self.snapshot(&tap.automaton))
+        self.recorded(replica, Recorder::Automaton, |tap| &tap.automaton)
     }
 
     /// Every election honest `replica`'s voter ran, by view, stamped. The voter
     /// also elects the next term's leader ahead of entering it, so a view can
     /// appear early and more than once.
     pub fn elections(&self, replica: usize) -> Log<Recorded<(View, usize)>> {
-        self.shared
-            .read(replica)
-            .map_or_else(Log::default, |tap| self.snapshot(&tap.elections))
+        self.recorded(replica, Recorder::Elections, |tap| &tap.elections)
     }
 
-    /// The peers honest `replica` blocked, stamped.
+    /// The peers honest `replica` blocked, stamped. A base that does not record every
+    /// blocker of the replica (marshal Twins) cuts the read ([Observer::dropped]):
+    /// [Self::blocked] answers there.
     pub fn blocks(&self, replica: usize) -> Log<Recorded<usize>> {
-        self.shared
+        self.recorded(replica, Recorder::Blocks, |tap| &tap.blocks)
+    }
+
+    /// The digest of the block honest `replica`'s marshal finalized at `height`, as
+    /// marshal answers (`Some(None)`: none). `None` when the base has no marshal reads,
+    /// when the request could not reach the replica's marshal (after a 1 ms sleep), or
+    /// when marshal did not answer within [MARSHAL_READ_TIMEOUT]. Changes nothing.
+    pub async fn finalized_block(
+        &self,
+        replica: usize,
+        height: u64,
+    ) -> Option<Option<Sha256Digest>> {
+        let read = self
+            .shared
             .read(replica)
-            .map_or_else(Log::default, |tap| self.snapshot(&tap.blocks))
+            .and_then(|tap| tap.reads())
+            .map(|reads| reads.finalized(height));
+        self.bounded(read).await
+    }
+
+    /// The height of the last block honest `replica`'s application acknowledged to its
+    /// marshal, as marshal answers; `None` as for [Self::finalized_block].
+    pub async fn processed_height(&self, replica: usize) -> Option<Option<u64>> {
+        let read = self
+            .shared
+            .read(replica)
+            .and_then(|tap| tap.reads())
+            .map(|reads| reads.processed());
+        self.bounded(read).await
+    }
+
+    /// Waits for `read`'s answer, at most [MARSHAL_READ_TIMEOUT]. A read ready at its
+    /// first poll never reached a live actor, which answers from its own task, so it is
+    /// no answer; it and a missing read sleep [NO_ANSWER], so a loop of reads advances
+    /// time. A read dropped before its answer leaves a closed responder behind.
+    async fn bounded<T>(
+        &self,
+        read: Option<Pin<Box<dyn Future<Output = Option<T>> + Send>>>,
+    ) -> Option<Option<T>> {
+        let Some(mut read) = read else {
+            self.context.sleep(NO_ANSWER).await;
+            return None;
+        };
+        if poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx).is_ready())).await {
+            self.context.sleep(NO_ANSWER).await;
+            return None;
+        }
+        select! {
+            answer = read => Some(answer),
+            _ = self.context.sleep(MARSHAL_READ_TIMEOUT) => None,
+        }
     }
 
     /// The network's blocked pairs, (blocker, blocked), now.
@@ -2235,12 +3031,19 @@ impl<P: Simplex> PrefixContext<P> {
     }
 
     /// Sets the directed link `from` -> `to`, or removes it with `None`, until the
-    /// release, which restores the base's.
+    /// release, which restores the base's. False for a self link, an unknown index and
+    /// after the handoff; a refusal costs [NO_ANSWER], so a loop of them advances time.
     pub async fn set_link(&self, from: usize, to: usize, link: Option<Link>) -> bool {
-        if self.shared.revoked.load(Ordering::Relaxed) || from == to {
-            return false;
-        }
-        let (Some(sender), Some(receiver)) = (self.shared.key(from), self.shared.key(to)) else {
+        let keys = match (self.shared.key(from), self.shared.key(to)) {
+            (Some(sender), Some(receiver))
+                if from != to && !self.shared.revoked.load(Ordering::Relaxed) =>
+            {
+                Some((sender, receiver))
+            }
+            _ => None,
+        };
+        let Some((sender, receiver)) = keys else {
+            self.context.sleep(NO_ANSWER).await;
             return false;
         };
         self.shared.links.lock().insert((from, to));
@@ -2261,34 +3064,47 @@ impl<P: Simplex> PrefixContext<P> {
     }
 
     /// Overrides honest `replica`'s application latencies until the release; `None`
-    /// restores the base's. A request already sleeping keeps the latency it drew.
+    /// restores the base's. A request already sleeping keeps the latency it drew. False
+    /// on a base without a block relay.
     pub fn set_latency(&self, replica: usize, latencies: Option<Latencies>) -> bool {
+        let Some(relay) = &self.shared.relay else {
+            return false;
+        };
         let Some(key) = self.shared.tap(replica).and(self.shared.key(replica)) else {
             return false;
         };
-        self.shared.relay.set_latency(&key, latencies);
+        relay.set_latency(&key, latencies);
         self.shared.latencies.lock().insert(replica);
         true
     }
 
     /// Crash-stops honest `replica`: its engine and application tasks are aborted and
     /// awaited. The release restarts it if the prefix did not. False if it is crashed,
-    /// or while another crash or restart of it runs.
+    /// while another crash or restart of it runs, and on a base whose replicas cannot
+    /// restart (marshal); a refusal costs [NO_ANSWER], so a loop of them advances time.
     pub async fn crash(&self, replica: usize) -> bool {
-        match self.shared.tap(replica) {
+        let crashed = match self.shared.tap(replica) {
             Some(tap) => crash(tap).await,
             None => false,
+        };
+        if !crashed {
+            self.context.sleep(NO_ANSWER).await;
         }
+        crashed
     }
 
     /// Restarts crashed honest `replica` from its journal, on its partition, with its
     /// retained reporter. False if it is not crashed, or while another crash or restart
-    /// of it runs.
+    /// of it runs; a refusal costs [NO_ANSWER], so a loop of them advances time.
     pub async fn restart(&self, replica: usize) -> bool {
-        match self.shared.tap(replica).cloned() {
+        let restarted = match self.shared.tap(replica).cloned() {
             Some(tap) => restart(&self.shared, &tap).await,
             None => false,
+        };
+        if !restarted {
+            self.context.sleep(NO_ANSWER).await;
         }
+        restarted
     }
 
     /// Whether honest `replica` is crashed.
@@ -2317,8 +3133,9 @@ pub fn standard_link(input: &FuzzInput, n: usize, from: usize, to: usize) -> Opt
 }
 
 /// Starts the base's Disrupter for a compromised identity at a continuation's
-/// release, with its sampled faulty views moved `view_offset` views later; returns
-/// its task. `marker` is set when the Disrupter's task first polls its vote receiver.
+/// release, signing in `epoch`, with its sampled faulty views moved `view_offset` views
+/// later; returns its task. `marker` is set when the Disrupter's task first polls its
+/// vote receiver.
 #[allow(clippy::too_many_arguments)]
 pub fn start_disrupter<P: Simplex>(
     context: deterministic::Context,
@@ -2329,6 +3146,7 @@ pub fn start_disrupter<P: Simplex>(
     relay: Option<Arc<block_relay::Relay<PublicKeyOf<P>>>>,
     view_offset: u64,
     marker: Marker,
+    epoch: Epoch,
 ) -> Handle<()> {
     let ((vote_sender, vote_receiver), certificate, resolver) = channels;
     let vote = (
@@ -2340,7 +3158,7 @@ pub fn start_disrupter<P: Simplex>(
         scheme,
         strategy,
         required_containers,
-        Epoch::new(EPOCH),
+        epoch,
         vote,
         certificate,
         resolver,
@@ -2353,6 +3171,7 @@ pub fn start_disrupter<P: Simplex>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EPOCH;
     use commonware_runtime::Runner as _;
 
     /// An observer that stamps nothing: positions are 0.
@@ -2444,6 +3263,32 @@ mod tests {
         });
     }
 
+    #[test]
+    fn a_failed_base_check_fails_the_actor_check() {
+        let running = ActorStatus {
+            identity: 0,
+            role: Role::Disrupter,
+            state: ActorState::Running,
+        };
+        for (actors, line) in [
+            (Vec::new(), "end failed - base=omission-incomplete"),
+            (
+                vec![running],
+                "end failed 0:disrupter=running base=omission-incomplete",
+            ),
+        ] {
+            let mut check = ActorCheck {
+                at: "end",
+                actors,
+                base: None,
+            };
+            assert!(check.ok());
+            check.base = Some("omission-incomplete");
+            assert!(!check.ok());
+            assert_eq!(check.to_string(), line);
+        }
+    }
+
     /// A receiver over a channel, for the marker test.
     #[derive(Debug)]
     struct Receiving(mpsc::UnboundedReceiver<()>);
@@ -2523,11 +3368,7 @@ mod tests {
                 open: Arc::new(Mutex::new(Vec::new())),
                 prepares: Arc::new(Mutex::new(Vec::new())),
             };
-            let mut automaton = TapAutomaton {
-                inner: silent.clone(),
-                tap: tap.clone(),
-                context: Arc::new(Mutex::new(context.child("tap"))),
-            };
+            let mut automaton = tap_automaton(Some(&tap), silent.clone(), &context);
             let round = Round::new(Epoch::new(EPOCH), View::new(1));
             let request = SimplexContext {
                 round,
@@ -2578,11 +3419,7 @@ mod tests {
                 open: Arc::new(Mutex::new(Vec::new())),
                 prepares: Arc::new(Mutex::new(Vec::new())),
             };
-            let mut automaton = TapAutomaton {
-                inner: silent.clone(),
-                tap: tap.clone(),
-                context: Arc::new(Mutex::new(context.child("tap"))),
-            };
+            let mut automaton = tap_automaton(Some(&tap), silent.clone(), &context);
             let round = Round::new(Epoch::new(EPOCH), View::new(1));
             let request = SimplexContext {
                 round,
@@ -2662,7 +3499,8 @@ mod tests {
                     term_length: TermLength::ONE,
                     optimistic_views: ViewDelta::zero(),
                     scripted_views: 0,
-                    relay: relay.clone(),
+                    epoch: Epoch::new(EPOCH),
+                    relay: Some(relay.clone()),
                     oracle,
                     base_link: Box::new(move |from, to| standard_link(&links, 4, from, to)),
                 },
@@ -2691,6 +3529,7 @@ mod tests {
                 Some(relay),
                 0,
                 registry.marker(0, Role::Disrupter),
+                Epoch::new(EPOCH),
             );
             registry.register(0, Role::Disrupter, handle);
             // Checked at once, the Disrupter has not run yet; the release check waits for it.
@@ -2724,7 +3563,7 @@ mod tests {
             block_filter: crate::BlockFilterChoice::None,
             reporting: ReporterWiring::Solo,
         };
-        let mut pins = Pins::new(&mut input, false);
+        let mut pins = Pins::new(&mut input, Domain::Simplex);
         pins.term_length(TermLength::ONE);
         assert_eq!(pins.input().optimistic_views, ViewDelta::new(3));
         assert!(!pins.lookahead(ViewDelta::new(4)));
@@ -2732,7 +3571,7 @@ mod tests {
         assert!(pins.configuration(N4F1C3));
         assert_eq!(pins.input().certify, CertifyChoice::Always);
         assert!(!pins.configuration(crate::N4F3C1));
-        let mut twins = Pins::new(&mut input, true);
+        let mut twins = Pins::new(&mut input, Domain::Twins);
         assert!(!twins.configuration(N4F0C4));
         assert_eq!(input.configuration, N4F1C3);
     }
@@ -2810,6 +3649,1250 @@ mod tests {
             // Holding takes no position; the first drop takes position 1.
             assert_eq!(tap.gate.lock().dropped, Some(1));
             assert_eq!(tap.open(), LOG_CAP);
+        });
+    }
+
+    type P = crate::SimplexCertificateMock;
+    type Key = PublicKeyOf<P>;
+    type SchemeOf = <P as Simplex>::Scheme;
+    type ElectorOf = <<P as Simplex>::Elector as ElectorConfig<SchemeOf>>::Elector;
+
+    /// Long enough for every task a pass woke to run: tasks woken in one round of the
+    /// executor run in a shuffled order.
+    const SETTLE: Duration = Duration::from_millis(10);
+
+    /// Hands out positions 1, 2, ... and keeps the drops and releases it hears of.
+    #[derive(Clone, Default)]
+    struct Watch {
+        position: Arc<AtomicU64>,
+        dropped: Arc<Mutex<Vec<u64>>>,
+        releases: Arc<Mutex<Vec<Release>>>,
+    }
+
+    impl Observer for Watch {
+        fn position(&self) -> (u64, u32) {
+            (self.position.fetch_add(1, Ordering::Relaxed) + 1, 1)
+        }
+
+        fn compromised(&self, _identities: &[usize]) {}
+
+        fn actors(&self, _check: &ActorCheck) {}
+
+        fn released(&self, release: &Release) {
+            self.releases.lock().push(release.clone());
+        }
+
+        fn dropped(&self, seq: u64) {
+            self.dropped.lock().push(seq);
+        }
+    }
+
+    /// A prefix that asks for its budget and runs its closure.
+    struct Script<F>(Budget, F);
+
+    impl<F> Prefix<P> for Script<F>
+    where
+        F: FnOnce(PrefixContext<P>) -> PrefixFuture + Send + 'static,
+    {
+        fn plan(&mut self, _pins: &mut Pins<'_>) -> Budget {
+            self.0
+        }
+
+        fn run(self: Box<Self>, cx: PrefixContext<P>) -> PrefixFuture {
+            (self.1)(cx)
+        }
+    }
+
+    fn script<F>(prefix: Duration, run: F) -> Script<F>
+    where
+        F: FnOnce(PrefixContext<P>) -> PrefixFuture + Send + 'static,
+    {
+        Script(
+            Budget {
+                prefix,
+                release: Duration::from_millis(500),
+            },
+            run,
+        )
+    }
+
+    const QUOTA: commonware_runtime::Quota =
+        commonware_runtime::Quota::per_second(std::num::NonZeroU32::MAX);
+
+    /// A connected N4F1C3 network whose participants also hold two marshal channels.
+    struct Net {
+        oracle: commonware_p2p::simulated::Oracle<Key, deterministic::Context>,
+        participants: Vec<Key>,
+        schemes: Vec<SchemeOf>,
+        engine: std::collections::HashMap<Key, NetworkChannels<Key>>,
+        marshal: std::collections::HashMap<Key, MarshalChannels<Key>>,
+    }
+
+    impl Net {
+        async fn new(context: &mut deterministic::Context) -> Self {
+            let mut input = test_input();
+            input.configuration = N4F1C3;
+            input.certify = CertifyChoice::Always;
+            let (oracle, participants, schemes, engine) =
+                crate::setup_network::<P>(context, &input).await;
+            let mut marshal = std::collections::HashMap::new();
+            for key in &participants {
+                let control = oracle.control(key.clone());
+                let backfill = control.register(3, QUOTA).await.unwrap();
+                let broadcast = control.register(4, QUOTA).await.unwrap();
+                marshal.insert(key.clone(), (backfill, broadcast));
+            }
+            Self {
+                oracle,
+                participants,
+                schemes,
+                engine,
+                marshal,
+            }
+        }
+
+        fn engine(&mut self, index: usize) -> NetworkChannels<Key> {
+            self.engine.remove(&self.participants[index]).unwrap()
+        }
+
+        fn marshal(&mut self, index: usize) -> MarshalChannels<Key> {
+            self.marshal.remove(&self.participants[index]).unwrap()
+        }
+
+        /// A runner over the network with B = 0, no block relay, and `prefix`.
+        fn runner(
+            &self,
+            context: &deterministic::Context,
+            watch: &Watch,
+            epoch: Epoch,
+            prefix: impl Prefix<P>,
+        ) -> Runner<P> {
+            let mut input = test_input();
+            let hook = Hook::plan(Box::new(prefix), Arc::new(watch.clone()), &mut input, false);
+            Runner::start(
+                hook,
+                context,
+                Topology {
+                    participants: self.participants.clone(),
+                    schemes: self.schemes.clone(),
+                    byzantine: Some(0),
+                    required: Vec::new(),
+                    term_length: TermLength::ONE,
+                    optimistic_views: ViewDelta::zero(),
+                    scripted_views: 0,
+                    epoch,
+                    relay: None,
+                    oracle: self.oracle.clone(),
+                    base_link: Box::new(|_, _| Some(crate::default_link())),
+                },
+                <P as Simplex>::elector(TermLength::ONE, ViewDelta::zero()),
+            )
+        }
+    }
+
+    /// The first payload byte each honest replica's gated receivers delivered.
+    type Got = Arc<Mutex<Vec<(usize, u8)>>>;
+
+    /// Runs `receiver` as an honest replica's engine or marshal would, into `got`.
+    fn drain<R>(context: &deterministic::Context, replica: usize, mut receiver: R, got: &Got)
+    where
+        R: commonware_p2p::Receiver<PublicKey = Key> + Send + 'static,
+    {
+        let got = got.clone();
+        context.child("drain").spawn(move |_| async move {
+            while let Ok((_, payload)) = receiver.recv().await {
+                got.lock()
+                    .push((replica, payload.as_ref().first().copied().unwrap_or(0)));
+            }
+        });
+    }
+
+    fn got(got: &Got) -> Vec<u8> {
+        let mut bytes: Vec<_> = got.lock().iter().map(|(_, byte)| *byte).collect();
+        bytes.sort_unstable();
+        bytes
+    }
+
+    /// Holds a clone of the prefix's context past the handoff.
+    type Leak = Arc<Mutex<Option<PrefixContext<P>>>>;
+
+    impl Clone for PrefixContext<P> {
+        fn clone(&self) -> Self {
+            Self {
+                context: self.context.child("leaked"),
+                shared: self.shared.clone(),
+            }
+        }
+    }
+
+    #[test]
+    fn runner_without_a_block_relay_reverts_links_and_gates() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut net = Net::new(&mut context).await;
+            let watch = Watch::default();
+            let delivered: Got = Arc::default();
+            let prefix = script(Duration::from_secs(10), |cx| {
+                Box::pin(async move {
+                    // The block, latency and crash capabilities are inert on a base
+                    // without a block relay and without restartable replicas.
+                    let round = Round::new(cx.epoch(), View::new(1));
+                    let digest = cx.block(round, Sha256Digest([0; 32]));
+                    assert!(!cx.send_block(digest, &[1]));
+                    cx.hold_blocks(1, |_, _| true);
+                    assert_eq!(cx.pass_blocks(1, |_, _| true), 0);
+                    let slow = (2_000.0, 0.0);
+                    assert!(!cx.set_latency(
+                        1,
+                        Some(Latencies {
+                            propose: slow,
+                            verify: slow,
+                            certify: slow,
+                        })
+                    ));
+                    assert!(!cx.crash(1).await);
+                    assert!(!cx.crashed(1));
+                    assert!(cx.set_link(2, 3, None).await);
+                    cx.hold(1, |_| true);
+                    assert!(cx.hold_marshal(1, |_| true));
+                    assert_eq!(cx.send(Channel::Vote, &[1], vec![7u8]), 1);
+                    assert_eq!(
+                        cx.send_marshal(MarshalChannel::Backfill, &[1], vec![8u8]),
+                        1
+                    );
+                    cx.sleep(Duration::from_secs(1)).await;
+                    assert_eq!(cx.held(1).len(), 1);
+                    assert_eq!(cx.held_marshal(1).len(), 1);
+                })
+            });
+            let mut runner = net.runner(&context, &watch, Epoch::zero(), prefix);
+            let tap = runner.tap(1);
+            let ((_, vote), _, _) = net.engine(1);
+            let ((_, backfill), _) = net.marshal(1);
+            drain(
+                &context,
+                1,
+                gate(tap.as_ref(), vote, Channel::Vote),
+                &delivered,
+            );
+            drain(
+                &context,
+                1,
+                marshal_gate(tap.as_ref(), backfill, MarshalChannel::Backfill),
+                &delivered,
+            );
+            runner.adopt(net.engine(0));
+            runner.adopt_marshal(net.marshal(0));
+            let (channels, release) = runner.run().await;
+            assert!(channels.is_some());
+            assert!(runner.marshal_channels().is_some());
+            assert!(!release.overran);
+            assert_eq!(release.gates, vec![1]);
+            assert_eq!(release.delivered, 2);
+            assert_eq!(release.links, vec![(2, 3)]);
+            assert!(release.latencies.is_empty());
+            assert!(release.restarted.is_empty());
+            assert_eq!(release.blocks, 0);
+            assert_eq!(watch.releases.lock().as_slice(), &[release]);
+            context.sleep(Duration::from_secs(1)).await;
+            assert_eq!(got(&delivered), vec![7, 8]);
+            // The cut link is back: 2 reaches 3.
+            let (_, (mut sender, _)) = net.marshal(2);
+            let (_, (_, mut receiver)) = net.marshal(3);
+            commonware_p2p::Sender::send(
+                &mut sender,
+                Recipients::Some(vec![net.participants[3].clone()]),
+                IoBuf::from(vec![9u8]),
+                false,
+            );
+            select! {
+                message = receiver.recv() => assert_eq!(message.unwrap().1.as_ref(), &[9]),
+                _ = context.sleep(Duration::from_secs(1)) => panic!("the link was not restored"),
+            }
+        });
+    }
+
+    #[test]
+    fn the_leader_follows_the_topology_epoch() {
+        let mut leaders = Vec::new();
+        for epoch in [Epoch::zero(), Epoch::new(EPOCH)] {
+            let seen = deterministic::Runner::default().start(|mut context| async move {
+                let net = Net::new(&mut context).await;
+                let set: Set<Key> = net.participants.as_slice().try_into().unwrap();
+                let elector: ElectorOf =
+                    <P as Simplex>::elector(TermLength::ONE, ViewDelta::zero()).build(&set);
+                let expected: Vec<usize> = (1..=8)
+                    .map(|view| {
+                        elector.elect(Round::new(epoch, View::new(view)), ()).get() as usize
+                    })
+                    .collect();
+                let seen = Arc::new(Mutex::new(Vec::new()));
+                let record = seen.clone();
+                let prefix = script(Duration::from_secs(1), move |cx| {
+                    Box::pin(async move {
+                        assert_eq!(cx.epoch(), epoch);
+                        *record.lock() = (1..=8).map(|view| cx.leader(View::new(view))).collect();
+                    })
+                });
+                let mut runner = net.runner(&context, &Watch::default(), epoch, prefix);
+                runner.run().await;
+                let seen = seen.lock().clone();
+                assert_eq!(seen, expected);
+                seen
+            });
+            leaders.push(seen);
+        }
+        assert_ne!(leaders[0], leaders[1], "the epoch moves the rotation");
+    }
+
+    #[test]
+    fn marshal_lanes_hold_pass_and_open() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut net = Net::new(&mut context).await;
+            let delivered: Got = Arc::default();
+            let seen = delivered.clone();
+            let prefix = script(Duration::from_secs(10), move |cx| {
+                Box::pin(async move {
+                    assert!(cx.marshal_lanes());
+                    assert!(cx.hold_marshal(1, |message| {
+                        message.channel == MarshalChannel::Backfill
+                    }));
+                    cx.send_marshal(MarshalChannel::Backfill, &[1], vec![1u8]);
+                    cx.send_marshal(MarshalChannel::Broadcast, &[1], vec![2u8]);
+                    cx.sleep(Duration::from_secs(1)).await;
+                    assert_eq!(got(&seen), vec![2]);
+                    let held = cx.held_marshal(1);
+                    assert_eq!(held.len(), 1);
+                    assert_eq!(held[0].from, Some(0));
+                    assert_eq!(held[0].channel, MarshalChannel::Backfill);
+                    assert_eq!(held[0].payload.as_ref(), &[1]);
+                    let deliveries = cx.marshal_deliveries(1);
+                    assert_eq!(deliveries.len(), 1);
+                    assert_eq!(deliveries[0].value.channel, MarshalChannel::Broadcast);
+                    assert_eq!(
+                        cx.pass_marshal(1, |message| message.payload.as_ref() == [1]),
+                        1
+                    );
+                    cx.sleep(SETTLE).await;
+                    assert_eq!(got(&seen), vec![1, 2]);
+                    assert_eq!(cx.marshal_deliveries(1).len(), 2);
+                    // Opened, the gate delivers what it held and holds nothing more.
+                    cx.send_marshal(MarshalChannel::Backfill, &[1], vec![3u8]);
+                    cx.sleep(Duration::from_secs(1)).await;
+                    assert_eq!(cx.held_marshal(1).len(), 1);
+                    assert_eq!(cx.open(1), 1);
+                    cx.send_marshal(MarshalChannel::Backfill, &[1], vec![4u8]);
+                    cx.sleep(Duration::from_secs(1)).await;
+                    assert_eq!(got(&seen), vec![1, 2, 3, 4]);
+                    assert!(cx.held_marshal(1).is_empty());
+                    // Held again until the release opens the gate.
+                    assert!(cx.hold_marshal(1, |_| true));
+                    cx.send_marshal(MarshalChannel::Broadcast, &[1], vec![5u8]);
+                    cx.sleep(Duration::from_secs(1)).await;
+                    assert_eq!(cx.held_marshal(1).len(), 1);
+                })
+            });
+            let watch = Watch::default();
+            let mut runner = net.runner(&context, &watch, Epoch::zero(), prefix);
+            let tap = runner.tap(1);
+            let ((_, backfill), (_, broadcast)) = net.marshal(1);
+            drain(
+                &context,
+                1,
+                marshal_gate(tap.as_ref(), backfill, MarshalChannel::Backfill),
+                &delivered,
+            );
+            drain(
+                &context,
+                1,
+                marshal_gate(tap.as_ref(), broadcast, MarshalChannel::Broadcast),
+                &delivered,
+            );
+            runner.adopt_marshal(net.marshal(0));
+            let (_, release) = runner.run().await;
+            assert_eq!(release.gates, vec![1]);
+            assert_eq!(release.delivered, 1);
+            context.sleep(SETTLE).await;
+            assert_eq!(got(&delivered), vec![1, 2, 3, 4, 5]);
+            assert!(watch.dropped.lock().is_empty());
+        });
+    }
+
+    #[test]
+    fn each_gate_drops_at_its_own_cap() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let net = Net::new(&mut context).await;
+            let watch = Watch::default();
+            let tap = ReplicaTap::<P>::new(
+                1,
+                net.participants.clone().into(),
+                Arc::new(watch),
+                Arc::new(AtomicBool::new(true)),
+            );
+            tap.gate.lock().hold = Some(Arc::new(|_| true));
+            tap.marshal_gate.lock().hold = Some(Arc::new(|_| true));
+            let payload = IoBuf::from(vec![0u8; 8]);
+            let sender = &net.participants[2];
+            for _ in 0..LOG_CAP + 10 {
+                assert!(tap.hold(MarshalChannel::Broadcast, sender, &payload));
+            }
+            assert_eq!(tap.marshal_gate.lock().held.len(), LOG_CAP);
+            assert_eq!(tap.marshal_gate.lock().dropped, Some(1));
+            // The engine gate keeps its own room and its own first drop.
+            assert!(tap.gate.lock().held.is_empty());
+            assert_eq!(tap.gate.lock().dropped, None);
+            for _ in 0..LOG_CAP + 1 {
+                assert!(tap.hold(Channel::Vote, sender, &payload));
+            }
+            assert_eq!(tap.gate.lock().held.len(), LOG_CAP);
+            assert_eq!(tap.gate.lock().dropped, Some(11));
+            assert_eq!(tap.open(), 2 * LOG_CAP);
+        });
+    }
+
+    #[test]
+    fn b_sends_stop_at_the_byte_budget() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut net = Net::new(&mut context).await;
+            let watch = Watch::default();
+            let prefix = script(Duration::from_secs(30), |cx| {
+                Box::pin(async move {
+                    let largest = vec![0u8; MAX_MESSAGE as usize];
+                    let size = u64::from(MAX_MESSAGE);
+                    // A message counts once per recipient.
+                    assert_eq!(cx.send(Channel::Resolver, &[1, 2], largest.clone()), 2);
+                    let fit = MAX_SENT / size - 2;
+                    for sent in 0..fit + 40 {
+                        let went = if sent % 2 == 0 {
+                            cx.send(Channel::Resolver, &[1], largest.clone())
+                        } else {
+                            cx.send_marshal(MarshalChannel::Backfill, &[1], largest.clone())
+                        };
+                        assert_eq!(went, usize::from(sent < fit), "{sent}");
+                        cx.sleep(Duration::from_millis(10)).await;
+                    }
+                    assert_eq!(cx.send(Channel::Vote, &[1], vec![1u8]), 0);
+                    assert_eq!(
+                        cx.send_marshal(MarshalChannel::Broadcast, &[1], vec![1u8]),
+                        0
+                    );
+                    cx.sleep(Duration::from_secs(1)).await;
+                    let engine: usize = cx
+                        .deliveries(1)
+                        .iter()
+                        .map(|entry| entry.value.payload.len())
+                        .sum();
+                    let marshal: usize = cx
+                        .marshal_deliveries(1)
+                        .iter()
+                        .map(|entry| entry.value.payload.len())
+                        .sum();
+                    let kept = (engine + marshal) as u64;
+                    assert!(kept > 0 && kept <= MAX_SENT, "{kept}");
+                })
+            });
+            let mut runner = net.runner(&context, &watch, Epoch::zero(), prefix);
+            let tap = runner.tap(1);
+            let delivered: Got = Arc::default();
+            let (_, _, (_, resolver)) = net.engine(1);
+            let ((_, backfill), _) = net.marshal(1);
+            drain(
+                &context,
+                1,
+                gate(tap.as_ref(), resolver, Channel::Resolver),
+                &delivered,
+            );
+            drain(
+                &context,
+                1,
+                marshal_gate(tap.as_ref(), backfill, MarshalChannel::Backfill),
+                &delivered,
+            );
+            runner.adopt(net.engine(0));
+            runner.adopt_marshal(net.marshal(0));
+            let (_, release) = runner.run().await;
+            assert!(!release.overran);
+        });
+    }
+
+    #[test]
+    fn b_sends_of_tiny_messages_stop_at_the_byte_budget() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut net = Net::new(&mut context).await;
+            let watch = Watch::default();
+            let accepted = Arc::new(AtomicU64::new(0));
+            let counted = accepted.clone();
+            let prefix = script(Duration::from_secs(1), move |cx| {
+                Box::pin(async move {
+                    // A send to nobody goes nowhere and still costs MIN_CHARGE.
+                    assert_eq!(cx.send(Channel::Vote, &[], Vec::<u8>::new()), 0);
+                    // Empty and one-byte messages on both kinds of channel, with no
+                    // yield: only the byte budget ends the loop.
+                    let mut sends = 0u64;
+                    loop {
+                        let message = if sends.is_multiple_of(2) {
+                            Vec::new()
+                        } else {
+                            vec![1u8]
+                        };
+                        let went = if sends.is_multiple_of(3) {
+                            cx.send_marshal(MarshalChannel::Backfill, &[1, 2, 3], message)
+                        } else {
+                            cx.send(Channel::Vote, &[1, 2, 3], message)
+                        };
+                        if went == 0 {
+                            break;
+                        }
+                        assert_eq!(went, 3);
+                        sends += 1;
+                    }
+                    counted.store(sends, Ordering::Relaxed);
+                })
+            });
+            let mut runner = net.runner(&context, &watch, Epoch::zero(), prefix);
+            runner.adopt(net.engine(0));
+            runner.adopt_marshal(net.marshal(0));
+            let (_, release) = runner.run().await;
+            assert!(!release.overran);
+            let accepted = accepted.load(Ordering::Relaxed);
+            assert!(accepted * 3 <= MAX_SENT / MIN_CHARGE, "{accepted}");
+            assert_eq!(accepted, (MAX_SENT / MIN_CHARGE - 1) / 3);
+        });
+    }
+
+    #[test]
+    fn a_refused_link_change_costs_time() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut net = Net::new(&mut context).await;
+            let watch = Watch::default();
+            let prefix = script(Duration::from_secs(1), |cx| {
+                Box::pin(async move {
+                    let start = cx.now();
+                    assert!(!cx.set_link(1, 99, None).await);
+                    assert!(cx.now() - start >= NO_ANSWER);
+                    // A loop of refusals advances time, so the runner ends it at its budget.
+                    while !cx.set_link(1, 1, None).await {}
+                })
+            });
+            let mut runner = net.runner(&context, &watch, Epoch::zero(), prefix);
+            runner.adopt(net.engine(0));
+            let (_, release) = runner.run().await;
+            assert!(release.overran);
+            assert!(release.links.is_empty());
+        });
+    }
+
+    #[test]
+    fn engine_pass_is_unchanged_with_marshal_traffic_held() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut net = Net::new(&mut context).await;
+            let delivered: Got = Arc::default();
+            let seen = delivered.clone();
+            let prefix = script(Duration::from_secs(10), move |cx| {
+                Box::pin(async move {
+                    cx.hold(1, |_| true);
+                    assert!(cx.hold_marshal(1, |_| true));
+                    cx.send(Channel::Vote, &[1], vec![1u8]);
+                    cx.send_marshal(MarshalChannel::Backfill, &[1], vec![2u8]);
+                    cx.send(Channel::Certificate, &[1], vec![3u8]);
+                    cx.send_marshal(MarshalChannel::Broadcast, &[1], vec![4u8]);
+                    cx.sleep(Duration::from_secs(1)).await;
+                    let engine: Vec<_> = cx.held(1).iter().map(|m| m.channel).collect();
+                    let mut sorted = engine.clone();
+                    sorted.sort();
+                    assert_eq!(sorted, vec![Channel::Vote, Channel::Certificate]);
+                    assert_eq!(cx.held_marshal(1).len(), 2);
+                    // An engine selector sees engine messages only, by index.
+                    let asked = Mutex::new(Vec::new());
+                    let passed = cx.pass(1, |message| {
+                        asked.lock().push(message.channel);
+                        message.channel == Channel::Certificate
+                    });
+                    assert_eq!(passed, 1);
+                    assert_eq!(asked.into_inner(), engine);
+                    cx.sleep(SETTLE).await;
+                    assert_eq!(got(&seen), vec![3]);
+                    assert_eq!(cx.held(1).len(), 1);
+                    assert_eq!(cx.held_marshal(1).len(), 2);
+                    assert_eq!(cx.pass(1, |_| true), 1);
+                    assert_eq!(cx.pass_marshal(1, |_| true), 2);
+                    cx.sleep(SETTLE).await;
+                    assert_eq!(got(&seen), vec![1, 2, 3, 4]);
+                    assert_eq!(cx.deliveries(1).len(), 2);
+                    assert_eq!(cx.marshal_deliveries(1).len(), 2);
+                })
+            });
+            let mut runner = net.runner(&context, &Watch::default(), Epoch::zero(), prefix);
+            let tap = runner.tap(1);
+            let ((_, vote), (_, certificate), _) = net.engine(1);
+            let ((_, backfill), (_, broadcast)) = net.marshal(1);
+            drain(
+                &context,
+                1,
+                gate(tap.as_ref(), vote, Channel::Vote),
+                &delivered,
+            );
+            drain(
+                &context,
+                1,
+                gate(tap.as_ref(), certificate, Channel::Certificate),
+                &delivered,
+            );
+            drain(
+                &context,
+                1,
+                marshal_gate(tap.as_ref(), backfill, MarshalChannel::Backfill),
+                &delivered,
+            );
+            drain(
+                &context,
+                1,
+                marshal_gate(tap.as_ref(), broadcast, MarshalChannel::Broadcast),
+                &delivered,
+            );
+            runner.adopt(net.engine(0));
+            runner.adopt_marshal(net.marshal(0));
+            let (_, release) = runner.run().await;
+            // Both filters were still installed at the release, with nothing held.
+            assert_eq!(release.gates, vec![1]);
+            assert_eq!(release.delivered, 0);
+        });
+    }
+
+    #[test]
+    fn hold_marshal_without_a_marshal_gate_is_false() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut net = Net::new(&mut context).await;
+            let watch = Watch::default();
+            let leak: Leak = Arc::default();
+            let leaked = leak.clone();
+            let dropped = watch.dropped.clone();
+            let prefix = script(Duration::from_secs(10), move |cx| {
+                Box::pin(async move {
+                    // Replica 1 has no marshal gate, replica 2 has one.
+                    assert!(!cx.hold_marshal(1, |_| true));
+                    assert_eq!(cx.pass_marshal(1, |_| true), 0);
+                    assert!(cx.held_marshal(1).is_empty());
+                    assert!(cx.marshal_deliveries(1).is_empty());
+                    assert_eq!(
+                        dropped.lock().len(),
+                        2,
+                        "each read of a missing gate is cut"
+                    );
+                    assert!(cx.hold_marshal(2, |_| true));
+                    assert!(cx.held_marshal(2).is_empty());
+                    assert_eq!(dropped.lock().len(), 2);
+                    *leaked.lock() = Some(cx.clone());
+                })
+            });
+            let mut runner = net.runner(&context, &watch, Epoch::zero(), prefix);
+            let ((_, backfill), _) = net.marshal(2);
+            drain(
+                &context,
+                2,
+                marshal_gate(runner.tap(2).as_ref(), backfill, MarshalChannel::Backfill),
+                &Got::default(),
+            );
+            let (_, release) = runner.run().await;
+            assert_eq!(release.gates, vec![2]);
+            // Past the handoff a gated replica refuses a filter too.
+            let cx = leak.lock().take().unwrap();
+            assert!(!cx.hold_marshal(2, |_| true));
+            assert_eq!(cx.pass_marshal(2, |_| true), 0);
+        });
+    }
+
+    #[test]
+    fn send_marshal_without_lanes_sends_nothing() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut net = Net::new(&mut context).await;
+            let watch = Watch::default();
+            let dropped = watch.dropped.clone();
+            let prefix = script(Duration::from_secs(10), move |cx| {
+                Box::pin(async move {
+                    assert!(!cx.marshal_lanes());
+                    assert_eq!(
+                        cx.send_marshal(MarshalChannel::Backfill, &[1, 2, 3], vec![1u8]),
+                        0
+                    );
+                    let at = cx.stamp().seq();
+                    assert!(cx.marshal_inbox().is_empty());
+                    assert_eq!(dropped.lock().as_slice(), &[at + 1]);
+                    // B's engine channels are unaffected.
+                    assert_eq!(cx.send(Channel::Vote, &[1], vec![1u8]), 1);
+                })
+            });
+            let mut runner = net.runner(&context, &watch, Epoch::zero(), prefix);
+            runner.adopt(net.engine(0));
+            let (channels, _) = runner.run().await;
+            assert!(channels.is_some());
+            assert!(runner.marshal_channels().is_none());
+        });
+    }
+
+    #[test]
+    fn b_marshal_lanes_record_until_the_release_and_return() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut net = Net::new(&mut context).await;
+            let watch = Watch::default();
+            let leak: Leak = Arc::default();
+            let leaked = leak.clone();
+            let prefix = script(Duration::from_secs(10), move |cx| {
+                Box::pin(async move {
+                    cx.sleep(Duration::from_secs(1)).await;
+                    let inbox = cx.marshal_inbox();
+                    assert_eq!(inbox.len(), 2);
+                    let mut seen: Vec<_> = inbox
+                        .iter()
+                        .map(|entry| (entry.value.from, entry.value.channel, entry.value.payload.as_ref()[0]))
+                        .collect();
+                    seen.sort();
+                    assert_eq!(
+                        seen,
+                        vec![
+                            (Some(2), MarshalChannel::Backfill, 5),
+                            (Some(3), MarshalChannel::Broadcast, 6),
+                        ]
+                    );
+                    *leaked.lock() = Some(cx.clone());
+                })
+            });
+            let mut runner = net.runner(&context, &watch, Epoch::zero(), prefix);
+            let b = net.participants[0].clone();
+            let ((mut backfill, _), _) = net.marshal(2);
+            let (_, (mut broadcast, _)) = net.marshal(3);
+            commonware_p2p::Sender::send(
+                &mut backfill,
+                Recipients::Some(vec![b.clone()]),
+                IoBuf::from(vec![5u8]),
+                false,
+            );
+            commonware_p2p::Sender::send(
+                &mut broadcast,
+                Recipients::Some(vec![b.clone()]),
+                IoBuf::from(vec![6u8]),
+                false,
+            );
+            runner.adopt_marshal(net.marshal(0));
+            let (channels, _) = runner.run().await;
+            assert!(channels.is_none(), "B's engine channels were never adopted");
+            let ((mut b_backfill, mut b_backfill_receiver), _) =
+                runner.marshal_channels().expect("the release returns B's lanes");
+            assert!(runner.marshal_channels().is_none());
+            // The lanes returned are B's live ones, no longer recorded.
+            commonware_p2p::Sender::send(
+                &mut backfill,
+                Recipients::Some(vec![b.clone()]),
+                IoBuf::from(vec![7u8]),
+                false,
+            );
+            select! {
+                message = b_backfill_receiver.recv() => assert_eq!(message.unwrap().1.as_ref(), &[7]),
+                _ = context.sleep(Duration::from_secs(1)) => panic!("B's backfill lane is dead"),
+            }
+            let cx = leak.lock().take().unwrap();
+            assert_eq!(cx.marshal_inbox().len(), 2);
+            assert_eq!(cx.send_marshal(MarshalChannel::Backfill, &[2], vec![1u8]), 0);
+            let sent = commonware_p2p::Sender::send(
+                &mut b_backfill,
+                Recipients::Some(vec![net.participants[2].clone()]),
+                IoBuf::from(vec![1u8]),
+                false,
+            );
+            assert_eq!(sent.len(), 1, "the base sends on B's returned lane");
+        });
+    }
+
+    #[test]
+    fn an_unfed_recorder_cuts_at_the_read() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let net = Net::new(&mut context).await;
+            let watch = Watch::default();
+            let dropped = watch.dropped.clone();
+            let prefix = script(Duration::from_secs(10), move |cx| {
+                Box::pin(async move {
+                    type Read = Box<dyn Fn(&PrefixContext<P>) -> usize + Send>;
+                    let reads: [(&str, Read); 9] = [
+                        ("deliveries", Box::new(|cx| cx.deliveries(1).len())),
+                        ("held", Box::new(|cx| cx.held(1).len())),
+                        (
+                            "marshal_deliveries",
+                            Box::new(|cx| cx.marshal_deliveries(1).len()),
+                        ),
+                        ("held_marshal", Box::new(|cx| cx.held_marshal(1).len())),
+                        ("marshal_inbox", Box::new(|cx| cx.marshal_inbox().len())),
+                        ("activities", Box::new(|cx| cx.activities(1).len())),
+                        ("automaton", Box::new(|cx| cx.automaton(1).len())),
+                        ("elections", Box::new(|cx| cx.elections(2).len())),
+                        ("blocks", Box::new(|cx| cx.blocks(1).len())),
+                    ];
+                    for (name, read) in reads {
+                        // A stage read before the cut keeps its position; the cut is the
+                        // read's own, after it.
+                        let before = cx.stamp().seq();
+                        assert_eq!(read(&cx), 0, "{name}");
+                        assert_eq!(dropped.lock().last(), Some(&(before + 1)), "{name}");
+                        dropped.lock().clear();
+                    }
+                    // A fed recorder, and a replica without a tap, cut nothing.
+                    let _ = cx.elections(1);
+                    let _ = cx.activities(0);
+                    assert!(dropped.lock().is_empty());
+                })
+            });
+            let runner = net.runner(&context, &watch, Epoch::zero(), prefix);
+            let set: Set<Key> = net.participants.as_slice().try_into().unwrap();
+            let _ = tap_elector(
+                runner.tap(1).as_ref(),
+                <P as Simplex>::elector(TermLength::ONE, ViewDelta::zero()),
+            )
+            .build(&set);
+            let mut runner = runner;
+            runner.run().await;
+        });
+    }
+
+    /// A reporter that counts what reaches it.
+    struct Sink<D>(Arc<AtomicU64>, std::marker::PhantomData<fn() -> D>);
+
+    impl<D> Clone for Sink<D> {
+        fn clone(&self) -> Self {
+            Self(self.0.clone(), std::marker::PhantomData)
+        }
+    }
+
+    impl<D: Digest> Reporter for Sink<D> {
+        type Activity = Activity<SchemeOf, D>;
+
+        fn report(&mut self, _activity: Self::Activity) -> Feedback {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Feedback::Ok
+        }
+    }
+
+    /// A queue of messages, then a closed receiver.
+    #[derive(Debug)]
+    struct Queue(VecDeque<(Key, IoBuf)>);
+
+    impl commonware_p2p::Receiver for Queue {
+        type Error = Closed;
+        type PublicKey = Key;
+
+        async fn recv(&mut self) -> Result<commonware_p2p::Message<Key>, Closed> {
+            self.0.pop_front().ok_or(Closed)
+        }
+    }
+
+    /// A finalization of `view` over `payload` by a quorum of `schemes`.
+    fn finalization<D: Digest>(
+        schemes: &[SchemeOf],
+        view: u64,
+        payload: D,
+    ) -> Activity<SchemeOf, D> {
+        use commonware_consensus::simplex::types::{Finalization, Finalize, Proposal};
+        let proposal = Proposal::new(
+            Round::new(Epoch::zero(), View::new(view)),
+            View::new(view - 1),
+            payload,
+        );
+        let finalizes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        Activity::Finalization(
+            Finalization::from_finalizes(
+                &schemes[0],
+                commonware_utils::iter::NonEmpty::try_new(finalizes.iter()).unwrap(),
+                &commonware_parallel::Sequential,
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn wrappers_without_a_tap_only_forward() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let net = Net::new(&mut context).await;
+            let key = net.participants[1].clone();
+            let message = IoBuf::from(vec![1u8, 2, 3]);
+            let mut engine = gate::<P, _>(
+                None,
+                Queue(VecDeque::from([(key.clone(), message.clone())])),
+                Channel::Vote,
+            );
+            assert!(engine.tap.is_none() && engine.wake.is_none());
+            let (from, payload) = engine.recv().await.unwrap();
+            assert_eq!((&from, payload.as_ref()), (&key, message.as_ref()));
+            assert!(engine.recv().await.is_err());
+            let mut marshal = marshal_gate::<P, _>(
+                None,
+                Queue(VecDeque::from([(key.clone(), message.clone())])),
+                MarshalChannel::Broadcast,
+            );
+            assert!(marshal.tap.is_none() && marshal.wake.is_none());
+            assert_eq!(marshal.recv().await.unwrap().1.as_ref(), message.as_ref());
+
+            let count = Arc::new(AtomicU64::new(0));
+            let mut reporter = tap_reporter::<P, _>(
+                None,
+                Sink::<Sha256Digest>(count.clone(), Default::default()),
+            );
+            assert!(reporter.tap.is_none());
+            reporter.report(finalization(&net.schemes, 3, Sha256Digest([3; 32])));
+            let mut finalized = tap_finalized::<P, _>(
+                None,
+                Sink::<commonware_cryptography::blake3::Digest>(count.clone(), Default::default()),
+            );
+            finalized.report(finalization(
+                &net.schemes,
+                4,
+                commonware_cryptography::blake3::Digest([4; 32]),
+            ));
+            assert_eq!(count.load(Ordering::Relaxed), 2);
+
+            let set: Set<Key> = net.participants.as_slice().try_into().unwrap();
+            let config = <P as Simplex>::elector(TermLength::ONE, ViewDelta::zero());
+            let inner: ElectorOf = config.clone().build(&set);
+            let elector = tap_elector::<P, _>(None, config).build(&set);
+            assert!(elector.tap.is_none());
+            for view in 1..=8 {
+                let round = Round::new(Epoch::zero(), View::new(view));
+                assert_eq!(elector.elect(round, ()), inner.elect(round, ()));
+            }
+
+            let mut blocker = tap_blocker::<P, _>(None, net.oracle.control(key.clone()));
+            assert!(blocker.tap.is_none());
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the test checks the block is forwarded"
+            )]
+            let _ = blocker.block(net.participants[2].clone());
+            context.sleep(SETTLE).await;
+            assert!(
+                net.oracle
+                    .blocked()
+                    .await
+                    .unwrap()
+                    .contains(&(key.clone(), net.participants[2].clone())),
+                "the block was not forwarded"
+            );
+
+            let silent = Silent {
+                open: Arc::new(Mutex::new(Vec::new())),
+                prepares: Arc::new(Mutex::new(Vec::new())),
+            };
+            let mut automaton = tap_automaton::<P, _>(None, silent.clone(), &context);
+            assert!(automaton.tap.is_none() && automaton.context.is_none());
+            let request = SimplexContext {
+                round: Round::new(Epoch::new(EPOCH), View::new(1)),
+                leader: key,
+                parent: (View::zero(), Sha256Digest([0; 32])),
+            };
+            let _receiver = automaton.verify(request, Sha256Digest([1; 32])).await;
+            assert_eq!(silent.open.lock().len(), 1);
+        });
+    }
+
+    #[test]
+    fn tap_finalized_raises_the_release_base_for_any_digest() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let net = Net::new(&mut context).await;
+            let watch = Watch::default();
+            let dropped = watch.dropped.clone();
+            let prefix = script(Duration::from_secs(1), move |cx| {
+                Box::pin(async move {
+                    // It records nothing: the activities log stays unfed.
+                    assert!(cx.activities(1).is_empty());
+                    assert_eq!(dropped.lock().len(), 1);
+                })
+            });
+            let mut runner = net.runner(&context, &watch, Epoch::zero(), prefix);
+            let count = Arc::new(AtomicU64::new(0));
+            let mut reporter = tap_finalized(
+                runner.tap(1).as_ref(),
+                Sink::<commonware_cryptography::blake3::Digest>(count.clone(), Default::default()),
+            );
+            for view in [7, 3] {
+                reporter.report(finalization(
+                    &net.schemes,
+                    view,
+                    commonware_cryptography::blake3::Digest([view as u8; 32]),
+                ));
+            }
+            assert_eq!(count.load(Ordering::Relaxed), 2);
+            let (_, release) = runner.run().await;
+            assert_eq!(release.base, 7);
+        });
+    }
+
+    #[test]
+    fn release_view_is_the_highest_elected_view() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let net = Net::new(&mut context).await;
+            let watch = Watch::default();
+            let mut runner = net.runner(
+                &context,
+                &watch,
+                Epoch::zero(),
+                script(Duration::from_secs(1), |_| Box::pin(async {})),
+            );
+            let set: Set<Key> = net.participants.as_slice().try_into().unwrap();
+            let electors: Vec<_> = (1..=3)
+                .map(|replica| {
+                    tap_elector(
+                        runner.tap(replica).as_ref(),
+                        <P as Simplex>::elector(TermLength::ONE, ViewDelta::zero()),
+                    )
+                    .build(&set)
+                })
+                .collect();
+            let elect = |replica: usize, view: u64| {
+                electors[replica - 1].elect(Round::new(Epoch::zero(), View::new(view)), ());
+            };
+            elect(1, 5);
+            elect(2, 9);
+            elect(1, 6);
+            let (_, release) = runner.run().await;
+            assert_eq!(release.view, 9);
+            assert_eq!(release.base, 0);
+            // Past the release the counter still follows the elector, unrecorded.
+            let tap = runner.tap(3).unwrap();
+            let recorded = tap.elections.lock().len();
+            elect(3, 20);
+            assert_eq!(tap.elected.load(Ordering::Relaxed), 20);
+            assert_eq!(tap.elections.lock().len(), recorded);
+        });
+    }
+
+    /// How a fake marshal read answers.
+    #[derive(Clone, Copy)]
+    enum Answer {
+        Never,
+        /// Ready at the first poll, as an answer from a closed mailbox would be.
+        Immediate,
+        /// The request was dropped before the first poll.
+        Dropped,
+        /// Answered by another task after 10 ms.
+        Later,
+    }
+
+    /// Marshal reads whose answer follows the height asked for.
+    struct FakeReads {
+        context: Mutex<deterministic::Context>,
+    }
+
+    impl FakeReads {
+        fn read<T: Send + 'static>(
+            &self,
+            answer: Answer,
+            value: Option<T>,
+        ) -> Pin<Box<dyn Future<Output = Option<T>> + Send>> {
+            match answer {
+                Answer::Never => Box::pin(futures::future::pending()),
+                Answer::Immediate => Box::pin(async move { value }),
+                Answer::Dropped => {
+                    let (sender, receiver) = oneshot::channel::<Option<T>>();
+                    drop(sender);
+                    Box::pin(async move { receiver.await.ok().flatten() })
+                }
+                Answer::Later => {
+                    let (sender, receiver) = oneshot::channel();
+                    self.context
+                        .lock()
+                        .child("answer")
+                        .spawn(move |context| async move {
+                            context.sleep(Duration::from_millis(10)).await;
+                            sender.send_lossy(value);
+                        });
+                    Box::pin(async move { receiver.await.ok().flatten() })
+                }
+            }
+        }
+    }
+
+    impl MarshalReads for FakeReads {
+        /// Height 0 never answers, 1 answers at once, 2 is dropped, 3 is finalized and 4
+        /// is not.
+        fn finalized(
+            &self,
+            height: u64,
+        ) -> Pin<Box<dyn Future<Output = Option<Sha256Digest>> + Send>> {
+            match height {
+                0 => self.read(Answer::Never, None),
+                1 => self.read(Answer::Immediate, Some(Sha256Digest([1; 32]))),
+                2 => self.read(Answer::Dropped, None),
+                3 => self.read(Answer::Later, Some(Sha256Digest([3; 32]))),
+                _ => self.read(Answer::Later, None),
+            }
+        }
+
+        fn processed(&self) -> Pin<Box<dyn Future<Output = Option<u64>> + Send>> {
+            self.read(Answer::Later, Some(9))
+        }
+    }
+
+    #[test]
+    fn marshal_reads_answer_time_out_or_refuse_immediately() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let net = Net::new(&mut context).await;
+            let prefix = script(Duration::from_secs(10), |cx| {
+                Box::pin(async move {
+                    // The time a read took, in whole milliseconds of the executor's rounds.
+                    let took = |cx: &PrefixContext<P>, start: Duration| cx.now() - start;
+                    let within =
+                        |took: Duration, least: Duration| took >= least && took < least + SETTLE;
+                    let start = cx.now();
+                    assert_eq!(cx.finalized_block(1, 0).await, None);
+                    assert!(within(took(&cx, start), MARSHAL_READ_TIMEOUT));
+                    for height in [1, 2] {
+                        let start = cx.now();
+                        assert_eq!(cx.finalized_block(1, height).await, None, "{height}");
+                        assert!(within(took(&cx, start), NO_ANSWER), "{height}");
+                    }
+                    let start = cx.now();
+                    assert_eq!(
+                        cx.finalized_block(1, 3).await,
+                        Some(Some(Sha256Digest([3; 32])))
+                    );
+                    assert!(within(took(&cx, start), Duration::from_millis(10)));
+                    assert_eq!(cx.finalized_block(1, 4).await, Some(None));
+                    assert_eq!(cx.processed_height(1).await, Some(Some(9)));
+                    // Without reads, and for B, there is no answer, after 1 ms.
+                    for replica in [0, 2, 9] {
+                        let start = cx.now();
+                        assert_eq!(cx.processed_height(replica).await, None);
+                        assert!(within(took(&cx, start), NO_ANSWER));
+                    }
+                })
+            });
+            let mut runner = net.runner(&context, &Watch::default(), Epoch::zero(), prefix);
+            runner.tap(1).unwrap().set_reads(Arc::new(FakeReads {
+                context: Mutex::new(context.child("reads")),
+            }));
+            let (_, release) = runner.run().await;
+            assert!(!release.overran);
+
+            // A prefix ended at its budget inside a read releases on time.
+            let reads = Arc::new(FakeReads {
+                context: Mutex::new(context.child("reads")),
+            });
+            let prefix = Script(
+                Budget {
+                    prefix: Duration::from_millis(300),
+                    release: Duration::ZERO,
+                },
+                |cx: PrefixContext<P>| -> PrefixFuture {
+                    Box::pin(async move {
+                        let _ = cx.finalized_block(1, 0).await;
+                        unreachable!("the read outlived the budget");
+                    })
+                },
+            );
+            let mut runner = net.runner(&context, &Watch::default(), Epoch::zero(), prefix);
+            runner.tap(1).unwrap().set_reads(reads);
+            let start = context.current();
+            let (_, release) = runner.run().await;
+            assert!(release.overran);
+            let took = context.current().duration_since(start).unwrap();
+            assert!(took >= Duration::from_millis(300) && took < MARSHAL_READ_TIMEOUT);
+        });
+    }
+
+    #[test]
+    fn marshal_pins_honor_only_their_domain() {
+        let mut input = test_input();
+        input.configuration = N4F1C3;
+        input.certify = CertifyChoice::Always;
+        input.term_length = TermLength::ONE;
+        input.optimistic_views = ViewDelta::zero();
+        let mut pins = Pins::new(&mut input, Domain::Marshal { term: true });
+        assert!(pins.configuration(N4F1C3));
+        assert!(!pins.configuration(N4F0C4));
+        assert!(!pins.configuration(crate::N4F3C1));
+        assert!(pins.lookahead(ViewDelta::zero()));
+        assert!(!pins.lookahead(ViewDelta::new(1)));
+        pins.term_length(TermLength::new(commonware_utils::NZU32!(3)));
+        assert_eq!(pins.input().term_length.get(), 3);
+        pins.term_length(TermLength::new(commonware_utils::NZU32!(
+            MARSHAL_MAX_TERM_LENGTH + 1
+        )));
+        assert_eq!(
+            pins.input().term_length.get(),
+            3,
+            "past the decoder's bound"
+        );
+        assert_eq!(pins.input().optimistic_views, ViewDelta::zero());
+        let mut pins = Pins::new(&mut input, Domain::Marshal { term: false });
+        pins.term_length(TermLength::ONE);
+        assert_eq!(
+            pins.input().term_length.get(),
+            3,
+            "a base without terms pins none"
+        );
+        assert_eq!(input.configuration, N4F1C3);
+
+        // The plan cuts a marshal budget as any other.
+        let mut input = test_input();
+        let hook = Hook::<P>::plan_marshal(
+            Box::new(Script(
+                Budget {
+                    prefix: Duration::from_secs(3600),
+                    release: Duration::from_secs(3600),
+                },
+                |_: PrefixContext<P>| -> PrefixFuture { Box::pin(async {}) },
+            )),
+            Arc::new(Unobserved),
+            &mut input,
+            false,
+        );
+        assert_eq!(
+            hook.budget(),
+            Budget {
+                prefix: MAX_PREFIX_BUDGET,
+                release: FAULT_PHASE,
+            }
+        );
+    }
+
+    #[test]
+    fn start_disrupter_signs_in_the_given_epoch() {
+        use commonware_codec::DecodeExt as _;
+        use commonware_consensus::{Epochable as _, simplex::types::Vote};
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut net = Net::new(&mut context).await;
+            let epoch = Epoch::new(7);
+            let registry = ActorRegistry::default();
+            let handle = start_disrupter::<P>(
+                context.child("disrupter"),
+                net.schemes[0].clone(),
+                &crate::strategy::StrategyChoice::AnyScope,
+                1,
+                net.engine(0),
+                None,
+                0,
+                registry.marker(0, Role::Disrupter),
+                epoch,
+            );
+            let ((_, mut votes), _, _) = net.engine(1);
+            let mut epochs = BTreeSet::new();
+            let deadline = context.current() + Duration::from_secs(5);
+            while context.current() < deadline {
+                select! {
+                    message = votes.recv() => {
+                        let (_, payload) = message.unwrap();
+                        if let Ok(vote) = Vote::<SchemeOf, Sha256Digest>::decode(payload) {
+                            epochs.insert(vote.epoch());
+                        }
+                    },
+                    _ = context.sleep(Duration::from_millis(100)) => {},
+                }
+            }
+            handle.abort();
+            assert_eq!(
+                epochs,
+                BTreeSet::from([epoch]),
+                "the Disrupter signed in {epochs:?}"
+            );
         });
     }
 }

@@ -10,6 +10,12 @@
 //! The general standard campaign may hold one honest node back and start it
 //! from a floor once the cluster has finalized the anchor, so marshal syncs
 //! from a finalization instead of genesis.
+//!
+//! Under a trusted continuation (see [super::trusted]) the honest replicas run
+//! behind the runner's engine gates, elector, automaton and reporter (standard)
+//! or finalization (coding) recorders and marshal reads; no blocker or marshal
+//! channel is tapped. The twin pair starts at the release, and no node is held
+//! back for a floor.
 
 mod coding;
 mod layout;
@@ -23,35 +29,50 @@ use super::{
     },
     input::{FloorStart, MarshalTwinsInput},
     invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant},
+    trusted::StandardReads,
 };
 pub use coding::fuzz_marshal_coding_twins;
+pub(super) use coding::run_coding_twins;
 use commonware_consensus::{
     marshal::{
         Start,
-        mocks::{application::Application, block::Block as MockBlock, harness::NUM_VALIDATORS},
+        mocks::{
+            application::Application,
+            block::Block as MockBlock,
+            harness::{LINK, NUM_VALIDATORS},
+        },
     },
     simplex::{Floor, mocks::twins, types::Context as SimplexContext},
     types::{Epoch, Height, TermLength, View},
 };
 use commonware_consensus_fuzz_core::{
     NAMESPACE, NetworkChannels, SimplexCertificateMock, TwinsBackend, TwinsCase, TwinsDisrupter,
-    TwinsElector, TwinsSetup, TwinsTopology, run_twins_with_backend, simplex::Simplex,
+    TwinsElector, TwinsSetup, TwinsTopology,
+    continuation::{
+        Channel, Hook, ReplicaTap, Role, gate, tap_automaton, tap_elector, tap_reporter,
+    },
+    run_twins_with_backend_and_hook,
+    simplex::Simplex,
     strategy::StrategyChoice,
 };
 use commonware_cryptography::{
     Digestible, certificate::ConstantProvider, sha256::Digest as Sha256Digest,
 };
 use commonware_macros::select;
-use commonware_p2p::{Receiver, Sender, simulated::Oracle};
-use commonware_runtime::{Clock as _, Runner, Supervisor as _, deterministic};
-use commonware_utils::{FuzzRng, NZUsize, sync::Mutex};
+use commonware_p2p::{
+    Receiver, Sender,
+    simulated::{Link, Oracle},
+};
+use commonware_runtime::{Clock as _, Handle, Runner, Supervisor as _, deterministic};
+use commonware_utils::{FuzzRng, NZUsize, SystemTimeExt as _, sync::Mutex};
 use layout::{AttackLayout, attack_layout};
 pub(crate) use observer::ObservedMarshal;
 use stack::{
     ATTACK_SLOW_VERIFY_DELAY, ATTACK_VICTIM_VERIFY_DELAY, DEFAULT_MAX_PENDING_ACKS,
     DeferredMarshal, InlineMarshal, MarshalChoice, POLL, SelectedMarshal, TwinsBlockBuilder,
     TwinsMarshal, Validator, genesis_block, register_engine_networks, setup_network,
-    setup_network_links, setup_validator, start_engine, start_engine_with_floor, wait_for_liveness,
+    setup_network_links, setup_validator, start_engine_with, start_engine_with_floor,
+    wait_for_liveness,
 };
 use std::{
     collections::HashMap,
@@ -181,6 +202,10 @@ struct MarshalTwinsState<P: Simplex> {
     certification_agreement: CertificationAgreementInvariant,
     block_contexts: BlockContextRegistry<Ctx<P>>,
     genesis: Sha256Digest,
+    /// A trusted continuation's taps, by participant; empty without one.
+    taps: Vec<Option<Arc<ReplicaTap<P>>>>,
+    /// The primary engine's task, kept only under a continuation.
+    actors: Vec<(Role, Handle<()>)>,
 }
 
 impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
@@ -263,6 +288,13 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
     ) where
         M: TwinsMarshal<P, A>,
     {
+        let tap = state.taps.get(idx).cloned().flatten();
+        let tap = tap.as_ref();
+        if let Some(tap) = tap {
+            tap.set_reads(Arc::new(StandardReads::<P>::new(
+                state.validators[idx].mailbox.clone(),
+            )));
+        }
         let application = A::create(
             self.application_choice,
             self.app_config,
@@ -301,21 +333,31 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
                 self.stack_label.clone(),
             ),
         };
+        let automaton = tap_automaton(tap, observed, &context);
+        let ((vote_sender, vote_receiver), (certificate_sender, certificate_receiver), resolver) =
+            channels;
+        let (resolver_sender, resolver_receiver) = resolver;
         start_engine_with_floor::<P, _, _, _>(
             context.child("honest"),
             oracle,
             validator,
             scheme,
-            elector,
-            observed,
+            tap_elector(tap, elector),
+            automaton,
             builder.clone(),
-            builder,
+            tap_reporter(tap, builder),
             floor,
             format!("marshal-twins-honest-{idx}"),
             self.input.forwarding,
-            channels.0,
-            channels.1,
-            channels.2,
+            (vote_sender, gate(tap, vote_receiver, Channel::Vote)),
+            (
+                certificate_sender,
+                gate(tap, certificate_receiver, Channel::Certificate),
+            ),
+            (
+                resolver_sender,
+                gate(tap, resolver_receiver, Channel::Resolver),
+            ),
         );
     }
 
@@ -450,6 +492,8 @@ where
             ),
             block_contexts,
             genesis,
+            taps: Vec::new(),
+            actors: Vec::new(),
         };
         TwinsSetup {
             oracle,
@@ -597,22 +641,24 @@ where
         state
             .primaries
             .push((idx, state.validators[idx].application.clone()));
-        start_engine::<P, _, _, _>(
+        let engine = start_engine_with::<P, _, _, _, _>(
             context,
-            oracle,
-            validator,
+            oracle.control(validator),
             scheme,
             topology.elector.clone(),
             primary_builder.clone(),
             primary_builder.clone(),
             primary_builder,
-            state.genesis,
+            Floor::Genesis(state.genesis),
             "marshal-twins-primary".into(),
             self.input.forwarding,
             vote,
             certificate,
             resolver,
         );
+        if !state.taps.is_empty() {
+            state.actors.push((Role::Primary, engine));
+        }
     }
 
     fn disrupter(&self) -> Option<TwinsDisrupter> {
@@ -723,43 +769,58 @@ where
         }
         invariants::agreement(&state.honest, &self.stack_label);
     }
+
+    fn install_taps(
+        &mut self,
+        state: &mut Self::State,
+        taps: Vec<Option<Arc<ReplicaTap<P>>>>,
+    ) -> bool {
+        // A held-back floor node would start only in the liveness wait, which a
+        // continuation skips: every honest node starts from genesis.
+        self.floor = None;
+        state.taps = taps;
+        true
+    }
+
+    fn take_actors(&mut self, state: &mut Self::State) -> Vec<(Role, Handle<()>)> {
+        std::mem::take(&mut state.actors)
+    }
+
+    fn link(&self) -> Link {
+        LINK
+    }
+
+    fn epoch(&self) -> Epoch {
+        Epoch::zero()
+    }
 }
 
 /// Crypto: `SimplexCertificateMock`. Marshal: standard, wrapper from fuzz
 /// input. Cluster: `N4F1C3` Twins, general campaign. Liveness: checked.
 /// App: from fuzz input (always-accept or faulty).
 pub fn fuzz_marshal_standard_twins(input: MarshalTwinsInput) {
+    let _ = run_standard_twins(input, None);
+}
+
+/// Runs one [fuzz_marshal_standard_twins] case, with a continuation's `hook` if any;
+/// returns what [fuzz_marshal_twins_with] returns.
+pub(super) fn run_standard_twins(
+    input: MarshalTwinsInput,
+    hook: Option<Hook<SimplexCertificateMock>>,
+) -> TwinsRun {
     let (selection, entropy) = select_general_stack(&input.raw_bytes);
     fuzz_marshal_twins_with::<
         SimplexCertificateMock,
         SelectedBlockBuilderApp<Ctx<SimplexCertificateMock>, SchemeOf<SimplexCertificateMock>>,
         SelectedMarshal,
-    >(input, CasePolicy::General, selection, entropy);
+    >(input, CasePolicy::General, selection, entropy, hook)
 }
 
 /// Crypto: `SimplexCertificateMock`. Marshal: standard, deferred. Cluster:
 /// `N4F1C3` Twins, `SplitHeader` strategy. Liveness: checked. App: fixed
 /// always-accept.
-pub fn fuzz_marshal_standard_deferred_cert_mock_twins_split_header(mut input: MarshalTwinsInput) {
-    input.strategy = StrategyChoice::SplitHeader {
-        fault_rounds: input.rounds.into(),
-        fault_rounds_bound: input.rounds.into(),
-    };
-    fuzz_marshal_twins_with::<
-        SimplexCertificateMock,
-        AlwaysAcceptBlockBuilderApp<Ctx<SimplexCertificateMock>, SchemeOf<SimplexCertificateMock>>,
-        DeferredMarshal,
-    >(
-        input.clone(),
-        CasePolicy::AttackLayout,
-        StackSelection {
-            application: ApplicationChoice::AlwaysAccept,
-            marshal: MarshalChoice::Deferred,
-            max_pending_acks: NZUsize!(2),
-            ancestry_depth: 0,
-        },
-        input.raw_bytes,
-    );
+pub fn fuzz_marshal_standard_deferred_cert_mock_twins_split_header(input: MarshalTwinsInput) {
+    let _ = run_split_header_twins::<DeferredMarshal>(input, MarshalChoice::Deferred, None);
 }
 
 /// Crypto: `SimplexCertificateMock`. Marshal: standard, inline. Cluster:
@@ -767,26 +828,43 @@ pub fn fuzz_marshal_standard_deferred_cert_mock_twins_split_header(mut input: Ma
 /// always-accept.
 /// Inline certification structurally returns true, so this target covers the
 /// verify-side split-header invariant, not certification poisoning.
-pub fn fuzz_marshal_standard_inline_cert_mock_twins_split_header(mut input: MarshalTwinsInput) {
+pub fn fuzz_marshal_standard_inline_cert_mock_twins_split_header(input: MarshalTwinsInput) {
+    let _ = run_split_header_twins::<InlineMarshal>(input, MarshalChoice::Inline, None);
+}
+
+/// The forced field of the split-header bases: the `SplitHeader` strategy over the
+/// input's rounds.
+pub(super) fn force_split_header(input: &mut MarshalTwinsInput) {
     input.strategy = StrategyChoice::SplitHeader {
         fault_rounds: input.rounds.into(),
         fault_rounds_bound: input.rounds.into(),
     };
-    fuzz_marshal_twins_with::<
-        SimplexCertificateMock,
-        AlwaysAcceptBlockBuilderApp<Ctx<SimplexCertificateMock>, SchemeOf<SimplexCertificateMock>>,
-        InlineMarshal,
-    >(
-        input.clone(),
+}
+
+/// Runs one split-header Twins case with the `marshal` wrapper `M`, with a
+/// continuation's `hook` if any; returns what [fuzz_marshal_twins_with] returns.
+pub(super) fn run_split_header_twins<M>(
+    mut input: MarshalTwinsInput,
+    marshal: MarshalChoice,
+    hook: Option<Hook<SimplexCertificateMock>>,
+) -> TwinsRun
+where
+    M: TwinsMarshal<SimplexCertificateMock, PrimaryApp<SimplexCertificateMock>>,
+{
+    force_split_header(&mut input);
+    let entropy = input.raw_bytes.clone();
+    fuzz_marshal_twins_with::<SimplexCertificateMock, PrimaryApp<SimplexCertificateMock>, M>(
+        input,
         CasePolicy::AttackLayout,
         StackSelection {
             application: ApplicationChoice::AlwaysAccept,
-            marshal: MarshalChoice::Inline,
+            marshal,
             max_pending_acks: NZUsize!(2),
             ancestry_depth: 0,
         },
-        input.raw_bytes,
-    );
+        entropy,
+        hook,
+    )
 }
 
 fn select_general_stack(raw_bytes: &[u8]) -> (StackSelection, Vec<u8>) {
@@ -833,14 +911,19 @@ fn select_general_stack(raw_bytes: &[u8]) -> (StackSelection, Vec<u8>) {
     )
 }
 
-/// Runs one Twins case and returns the honest node that joined from a floor,
-/// with its anchor height, if any.
+/// The honest node that joined a Twins case from a floor, with its anchor height,
+/// if any, the runtime's auditor state, and the simulated time at the end.
+pub(super) type TwinsRun = (Option<(usize, Height)>, String, Duration);
+
+/// Runs one Twins case, as a trusted continuation with `hook` (see
+/// [run_twins_with_backend_and_hook]).
 fn fuzz_marshal_twins_with<P, A, M>(
     input: MarshalTwinsInput,
     case_policy: CasePolicy,
     selection: StackSelection,
     entropy: Vec<u8>,
-) -> Option<(usize, Height)>
+    hook: Option<Hook<P>>,
+) -> TwinsRun
 where
     P: Simplex,
     A: TwinsBlockBuilder<P>,
@@ -872,8 +955,13 @@ where
             stack_label,
             entropy,
         );
-        run_twins_with_backend::<P, _>(&mut context, &mut backend, scenario_entropy).await;
-        backend.floor_node
+        run_twins_with_backend_and_hook::<P, _>(&mut context, &mut backend, scenario_entropy, hook)
+            .await;
+        (
+            backend.floor_node,
+            context.auditor().state(),
+            context.current().epoch(),
+        )
     })
 }
 
@@ -965,7 +1053,8 @@ mod tests {
                     SchemeOf<SimplexCertificateMock>,
                 >,
                 SelectedMarshal,
-            >(input, CasePolicy::General, selection, entropy);
+            >(input, CasePolicy::General, selection, entropy, None)
+            .0;
         });
         assert_eq!(
             floor_node.map(|(_, height)| height),

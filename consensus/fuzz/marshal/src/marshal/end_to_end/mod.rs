@@ -36,10 +36,13 @@ pub mod app;
 mod block_disrupter;
 mod coding_disrupter;
 pub mod coding_stack;
+#[cfg(test)]
+mod golden;
 mod input;
 pub(crate) mod invariants;
 mod runner;
 mod scenario;
+mod trusted;
 pub mod twins;
 
 pub use input::{
@@ -52,6 +55,15 @@ pub use runner::{
 };
 pub use scenario::{
     DropRule, PreGstAction, Role, ScenarioTemplate, fuzz_marshal_standard_scenarios,
+};
+pub use trusted::{
+    fuzz_marshal_coding_block_poison_with_prefix, fuzz_marshal_coding_disrupter_with_prefix,
+    fuzz_marshal_coding_twins_with_prefix, fuzz_marshal_standard_block_dissemination_with_prefix,
+    fuzz_marshal_standard_certificate_poison_with_prefix,
+    fuzz_marshal_standard_deferred_cert_mock_twins_split_header_with_prefix,
+    fuzz_marshal_standard_disrupter_with_prefix,
+    fuzz_marshal_standard_inline_cert_mock_twins_split_header_with_prefix,
+    fuzz_marshal_standard_twins_with_prefix,
 };
 pub use twins::{
     fuzz_marshal_coding_twins, fuzz_marshal_standard_deferred_cert_mock_twins_split_header,

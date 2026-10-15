@@ -34,6 +34,7 @@ use commonware_consensus::{
 };
 use commonware_consensus_fuzz_core::{
     NetworkChannels,
+    continuation::{MAX_MESSAGE, MarshalChannel, ReplicaTap, marshal_gate, tap_blocker},
     network::{WedgeChannel, WedgeNode, WedgeReceiver},
     simplex::Simplex,
 };
@@ -44,13 +45,13 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{
-    Receiver, Sender,
+    Blocker, Receiver, Sender,
     simulated::{Config as NetworkConfig, Network as SimulatedNetwork, Oracle},
 };
 use commonware_parallel::Sequential;
 use commonware_resolver::TargetedResolver;
 use commonware_runtime::{
-    Clock, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    Clock, Handle, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::{NZU64, NZUsize, channel::oneshot};
@@ -415,7 +416,7 @@ pub async fn setup_network<P: Simplex>(
     let (network, oracle) = SimulatedNetwork::new_with_peers(
         context,
         NetworkConfig {
-            max_size: 1024 * 1024,
+            max_size: MAX_MESSAGE,
             // The Twins scenario owns connectivity; protocol-level blocking
             // must not rewrite its topology.
             max_peers_per_set: NZUsize!(participants.len()),
@@ -460,6 +461,36 @@ pub async fn setup_validator<P: Simplex>(
     max_pending_acks: NonZeroUsize,
     wedge: Option<WedgeNode<SchemeOf<P>, Sha256Digest>>,
 ) -> Validator<P> {
+    setup_validator_tapped::<P>(
+        context,
+        oracle,
+        validator,
+        provider,
+        start,
+        resolver,
+        max_pending_acks,
+        wedge,
+        None,
+    )
+    .await
+}
+
+/// [setup_validator] with the backfill and broadcast receivers behind honest replica
+/// `tap`'s marshal gate (below the wedge) and the backfill resolver's blocker recorded
+/// by it. Without a tap the wrappers only forward. A caller-built `resolver` is used
+/// as given.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn setup_validator_tapped<P: Simplex>(
+    context: deterministic::Context,
+    oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
+    validator: PublicKeyOf<P>,
+    provider: ConstantProvider<SchemeOf<P>, Epoch>,
+    start: Start<SchemeOf<P>, Sha256Digest, Arc<B<P>>>,
+    resolver: Option<MarshalResolver<P>>,
+    max_pending_acks: NonZeroUsize,
+    wedge: Option<WedgeNode<SchemeOf<P>, Sha256Digest>>,
+    tap: Option<&Arc<ReplicaTap<P>>>,
+) -> Validator<P> {
     let application = Application::<B<P>>::manual_ack();
     let acknowledger = application.clone();
     context.child("acknowledger").spawn(move |_| async move {
@@ -493,7 +524,7 @@ pub async fn setup_validator<P: Simplex>(
             let backfill = (
                 backfill_sender,
                 WedgeReceiver::<SchemeOf<P>, Sha256Digest, B<P>, _>::new(
-                    backfill_receiver,
+                    marshal_gate(tap, backfill_receiver, MarshalChannel::Backfill),
                     wedge.clone(),
                     WedgeChannel::MarshalBackfill,
                 ),
@@ -503,7 +534,7 @@ pub async fn setup_validator<P: Simplex>(
                 resolver::Config {
                     public_key: validator.clone(),
                     peer_provider: oracle.manager(),
-                    blocker: oracle.control(validator.clone()),
+                    blocker: tap_blocker(tap, oracle.control(validator.clone())),
                     mailbox_size: config.mailbox_size,
                     timeout: Duration::from_secs(2),
                     fetch_retry_timeout: Duration::from_millis(100),
@@ -530,7 +561,7 @@ pub async fn setup_validator<P: Simplex>(
     broadcast_engine.start((
         broadcast_sender,
         WedgeReceiver::<SchemeOf<P>, Sha256Digest, B<P>, _>::new(
-            broadcast_receiver,
+            marshal_gate(tap, broadcast_receiver, MarshalChannel::Broadcast),
             wedge,
             WedgeChannel::MarshalBroadcast,
         ),
@@ -722,10 +753,60 @@ pub(crate) fn start_engine_with_floor<P: Simplex, EC, A, R>(
     A: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>,
     R: Relay<Digest = Sha256Digest, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>,
 {
+    drop(start_engine_with::<P, EC, A, R, _>(
+        context,
+        oracle.control(validator),
+        scheme,
+        elector,
+        automaton,
+        relay,
+        reporter,
+        floor,
+        partition,
+        forwarding,
+        vote,
+        certificate,
+        resolver,
+    ));
+}
+
+/// Like [`start_engine_with_floor`], with the engine's `blocker`; returns the engine's
+/// task.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_engine_with<P: Simplex, EC, A, R, X>(
+    context: deterministic::Context,
+    blocker: X,
+    scheme: SchemeOf<P>,
+    elector: EC,
+    automaton: A,
+    relay: R,
+    reporter: impl Reporter<Activity = Activity<SchemeOf<P>, Sha256Digest>>,
+    floor: Floor<SchemeOf<P>, Sha256Digest>,
+    partition: String,
+    forwarding: commonware_consensus::simplex::ForwardPolicy,
+    vote: (
+        impl Sender<PublicKey = PublicKeyOf<P>>,
+        impl Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    certificate: (
+        impl Sender<PublicKey = PublicKeyOf<P>>,
+        impl Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    resolver: (
+        impl Sender<PublicKey = PublicKeyOf<P>>,
+        impl Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+) -> Handle<()>
+where
+    EC: ElectorConfig<SchemeOf<P>>,
+    A: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>,
+    R: Relay<Digest = Sha256Digest, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>,
+    X: Blocker<PublicKey = PublicKeyOf<P>>,
+{
     let engine = Engine::new(
         context.child("engine"),
         config::Config {
-            blocker: oracle.control(validator),
+            blocker,
             scheme,
             elector,
             automaton,
@@ -752,7 +833,7 @@ pub(crate) fn start_engine_with_floor<P: Simplex, EC, A, R>(
             track_historical_votes: false,
         },
     );
-    engine.start(vote, certificate, resolver);
+    engine.start(vote, certificate, resolver)
 }
 
 fn trailing_blocks<B, D, K>(application: &Application<B>, prefix_end: View) -> usize
