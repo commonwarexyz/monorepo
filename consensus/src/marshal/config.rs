@@ -3,6 +3,7 @@ use crate::{
     simplex::types::Finalization,
     types::{Epoch, Epocher, ViewDelta},
 };
+use commonware_codec::Codec;
 use commonware_cryptography::{
     Digest, Digestible,
     certificate::{Provider, Scheme},
@@ -39,7 +40,7 @@ pub enum Start<S: Scheme, C: Digest, B> {
 /// `H - max_pending_acks` (the maximum backlog of blocks the application can buffer).
 pub struct Config<P, ES, T, AB, B, C = <AB as Digestible>::Digest>
 where
-    AB: Block,
+    AB: Block + Codec,
     C: Digest,
     P: Provider<Scope = Epoch>,
     ES: Epocher,

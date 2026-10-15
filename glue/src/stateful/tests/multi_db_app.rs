@@ -1,4 +1,4 @@
-use super::common::*;
+use super::{common::*, mocks::digested};
 use crate::{
     simulate::{
         engine::{EngineDefinition, InitContext},
@@ -35,7 +35,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519, sha256,
 };
@@ -297,7 +297,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        parent: Arc<Self::Block>,
+        parent: Digested<Self::Block>,
         _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
@@ -324,18 +324,20 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        block: Arc<Self::Block>,
-        _parent: Arc<Self::Block>,
+        block: Digested<Self::Block>,
+        _parent: Digested<Self::Block>,
         _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let (merkleized_a, merkleized_b) = Self::execute(block.height(), batches).await;
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
-        let matches_a = merkleized_a.root() == block.root_a
-            && non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size) == block.range_a;
-        let matches_b = merkleized_b.root() == block.root_b
-            && non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size) == block.range_b;
+        let matches_a = merkleized_a.root() == block.inner().root_a
+            && non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size)
+                == block.inner().range_a;
+        let matches_b = merkleized_b.root() == block.inner().root_b
+            && non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size)
+                == block.inner().range_b;
         if !matches_a || !matches_b {
             return None;
         }
@@ -517,6 +519,7 @@ impl EngineDefinition for MultiDbEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -583,7 +586,7 @@ impl EngineDefinition for MultiDbEngine {
         let marshal_config = marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: plan.marshal_start(genesis_block.clone().into()),
+            start: plan.marshal_start(digested(genesis_block.clone())),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
@@ -662,6 +665,7 @@ impl EngineDefinition for MultiDbEngine {
                     retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
+                strategy: Sequential,
             },
         );
 

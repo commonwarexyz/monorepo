@@ -5,7 +5,7 @@ use commonware_consensus::{
     Heightable as _, marshal::blocks::Blocks, simplex::types::Context, types::Height,
 };
 use commonware_cryptography::{
-    Digestible as _, bls12381::primitives::variant::MinSig, ed25519, sha256,
+    Digested, Digestible as _, bls12381::primitives::variant::MinSig, ed25519, sha256,
 };
 use commonware_glue::{
     dkg::reshare::Input as ReshareInput,
@@ -18,7 +18,6 @@ use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
 use commonware_storage::qmdb::sync::Target;
 use commonware_utils::{non_empty_range, sequence::U64};
 use rand::Rng;
-use std::sync::Arc;
 
 const HEIGHT_KEY: U64 = U64::new(0);
 
@@ -65,7 +64,7 @@ where
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        parent: Arc<Self::Block>,
+        parent: Digested<Self::Block>,
         _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
@@ -75,22 +74,24 @@ where
         let height = parent.height().next();
         let merkleized = Self::execute(height, batches).await;
         let bounds = merkleized.bounds();
-        let block = Block {
-            context: context.1,
-            parent: parent.digest(),
+        let block = Block::new(
+            context.1,
+            parent.digest(),
             height,
-            state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            Target::new(
+                merkleized.root(),
+                non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            ),
             payload,
-        };
+        );
         Some(Proposed { block, merkleized })
     }
 
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        block: Arc<Self::Block>,
-        _parent: Arc<Self::Block>,
+        block: Digested<Self::Block>,
+        _parent: Digested<Self::Block>,
         _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {

@@ -188,11 +188,14 @@ impl<V: Variant> Acquisitions<V> {
 mod tests {
     use super::*;
     use crate::{
-        marshal::{mocks::block::EmptyBlock, standard::Standard},
+        marshal::{
+            mocks::block::{EmptyBlock, ready},
+            standard::Standard,
+        },
         types::Height,
     };
     use commonware_cryptography::{
-        Digestible,
+        Digested, Digestible,
         sha256::{Digest, Sha256},
     };
     use commonware_macros::select;
@@ -202,8 +205,13 @@ mod tests {
     type TestBlock = EmptyBlock<Sha256>;
     type TestAcquisitions = Acquisitions<Standard<TestBlock>>;
 
-    fn block(height: u64) -> Arc<TestBlock> {
-        Arc::new(TestBlock::new(Sha256::fill(0), Height::new(height), height))
+    fn block(height: u64) -> Digested<TestBlock> {
+        ready(TestBlock::new(Sha256::fill(0), Height::new(height), height))
+    }
+
+    // Counts references to the block body, excluding the probe itself.
+    fn strong_count(block: &Digested<TestBlock>) -> usize {
+        Arc::strong_count(&block.inner_shared()) - 1
     }
 
     fn lease(acquisitions: &mut TestAcquisitions, commitments: &[Digest]) -> oneshot::Receiver<()> {
@@ -276,13 +284,13 @@ mod tests {
         assert_eq!(acquisitions.next(), Some(commitment));
         assert_eq!(acquisitions.next(), None);
         acquisitions.complete(body.clone());
-        assert_eq!(Arc::strong_count(&body), 2);
+        assert_eq!(strong_count(&body), 2);
         drop(first);
         assert_eq!(acquisitions.closed().now_or_never(), Some(Vec::new()));
-        assert_eq!(Arc::strong_count(&body), 2);
+        assert_eq!(strong_count(&body), 2);
         drop(second);
         assert_eq!(acquisitions.closed().now_or_never(), Some(Vec::new()));
-        assert_eq!(Arc::strong_count(&body), 1);
+        assert_eq!(strong_count(&body), 1);
         assert!(acquisitions.entries.is_empty());
     }
 
@@ -333,7 +341,7 @@ mod tests {
         assert_eq!(acquisitions.next(), None);
         acquisitions.complete(body.clone());
         assert!(acquisitions.entries.is_empty());
-        assert_eq!(Arc::strong_count(&body), 1);
+        assert_eq!(strong_count(&body), 1);
         let canceled = lease(&mut acquisitions, &[]);
         assert!(canceled.now_or_never().unwrap().is_err());
         drop(retained);

@@ -8,10 +8,11 @@ use crate::{
     marshal::core::{Buffer, ExpectedCommitment, Variant},
     types::Round,
 };
-use commonware_broadcast::buffered;
-use commonware_codec::Read;
-use commonware_cryptography::{Digestible, PublicKey};
+use commonware_broadcast::{Broadcaster as _, buffered};
+use commonware_codec::{Codec, Error as CodecError, Input, Read};
+use commonware_cryptography::{Digested, Digestible, PublicKey};
 use commonware_p2p::Recipients;
+use commonware_parallel::Strategy;
 use commonware_utils::channel::oneshot;
 use std::sync::Arc;
 
@@ -19,23 +20,19 @@ use std::sync::Arc;
 ///
 /// This variant sends the entire block to all peers.
 #[derive(Default, Clone, Copy)]
-pub struct Standard<B: Block>(std::marker::PhantomData<B>);
+pub struct Standard<B: Block + Codec>(std::marker::PhantomData<B>);
 
 impl<B> Variant for Standard<B>
 where
-    B: Block,
+    B: Block + Codec,
 {
     type ApplicationBlock = B;
-    type Block = Arc<B>;
+    type Block = Digested<B>;
     type StoredBlock = Arc<B>;
     type Commitment = <B as Digestible>::Digest;
 
     fn commitment(block: &Self::Block) -> Self::Commitment {
         // Standard variant commitment is exactly the block digest.
-        block.digest()
-    }
-
-    fn stored_commitment(block: &Self::StoredBlock) -> Self::Commitment {
         block.digest()
     }
 
@@ -49,45 +46,136 @@ where
         block.parent()
     }
 
-    fn block_cfg(
-        block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
-        _expected: ExpectedCommitment<Self::Commitment>,
-    ) -> <Self::Block as Read>::Cfg {
-        block_cfg.clone()
+    fn stored_parent_commitment(block: &Self::StoredBlock) -> Self::Commitment {
+        block.parent()
     }
 
-    fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
+    fn decode_block(
+        buf: impl Input,
+        block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
+        expected: ExpectedCommitment<Self::Commitment>,
+        strategy: &impl Strategy,
+    ) -> impl Future<Output = Result<Self::Block, CodecError>> + Send {
+        let (ExpectedCommitment::Trusted(digest) | ExpectedCommitment::Untrusted(digest)) =
+            expected;
+        let compute = B::decode_cfg(buf, block_cfg).map(|block| Digested::compute(block, strategy));
+        async move {
+            let block = compute?.await;
+            if block.digest() != digest {
+                return Err(CodecError::Invalid("Block", "digest mismatch"));
+            }
+            Ok(block)
+        }
+    }
+
+    fn restore(
+        stored: Self::StoredBlock,
+        digest: <Self::Block as Digestible>::Digest,
+    ) -> Self::Block {
+        Digested::precomputed(stored, digest)
+    }
+
+    fn restore_across(
+        stored: Self::StoredBlock,
+        strategy: &impl Strategy,
+    ) -> impl Future<Output = Self::Block> + Send {
+        Digested::compute(stored, strategy)
+    }
+
+    fn into_shared(block: Self::Block) -> Digested<Self::ApplicationBlock> {
         block
     }
 
     fn from_application_block(
-        block: Self::ApplicationBlock,
-        _payload: Self::Commitment,
+        block: Digested<Self::ApplicationBlock>,
+        commitment: Self::Commitment,
     ) -> Self::Block {
-        Arc::new(block)
+        assert_eq!(
+            block.digest(),
+            commitment,
+            "commitment does not commit to block"
+        );
+        block
     }
 }
 
 impl<B, K> Buffer<Standard<B>> for buffered::Mailbox<K, B>
 where
-    B: Block,
+    B: Block + Codec,
     K: PublicKey,
 {
     type PublicKey = K;
 
-    async fn find_by_digest(&self, digest: B::Digest) -> Option<Arc<B>> {
+    async fn find_by_digest(&self, digest: B::Digest) -> Option<Digested<B>> {
         self.get(digest).await
     }
 
-    async fn find_by_commitment(&self, commitment: B::Digest) -> Option<Arc<B>> {
+    async fn find_by_commitment(&self, commitment: B::Digest) -> Option<Digested<B>> {
         self.find_by_digest(commitment).await
     }
 
-    fn subscribe_by_commitment(&self, commitment: B::Digest) -> Option<oneshot::Receiver<Arc<B>>> {
+    fn subscribe_by_commitment(
+        &self,
+        commitment: B::Digest,
+    ) -> Option<oneshot::Receiver<Digested<B>>> {
         Some(self.subscribe(commitment))
     }
 
-    fn send(&self, _round: Round, block: Arc<B>, recipients: Recipients<K>) {
-        self.broadcast_shared(recipients, block);
+    fn send(&self, _round: Round, block: Digested<B>, recipients: Recipients<K>) {
+        self.broadcast(recipients, block);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{marshal::mocks::block::Block as MockBlock, types::Height};
+    use commonware_codec::Encode;
+    use commonware_cryptography::{
+        Digest as _, Hasher as _,
+        sha256::{Digest as Sha256Digest, Sha256},
+    };
+    use commonware_parallel::Sequential;
+    use futures::executor::block_on;
+
+    type TestBlock = MockBlock<Sha256Digest, u64>;
+    type TestVariant = Standard<TestBlock>;
+
+    #[test]
+    fn decode_block_binds_digest() {
+        let block = TestBlock::new::<Sha256>(0, Sha256Digest::EMPTY, Height::new(1), 0);
+        let encoded = block.encode();
+
+        for expected in [
+            ExpectedCommitment::Trusted(block.digest()),
+            ExpectedCommitment::Untrusted(block.digest()),
+        ] {
+            let decoded = block_on(TestVariant::decode_block(
+                encoded.clone(),
+                &(),
+                expected,
+                &Sequential,
+            ))
+            .unwrap();
+            assert_eq!(decoded.inner(), &block);
+            assert_eq!(decoded.digest(), block.digest());
+        }
+
+        // A digest the bytes do not hash to is rejected, whether or not it is trusted.
+        let other = Sha256::hash(&[b"other block"]);
+        for expected in [
+            ExpectedCommitment::Trusted(other),
+            ExpectedCommitment::Untrusted(other),
+        ] {
+            assert!(
+                block_on(TestVariant::decode_block(
+                    encoded.clone(),
+                    &(),
+                    expected,
+                    &Sequential
+                ))
+                .is_err()
+            );
+        }
     }
 }

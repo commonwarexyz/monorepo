@@ -10,7 +10,7 @@ use commonware_consensus::{
     types::{Epoch, Height, View},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
+    Digest as _, Digested, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::{BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
@@ -344,7 +344,7 @@ impl<
     async fn prepare(
         &mut self,
         context: (E, Self::Context),
-        parent: Arc<Self::Block>,
+        parent: Digested<Self::Block>,
         blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
@@ -361,7 +361,7 @@ impl<
     async fn propose(
         &mut self,
         _context: (E, Self::Context),
-        _parent: Arc<Self::Block>,
+        _parent: Digested<Self::Block>,
         _blocks: Blocks<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
@@ -375,8 +375,8 @@ impl<
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        _block: Arc<Self::Block>,
-        _parent: Arc<Self::Block>,
+        _block: Digested<Self::Block>,
+        _parent: Digested<Self::Block>,
         _blocks: Blocks<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
@@ -419,6 +419,17 @@ impl<
 
 pub(crate) fn test_databases() -> TestDatabases {
     Shared::new("test", TestDb::default())
+}
+
+/// Pairs a test block with its digest.
+pub(crate) fn digested<B: Digestible>(block: B) -> Digested<B> {
+    let digest = block.digest();
+    Digested::precomputed(block, digest)
+}
+
+/// Pairs a shared test block with its digest without copying the body.
+pub(crate) fn digested_shared<B: Digestible>(block: &Arc<B>) -> Digested<B> {
+    Digested::precomputed(Arc::clone(block), block.digest())
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

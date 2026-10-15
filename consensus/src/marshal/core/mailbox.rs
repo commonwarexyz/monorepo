@@ -964,7 +964,7 @@ mod tests {
         types::{Epoch, View},
     };
     use commonware_cryptography::{
-        Digest as _, Signer as _, certificate::mocks::Fixture, ed25519::PrivateKey,
+        Digest as _, Digested, Signer as _, certificate::mocks::Fixture, ed25519::PrivateKey,
     };
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{NZUsize, TestRng, channel::oneshot::error::TryRecvError};
@@ -976,8 +976,10 @@ mod tests {
         Round::new(Epoch::zero(), View::new(height))
     }
 
-    fn block(height: u64) -> harness::B {
-        harness::make_raw_block(harness::D::EMPTY, Height::new(height), height)
+    fn block(height: u64) -> Digested<harness::B> {
+        let block = harness::make_raw_block(harness::D::EMPTY, Height::new(height), height);
+        let digest = block.digest();
+        Digested::precomputed(block, digest)
     }
 
     fn commitment(height: u64) -> harness::D {
@@ -1017,7 +1019,7 @@ mod tests {
             TestMessage::Proposed {
                 span: Span::none(),
                 round: round(height),
-                block: block(height).into(),
+                block: block(height),
                 recipients: Recipients::All,
                 ack,
             },
@@ -1031,7 +1033,7 @@ mod tests {
             TestMessage::Verified {
                 span: Span::none(),
                 round: round(height),
-                block: block(height).into(),
+                block: block(height),
                 ack,
             },
             receiver,
@@ -1044,14 +1046,14 @@ mod tests {
             TestMessage::Certified {
                 span: Span::none(),
                 round: round(height),
-                block: block(height).into(),
+                block: block(height),
                 ack,
             },
             receiver,
         )
     }
 
-    fn get_block(height: u64) -> (TestMessage, oneshot::Receiver<Option<Arc<harness::B>>>) {
+    fn get_block(height: u64) -> (TestMessage, oneshot::Receiver<Option<Digested<harness::B>>>) {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::GetBlock {

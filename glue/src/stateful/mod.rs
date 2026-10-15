@@ -115,11 +115,11 @@
 use commonware_consensus::{
     CertifiableBlock, Epochable, Handoff, Viewable, marshal::blocks::Blocks,
 };
-use commonware_cryptography::certificate::Scheme;
+use commonware_cryptography::{Digested, certificate::Scheme};
 use commonware_runtime::{Clock, Metrics, Spawner};
 use db::DatabaseSet;
 use rand_core::Rng;
-use std::{future::Future, sync::Arc};
+use std::future::Future;
 
 mod actor;
 pub use actor::{Config, Mailbox, PruneConfig, Stateful, SyncPlan};
@@ -208,7 +208,7 @@ where
     fn prepare(
         &mut self,
         _context: (E, Self::Context),
-        _parent: Arc<Self::Block>,
+        _parent: Digested<Self::Block>,
         _blocks: Blocks<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
@@ -233,7 +233,7 @@ where
     fn propose(
         &mut self,
         context: (E, Self::Context),
-        parent: Arc<Self::Block>,
+        parent: Digested<Self::Block>,
         blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
@@ -273,8 +273,8 @@ where
     fn verify(
         &mut self,
         context: (E, Self::Context),
-        block: Arc<Self::Block>,
-        parent: Arc<Self::Block>,
+        block: Digested<Self::Block>,
+        parent: Digested<Self::Block>,
         blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;

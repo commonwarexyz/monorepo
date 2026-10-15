@@ -1,8 +1,8 @@
 //! Bounded forward access to a selected branch and its finalized prefix.
 
 use super::core::{Mailbox, Variant};
-use crate::{Block, types::Height};
-use commonware_cryptography::certificate::Scheme;
+use crate::{Block, Heightable, types::Height};
+use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_utils::channel::oneshot;
 use futures::{Stream, future::BoxFuture, stream::FuturesOrdered};
 use std::{
@@ -15,13 +15,7 @@ use std::{
 };
 use thiserror::Error;
 
-// Keep each resident digest with the body it validated. Older canonical
-// history needs its digest only when consumed.
-type Fetched<B> = (
-    Arc<B>,
-    Option<<B as commonware_cryptography::Digestible>::Digest>,
-);
-type Fetch<B> = dyn Fn(Height) -> BoxFuture<'static, Result<Fetched<B>, Error>> + Send + Sync;
+type Fetch<B> = dyn Fn(Height) -> BoxFuture<'static, Result<Digested<B>, Error>> + Send + Sync;
 type DigestAt<B> =
     dyn Fn(Height) -> Option<<B as commonware_cryptography::Digestible>::Digest> + Send + Sync;
 type Demand = dyn Fn(RangeInclusive<Height>) -> oneshot::Receiver<()> + Send + Sync;
@@ -150,7 +144,7 @@ impl<B: Block> Blocks<B> {
     where
         D: Fn(Height) -> Option<B::Digest> + Send + Sync + 'static,
         F: Fn(Height) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Option<Arc<B>>> + Send + 'static,
+        Fut: Future<Output = Option<Digested<B>>> + Send + 'static,
     {
         let digest: Arc<DigestAt<B>> = Arc::new(digest);
         let expected = digest.clone();
@@ -165,8 +159,8 @@ impl<B: Block> Blocks<B> {
                 if expected.is_some_and(|digest| digest != block.digest()) {
                     return Err(Error::InvalidDigest);
                 }
-                Ok((block, expected))
-            }) as BoxFuture<'static, Result<Fetched<B>, Error>>
+                Ok(block)
+            }) as BoxFuture<'static, Result<Digested<B>, Error>>
         });
         Self {
             tip,
@@ -224,14 +218,14 @@ pub struct BlockRange<B: Block> {
     next: Option<Height>,
     end: Height,
     previous: Option<B::Digest>,
-    pending: FuturesOrdered<BoxFuture<'static, Result<Fetched<B>, Error>>>,
+    pending: FuturesOrdered<BoxFuture<'static, Result<Digested<B>, Error>>>,
     lease: Option<oneshot::Receiver<()>>,
 }
 
 impl<B: Block> Unpin for BlockRange<B> {}
 
 impl<B: Block> Stream for BlockRange<B> {
-    type Item = Result<Arc<B>, Error>;
+    type Item = Result<Digested<B>, Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -256,11 +250,11 @@ impl<B: Block> Stream for BlockRange<B> {
         let Some(result) = ready!(Pin::new(&mut this.pending).poll_next(cx)) else {
             return Poll::Ready(None);
         };
-        let result = result.and_then(|(block, digest)| {
+        let result = result.and_then(|block| {
             if this.previous.is_some_and(|digest| block.parent() != digest) {
                 return Err(Error::InvalidParent);
             }
-            this.previous = Some(digest.unwrap_or_else(|| block.digest()));
+            this.previous = Some(block.digest());
             Ok(block)
         });
         if result.is_err() {
@@ -277,75 +271,24 @@ impl<B: Block> Stream for BlockRange<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        Heightable,
-        marshal::{
-            core::mailbox::Message,
-            mocks::{block::EmptyBlock, harness},
-            standard::Standard,
-        },
+    use crate::marshal::{
+        core::mailbox::Message,
+        mocks::{block::EmptyBlock, harness},
+        standard::Standard,
     };
-    use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
-    use commonware_cryptography::{Digestible, sha256::Sha256};
+    use commonware_cryptography::sha256::Sha256;
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{NZUsize, channel::oneshot, sync::Mutex};
     use futures::{FutureExt, StreamExt};
-    use std::{
-        collections::BTreeMap,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
+    use std::collections::BTreeMap;
 
     type TestBlock = EmptyBlock<Sha256>;
-    type Requests = Arc<Mutex<BTreeMap<Height, oneshot::Sender<Arc<TestBlock>>>>>;
+    type Requests = Arc<Mutex<BTreeMap<Height, oneshot::Sender<Digested<TestBlock>>>>>;
 
-    #[derive(Clone)]
-    struct CountedBlock {
-        block: TestBlock,
-        digests: Arc<AtomicUsize>,
-    }
-
-    impl Write for CountedBlock {
-        fn write(&self, writer: &mut impl bytes::BufMut) {
-            self.block.write(writer);
-        }
-    }
-
-    impl EncodeSize for CountedBlock {
-        fn encode_size(&self) -> usize {
-            self.block.encode_size()
-        }
-    }
-
-    impl Read for CountedBlock {
-        type Cfg = Arc<AtomicUsize>;
-
-        fn read_cfg(reader: &mut impl Buf, digests: &Self::Cfg) -> Result<Self, CodecError> {
-            Ok(Self {
-                block: TestBlock::read(reader)?,
-                digests: digests.clone(),
-            })
-        }
-    }
-
-    impl Digestible for CountedBlock {
-        type Digest = <TestBlock as Digestible>::Digest;
-
-        fn digest(&self) -> Self::Digest {
-            self.digests.fetch_add(1, Ordering::Relaxed);
-            self.block.digest()
-        }
-    }
-
-    impl Heightable for CountedBlock {
-        fn height(&self) -> Height {
-            self.block.height()
-        }
-    }
-
-    impl Block for CountedBlock {
-        fn parent(&self) -> Self::Digest {
-            self.block.parent()
-        }
+    fn digested(block: impl Into<Arc<TestBlock>>) -> Digested<TestBlock> {
+        let block = block.into();
+        let digest = block.digest();
+        Digested::precomputed(block, digest)
     }
 
     fn chain(count: u64) -> Vec<TestBlock> {
@@ -378,74 +321,6 @@ mod tests {
     }
 
     #[test]
-    fn acquired_blocks_compute_each_digest_once() {
-        deterministic::Runner::default().start(|_| async move {
-            for resident in [false, true] {
-                let commitments: Arc<[_]> = chain(4).iter().map(Digestible::digest).collect();
-                let parents = commitments.clone();
-                let digests = Arc::new(AtomicUsize::new(0));
-                let observed = digests.clone();
-                let source = Blocks::new(
-                    Height::new(3),
-                    NZUsize!(8),
-                    move |height| resident.then(|| commitments[height.get() as usize]),
-                    move |height| {
-                        let parent = height
-                            .previous()
-                            .map(|height| parents[height.get() as usize])
-                            .unwrap_or_else(|| Sha256::fill(0));
-                        let block = CountedBlock {
-                            block: TestBlock::new(parent, height, height.get()),
-                            digests: observed.clone(),
-                        };
-                        async move { Some(Arc::new(block)) }
-                    },
-                );
-                let mut range = source.range(Height::new(1)..=Height::new(3));
-                for height in 1..=3 {
-                    assert_eq!(
-                        range.next().await.unwrap().unwrap().height(),
-                        Height::new(height),
-                    );
-                }
-                assert!(range.next().await.is_none());
-                assert_eq!(digests.load(Ordering::Relaxed), 3, "resident={resident}");
-            }
-        });
-    }
-
-    #[test]
-    fn canonical_linkage_rejects_before_hashing_a_detached_block() {
-        deterministic::Runner::default().start(|_| async move {
-            let digests = Arc::new(AtomicUsize::new(0));
-            let observed = digests.clone();
-            let source = Blocks::new(
-                Height::new(2),
-                NZUsize!(8),
-                |_| None,
-                move |height| {
-                    let block = CountedBlock {
-                        block: TestBlock::new(Sha256::fill(7), height, height.get()),
-                        digests: observed.clone(),
-                    };
-                    async move { Some(Arc::new(block)) }
-                },
-            );
-            let mut range = source.range(Height::zero()..=Height::new(2));
-            assert_eq!(
-                range.next().await.unwrap().unwrap().height(),
-                Height::zero()
-            );
-            assert!(matches!(
-                range.next().await,
-                Some(Err(Error::InvalidParent))
-            ));
-            assert!(range.next().await.is_none());
-            assert_eq!(digests.load(Ordering::Relaxed), 1);
-        });
-    }
-
-    #[test]
     fn ranges_fetch_concurrently_and_release_consumed_blocks() {
         deterministic::Runner::default().start(|_| async move {
             let blocks = chain(12);
@@ -465,7 +340,7 @@ mod tests {
                     .lock()
                     .remove(&Height::new(height as u64))
                     .unwrap()
-                    .send(block)
+                    .send(digested(block))
                     .unwrap();
             }
             assert!(range.next().now_or_never().is_none());
@@ -478,7 +353,7 @@ mod tests {
                 .lock()
                 .remove(&Height::zero())
                 .unwrap()
-                .send(first)
+                .send(digested(first))
                 .unwrap();
             let first = range.next().await.unwrap().unwrap();
             assert_eq!(first.height(), Height::zero());
@@ -563,7 +438,7 @@ mod tests {
                     .lock()
                     .remove(&Height::new(1))
                     .unwrap()
-                    .send(Arc::new(replacement))
+                    .send(digested(replacement))
                     .unwrap();
                 assert_eq!(range.next().await.unwrap().unwrap_err(), expected);
                 assert!(range.next().await.is_none());
@@ -583,7 +458,7 @@ mod tests {
                 |_| None,
                 move |height| {
                     *observed.lock() += 1;
-                    async move { Some(Arc::new(TestBlock::new(Sha256::fill(0), height, 0))) }
+                    async move { Some(digested(TestBlock::new(Sha256::fill(0), height, 0))) }
                 },
             );
             let mut empty = source.range(Height::new(2)..=Height::new(1));

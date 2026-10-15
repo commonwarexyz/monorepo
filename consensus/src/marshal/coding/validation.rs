@@ -11,6 +11,7 @@ use crate::{
 use commonware_codec::{EncodeSize, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digest, Digestible, Hasher};
+use commonware_parallel::Strategy;
 
 /// Validation failures for coding proposal verification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,13 +112,14 @@ pub(crate) fn validate_reconstruction<H, B, C>(
     block: &B,
     config: CodingConfig,
     commitment: Commitment<B, C, H>,
+    strategy: &impl Strategy,
 ) -> Result<(), ReconstructionError<H::Digest>>
 where
     H: Hasher,
     B: CertifiableBlock,
     C: Scheme,
 {
-    if block.digest() != commitment.block() {
+    if block.digest_across(strategy) != commitment.block() {
         return Err(ReconstructionError::BlockDigest);
     }
     if config != commitment.config() {
@@ -147,6 +149,7 @@ mod tests {
     use commonware_cryptography::{
         Committable, Digestible, Hasher, Sha256, sha256::Digest as Sha256Digest,
     };
+    use commonware_parallel::Sequential;
     use commonware_utils::NZU64;
 
     type TestCommitment = Commitment<TestBlock, ReedSolomon<Sha256>, Sha256>;
@@ -328,7 +331,12 @@ mod tests {
     fn test_validate_reconstruction_ok() {
         let fixture = baseline_fixture();
         assert_eq!(
-            validate_reconstruction(&fixture.block, fixture.config, fixture.commitment),
+            validate_reconstruction(
+                &fixture.block,
+                fixture.config,
+                fixture.commitment,
+                &Sequential
+            ),
             Ok(())
         );
     }
@@ -529,7 +537,12 @@ mod tests {
             b"block_root",
         );
         assert_eq!(
-            validate_reconstruction(&fixture.block, fixture.config, wrong_commitment),
+            validate_reconstruction(
+                &fixture.block,
+                fixture.config,
+                wrong_commitment,
+                &Sequential
+            ),
             Err(ReconstructionError::BlockDigest)
         );
     }
@@ -545,7 +558,12 @@ mod tests {
             b"block_root",
         );
         assert_eq!(
-            validate_reconstruction(&fixture.block, fixture.config, wrong_commitment),
+            validate_reconstruction(
+                &fixture.block,
+                fixture.config,
+                wrong_commitment,
+                &Sequential
+            ),
             Err(ReconstructionError::CodingConfig)
         );
     }
@@ -561,7 +579,12 @@ mod tests {
             b"block_root",
         );
         assert_eq!(
-            validate_reconstruction(&fixture.block, fixture.config, wrong_commitment),
+            validate_reconstruction(
+                &fixture.block,
+                fixture.config,
+                wrong_commitment,
+                &Sequential
+            ),
             Err(ReconstructionError::ContextDigest(
                 wrong_commitment.context(),
                 hash_context::<Sha256, _>(&fixture.block.context),

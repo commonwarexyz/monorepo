@@ -31,7 +31,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest, Digestible, Hasher, PublicKey as CryptoPublicKey, Signer,
+    Digest, Digested, Digestible, Hasher, PublicKey as CryptoPublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::DealerPrivMsg,
         primitives::{
@@ -86,9 +86,16 @@ pub(crate) type TestManager = SimManager<TestPublicKey, deterministic::Context>;
 pub(crate) type TestMailbox = orchestrator::Mailbox<TestBlock>;
 pub(crate) type TestMarshalMailbox = MarshalMailbox<TestScheme, TestMarshalVariant>;
 
+/// Pairs a test block with its digest.
+pub(crate) fn ready(block: impl Into<Arc<TestBlock>>) -> Digested<TestBlock> {
+    let block = block.into();
+    let digest = block.digest();
+    Digested::precomputed(block, digest)
+}
+
 /// Provides encoded test storage with selected branch metadata and no retained bodies.
 pub(crate) fn blocks(
-    blocks: impl IntoIterator<Item = Arc<TestBlock>>,
+    blocks: impl IntoIterator<Item = Digested<TestBlock>>,
 ) -> marshal::blocks::Blocks<TestBlock> {
     let mut digests = BTreeMap::new();
     let mut encoded = BTreeMap::new();
@@ -103,15 +110,17 @@ pub(crate) fn blocks(
         .last_key_value()
         .map_or(Height::zero(), |(height, _)| *height);
     let encoded = Arc::new(encoded);
+    let expected = digests.clone();
     marshal::blocks::Blocks::new(
         tip,
         NZUsize!(8),
         move |height| digests.get(&height).copied(),
         move |height| {
             let encoded = encoded.get(&height).cloned();
+            let digest = expected.get(&height).copied();
             async move {
-                encoded
-                    .map(|bytes| Arc::new(TestBlock::decode_cfg(bytes, &()).expect("test block")))
+                let block = TestBlock::decode_cfg(encoded?, &()).expect("test block");
+                Some(Digested::precomputed(block, digest?))
             }
         },
     )
@@ -638,11 +647,11 @@ impl Registrar for MockConsumer {
 
 #[derive(Clone, Default)]
 pub(crate) struct MarshalApplication {
-    blocks: Arc<Mutex<BTreeMap<Height, Arc<TestBlock>>>>,
+    blocks: Arc<Mutex<BTreeMap<Height, Digested<TestBlock>>>>,
 }
 
 impl MarshalApplication {
-    pub(crate) fn blocks(&self) -> BTreeMap<Height, Arc<TestBlock>> {
+    pub(crate) fn blocks(&self) -> BTreeMap<Height, Digested<TestBlock>> {
         self.blocks.lock().clone()
     }
 }
@@ -760,6 +769,8 @@ pub(crate) async fn closed_marshal_mailbox(
     .await
     .expect("blocks archive");
 
+    let genesis = genesis_block(signer.public_key());
+    let genesis = Digested::precomputed(genesis.clone(), genesis.digest());
     let (actor, mailbox, _) = MarshalActor::<_, _, _, _, _, _, _, Exact>::init(
         context.child("marshal"),
         finalizations_by_height,
@@ -767,7 +778,7 @@ pub(crate) async fn closed_marshal_mailbox(
         marshal::Config {
             provider: TestProvider::new(scheme),
             epocher: FixedEpocher::new(blocks_per_epoch),
-            start: MarshalStart::Genesis(genesis_block(signer.public_key()).into()),
+            start: MarshalStart::Genesis(genesis),
             partition_prefix: format!("{partition_prefix}-marshal"),
             mailbox_size: NZUsize!(16),
             view_retention: ViewDelta::new(8),

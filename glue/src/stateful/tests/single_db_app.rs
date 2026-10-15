@@ -1,4 +1,4 @@
-use super::common::*;
+use super::{common::*, mocks::digested};
 use crate::{
     simulate::{
         engine::{EngineDefinition, InitContext},
@@ -35,7 +35,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519, sha256,
 };
@@ -227,7 +227,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        parent: Arc<Self::Block>,
+        parent: Digested<Self::Block>,
         _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
@@ -248,15 +248,15 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        block: Arc<Self::Block>,
-        _parent: Arc<Self::Block>,
+        block: Digested<Self::Block>,
+        _parent: Digested<Self::Block>,
         _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let merkleized = Self::execute(block.height(), batches).await;
         let bounds = merkleized.bounds();
-        if merkleized.root() != block.state_root
-            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != block.range
+        if merkleized.root() != block.inner().state_root
+            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != block.inner().range
         {
             return None;
         }
@@ -422,6 +422,7 @@ impl EngineDefinition for SingleDbEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -484,7 +485,7 @@ impl EngineDefinition for SingleDbEngine {
         let marshal_config = marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: plan.marshal_start(genesis_block.clone().into()),
+            start: plan.marshal_start(digested(genesis_block.clone())),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
@@ -545,6 +546,7 @@ impl EngineDefinition for SingleDbEngine {
                     retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
+                strategy: Sequential,
             },
         );
 

@@ -8,14 +8,16 @@ use commonware_actor::{
     mailbox::{Policy, Sender as ActorSender},
 };
 use commonware_consensus::{
-    Reporter,
+    Heightable as _, Reporter,
     marshal::{Update, blocks::Blocks},
     types::Height,
 };
-use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{
+    Digested, Digestible as _, Signer, bls12381::primitives::variant::Variant,
+};
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::oneshot, sequence::Unit};
-use std::{collections::VecDeque, sync::Arc};
+use std::collections::VecDeque;
 use tracing::{Span, error, info_span};
 
 /// Response to [`Mailbox::epoch_info`].
@@ -154,7 +156,7 @@ where
     /// once its effects are complete.
     Finalized {
         span: Span,
-        block: Arc<B>,
+        block: Digested<B>,
         response: A,
     },
 }
@@ -315,11 +317,11 @@ mod tests {
     use super::*;
     use crate::dkg::tests::mocks::{self, TestBlock, TestBlsVariant};
     use commonware_actor::mailbox;
-    use commonware_consensus::Heightable as _;
-    use commonware_cryptography::{Digestible as _, ed25519::PrivateKey};
+    use commonware_cryptography::ed25519::PrivateKey;
     use commonware_runtime::{Runner, deterministic};
     use commonware_utils::{NZUsize, channel::oneshot};
     use futures::{FutureExt as _, StreamExt as _};
+    use std::sync::Arc;
 
     type TestMessage = Message<TestBlock, TestBlsVariant, PrivateKey>;
 
@@ -330,7 +332,7 @@ mod tests {
             let (sender, receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
             drop(receiver);
 
-            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
+            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
 
             assert!(mailbox.next_log(Height::new(1)).await.is_none());
         });
@@ -341,8 +343,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
-            let parent = Arc::new(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
+            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
+            let parent = mocks::genesis_block(PrivateKey::from_seed(0).public_key());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let (release, gate) = oneshot::channel();
             let gate = gate.shared();
             let source = mocks::blocks([parent.clone()]);
@@ -399,7 +402,7 @@ mod tests {
             let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
             let parent = Arc::new(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
             let retained = Arc::downgrade(&parent);
-            let source = mocks::blocks([parent.clone()]);
+            let source = mocks::blocks([mocks::ready(parent.clone())]);
             let (release, gate) = oneshot::channel();
             let gate = gate.shared();
             let blocks = Blocks::new(

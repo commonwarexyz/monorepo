@@ -12,8 +12,8 @@
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA {
-    use commonware_codec::{Codec, Encode};
-    use commonware_cryptography::Digestible;
+    use commonware_codec::Encode;
+    use commonware_cryptography::{Digestible, Digested};
     use std::sync::Arc;
 
     pub mod simplex;
@@ -62,10 +62,11 @@ stability_scope!(BETA {
 
     /// Block is the interface for a block in the blockchain.
     ///
-    /// Blocks must use a canonical encoding: every byte sequence `bytes` accepted by the decoder
-    /// must satisfy `encode(decode(bytes)) == bytes`. Decoders must reject alternate encodings of
-    /// the same block.
-    pub trait Block: Heightable + Codec + Digestible {
+    /// A block type that is also decoded, such as an application block received over the wire or
+    /// read from storage, must use a canonical encoding. Every byte sequence `bytes` accepted by
+    /// the decoder must satisfy `encode(decode(bytes)) == bytes`, and decoders must reject
+    /// alternate encodings of the same block.
+    pub trait Block: Heightable + Digestible + Encode {
         /// Get the parent block's digest.
         fn parent(&self) -> Self::Digest;
     }
@@ -73,6 +74,18 @@ stability_scope!(BETA {
     impl<B: Block> Block for Arc<B> {
         fn parent(&self) -> Self::Digest {
             self.as_ref().parent()
+        }
+    }
+
+    impl<B: Block> Heightable for Digested<B> {
+        fn height(&self) -> Height {
+            self.inner().height()
+        }
+    }
+
+    impl<B: Block> Block for Digested<B> {
+        fn parent(&self) -> Self::Digest {
+            self.inner().parent()
         }
     }
 
@@ -91,6 +104,14 @@ stability_scope!(BETA {
 
         /// Get the consensus context that was used when this block was proposed.
         fn context(&self) -> Self::Context;
+    }
+
+    impl<B: CertifiableBlock> CertifiableBlock for Digested<B> {
+        type Context = B::Context;
+
+        fn context(&self) -> Self::Context {
+            self.inner().context()
+        }
     }
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
@@ -416,6 +437,9 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         type Context: Epochable;
 
         /// The block type produced by the application's builder.
+        ///
+        /// The builder hands marshal a [`Digested`] block, so the application computes the digest
+        /// of a block it built exactly once, on its own strategy, before returning it.
         type Block: Block;
 
         /// Per-proposal input handed to [`prepare`](Self::prepare) and
@@ -466,10 +490,10 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn prepare(
             &mut self,
             _context: (E, Self::Context),
-            _parent: Arc<Self::Block>,
+            _parent: Digested<Self::Block>,
             _blocks: Blocks<Self::Block>,
             _input: Self::Input,
-        ) -> impl Future<Output = Handoff<Self::Block>> + Send {
+        ) -> impl Future<Output = Handoff<Digested<Self::Block>>> + Send {
             async { Handoff::Wait }
         }
 
@@ -486,10 +510,10 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn propose(
             &mut self,
             context: (E, Self::Context),
-            parent: Arc<Self::Block>,
+            parent: Digested<Self::Block>,
             blocks: Blocks<Self::Block>,
             input: Self::Input,
-        ) -> impl Future<Output = Option<Self::Block>> + Send;
+        ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send;
 
         /// Verify `block` produced by the application's proposer against `parent`.
         ///
@@ -515,8 +539,8 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn verify(
             &mut self,
             context: (E, Self::Context),
-            block: Arc<Self::Block>,
-            parent: Arc<Self::Block>,
+            block: Digested<Self::Block>,
+            parent: Digested<Self::Block>,
             blocks: Blocks<Self::Block>,
         ) -> impl Future<Output = bool> + Send;
     }

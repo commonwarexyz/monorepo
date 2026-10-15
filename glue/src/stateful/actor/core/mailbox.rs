@@ -9,7 +9,7 @@ use commonware_consensus::{
     Application as ConsensusApplication, CertifiableBlock, Epochable, Handoff, Reporter, Viewable,
     marshal::{Update, blocks::Blocks},
 };
-use commonware_cryptography::Digestible;
+use commonware_cryptography::{Digested, Digestible};
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::{
     acknowledgement::Exact,
@@ -25,6 +25,31 @@ use tracing::{Span, info_span};
 /// Re-enqueues live verification requests after finalization or pruning stops
 /// their active attempt.
 type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
+
+/// A weak reference to a [`Digested`] block that keeps its digest.
+///
+/// The actor holds only weak references, so a cancelled caller releases the block body.
+pub(in crate::stateful::actor) struct WeakBlock<B: Digestible> {
+    body: Weak<B>,
+    digest: B::Digest,
+}
+
+impl<B: Digestible> WeakBlock<B> {
+    /// Creates a weak reference to `block`.
+    pub(in crate::stateful::actor) fn new(block: &Digested<B>) -> Self {
+        Self {
+            body: Arc::downgrade(&block.inner_shared()),
+            digest: block.digest(),
+        }
+    }
+
+    /// Returns the block, or `None` if every strong reference has been dropped.
+    pub(in crate::stateful::actor) fn upgrade(&self) -> Option<Digested<B>> {
+        self.body
+            .upgrade()
+            .map(|body| Digested::precomputed(body, self.digest))
+    }
+}
 
 /// Response channel for a caller-scoped verification request.
 pub(in crate::stateful::actor) struct Verification {
@@ -92,10 +117,10 @@ where
     Propose {
         span: Span,
         context: (E, A::Context),
-        parent: Weak<A::Block>,
+        parent: WeakBlock<A::Block>,
         blocks: Blocks<A::Block>,
         upstream: A::Input,
-        proposal: Proposal<A::Block>,
+        proposal: Proposal<Digested<A::Block>>,
     },
 
     /// A request to verify a block.
@@ -104,7 +129,7 @@ where
     /// A finalized block and its marshal acknowledgement.
     Finalized {
         span: Span,
-        block: Arc<A::Block>,
+        block: Digested<A::Block>,
         acknowledgement: Exact,
         retry_mailbox: RetryMailbox<E, A>,
     },
@@ -272,10 +297,10 @@ where
     async fn prepare(
         &mut self,
         context: (E, Self::Context),
-        parent: Arc<Self::Block>,
+        parent: Digested<Self::Block>,
         blocks: Blocks<Self::Block>,
         upstream: Self::Input,
-    ) -> Handoff<Self::Block> {
+    ) -> Handoff<Digested<Self::Block>> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
             "stateful.mailbox.prepare",
@@ -285,7 +310,7 @@ where
         let _ = self.sender.enqueue(Message::Propose {
             span,
             context,
-            parent: Arc::downgrade(&parent),
+            parent: WeakBlock::new(&parent),
             blocks,
             upstream,
             proposal: Proposal::Prepare(response),
@@ -298,10 +323,10 @@ where
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        parent: Arc<Self::Block>,
+        parent: Digested<Self::Block>,
         blocks: Blocks<Self::Block>,
         upstream: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
             "stateful.mailbox.propose",
@@ -311,7 +336,7 @@ where
         let _ = self.sender.enqueue(Message::Propose {
             span,
             context,
-            parent: Arc::downgrade(&parent),
+            parent: WeakBlock::new(&parent),
             blocks,
             upstream,
             proposal: Proposal::Propose(response),
@@ -324,8 +349,8 @@ where
     async fn verify(
         &mut self,
         context: (E, Self::Context),
-        block: Arc<Self::Block>,
-        parent: Arc<Self::Block>,
+        block: Digested<Self::Block>,
+        parent: Digested<Self::Block>,
         blocks: Blocks<Self::Block>,
     ) -> bool {
         // The actor holds only weak body references, so dropping this future releases the bodies
@@ -339,8 +364,8 @@ where
         let _ = self.sender.enqueue(Message::Verify(Request {
             span,
             context,
-            block: Arc::downgrade(&block),
-            parent: Arc::downgrade(&parent),
+            block: WeakBlock::new(&block),
+            parent: WeakBlock::new(&parent),
             blocks,
             verification: Verification { response },
         }));

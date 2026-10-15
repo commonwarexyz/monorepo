@@ -1,6 +1,6 @@
 use super::Variant;
 use crate::simplex::{scheme::Scheme, types::Finalization};
-use commonware_cryptography::certificate::Scoped;
+use commonware_cryptography::{Digested, certificate::Scoped};
 use commonware_utils::channel::oneshot;
 
 /// A finalized delivery admitted under the requested height's epoch scope.
@@ -12,6 +12,6 @@ where
 {
     pub(super) scoped: Scoped<S>,
     pub(super) finalization: Finalization<S, V::Commitment>,
-    pub(super) block: V::ApplicationBlock,
+    pub(super) block: Digested<V::ApplicationBlock>,
     pub(super) response: oneshot::Sender<bool>,
 }

@@ -15,7 +15,7 @@ use tracing::debug;
 /// A proposal staged for its relay broadcast.
 pub(crate) struct Staged<B> {
     /// The block, shared with the relay send and the eventual persist.
-    pub(crate) block: Arc<B>,
+    pub(crate) block: B,
     /// Delivers the durable-sync handle once marshal persists the block.
     pub(crate) ack: oneshot::Sender<Handle<()>>,
 }
@@ -72,13 +72,13 @@ pub(crate) struct Gates<D: Digest, B> {
     inner: Arc<Mutex<Inner<D, B>>>,
 }
 
-impl<D: Digest, B> Default for Gates<D, B> {
+impl<D: Digest, B: Clone> Default for Gates<D, B> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<D: Digest, B> Gates<D, B> {
+impl<D: Digest, B: Clone> Gates<D, B> {
     /// Creates an empty registry.
     pub(crate) fn new() -> Self {
         Self {
@@ -131,7 +131,7 @@ impl<D: Digest, B> Gates<D, B> {
     ///
     /// The entry stays staged: a held candidate may still be abandoned, so it is stored only by the
     /// lock-in broadcast or by certification.
-    pub(crate) fn send_staged(&self, round: Round, digest: D) -> Option<Arc<B>> {
+    pub(crate) fn send_staged(&self, round: Round, digest: D) -> Option<B> {
         let mut inner = self.inner.lock();
         let block = inner.proposals.get(&(round, digest))?.block.clone();
         inner.sent.insert((round, digest)).then_some(block)
@@ -155,7 +155,7 @@ impl<D: Digest, B> Gates<D, B> {
         &self,
         round: Round,
         digest: D,
-        persist: impl FnOnce(Arc<B>, oneshot::Sender<Handle<()>>),
+        persist: impl FnOnce(B, oneshot::Sender<Handle<()>>),
     ) -> Option<oneshot::Receiver<GateOutcome>> {
         let (gate, staged) = {
             let mut inner = self.inner.lock();
@@ -212,7 +212,7 @@ impl<D: Digest, B> Gates<D, B> {
         &self,
         round: Round,
         digest: D,
-        block: Arc<B>,
+        block: B,
         publish: impl FnOnce(D),
         name: &'static str,
     ) {
@@ -363,7 +363,7 @@ mod tests {
                             .stage(
                                 round(view),
                                 digest,
-                                Arc::new(view),
+                                view,
                                 |digest| {
                                     tx.send_lossy(digest);
                                 },
@@ -609,7 +609,7 @@ mod tests {
                         .stage(
                             round(1),
                             digest,
-                            Arc::new(7),
+                            7,
                             |digest| {
                                 tx.send_lossy(digest);
                             },
@@ -624,7 +624,7 @@ mod tests {
             let gate = gates.take(round(1), digest).expect("gate registered");
             let (Staged { block, ack }, sent) =
                 gates.take_staged(round(1), digest).expect("block staged");
-            assert_eq!(*block, 7);
+            assert_eq!(block, 7);
             assert!(!sent, "a staged block starts unsent");
             assert!(
                 gates.take_staged(round(1), digest).is_none(),
@@ -654,7 +654,7 @@ mod tests {
                         .stage(
                             round(1),
                             digest,
-                            Arc::new(7),
+                            7,
                             |digest| {
                                 tx.send_lossy(digest);
                             },
@@ -667,10 +667,10 @@ mod tests {
 
             // The second stage registers while the claimed proposal is persisted and then
             // stays pending, so only the first stage can resolve a gate.
-            let mut restage = Box::pin(gates.stage(round(1), digest, Arc::new(7), |_| {}, "test"));
+            let mut restage = Box::pin(gates.stage(round(1), digest, 7, |_| {}, "test"));
             let gate = gates
                 .claim(round(1), digest, |block, ack| {
-                    assert_eq!(*block, 7);
+                    assert_eq!(block, 7);
                     assert!((&mut restage).now_or_never().is_none());
                     ack.send_lossy(Handle::ready(Ok(())));
                 })
@@ -707,7 +707,7 @@ mod tests {
                             .stage(
                                 round(1),
                                 digest,
-                                Arc::new(7),
+                                7,
                                 |digest| {
                                     tx.send_lossy(digest);
                                 },
@@ -724,7 +724,7 @@ mod tests {
                             .is_none()
                     );
                     let block = gates.send_staged(round(1), digest).expect("block staged");
-                    assert_eq!(*block, 7);
+                    assert_eq!(block, 7);
                 }
             }
 
@@ -758,7 +758,7 @@ mod tests {
                         .stage(
                             round(view),
                             digest,
-                            Arc::new(7),
+                            7,
                             |digest| {
                                 tx.send_lossy(digest);
                             },
@@ -818,7 +818,7 @@ mod tests {
                             .stage(
                                 round(view),
                                 digest,
-                                Arc::new(7),
+                                7,
                                 |digest| {
                                     tx.send_lossy(digest);
                                 },
@@ -859,7 +859,7 @@ mod tests {
                         .stage(
                             round(1),
                             digest,
-                            Arc::new(7),
+                            7,
                             |digest| {
                                 tx.send_lossy(digest);
                             },

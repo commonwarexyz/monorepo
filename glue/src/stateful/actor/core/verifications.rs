@@ -2,7 +2,7 @@ use crate::stateful::{
     Application,
     actor::{
         BlockDigest,
-        core::mailbox::Verification,
+        core::mailbox::{Verification, WeakBlock},
         processor::{Disposition, VerificationProgress, Verifier},
     },
 };
@@ -16,7 +16,7 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{channel::oneshot, futures::Pool};
 use futures::FutureExt as _;
 use rand_core::Rng;
-use std::{collections::BTreeMap, future::Future, sync::Weak};
+use std::{collections::BTreeMap, future::Future};
 use tracing::{Instrument as _, Span, info_span};
 
 /// A caller-scoped verification request that can be deferred or restarted.
@@ -30,8 +30,8 @@ where
 {
     pub(super) span: Span,
     pub(super) context: (E, A::Context),
-    pub(super) block: Weak<A::Block>,
-    pub(super) parent: Weak<A::Block>,
+    pub(super) block: WeakBlock<A::Block>,
+    pub(super) parent: WeakBlock<A::Block>,
     pub(super) blocks: Blocks<A::Block>,
     pub(super) verification: Verification,
 }

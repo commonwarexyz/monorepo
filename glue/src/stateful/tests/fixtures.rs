@@ -1,6 +1,6 @@
 //! Shared marshal fixtures for stateful actor tests.
 
-use super::mocks::{TestBlock, TestScheme, TestVariant};
+use super::mocks::{TestBlock, TestScheme, TestVariant, digested};
 use commonware_actor::Feedback;
 use commonware_consensus::{
     Block, Heightable as _, Reporter,
@@ -14,7 +14,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digestible as _,
+    Digested, Digestible as _,
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519,
     sha256::Digest as Sha256Digest,
@@ -57,7 +57,9 @@ pub(crate) fn blocks<B: Block>(tip: Height, bodies: &[Arc<B>]) -> Blocks<B> {
         NZUsize!(8),
         move |height| digests.get(&height).map(|(digest, _)| *digest),
         move |height| {
-            let block = entries.get(&height).and_then(|(_, body)| body.upgrade());
+            let block = entries
+                .get(&height)
+                .and_then(|(digest, body)| Some(Digested::precomputed(body.upgrade()?, *digest)));
             async move { block }
         },
     )
@@ -502,7 +504,7 @@ where
             provider,
             epocher: FixedEpocher::new(NZU64!(u64::MAX)),
             start: options.floor.map_or_else(
-                || marshal::Start::Genesis(TestBlock::new(0, 0).into()),
+                || marshal::Start::Genesis(digested(TestBlock::new(0, 0))),
                 marshal::Start::Floor,
             ),
             partition_prefix: format!("{prefix}-marshal"),

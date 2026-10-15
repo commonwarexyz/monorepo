@@ -58,6 +58,7 @@ pub use variant::Standard;
 #[cfg(test)]
 mod tests {
     use super::{Deferred, Inline, Standard};
+    pub(super) use crate::marshal::mocks::block::ready;
     use crate::{
         Application as ConsensusApplication, Automaton, CertifiableAutomaton, Handoff, Heightable,
         Relay, Reporter, Viewable,
@@ -72,6 +73,7 @@ mod tests {
             core::{Actor, Mailbox, Processed, cache, durability::Durable as _},
             mocks::{
                 application::Application,
+                block::DigestCounter,
                 harness::{
                     self, B, BLOCKS_PER_EPOCH, Ctx, D, DeferredHarness, EmptyProvider,
                     InlineHarness, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE,
@@ -80,6 +82,7 @@ mod tests {
                     setup_network_with_participants,
                 },
                 store::{Op, Recording},
+                strategy::{Gate, GatedStrategy},
                 verifying::MockVerifyingApp,
             },
             resolver::handler,
@@ -101,7 +104,7 @@ mod tests {
     use commonware_broadcast::Broadcaster as _;
     use commonware_codec::{Buf, DecodeExt as _, Encode, FixedSize, Read, Write};
     use commonware_cryptography::{
-        Digestible, Hasher as _,
+        Digested, Digestible, Hasher as _,
         certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
         ed25519::PublicKey,
         sha256::Sha256,
@@ -140,6 +143,156 @@ mod tests {
         },
         time::Duration,
     };
+
+    /// Locally built blocks keep their identity through persistence and replay restores it once.
+    #[test_traced("WARN")]
+    fn test_standard_local_blocks_compute_digest_once_and_replay_once() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let mut oracle = setup_network_with_participants(
+                    context.child("network"),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let validator = participants[0].clone();
+                let setup = StandardHarness::setup_validator_with(
+                    context.child("validator"),
+                    &mut oracle,
+                    validator.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(3),
+                    Application::manual_ack(),
+                )
+                .await;
+                let marshal = setup.mailbox.clone();
+                assert_eq!(setup.application.acknowledged().await, Height::zero());
+                while marshal.get_processed().await.map(Processed::height) != Some(Height::zero()) {
+                    reschedule().await;
+                }
+
+                let mut counter = DigestCounter::default();
+                let mut digests = Vec::new();
+                let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
+                for (built, height) in (1..=3).enumerate() {
+                    let built = built + 1;
+                    let round = Round::new(Epoch::zero(), View::new(height));
+                    let block_context = Ctx {
+                        round,
+                        leader: validator.clone(),
+                        parent: (View::new(height - 1), parent),
+                    };
+                    let block = B::new::<Sha256>(
+                        block_context.clone(),
+                        parent,
+                        Height::new(height),
+                        0x1DE_0000 + height,
+                    );
+                    counter.track(&block);
+                    let app: MockVerifyingApp<B, S> =
+                        MockVerifyingApp::new().with_propose_result(block.clone());
+                    let mut wrapper = Wrapper::new(
+                        kind,
+                        context.child("proposal").with_attribute("height", height),
+                        app,
+                        marshal.clone(),
+                    );
+                    let digest = wrapper
+                        .propose(block_context, Arc::from([parent]))
+                        .await
+                        .await
+                        .expect("proposal must build a block");
+                    assert_eq!(counter.count(), built, "{kind:?} proposal hashing");
+
+                    assert!(
+                        wrapper
+                            .broadcast(digest, Plan::Propose { round })
+                            .accepted()
+                    );
+                    assert!(
+                        wrapper
+                            .certify(round, digest, Arc::from([parent]))
+                            .await
+                            .await
+                            .unwrap()
+                    );
+                    let cached = marshal.get_block(&digest).await.unwrap();
+                    assert_eq!(cached.inner(), &block);
+                    assert_eq!(counter.count(), built, "{kind:?} seal and relay hashing");
+                    let finalization = StandardHarness::make_finalization(
+                        Proposal::new(round, View::new(height - 1), digest),
+                        &schemes,
+                        QUORUM,
+                    );
+                    assert!(
+                        wrapper
+                            .report(Activity::Finalization(finalization))
+                            .accepted()
+                    );
+                    wait_until(&context, Duration::from_secs(1), "block dispatched", || {
+                        setup
+                            .application
+                            .blocks()
+                            .contains_key(&Height::new(height))
+                    })
+                    .await;
+                    assert_eq!(counter.count(), built, "{kind:?} live dispatch hashing");
+                    parent = digest;
+                    digests.push(digest);
+                }
+
+                let blocks = marshal.blocks(Height::new(3), Arc::from(digests.clone()));
+                let mut range = blocks.range(Height::new(1)..=Height::new(3));
+                for expected in 1..=3 {
+                    let block = range.next().await.unwrap().unwrap();
+                    assert_eq!(block.height(), Height::new(expected));
+                }
+                assert_eq!(counter.count(), 3, "{kind:?} ancestry hashing");
+                assert_eq!(setup.application.pending_ack_heights().len(), 3);
+                drop(marshal);
+                setup.crash().await;
+
+                let restart = StandardHarness::setup_validator_with(
+                    context.child("restart"),
+                    &mut oracle,
+                    validator,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(3),
+                    Application::manual_ack(),
+                )
+                .await;
+                assert_eq!(restart.height, Some(Height::zero()));
+
+                // Startup checks the stored successor against its finalization before replay.
+                assert_eq!(counter.count(), 4, "{kind:?} successor restoration");
+                wait_until(&context, Duration::from_secs(1), "blocks replayed", || {
+                    restart.application.pending_ack_heights().len() == 3
+                })
+                .await;
+                assert_eq!(counter.count(), 7, "{kind:?} one restoration per replay");
+                for digest in digests {
+                    for _ in 0..2 {
+                        assert_eq!(
+                            restart.mailbox.get_block(&digest).await.unwrap().digest(),
+                            digest
+                        );
+                    }
+                }
+                assert_eq!(counter.count(), 7, "{kind:?} keyed archive reads");
+                restart.crash().await;
+            });
+        }
+    }
 
     /// A signing provider whose scopes each survive a fixed number of lookups
     /// and then retire, modeling an application that prunes an epoch between a
@@ -213,7 +366,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(buffer),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -645,7 +798,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(2)),
                     View::new(1),
-                    StandardHarness::commitment(&block_two),
+                    block_two.digest(),
                 ),
                 &schemes,
                 3,
@@ -663,13 +816,19 @@ mod tests {
 
             assert!(
                 peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
+                    .verified(
+                        Round::new(Epoch::zero(), View::new(1)),
+                        ready(block_one.clone())
+                    )
                     .await
             );
 
             assert!(
                 peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
+                    .verified(
+                        Round::new(Epoch::zero(), View::new(2)),
+                        ready(block_two.clone())
+                    )
                     .await
             );
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_two.clone()).await;
@@ -739,7 +898,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(2)),
                     View::new(1),
-                    StandardHarness::commitment(&block_two),
+                    block_two.digest(),
                 ),
                 &schemes,
                 3,
@@ -748,7 +907,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(3)),
                     View::new(2),
-                    StandardHarness::commitment(&block_three),
+                    block_three.digest(),
                 ),
                 &schemes,
                 3,
@@ -766,19 +925,28 @@ mod tests {
 
             assert!(
                 peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
+                    .verified(
+                        Round::new(Epoch::zero(), View::new(1)),
+                        ready(block_one.clone())
+                    )
                     .await
             );
 
             assert!(
                 peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
+                    .verified(
+                        Round::new(Epoch::zero(), View::new(2)),
+                        ready(block_two.clone())
+                    )
                     .await
             );
 
             assert!(
                 peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(3)), block_three.clone())
+                    .verified(
+                        Round::new(Epoch::zero(), View::new(3)),
+                        ready(block_three.clone())
+                    )
                     .await
             );
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_two.clone()).await;
@@ -852,7 +1020,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(1)),
                     View::zero(),
-                    StandardHarness::commitment(&block_one),
+                    block_one.digest(),
                 ),
                 &schemes,
                 3,
@@ -887,7 +1055,11 @@ mod tests {
                 "latest tip should be derived from the highest stored finalization"
             );
             assert_eq!(
-                recovering.mailbox.get_block(Height::new(2)).await,
+                recovering
+                    .mailbox
+                    .get_block(Height::new(2))
+                    .await
+                    .map(|block| block.inner_shared()),
                 Some(block_two.clone().into()),
                 "block without a finalization row should still be queryable by height"
             );
@@ -955,11 +1127,7 @@ mod tests {
                     View::new(blocks[i - 1].height().get())
                 };
                 finalizations.push(StandardHarness::make_finalization(
-                    Proposal::new(
-                        Round::new(Epoch::zero(), view),
-                        parent_view,
-                        StandardHarness::commitment(block),
-                    ),
+                    Proposal::new(Round::new(Epoch::zero(), view), parent_view, block.digest()),
                     &schemes,
                     3,
                 ));
@@ -979,7 +1147,7 @@ mod tests {
                     peer_mailbox
                         .verified(
                             Round::new(Epoch::zero(), View::new(block.height().get())),
-                            (*block).clone(),
+                            ready((*block).clone()),
                         )
                         .await
                 );
@@ -1060,7 +1228,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(pending_tip)),
                     View::new(pending_tip - 1),
-                    StandardHarness::commitment(tip_block),
+                    tip_block.digest(),
                 ),
                 &schemes,
                 QUORUM,
@@ -1082,7 +1250,7 @@ mod tests {
                     peer_mailbox
                         .verified(
                             Round::new(Epoch::zero(), View::new(block.height().get())),
-                            block.clone(),
+                            ready(block.clone()),
                         )
                         .await
                 );
@@ -1168,7 +1336,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(1)),
                     View::zero(),
-                    StandardHarness::commitment(&block_one),
+                    block_one.digest(),
                 ),
                 &schemes,
                 3,
@@ -1177,7 +1345,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(2)),
                     View::new(1),
-                    StandardHarness::commitment(&block_two),
+                    block_two.digest(),
                 ),
                 &schemes,
                 3,
@@ -1245,7 +1413,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(2)),
                     View::new(1),
-                    StandardHarness::commitment(&block_two),
+                    block_two.digest(),
                 ),
                 &schemes,
                 3,
@@ -1312,7 +1480,7 @@ mod tests {
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            let block = Arc::new(make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100));
+            let block = ready(make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100));
             let digest = block.digest();
             let round = Round::new(Epoch::zero(), View::new(1));
 
@@ -1341,8 +1509,10 @@ mod tests {
 
             mgr = mgr.load_persisted_epochs().await;
             assert_eq!(
-                mgr.find_block_matching(digest, |_| true).await,
-                Some(block),
+                mgr.find_block_matching(digest, |_| true)
+                    .await
+                    .map(|block| block.inner_shared()),
+                Some(block.inner_shared()),
                 "cache should find block after loading persisted epochs"
             );
         });
@@ -1372,7 +1542,7 @@ mod tests {
             let digest = block.digest();
             let round = Round::new(Epoch::zero(), View::new(1));
             let notarization = StandardHarness::make_notarization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                Proposal::new(round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -1510,7 +1680,7 @@ mod tests {
 
             // Deliver the anchor through the broadcast buffer, completing the
             // subscription's waiter and the pending floor's waiter.
-            let _ = buffer.broadcast(Recipients::All, anchor.clone());
+            let _ = buffer.broadcast(Recipients::All, ready(anchor.clone()));
 
             // The subscriber must receive the anchor.
             let received = subscription.await.unwrap();
@@ -1586,7 +1756,7 @@ mod tests {
             );
 
             // The anchor reaches the buffer while only the pending floor's waiter awaits it.
-            let _ = buffer.broadcast(Recipients::All, anchor.clone());
+            let _ = buffer.broadcast(Recipients::All, ready(anchor.clone()));
 
             // A query queued behind acquisition observes the installed floor.
             if subscribe {
@@ -1628,7 +1798,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(5)),
                     View::new(4),
-                    StandardHarness::commitment(&anchor),
+                    anchor.digest(),
                 ),
                 &schemes,
                 QUORUM,
@@ -1667,7 +1837,7 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let anchor = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
-            let commitment = StandardHarness::commitment(&anchor);
+            let commitment = anchor.digest();
             let (application, started_rx) = HoldingBlockReporter::new_after(Height::zero());
             let buffer = RecordingBuffer::default();
             let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
@@ -1676,7 +1846,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application,
                 Some(buffer.clone()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -1780,7 +1950,7 @@ mod tests {
                 QUORUM,
             );
             mailbox.set_floor(finalization);
-            let _ = buffer.broadcast(Recipients::All, anchor.clone());
+            let _ = buffer.broadcast(Recipients::All, ready(anchor.clone()));
             let received = anchor_wait.await.unwrap();
             assert_eq!(received.digest(), anchor.digest());
 
@@ -1799,7 +1969,7 @@ mod tests {
             let _ = mailbox.get_processed().await;
             assert!(matches!(late_first.try_recv(), Err(TryRecvError::Empty)));
             // Later local availability satisfies every registered caller.
-            let _ = buffer.broadcast(Recipients::All, missing.clone());
+            let _ = buffer.broadcast(Recipients::All, ready(missing.clone()));
             assert_eq!(first.await.unwrap().digest(), missing_digest);
             assert_eq!(second.await.unwrap().digest(), missing_digest);
             assert_eq!(late_first.await.unwrap().digest(), missing_digest);
@@ -1860,7 +2030,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(ANCHOR_HEIGHT));
 
             // The server caches the anchor so it can serve the resolver fetch.
-            StandardHarness::propose(&mut server_handle, round, &anchor).await;
+            StandardHarness::propose(&mut server_handle, round, &ready(anchor.clone())).await;
 
             // Subscribe while the anchor is unavailable on the victim.
             let subscription = mailbox.acquire(anchor.digest());
@@ -1963,7 +2133,7 @@ mod tests {
             for block in &canonical {
                 let height = block.height();
                 let round = Round::new(Epoch::zero(), View::new(height.get()));
-                assert!(mailbox.verified(round, block.clone()).await);
+                assert!(mailbox.verified(round, ready(block.clone())).await);
                 let finalization = StandardHarness::make_finalization(
                     Proposal {
                         round,
@@ -1986,7 +2156,7 @@ mod tests {
             let fork_round = Round::new(Epoch::zero(), View::new(4));
 
             // The server caches the fork block so it can serve the resolver fetch.
-            StandardHarness::propose(&mut server_handle, fork_round, &fork).await;
+            StandardHarness::propose(&mut server_handle, fork_round, &ready(fork.clone())).await;
 
             // Subscribe while the fork block is unavailable on the victim.
             let subscription = mailbox.acquire(fork.digest());
@@ -2028,7 +2198,7 @@ mod tests {
             // canonical chain.
             let next = make_raw_block(canonical[2].digest(), Height::new(4), 4);
             let next_round = Round::new(Epoch::zero(), View::new(5));
-            assert!(mailbox.verified(next_round, next.clone()).await);
+            assert!(mailbox.verified(next_round, ready(next.clone())).await);
             let next_finalization = StandardHarness::make_finalization(
                 Proposal {
                     round: next_round,
@@ -2096,7 +2266,7 @@ mod tests {
             }
         }
 
-        const fn gates(&self) -> &Gates<D, B> {
+        const fn gates(&self) -> &Gates<D, Digested<B>> {
             match self {
                 Self::Inline(inline) => inline.gates(),
                 Self::Deferred(deferred) => deferred.gates(),
@@ -2244,7 +2414,7 @@ mod tests {
                 100,
             );
             let certified_digest = certified_block.digest();
-            assert!(marshal.verified(certified_round, certified_block).await);
+            assert!(marshal.verified(certified_round, ready(certified_block)).await);
 
             let skipped_round = Round::new(Epoch::zero(), View::new(2));
             let skipped_block = B::new::<Sha256>(
@@ -2258,7 +2428,7 @@ mod tests {
                 200,
             );
             let skipped_digest = skipped_block.digest();
-            assert!(marshal.verified(skipped_round, skipped_block).await);
+            assert!(marshal.verified(skipped_round, ready(skipped_block)).await);
 
             let round = Round::new(Epoch::zero(), View::new(3));
             let block = B::new::<Sha256>(
@@ -2292,7 +2462,7 @@ mod tests {
             let certify_rx = wrapper.certify(round, digest, Arc::from([genesis.digest(), certified_digest, skipped_digest])).await;
             assert!(
                 buffer
-                    .broadcast(Recipients::Some(vec![]), block)
+                    .broadcast(Recipients::Some(vec![]), ready(block))
                     .accepted(),
                 "candidate broadcast should be accepted"
             );
@@ -2392,7 +2562,7 @@ mod tests {
                 100,
             );
             let floor_digest = floor_block.digest();
-            assert!(marshal.verified(floor_round, floor_block).await);
+            assert!(marshal.verified(floor_round, ready(floor_block)).await);
             let floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(floor_round, View::zero(), floor_digest),
                 &schemes,
@@ -2412,7 +2582,7 @@ mod tests {
                 200,
             );
             let skipped_digest = skipped_block.digest();
-            assert!(marshal.verified(skipped_round, skipped_block).await);
+            assert!(marshal.verified(skipped_round, ready(skipped_block)).await);
 
             let round = Round::new(Epoch::zero(), View::new(3));
             let embedded_context = Ctx {
@@ -2429,7 +2599,7 @@ mod tests {
             let digest = block.digest();
             assert!(
                 buffer
-                    .broadcast(Recipients::Some(vec![]), block)
+                    .broadcast(Recipients::Some(vec![]), ready(block))
                     .accepted(),
                 "candidate broadcast should be accepted"
             );
@@ -2649,7 +2819,7 @@ mod tests {
                 100,
             );
             let parent_digest = parent.digest();
-            assert!(marshal.verified(parent_round, parent).await);
+            assert!(marshal.verified(parent_round, ready(parent)).await);
 
             let (target_view, target_timestamp) = if fork { (6, 350) } else { (5, 200) };
             let target_round = Round::new(Epoch::zero(), View::new(target_view));
@@ -2665,7 +2835,7 @@ mod tests {
                 target_timestamp,
             );
             let target_digest = target.digest();
-            assert!(marshal.verified(target_round, target.clone()).await);
+            assert!(marshal.verified(target_round, ready(target.clone())).await);
 
             // The finalized chain runs through block a at view 5.
             let a_round = Round::new(Epoch::zero(), View::new(5));
@@ -2684,7 +2854,7 @@ mod tests {
             } else {
                 (target_digest, target.clone())
             };
-            assert!(marshal.verified(a_round, a_block).await);
+            assert!(marshal.verified(a_round, ready(a_block)).await);
             let c_round = Round::new(Epoch::zero(), View::new(10));
             let c = B::new::<Sha256>(
                 Ctx {
@@ -2697,7 +2867,7 @@ mod tests {
                 300,
             );
             let c_digest = c.digest();
-            assert!(marshal.verified(c_round, c).await);
+            assert!(marshal.verified(c_round, ready(c)).await);
 
             // Verification stages the certification gate for the target.
             assert!(
@@ -2923,7 +3093,7 @@ mod tests {
                 let block =
                     B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
                 let digest = block.digest();
-                assert!(marshal.verified(round, block).await);
+                assert!(marshal.verified(round, ready(block)).await);
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -3024,7 +3194,7 @@ mod tests {
                             let block =
                                 B::new::<Sha256>(block_context.clone(), parent.1, height, INVALID);
                             let digest = block.digest();
-                            assert!(marshal.verified(round, block).await);
+                            assert!(marshal.verified(round, ready(block)).await);
                             assert_eq!(
                                 wrapper
                                     .verify(block_context, digest, Arc::from([parent.1]))
@@ -3070,7 +3240,7 @@ mod tests {
                         let block =
                             B::new::<Sha256>(block_context.clone(), parent.1, height, height.get());
                         let digest = block.digest();
-                        assert!(marshal.verified(round, block).await);
+                        assert!(marshal.verified(round, ready(block)).await);
                         assert!(
                             wrapper
                                 .verify(block_context, digest, Arc::from([parent.1]))
@@ -3139,7 +3309,7 @@ mod tests {
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
                     Some(RecordingBuffer::default()),
-                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 )
                 .await;
                 let buffer = buffer.expect("buffer was provided");
@@ -3210,7 +3380,7 @@ mod tests {
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
                     Some(RecordingBuffer::default()),
-                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 )
                 .await;
                 let buffer = buffer.expect("buffer was provided");
@@ -3287,7 +3457,7 @@ mod tests {
             ConstantProvider::new(schemes[0].clone()),
             Application::<B>::manual_ack(),
             Some(RecordingBuffer::default()),
-            Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+            Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
         )
         .await;
         let buffer = buffer.expect("buffer was provided");
@@ -3477,7 +3647,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
@@ -3560,7 +3730,7 @@ mod tests {
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
                     Some(RecordingBuffer::default()),
-                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 )
                 .await;
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
@@ -3586,7 +3756,7 @@ mod tests {
                 let child =
                     B::new::<Sha256>(child_context.clone(), parent_digest, Height::new(3), 200);
                 let child_digest = child.digest();
-                assert!(marshal.verified(child_round, child).await);
+                assert!(marshal.verified(child_round, ready(child)).await);
 
                 let verify = wrapper.verify(child_context, child_digest, Arc::from([genesis.digest(), parent_digest])).await;
                 wait_until(
@@ -3612,7 +3782,7 @@ mod tests {
                         && matches!(fetch.subscriber, handler::Annotation::Subscription)
                 }), "{kind:?}: malicious child height must not select a different parent");
 
-                assert!(marshal.verified(parent_round, parent).await);
+                assert!(marshal.verified(parent_round, ready(parent)).await);
                 let verify_result = verify.await.expect("verify result missing");
                 if kind == WrapperKind::Inline {
                     assert!(
@@ -3697,7 +3867,7 @@ mod tests {
                 let parent_proposal = Proposal::new(parent_round, View::zero(), parent_digest);
                 let parent_notarization =
                     StandardHarness::make_notarization(parent_proposal, &schemes, QUORUM);
-                assert!(honest_mailbox.verified(parent_round, parent.clone()).await);
+                assert!(honest_mailbox.verified(parent_round, ready(parent.clone())).await);
                 StandardHarness::report_notarization(&mut honest_mailbox, parent_notarization)
                     .await;
                 assert!(honest_mailbox.get_block(&parent_digest).await.is_some());
@@ -3736,7 +3906,7 @@ mod tests {
                 let child =
                     B::new::<Sha256>(child_context.clone(), parent_digest, Height::new(2), 200);
                 let child_digest = child.digest();
-                assert!(victim_mailbox.verified(child_round, child).await);
+                assert!(victim_mailbox.verified(child_round, ready(child)).await);
 
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper = Wrapper::new(
@@ -3825,7 +3995,7 @@ mod tests {
                 height * 100,
             );
             commitments.push(block.digest());
-            assert!(marshal.verified(round, block).await);
+            assert!(marshal.verified(round, ready(block)).await);
         }
         commitments.into()
     }
@@ -4052,7 +4222,9 @@ mod tests {
                 );
                 let stale_digest = stale.digest();
                 let (ack, persisted) = oneshot::channel();
-                let _ = setup.mailbox.proposed(round, stale, Recipients::All, ack);
+                let _ = setup
+                    .mailbox
+                    .proposed(round, ready(stale), Recipients::All, ack);
                 let sync = persisted.await.expect("stale block sync handle missing");
                 assert!(sync.durable(round, "stale block").await);
                 setup.crash().await;
@@ -4230,7 +4402,7 @@ mod tests {
                     Height::new(1),
                     101,
                 );
-                assert!(marshal.clone().verified(rebuilt_round, stored).await);
+                assert!(marshal.clone().verified(rebuilt_round, ready(stored)).await);
                 let rebuilt_context = Ctx {
                     round: rebuilt_round,
                     leader: me.clone(),
@@ -4341,7 +4513,12 @@ mod tests {
             );
             let linked = B::new::<Sha256>(tip_context, genesis.digest(), Height::new(1), 101);
             for (label, tip, built) in [("forged", &forged, false), ("linked", &linked, true)] {
-                assert!(marshal.clone().verified(tip_round, tip.clone()).await);
+                assert!(
+                    marshal
+                        .clone()
+                        .verified(tip_round, ready(tip.clone()))
+                        .await
+                );
                 let handoff_context = Ctx {
                     round: Round::new(Epoch::zero(), View::new(2)),
                     leader: me.clone(),
@@ -4548,7 +4725,7 @@ mod tests {
                 assert!(
                     marshal
                         .clone()
-                        .verified(malformed_round, malformed_block)
+                        .verified(malformed_round, ready(malformed_block))
                         .await
                 );
 
@@ -4598,7 +4775,7 @@ mod tests {
                 let parent =
                     B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 300);
                 let parent_digest = parent.digest();
-                assert!(marshal.verified(parent_round, parent).await);
+                assert!(marshal.verified(parent_round, ready(parent)).await);
 
                 let mismatch_round = Round::new(Epoch::zero(), View::new(3));
                 let mismatched_context = Ctx {
@@ -4617,7 +4794,7 @@ mod tests {
                 assert!(
                     marshal
                         .clone()
-                        .verified(mismatch_round, mismatched_block)
+                        .verified(mismatch_round, ready(mismatched_block))
                         .await
                 );
 
@@ -4701,7 +4878,7 @@ mod tests {
                 };
                 let parent = B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 100);
                 let parent_digest = parent.digest();
-                assert!(marshal.verified(parent_round, parent).await);
+                assert!(marshal.verified(parent_round, ready(parent)).await);
 
                 // 2) Publish a valid child; only application-level verification should fail.
                 let round = Round::new(Epoch::zero(), View::new(2));
@@ -4712,7 +4889,7 @@ mod tests {
                 };
                 let block = B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
                 let digest = block.digest();
-                assert!(marshal.verified(round, block).await);
+                assert!(marshal.verified(round, ready(block)).await);
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -4803,7 +4980,7 @@ mod tests {
             );
             // `verified` awaits the durable-sync handle internally; a storage sync
             // failure must panic here (fatal), never resolve to a recoverable verdict.
-            let _ = marshal.verified(round, block).await;
+            let _ = marshal.verified(round, ready(block)).await;
         });
     }
 
@@ -4855,7 +5032,7 @@ mod tests {
                 Height::new(1),
                 100,
             );
-            let _ = marshal.certified(round, block).await;
+            let _ = marshal.certified(round, ready(block)).await;
         });
     }
 
@@ -4909,7 +5086,7 @@ mod tests {
                 100,
             );
             let notarization = StandardHarness::make_notarization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                Proposal::new(round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -4967,8 +5144,8 @@ mod tests {
             // The verified write records the round's digest, so the subsequent
             // certified delivery for the same block skips the notarized-archive
             // copy and leans on the verified archive's durability.
-            assert!(marshal.verified(round, block.clone()).await);
-            assert!(marshal.certified(round, block).await);
+            assert!(marshal.verified(round, ready(block.clone())).await);
+            assert!(marshal.certified(round, ready(block)).await);
 
             actor_handle.abort();
             let _ = actor_handle.await;
@@ -4997,10 +5174,7 @@ mod tests {
         fetch: FetchRecord,
         block: &B,
     ) {
-        assert_eq!(
-            fetch.key,
-            handler::Key::Block(StandardHarness::commitment(block))
-        );
+        assert_eq!(fetch.key, handler::Key::Block(block.digest()));
         let (response, response_rx) = oneshot::channel();
         assert!(
             resolver
@@ -5032,7 +5206,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::default(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let buffer = buffer.unwrap();
@@ -5215,13 +5389,13 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.clone().into()),
+                Start::Genesis(genesis.clone()),
             )
             .await;
             let buffer = buffer.unwrap();
             assert_eq!(application.acknowledged().await, Height::zero());
             let block = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let commitment = StandardHarness::commitment(&block);
+            let commitment = block.digest();
             let round = Round::new(Epoch::zero(), View::new(1));
             let acquisition = mailbox.acquire(commitment);
             StandardHarness::report_finalization(
@@ -5308,18 +5482,18 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::default(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.clone().into()),
+                Start::Genesis(genesis.clone()),
             )
             .await;
             let is_acquisition = |fetch: &FetchRecord, block: &B| {
-                fetch.key == handler::Key::Block(StandardHarness::commitment(block))
+                fetch.key == handler::Key::Block(block.digest())
                     && fetch.subscriber == handler::Annotation::Subscription
             };
 
             // The resolver must still hold the demand when the delivery verdict resolves, so the
             // verdict reaches the resolver and retires it.
             let delivered = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let acquisition = mailbox.acquire(StandardHarness::commitment(&delivered));
+            let acquisition = mailbox.acquire(delivered.digest());
             wait_until(
                 &context,
                 Duration::from_secs(1),
@@ -5349,7 +5523,7 @@ mod tests {
 
             // A locally verified block satisfies its caller without a resolver verdict.
             let verified = make_raw_block(genesis.digest(), Height::new(1), 200);
-            let acquisition = mailbox.acquire(StandardHarness::commitment(&verified));
+            let acquisition = mailbox.acquire(verified.digest());
             wait_until(
                 &context,
                 Duration::from_secs(1),
@@ -5364,7 +5538,10 @@ mod tests {
             .await;
             assert!(
                 mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(1)), verified.clone())
+                    .verified(
+                        Round::new(Epoch::zero(), View::new(1)),
+                        ready(verified.clone())
+                    )
                     .await
             );
             assert_eq!(acquisition.await.unwrap().digest(), verified.digest());
@@ -5391,15 +5568,15 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.clone().into()),
+                Start::Genesis(genesis.clone()),
             ).await;
             assert_eq!(application.acknowledged().await, Height::zero());
             let first_round = Round::new(Epoch::zero(), View::new(1));
             let first = make_raw_block(genesis.digest(), Height::new(1), 100);
-            assert!(mailbox.verified(first_round, first.clone()).await);
+            assert!(mailbox.verified(first_round, ready(first.clone())).await);
             StandardHarness::report_finalization(&mut mailbox,
                 StandardHarness::make_finalization(
-                    Proposal::new(first_round, View::zero(), StandardHarness::commitment(&first)),
+                    Proposal::new(first_round, View::zero(), first.digest()),
                     &schemes, QUORUM,
                 ),
             ).await;
@@ -5418,15 +5595,15 @@ mod tests {
             assert!(matches!(survivor.try_recv(), Err(TryRecvError::Empty)));
 
             let upper_round = Round::new(Epoch::zero(), View::new(3));
-            assert!(mailbox.verified(upper_round, upper.clone()).await);
+            assert!(mailbox.verified(upper_round, ready(upper.clone())).await);
             StandardHarness::report_finalization(&mut mailbox,
                 StandardHarness::make_finalization(
-                    Proposal::new(upper_round, View::new(2), StandardHarness::commitment(&upper)),
+                    Proposal::new(upper_round, View::new(2), upper.digest()),
                     &schemes, QUORUM,
                 ),
             ).await;
             let is_repair = |fetch: &FetchRecord| {
-                fetch.key == handler::Key::Block(StandardHarness::commitment(&missing))
+                fetch.key == handler::Key::Block(missing.digest())
                     && fetch.subscriber == handler::Annotation::Height(Height::new(2))
             };
             wait_until(&context, Duration::from_secs(1), "missing parent repair", || {
@@ -5465,7 +5642,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             assert_eq!(application.acknowledged().await, Height::zero());
@@ -5500,7 +5677,7 @@ mod tests {
                 .expect("exact predecessor demand missing");
 
             let round = Round::new(Epoch::zero(), View::new(5));
-            assert!(mailbox.verified(round, anchor.clone()).await);
+            assert!(mailbox.verified(round, ready(anchor.clone())).await);
             mailbox.set_floor(StandardHarness::make_finalization(
                 Proposal::new(round, View::new(4), anchor.digest()),
                 &schemes,
@@ -5665,15 +5842,15 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.clone().into()),
+                Start::Genesis(genesis.clone()),
             )
             .await;
             let height = Height::new(1);
             let block = make_raw_block(genesis.digest(), height, 100);
-            let commitment = StandardHarness::commitment(&block);
+            let commitment = block.digest();
             let acquisition = mailbox.acquire(commitment);
             let other = make_raw_block(genesis.digest(), height, 200);
-            let other_commitment = StandardHarness::commitment(&other);
+            let other_commitment = other.digest();
             let _other_acquisition = mailbox.acquire(other_commitment);
             mailbox.hint_finalized(height, NonEmptyVec::new(participants[1].clone()));
             let _ = mailbox.get_processed().await;
@@ -5760,7 +5937,7 @@ mod tests {
     }
 
     /// Recorded `send` call on the [`RecordingBuffer`].
-    type BufferSend = (Round, Arc<B>, Recipients<PublicKey>);
+    type BufferSend = (Round, Digested<B>, Recipients<PublicKey>);
 
     /// A buffer that records each `send` invocation, holds subscriptions until a
     /// test delivers or closes them, and optionally serves locally inserted blocks.
@@ -5769,7 +5946,7 @@ mod tests {
         blocks: Arc<Mutex<Vec<B>>>,
         last_handed: Arc<Mutex<Option<Weak<B>>>>,
         evict_on_next_hit: Arc<Mutex<bool>>,
-        commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<B>>>>>,
+        commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Digested<B>>>>>,
         sends: Arc<Mutex<Vec<BufferSend>>>,
     }
 
@@ -5790,7 +5967,7 @@ mod tests {
                 .any(|block| block.digest() == digest)
         }
 
-        fn find(&self, digest: D) -> Option<Arc<B>> {
+        fn find(&self, digest: D) -> Option<Digested<B>> {
             let mut blocks = self.blocks.lock();
             let index = blocks.iter().position(|block| block.digest() == digest)?;
             let block = if std::mem::take(&mut *self.evict_on_next_hit.lock()) {
@@ -5798,8 +5975,8 @@ mod tests {
             } else {
                 blocks[index].clone()
             };
-            let block = Arc::new(block);
-            *self.last_handed.lock() = Some(Arc::downgrade(&block));
+            let block = ready(block);
+            *self.last_handed.lock() = Some(Arc::downgrade(&block.inner_shared()));
             Some(block)
         }
 
@@ -5833,28 +6010,31 @@ mod tests {
                 &mut self.commitment_subscriptions.lock()[index],
                 oneshot::channel().0,
             );
-            sender.send(Arc::new(block)).is_ok()
+            sender.send(ready(block)).is_ok()
         }
     }
 
     impl crate::marshal::core::Buffer<Standard<B>> for RecordingBuffer {
         type PublicKey = PublicKey;
 
-        async fn find_by_digest(&self, digest: D) -> Option<Arc<B>> {
+        async fn find_by_digest(&self, digest: D) -> Option<Digested<B>> {
             self.find(digest)
         }
 
-        async fn find_by_commitment(&self, commitment: D) -> Option<Arc<B>> {
+        async fn find_by_commitment(&self, commitment: D) -> Option<Digested<B>> {
             self.find(commitment)
         }
 
-        fn subscribe_by_commitment(&self, _commitment: D) -> Option<oneshot::Receiver<Arc<B>>> {
+        fn subscribe_by_commitment(
+            &self,
+            _commitment: D,
+        ) -> Option<oneshot::Receiver<Digested<B>>> {
             let (sender, receiver) = oneshot::channel();
             self.commitment_subscriptions.lock().push(sender);
             Some(receiver)
         }
 
-        fn send(&self, round: Round, block: Arc<B>, recipients: Recipients<PublicKey>) {
+        fn send(&self, round: Round, block: Digested<B>, recipients: Recipients<PublicKey>) {
             self.sends.lock().push((round, block, recipients));
         }
     }
@@ -6169,7 +6349,7 @@ mod tests {
         provider: P,
         application: R,
         buffer: Option<Buf>,
-        start: Start<S, D, Arc<B>>,
+        start: Start<S, D, Digested<B>>,
     ) -> (
         Mailbox<S, Standard<B>>,
         Option<Buf>,
@@ -6317,7 +6497,7 @@ mod tests {
                 provider.clone(),
                 ApplicationReporter { updates },
                 Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.clone().into()),
+                Start::Genesis(genesis.clone()),
             )
             .await;
 
@@ -6327,11 +6507,11 @@ mod tests {
             let block = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_digest = block.digest();
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                Proposal::new(round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(round, block).await);
+            assert!(mailbox.verified(round, ready(block)).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
             assert_eq!(
                 delivery.await.expect("normal block should be delivered"),
@@ -6360,7 +6540,7 @@ mod tests {
                 provider,
                 restart_application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.into()),
+                Start::Genesis(genesis),
             )
             .await;
             select! {
@@ -6398,7 +6578,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 None::<RecordingBuffer>,
-                Start::Genesis(genesis.clone().into()),
+                Start::Genesis(genesis.clone()),
             )
             .await;
 
@@ -6411,7 +6591,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(genesis.digest(), Height::new(1), 100);
             let digest = block.digest();
-            assert!(mailbox.verified(round, block).await);
+            assert!(mailbox.verified(round, ready(block)).await);
             mailbox.forward(
                 round,
                 digest,
@@ -6440,11 +6620,7 @@ mod tests {
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(4),
-                    StandardHarness::commitment(&floor_block),
-                ),
+                Proposal::new(floor_round, View::new(4), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -6477,11 +6653,7 @@ mod tests {
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(4),
-                    StandardHarness::commitment(&floor_block),
-                ),
+                Proposal::new(floor_round, View::new(4), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -6491,7 +6663,7 @@ mod tests {
                 ConstantProvider::new(wrong_schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             mailbox.set_floor(floor_finalization);
@@ -6509,11 +6681,7 @@ mod tests {
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(4),
-                    StandardHarness::commitment(&floor_block),
-                ),
+                Proposal::new(floor_round, View::new(4), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -6537,7 +6705,7 @@ mod tests {
                         matches!(
                             fetch.key,
                             handler::Key::Block(commitment)
-                                if commitment == StandardHarness::commitment(&floor_block)
+                                if commitment == floor_block.digest()
                         )
                     })
                 },
@@ -6546,19 +6714,19 @@ mod tests {
 
             let served = make_raw_block(Sha256::hash(&[b"served-parent"]), Height::new(1), 100);
             let served_round = Round::new(Epoch::zero(), View::new(1));
-            assert!(mailbox.verified(served_round, served.clone()).await);
+            assert!(mailbox.verified(served_round, ready(served.clone())).await);
             let (response, response_rx) = oneshot::channel();
             resolver.enqueue(handler::Message::Produce {
-                key: handler::Key::Block(StandardHarness::commitment(&served)),
+                key: handler::Key::Block(served.digest()),
                 response,
             });
             assert_eq!(response_rx.await.unwrap(), served.encode());
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_round = Round::new(Epoch::zero(), View::new(6));
-            assert!(mailbox.verified(next_round, next.clone()).await);
+            assert!(mailbox.verified(next_round, ready(next.clone())).await);
             let next_finalization = StandardHarness::make_finalization(
-                Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
+                Proposal::new(next_round, View::new(5), next.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -6567,7 +6735,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
 
-            assert!(mailbox.verified(floor_round, floor_block).await);
+            assert!(mailbox.verified(floor_round, ready(floor_block)).await);
             assert_eq!(started_rx.await.unwrap(), Height::new(5));
         });
     }
@@ -6583,11 +6751,7 @@ mod tests {
             let floor_block =
                 make_raw_block(Sha256::hash(&[b"local-floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(4),
-                    StandardHarness::commitment(&floor_block),
-                ),
+                Proposal::new(floor_round, View::new(4), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -6639,9 +6803,9 @@ mod tests {
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_round = Round::new(Epoch::zero(), View::new(6));
-            assert!(mailbox.verified(next_round, next.clone()).await);
+            assert!(mailbox.verified(next_round, ready(next.clone())).await);
             let next_finalization = StandardHarness::make_finalization(
-                Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
+                Proposal::new(next_round, View::new(5), next.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -6688,11 +6852,7 @@ mod tests {
             let floor_block =
                 make_raw_block(Sha256::hash(&[b"genesis-parent"]), Height::new(1), 100);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::zero(),
-                    StandardHarness::commitment(&floor_block),
-                ),
+                Proposal::new(floor_round, View::zero(), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -6746,11 +6906,7 @@ mod tests {
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(4),
-                    StandardHarness::commitment(&floor_block),
-                ),
+                Proposal::new(floor_round, View::new(4), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -6761,7 +6917,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application,
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mut mailbox = mailbox;
@@ -6776,7 +6932,7 @@ mod tests {
                         matches!(
                             fetch.key,
                             handler::Key::Block(commitment)
-                                if commitment == StandardHarness::commitment(&floor_block)
+                                if commitment == floor_block.digest()
                         )
                     })
                 },
@@ -6785,9 +6941,9 @@ mod tests {
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_round = Round::new(Epoch::zero(), View::new(6));
-            assert!(mailbox.verified(next_round, next.clone()).await);
+            assert!(mailbox.verified(next_round, ready(next.clone())).await);
             let next_finalization = StandardHarness::make_finalization(
-                Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
+                Proposal::new(next_round, View::new(5), next.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -6802,7 +6958,7 @@ mod tests {
                     matches!(
                         fetch.key,
                         handler::Key::Block(commitment)
-                            if commitment == StandardHarness::commitment(&floor_block)
+                            if commitment == floor_block.digest()
                     )
                 })
                 .expect("floor fetch missing");
@@ -6845,7 +7001,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mut mailbox = mailbox;
@@ -6854,15 +7010,11 @@ mod tests {
             let block1_round = Round::new(Epoch::zero(), View::new(1));
             let block1 = make_raw_block(Sha256::hash(&[b"block1-parent"]), Height::new(1), 100);
             let block1_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    block1_round,
-                    View::zero(),
-                    StandardHarness::commitment(&block1),
-                ),
+                Proposal::new(block1_round, View::zero(), block1.digest()),
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block1_round, block1.clone()).await);
+            assert!(mailbox.verified(block1_round, ready(block1.clone())).await);
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -6875,11 +7027,7 @@ mod tests {
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(4),
-                    StandardHarness::commitment(&floor_block),
-                ),
+                Proposal::new(floor_round, View::new(4), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -6896,14 +7044,18 @@ mod tests {
                         matches!(
                             fetch.key,
                             handler::Key::Block(commitment)
-                                if commitment == StandardHarness::commitment(&floor_block)
+                                if commitment == floor_block.digest()
                         )
                     })
                 },
             )
             .await;
 
-            assert!(mailbox.verified(floor_round, floor_block.clone()).await);
+            assert!(
+                mailbox
+                    .verified(floor_round, ready(floor_block.clone()))
+                    .await
+            );
             assert_eq!(
                 mailbox
                     .get_block(Height::new(5))
@@ -6944,7 +7096,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(buffer.clone()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mut mailbox = mailbox;
@@ -6953,15 +7105,11 @@ mod tests {
             let block1_round = Round::new(Epoch::zero(), View::new(1));
             let block1 = make_raw_block(Sha256::hash(&[b"block1-parent"]), Height::new(1), 100);
             let block1_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    block1_round,
-                    View::zero(),
-                    StandardHarness::commitment(&block1),
-                ),
+                Proposal::new(block1_round, View::zero(), block1.digest()),
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block1_round, block1).await);
+            assert!(mailbox.verified(block1_round, ready(block1)).await);
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -6975,11 +7123,7 @@ mod tests {
             let floor_block =
                 make_raw_block(Sha256::hash(&[b"local-floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(4),
-                    StandardHarness::commitment(&floor_block),
-                ),
+                Proposal::new(floor_round, View::new(4), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7027,11 +7171,7 @@ mod tests {
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(4),
-                    StandardHarness::commitment(&floor_block),
-                ),
+                Proposal::new(floor_round, View::new(4), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7042,7 +7182,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mut mailbox = mailbox;
@@ -7057,7 +7197,7 @@ mod tests {
                         matches!(
                             fetch.key,
                             handler::Key::Block(commitment)
-                                if commitment == StandardHarness::commitment(&floor_block)
+                                if commitment == floor_block.digest()
                         )
                     })
                 },
@@ -7067,13 +7207,9 @@ mod tests {
             let missing = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let later = make_raw_block(missing.digest(), Height::new(7), 700);
             let later_round = Round::new(Epoch::zero(), View::new(7));
-            assert!(mailbox.verified(later_round, later.clone()).await);
+            assert!(mailbox.verified(later_round, ready(later.clone())).await);
             let later_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    later_round,
-                    View::new(6),
-                    StandardHarness::commitment(&later),
-                ),
+                Proposal::new(later_round, View::new(6), later.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7092,7 +7228,7 @@ mod tests {
                 "gap repair must wait until the floor anchor is resolved"
             );
 
-            assert!(mailbox.verified(floor_round, floor_block).await);
+            assert!(mailbox.verified(floor_round, ready(floor_block)).await);
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -7123,11 +7259,7 @@ mod tests {
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(4),
-                    StandardHarness::commitment(&floor_block),
-                ),
+                Proposal::new(floor_round, View::new(4), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7135,11 +7267,7 @@ mod tests {
             let next_round = Round::new(Epoch::zero(), View::new(6));
             let next_block = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    next_round,
-                    View::new(5),
-                    StandardHarness::commitment(&next_block),
-                ),
+                Proposal::new(next_round, View::new(5), next_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7173,14 +7301,14 @@ mod tests {
                         matches!(
                             fetch.key,
                             handler::Key::Block(commitment)
-                                if commitment == StandardHarness::commitment(&floor_block)
+                                if commitment == floor_block.digest()
                         )
                     })
                 },
             )
             .await;
 
-            assert!(mailbox.verified(floor_round, floor_block).await);
+            assert!(mailbox.verified(floor_round, ready(floor_block)).await);
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -7190,7 +7318,7 @@ mod tests {
                         matches!(
                             fetch.key,
                             handler::Key::Block(commitment)
-                                if commitment == StandardHarness::commitment(&next_block)
+                                if commitment == next_block.digest()
                         )
                     })
                 },
@@ -7213,7 +7341,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application,
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mut mailbox = mailbox;
@@ -7222,11 +7350,7 @@ mod tests {
             let old_floor_block =
                 make_raw_block(Sha256::hash(&[b"old-floor-parent"]), Height::new(5), 500);
             let old_floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    old_floor_round,
-                    View::new(4),
-                    StandardHarness::commitment(&old_floor_block),
-                ),
+                Proposal::new(old_floor_round, View::new(4), old_floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7240,7 +7364,7 @@ mod tests {
                         matches!(
                             fetch.key,
                             handler::Key::Block(commitment)
-                                if commitment == StandardHarness::commitment(&old_floor_block)
+                                if commitment == old_floor_block.digest()
                         )
                     })
                 },
@@ -7251,11 +7375,7 @@ mod tests {
             let new_floor_block =
                 make_raw_block(Sha256::hash(&[b"new-floor-parent"]), Height::new(7), 700);
             let new_floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    new_floor_round,
-                    View::new(6),
-                    StandardHarness::commitment(&new_floor_block),
-                ),
+                Proposal::new(new_floor_round, View::new(6), new_floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7269,7 +7389,7 @@ mod tests {
                         matches!(
                             fetch.key,
                             handler::Key::Block(commitment)
-                                if commitment == StandardHarness::commitment(&new_floor_block)
+                                if commitment == new_floor_block.digest()
                         )
                     })
                 },
@@ -7278,13 +7398,13 @@ mod tests {
 
             let old_next_round = Round::new(Epoch::zero(), View::new(6));
             let old_next = make_raw_block(old_floor_block.digest(), Height::new(6), 600);
-            assert!(mailbox.verified(old_next_round, old_next.clone()).await);
+            assert!(
+                mailbox
+                    .verified(old_next_round, ready(old_next.clone()))
+                    .await
+            );
             let old_next_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    old_next_round,
-                    View::new(5),
-                    StandardHarness::commitment(&old_next),
-                ),
+                Proposal::new(old_next_round, View::new(5), old_next.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7293,13 +7413,13 @@ mod tests {
 
             let new_next_round = Round::new(Epoch::zero(), View::new(8));
             let new_next = make_raw_block(new_floor_block.digest(), Height::new(8), 800);
-            assert!(mailbox.verified(new_next_round, new_next.clone()).await);
+            assert!(
+                mailbox
+                    .verified(new_next_round, ready(new_next.clone()))
+                    .await
+            );
             let new_next_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    new_next_round,
-                    View::new(7),
-                    StandardHarness::commitment(&new_next),
-                ),
+                Proposal::new(new_next_round, View::new(7), new_next.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7313,7 +7433,7 @@ mod tests {
                     matches!(
                         fetch.key,
                         handler::Key::Block(commitment)
-                            if commitment == StandardHarness::commitment(&old_floor_block)
+                            if commitment == old_floor_block.digest()
                     )
                 })
                 .expect("old floor fetch missing");
@@ -7349,7 +7469,7 @@ mod tests {
                     matches!(
                         fetch.key,
                         handler::Key::Block(commitment)
-                            if commitment == StandardHarness::commitment(&new_floor_block)
+                            if commitment == new_floor_block.digest()
                     )
                 })
                 .expect("new floor fetch missing");
@@ -7388,11 +7508,7 @@ mod tests {
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
-            let floor_proposal = Proposal::new(
-                floor_round,
-                View::new(4),
-                StandardHarness::commitment(&floor_block),
-            );
+            let floor_proposal = Proposal::new(floor_round, View::new(4), floor_block.digest());
             let floor_finalization =
                 StandardHarness::make_finalization(floor_proposal.clone(), &schemes, QUORUM);
             let (application, mut started_rx) = HoldingBlockReporter::new_after(Height::zero());
@@ -7403,7 +7519,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application,
                 Some(buffer.clone()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mut mailbox = mailbox;
@@ -7418,7 +7534,7 @@ mod tests {
                         matches!(
                             fetch.key,
                             handler::Key::Block(commitment)
-                                if commitment == StandardHarness::commitment(&floor_block)
+                                if commitment == floor_block.digest()
                         )
                     })
                 },
@@ -7427,9 +7543,9 @@ mod tests {
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_round = Round::new(Epoch::zero(), View::new(6));
-            assert!(mailbox.verified(next_round, next.clone()).await);
+            assert!(mailbox.verified(next_round, ready(next.clone())).await);
             let next_finalization = StandardHarness::make_finalization(
-                Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
+                Proposal::new(next_round, View::new(5), next.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7460,12 +7576,12 @@ mod tests {
             let old_proposal = Proposal::new(
                 Round::new(Epoch::zero(), View::new(5)),
                 View::new(4),
-                StandardHarness::commitment(&old),
+                old.digest(),
             );
             let new_proposal = Proposal::new(
                 Round::new(Epoch::zero(), View::new(6)),
                 View::new(5),
-                StandardHarness::commitment(&new),
+                new.digest(),
             );
             let (application, started_rx) = HoldingBlockReporter::new_after(Height::zero());
             let buffer = RecordingBuffer::default();
@@ -7475,7 +7591,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application,
                 Some(buffer.clone()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -7520,7 +7636,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(7)),
                     View::new(6),
-                    StandardHarness::commitment(&missing),
+                    missing.digest(),
                 ),
                 &schemes,
                 QUORUM,
@@ -7536,7 +7652,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(8)),
                     View::new(7),
-                    StandardHarness::commitment(&local),
+                    local.digest(),
                 ),
                 &schemes,
                 QUORUM,
@@ -7564,7 +7680,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mut mailbox = mailbox;
@@ -7573,15 +7689,11 @@ mod tests {
             let block1_round = Round::new(Epoch::zero(), View::new(1));
             let block1 = make_raw_block(Sha256::hash(&[b"block1-parent"]), Height::new(1), 100);
             let block1_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    block1_round,
-                    View::zero(),
-                    StandardHarness::commitment(&block1),
-                ),
+                Proposal::new(block1_round, View::zero(), block1.digest()),
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block1_round, block1.clone()).await);
+            assert!(mailbox.verified(block1_round, ready(block1.clone())).await);
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -7594,11 +7706,7 @@ mod tests {
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"stale-floor"]), Height::zero(), 500);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(4),
-                    StandardHarness::commitment(&floor_block),
-                ),
+                Proposal::new(floor_round, View::new(4), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7615,7 +7723,7 @@ mod tests {
                         matches!(
                             fetch.key,
                             handler::Key::Block(commitment)
-                                if commitment == StandardHarness::commitment(&floor_block)
+                                if commitment == floor_block.digest()
                         )
                     })
                 },
@@ -7627,15 +7735,11 @@ mod tests {
             let block2_round = Round::new(Epoch::zero(), View::new(2));
             let block2 = make_raw_block(block1.digest(), Height::new(2), 200);
             let block2_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    block2_round,
-                    View::new(1),
-                    StandardHarness::commitment(&block2),
-                ),
+                Proposal::new(block2_round, View::new(1), block2.digest()),
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block2_round, block2).await);
+            assert!(mailbox.verified(block2_round, ready(block2)).await);
             StandardHarness::report_finalization(&mut mailbox, block2_finalization).await;
             assert!(mailbox.get_finalization(Height::new(2)).await.is_some());
             context.sleep(Duration::from_millis(100)).await;
@@ -7648,7 +7752,7 @@ mod tests {
 
             // Once the anchor arrives, dispatch restarts at the floor
             // successor instead of treating the stale ack as progress.
-            assert!(mailbox.verified(floor_round, floor_block).await);
+            assert!(mailbox.verified(floor_round, ready(floor_block)).await);
             select! {
                 height = application.acknowledged() => {
                     assert_eq!(
@@ -7680,7 +7784,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.clone().into()),
+                Start::Genesis(genesis.clone()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -7689,15 +7793,11 @@ mod tests {
             let block1_round = Round::new(Epoch::zero(), View::new(1));
             let block1 = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block1_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    block1_round,
-                    View::zero(),
-                    StandardHarness::commitment(&block1),
-                ),
+                Proposal::new(block1_round, View::zero(), block1.digest()),
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block1_round, block1).await);
+            assert!(mailbox.verified(block1_round, ready(block1)).await);
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -7709,11 +7809,7 @@ mod tests {
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(4),
-                    StandardHarness::commitment(&genesis),
-                ),
+                Proposal::new(floor_round, View::new(4), genesis.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7757,7 +7853,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.clone().into()),
+                Start::Genesis(genesis.clone()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -7766,15 +7862,11 @@ mod tests {
             let block1_round = Round::new(Epoch::zero(), View::new(1));
             let block1 = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block1_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    block1_round,
-                    View::zero(),
-                    StandardHarness::commitment(&block1),
-                ),
+                Proposal::new(block1_round, View::zero(), block1.digest()),
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block1_round, block1.clone()).await);
+            assert!(mailbox.verified(block1_round, ready(block1.clone())).await);
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -7797,15 +7889,11 @@ mod tests {
             let block2_round = Round::new(Epoch::zero(), View::new(2));
             let block2 = make_raw_block(block1.digest(), Height::new(2), 200);
             let block2_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    block2_round,
-                    View::new(1),
-                    StandardHarness::commitment(&block2),
-                ),
+                Proposal::new(block2_round, View::new(1), block2.digest()),
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block2_round, block2).await);
+            assert!(mailbox.verified(block2_round, ready(block2)).await);
             StandardHarness::report_finalization(&mut mailbox, block2_finalization).await;
             wait_until(
                 &context,
@@ -7844,11 +7932,7 @@ mod tests {
             .await;
 
             let stale_floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    stale_floor_round,
-                    View::new(4),
-                    StandardHarness::commitment(&genesis),
-                ),
+                Proposal::new(stale_floor_round, View::new(4), genesis.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7894,7 +7978,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             assert_eq!(application.acknowledged().await, Height::zero());
@@ -7903,15 +7987,11 @@ mod tests {
             let block1_round = Round::new(Epoch::zero(), View::new(1));
             let block1 = make_raw_block(Sha256::hash(&[b"block1-parent"]), Height::new(1), 100);
             let block1_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    block1_round,
-                    View::zero(),
-                    StandardHarness::commitment(&block1),
-                ),
+                Proposal::new(block1_round, View::zero(), block1.digest()),
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block1_round, block1.clone()).await);
+            assert!(mailbox.verified(block1_round, ready(block1.clone())).await);
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             assert_eq!(application.acknowledged().await, Height::new(1));
             while mailbox.get_processed().await != Some(Processed::Block(Height::new(1))) {
@@ -7923,15 +8003,11 @@ mod tests {
             let block2_round = Round::new(Epoch::zero(), View::new(2));
             let block2 = make_raw_block(block1.digest(), Height::new(2), 200);
             let block2_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    block2_round,
-                    View::new(1),
-                    StandardHarness::commitment(&block2),
-                ),
+                Proposal::new(block2_round, View::new(1), block2.digest()),
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block2_round, block2).await);
+            assert!(mailbox.verified(block2_round, ready(block2)).await);
             mailbox.set_floor(block2_finalization);
             while application.pending_ack_heights() != vec![Height::new(2)] {
                 context.sleep(Duration::from_millis(10)).await;
@@ -7964,7 +8040,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mut mailbox = mailbox;
@@ -7973,15 +8049,11 @@ mod tests {
             let block1_round = Round::new(Epoch::zero(), View::new(1));
             let block1 = make_raw_block(Sha256::hash(&[b"block1-parent"]), Height::new(1), 100);
             let block1_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    block1_round,
-                    View::zero(),
-                    StandardHarness::commitment(&block1),
-                ),
+                Proposal::new(block1_round, View::zero(), block1.digest()),
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block1_round, block1.clone()).await);
+            assert!(mailbox.verified(block1_round, ready(block1.clone())).await);
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -8004,15 +8076,11 @@ mod tests {
             let block2_round = Round::new(Epoch::zero(), View::new(2));
             let block2 = make_raw_block(block1.digest(), Height::new(2), 200);
             let block2_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    block2_round,
-                    View::new(1),
-                    StandardHarness::commitment(&block2),
-                ),
+                Proposal::new(block2_round, View::new(1), block2.digest()),
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block2_round, block2).await);
+            assert!(mailbox.verified(block2_round, ready(block2)).await);
             StandardHarness::report_finalization(&mut mailbox, block2_finalization).await;
             wait_until(
                 &context,
@@ -8024,11 +8092,7 @@ mod tests {
 
             let same_height_round = Round::new(Epoch::zero(), View::new(5));
             let same_height_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    same_height_round,
-                    View::zero(),
-                    StandardHarness::commitment(&block1),
-                ),
+                Proposal::new(same_height_round, View::zero(), block1.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -8057,7 +8121,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mut mailbox = mailbox;
@@ -8066,15 +8130,11 @@ mod tests {
             let block_round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b"processed-parent"]), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    block_round,
-                    View::zero(),
-                    StandardHarness::commitment(&block),
-                ),
+                Proposal::new(block_round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block_round, block.clone()).await);
+            assert!(mailbox.verified(block_round, ready(block.clone())).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
             assert_eq!(application.acknowledged().await, Height::new(1));
 
@@ -8105,11 +8165,7 @@ mod tests {
             .await;
 
             let stale_floor = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::zero(),
-                    StandardHarness::commitment(&block),
-                ),
+                Proposal::new(floor_round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -8147,7 +8203,7 @@ mod tests {
 
             assert!(
                 mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                    .verified(Round::new(Epoch::zero(), View::new(2)), ready(barrier))
                     .await
             );
             assert_eq!(
@@ -8174,7 +8230,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -8206,11 +8262,7 @@ mod tests {
             // parent check uses the block's parent digest. Context-parent
             // mismatches are rejected by the standard verification wrappers.
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(1),
-                    StandardHarness::commitment(&floor_block),
-                ),
+                Proposal::new(floor_round, View::new(1), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -8255,7 +8307,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -8324,7 +8376,7 @@ mod tests {
             let height = Height::new(1);
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
-            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let proposal = Proposal::new(round, View::zero(), block.digest());
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
             let verifier = schemes[0].clone();
             let application = Application::<B>::manual_ack();
@@ -8335,7 +8387,7 @@ mod tests {
                 VerifierProvider::new(verifier.clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -8381,7 +8433,7 @@ mod tests {
                 VerifierProvider::new(verifier),
                 Application::<B>::default(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -8398,6 +8450,205 @@ mod tests {
         });
     }
 
+    /// A valid certificate only authorizes the bytes whose digest it commits to.
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_rejects_different_block_bytes() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let height = Height::new(1);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(genesis.digest(), height, 100);
+            let other = make_raw_block(genesis.digest(), height, 200);
+            let digest = block.digest();
+            let other_digest = other.digest();
+            assert_eq!(block.height(), other.height());
+            assert_ne!(digest, other_digest);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), digest),
+                &schemes,
+                QUORUM,
+            );
+            let application = Application::<B>::manual_ack();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-delivery-different-bytes",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis),
+            )
+            .await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+            let mut subscriber = mailbox.subscribe(digest);
+            let mut other_subscriber = mailbox.subscribe(other_digest);
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Height(height),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (finalization.clone(), other).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(!response_rx.await.expect("delivery response missing"));
+            assert!(mailbox.get_block(height).await.is_none());
+            assert!(mailbox.get_block(&digest).await.is_none());
+            assert!(mailbox.get_block(&other_digest).await.is_none());
+            assert!(mailbox.get_finalization(height).await.is_none());
+            assert!(!application.blocks().contains_key(&height));
+            assert!(application.tip().is_none());
+            assert!(matches!(subscriber.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(
+                other_subscriber.try_recv(),
+                Err(TryRecvError::Empty)
+            ));
+
+            // The same certificate accepts its own block, isolating the rejected byte binding.
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Height(height),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (finalization, block.clone()).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(response_rx.await.expect("delivery response missing"));
+            assert_eq!(subscriber.await.unwrap().inner(), &block);
+            assert_eq!(application.acknowledged().await, height);
+            assert!(matches!(
+                other_subscriber.try_recv(),
+                Err(TryRecvError::Empty)
+            ));
+        });
+    }
+
+    /// Identity work must finish before the block is published.
+    #[test_traced("WARN")]
+    fn test_standard_resolver_delivery_waits_for_identity_job() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let prefix = "gated-finalized-identity";
+            let strategy = GatedStrategy::new(context.child("strategy"));
+            let (finalizations, blocks) = prunable_finalized_stores(&context, prefix).await;
+            let blocks = Recording::new(blocks, |block: &Arc<B>| Arc::as_ptr(block) as usize);
+            let operations = blocks.ops();
+            let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("actor"),
+                finalizations,
+                blocks,
+                Config {
+                    provider: ConstantProvider::new(schemes[0].clone()),
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                    mailbox_size: NZUsize!(100),
+                    view_retention: ViewDelta::new(10),
+                    max_repair: NZUsize!(10),
+                    max_pending_acks: NZUsize!(1),
+                    block_codec_config: (),
+                    partition_prefix: prefix.to_string(),
+                    prunable_items_per_section: NZU64!(10),
+                    replay_buffer: NZUsize!(1024),
+                    key_write_buffer: NZUsize!(1024),
+                    value_write_buffer: NZUsize!(1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    strategy: strategy.clone(),
+                },
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let actor_handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+            assert_eq!(application.acknowledged().await, Height::zero());
+            while mailbox.get_processed().await.map(Processed::height) != Some(Height::zero()) {
+                reschedule().await;
+            }
+
+            let height = Height::new(1);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(
+                StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest(),
+                height,
+                0x1DE_1000,
+            );
+            let digest = block.digest();
+            let mut counter = DigestCounter::default();
+            counter.track(&block);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), digest),
+                &schemes,
+                QUORUM,
+            );
+            let mut subscriber = mailbox.subscribe(digest);
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            let _ = mailbox.get_processed().await;
+            let Gate { started, release } = strategy.arm();
+            let (response, mut response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Block(digest),
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Height(height),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: block.encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            started.await.expect("identity job must start");
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(counter.count(), 0);
+            assert!(matches!(response_rx.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(subscriber.try_recv(), Err(TryRecvError::Empty)));
+            assert!(!application.blocks().contains_key(&height));
+            assert!(
+                !operations
+                    .lock()
+                    .iter()
+                    .any(|op| matches!(op, Op::Put(h, _) if *h == height))
+            );
+
+            release.send(()).expect("identity job remains alive");
+            assert!(response_rx.await.expect("delivery response missing"));
+            assert_eq!(subscriber.await.unwrap().inner(), &block);
+            assert_eq!(application.acknowledged().await, height);
+            assert_eq!(counter.count(), 2);
+            assert!(
+                operations
+                    .lock()
+                    .iter()
+                    .any(|op| matches!(op, Op::Put(h, _) if *h == height))
+            );
+            actor_handle.abort();
+            let _ = actor_handle.await;
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_standard_processed_round_skips_fetch_and_preserves_subscription() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -8407,7 +8658,7 @@ mod tests {
 
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
-            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let proposal = Proposal::new(round, View::zero(), block.digest());
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
             let application = Application::<B>::manual_ack();
             let (mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
@@ -8416,7 +8667,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -8424,7 +8675,7 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::zero());
 
             assert!(
-                mailbox.verified(round, block.clone()).await,
+                mailbox.verified(round, ready(block.clone())).await,
                 "verified block should persist before finalization"
             );
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
@@ -8471,7 +8722,7 @@ mod tests {
 
             assert!(
                 mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                    .verified(Round::new(Epoch::zero(), View::new(2)), ready(barrier))
                     .await,
                 "barrier verification should be processed"
             );
@@ -8487,7 +8738,7 @@ mod tests {
                 .lock()
                 .pop()
                 .expect("commitment subscription should be registered")
-                .send_lossy(Arc::new(missing));
+                .send_lossy(ready(missing));
             assert_eq!(subscription.await.unwrap().digest(), missing_digest);
         });
     }
@@ -8502,7 +8753,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                Proposal::new(round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -8513,13 +8764,13 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mut mailbox = mailbox;
             assert_eq!(application.acknowledged().await, Height::zero());
 
-            assert!(mailbox.verified(round, block.clone()).await);
+            assert!(mailbox.verified(round, ready(block.clone())).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             let retain_floor = resolver.retain_count() + 2;
@@ -8548,7 +8799,7 @@ mod tests {
 
             assert!(
                 mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                    .verified(Round::new(Epoch::zero(), View::new(2)), ready(barrier))
                     .await
             );
             assert_eq!(
@@ -8580,7 +8831,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(original_genesis.clone().into()),
+                Start::Genesis(ready(original_genesis.clone())),
             )
             .await;
             assert_eq!(
@@ -8600,7 +8851,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(replacement_genesis.clone().into()),
+                Start::Genesis(ready(replacement_genesis.clone())),
             )
             .await;
         });
@@ -8621,7 +8872,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                Proposal::new(round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -8632,13 +8883,13 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mut mailbox = mailbox;
             assert_eq!(application.acknowledged().await, Height::zero());
 
-            assert!(mailbox.verified(round, block.clone()).await);
+            assert!(mailbox.verified(round, ready(block.clone())).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             let retain_floor = resolver.retain_count() + 2;
@@ -8667,7 +8918,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -8700,7 +8951,7 @@ mod tests {
 
             assert!(
                 mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                    .verified(Round::new(Epoch::zero(), View::new(2)), ready(barrier))
                     .await
             );
             assert_eq!(
@@ -8716,7 +8967,7 @@ mod tests {
                 .lock()
                 .pop()
                 .expect("commitment subscription should be registered")
-                .send_lossy(Arc::new(missing));
+                .send_lossy(ready(missing));
             assert_eq!(subscription.await.unwrap().digest(), missing_digest);
         });
     }
@@ -8731,7 +8982,7 @@ mod tests {
 
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
-            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let proposal = Proposal::new(round, View::zero(), block.digest());
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
 
             seed_processed_height(context.child("metadata"), partition_prefix, Height::zero())
@@ -8750,12 +9001,12 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
             StandardHarness::report_finalization(&mut mailbox.clone(), finalization).await;
-            let mut subscription = mailbox.acquire(StandardHarness::commitment(&block));
+            let mut subscription = mailbox.acquire(block.digest());
             context.sleep(Duration::from_millis(100)).await;
             assert!(
                 matches!(subscription.try_recv(), Err(TryRecvError::Empty)),
@@ -8822,11 +9073,7 @@ mod tests {
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(4),
-                    StandardHarness::commitment(&floor_block),
-                ),
+                Proposal::new(floor_round, View::new(4), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -8838,11 +9085,15 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application,
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
-            assert!(mailbox.verified(floor_round, floor_block.clone()).await);
+            assert!(
+                mailbox
+                    .verified(floor_round, ready(floor_block.clone()))
+                    .await
+            );
             mailbox.set_floor(floor_finalization);
             select! {
                 height = started => {
@@ -8871,7 +9122,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -8896,7 +9147,7 @@ mod tests {
 
             assert!(
                 mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(6)), barrier)
+                    .verified(Round::new(Epoch::zero(), View::new(6)), ready(barrier))
                     .await,
                 "barrier verification should be processed"
             );
@@ -8922,7 +9173,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                Proposal::new(round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -8932,7 +9183,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let missing = Sha256::hash(&[b"missing-before-set-floor"]);
@@ -8952,7 +9203,7 @@ mod tests {
             .await;
 
             mailbox.set_floor(finalization.clone());
-            assert!(mailbox.verified(round, block.clone()).await);
+            assert!(mailbox.verified(round, ready(block.clone())).await);
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -8979,7 +9230,7 @@ mod tests {
 
             assert!(
                 mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                    .verified(Round::new(Epoch::zero(), View::new(2)), ready(barrier))
                     .await
             );
             assert_eq!(
@@ -9012,7 +9263,7 @@ mod tests {
                 Proposal::new(
                     anchor_round,
                     View::new(1),
-                    StandardHarness::commitment(&anchor),
+                    anchor.digest(),
                 ),
                 &schemes,
                 QUORUM,
@@ -9023,7 +9274,7 @@ mod tests {
                 Proposal::new(
                     processed_round,
                     View::new(2),
-                    StandardHarness::commitment(&processed),
+                    processed.digest(),
                 ),
                 &schemes,
                 QUORUM,
@@ -9059,7 +9310,7 @@ mod tests {
                     (
                         handler::Key::Block(commitment),
                         handler::Annotation::Round(round),
-                    ) if *commitment == StandardHarness::commitment(&anchor)
+                    ) if *commitment == anchor.digest()
                         && *round == anchor_round
                 )
             };
@@ -9155,7 +9406,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                Proposal::new(round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -9167,11 +9418,11 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application,
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
-            assert!(mailbox.verified(round, block.clone()).await);
+            assert!(mailbox.verified(round, ready(block.clone())).await);
             StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
 
             select! {
@@ -9199,7 +9450,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -9239,8 +9490,12 @@ mod tests {
         type Block = T::Block;
         type Error = T::Error;
 
-        async fn put(mut self, block: &Self::Block) -> Result<Self, Self::Error> {
-            self.inner = self.inner.put(block).await?;
+        async fn put(
+            mut self,
+            digest: <Self::Block as Digestible>::Digest,
+            block: &Self::Block,
+        ) -> Result<Self, Self::Error> {
+            self.inner = self.inner.put(digest, block).await?;
             Ok(self)
         }
 
@@ -9431,11 +9686,11 @@ mod tests {
         partition_prefix: &str,
         provider: harness::P,
         max_pending_acks: NonZeroUsize,
-    ) -> Config<harness::P, FixedEpocher, Sequential, B, Arc<B>, D> {
+    ) -> Config<harness::P, FixedEpocher, Sequential, B, Digested<B>, D> {
         Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+            start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -9501,7 +9756,7 @@ mod tests {
                 Config {
                     provider: ConstantProvider::new(schemes[0].clone()),
                     epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                    start: Start::Genesis(genesis.into()),
+                    start: Start::Genesis(ready(genesis)),
                     mailbox_size: NZUsize!(100),
                     view_retention: ViewDelta::new(10),
                     max_repair: NZUsize!(10),
@@ -9535,9 +9790,19 @@ mod tests {
                 // Keep an external owner through both insertion and duplicate delivery
                 for _ in 0..2 {
                     let durable = if certified {
-                        mailbox.certified(round, Arc::clone(&block)).await
+                        mailbox
+                            .certified(
+                                round,
+                                Digested::precomputed(Arc::clone(&block), block.digest()),
+                            )
+                            .await
                     } else {
-                        mailbox.verified(round, Arc::clone(&block)).await
+                        mailbox
+                            .verified(
+                                round,
+                                Digested::precomputed(Arc::clone(&block), block.digest()),
+                            )
+                            .await
                     };
                     assert!(durable);
                     assert_eq!(
@@ -9608,12 +9873,12 @@ mod tests {
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(genesis.digest(), Height::new(1), 100);
-            assert!(mailbox.verified(round, block.clone()).await);
+            assert!(mailbox.verified(round, ready(block.clone())).await);
 
             // Report the finalization: the actor buffers the block into the
             // finalized archives and starts the paced 100ms sync.
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                Proposal::new(round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -9723,9 +9988,9 @@ mod tests {
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(genesis.digest(), Height::new(1), 100);
-            assert!(mailbox.verified(round, block.clone()).await);
+            assert!(mailbox.verified(round, ready(block.clone())).await);
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                Proposal::new(round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -9748,7 +10013,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(5)),
                     View::new(4),
-                    StandardHarness::commitment(&fork),
+                    fork.digest(),
                 ),
                 &schemes,
                 QUORUM,
@@ -9759,7 +10024,7 @@ mod tests {
                     matches!(
                         fetch.key,
                         handler::Key::Block(commitment)
-                            if commitment == StandardHarness::commitment(&fork)
+                            if commitment == fork.digest()
                     )
                 })
             })
@@ -9771,7 +10036,7 @@ mod tests {
                     matches!(
                         fetch.key,
                         handler::Key::Block(commitment)
-                            if commitment == StandardHarness::commitment(&fork)
+                            if commitment == fork.digest()
                     )
                 })
                 .expect("anchor fetch missing");
@@ -9802,7 +10067,7 @@ mod tests {
                 resolver
                     .enqueue(handler::Message::Deliver {
                         delivery: Delivery {
-                            key: handler::Key::Block(StandardHarness::commitment(&next)),
+                            key: handler::Key::Block(next.digest()),
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Height(Height::new(2)),
                                 tracing::Span::none(),
@@ -9818,7 +10083,7 @@ mod tests {
                 resolver
                     .enqueue(handler::Message::Deliver {
                         delivery: Delivery {
-                            key: handler::Key::Block(StandardHarness::commitment(&above)),
+                            key: handler::Key::Block(above.digest()),
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Height(Height::new(3)),
                                 tracing::Span::none(),
@@ -9941,29 +10206,21 @@ mod tests {
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let first_round = Round::new(Epoch::zero(), View::new(1));
             let first = make_raw_block(genesis.digest(), Height::new(1), 100);
-            assert!(mailbox.verified(first_round, first.clone()).await);
+            assert!(mailbox.verified(first_round, ready(first.clone())).await);
             let second_round = Round::new(Epoch::zero(), View::new(2));
             let second = make_raw_block(first.digest(), Height::new(2), 200);
-            assert!(mailbox.verified(second_round, second.clone()).await);
+            assert!(mailbox.verified(second_round, ready(second.clone())).await);
 
             let started_at = context.current();
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    first_round,
-                    View::zero(),
-                    StandardHarness::commitment(&first),
-                ),
+                Proposal::new(first_round, View::zero(), first.digest()),
                 &schemes,
                 QUORUM,
             );
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
             context.sleep(STAGGER).await;
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    second_round,
-                    View::new(1),
-                    StandardHarness::commitment(&second),
-                ),
+                Proposal::new(second_round, View::new(1), second.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -10248,7 +10505,7 @@ mod tests {
             .await;
             let retains = resolver.retain_count();
             let round = Round::new(Epoch::zero(), View::new(1));
-            assert!(mailbox.verified(round, local.clone()).await);
+            assert!(mailbox.verified(round, ready(local.clone())).await);
             assert_eq!(resolver.retain_count(), retains + 1);
             assert!(active_fetch(local_key).is_none());
             assert_eq!(
@@ -10259,11 +10516,11 @@ mod tests {
 
             // A resolver delivery, a local body for queued demand, a local re-ingest of a
             // completed body, and its consumption each leave the resolver untouched.
-            let ready = make_raw_block(local.digest(), Height::new(2), 200);
-            let queued = make_raw_block(ready.digest(), Height::new(3), 300);
-            let ready_key = handler::Key::Block(ready.digest());
+            let completed = make_raw_block(local.digest(), Height::new(2), 200);
+            let queued = make_raw_block(completed.digest(), Height::new(3), 300);
+            let ready_key = handler::Key::Block(completed.digest());
             let queued_key = handler::Key::Block(queued.digest());
-            let _lease = mailbox.prefetch(Arc::from([ready.digest(), queued.digest()]), 0..2);
+            let _lease = mailbox.prefetch(Arc::from([completed.digest(), queued.digest()]), 0..2);
             wait_until(
                 &context,
                 Duration::from_secs(1),
@@ -10279,17 +10536,17 @@ mod tests {
             );
             let retains = resolver.retain_count();
             let fetch = active_fetch(ready_key).unwrap();
-            deliver_acquisition_test_block(&resolver, fetch, &ready).await;
+            deliver_acquisition_test_block(&resolver, fetch, &completed).await;
             assert_eq!(resolver.retain_count(), retains, "resolver delivery");
             let round = Round::new(Epoch::zero(), View::new(3));
-            assert!(mailbox.verified(round, queued.clone()).await);
+            assert!(mailbox.verified(round, ready(queued.clone())).await);
             assert_eq!(resolver.retain_count(), retains, "queued demand");
             let round = Round::new(Epoch::zero(), View::new(2));
-            assert!(mailbox.verified(round, ready.clone()).await);
+            assert!(mailbox.verified(round, ready(completed.clone())).await);
             assert_eq!(resolver.retain_count(), retains, "completed body re-ingest");
             assert_eq!(
-                mailbox.acquire(ready.digest()).await.unwrap().digest(),
-                ready.digest()
+                mailbox.acquire(completed.digest()).await.unwrap().digest(),
+                completed.digest()
             );
             assert_eq!(
                 resolver.retain_count(),
@@ -10446,25 +10703,28 @@ mod tests {
             .await;
 
             // A verdict-completed body occupies capacity until canonical storage claims it.
-            let ready = make_raw_block(queued.digest(), Height::new(8), 800);
-            let tail = make_raw_block(ready.digest(), Height::new(9), 900);
-            let _lease = mailbox.prefetch(Arc::from([ready.digest(), tail.digest()]), 0..2);
+            let completed = make_raw_block(queued.digest(), Height::new(8), 800);
+            let tail = make_raw_block(completed.digest(), Height::new(9), 900);
+            let _lease = mailbox.prefetch(Arc::from([completed.digest(), tail.digest()]), 0..2);
             wait_until(
                 &context,
                 Duration::from_secs(1),
                 "ready body prefetch",
-                || active(&ready).is_some(),
+                || active(&completed).is_some(),
             )
             .await;
-            let fetch = active(&ready).unwrap();
-            deliver_acquisition_test_block(&resolver, fetch.clone(), &ready).await;
+            let fetch = active(&completed).unwrap();
+            deliver_acquisition_test_block(&resolver, fetch.clone(), &completed).await;
             resolver.complete(&fetch);
             let _ = mailbox.get_processed().await;
             assert!(!fetched(&tail));
-            mailbox.hint_finalized(ready.height(), NonEmptyVec::new(participants[1].clone()));
+            mailbox.hint_finalized(
+                completed.height(),
+                NonEmptyVec::new(participants[1].clone()),
+            );
             let _ = mailbox.get_processed().await;
             let retains = resolver.retain_count();
-            deliver_finalized_test_block(&resolver, finalization(&ready), &ready).await;
+            deliver_finalized_test_block(&resolver, finalization(&completed), &completed).await;
             let _ = mailbox.get_processed().await;
             assert_eq!(resolver.retain_count(), retains, "ready finalized demand");
             wait_until(
@@ -10476,8 +10736,8 @@ mod tests {
             .await;
             assert!(!fetched(&queued));
             assert_eq!(
-                mailbox.acquire(ready.digest()).await.unwrap().digest(),
-                ready.digest()
+                mailbox.acquire(completed.digest()).await.unwrap().digest(),
+                completed.digest()
             );
             assert_eq!(resolver.retain_count(), retains);
         });
@@ -10844,7 +11104,7 @@ mod tests {
             let block = make_raw_block(genesis.digest(), Height::new(1), 100);
             buffer.insert(block.clone());
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                Proposal::new(round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -10918,7 +11178,7 @@ mod tests {
                     reschedule().await;
                 }
                 let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-                let mut chain = vec![genesis];
+                let mut chain = vec![genesis.inner().clone()];
                 for height in 1..=9 {
                     chain.push(make_raw_block(
                         chain.last().unwrap().digest(),
@@ -11061,7 +11321,7 @@ mod tests {
                     Proposal::new(
                         Round::new(Epoch::zero(), View::new(6)),
                         View::new(5),
-                        StandardHarness::commitment(&boundary),
+                        boundary.digest(),
                     ),
                     &schemes,
                     QUORUM,
@@ -11069,7 +11329,7 @@ mod tests {
             )
             .await;
             let is_repair = |fetch: &FetchRecord, block: &B| {
-                fetch.key == handler::Key::Block(StandardHarness::commitment(block))
+                fetch.key == handler::Key::Block(block.digest())
                     && fetch.subscriber == handler::Annotation::Height(block.height())
             };
             wait_until(
@@ -11091,7 +11351,7 @@ mod tests {
                 .collect();
             let acquisitions: Vec<_> = unrelated
                 .iter()
-                .map(|block| mailbox.acquire(StandardHarness::commitment(block)))
+                .map(|block| mailbox.acquire(block.digest()))
                 .collect();
             wait_until(
                 &context,
@@ -11100,9 +11360,9 @@ mod tests {
                 || {
                     let active = resolver.active_fetches();
                     unrelated.iter().all(|block| {
-                        active.iter().any(|fetch| {
-                            fetch.key == handler::Key::Block(StandardHarness::commitment(block))
-                        })
+                        active
+                            .iter()
+                            .any(|fetch| fetch.key == handler::Key::Block(block.digest()))
                     })
                 },
             )
@@ -11119,7 +11379,7 @@ mod tests {
                         resolver
                             .enqueue(handler::Message::Deliver {
                                 delivery: Delivery {
-                                    key: handler::Key::Block(StandardHarness::commitment(block)),
+                                    key: handler::Key::Block(block.digest()),
                                     subscribers: NonEmptyVec::new((
                                         handler::Annotation::Subscription,
                                         tracing::Span::none(),
@@ -11444,7 +11704,7 @@ mod tests {
             let block = make_raw_block(genesis.digest(), Height::new(1), 100);
             buffer.insert(block.clone());
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                Proposal::new(round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -11563,7 +11823,7 @@ mod tests {
                     i,
                     NUM_VALIDATORS as u16,
                 );
-                let commitment = StandardHarness::commitment(&block);
+                let commitment = block.digest();
                 parent = StandardHarness::digest(&block);
                 parent_commitment = commitment;
                 let round = Round::new(
@@ -11642,7 +11902,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -11685,14 +11945,19 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
 
             let targets = vec![participants[1].clone()];
             let (ack, persist) = oneshot::channel();
-            mailbox.proposed(round, block.clone(), Recipients::Some(targets.clone()), ack);
+            mailbox.proposed(
+                round,
+                ready(block.clone()),
+                Recipients::Some(targets.clone()),
+                ack,
+            );
             wait_until(&context, Duration::from_secs(5), "proposed send", || {
                 !buffer.sends.lock().is_empty()
             })
@@ -11726,7 +11991,7 @@ mod tests {
     /// the staging task, which ends once the block is durable or its staged ack is dropped.
     async fn stage_block(
         context: &deterministic::Context,
-        gates: &Gates<D, B>,
+        gates: &Gates<D, Digested<B>>,
         round: Round,
         block: B,
     ) -> Handle<()> {
@@ -11739,7 +12004,7 @@ mod tests {
                     .stage(
                         round,
                         digest,
-                        Arc::new(block),
+                        ready(block),
                         |digest| {
                             tx.send_lossy(digest);
                         },
@@ -11778,7 +12043,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -11846,7 +12111,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -11916,7 +12181,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -11978,7 +12243,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -12062,7 +12327,7 @@ mod tests {
                     ConstantProvider::new(schemes[1].clone()),
                     Application::<B>::manual_ack(),
                     Some(RecordingBuffer::default()),
-                    Start::Genesis(genesis.clone().into()),
+                    Start::Genesis(genesis.clone()),
                 )
                 .await;
                 let buffer = buffer.expect("buffer was provided");
@@ -12080,7 +12345,7 @@ mod tests {
                 for height in 1..=boundary_height.get() {
                     let parent = boundary.digest();
                     let round = Round::new(Epoch::zero(), View::new(height));
-                    boundary = B::new::<Sha256>(
+                    boundary = ready(B::new::<Sha256>(
                         Ctx {
                             round,
                             leader: outgoing.clone(),
@@ -12089,7 +12354,7 @@ mod tests {
                         parent,
                         Height::new(height),
                         height * 100,
-                    );
+                    ));
                     assert!(marshal.verified(round, boundary.clone()).await);
                     chain.push(boundary.digest());
                 }
@@ -12244,15 +12509,15 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
 
             let (ack_a, persist_a) = oneshot::channel();
-            mailbox.proposed(round, block_a.clone(), Recipients::All, ack_a);
+            mailbox.proposed(round, ready(block_a.clone()), Recipients::All, ack_a);
             let (ack_b, persist_b) = oneshot::channel();
-            mailbox.proposed(round, block_b.clone(), Recipients::All, ack_b);
+            mailbox.proposed(round, ready(block_b.clone()), Recipients::All, ack_b);
 
             let sync_a = persist_a.await.expect("first proposed sync handle missing");
             assert!(sync_a.durable(round, "proposed").await);
@@ -12290,12 +12555,12 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
 
-            assert!(mailbox.verified(round, block.clone()).await);
+            assert!(mailbox.verified(round, ready(block.clone())).await);
 
             let targets = vec![participants[1].clone(), participants[2].clone()];
             mailbox.forward(round, digest, Recipients::Some(targets.clone()));
@@ -12345,13 +12610,13 @@ mod tests {
                     let round = Round::new(Epoch::zero(), View::new(1));
                     let block = make_raw_block(genesis.digest(), height, 100);
                     let finalization = StandardHarness::make_finalization(
-                        Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                        Proposal::new(round, View::zero(), block.digest()),
                         &schemes,
                         QUORUM,
                     );
 
                     // The actor has not started, so this live request fills ready capacity.
-                    let ready = mailbox.acquire(genesis.digest());
+                    let pending = mailbox.acquire(genesis.digest());
                     if prune_first {
                         mailbox.prune(Height::new(10));
                     }
@@ -12376,7 +12641,7 @@ mod tests {
 
                     // This read follows the overflowed prune in the actor mailbox.
                     assert!(mailbox.get_verified(round).await.is_none());
-                    assert_eq!(ready.await.unwrap().digest(), genesis.digest());
+                    assert_eq!(pending.await.unwrap().digest(), genesis.digest());
                     assert_eq!(mailbox.get_processed().await, None);
                     assert_eq!(
                         mailbox.get_block(Height::zero()).await.unwrap().digest(),
@@ -12387,7 +12652,7 @@ mod tests {
                     let direct_before = direct.try_recv();
                     let canonical_before = early.or_else(|| read.as_mut().now_or_never());
 
-                    assert!(mailbox.verified(round, block.clone()).await);
+                    assert!(mailbox.verified(round, ready(block.clone())).await);
                     assert!(mailbox.get_block(height).await.is_none());
                     StandardHarness::report_finalization(&mut mailbox, finalization).await;
                     assert_eq!(
@@ -12431,7 +12696,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                Proposal::new(round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -12442,11 +12707,11 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
-            assert!(mailbox.verified(round, block.clone()).await);
+            assert!(mailbox.verified(round, ready(block.clone())).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             while mailbox.get_finalization(Height::new(1)).await.is_none() {
@@ -12501,7 +12766,7 @@ mod tests {
             let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
             let mut tip_finalization = None;
             for height in 1..=HEIGHTS {
-                let block = make_raw_block(parent, Height::new(height), height);
+                let block = ready(make_raw_block(parent, Height::new(height), height));
                 parent = block.digest();
                 let round = Round::new(
                     epocher.containing(Height::new(height)).unwrap().epoch(),
@@ -12512,7 +12777,7 @@ mod tests {
                 let proposal = Proposal::new(
                     round,
                     View::new(height - 1),
-                    StandardHarness::commitment(&block),
+                    block.digest(),
                 );
                 let notarization =
                     StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -12605,7 +12870,7 @@ mod tests {
             let height = Height::new(1);
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
-            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let proposal = Proposal::new(round, View::zero(), block.digest());
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
             let verifier = schemes[0].clone();
             let application = Application::<B>::manual_ack();
@@ -12616,7 +12881,7 @@ mod tests {
                 VerifierProvider::new(verifier.clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -12661,7 +12926,7 @@ mod tests {
                 VerifierProvider::new(verifier),
                 Application::<B>::default(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -12710,7 +12975,7 @@ mod tests {
                     ConstantProvider::new(schemes[0].clone()),
                     application.clone(),
                     Some(RecordingBuffer::default()),
-                    Start::Genesis(genesis.into()),
+                    Start::Genesis(genesis),
                 )
                 .await;
                 assert_eq!(application.acknowledged().await, Height::zero());
@@ -12791,7 +13056,7 @@ mod tests {
             let height = Height::new(1);
             let round = Round::new(Epoch::new(1), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
-            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let proposal = Proposal::new(round, View::zero(), block.digest());
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
 
             let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
@@ -12800,7 +13065,7 @@ mod tests {
                 VerifierProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -12837,7 +13102,7 @@ mod tests {
             let height = Height::new(1);
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
-            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let proposal = Proposal::new(round, View::zero(), block.digest());
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
             let application = Application::<B>::manual_ack();
 
@@ -12850,7 +13115,7 @@ mod tests {
                 provider.clone(),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             assert!(
@@ -12906,7 +13171,7 @@ mod tests {
             let height = Height::new(1);
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
-            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let proposal = Proposal::new(round, View::zero(), block.digest());
             let finalization = StandardHarness::make_finalization(proposal, &foreign, QUORUM);
 
             // Retiring the scope after admission must not turn the rejection into
@@ -12918,7 +13183,7 @@ mod tests {
                 provider.clone(),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             assert!(
@@ -12971,7 +13236,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(1)),
                     View::zero(),
-                    StandardHarness::commitment(&early_block),
+                    early_block.digest(),
                 ),
                 &first,
                 QUORUM,
@@ -12982,7 +13247,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::new(1), View::new(late_height.get())),
                     View::zero(),
-                    StandardHarness::commitment(&late_block),
+                    late_block.digest(),
                 ),
                 &second,
                 QUORUM,
@@ -13001,7 +13266,7 @@ mod tests {
                 provider.clone(),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             assert!(
@@ -13049,7 +13314,7 @@ mod tests {
                     .get_finalization(late_height)
                     .await
                     .map(|finalization| finalization.proposal.payload),
-                Some(StandardHarness::commitment(&late_block)),
+                Some(late_block.digest()),
                 "finalization verified under the live epoch's scope must be stored"
             );
         });
@@ -13072,7 +13337,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -13086,11 +13351,7 @@ mod tests {
             );
             let floor_round = Round::new(Epoch::zero(), View::new(10));
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(9),
-                    StandardHarness::commitment(&floor_anchor),
-                ),
+                Proposal::new(floor_round, View::new(9), floor_anchor.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -13121,7 +13382,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                Proposal::new(round, View::zero(), block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -13132,11 +13393,11 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
-            assert!(mailbox.verified(round, block.clone()).await);
+            assert!(mailbox.verified(round, ready(block.clone())).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             // Wait until marshal has durably stored the finalization.
@@ -13187,7 +13448,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -13221,7 +13482,7 @@ mod tests {
                 EmptyProvider,
                 Application::<B>::default(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let (response, response_rx) = oneshot::channel();
@@ -13285,10 +13546,10 @@ mod tests {
         async fn prepare(
             &mut self,
             context: (Runtime, Ctx),
-            parent: Arc<B>,
+            parent: Digested<B>,
             blocks: Blocks<B>,
             input: (),
-        ) -> Handoff<B> {
+        ) -> Handoff<Digested<B>> {
             self.prepares.fetch_add(1, Ordering::SeqCst);
             self.propose(context, parent, blocks, input)
                 .await
@@ -13298,10 +13559,10 @@ mod tests {
         async fn propose(
             &mut self,
             (_, context): (Runtime, Ctx),
-            _: Arc<B>,
+            _: Digested<B>,
             _: Blocks<B>,
             _: (),
-        ) -> Option<B> {
+        ) -> Option<Digested<B>> {
             self.build_started
                 .lock()
                 .take()
@@ -13310,10 +13571,16 @@ mod tests {
             let release = self.build_release.lock().take().unwrap();
             release.await.unwrap();
             self.build_completed.lock().take().unwrap().send_lossy(());
-            Some(self.block.clone())
+            Some(ready(self.block.clone()))
         }
 
-        async fn verify(&mut self, _: (Runtime, Ctx), _: Arc<B>, _: Arc<B>, _: Blocks<B>) -> bool {
+        async fn verify(
+            &mut self,
+            _: (Runtime, Ctx),
+            _: Digested<B>,
+            _: Digested<B>,
+            _: Blocks<B>,
+        ) -> bool {
             let started = self.verify_started.lock().take();
             if let Some(started) = started {
                 let release = self.verify_release.lock().take().unwrap();
@@ -13378,7 +13645,7 @@ mod tests {
                 100,
             );
             let floor_digest = floor_block.digest();
-            assert!(marshal.verified(floor_round, floor_block).await);
+            assert!(marshal.verified(floor_round, ready(floor_block)).await);
             let floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(floor_round, View::zero(), floor_digest),
                 &schemes,
@@ -13403,7 +13670,7 @@ mod tests {
             assert!(
                 setup
                     .extra
-                    .broadcast(Recipients::Some(vec![]), parent_block)
+                    .broadcast(Recipients::Some(vec![]), ready(parent_block))
                     .accepted()
             );
 
@@ -13570,7 +13837,7 @@ mod tests {
                     assert!(
                         setup
                             .extra
-                            .broadcast(Recipients::Some(vec![]), replacement)
+                            .broadcast(Recipients::Some(vec![]), ready(replacement))
                             .accepted()
                     );
                     let finalization = StandardHarness::make_finalization(

@@ -12,25 +12,25 @@ use crate::{
     marshal::{application::gates::Gates, blocks::Blocks},
     simplex::types::Context,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::{Digest, Digested, PublicKey};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::metrics::histogram::Timer};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand_core::Rng;
-use std::{future::Future, sync::Arc};
+use std::future::Future;
 use tracing::{Instrument as _, Span, debug};
 
 /// The outcome of the marshal's proposal checks for a parent.
 pub(crate) enum Resolved<D, S, B: Block, M = ()> {
     /// The marshal re-proposes the epoch boundary block, whose digest is the first field.
-    Reuse(D, Arc<S>),
+    Reuse(D, S),
     /// The marshal cannot build on this parent.
     Skip,
     /// The parent is fetched and the application may build on it and the selected branch
     /// ending at it. The timer measures the application's build from this point. The metadata
     /// (the coding configuration, or unit for standard blocks) is passed to the sealing
     /// callback with the built block.
-    Build(Arc<B>, Blocks<B>, Timer, M),
+    Build(Digested<B>, Blocks<B>, Timer, M),
 }
 
 /// Answers a prepare request for `consensus_context` from a task spawned from `context` and
@@ -44,7 +44,7 @@ pub(crate) enum Resolved<D, S, B: Block, M = ()> {
 /// application's decision. The block is staged before its digest is sent. Dropping the receiver
 /// cancels the wait for the parent and the build.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare<E, A, D, P, S, Fut, M>(
+pub(crate) fn prepare<E, A, D, P, S, Fut, M, Seal>(
     context: &E,
     application: &A,
     gates: Gates<D, S>,
@@ -52,16 +52,17 @@ pub(crate) fn prepare<E, A, D, P, S, Fut, M>(
     checks: Fut,
     span: Span,
     build_span: impl FnOnce() -> Span + Send + 'static,
-    seal: impl FnOnce(A::Block, M) -> (D, Arc<S>) + Send + 'static,
+    seal: impl FnOnce(Digested<A::Block>, M) -> Seal + Send + 'static,
 ) -> oneshot::Receiver<Handoff<D>>
 where
     E: Rng + Clock + Spawner + Metrics,
     A: Application<E, Context = Context<D, P>, Input = ()>,
     D: Digest,
     P: PublicKey,
-    S: Send + Sync + 'static,
+    S: Clone + Send + Sync + 'static,
     M: Send + 'static,
     Fut: Future<Output = Resolved<D, S, A::Block, M>> + Send + 'static,
+    Seal: Future<Output = (D, S)> + Send + 'static,
 {
     let mut application = application.clone();
     let (mut tx, rx) = oneshot::channel();
@@ -136,7 +137,7 @@ where
 
             // The block is staged under the application's decision, and its digest reaches
             // consensus only once the relay broadcast and certification can find the block.
-            let (digest, block) = seal(block, metadata);
+            let (digest, block) = seal(block, metadata).await;
             gates
                 .stage(
                     round,
@@ -161,10 +162,10 @@ where
 /// marshal cannot build on, or a build that produces no block, closes the receiver. Otherwise
 /// `application` builds on the fetched parent under the span `build_span` returns, and
 /// `seal` turns the built block, with the metadata the checks resolved, into the block's staged
-/// form and digest. The block is staged before its digest is sent. Dropping the receiver
-/// cancels the wait for the parent and the build.
+/// form and digest. The block is staged before its digest is sent. Dropping the receiver cancels
+/// the wait for the parent and the build.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn propose<E, A, D, P, S, Fut, M>(
+pub(crate) fn propose<E, A, D, P, S, Fut, M, Seal>(
     context: &E,
     application: &A,
     gates: Gates<D, S>,
@@ -172,16 +173,17 @@ pub(crate) fn propose<E, A, D, P, S, Fut, M>(
     checks: Fut,
     span: Span,
     build_span: impl FnOnce() -> Span + Send + 'static,
-    seal: impl FnOnce(A::Block, M) -> (D, Arc<S>) + Send + 'static,
+    seal: impl FnOnce(Digested<A::Block>, M) -> Seal + Send + 'static,
 ) -> oneshot::Receiver<D>
 where
     E: Rng + Clock + Spawner + Metrics,
     A: Application<E, Context = Context<D, P>, Input = ()>,
     D: Digest,
     P: PublicKey,
-    S: Send + Sync + 'static,
+    S: Clone + Send + Sync + 'static,
     M: Send + 'static,
     Fut: Future<Output = Resolved<D, S, A::Block, M>> + Send + 'static,
+    Seal: Future<Output = (D, S)> + Send + 'static,
 {
     let mut application = application.clone();
     let (mut tx, rx) = oneshot::channel();
@@ -255,7 +257,7 @@ where
 
             // The digest reaches consensus only once the relay broadcast and certification can
             // find the staged block.
-            let (digest, block) = seal(built_block, metadata);
+            let (digest, block) = seal(built_block, metadata).await;
             gates
                 .stage(
                     round,

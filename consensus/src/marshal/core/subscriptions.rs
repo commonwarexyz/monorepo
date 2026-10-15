@@ -221,7 +221,7 @@ mod tests {
         types::{Height, Round},
     };
     use commonware_cryptography::{
-        Digestible,
+        Digested, Digestible,
         ed25519::PublicKey,
         sha256::{Digest, Sha256},
     };
@@ -234,8 +234,8 @@ mod tests {
 
     type TestBlock = EmptyBlock<Sha256>;
     type TestVariant = Standard<TestBlock>;
-    type TestWaiters = AbortablePool<'static, Option<Arc<TestBlock>>>;
-    type Subscriber = oneshot::Sender<Arc<TestBlock>>;
+    type TestWaiters = AbortablePool<'static, Option<Digested<TestBlock>>>;
+    type Subscriber = oneshot::Sender<Digested<TestBlock>>;
     type Subscribers = Arc<Mutex<Vec<Subscriber>>>;
 
     #[derive(Clone, Default)]
@@ -252,31 +252,42 @@ mod tests {
     impl Buffer<TestVariant> for TestBuffer {
         type PublicKey = PublicKey;
 
-        async fn find_by_digest(&self, _digest: Digest) -> Option<Arc<TestBlock>> {
+        async fn find_by_digest(&self, _digest: Digest) -> Option<Digested<TestBlock>> {
             None
         }
 
-        async fn find_by_commitment(&self, _commitment: Digest) -> Option<Arc<TestBlock>> {
+        async fn find_by_commitment(&self, _commitment: Digest) -> Option<Digested<TestBlock>> {
             None
         }
 
         fn subscribe_by_commitment(
             &self,
             _commitment: Digest,
-        ) -> Option<oneshot::Receiver<Arc<TestBlock>>> {
+        ) -> Option<oneshot::Receiver<Digested<TestBlock>>> {
             let (sender, receiver) = oneshot::channel();
             self.commitment_subscribers.lock().push(sender);
             Some(receiver)
         }
 
-        fn send(&self, _round: Round, _block: Arc<TestBlock>, _recipients: Recipients<PublicKey>) {}
+        fn send(
+            &self,
+            _round: Round,
+            _block: Digested<TestBlock>,
+            _recipients: Recipients<PublicKey>,
+        ) {
+        }
     }
 
-    fn block(height: u64, timestamp: u64) -> TestBlock {
-        TestBlock::new(Sha256::fill(0), Height::new(height), timestamp)
+    fn block(height: u64, timestamp: u64) -> Digested<TestBlock> {
+        let block = TestBlock::new(Sha256::fill(0), Height::new(height), timestamp);
+        let digest = block.digest();
+        Digested::precomputed(block, digest)
     }
 
-    fn assert_receives(receiver: oneshot::Receiver<Arc<TestBlock>>, expected: &TestBlock) {
+    fn assert_receives(
+        receiver: oneshot::Receiver<Digested<TestBlock>>,
+        expected: &Digested<TestBlock>,
+    ) {
         let received = receiver
             .now_or_never()
             .expect("receiver should be ready")
@@ -314,7 +325,7 @@ mod tests {
         assert_eq!(test_buffer.commitment_subscription_count(), 1);
         assert_eq!(subscriptions.entries.len(), 1);
 
-        assert!(subscriptions.notify(Arc::new(block.clone())));
+        assert!(subscriptions.notify(block.clone()));
         assert_receives(first_receiver, &block);
         assert_receives(second_receiver, &block);
         assert!(subscriptions.entries.is_empty());
@@ -323,7 +334,7 @@ mod tests {
     #[test]
     fn finalized_waiters_share_delivery_and_close_below_prune() {
         let mut subscriptions = Finalized::<TestVariant>::new();
-        let block = Arc::new(block(5, 50));
+        let block = block(5, 50);
         let (stale_sender, mut stale_receiver) = oneshot::channel();
         let (first_sender, first_receiver) = oneshot::channel();
         let (second_sender, second_receiver) = oneshot::channel();
@@ -396,7 +407,7 @@ mod tests {
             .expect("open subscriber should remain");
         assert_eq!(subscription.fetching.len(), 1);
 
-        assert!(subscriptions.notify(Arc::new(block.clone())));
+        assert!(subscriptions.notify(block.clone()));
         assert_receives(open_receiver, &block);
         assert!(subscriptions.entries.is_empty());
     }
@@ -419,13 +430,11 @@ mod tests {
         );
 
         assert_eq!(subscriptions.entries.len(), 1);
-        assert!(!subscriptions.notify(Arc::new(TestBlock::new(
-            Sha256::fill(1),
-            Height::new(9),
-            90
-        ))));
+        let other = TestBlock::new(Sha256::fill(1), Height::new(9), 90);
+        let other_digest = other.digest();
+        assert!(!subscriptions.notify(Digested::precomputed(other, other_digest)));
         assert!(subscriptions.entries.contains_key(&block.digest()));
-        assert!(subscriptions.notify(Arc::new(block.clone())));
+        assert!(subscriptions.notify(block.clone()));
         assert_receives(receiver, &block);
         assert!(subscriptions.entries.is_empty());
     }
@@ -582,7 +591,7 @@ mod tests {
             drop(first_receiver);
             assert!(subscriptions.retain_open().is_empty());
             assert!(subscriptions.entries.contains_key(&commitment));
-            assert!(subscriptions.notify(Arc::new(block.clone())));
+            assert!(subscriptions.notify(block.clone()));
             assert_receives(second_receiver, &block);
             assert!(!subscriptions.entries.contains_key(&commitment));
         });

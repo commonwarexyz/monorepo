@@ -12,12 +12,13 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox::Sender as ActorSender;
 use commonware_consensus::{
+    Block as _, Heightable as _,
     marshal::{blocks::Blocks, core::Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::{
-    BatchVerifier, PublicKey, Signer,
+    BatchVerifier, Digestible as _, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::{
             DealerLog, FinalizeError as DkgFinalizeError, Info, Logs, Output, observe,
@@ -570,7 +571,7 @@ where
             warn!(epoch = ?scan.epoch, "epoch info branch is detached from finalized prefix");
             return None;
         }
-        let Some(Payload::DealerLog(log)) = block.payload() else {
+        let Some(Payload::DealerLog(log)) = block.inner().payload() else {
             continue;
         };
         let Some((dealer, log)) = log.check(scan.info) else {
@@ -730,7 +731,7 @@ where
                             store,
                             epoch,
                             dealer.as_deref_mut(),
-                            block.payload(),
+                            block.inner().payload(),
                         )
                         .await;
 
@@ -742,7 +743,7 @@ where
                                 info,
                                 store,
                                 &mut work,
-                                block.as_ref(),
+                                block.inner(),
                             )
                             .await
                             .is_break()
@@ -1443,12 +1444,12 @@ mod tests {
             store::AckOutcome,
         },
         state_sync::Plan as StateSyncPlan,
-        tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant, child},
+        tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant, child, ready},
     };
     use commonware_actor::Feedback;
     use commonware_consensus::{Heightable, Reporter, marshal};
     use commonware_cryptography::{
-        Digestible as _, Signer,
+        Digested, Signer,
         bls12381::{
             dkg::feldman_desmedt::{
                 Dealer as CryptoDealer, DealerPrivMsg, DealerPubMsg, Player as CryptoPlayer,
@@ -1460,6 +1461,7 @@ mod tests {
         sha256::Sha256,
         transcript::Summary,
     };
+    use commonware_macros::boxed;
     use commonware_math::algebra::Random as _;
     use commonware_p2p::{
         simulated::{Config as NetworkConfig, Network},
@@ -1479,7 +1481,8 @@ mod tests {
     type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
     type TestArtifacts = ArtifactCache<TestBlsVariant, PrivateKey, Unit>;
     type TestRequests = ArtifactRequests<TestBlock, TestBlsVariant, PrivateKey>;
-    type TestInclusionMailbox = crate::dkg::reshare::Mailbox<TestBlock, TestBlsVariant, PrivateKey>;
+    type TestInclusionMailbox =
+        crate::dkg::reshare::Mailbox<TestBlock, TestBlsVariant, PrivateKey, Exact>;
     type TestInclusionStore =
         Store<deterministic::Context, MemorySecretStore, TestBlsVariant, PublicKey>;
 
@@ -1504,7 +1507,7 @@ mod tests {
     }
 
     fn gated_blocks(
-        blocks: impl IntoIterator<Item = Arc<TestBlock>>,
+        blocks: impl IntoIterator<Item = Digested<TestBlock>>,
         gate: oneshot::Receiver<()>,
     ) -> (Blocks<TestBlock>, oneshot::Receiver<()>) {
         let source = mocks::blocks(blocks);
@@ -1589,6 +1592,7 @@ mod tests {
     }
 
     /// Builds a singleton inclusion actor with one authenticated local dealer log.
+    #[boxed]
     async fn setup_inclusion_harness(
         context: &mut deterministic::Context,
         partition_prefix: &str,
@@ -1724,7 +1728,7 @@ mod tests {
     /// Reports a finalized block and returns its acknowledgement waiter.
     fn deliver(
         mailbox: &mut TestInclusionMailbox,
-        block: &Arc<TestBlock>,
+        block: &Digested<TestBlock>,
     ) -> <Exact as Acknowledgement>::Waiter {
         let (ack, waiter) = Exact::handle();
         assert_eq!(
@@ -1754,9 +1758,9 @@ mod tests {
 
             // Epoch zero spans heights 0..=3 and epoch one spans 4..=7. Each early phase ends one
             // block before its epoch midpoint.
-            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
             while blocks.len() < 6 {
-                blocks.push(Arc::new(child(blocks.last().unwrap())));
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
 
             // Dealing completes epoch zero's early phase.
@@ -1833,9 +1837,9 @@ mod tests {
             } = setup_inclusion_harness(&mut context, "inclusion-entry", NZU64!(4)).await;
 
             // Epoch zero spans heights 0..=3 with its midpoint at 2.
-            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
             while blocks.len() < 3 {
-                blocks.push(Arc::new(child(blocks.last().unwrap())));
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
 
             // Dealing covers every block below the midpoint.
@@ -1887,8 +1891,8 @@ mod tests {
             } = setup_inclusion_harness(&mut context, "conflicting-redelivery", NZU64!(4)).await;
 
             // Dealing covers genesis and its canonical child, the last block before the midpoint.
-            let genesis = Arc::new(mocks::genesis_block(public_key.clone()));
-            let canonical = Arc::new(child(&genesis));
+            let genesis = ready(mocks::genesis_block(public_key.clone()));
+            let canonical = ready(child(genesis.inner()));
             let receipts = [&genesis, &canonical].map(|block| deliver(&mut mailbox, block));
             assert!(
                 actor
@@ -1907,8 +1911,8 @@ mod tests {
             }
 
             // A sibling shares the canonical block's parent and height but not its digest.
-            let sibling = Arc::new(TestBlock::new::<Sha256>(
-                genesis.context().clone(),
+            let sibling = ready(TestBlock::new::<Sha256>(
+                genesis.inner().context().clone(),
                 genesis.digest(),
                 Height::new(1),
                 u64::MAX,
@@ -1943,9 +1947,9 @@ mod tests {
             } = setup_inclusion_harness(&mut context, "skipped-inclusion", NZU64!(6)).await;
 
             // Epoch zero spans heights 0..=5 with its midpoint at 3.
-            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
             while blocks.len() < 6 {
-                blocks.push(Arc::new(child(blocks.last().unwrap())));
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
 
             // Dealing applies every block below the midpoint.
@@ -1994,9 +1998,9 @@ mod tests {
             } = setup_inclusion_harness(&mut context, "unlinked-inclusion", NZU64!(6)).await;
 
             // Epoch zero spans heights 0..=5 with its midpoint at 3.
-            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
             while blocks.len() < 3 {
-                blocks.push(Arc::new(child(blocks.last().unwrap())));
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
 
             // Dealing applies every block below the midpoint.
@@ -2018,8 +2022,8 @@ mod tests {
             }
 
             // Inclusion receives a midpoint that extends height one instead of the tip.
-            let unlinked = Arc::new(TestBlock::new::<Sha256>(
-                blocks[1].context().clone(),
+            let unlinked = ready(TestBlock::new::<Sha256>(
+                blocks[1].inner().context().clone(),
                 blocks[1].digest(),
                 Height::new(3),
                 u64::MAX,
@@ -2064,18 +2068,18 @@ mod tests {
                 next_players: participants,
                 directory: Unit,
             };
-            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
             while blocks.len() < 3 {
-                blocks.push(Arc::new(child(blocks.last().unwrap())));
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
-            blocks.push(Arc::new(
-                child(&blocks[2]).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+            blocks.push(ready(
+                child(blocks[2].inner()).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
                     NZU32!(16),
                     Payload::EpochInfo(next),
                 ),
             ));
             while blocks.len() < 6 {
-                blocks.push(Arc::new(child(blocks.last().unwrap())));
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
 
             // Following acknowledges a repeated block and commits epoch one at the boundary.
@@ -2151,12 +2155,12 @@ mod tests {
                 next_players: participants,
                 directory: Unit,
             };
-            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key))];
+            let mut blocks = vec![ready(mocks::genesis_block(public_key))];
             while blocks.len() < 3 {
-                blocks.push(Arc::new(child(blocks.last().unwrap())));
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
-            blocks.push(Arc::new(
-                child(&blocks[2]).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+            blocks.push(ready(
+                child(blocks[2].inner()).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
                     NZU32!(16),
                     Payload::EpochInfo(wrong),
                 ),
@@ -2217,7 +2221,7 @@ mod tests {
             actor.context = ContextCell::new(closed_context);
 
             let genesis = mocks::genesis_block(public_key);
-            let final_block = Arc::new(TestBlock::new::<Sha256>(
+            let final_block = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
                 Height::new(5),
@@ -2295,26 +2299,26 @@ mod tests {
                 Height::new(2),
                 2,
             );
-            let canonical_midpoint = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_midpoint = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_two.digest(),
                 Height::new(3),
                 3,
             ));
-            let canonical_four = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_four = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_midpoint.digest(),
                 Height::new(4),
                 4,
             ));
-            let final_block = Arc::new(TestBlock::new::<Sha256>(
+            let final_block = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_four.digest(),
                 Height::new(5),
                 5,
             ));
 
-            let detached_midpoint = Arc::new(
+            let detached_midpoint = ready(
                 TestBlock::new::<Sha256>(
                     genesis.context().clone(),
                     canonical_two.digest(),
@@ -2326,7 +2330,7 @@ mod tests {
                     Payload::DealerLog(signed_log),
                 ),
             );
-            let detached_four = Arc::new(TestBlock::new::<Sha256>(
+            let detached_four = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 detached_midpoint.digest(),
                 Height::new(4),
@@ -2474,31 +2478,31 @@ mod tests {
                 Height::new(3),
                 3,
             );
-            let canonical_midpoint = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_midpoint = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_three.digest(),
                 Height::new(4),
                 4,
             ));
-            let canonical_five = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_five = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_midpoint.digest(),
                 Height::new(5),
                 5,
             ));
-            let canonical_six = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_six = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_five.digest(),
                 Height::new(6),
                 6,
             ));
-            let canonical_final = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_final = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_six.digest(),
                 Height::new(7),
                 7,
             ));
-            let losing_five = Arc::new(
+            let losing_five = ready(
                 TestBlock::new::<Sha256>(
                     genesis.context().clone(),
                     canonical_midpoint.digest(),
@@ -2510,7 +2514,7 @@ mod tests {
                     Payload::DealerLog(signed_log),
                 ),
             );
-            let losing_six = Arc::new(TestBlock::new::<Sha256>(
+            let losing_six = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 losing_five.digest(),
                 Height::new(6),
@@ -2690,7 +2694,7 @@ mod tests {
                 Height::new(6),
                 6,
             );
-            let blocks = mocks::blocks([Arc::new(block_six), Arc::new(block_five)]);
+            let blocks = mocks::blocks([mocks::ready(block_six), mocks::ready(block_five)]);
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
                 info: &info,
@@ -2731,7 +2735,7 @@ mod tests {
                 Height::new(6),
                 6,
             );
-            let blocks = mocks::blocks([Arc::new(block_six), Arc::new(block_five)]);
+            let blocks = mocks::blocks([mocks::ready(block_six), mocks::ready(block_five)]);
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
                 info: &info,
@@ -2811,7 +2815,7 @@ mod tests {
                 7,
             ));
             chain.push(candidate);
-            let source = mocks::blocks(chain);
+            let source = mocks::blocks(chain.into_iter().map(mocks::ready));
             let metadata = source.clone();
             let acquired = Arc::new(Mutex::new(Vec::new()));
             let observed = acquired.clone();
@@ -2853,13 +2857,13 @@ mod tests {
         executor.start(|context| async move {
             let info = info();
             let genesis = mocks::genesis_block(signers()[0].public_key());
-            let canonical = Arc::new(TestBlock::new::<Sha256>(
+            let canonical = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
                 Height::new(6),
                 6,
             ));
-            let detached = Arc::new(TestBlock::new::<Sha256>(
+            let detached = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
                 Height::new(6),
@@ -2905,13 +2909,13 @@ mod tests {
         executor.start(|context| async move {
             let info = info();
             let genesis = mocks::genesis_block(signers()[0].public_key());
-            let canonical = Arc::new(TestBlock::new::<Sha256>(
+            let canonical = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
                 Height::new(6),
                 6,
             ));
-            let candidate = Arc::new(TestBlock::new::<Sha256>(
+            let candidate = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical.digest(),
                 Height::new(7),
@@ -2971,7 +2975,7 @@ mod tests {
                 Height::new(6),
                 7,
             );
-            let blocks = mocks::blocks([Arc::new(block_six), Arc::new(block_five)]);
+            let blocks = mocks::blocks([mocks::ready(block_six), mocks::ready(block_five)]);
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
                 info: &info,

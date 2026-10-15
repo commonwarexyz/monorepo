@@ -41,11 +41,15 @@ impl<T: Blocks> Blocks for Recording<T> {
     type Block = T::Block;
     type Error = T::Error;
 
-    async fn put(mut self, block: &Self::Block) -> Result<Self, Self::Error> {
+    async fn put(
+        mut self,
+        digest: <Self::Block as Digestible>::Digest,
+        block: &Self::Block,
+    ) -> Result<Self, Self::Error> {
         self.ops
             .lock()
             .push(Op::Put(block.height(), (self.payload_address)(block)));
-        self.inner = self.inner.put(block).await?;
+        self.inner = self.inner.put(digest, block).await?;
         Ok(self)
     }
 

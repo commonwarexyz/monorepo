@@ -17,6 +17,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{
     Acknowledgement as _, acknowledgement::Exact, channel::fallible::OneshotExt,
@@ -203,12 +204,13 @@ fn requeue<E, A>(
 }
 
 /// Serves proposals, verifications, and finalizations against the live database set.
-pub(super) struct Processing<E, A, S, V>
+pub(super) struct Processing<E, A, S, V, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
+    T: Strategy,
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
@@ -219,18 +221,19 @@ where
     /// Marshal mailbox used for lazy block lookup.
     pub(super) marshal: MarshalMailbox<S, V>,
     /// The processing state of the actor.
-    pub(super) processor: Processor<E, A>,
+    pub(super) processor: Processor<E, A, T>,
 
     /// Verification requests deferred until processing starts.
     pub(super) deferred_verifications: Vec<VerificationRequest<E, A>>,
 }
 
-impl<E, A, S, V> Processing<E, A, S, V>
+impl<E, A, S, V, T> Processing<E, A, S, V, T>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
+    T: Strategy,
 {
     /// Serves requests until the mailbox closes or the actor stops.
     ///
@@ -404,11 +407,11 @@ where
                     retry_mailbox,
                 }) => {
                     // Redelivery still waits for durability but leaves active verifications running.
-                    if self.processor.redelivered(block.as_ref()) {
+                    if self.processor.redelivered(&block) {
                         durability.record_duplicate(block.height(), acknowledgement);
                     } else {
                         let process = info_span!(parent: &span, "stateful.actor.finalized");
-                        let boundary = self.processor.boundary(block.as_ref());
+                        let boundary = self.processor.boundary(&block);
                         let (retry, reject) = verifications
                             .quiesce_where(|progress| boundary.disposition(progress))
                             .await;
@@ -417,7 +420,7 @@ where
                             let Applied { barrier, prune } = verifications
                                 .drive(self.processor.finalize(
                                     &self.context,
-                                    block.as_ref(),
+                                    &block,
                                     durability.barrier.is_none(),
                                 ))
                                 .await;
@@ -519,7 +522,7 @@ mod tests {
             fixtures,
             mocks::{
                 FlushControl, TestApp, TestBlock, TestDatabases, TestDb, TestMerkleized,
-                TestScheme, TestUnmerkleized, anchor, test_databases,
+                TestScheme, TestUnmerkleized, anchor, digested, digested_shared, test_databases,
             },
         },
     };
@@ -531,8 +534,9 @@ mod tests {
         simplex::{mocks::scheme as scheme_mocks, types::Activity},
         types::{FixedEpocher, Height},
     };
-    use commonware_cryptography::{Digestible as _, sha256::Digest};
+    use commonware_cryptography::{Digested, Digestible as _, sha256::Digest};
     use commonware_macros::select;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock as _, ContextCell, Error as RuntimeError, Handle, Name, Runner as _, Spawner as _,
         Supervisor as _, deterministic,
@@ -598,7 +602,7 @@ mod tests {
         async fn prepare(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _parent: Arc<Self::Block>,
+            _parent: Digested<Self::Block>,
             _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
@@ -610,7 +614,7 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _parent: Arc<Self::Block>,
+            _parent: Digested<Self::Block>,
             _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
@@ -622,8 +626,8 @@ mod tests {
         async fn verify(
             &mut self,
             context: (deterministic::Context, Self::Context),
-            _block: Arc<Self::Block>,
-            _parent: Arc<Self::Block>,
+            _block: Digested<Self::Block>,
+            _parent: Digested<Self::Block>,
             _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
@@ -693,7 +697,7 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _parent: Arc<Self::Block>,
+            _parent: Digested<Self::Block>,
             _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
@@ -704,8 +708,8 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            block: Arc<Self::Block>,
-            _parent: Arc<Self::Block>,
+            block: Digested<Self::Block>,
+            _parent: Digested<Self::Block>,
             _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
@@ -783,13 +787,13 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            parent: Arc<Self::Block>,
+            parent: Digested<Self::Block>,
             _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             Some(Proposed {
-                block: TestBlock::child(&parent, 9),
+                block: TestBlock::child(parent.inner(), 9),
                 merkleized: TestMerkleized,
             })
         }
@@ -797,8 +801,8 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _block: Arc<Self::Block>,
-            _parent: Arc<Self::Block>,
+            _block: Digested<Self::Block>,
+            _parent: Digested<Self::Block>,
             _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
@@ -947,7 +951,7 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            parent: Arc<Self::Block>,
+            parent: Digested<Self::Block>,
             _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
@@ -958,7 +962,7 @@ mod tests {
                 let _ = (&mut gate.release).await;
             }
             Some(Proposed {
-                block: TestBlock::child(&parent, 10),
+                block: TestBlock::child(parent.inner(), 10),
                 merkleized: TestMerkleized,
             })
         }
@@ -966,8 +970,8 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            block: Arc<Self::Block>,
-            _parent: Arc<Self::Block>,
+            block: Digested<Self::Block>,
+            _parent: Digested<Self::Block>,
             _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
@@ -1114,6 +1118,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -1143,20 +1148,20 @@ mod tests {
                     context.child("proposal"),
                     TestBlock::child(&b, 10).context(),
                 ),
-                b.clone(),
+                digested_shared(&b),
                 proposal_source,
                 (),
             )));
             let mut first = Some(Box::pin(first_verifier.verify(
                 (context.child("first_verify"), first_block.context()),
-                first_block.clone(),
-                b.clone(),
+                digested_shared(&first_block),
+                digested_shared(&b),
                 first_source,
             )));
             let mut second = Some(Box::pin(second_verifier.verify(
                 (context.child("second_verify"), second_block.context()),
-                second_block.clone(),
-                second_parent.clone(),
+                digested_shared(&second_block),
+                digested_shared(&second_parent),
                 second_source,
             )));
 
@@ -1188,7 +1193,7 @@ mod tests {
             if finalize {
                 for block in [&a, &b] {
                     let (ack, waiter) = Exact::handle();
-                    let _ = mailbox.report(Update::Block(block.clone(), ack));
+                    let _ = mailbox.report(Update::Block(digested_shared(block), ack));
                     acknowledgements.push(Box::pin(waiter));
                 }
                 assert!(poll!(&mut actor).is_pending());
@@ -1261,7 +1266,7 @@ mod tests {
                     let block = drive_processing(&mut actor, proposal.take().unwrap())
                         .await
                         .unwrap();
-                    assert_eq!(block, TestBlock::child(&b, 10));
+                    assert_eq!(*block.inner(), TestBlock::child(&b, 10));
                 }
             }
             if let Some(first) = first {
@@ -1295,8 +1300,8 @@ mod tests {
                     &mut actor,
                     verifier.verify(
                         (context.child("cached_verify"), rejected.context()),
-                        rejected.clone(),
-                        b.clone(),
+                        digested_shared(&rejected),
+                        digested_shared(&b),
                         source,
                     )
                 )
@@ -1437,6 +1442,7 @@ mod tests {
             anchor(0, 0),
             StatefulMetrics::new(context),
             None,
+            Sequential,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
@@ -1506,6 +1512,7 @@ mod tests {
             anchor(0, 0),
             StatefulMetrics::new(context),
             pruning,
+            Sequential,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
@@ -1558,6 +1565,7 @@ mod tests {
             anchor(0, 0),
             StatefulMetrics::new(context),
             pruning,
+            Sequential,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
@@ -1601,8 +1609,8 @@ mod tests {
                         );
                         first_mailbox.verify(
                             (task_context, consensus_context),
-                            Arc::new(first_block),
-                            source_parent,
+                            digested(first_block),
+                            digested_shared(&source_parent),
                             source,
                         )
                     }
@@ -1625,8 +1633,8 @@ mod tests {
                         );
                         mailbox.verify(
                             (task_context, consensus_context),
-                            Arc::new(second_block),
-                            source_parent,
+                            digested(second_block),
+                            digested_shared(&source_parent),
                             source,
                         )
                     }
@@ -1682,8 +1690,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 mailbox.verify(
                     (request_context, block_context),
-                    Arc::new(block),
-                    source_parent,
+                    digested(block),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -1731,8 +1739,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 mailbox.verify(
                     (context.child("caller"), block_context),
-                    Arc::new(block),
-                    source_parent,
+                    digested(block),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -1770,8 +1778,8 @@ mod tests {
             let block4 = TestBlock::child(&block3, 4);
             let mut incomplete = Box::pin(mailbox.verify(
                 (context.child("missing_history"), block3.context()),
-                Arc::new(block3.clone()),
-                Arc::new(block2.clone()),
+                digested(block3.clone()),
+                digested(block2.clone()),
                 fixtures::blocks(block2.height(), &[]),
             ));
             assert!(poll!(&mut incomplete).is_pending());
@@ -1784,8 +1792,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 mailbox.verify(
                     (context.child("first"), block1.context()),
-                    Arc::new(block1.clone()),
-                    source_parent,
+                    digested(block1.clone()),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -1803,8 +1811,8 @@ mod tests {
             let source = fixtures::blocks(source_parent.height(), &source_history);
             let mut incomplete = Box::pin(mailbox.verify(
                 (context.child("missing_intermediate"), block4.context()),
-                Arc::new(block4),
-                source_parent,
+                digested(block4),
+                digested_shared(&source_parent),
                 source,
             ));
             assert!(poll!(&mut incomplete).is_pending());
@@ -1817,8 +1825,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 mailbox.verify(
                     (context.child("second"), block2.context()),
-                    Arc::new(block2),
-                    source_parent,
+                    digested(block2),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -1855,8 +1863,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 mailbox.verify(
                     (context.child("verify"), block.context()),
-                    Arc::new(block),
-                    source_parent,
+                    digested(block),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -1905,6 +1913,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -1928,8 +1937,8 @@ mod tests {
                     );
                     mailbox.verify(
                         (context.child("verify_child"), child.context()),
-                        Arc::new(child),
-                        source_parent,
+                        digested(child),
+                        digested_shared(&source_parent),
                         source,
                     )
                 }
@@ -1950,8 +1959,8 @@ mod tests {
                         );
                         mailbox.verify(
                             (context.child(label), parent.context()),
-                            Arc::new(parent.clone()),
-                            source_parent,
+                            digested(parent.clone()),
+                            digested_shared(&source_parent),
                             source,
                         )
                     }
@@ -2007,6 +2016,7 @@ mod tests {
             anchor(0, 0),
             StatefulMetrics::new(context),
             None,
+            Sequential,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
@@ -2043,8 +2053,8 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify_child"), child.context()),
-                Arc::new(child),
-                parent.clone(),
+                digested(child),
+                digested_shared(&parent),
                 fixtures::blocks(parent.height(), std::slice::from_ref(&parent)),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -2057,7 +2067,7 @@ mod tests {
                     context.child("propose"),
                     TestBlock::child(&parent, 3).context(),
                 ),
-                parent.clone(),
+                digested_shared(&parent),
                 fixtures::blocks(parent.height(), std::slice::from_ref(&parent)),
                 (),
             ));
@@ -2103,7 +2113,7 @@ mod tests {
                     context.child("propose"),
                     TestBlock::child(&parent, 3).context(),
                 ),
-                parent.clone(),
+                digested_shared(&parent),
                 fixtures::blocks(parent.height(), std::slice::from_ref(&parent)),
                 (),
             ));
@@ -2114,8 +2124,8 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify_child"), child.context()),
-                Arc::new(child),
-                parent.clone(),
+                digested(child),
+                digested_shared(&parent),
                 fixtures::blocks(parent.height(), std::slice::from_ref(&parent)),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -2175,6 +2185,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -2199,8 +2210,8 @@ mod tests {
                     );
                     mailbox.verify(
                         (context.child("verify_child"), child.context()),
-                        Arc::new(child),
-                        source_parent,
+                        digested(child),
+                        digested_shared(&source_parent),
                         source,
                     )
                 }
@@ -2223,7 +2234,7 @@ mod tests {
             let conflicting = TestBlock::child(&genesis, 2);
 
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(canonical), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(canonical), acknowledgement));
             while control.flushes.lock().is_empty() {
                 context.sleep(Duration::from_millis(10)).await;
             }
@@ -2246,8 +2257,8 @@ mod tests {
                     );
                     mailbox.verify(
                         (context.child("verify"), conflicting.context()),
-                        Arc::new(conflicting),
-                        source_parent,
+                        digested(conflicting),
+                        digested_shared(&source_parent),
                         source,
                     )
                 }
@@ -2283,8 +2294,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 verifier.verify(
                     (context.child("verify"), consensus_context),
-                    Arc::new(block),
-                    source_parent,
+                    digested(block),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -2299,7 +2310,7 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 mailbox.propose(
                     (context.child("propose"), proposal_context),
-                    source_parent,
+                    digested_shared(&source_parent),
                     source,
                     (),
                 )
@@ -2354,7 +2365,7 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 proposer.propose(
                     (context.child("propose"), proposal_context),
-                    source_parent,
+                    digested_shared(&source_parent),
                     source,
                     (),
                 )
@@ -2370,8 +2381,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 mailbox.verify(
                     (context.child("verify"), consensus_context),
-                    Arc::new(block),
-                    source_parent,
+                    digested(block),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -2425,6 +2436,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let processing = Processing {
@@ -2451,7 +2463,7 @@ mod tests {
             proposal_started.await.expect("proposal should start");
 
             let (acknowledgement, mut waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
             context.sleep(Duration::from_millis(10)).await;
             assert!(poll!(&mut waiter).is_pending());
             assert!(!proposal_release.is_closed());
@@ -2498,6 +2510,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let processing = Processing {
@@ -2523,7 +2536,7 @@ mod tests {
                     context.child("propose"),
                     TestBlock::child(&parent, 3).context(),
                 ),
-                parent,
+                digested_shared(&parent),
                 blocks,
                 (),
             ));
@@ -2576,6 +2589,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let processing = Processing {
@@ -2601,7 +2615,7 @@ mod tests {
                 assert!(
                     marshal
                         .mailbox
-                        .verified(block.context().round, Arc::new(block.clone()))
+                        .verified(block.context().round, digested(block.clone()))
                         .await
                 );
             }
@@ -2610,8 +2624,8 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify_outgoing = Box::pin(verifier.verify(
                 (context.child("outgoing"), outgoing.context()),
-                Arc::new(outgoing.clone()),
-                Arc::clone(&genesis),
+                digested(outgoing.clone()),
+                digested_shared(&genesis),
                 fixtures::blocks(genesis.height(), std::slice::from_ref(&genesis)),
             ));
             assert!(poll!(&mut verify_outgoing).is_pending());
@@ -2633,7 +2647,7 @@ mod tests {
                 .await;
             proposal_started.await.expect("handoff build should start");
             let (acknowledgement, mut waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(outgoing.clone()), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(outgoing.clone()), acknowledgement));
 
             // The parent verifies and certifies while the build is held.
             let optimistic = deferred
@@ -2717,6 +2731,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -2739,7 +2754,7 @@ mod tests {
                     context.child("propose"),
                     TestBlock::child(&held, 6).context(),
                 ),
-                Arc::clone(&held),
+                digested_shared(&held),
                 fixtures::pending_blocks(held.height()),
                 (),
             ));
@@ -2747,20 +2762,20 @@ mod tests {
 
             // Finalizations and subscriptions queue behind the proposal, then a verification.
             let (acknowledgement, first_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(first), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(first), acknowledgement));
             let first_subscriber = mailbox.clone();
             let mut first_databases = Box::pin(first_subscriber.subscribe_databases());
             assert!(poll!(&mut first_databases).is_pending());
             let (acknowledgement, mut second_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(second), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(second), acknowledgement));
             let second_subscriber = mailbox.clone();
             let mut second_databases = Box::pin(second_subscriber.subscribe_databases());
             assert!(poll!(&mut second_databases).is_pending());
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), other.context()),
-                Arc::new(other),
-                Arc::clone(&genesis),
+                digested(other),
+                digested_shared(&genesis),
                 fixtures::blocks(genesis.height(), std::slice::from_ref(&genesis)),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -2851,6 +2866,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -2871,22 +2887,22 @@ mod tests {
                     context.child("propose"),
                     TestBlock::child(&genesis, 5).context(),
                 ),
-                Arc::clone(&genesis),
+                digested_shared(&genesis),
                 fixtures::blocks(genesis.height(), std::slice::from_ref(&genesis)),
                 (),
             ));
             assert!(poll!(&mut proposal).is_pending());
             proposal_started.await.expect("proposal should start");
             let (acknowledgement, mut waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(winner.clone(), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested_shared(&winner), acknowledgement));
 
             // Verifications queued after the finalization start during the proposal, one at a
             // time so each takes the next application gate.
             let mut winner_verifier = mailbox.clone();
             let mut verify_winner = Box::pin(winner_verifier.verify(
                 (context.child("verify_winner"), winner.context()),
-                Arc::new((*winner).clone()),
-                Arc::clone(&genesis),
+                digested_shared(&winner),
+                digested_shared(&genesis),
                 fixtures::blocks(genesis.height(), std::slice::from_ref(&genesis)),
             ));
             assert!(poll!(&mut verify_winner).is_pending());
@@ -2896,8 +2912,8 @@ mod tests {
             let mut child_verifier = mailbox.clone();
             let mut verify_child = Box::pin(child_verifier.verify(
                 (context.child("verify_child"), child.context()),
-                Arc::new(child),
-                Arc::clone(&winner),
+                digested(child),
+                digested_shared(&winner),
                 fixtures::blocks(winner.height(), std::slice::from_ref(&winner)),
             ));
             assert!(poll!(&mut verify_child).is_pending());
@@ -2907,8 +2923,8 @@ mod tests {
             let mut losing_verifier = mailbox.clone();
             let mut verify_losing = Box::pin(losing_verifier.verify(
                 (context.child("verify_losing"), losing_child.context()),
-                Arc::new(losing_child),
-                Arc::clone(&losing),
+                digested(losing_child),
+                digested_shared(&losing),
                 fixtures::blocks(losing.height(), std::slice::from_ref(&losing)),
             ));
             assert!(poll!(&mut verify_losing).is_pending());
@@ -2968,8 +2984,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 parent_verifier.verify(
                     (context.child("verify_parent"), losing_parent.context()),
-                    Arc::new(losing_parent.clone()),
-                    source_parent,
+                    digested(losing_parent.clone()),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -2992,7 +3008,7 @@ mod tests {
                         context.child("propose"),
                         TestBlock::child(&genesis, 4).context(),
                     ),
-                    source_parent,
+                    digested_shared(&source_parent),
                     source,
                     (),
                 )
@@ -3007,8 +3023,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 child_verifier.verify(
                     (context.child("verify_child"), losing_child.context()),
-                    Arc::new(losing_child),
-                    source_parent,
+                    digested(losing_child),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3018,7 +3034,7 @@ mod tests {
                 .expect("losing child verification should start");
 
             let (acknowledgement, mut waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
             context.sleep(Duration::from_millis(10)).await;
             assert!(poll!(&mut waiter).is_pending());
 
@@ -3076,8 +3092,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 parent_verifier.verify(
                     (context.child("verify_parent"), parent_context),
-                    Arc::new(parent.clone()),
-                    source_parent,
+                    digested(parent.clone()),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3098,8 +3114,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 child_verifier.verify(
                     (context.child("verify_child"), child_context),
-                    Arc::new(child),
-                    source_parent,
+                    digested(child),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3109,7 +3125,7 @@ mod tests {
                 .expect("child verification should start");
 
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(parent), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(parent), acknowledgement));
             waiter
                 .await
                 .expect("finalized parent should be acknowledged");
@@ -3148,8 +3164,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 fork_verifier.verify(
                     (context.child("verify_fork"), fork_context),
-                    Arc::new(losing_parent.clone()),
-                    source_parent,
+                    digested(losing_parent.clone()),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3168,8 +3184,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 child_verifier.verify(
                     (context.child("verify_child"), child_context),
-                    Arc::new(losing_child),
-                    source_parent,
+                    digested(losing_child),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3179,7 +3195,7 @@ mod tests {
                 .expect("losing child verification should start");
 
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
             select! {
                 _ = child_release.closed() => {},
                 _ = context.sleep(Duration::from_millis(100)) => {
@@ -3239,8 +3255,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 parent_verifier.verify(
                     (context.child("verify_parent"), losing_parent.context()),
-                    Arc::new(losing_parent.clone()),
-                    source_parent,
+                    digested(losing_parent.clone()),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3260,8 +3276,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 child_verifier.verify(
                     (context.child("verify_child"), losing_child.context()),
-                    Arc::new(losing_child.clone()),
-                    source_parent,
+                    digested(losing_child.clone()),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3284,8 +3300,8 @@ mod tests {
                         context.child("verify_grandchild"),
                         losing_grandchild.context(),
                     ),
-                    Arc::new(losing_grandchild),
-                    source_parent,
+                    digested(losing_grandchild),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3295,7 +3311,7 @@ mod tests {
                 .expect("losing grandchild verification should start");
 
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
             grandchild_release.closed().await;
             waiter.await.expect("winning block should be acknowledged");
 
@@ -3351,6 +3367,7 @@ mod tests {
                 anchor(1, 1),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -3371,8 +3388,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 verifier.verify(
                     (context.child("verify_child"), child.context()),
-                    Arc::new(child),
-                    source_parent,
+                    digested(child),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3382,7 +3399,7 @@ mod tests {
                 .expect("child verification should start");
 
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(finalized), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(finalized), acknowledgement));
             waiter
                 .await
                 .expect("redelivered anchor should be acknowledged");
@@ -3440,6 +3457,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mut mailbox = Mailbox::new(sender);
@@ -3454,7 +3472,7 @@ mod tests {
             let actor = context.child("loop").spawn(move |_| processing.run());
 
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(genesis), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(genesis), acknowledgement));
             waiter.await.expect("genesis should be acknowledged");
 
             assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
@@ -3493,6 +3511,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
 
             // Defer a verification as the syncing actor does before its
@@ -3512,8 +3531,8 @@ mod tests {
                         );
                         mailbox.verify(
                             (task_context, consensus_context),
-                            Arc::new(block),
-                            source_parent,
+                            digested(block),
+                            digested_shared(&source_parent),
                             source,
                         )
                     }
@@ -3591,6 +3610,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -3612,8 +3632,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 first_verifier.verify(
                     (context.child("first_verify"), consensus_context.clone()),
-                    Arc::new(first_child),
-                    source_parent,
+                    digested(first_child),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3624,8 +3644,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 second_verifier.verify(
                     (context.child("second_verify"), consensus_context),
-                    Arc::new(second_child),
-                    source_parent,
+                    digested(second_child),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3635,7 +3655,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(parent), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(parent), acknowledgement));
             context.sleep(Duration::from_millis(10)).await;
             apply_release
                 .send(())
@@ -3705,6 +3725,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -3725,8 +3746,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 child_verifier.verify(
                     (context.child("verify_child"), child.context()),
-                    Arc::new(child),
-                    source_parent,
+                    digested(child),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3743,8 +3764,8 @@ mod tests {
                     );
                     winner_verifier.verify(
                         (context.child("verify_winner"), finalized.context()),
-                        Arc::new(finalized.clone()),
-                        source_parent,
+                        digested(finalized.clone()),
+                        digested_shared(&source_parent),
                         source,
                     )
                 }
@@ -3754,7 +3775,7 @@ mod tests {
 
             let (acknowledgement, waiter) = Exact::handle();
             let mut waiter = Box::pin(waiter);
-            let _ = mailbox.report(Update::Block(Arc::new(finalized), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(finalized), acknowledgement));
             assert!(
                 poll!(&mut waiter).is_pending(),
                 "finalization must wait for the existing winner computation",
@@ -3815,6 +3836,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -3838,8 +3860,8 @@ mod tests {
                 );
                 child_verifier.verify(
                     (context.child("verify_child"), child.context()),
-                    Arc::new(child),
-                    source_parent,
+                    digested(child),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3858,8 +3880,8 @@ mod tests {
                     );
                     first_verifier.verify(
                         (context.child("verify_first"), first.context()),
-                        Arc::new(first.clone()),
-                        source_parent,
+                        digested(first.clone()),
+                        digested_shared(&source_parent),
                         source,
                     )
                 }
@@ -3870,7 +3892,7 @@ mod tests {
             assert!(verify_gate.lock().replace(gate).is_none());
 
             let (acknowledgement, first_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(first), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(first), acknowledgement));
             replay_release
                 .send(())
                 .expect("first-block replay should remain active");
@@ -3883,7 +3905,7 @@ mod tests {
             assert!(poll!(&mut verify_child).is_pending());
 
             let (acknowledgement, second_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(second), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(second), acknowledgement));
             second_waiter
                 .await
                 .expect("second finalized block should be acknowledged");
@@ -3941,6 +3963,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -3961,8 +3984,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 first_verifier.verify(
                     (context.child("first_attempt"), losing.context()),
-                    Arc::new(losing.clone()),
-                    source_parent,
+                    digested(losing.clone()),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3976,8 +3999,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 retried_verifier.verify(
                     (context.child("retried"), losing.context()),
-                    Arc::new(losing),
-                    source_parent,
+                    digested(losing),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -3985,9 +4008,9 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             let (acknowledgement, first_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(first), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(first), acknowledgement));
             let (acknowledgement, winner_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
             replay_release
                 .send(())
                 .expect("finalization should retain the replay owner");
@@ -4082,6 +4105,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 Some(pruning),
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -4096,13 +4120,13 @@ mod tests {
             let actor = context.child("loop").spawn(move |_| processing.run());
 
             let (acknowledgement, waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(block1), acknowledgement));
             while control.flushes.lock().is_empty() {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
             let (acknowledgement, waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(block2.clone()), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(block2.clone()), acknowledgement));
             let consensus_context = child.context();
             let mut verify = Box::pin({
                 let source_parent = Arc::new(parent.clone());
@@ -4110,8 +4134,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 mailbox.verify(
                     (context.child("verify"), consensus_context),
-                    Arc::new(child),
-                    source_parent,
+                    digested(child),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -4218,6 +4242,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 Some(pruning),
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -4232,9 +4257,9 @@ mod tests {
             let actor = context.child("loop").spawn(move |_| processing.run());
 
             let (acknowledgement, waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(block1), acknowledgement));
             let (acknowledgement, waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(block2.clone()), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(block2.clone()), acknowledgement));
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin({
                 let source_parent = Arc::new(block2.clone());
@@ -4242,8 +4267,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 verifier.verify(
                     (context.child("verify"), losing.context()),
-                    Arc::new(losing),
-                    source_parent,
+                    digested(losing),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -4267,7 +4292,7 @@ mod tests {
             verify_release.closed().await;
 
             let (acknowledgement, winner_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(winner.clone()), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(winner.clone()), acknowledgement));
             let proposal_context = TestBlock::child(&winner, 5).context();
             let mut proposer = mailbox.clone();
             let mut proposal = Box::pin({
@@ -4276,7 +4301,7 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 proposer.propose(
                     (context.child("propose"), proposal_context),
-                    source_parent,
+                    digested_shared(&source_parent),
                     source,
                     (),
                 )
@@ -4362,9 +4387,9 @@ mod tests {
             // Apply blocks 1 and 2 without releasing any flush: the loop must
             // stay live (both blocks applied) while no acknowledgement fires.
             let (acknowledgement, mut waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(block1), acknowledgement));
             let (acknowledgement, mut waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(block2.clone()), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(block2.clone()), acknowledgement));
 
             // Queue a verification before pruning starts, then hold it in the
             // application until the prune is waiting on durability.
@@ -4376,8 +4401,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 verifier.verify(
                     (context.child("verify"), consensus_context),
-                    Arc::new(block3),
-                    source_parent,
+                    digested(block3),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -4477,6 +4502,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(2));
             let mut mailbox = Mailbox::new(sender);
@@ -4491,7 +4517,7 @@ mod tests {
             let actor = context.child("loop").spawn(move |_| processing.run());
 
             let (acknowledgement, mut waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(block1), acknowledgement));
             finalized_started
                 .await
                 .expect("finalized handoff should start");
@@ -4506,7 +4532,7 @@ mod tests {
                 .expect("finalized handoff should remain active");
 
             let (acknowledgement, mut waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(block2), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(block2), acknowledgement));
             while control.applied.load(Ordering::Relaxed) < 2 {
                 context.sleep(Duration::from_millis(10)).await;
             }
@@ -4556,10 +4582,10 @@ mod tests {
             // Apply block 1 with its flush held, then report it again.
             let first = TestBlock::child(&TestBlock::new(0, 0), 1);
             let (ack, _waiter) = Exact::handle();
-            mailbox.report(Update::Block(Arc::new(first.clone()), ack));
+            mailbox.report(Update::Block(digested(first.clone()), ack));
             drop(mailbox.subscribe_databases().await);
             let (ack, mut duplicate) = Exact::handle();
-            mailbox.report(Update::Block(Arc::new(first.clone()), ack));
+            mailbox.report(Update::Block(digested(first.clone()), ack));
 
             // The subscription is a FIFO fence after both reports have been handled.
             drop(mailbox.subscribe_databases().await);
@@ -4651,6 +4677,7 @@ mod tests {
                     anchor(0, 0),
                     StatefulMetrics::new(&context),
                     None,
+                    Sequential,
                 ),
                 deferred_verifications: Vec::new(),
             };
@@ -4674,7 +4701,7 @@ mod tests {
             for block in &blocks[1..] {
                 assert!(
                     ingress
-                        .verified(block.context().round, Arc::new(block.clone()))
+                        .verified(block.context().round, digested(block.clone()))
                         .await
                 );
                 let finalization = if block.height().get() == floor_height {
@@ -4715,8 +4742,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 verifier.verify(
                     (context.child("verify_child"), child.context()),
-                    Arc::new(child),
-                    source_parent,
+                    digested(child),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -4841,6 +4868,7 @@ mod tests {
                     anchor(0, 0),
                     StatefulMetrics::new(&context),
                     None,
+                    Sequential,
                 ),
                 deferred_verifications: Vec::new(),
             };
@@ -4854,7 +4882,7 @@ mod tests {
             assert!(
                 marshal
                     .mailbox
-                    .verified(floor.context().round, Arc::new(floor.clone()))
+                    .verified(floor.context().round, digested(floor.clone()))
                     .await
             );
             marshal
@@ -4880,7 +4908,7 @@ mod tests {
 
             let (acknowledgement, mut waiter1) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(1, 1)),
+                digested(TestBlock::new(1, 1)),
                 acknowledgement,
             ));
             while control.flushes.lock().is_empty() {
@@ -4892,7 +4920,7 @@ mod tests {
             for height in 2..=BLOCKS {
                 let block = TestBlock::child(&parent, height as u8);
                 let (acknowledgement, waiter) = Exact::handle();
-                let _ = mailbox.report(Update::Block(Arc::new(block.clone()), acknowledgement));
+                let _ = mailbox.report(Update::Block(digested(block.clone()), acknowledgement));
                 waiters.push(waiter);
                 parent = block;
             }
@@ -4955,7 +4983,7 @@ mod tests {
             let block2 = TestBlock::child(&block1, 2);
             let (acknowledgement, waiter1) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(block1.clone()),
+                digested(block1.clone()),
                 acknowledgement,
             ));
             while control.flushes.lock().is_empty() {
@@ -4964,7 +4992,7 @@ mod tests {
 
             let (acknowledgement, mut waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(block2.clone()),
+                digested(block2.clone()),
                 acknowledgement,
             ));
             while control.applied.load(Ordering::Relaxed) < 2 {
@@ -4980,8 +5008,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 verifier.verify(
                     (context.child("verify"), consensus_context),
-                    Arc::new(block3),
-                    source_parent,
+                    digested(block3),
+                    digested_shared(&source_parent),
                     source,
                 )
             });
@@ -5038,13 +5066,13 @@ mod tests {
             let block1 = TestBlock::child(&genesis, 1);
             let block2 = TestBlock::child(&block1, 2);
             let (acknowledgement, waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(block1.clone()), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(block1.clone()), acknowledgement));
             while control.flushes.lock().is_empty() {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
             let (acknowledgement, waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(block2.clone()), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(block2.clone()), acknowledgement));
             while control.applied.load(Ordering::Relaxed) < 2 {
                 context.sleep(Duration::from_millis(10)).await;
             }
@@ -5057,8 +5085,8 @@ mod tests {
                     fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
                 verifier.verify(
                     (context.child("verify"), block3.context()),
-                    Arc::new(block3),
-                    source_parent,
+                    digested(block3),
+                    digested_shared(&source_parent),
                     source,
                 )
             };
@@ -5109,12 +5137,12 @@ mod tests {
 
             let (acknowledgement, waiter1) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(1, 1)),
+                digested(TestBlock::new(1, 1)),
                 acknowledgement,
             ));
             let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::child(&TestBlock::new(1, 1), 2)),
+                digested(TestBlock::child(&TestBlock::new(1, 1), 2)),
                 acknowledgement,
             ));
             while control.applied.load(Ordering::Relaxed) < 2 {
@@ -5151,7 +5179,7 @@ mod tests {
             // Park the loop idle with block 1's flush pending.
             let (acknowledgement, mut waiter1) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(1, 1)),
+                digested(TestBlock::new(1, 1)),
                 acknowledgement,
             ));
             while control.flushes.lock().is_empty() {
@@ -5167,7 +5195,7 @@ mod tests {
             let _ = release.send(Ok(()));
             let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::child(&TestBlock::new(1, 1), 2)),
+                digested(TestBlock::child(&TestBlock::new(1, 1), 2)),
                 acknowledgement,
             ));
             waiter1.await.expect("block 1 acknowledgement");
@@ -5196,7 +5224,7 @@ mod tests {
 
             let (acknowledgement, waiter1) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(1, 1)),
+                digested(TestBlock::new(1, 1)),
                 acknowledgement,
             ));
             while control.flushes.lock().is_empty() {
@@ -5205,7 +5233,7 @@ mod tests {
 
             let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::child(&TestBlock::new(1, 1), 2)),
+                digested(TestBlock::child(&TestBlock::new(1, 1), 2)),
                 acknowledgement,
             ));
             while control.applied.load(Ordering::Relaxed) < 2 {
@@ -5236,7 +5264,7 @@ mod tests {
 
             let (acknowledgement, waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(1, 1)),
+                digested(TestBlock::new(1, 1)),
                 acknowledgement,
             ));
             while control.flushes.lock().is_empty() {
@@ -5263,7 +5291,7 @@ mod tests {
 
             let (acknowledgement, _waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(1, 1)),
+                digested(TestBlock::new(1, 1)),
                 acknowledgement,
             ));
             while control.flushes.lock().is_empty() {
@@ -5326,8 +5354,8 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), block.context()),
-                Arc::new(block),
-                parent.clone(),
+                digested(block),
+                digested_shared(&parent),
                 blocks,
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -5338,7 +5366,7 @@ mod tests {
 
             // Redeliver the applied tip, then fence behind any requeued verification.
             let (ack, waiter) = Exact::handle();
-            mailbox.report(Update::Block(Arc::new(genesis), ack));
+            mailbox.report(Update::Block(digested(genesis), ack));
             waiter.await.expect("redelivered tip must be acknowledged");
             drop(mailbox.subscribe_databases().await);
             assert_eq!(
