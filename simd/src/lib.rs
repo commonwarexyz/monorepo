@@ -36,8 +36,8 @@ extern crate std;
 //
 // Ocelot uses the AES polynomial basis (modulus 0x11b), matching GFNI multiplication directly.
 // Its GF16 algorithms compose GF8 multiplication and XOR over two byte planes; they do not
-// require integer widening or GFNI affine transforms. The current PR has portable and AVX-512
-// kernels only. An Ocelot NEON instruction schedule remains to be chosen.
+// require integer widening or GFNI affine transforms. Ocelot has portable and AVX-512 kernels;
+// its NEON instruction schedule is not yet chosen.
 //
 // IFMA multiplies the low 52 bits of each source, selects the low or high 52-bit product half,
 // and adds into the full wrapping u64 accumulator. NEON widening consumes two u32 lanes and
