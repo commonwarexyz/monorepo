@@ -99,7 +99,7 @@ jobs:
           echo "All lints passed!"
 
   # The fast and slow nextest profiles only select which tests run, so one build of each
-  # configuration's test binaries, on a larger runner, serves both.
+  # configuration's test binaries, on a larger runner, serves all of its partitions.
   Tests-Build:
     name: "Tests (os: ${{ matrix.os }}${{ matrix.flags && format(', flags: \"{0}\"', matrix.flags) || '' }}) (build)"
     runs-on: ${{ matrix.runner }}
@@ -141,9 +141,9 @@ jobs:
         retention-days: 1
         overwrite: true
 
-  # Coverage runs every Linux test, slow ones included, for both Linux configurations, so the
-  # slow partitions here run only on macOS. All partitions share one matrix, so the first failing
-  # partition cancels the others.
+  # Coverage runs every Linux test outside the fuzz crates, slow ones included, for both Linux
+  # configurations, so the slow partitions here run only on macOS. All partitions share one
+  # matrix, so the first failing partition cancels the others.
   Tests:
     name: "Tests (os: ${{ matrix.config.os }}${{ matrix.config.flags && format(', flags: \"{0}\"', matrix.config.flags) || '' }}, suite: ${{ matrix.shard.suite }}) (partition: ${{ matrix.shard.partition }}/${{ matrix.shard.partitions }})"
     needs: Tests-Build
