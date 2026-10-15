@@ -145,6 +145,9 @@ At the outer boundary, `dispatch` selects a native backend supported by the host
 falling back to scalar emulation.
 The default `std` feature enables runtime CPU feature detection. Without `std`,
 native backends require their features to be enabled at compile time.
+Targets whose architecture is supported but which lack a required baseline
+feature, such as AArch64 without NEON, build without the native backends and
+always dispatch to scalar emulation.
 
 Dispatch requires one operation that implements every candidate backend with a
 common output type. Use a struct for this adapter, and return ordinary Rust

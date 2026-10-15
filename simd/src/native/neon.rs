@@ -40,7 +40,8 @@ pub struct NativeNeon(());
 impl NativeNeon {
     /// Returns a token if the current CPU supports NEON and SHA2.
     ///
-    /// Without `std`, both features must be enabled at compile time.
+    /// Without `std`, SHA2 must be enabled at compile time. NEON is always enabled when
+    /// this type exists.
     pub fn new() -> Option<Self> {
         #[cfg(feature = "std")]
         {
@@ -50,7 +51,7 @@ impl NativeNeon {
         }
         #[cfg(not(feature = "std"))]
         {
-            (cfg!(target_feature = "neon") && cfg!(target_feature = "sha2")).then_some(Self(()))
+            cfg!(target_feature = "sha2").then_some(Self(()))
         }
     }
 }
