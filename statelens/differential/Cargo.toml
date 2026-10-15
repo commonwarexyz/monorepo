@@ -1,0 +1,32 @@
+# Test-only crate: the differential test of TSS prefixes against the marshal
+# scenario prefixes (see README.md). The empty `[workspace]` table below stops
+# cargo's upward search, so the root workspace never builds it (an explicit
+# exception to PRD R-LAYOUT-2); the shim, a path dependency under this
+# directory, is a member of it automatically. `statelens/scripts/differential.sh`
+# builds it in a scratch worktree.
+[package]
+name = "statelens-differential"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+bytes = "1"
+commonware-actor = { path = "../../actor" }
+commonware-codec = { path = "../../codec" }
+commonware-consensus = { path = "../../consensus", features = ["mocks"] }
+commonware-consensus-fuzz-core = { path = "../../consensus/fuzz/core" }
+commonware-consensus-fuzz-marshal = { path = "../../consensus/fuzz/marshal" }
+commonware-cryptography = { path = "../../cryptography", features = ["mocks"] }
+commonware-macros = { path = "../../macros" }
+commonware-p2p = { path = "../../p2p", features = ["mocks"] }
+commonware-resolver = { path = "../../resolver" }
+commonware-runtime = { path = "../../runtime", features = ["test-utils"] }
+commonware-utils = { path = "../../utils" }
+futures = "0.3"
+statelens-differential-shim = { path = "shim" }
