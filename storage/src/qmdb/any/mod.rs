@@ -2578,7 +2578,7 @@ pub(crate) mod test {
     }
 
     /// Prefetching applied keys warms every page a later read of them needs, skips absent
-    /// keys, and borrows nothing from the database: a prefetch outlives the handle it came from
+    /// keys, and borrows nothing from the database. A prefetch outlives the handle it came from
     /// across a prune, and dropping one mid-flight leaves the database usable. `cache` is the
     /// database's page cache.
     pub(crate) async fn test_any_db_prefetch<F: Family, D>(
