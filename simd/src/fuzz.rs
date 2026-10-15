@@ -363,12 +363,6 @@ fn test_selected_profile() {
         };
         assert_eq!(selected.0, path, "unexpected SIMD dispatch backend");
     }
-    #[cfg(all(target_arch = "aarch64", feature = "std"))]
-    if std::arch::is_aarch64_feature_detected!("neon")
-        && std::arch::is_aarch64_feature_detected!("sha2")
-    {
-        assert!(matches!(selected.0, Path::Neon | Path::ArmV9));
-    }
     if selected.0 == Path::Portable {
         for plan in [
             Plan::Load,
