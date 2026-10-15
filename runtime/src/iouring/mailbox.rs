@@ -7,6 +7,9 @@
 //! worker swaps the whole batch into its scratch buffer and applies it outside
 //! the lock. A closed mailbox returns messages to the sender, so no payload is
 //! ever destroyed under the lock.
+//!
+//! The pool's idle state also signals a selected worker through its mailbox's
+//! [`Waker`], without a message. See [`super::idle`] for parking order.
 
 use super::{request::RequestOutput, sleep::TimerId, waiter::WaiterId, waker::Waker};
 use crate::Error;
