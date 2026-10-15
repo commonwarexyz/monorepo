@@ -76,8 +76,10 @@
 //! [Archive] uses two maps to enable lookups by both index and key. The memory used to track each
 //! index item is `8 + 8` (where `8` is the index and `8` is the position in the index journal).
 //! The memory used to track each key item is `~translated(key).len() + 16` bytes (where `16` is the
-//! size of the `Record` struct). This means that an [Archive] employing a [Translator] that uses
-//! the first `8` bytes of a key will use `~40` bytes to index each key.
+//! size of the `Record` struct), plus a second copy of `translated(key)` kept per section so that
+//! pruning can retire the key (see [Index Cleanup](#index-cleanup)). This means that an [Archive]
+//! employing a [Translator] that uses the first `8` bytes of a key will use `~48` bytes to index
+//! each key.
 //!
 //! ### MultiArchive Overhead
 //!
@@ -100,13 +102,14 @@
 //! called on a `section`, entries below the pruned `section` are gone: `get` returns `None`,
 //! and a `put` below the floor is satisfied without storing.
 //!
-//! ## Lazy Index Cleanup
+//! ## Index Cleanup
 //!
-//! Instead of performing a full iteration of the in-memory index, storing an additional in-memory
-//! index per `section`, or replaying a `section` of the value blob,
-//! [Archive] lazily cleans up the [crate::index::unordered::Index] after pruning. When a new key is
-//! stored that overlaps (same translated value) with a pruned key, the pruned key is removed from
-//! the in-memory index.
+//! [Archive] keeps the translated key of every record in each retained `section`. Pruning a
+//! `section` visits exactly those translated keys in the [crate::index::unordered::Index] and
+//! drops the entries whose index is below the new floor, so the index holds only retained items
+//! without reading the index journal or scanning the whole in-memory index. Entries that share a
+//! translated key with a retained record survive, including the same key stored at a retained
+//! index.
 //!
 //! # Read Path
 //!
@@ -222,7 +225,7 @@ mod tests {
     use crate::{
         archive::{Archive as _, Error, Identifier, MultiArchive as _},
         journal::{Error as JournalError, segmented::glob::corrupt_frame},
-        translator::{FourCap, TwoCap},
+        translator::{EightCap, FourCap, TwoCap},
     };
     use commonware_codec::{Error as CodecError, FixedSize};
     use commonware_cryptography::Crc32;
@@ -266,8 +269,17 @@ mod tests {
         partition_prefix: &str,
         items_per_section: NonZeroU64,
     ) -> Config<FourCap, ()> {
+        translated_config(context, partition_prefix, items_per_section, FourCap)
+    }
+
+    fn translated_config<E: BufferPooler, T: Translator>(
+        context: &E,
+        partition_prefix: &str,
+        items_per_section: NonZeroU64,
+        translator: T,
+    ) -> Config<T, ()> {
         Config {
-            translator: FourCap,
+            translator,
             metadata_partition: format!("{partition_prefix}-metadata"),
             key_partition: format!("{partition_prefix}-index"),
             key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2389,7 +2401,8 @@ mod tests {
             let buffer = context.encode();
             assert!(has_metric_value(&buffer, "items_tracked", 3));
             assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
-            assert!(has_metric_value(&buffer, "pruned_total", 0)); // no lazy cleanup yet
+            assert!(has_metric_value(&buffer, "index_items", 3));
+            assert!(has_metric_value(&buffer, "index_pruned_total", 2));
 
             // Try to prune older section
             archive = archive.prune(2).await.expect("Failed to prune");
@@ -2397,7 +2410,7 @@ mod tests {
             // Try to prune current section again
             archive = archive.prune(3).await.expect("Failed to prune");
 
-            // Trigger lazy removal of keys
+            // Reusing a pruned key's translated key does not count another removal
             archive = archive
                 .put(6, test_key("key2-blfh"), &5)
                 .await
@@ -2405,9 +2418,10 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(has_metric_value(&buffer, "items_tracked", 4)); // lazily remove one, add one
+            assert!(has_metric_value(&buffer, "items_tracked", 4));
             assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
-            assert!(has_metric_value(&buffer, "pruned_total", 1));
+            assert!(has_metric_value(&buffer, "index_items", 4));
+            assert!(has_metric_value(&buffer, "index_pruned_total", 2));
 
             // A put below the prune floor is satisfied without storing
             let archive = archive
@@ -2501,7 +2515,7 @@ mod tests {
             // Check metrics
             let buffer = context.encode();
             assert!(has_metric_value(&buffer, "items_tracked", num_keys));
-            assert!(has_metric_value(&buffer, "pruned_total", 0));
+            assert!(has_metric_value(&buffer, "index_pruned_total", 0));
 
             // Sync and drop the archive
             let archive = archive.sync().await.expect("Failed to sync archive");
@@ -2587,7 +2601,8 @@ mod tests {
                 num_keys - removed
             ));
             assert!(has_metric_value(&buffer, "indices_pruned_total", removed));
-            assert!(has_metric_value(&buffer, "pruned_total", 0)); // have not lazily removed keys yet
+            assert!(has_metric_value(&buffer, "index_items", num_keys - removed));
+            assert!(has_metric_value(&buffer, "index_pruned_total", removed));
 
             context.auditor().state()
         })
@@ -2890,6 +2905,132 @@ mod tests {
                 .await
                 .expect("Failed to put_multi_sync below floor");
             assert_eq!(archive.get_all(2).await.expect("Failed to get data"), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_retires_keys() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // A wide translator never reuses a bucket, so every pruned key must be retired by
+            // prune itself.
+            let cfg = translated_config(&context, "test", NZU64!(4), EightCap);
+            let mut archive = Archive::init(context.child("storage"), cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+            let key = |index: u64| test_key(&format!("{index:04x}"));
+            for batch in 0..32u64 {
+                let first = batch * 16;
+                for index in first..first + 16 {
+                    archive = archive
+                        .put(index, key(index), &(index as i32))
+                        .await
+                        .expect("Failed to put data");
+                }
+                archive = archive.prune(first).await.expect("Failed to prune");
+
+                // The key index holds exactly the retained window.
+                let buffer = context.encode();
+                assert!(has_metric_value(&buffer, "items_tracked", 16));
+                assert!(has_metric_value(&buffer, "index_items", 16));
+                assert!(has_metric_value(&buffer, "index_keys", 16));
+                assert_eq!(
+                    archive.get(Identifier::Key(&key(first))).await.unwrap(),
+                    Some(first as i32)
+                );
+                if first > 0 {
+                    assert_eq!(
+                        archive.get(Identifier::Key(&key(first - 1))).await.unwrap(),
+                        None
+                    );
+                }
+
+                // Pruning within the retained section changes nothing.
+                archive = archive.prune(first + 1).await.expect("Failed to prune");
+                assert!(has_metric_value(&context.encode(), "index_items", 16));
+            }
+
+            // Restart rebuilds the retained window, and pruning everything empties it.
+            archive.sync().await.expect("Failed to sync archive");
+            let archive = Archive::init(context.child("reopened"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let buffer = context.encode();
+            assert!(has_metric_value(&buffer, "reopened_index_items", 16));
+            assert!(has_metric_value(&buffer, "reopened_index_keys", 16));
+            assert_eq!(
+                archive.get(Identifier::Key(&key(511))).await.unwrap(),
+                Some(511)
+            );
+            assert_eq!(archive.get(Identifier::Key(&key(495))).await.unwrap(), None);
+            let archive = archive.prune(512).await.expect("Failed to prune");
+            let buffer = context.encode();
+            assert!(has_metric_value(&buffer, "reopened_items_tracked", 0));
+            assert!(has_metric_value(&buffer, "reopened_index_items", 0));
+            assert!(has_metric_value(&buffer, "reopened_index_keys", 0));
+            assert_eq!(archive.get(Identifier::Key(&key(511))).await.unwrap(), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_keeps_colliding_retained_keys() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Each pruned key shares its translated key with a retained record: another key,
+            // a put_multi value, or the same key stored on both sides of the floor.
+            let cfg = test_config(&context, "test", NZU64!(4));
+            let mut archive = Archive::init(context.child("storage"), cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+            archive = archive.put(1, test_key("head-pruned"), &10).await.unwrap();
+            archive = archive.put(5, test_key("head-kept"), &50).await.unwrap();
+            archive = archive
+                .put_multi(5, test_key("tail-kept"), &51)
+                .await
+                .unwrap();
+            archive = archive.put(2, test_key("tail-pruned"), &20).await.unwrap();
+            archive = archive.put_multi(1, test_key("same"), &60).await.unwrap();
+            archive = archive.put_multi(5, test_key("same"), &61).await.unwrap();
+            archive = archive.prune(7).await.expect("Failed to prune");
+
+            let expected = [
+                ("head-kept", Some(50)),
+                ("tail-kept", Some(51)),
+                ("same", Some(61)),
+                ("head-pruned", None),
+                ("tail-pruned", None),
+            ];
+            assert_eq!(archive.get_all(5).await.unwrap(), Some(vec![50, 51, 61]));
+            for (key, value) in expected {
+                assert_eq!(
+                    archive.get(Identifier::Key(&test_key(key))).await.unwrap(),
+                    value,
+                    "{key}"
+                );
+            }
+            let buffer = context.encode();
+            assert!(has_metric_value(&buffer, "index_items", 3));
+            assert!(has_metric_value(&buffer, "index_keys", 3));
+            assert!(has_metric_value(&buffer, "index_pruned_total", 3));
+
+            // The retained entries survive a restart.
+            archive.sync().await.expect("Failed to sync archive");
+            let archive = Archive::init(context.child("reopened"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            assert_eq!(archive.get_all(5).await.unwrap(), Some(vec![50, 51, 61]));
+            for (key, value) in expected {
+                assert_eq!(
+                    archive.get(Identifier::Key(&test_key(key))).await.unwrap(),
+                    value,
+                    "{key}"
+                );
+            }
+            assert!(has_metric_value(
+                &context.encode(),
+                "reopened_index_items",
+                3
+            ));
         });
     }
 }

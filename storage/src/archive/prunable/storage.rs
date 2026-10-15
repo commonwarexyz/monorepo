@@ -129,6 +129,10 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     /// Maps translated key representation to its corresponding index.
     keys: Index<T, u64>,
 
+    /// Translated key of every record in each retained section. Pruning a section retires its
+    /// entries from `keys` without reading the index journal.
+    section_keys: BTreeMap<u64, Vec<T::Key>>,
+
     /// Maps index to its first position in the index journal.
     indices: BTreeMap<u64, u64>,
 
@@ -198,10 +202,11 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         let mut indices: BTreeMap<u64, u64> = BTreeMap::new();
         let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut keys = Index::new(context.child("index"), cfg.translator);
+        let mut section_keys: BTreeMap<u64, Vec<T::Key>> = BTreeMap::new();
         let mut intervals = RMap::new();
         debug!("initializing archive from index journal");
         while let Some(result) = replay.next().await {
-            let (_, position, entry) = result?;
+            let (section, position, entry) = result?;
 
             // Index every retained occurrence by position, translated key, and range.
             match indices.entry(entry.index) {
@@ -213,6 +218,10 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
                 }
             }
             keys.insert(&entry.key, entry.index);
+            section_keys
+                .entry(section)
+                .or_default()
+                .push(keys.translate(entry.key.as_ref()));
             intervals.insert(entry.index);
         }
         let oversized = replay.finish_tracked().await?;
@@ -241,6 +250,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             extra_indices,
             intervals,
             keys,
+            section_keys,
             items_tracked,
             indices_pruned,
             unnecessary_reads,
@@ -385,9 +395,12 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         // Store interval
         self.intervals.insert(index);
 
-        // Insert and prune any useless keys
-        self.keys
-            .insert_and_retain(&key, index, |v| *v >= oldest_allowed);
+        // Index the record by key and remember its translated key for pruning.
+        self.keys.insert(&key, index);
+        self.section_keys
+            .entry(section)
+            .or_default()
+            .push(self.keys.translate(key.as_ref()));
 
         // Include this section in the next sync request.
         self.pending.insert(section);
@@ -428,6 +441,18 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             self.indices.remove(&next).unwrap();
             self.extra_indices.remove(&next);
             self.indices_pruned.inc();
+        }
+
+        // Retire the pruned sections' entries from the key index. Each translated key is
+        // visited once so that colliding keys cannot make this quadratic, and the predicate
+        // keeps entries that share a translated key with a retained record.
+        let retained = self.section_keys.split_off(&min);
+        for mut translated in std::mem::replace(&mut self.section_keys, retained).into_values() {
+            translated.sort_unstable();
+            translated.dedup();
+            for key in translated {
+                self.keys.retain_translated(key, |index| *index >= min);
+            }
         }
 
         // Remove pruned indices from the retained range view.

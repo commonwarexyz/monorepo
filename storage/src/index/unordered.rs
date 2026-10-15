@@ -118,6 +118,49 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
             }
         }
     }
+
+    /// Translate `key` into the key its values are stored under.
+    pub(crate) fn translate(&self, key: &[u8]) -> T::Key {
+        self.translator.transform(key)
+    }
+
+    /// Retain only the values stored under the translated key `k` for which `should_retain`
+    /// returns `true`, visiting them in unspecified order. The key is removed once no value
+    /// remains. The cost is linear in the number of values stored under `k`.
+    pub(crate) fn retain_translated(
+        &mut self,
+        k: T::Key,
+        mut should_retain: impl FnMut(&V) -> bool,
+    ) {
+        let Entry::Occupied(mut entry) = self.map.entry(k) else {
+            return;
+        };
+        let keep_head = should_retain(entry.get());
+        let mut removed = usize::from(!keep_head);
+        if let Some(chain) = self.overflow.get_mut(&k) {
+            let before = chain.len();
+            chain.retain(&mut should_retain);
+            removed += before - chain.len();
+            if !keep_head {
+                // The chain is stored oldest first, so its last value is the newest survivor.
+                match chain.pop() {
+                    Some(head) => *entry.get_mut() = head,
+                    None => {
+                        entry.remove();
+                        self.keys.dec();
+                    }
+                }
+            }
+            if chain.is_empty() {
+                self.overflow.remove(&k);
+            }
+        } else if !keep_head {
+            entry.remove();
+            self.keys.dec();
+        }
+        self.items.dec_by(removed as i64);
+        self.pruned.inc_by(removed as u64);
+    }
 }
 
 impl<T: Translator, V: Send + Sync> super::Factory for Index<T, V> {
@@ -281,5 +324,58 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     #[cfg(test)]
     fn pruned(&self) -> usize {
         self.pruned.get() as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::translator::FourCap;
+    use commonware_macros::test_traced;
+    use commonware_runtime::{Runner, deterministic};
+
+    #[test_traced]
+    fn test_retain_translated_every_subset() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = Index::new(context, FourCap);
+            let k = index.translate(b"same");
+            let mut pruned = 0;
+            for mask in 0u8..32 {
+                for value in 0..5 {
+                    index.insert(b"same", value);
+                }
+                let before = index.pruned();
+                index.retain_translated(k, |value| mask & (1 << value) != 0);
+
+                // Survivors keep their iteration order (newest first) whether or not the
+                // inline value survived.
+                let expected: Vec<u64> = (0..5).rev().filter(|v| mask & (1 << v) != 0).collect();
+                assert_eq!(index.get(b"same").copied().collect::<Vec<_>>(), expected);
+                assert_eq!(index.keys(), usize::from(mask != 0));
+                assert_eq!(index.items(), expected.len());
+                assert_eq!(index.pruned() - before, 5 - expected.len());
+
+                // A later insert still lands inline, and removing everything drops the key.
+                index.insert(b"same", 5);
+                assert_eq!(index.get(b"same").next(), Some(&5));
+                index.retain_translated(k, |_| false);
+                assert_eq!((index.keys(), index.items()), (0, 0));
+                pruned += 6;
+                assert_eq!(index.pruned(), pruned);
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_retain_translated_missing_key() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = Index::new(context, FourCap);
+            index.insert(b"other", 1u64);
+            index.retain_translated(index.translate(b"same"), |_| false);
+            assert_eq!(index.get(b"other").copied().collect::<Vec<_>>(), vec![1]);
+            assert_eq!((index.keys(), index.items(), index.pruned()), (1, 1, 0));
+        });
     }
 }
