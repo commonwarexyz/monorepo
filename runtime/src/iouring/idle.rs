@@ -64,26 +64,30 @@
 //! returned this way hands the duty on: it fences and wakes a parked worker, as
 //! a kick does. A parking worker publishes its idle bit, returns its count
 //! without handing it on, fences, and looks once more. A global runnable sends
-//! it back to work. A held count makes it wait without reading the other run
-//! queues, since that count's last return will find a backlog or wake a parked
-//! worker, this one included. Otherwise a stealable backlog in another run
-//! queue sends it to search. It waits as well when a thief's claim holds room
-//! its own run queue needs, since that thief holds a count. Every exit of the
-//! drive loop, unwinding included, withdraws a live publication and returns a
-//! held count before the worker destroys its root.
+//! it back to work. That look stops before the run queues, so a worker that
+//! returned the last count withdraws and then hands the duty on as a last
+//! return does, unless a claim brought it a count, which it returns before user
+//! code. A held count makes it wait without reading the other run queues, since
+//! that count's last return will find a backlog or wake a parked worker, this
+//! one included. Otherwise a stealable backlog in another run queue sends it to
+//! search. It waits as well when a thief's claim holds room its own run queue
+//! needs, since that thief holds a count. Every exit of the drive loop,
+//! unwinding included, withdraws a live publication and returns a held count
+//! before the worker destroys its root.
 //!
 //! ```text
 //! push or kick                           parking worker i
 //!   publish work (or hand on a search)     set bit i, return a held count
 //!   fence(SeqCst)                          fence(SeqCst)
-//!   kick: a count is held, return          global nonempty: withdraw, run
-//!   no idle bit: return                    no room, or a count held: wait
-//!   reserve a count                        stealable backlog: take the count
-//!     kick: only if still zero               if zero, withdraw, search
-//!   claim lowest bit                       otherwise: wait
-//!     success: signal its worker           wait: spin, or arm and attempt a wait,
-//!     failure: return the reserved count     then withdraw, keeping a claim's count
-//!       last return: fence and retry
+//!   kick: a count is held, return          global nonempty: withdraw
+//!   no idle bit: return                      last count returned, unclaimed: kick
+//!   reserve a count                          run
+//!     kick: only if still zero             no room, or a count held: wait
+//!   claim lowest bit                       stealable backlog: take the count
+//!     success: signal its worker             if zero, withdraw, search
+//!     failure: return the reserved count   otherwise: wait
+//!       last return: fence and retry       wait: spin, or arm and attempt a wait,
+//!                                            then withdraw, keeping a claim's count
 //! ```
 //!
 //! Each side fences between its store and its loads, so one of them sees the
@@ -93,11 +97,14 @@
 //! sees the push, and workers that were claimed or withdrew and run again. A
 //! push into the global queue is therefore never left queued with every worker
 //! asleep, and a stealable backlog that persists is taken or offered to a
-//! parked worker. A wake that arrives before the worker arms its wait is
-//! latched by the worker's wake source, so the wait returns at once. A claimed
-//! worker withdraws its bit as soon as its wait returns, before it runs any
-//! callback, and a withdrawal reports a claim only when it ends a live
-//! publication.
+//! parked worker. A take queues its share without a kick. A look that reads the
+//! length the take left, or a later one, sees the share, and a worker that
+//! parked on a zero from before the push that filled the queue was seen by that
+//! push, which wakes a worker for it. A wake that arrives before the worker
+//! arms its wait is latched by the worker's wake source, so the wait returns at
+//! once. A claimed worker withdraws its bit as soon as its wait returns, before
+//! it runs any callback, and a withdrawal reports a claim only when it ends a
+//! live publication.
 //!
 //! The fences carry most of the argument. When two sides each store, pass a
 //! sequentially consistent fence, and then load what the other side stores,
@@ -349,6 +356,8 @@ pub enum Park {
     /// holding the slots this worker needs. Wait for a wake.
     Wait,
     /// The global queue's mirror was nonzero: run again and try to take work.
+    /// A last count returned in the park was handed on, unless a claim brought
+    /// one.
     Run,
     /// A stealable backlog was observed and this worker holds a count to search.
     Search,
@@ -462,8 +471,8 @@ impl<'a> Searcher<'a> {
     #[inline(never)]
     fn end_search(&mut self) {
         // A published worker returns its count in its park instead, whose last
-        // look covers what it would hand on, and a wake here could claim the
-        // worker itself.
+        // look covers what it would hand on or which hands it on once
+        // withdrawn, and a wake here could claim the worker itself.
         assert!(!self.published, "search count returned while published");
 
         self.searching = false;
@@ -492,7 +501,8 @@ impl<'a> Searcher<'a> {
     /// [`Park::Wait`] leaves a live publication, which the caller ends through
     /// [`Self::finish_park`] after its wait, even if that wait does not block.
     /// The other results withdraw it. [`Park::Search`] holds exactly one count
-    /// for the caller's search, while [`Park::Run`] may inherit a claim's count.
+    /// for the caller's search, while [`Park::Run`] may inherit a claim's count
+    /// and otherwise hands on a last count returned here.
     #[must_use]
     pub fn prepare_park(&mut self, ready: &Ready) -> Park {
         assert!(!self.published, "worker published twice");
@@ -505,14 +515,13 @@ impl<'a> Searcher<'a> {
         self.published = true;
 
         // The look below covers whatever this worker would hand on, so the
-        // count is returned without a wake. The return is relaxed because it
-        // has nothing to publish: a search that stole is left through
-        // `leave_search` before its runnables are polled, and this run queue
-        // is empty, so the count returned here was held through a search
-        // that moved nothing.
-        if mem::take(&mut self.searching) {
-            pool.idle().searching.fetch_sub(1, Ordering::Relaxed);
-        }
+        // count is returned without a wake, except on the global branch. The
+        // return is relaxed because it has nothing to publish: a search that
+        // stole is left through `leave_search` before its runnables are
+        // polled, and this run queue is empty, so the count returned here was
+        // held through a search that moved nothing.
+        let last = mem::take(&mut self.searching)
+            && pool.idle().searching.fetch_sub(1, Ordering::Relaxed) == 1;
 
         // Pairs with the fences in `Pool::push_batch`, `Pool::kick`, and
         // `Idle::undo_claim`: either the loads after their fence see the bit
@@ -524,9 +533,15 @@ impl<'a> Searcher<'a> {
         fence(Ordering::SeqCst);
 
         // The global queue has work, so the worker runs again instead of
-        // waiting.
+        // waiting. This look stops before the run queues, so it does not cover
+        // a backlog whose kick the returned count suppressed. The last count
+        // is handed on as a last return does, after the withdrawal so the
+        // wake cannot claim this worker. A claim's count stays held, and the
+        // drive loop returns it before any user code.
         if pool.has_global() {
-            self.withdraw();
+            if !self.withdraw() && last {
+                pool.kick();
+            }
             return Park::Run;
         }
 
@@ -1027,6 +1042,67 @@ pub mod tests {
             drop((searcher, parker));
             release(&pool, &mut [&mut zero, &mut one, &mut two], tasks);
         }
+    }
+
+    /// A parker whose last look sees the global queue runs, and its look
+    /// stops before the run queues. If it returned the last count, it hands
+    /// the duty on, so a backlog whose kicks that count suppressed still
+    /// reaches a parked worker.
+    #[test]
+    fn test_run_after_the_last_count_hands_the_duty_on() {
+        let pool = pool(4);
+        let set = Tasks::new(1);
+        let (mut r0, mut r1, mut r2, mut r3) = (
+            ready(&pool, 0),
+            ready(&pool, 1),
+            ready(&pool, 2),
+            ready(&pool, 3),
+        );
+        let mut zero = Searcher::new(&pool, 0);
+        let mut one = Searcher::new(&pool, 1);
+        let mut two = Searcher::new(&pool, 2);
+
+        // Workers zero and one find no work and park.
+        assert_eq!(zero.prepare_park(&r0), Park::Wait);
+        assert_eq!(one.prepare_park(&r1), Park::Wait);
+
+        // Worker two searches, finds nothing, and keeps its count.
+        assert!(!two.search(&mut r2));
+        assert_eq!(pool.idle().search_count(), 1);
+
+        // Worker three fills its run queue and overflows. Its kicks see the
+        // held count, and the overflow's push claims only worker zero.
+        let tasks = enqueue(&pool, &mut r3, &set, CAPACITY + 1);
+        assert!(!pool.idle().is_idle(0) && signalled(&pool, 0));
+        assert!(pool.idle().is_idle(1) && !signalled(&pool, 1));
+        assert_eq!(pool.idle().search_count(), 2);
+
+        // Worker zero resumes with the claim's count, takes a share, and
+        // returns the count before polling. The return is not the last.
+        zero.finish_park();
+        pool.take(&mut r0).unwrap().discard();
+        zero.leave_search();
+        assert!(pool.idle().is_idle(1) && !signalled(&pool, 1));
+        assert_eq!(pool.idle().search_count(), 1);
+
+        // Worker two parks and returns the last count. Its look sees the
+        // global queue, so it runs and hands the duty on to worker one.
+        assert_eq!(two.prepare_park(&r2), Park::Run);
+        assert!(!two.searching);
+        assert!(!pool.idle().is_idle(1) && signalled(&pool, 1));
+        assert_eq!(pool.idle().search_count(), 1);
+
+        // Worker one resumes with the count its wake reserved and steals a
+        // backlog.
+        one.finish_park();
+        assert!(one.searching);
+        assert!(one.search(&mut r1));
+
+        one.leave_search();
+        assert_eq!(pool.idle().search_count(), 0);
+
+        drop((zero, one, two));
+        release(&pool, &mut [&mut r0, &mut r1, &mut r2, &mut r3], tasks);
     }
 
     /// An empty destination pinned by a claim returns `Wait` with a live
