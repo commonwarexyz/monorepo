@@ -118,63 +118,6 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
             }
         }
     }
-
-    /// Insert `value` under `key` and return the translated key it is stored under, which
-    /// [Self::retain_translated] accepts.
-    pub(crate) fn insert_translated(&mut self, key: &[u8], value: V) -> T::Key {
-        let k = self.translator.transform(key);
-        match self.map.entry(k) {
-            Entry::Occupied(mut entry) => {
-                // The newest value is stored inline; the displaced value joins the end of the
-                // overflow chain.
-                let old = std::mem::replace(entry.get_mut(), value);
-                push_displaced(&mut self.overflow, k, old);
-                self.items.inc();
-            }
-            Entry::Vacant(entry) => {
-                Self::create(&self.keys, &self.items, entry, value);
-            }
-        }
-        k
-    }
-
-    /// Retain only the values stored under the translated key `k` for which `should_retain`
-    /// returns `true`, visiting them in unspecified order. The key is removed once no value
-    /// remains. The cost is linear in the number of values stored under `k`.
-    pub(crate) fn retain_translated(
-        &mut self,
-        k: T::Key,
-        mut should_retain: impl FnMut(&V) -> bool,
-    ) {
-        let Entry::Occupied(mut entry) = self.map.entry(k) else {
-            return;
-        };
-        let keep_head = should_retain(entry.get());
-        let mut removed = usize::from(!keep_head);
-        if let Some(chain) = self.overflow.get_mut(&k) {
-            let before = chain.len();
-            chain.retain(&mut should_retain);
-            removed += before - chain.len();
-            if !keep_head {
-                // The chain is stored oldest first, so its last value is the newest survivor.
-                match chain.pop() {
-                    Some(head) => *entry.get_mut() = head,
-                    None => {
-                        entry.remove();
-                        self.keys.dec();
-                    }
-                }
-            }
-            if chain.is_empty() {
-                self.overflow.remove(&k);
-            }
-        } else if !keep_head {
-            entry.remove();
-            self.keys.dec();
-        }
-        self.items.dec_by(removed as i64);
-        self.pruned.inc_by(removed as u64);
-    }
 }
 
 impl<T: Translator, V: Send + Sync> super::Factory for Index<T, V> {
@@ -232,7 +175,19 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     }
 
     fn insert(&mut self, key: &[u8], v: V) {
-        self.insert_translated(key, v);
+        let k = self.translator.transform(key);
+        match self.map.entry(k) {
+            Entry::Occupied(mut entry) => {
+                // The newest value is stored inline; the displaced value joins the end of the
+                // overflow chain.
+                let old = std::mem::replace(entry.get_mut(), v);
+                push_displaced(&mut self.overflow, k, old);
+                self.items.inc();
+            }
+            Entry::Vacant(entry) => {
+                Self::create(&self.keys, &self.items, entry, v);
+            }
+        }
     }
 
     fn insert_and_retain(

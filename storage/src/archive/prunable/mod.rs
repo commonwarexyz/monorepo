@@ -2,8 +2,8 @@
 //!
 //! Data is stored across two backends: [crate::journal::segmented::fixed] for fixed-size index entries and
 //! [crate::journal::segmented::glob::Glob] for values (managed by [crate::journal::segmented::oversized]).
-//! The location of written data is stored in-memory by both index and key (via [crate::index::unordered::Index])
-//! to enable efficient lookups (on average).
+//! The location of written data is stored in-memory by both index and key (see
+//! [In-Memory State](#in-memory-state)) to enable efficient lookups (on average).
 //!
 //! _Notably, [Archive] does not make use of compaction nor on-disk indexes (and thus has no read
 //! nor write amplification during normal operation).
@@ -38,34 +38,29 @@
 //! whose index has been pruned are never returned or reported as present, so a key matching
 //! both a pruned and a non-pruned entry resolves to the non-pruned entry.
 //!
+//! ## In-Memory State
+//!
+//! Each retained `section` (selected by `section = index / items_per_section * items_per_section`
+//! to minimize the number of open blobs) holds the translated key of every record it stores, by
+//! journal position, and the first journal position of every index it stores, in a vector by
+//! offset from the section's start. The vector spans every offset up to the highest one stored,
+//! so a section costs `8` bytes per index from its start to its highest stored index whether or
+//! not the indices between are stored. Records usually arrive contiguously, which keeps that
+//! proportional to the records themselves; an `items_per_section` far larger than the number of
+//! records a section ever holds, with those records spread across it, is the shape to avoid.
+//!
+//! Lookups by key go through a [commonware_utils::handles::Table] from the hash of a translated
+//! key to a handle naming the record's section and position. The table stores no keys: a lookup
+//! resolves each candidate handle to the translated key its section holds and reads the index
+//! journal only for records whose translated key matches.
+//!
 //! ## Conflicts
 //!
 //! Because a translated representation of a key is only ever stored in memory, it is possible (and
 //! expected) that two keys will eventually be represented by the same translated key. To handle
 //! this case, [Archive] must check the persisted form of all conflicting keys to ensure data from
-//! the correct key is returned. To support efficient checks, [Archive] (via
-//! [crate::index::unordered::Index]) keeps a linked list of all keys with the same translated
-//! prefix:
-//!
-//! ```rust
-//! struct Record {
-//!     index: u64,
-//!
-//!     next: Option<Box<Record>>,
-//! }
-//! ```
-//!
-//! _To avoid random memory reads in the common case, the in-memory index directly stores the first
-//! item in the linked list instead of a pointer to the first item._
-//!
-//! `index` is the key to the map used to serve lookups by `index` that stores the position in the
-//! index journal (selected by `section = index / items_per_section * items_per_section` to minimize
-//! the number of open blobs):
-//!
-//! ```text
-//! // Maps index -> position in index journal
-//! indices: BTreeMap<u64, u64>
-//! ```
+//! the correct key is returned: every record whose translated key matches is a candidate, and its
+//! stored key is compared before a value is read.
 //!
 //! _If the [Translator] provided by the caller does not uniformly distribute keys across the key
 //! space or uses a translated representation that means keys on average have many conflicts,
@@ -73,23 +68,17 @@
 //!
 //! ## Memory Overhead
 //!
-//! [Archive] uses two maps to enable lookups by both index and key. The memory used to track each
-//! index item is `8 + 8` (where `8` is the index and `8` is the position in the index journal).
-//! The memory used to track each key item is `~translated(key).len() + 16` bytes (where `16` is the
-//! size of the `Record` struct), plus a second copy of `translated(key)` kept per section so that
-//! pruning can retire the key (see [Index Cleanup](#index-cleanup)). This means that an [Archive]
-//! employing a [Translator] that uses the first `8` bytes of a key will use `~48` bytes to index
-//! each key.
+//! Per retained record, [Archive] keeps `translated(key).len()` bytes and `8` bytes of position
+//! in its section (see [In-Memory State](#in-memory-state) for sparse sections) and one key-table
+//! entry of `12` bytes per slot, where the table holds at most three quarters of a power-of-two
+//! number of slots. With a [Translator] that uses the first `8` bytes of a key, this is between
+//! `~30` and `~40` bytes per record depending on how full the key table is.
 //!
 //! ### MultiArchive Overhead
 //!
-//! [Archive] stores index positions in a dual-map layout:
-//! - `indices: BTreeMap<u64, u64>` tracks the first position for each index.
-//! - `extra_indices: BTreeMap<u64, Vec<u64>>` tracks additional positions for indices written via
-//!   [crate::archive::MultiArchive::put_multi].
-//!
-//! This means the baseline overhead above remains unchanged for the first item at an index. For
-//! indices with duplicates, the additional in-memory payload is:
+//! Additional positions for indices written via [crate::archive::MultiArchive::put_multi] are
+//! tracked in `extra_indices: BTreeMap<u64, Vec<u64>>`, so the overhead above is unchanged for
+//! the first item at an index. For indices with duplicates, the additional in-memory payload is:
 //! - one `Vec<u64>` header (`24` bytes), and
 //! - `n * 8` bytes for `n` additional positions.
 //!
@@ -104,12 +93,10 @@
 //!
 //! ## Index Cleanup
 //!
-//! [Archive] keeps the translated key of every record in each retained `section`. Pruning a
-//! `section` visits exactly those translated keys in the [crate::index::unordered::Index] and
-//! drops the entries whose index is below the new floor, so the index holds only retained items
-//! without reading the index journal or scanning the whole in-memory index. Entries that share a
-//! translated key with a retained record survive, including the same key stored at a retained
-//! index.
+//! Pruning a `section` drops its in-memory state and removes its records' handles from the key
+//! table by the translated keys the section holds, so the index journal is never read and the
+//! table is never scanned. The table shifts entries back on removal instead of leaving
+//! tombstones, so its size depends only on the number of retained records.
 //!
 //! # Read Path
 //!
@@ -2393,8 +2380,7 @@ mod tests {
             let buffer = context.encode();
             assert!(has_metric_value(&buffer, "items_tracked", 3));
             assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
-            assert!(has_metric_value(&buffer, "index_items", 3));
-            assert!(has_metric_value(&buffer, "index_pruned_total", 2));
+            assert!(has_metric_value(&buffer, "keys_tracked", 3));
 
             // Try to prune older section
             archive = archive.prune(2).await.expect("Failed to prune");
@@ -2412,8 +2398,7 @@ mod tests {
             let buffer = context.encode();
             assert!(has_metric_value(&buffer, "items_tracked", 4));
             assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
-            assert!(has_metric_value(&buffer, "index_items", 4));
-            assert!(has_metric_value(&buffer, "index_pruned_total", 2));
+            assert!(has_metric_value(&buffer, "keys_tracked", 4));
 
             // A put below the prune floor is satisfied without storing
             let archive = archive
@@ -2507,7 +2492,7 @@ mod tests {
             // Check metrics
             let buffer = context.encode();
             assert!(has_metric_value(&buffer, "items_tracked", num_keys));
-            assert!(has_metric_value(&buffer, "index_pruned_total", 0));
+            assert!(has_metric_value(&buffer, "keys_tracked", num_keys));
 
             // Sync and drop the archive
             let archive = archive.sync().await.expect("Failed to sync archive");
@@ -2593,8 +2578,11 @@ mod tests {
                 num_keys - removed
             ));
             assert!(has_metric_value(&buffer, "indices_pruned_total", removed));
-            assert!(has_metric_value(&buffer, "index_items", num_keys - removed));
-            assert!(has_metric_value(&buffer, "index_pruned_total", removed));
+            assert!(has_metric_value(
+                &buffer,
+                "keys_tracked",
+                num_keys - removed
+            ));
 
             context.auditor().state()
         })
@@ -2924,8 +2912,7 @@ mod tests {
                 // The key index holds exactly the retained window.
                 let buffer = context.encode();
                 assert!(has_metric_value(&buffer, "items_tracked", 16));
-                assert!(has_metric_value(&buffer, "index_items", 16));
-                assert!(has_metric_value(&buffer, "index_keys", 16));
+                assert!(has_metric_value(&buffer, "keys_tracked", 16));
                 assert_eq!(
                     archive.get(Identifier::Key(&key(first))).await.unwrap(),
                     Some(first as i32)
@@ -2939,7 +2926,7 @@ mod tests {
 
                 // Pruning within the retained section changes nothing.
                 archive = archive.prune(first + 1).await.expect("Failed to prune");
-                assert!(has_metric_value(&context.encode(), "index_items", 16));
+                assert!(has_metric_value(&context.encode(), "keys_tracked", 16));
             }
 
             // Restart rebuilds the retained window, and pruning everything empties it.
@@ -2948,8 +2935,7 @@ mod tests {
                 .await
                 .expect("Failed to initialize archive");
             let buffer = context.encode();
-            assert!(has_metric_value(&buffer, "reopened_index_items", 16));
-            assert!(has_metric_value(&buffer, "reopened_index_keys", 16));
+            assert!(has_metric_value(&buffer, "reopened_keys_tracked", 16));
             assert_eq!(
                 archive.get(Identifier::Key(&key(511))).await.unwrap(),
                 Some(511)
@@ -2958,8 +2944,7 @@ mod tests {
             let archive = archive.prune(512).await.expect("Failed to prune");
             let buffer = context.encode();
             assert!(has_metric_value(&buffer, "reopened_items_tracked", 0));
-            assert!(has_metric_value(&buffer, "reopened_index_items", 0));
-            assert!(has_metric_value(&buffer, "reopened_index_keys", 0));
+            assert!(has_metric_value(&buffer, "reopened_keys_tracked", 0));
             assert_eq!(archive.get(Identifier::Key(&key(511))).await.unwrap(), None);
         });
     }
@@ -3001,9 +2986,9 @@ mod tests {
                 );
             }
             let buffer = context.encode();
-            assert!(has_metric_value(&buffer, "index_items", 3));
-            assert!(has_metric_value(&buffer, "index_keys", 3));
-            assert!(has_metric_value(&buffer, "index_pruned_total", 3));
+            assert!(has_metric_value(&buffer, "items_tracked", 1));
+            assert!(has_metric_value(&buffer, "keys_tracked", 3));
+            assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
 
             // The retained entries survive a restart.
             archive.sync().await.expect("Failed to sync archive");
@@ -3020,9 +3005,108 @@ mod tests {
             }
             assert!(has_metric_value(
                 &context.encode(),
-                "reopened_index_items",
+                "reopened_keys_tracked",
                 3
             ));
+        });
+    }
+
+    #[test_traced]
+    fn test_positions_match_model() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Offsets arrive in order at first, then spread out, then fill in; positions count
+            // every step so repeats of an offset keep its first position.
+            let mut rng = context;
+            let mut positions = storage::Positions::new();
+            let mut model = BTreeMap::new();
+            for step in 0..4_000u64 {
+                let offset = match step {
+                    0..=99 => step,
+                    100..=199 => rng.random_range(0..100_000),
+                    _ => rng.random_range(0..2_000),
+                };
+                let inserted = positions.insert(offset, step);
+                assert_eq!(inserted, !model.contains_key(&offset));
+                if inserted {
+                    model.insert(offset, step);
+                }
+                assert_eq!(positions.len(), model.len() as u64);
+                for probe in [offset, offset + 1, rng.random_range(0..100_000)] {
+                    assert_eq!(positions.get(probe), model.get(&probe).copied(), "{probe}");
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_out_of_order_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // One wide section whose puts arrive in order, then with gaps, out of order, far
+            // apart, and as duplicates.
+            let cfg = test_config(&context, "test", NZU64!(1 << 20), FourCap);
+            let mut archive = Archive::init(context.child("storage"), cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+            let indices = [0u64, 1, 2, 10, 5_000, 3, 7, 4];
+            for index in indices {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), &(index as i32))
+                    .await
+                    .expect("Failed to put data");
+            }
+            archive = archive
+                .put_multi(7, test_key("k7-dup"), &70)
+                .await
+                .expect("Failed to put_multi");
+            archive = archive
+                .put(6, test_key("k6"), &6)
+                .await
+                .expect("Failed to put data");
+
+            let check = |archive: Archive<_, _, _, i32>| async move {
+                for index in indices.into_iter().chain([6]) {
+                    assert_eq!(
+                        archive.get(Identifier::Index(index)).await.unwrap(),
+                        Some(index as i32),
+                        "{index}"
+                    );
+                    assert_eq!(
+                        archive
+                            .get(Identifier::Key(&test_key(&format!("k{index}"))))
+                            .await
+                            .unwrap(),
+                        Some(index as i32),
+                        "{index}"
+                    );
+                }
+                for index in [5, 8, 9, 11, 4_999, 5_001] {
+                    assert_eq!(archive.get(Identifier::Index(index)).await.unwrap(), None);
+                    assert!(!archive.has(Identifier::Index(index)).await.unwrap());
+                }
+                assert_eq!(archive.get_all(7).await.unwrap(), Some(vec![7, 70]));
+                assert!(archive.has_at(7, &test_key("k7-dup")).await.unwrap());
+                assert!(!archive.has_at(7, &test_key("k6")).await.unwrap());
+                assert!(!archive.has_at(8, &test_key("k7")).await.unwrap());
+                assert_eq!(archive.next_gap(0), (Some(4), Some(6)));
+                assert_eq!(archive.next_gap(6), (Some(7), Some(10)));
+                archive
+            };
+            let archive = check(archive).await;
+            let buffer = context.encode();
+            assert!(has_metric_value(&buffer, "items_tracked", 9));
+            assert!(has_metric_value(&buffer, "keys_tracked", 10));
+
+            // The same view is rebuilt from the journal.
+            archive.sync().await.expect("Failed to sync archive");
+            let archive = Archive::init(context.child("reopened"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let buffer = context.encode();
+            assert!(has_metric_value(&buffer, "reopened_items_tracked", 9));
+            assert!(has_metric_value(&buffer, "reopened_keys_tracked", 10));
+            check(archive).await;
         });
     }
 }
