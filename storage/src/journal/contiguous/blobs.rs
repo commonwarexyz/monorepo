@@ -209,7 +209,7 @@ pub(super) struct Writable<E: Context> {
     /// Sync of the tail's predecessor.
     tail_predecessor_sync: Option<SyncCompletion>,
 
-    /// The (blob index, logical offset) below which cached pages have been dropped.
+    /// The (blob index, logical offset) below which eviction has already dropped cached pages.
     ///
     /// # Invariant
     ///
@@ -388,7 +388,8 @@ impl<E: Context> Writable<E> {
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
 
-        // Free the cached pages of the blobs being pruned.
+        // Free the cached pages of the blobs being pruned that eviction has not already dropped.
+        // Pages read again after eviction passed them age out of the cache normally.
         self.evict_cached_before(min_blob, 0);
 
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
