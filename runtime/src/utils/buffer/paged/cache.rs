@@ -6,18 +6,18 @@
 //! Concurrent readers often miss the same pages, for example a prefetch and the read it serves.
 //! Rather than read such a page again, a reader joins the read of it already in flight.
 //!
-//! A page fault reads its page with a standalone fetch: a shared future that every reader waiting
+//! A page fault reads its page with a standalone fetch, a shared future that every reader waiting
 //! on the page drives. A batched miss ([CacheRef::read_after_misses]) reads the pages nobody is
-//! reading with a batch: one [Blob::read_many] call, run by a shared future (the batch's driver),
-//! that validates and caches each page as it arrives and delivers it to the readers waiting on
-//! it. Caching and delivering a page is publishing it. The read that started a batch receives
-//! every page. Other readers join it by selecting the unpublished pages they need. Each holds a
-//! subscription: an inbox in the batch for its pages and a handle on the driver, so the batch
-//! progresses while any of its readers is polled and never waits on a slow one. The read that
-//! started a batch also awaits the driver's end, so a read error after the last page still fails
-//! it.
+//! reading with a batch. A batch is one [Blob::read_many] call, run by a shared future (the
+//! batch's driver) that validates and caches each page as it arrives and delivers it to the
+//! readers waiting on it. Caching and delivering a page is publishing it. The read that started a
+//! batch receives every page. Other readers join it by selecting the unpublished pages they need.
+//! Each holds a subscription with an inbox in the batch for its pages and a handle on the driver,
+//! so the batch progresses while any of its readers is polled and never waits on a slow one. The
+//! read that started a batch also awaits the driver's end, so a read error after the last page
+//! still fails it.
 //!
-//! Fetches and drivers are [Shared] futures: a reader may stop polling one, because it has its
+//! Fetches and drivers are [Shared] futures. A reader may stop polling one, because it has its
 //! page or was dropped, without stranding the readers still waiting, and the underlying read is
 //! polled about once per wake however many readers wait on it.
 //!
@@ -32,10 +32,10 @@
 //! driver ends or is dropped. Retiring only queues the batch, and the cache unregisters it at its
 //! next lookup, so dropping a driver never takes the cache lock.
 //!
-//! Lock order: the cache lock, then a batch's state lock. The retirement queue's lock is
-//! innermost.
+//! The cache lock is taken before a batch's state lock, and the retirement queue's lock is taken
+//! last.
 //!
-//! Failures are shared like pages: a page failing validation fails every reader waiting on it, and
+//! Failures are shared like pages. A page failing validation fails every reader waiting on it, and
 //! a failed read fails the batch's starter and every reader still waiting on one of its pages.
 //! None of them retries.
 
@@ -152,13 +152,15 @@ type BatchFuture = BoxFuture<'static, Result<(), Error>>;
 /// A handle to a [BatchFuture] that any of the batch's readers can drive.
 type BatchDriver = Shared<BatchFuture>;
 
-/// A page delivered to a reader: its tag, and its logical bytes or why it failed validation.
+/// A page delivered to a reader, as its tag and either its logical bytes or why it failed
+/// validation.
 type Delivery = (usize, Result<IoBuf, Error>);
 
 /// The reader that started a [Batch], which receives every page tagged with its index.
 const STARTER: usize = 0;
 
-/// Where a page goes for one joiner: the tag the joiner selected it with, and the joiner's reader.
+/// Where a page goes for one joiner, as the tag the joiner selected it with and the joiner's
+/// reader.
 type Joiner = (usize, usize);
 
 /// What a [Batch] has yet to publish, who joined it, and what it published to each reader.
@@ -238,8 +240,8 @@ impl Batch {
         result
     }
 
-    /// Publish the outcome of the page at `index`: cache the page if it is valid, and deliver it to
-    /// the starter and the page's joiners. Fails if the page was already published.
+    /// Publish the outcome of the page at `index`. Caches the page if it is valid and delivers it
+    /// to the starter and the page's joiners. Fails if the page was already published.
     fn publish(
         &self,
         cache: &RwLock<Cache>,
@@ -269,8 +271,8 @@ impl Batch {
         Ok(())
     }
 
-    /// Fail the batch: record why, and take its joiners, under the cache lock so no reader selects
-    /// a page the batch will never publish.
+    /// Fail the batch. Records why and takes its joiners under the cache lock, so no reader
+    /// selects a page the batch will never publish.
     fn fail(&self, cache: &RwLock<Cache>, err: &Error) {
         error!(blob_id = self.blob_id, ?err, "Batched page read failed");
         let _cache = cache.write();
@@ -304,7 +306,7 @@ type Registration = (Weak<Batch>, WeakShared<BatchFuture>);
 /// The cache's batches, by blob, so readers that miss a page a batch has yet to publish join it.
 ///
 /// Batches are registered weakly, so the registry never keeps a driver alive. A batch retires when
-/// its driver ends or is dropped: the batch's read drops its [RetireGuard], which queues the
+/// its driver ends or is dropped. The batch's read then drops its [RetireGuard], which queues the
 /// batch, and [Self::unregister_retired] removes it.
 #[derive(Default)]
 struct BatchRegistry {
@@ -467,8 +469,8 @@ impl Stream for Subscription {
             return Poll::Ready(None);
         }
 
-        // Take a delivered page, or else drive the batch and look again: driving may deliver one
-        // of this reader's pages while others stay pending. Pages are delivered only while a
+        // Take a delivered page, or else drive the batch and look again, since driving may deliver
+        // one of this reader's pages while others stay pending. Pages are delivered only while a
         // reader drives the batch, and the driver wakes every reader that found it busy once that
         // reader stops (see [Shared]), so the inbox needs no waker. A completed driver has made
         // every delivery and is never polled again.
@@ -504,8 +506,8 @@ impl Stream for Subscription {
 /// piece)`.
 type Pieces<'a, 'b> = &'a mut [(u64, usize, &'b mut [u8])];
 
-/// A batched read's share of a [Batch]: a subscription to the pages it needs, and the pieces each
-/// fills.
+/// A batched read's share of a [Batch], which is a subscription to the pages it needs and the
+/// pieces each fills.
 struct BatchRead<'a, 'b> {
     subscription: Subscription,
     /// The pieces each selected page fills, by tag.
@@ -844,7 +846,7 @@ impl CacheRef {
             misses.push((physical_page(pieces[0].0, page_size)?, pieces));
         }
 
-        // Join a source for every page before driving any: copy pages that became resident, join
+        // Join a source for every page before driving any. Copy pages that became resident, join
         // the fetches and batches other readers have in flight, and read the rest with one batch
         // of this call's own, registered so later readers join it.
         let mut fetches = Vec::new();
@@ -2492,7 +2494,7 @@ mod tests {
             })
         };
 
-        // Every completion wakes every reader, but only the first to run polls the read: the
+        // Every completion wakes every reader, but only the first to run polls the read. The
         // others find it not woken since and only wait.
         let alone = polls(0);
         let joined = polls(JOINERS);

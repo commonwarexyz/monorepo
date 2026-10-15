@@ -37,15 +37,15 @@ const INLINE_WAKES: usize = 4;
 /// it busy meanwhile, the polling clone wakes every other clone again once it stops polling, so a
 /// clone that went back to sleep after finding the inner future busy observes what that poll did
 /// and polls the inner future if it was woken. Progress therefore never depends on any particular
-/// clone being polled again: a clone may stop polling, because it is dropped or finished through
+/// clone being polled again. A clone may stop polling, because it is dropped or finished through
 /// another path, without stranding the others. A clone polled when the inner future was not woken
 /// since its last poll only registers, so the inner future is polled about once per wake however
 /// many clones are woken.
 ///
 /// # Panics
 ///
-/// A panic while polling the inner future propagates to the polling clone and poisons the future:
-/// every waiting clone is woken, and polling any clone afterwards panics.
+/// A panic while polling the inner future propagates to the polling clone and poisons the future.
+/// Every waiting clone is woken, and polling any clone afterwards panics.
 ///
 /// # Wakers
 ///
@@ -119,8 +119,8 @@ impl Wakes {
 impl<F: Future> State<F> {
     /// Register `waker` for the clone with `key`, assigning the clone a key if it has none.
     ///
-    /// Returns the waker it replaces, if any, for the caller to drop after releasing the lock: a
-    /// waker's destructor may run arbitrary code, including dropping another clone.
+    /// Returns the waker it replaces, if any, for the caller to drop after releasing the lock,
+    /// since a waker's destructor may run arbitrary code, including dropping another clone.
     #[must_use]
     fn register(&mut self, key: &mut Option<usize>, waker: &Waker) -> Option<Waker> {
         let key = *key.get_or_insert_with(|| {
@@ -733,8 +733,8 @@ mod tests {
         let _ = poll(&mut b, &plain);
     }
 
-    /// Runs `f` on its own thread and fails instead of waiting forever if it does not return: a
-    /// regression that re-enters the state lock would otherwise deadlock the test.
+    /// Runs `f` on its own thread and fails instead of waiting forever if it does not return, since
+    /// a regression that re-enters the state lock would otherwise deadlock the test.
     fn completes(f: impl FnOnce() + Send + 'static) {
         let (done, finished) = std::sync::mpsc::channel();
         thread::spawn(move || {
