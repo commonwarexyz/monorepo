@@ -11,7 +11,7 @@
 //! from a floor once the cluster has finalized the anchor, so marshal syncs
 //! from a finalization instead of genesis.
 //!
-//! Under a trusted continuation (see [super::trusted]) the honest replicas run
+//! Under a trusted continuation (see `trusted`) the honest replicas run
 //! behind the runner's engine gates, elector, automaton and reporter (standard)
 //! or finalization (coding) recorders and marshal reads; no blocker or marshal
 //! channel is tapped. The twin pair starts at the release, and no node is held

@@ -133,7 +133,7 @@ pub fn fuzz_marshal_standard_certificate_poison_with_prefix<P, X, O>(
 /// sampled from the raw bytes the prefix leaves. B's actor from the release: the block
 /// disseminator for participant 0, which attacks the first term B leads after the
 /// release, once B receives an honest vote for the view before it, on that vote's block
-/// (see [block_disrupter::Live]). A release after the cluster reached the last height of
+/// (see `block_disrupter::Live`). A release after the cluster reached the last height of
 /// epoch 0 leaves no view to attack: a run whose disseminator never attacked fails the
 /// `end` actor check with `base=no-dissemination`.
 pub fn fuzz_marshal_standard_block_dissemination_with_prefix<P, X, O>(
