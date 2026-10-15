@@ -1973,6 +1973,7 @@ impl Worker {
             searcher.index(),
             tests::ParkPoint::BeforeWait,
         );
+
         false
     }
 

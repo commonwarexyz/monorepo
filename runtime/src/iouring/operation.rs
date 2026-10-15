@@ -165,9 +165,11 @@ pub mod tests {
         on_clone: Option<fn()>,
     }
 
-    /// The one vtable of every waker [`Reentrant`] makes. An associated const
-    /// would let optimized code place copies at more than one address, and
-    /// will_wake would then find two clones of one waker unequal.
+    /// The one vtable of every waker [`Reentrant`] makes.
+    ///
+    /// An associated const would let optimized code place copies at more than
+    /// one address, and `will_wake` would then find two clones of one waker
+    /// unequal.
     static REENTRANT_VTABLE: RawWakerVTable = RawWakerVTable::new(
         Reentrant::clone,
         Reentrant::wake,
