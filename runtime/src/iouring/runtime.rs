@@ -1098,8 +1098,8 @@ impl Role {
     }
 }
 
-/// A pool worker's seat in the pool: its index and the task set whose tasks
-/// it polls. Dedicated workers have no seat.
+/// A pool worker's seat in the pool: its index, the task set whose tasks it
+/// polls, and its run queue. Dedicated workers have no seat.
 struct Seat {
     /// Index of this worker in the pool, as in [`Role::Pool`].
     index: u32,
