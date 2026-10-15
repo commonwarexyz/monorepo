@@ -644,8 +644,17 @@ jobs:
       uses: ./.github/actions/setup
       with:
         rust-cache-enabled: false
+        targets: aarch64-unknown-none-softfloat,x86_64-unknown-none
     - name: Check no_std compatibility
       run: ./.github/scripts/check_no_std.sh
+    # Soft-float targets lack the vector baseline, so SIMD must build and dispatch to scalar.
+    - name: Check SIMD fallback on soft-float targets
+      run: |
+        for target in aarch64-unknown-none-softfloat x86_64-unknown-none; do
+          cargo check -p commonware-simd --no-default-features --lib --target "$target"
+        done
+      env:
+        RUSTFLAGS: -D warnings
 
   lint-toml:
     name: Lint Cargo.toml Files
