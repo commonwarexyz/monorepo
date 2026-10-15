@@ -24,8 +24,9 @@
 //! A reader joins every fetch and batch it needs before driving any of them. It examines its
 //! misses over several holds of the cache's write lock, letting waiting threads take the lock
 //! between holds, and registers its batch in the last hold, so a reader that misses one of those
-//! pages in between reads it too. A batch publishes a page, or fails, only under the cache's write
-//! lock, so a reader that finds a page unpublished can select it in the same hold.
+//! pages in between reads it too. A batch takes a page's joiners and caches the page, or fails,
+//! only under the cache's write lock, so a reader that finds a page unpublished can select it in
+//! the same hold, and then receives the page or the batch's failure.
 //!
 //! The cache registers batches weakly, so it never keeps a driver alive. A batch retires when its
 //! driver ends or is dropped. Retiring only queues the batch, and the cache unregisters it at its
@@ -168,7 +169,8 @@ struct BatchState {
     /// batch fails.
     joiners: Box<[Option<Vec<Joiner>>]>,
     /// The pages published to each reader and not yet taken, by reader, starting with [STARTER].
-    /// `None` once the reader is dropped.
+    /// `None` once the reader is dropped. A dropped reader's slot stays until the batch ends, since
+    /// the selections it made still name it, so this grows with every reader that joins.
     inboxes: Vec<Option<VecDeque<Delivery>>>,
     /// Why the batch failed, once it has.
     error: Option<Error>,
