@@ -117,13 +117,6 @@
 //! cleanup waits for the pool to close, which needs the root to end. The
 //! channel outlives the root, so a failure after the root completes is taken
 //! once the pool is joined. Only the first failure is delivered.
-//!
-//! # Testing
-//!
-//! The unit tests here check the queue, the idle set, and the barrier one call
-//! at a time. The loom models in `task.rs` race pushes from outside the pool
-//! against parking workers with real task state, and the runtime tests in
-//! `tests.rs` hook each step of a worker's park, startup, and shutdown.
 
 use super::{
     mailbox::{Mailbox, Message},
