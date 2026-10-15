@@ -2397,7 +2397,7 @@ mod tests {
             let buffer = context.encode();
             assert!(has_metric_value(&buffer, "items_tracked", 3));
             assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
-            assert!(has_metric_value(&buffer, "pruned_total", 2));
+            assert!(has_metric_value(&buffer, "index_pruned_total", 2));
 
             // Try to prune older section
             archive = archive.prune(2).await.expect("Failed to prune");
@@ -2415,7 +2415,7 @@ mod tests {
             let buffer = context.encode();
             assert!(has_metric_value(&buffer, "items_tracked", 4));
             assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
-            assert!(has_metric_value(&buffer, "pruned_total", 2));
+            assert!(has_metric_value(&buffer, "index_pruned_total", 2));
 
             // A put below the prune floor is satisfied without storing
             let archive = archive
@@ -2509,7 +2509,7 @@ mod tests {
             // Check metrics
             let buffer = context.encode();
             assert!(has_metric_value(&buffer, "items_tracked", num_keys));
-            assert!(has_metric_value(&buffer, "pruned_total", 0));
+            assert!(has_metric_value(&buffer, "index_pruned_total", 0));
 
             // Sync and drop the archive
             let archive = archive.sync().await.expect("Failed to sync archive");
@@ -2594,8 +2594,9 @@ mod tests {
                 "items_tracked",
                 num_keys - removed
             ));
+            assert!(has_metric_value(&buffer, "index_items", num_keys - removed));
             assert!(has_metric_value(&buffer, "indices_pruned_total", removed));
-            assert!(has_metric_value(&buffer, "pruned_total", removed));
+            assert!(has_metric_value(&buffer, "index_pruned_total", removed));
 
             context.auditor().state()
         })
