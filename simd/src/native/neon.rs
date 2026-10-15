@@ -164,16 +164,16 @@ impl Simd for NativeNeon {
     #[inline]
     fn u8_load(self, input: &[u8]) -> uint8x16_t {
         assert!(input.len() >= 16);
-        // The validated slice contains 16 readable lanes; vector alignment is not required.
-        // SAFETY: Construction of this token established NEON support.
+        // SAFETY: Construction of this token established NEON support. The validated slice
+        // contains 16 readable lanes, and vector alignment is not required.
         unsafe { vld1q_u8(input.as_ptr()) }
     }
 
     #[inline]
     fn u8_store(self, value: uint8x16_t, output: &mut [u8]) {
         assert!(output.len() >= 16);
-        // The validated slice contains 16 writable lanes; vector alignment is not required.
-        // SAFETY: Construction of this token established NEON support.
+        // SAFETY: Construction of this token established NEON support. The validated slice
+        // contains 16 writable lanes, and vector alignment is not required.
         unsafe { vst1q_u8(output.as_mut_ptr(), value) }
     }
 
@@ -212,16 +212,16 @@ impl Simd for NativeNeon {
     #[inline]
     fn u32_load(self, input: &[u32]) -> uint32x4_t {
         assert!(input.len() >= 4);
-        // The validated slice contains 4 readable lanes; vector alignment is not required.
-        // SAFETY: Construction of this token established NEON support.
+        // SAFETY: Construction of this token established NEON support. The validated slice
+        // contains 4 readable lanes, and vector alignment is not required.
         unsafe { vld1q_u32(input.as_ptr()) }
     }
 
     #[inline]
     fn u32_store(self, value: uint32x4_t, output: &mut [u32]) {
         assert!(output.len() >= 4);
-        // The validated slice contains 4 writable lanes; vector alignment is not required.
-        // SAFETY: Construction of this token established NEON support.
+        // SAFETY: Construction of this token established NEON support. The validated slice
+        // contains 4 writable lanes, and vector alignment is not required.
         unsafe { vst1q_u32(output.as_mut_ptr(), value) }
     }
 
@@ -278,16 +278,16 @@ impl Simd for NativeNeon {
     #[inline]
     fn u64_load(self, input: &[u64]) -> uint64x2_t {
         assert!(input.len() >= 2);
-        // The validated slice contains 2 readable lanes; vector alignment is not required.
-        // SAFETY: Construction of this token established NEON support.
+        // SAFETY: Construction of this token established NEON support. The validated slice
+        // contains 2 readable lanes, and vector alignment is not required.
         unsafe { vld1q_u64(input.as_ptr()) }
     }
 
     #[inline]
     fn u64_store(self, value: uint64x2_t, output: &mut [u64]) {
         assert!(output.len() >= 2);
-        // The validated slice contains 2 writable lanes; vector alignment is not required.
-        // SAFETY: Construction of this token established NEON support.
+        // SAFETY: Construction of this token established NEON support. The validated slice
+        // contains 2 writable lanes, and vector alignment is not required.
         unsafe { vst1q_u64(output.as_mut_ptr(), value) }
     }
 
@@ -406,8 +406,8 @@ impl Simd for NativeNeon {
                 bytes[4 * lane + byte] = (4 * index + byte) as u8;
             }
         }
-        // bytes contains 16 readable indices, each selecting a validated source lane.
-        // SAFETY: Construction of this token established NEON support.
+        // SAFETY: Construction of this token established NEON support. The local array
+        // contains 16 readable indices, each selecting a validated source lane.
         unsafe {
             vreinterpretq_u32_u8(vqtbl1q_u8(
                 vreinterpretq_u8_u32(value),
@@ -427,8 +427,8 @@ impl Simd for NativeNeon {
                 bytes[4 * lane + byte] = (4 * index + byte) as u8;
             }
         }
-        // bytes contains 16 readable indices, each selecting a validated source lane.
-        // SAFETY: Construction of this token established NEON support.
+        // SAFETY: Construction of this token established NEON support. The local array
+        // contains 16 readable indices, each selecting a validated source lane.
         unsafe {
             let table = uint8x16x2_t(vreinterpretq_u8_u32(a), vreinterpretq_u8_u32(b));
             vreinterpretq_u32_u8(vqtbl2q_u8(table, vld1q_u8(bytes.as_ptr())))
