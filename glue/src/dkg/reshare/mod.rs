@@ -55,9 +55,8 @@
 //! 3. **Inclusion** runs from the midpoint through the final block. Each dealer
 //!    publishes its signed dealer log in a block it proposes, and the final
 //!    block carries the next epoch's
-//!    [`EpochInfo`](crate::dkg::types::EpochInfo). See
-//!    [Inclusion Liveness](#inclusion-liveness) for what this requires of
-//!    leader election.
+//!    [`EpochInfo`](crate::dkg::types::EpochInfo). See [Liveness](#liveness)
+//!    for what this requires of leader election.
 //!
 //! ```text
 //! boundary EpochInfo(E)
@@ -121,13 +120,13 @@
 //! update, and epoch [`Fence`](crate::dkg::fence::Fence) update required by that
 //! block is complete.
 //!
-//! # Inclusion Liveness
+//! # Liveness
 //!
-//! A dealer's log reaches the chain only through a block that the dealer itself
-//! proposes during the inclusion window: [`Mailbox::next_log`] serves only this
-//! node's log. A ceremony succeeds only if at least a quorum of dealers each
-//! lead a block that finalizes in that window. With the maximum tolerated number
-//! of faulty dealers, every honest dealer must.
+//! Each dealer posts its log in a block it proposes itself
+//! ([`Mailbox::next_log`] returns only this node's log). A ceremony needs logs
+//! from a quorum of dealers, so a quorum of dealers must each propose a block
+//! that finalizes during the inclusion window. If the maximum number of dealers
+//! are faulty, every honest dealer has to.
 //!
 //! Whether that happens depends on the consensus configuration, not only on the
 //! epoch length. The window must contain enough distinct leader turns (roughly

@@ -180,9 +180,9 @@ where
 
     /// Epoch schedule used to interpret finalized block heights.
     ///
-    /// The second half of each epoch is the dealer-log inclusion window. It must
-    /// give enough dealers a turn to propose for ceremonies to succeed (see
-    /// [Inclusion Liveness](crate::dkg::reshare#inclusion-liveness)).
+    /// The second half of each epoch is the inclusion window. It must give enough
+    /// dealers a turn to propose for ceremonies to succeed (see
+    /// [Liveness](crate::dkg::reshare#liveness)).
     pub blocks_per_epoch: NonZeroU64,
 }
 

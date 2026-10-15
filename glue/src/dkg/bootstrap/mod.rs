@@ -133,11 +133,10 @@ pub struct Config<M, X, SS, T, D = Unit> {
     /// every participant must configure the same directory.
     pub directory: D,
 
-    /// Length of the one-shot consensus epoch.
+    /// Number of blocks in the single epoch of the dedicated DKG chain.
     ///
-    /// The second half of the epoch is the dealer-log inclusion window, subject to
-    /// the same [Inclusion Liveness](crate::dkg::reshare#inclusion-liveness)
-    /// requirement as resharing.
+    /// The second half of the epoch is the inclusion window, subject to the same
+    /// [liveness](crate::dkg::reshare#liveness) requirement as resharing.
     pub blocks_per_epoch: NonZeroU64,
 }
 

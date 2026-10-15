@@ -212,8 +212,7 @@ pub trait ParticipantsProvider: Send + Sync + 'static {
     ///
     /// The set must be non-empty and contain at most `max_participants` entries. The reshare
     /// actor panics on a violation. Ceremonies with this set succeed only if enough of its
-    /// members lead a block in each dealer-log inclusion window (see
-    /// [Inclusion Liveness](reshare#inclusion-liveness)).
+    /// members lead a block in each inclusion window (see [Liveness](reshare#liveness)).
     fn participants(&mut self, epoch: Epoch) -> impl Future<Output = Set<Self::PublicKey>> + Send;
 
     /// Returns the transport directory embedded in the [`EpochInfo`](types::EpochInfo)
