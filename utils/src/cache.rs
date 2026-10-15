@@ -291,14 +291,14 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// Like [Self::get_or_insert_mut], for a key the caller expects to request soon but has not
     /// requested yet.
     ///
-    /// The entry is placed in Main, without recording use, as the last resident Main's eviction
-    /// sweep reaches: a missing key is admitted there, and a resident one is moved there (see
+    /// The entry is placed in Main, without recording use, where Main's eviction sweep will reach
+    /// it last. A missing key is admitted there, and a resident one is moved there (see
     /// [Self::expect]). Admitting it displaces only a Main resident that was not referenced since
     /// the sweep last passed it. A request before the sweep reaches the entry gives it the same
-    /// second chance as any referenced Main resident, and an unrequested entry is evicted when the
+    /// second chance as any referenced Main resident. An unrequested entry is evicted when the
     /// sweep reaches it.
     ///
-    /// Expected entries always reside in Main: a full Main evicts from itself even while Small has
+    /// Expected entries always reside in Main. A full Main evicts from itself even while Small has
     /// unused capacity, which stays available to demand misses. An expected set therefore survives
     /// until requested only while it fits in Main alongside Main's other admissions, regardless
     /// of the cache's total capacity.
@@ -1285,7 +1285,7 @@ mod tests {
 
     #[test]
     fn test_expect_keeps_residents_until_requested() {
-        // A full cache: Small (10) holds the newest puts, and a hot set in Main is referenced.
+        // In a full cache, Small (10) holds the newest puts, and a hot set in Main is referenced.
         let fill = |cache: &mut Cache<u64, u64>| {
             for key in 0..100 {
                 cache.put(key, key);

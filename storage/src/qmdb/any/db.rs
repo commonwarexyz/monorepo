@@ -224,6 +224,7 @@ where
 
     /// Return a future that reads the storage holding the applied operations of `keys` into
     /// the page cache, so later reads of those keys avoid storage I/O while the pages stay cached.
+    /// Prefetching warms the pages through [crate::journal::contiguous::Contiguous::prefetch].
     ///
     /// Prefetching is candidate-based. The keys are looked up in the index before this returns,
     /// and every operation the index holds for a key's translated key is read. Keys absent from
@@ -232,9 +233,13 @@ where
     /// and failures are logged. The future does not borrow the database, so it can run alongside
     /// any database operation, and it can be dropped at any point.
     ///
+    /// Only the keys' own operations are read. With an ordered index, creating or deleting a key
+    /// also reads the operation of its neighboring key, which is not prefetched. Reads made by
+    /// raising the inactivity floor are not prefetched either.
+    ///
     /// Residency is best effort. Prefetched pages are admitted only to the page cache's Main
-    /// section, so they stay cached until their first read only while Main, not the whole cache,
-    /// has room for them alongside the pages it admits in the meantime.
+    /// section and are not pinned. They stay cached until their first read only while Main, not
+    /// the whole cache, has room for them alongside the pages it admits in the meantime.
     pub fn prefetch(
         &self,
         keys: &[&U::Key],
