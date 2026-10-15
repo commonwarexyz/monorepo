@@ -40,6 +40,7 @@
 /// ```
 /// use commonware_simd::Simd;
 ///
+/// /// Adds one full vector; the slices hold at least `S::U64_LANES` elements.
 /// fn add<S: Simd>(simd: S, a: &[u64], b: &[u64], output: &mut [u64]) {
 ///     let sum = simd.u64_add(simd.u64_load(a), simd.u64_load(b));
 ///     simd.u64_store(sum, output);
