@@ -105,7 +105,9 @@ impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
         let commitment = Commitment::<B, C, H>::read(buf)?;
         let index = u16::read(buf)?;
 
-        // A coded payload is the block followed by its coding config.
+        // A coded payload is the block followed by its coding config. The claimed config is
+        // untrusted until consensus confirms the commitment, so the width bound it selects may be
+        // the scheme's widest for a maximum-size payload.
         let maximum = max_block_size.get().saturating_add(CodingConfig::SIZE);
         let inner = C::Shard::read_cfg(buf, &(commitment.config(), maximum))?;
 

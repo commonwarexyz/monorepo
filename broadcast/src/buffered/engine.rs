@@ -99,8 +99,8 @@ where
     /// the message once.
     counts: BTreeMap<M::Digest, usize>,
 
-    /// Latest primary peer set allowed to keep buffered messages resident.
-    latest_primary_peers: Set<P>,
+    /// Primary peers of every tracked peer set, allowed to keep buffered messages resident.
+    primary_peers: Set<P>,
 
     ////////////////////////////////////////
     // Metrics
@@ -136,7 +136,7 @@ where
             deques: BTreeMap::new(),
             items: BTreeMap::new(),
             counts: BTreeMap::new(),
-            latest_primary_peers: Set::default(),
+            primary_peers: Set::default(),
             peer_provider: cfg.peer_provider,
             metrics,
         };
@@ -177,8 +177,8 @@ where
                 debug!("peer set subscription closed");
                 break;
             } => {
-                // Evict by latest primary only; see buffered module docs.
-                self.update_latest_primary_peers(update.latest.primary);
+                // Evict by the tracked primary sets; see buffered module docs.
+                self.update_primary_peers(update.all.primary);
             },
             // Handle mailbox messages
             Some(msg) = self.mailbox_receiver.recv() else {
@@ -284,7 +284,10 @@ where
                 self.metrics.receive.inc(Status::Dropped);
             }
             InsertMessageResult::Ineligible => {
-                debug!(?peer, "message from peer outside latest.primary not cached");
+                debug!(
+                    ?peer,
+                    "message from peer outside tracked primary sets not cached"
+                );
                 self.metrics.receive.inc(Status::Dropped);
             }
         }
@@ -330,8 +333,8 @@ where
         digest: M::Digest,
         make_shared: impl FnOnce() -> Arc<M>,
     ) -> InsertMessageResult {
-        // Only peers listed in `latest.primary` may buffer
-        if self.latest_primary_peers.position(&peer).is_none() {
+        // Only primary peers of a tracked peer set may buffer
+        if self.primary_peers.position(&peer).is_none() {
             return InsertMessageResult::Ineligible;
         }
 
@@ -376,7 +379,7 @@ where
         InsertMessageResult::Inserted
     }
 
-    fn update_latest_primary_peers(&mut self, peers: Set<P>) {
+    fn update_primary_peers(&mut self, peers: Set<P>) {
         for (peer, deque) in self
             .deques
             .extract_if(.., |peer, _| peers.position(peer).is_none())
@@ -386,7 +389,7 @@ where
                 decrement_digest_refcount(&mut self.counts, &mut self.items, &digest);
             }
         }
-        self.latest_primary_peers = peers;
+        self.primary_peers = peers;
     }
 
     ////////////////////////////////////////
