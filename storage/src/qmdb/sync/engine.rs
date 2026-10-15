@@ -686,6 +686,10 @@ where
 
         // Check if sync is complete
         if self.is_ready_to_complete()? {
+            // Let the coordinator observe this anchor before a newer target replaces it.
+            self.report_reached_target().await;
+            self.drain_finish_requests()?;
+
             // Take a queued target update before completing at the old target, unless the
             // caller already asked to finish. Updates that do not advance the target are
             // discarded.
@@ -704,8 +708,6 @@ where
                     }
                 }
             }
-
-            self.report_reached_target().await;
 
             if self.finish_rx.is_some() {
                 let event = wait_for_event(
@@ -1522,6 +1524,66 @@ pub(crate) mod tests {
             );
             requests.retain(|_| false);
             assert!(matches!(requests.next_completed().await, Err(Aborted)));
+        });
+    }
+
+    #[test]
+    fn reports_reached_target_before_queued_update() {
+        deterministic::Runner::default().start(|context| async move {
+            let (update_tx, update_rx) = mpsc::channel(1);
+            let (_finish_tx, finish_rx) = mpsc::channel(1);
+            let (reached_tx, mut reached_rx) = mpsc::channel(1);
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
+            config.update_rx = Some(update_rx);
+            config.finish_rx = Some(finish_rx);
+            config.reached_target_tx = Some(reached_tx);
+            let original = config.target.clone();
+            let next = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(12)),
+            };
+            update_tx.send(next.clone()).await.unwrap();
+            let engine = Engine::new(config).await.unwrap();
+            let NextStep::Continue(engine) = engine.step().await.unwrap() else {
+                panic!("the coordinator has not requested completion");
+            };
+            assert_eq!(
+                reached_rx.try_recv().ok(),
+                Some(original),
+                "a queued update hid a reached target from the coordinator"
+            );
+            assert_eq!(engine.target, next);
+        });
+    }
+
+    #[test]
+    fn finish_during_progress_report_precedes_a_queued_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let (update_tx, update_rx) = mpsc::channel(1);
+            let (finish_tx, finish_rx) = mpsc::channel(1);
+            let (reached_tx, mut reached_rx) = mpsc::channel(1);
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
+            config.target.root = sha256::Digest::from([0; 32]);
+            let original = config.target.clone();
+            reached_tx.send(original.clone()).await.unwrap();
+            config.update_rx = Some(update_rx);
+            config.finish_rx = Some(finish_rx);
+            config.reached_target_tx = Some(reached_tx);
+            update_tx
+                .send(Target {
+                    root: sha256::Digest::from([2; 32]),
+                    range: non_empty_range!(Location::new(5), Location::new(12)),
+                })
+                .await
+                .unwrap();
+            let engine = Engine::new(config).await.unwrap();
+            let finish = async {
+                assert_eq!(reached_rx.recv().await.unwrap(), original);
+                finish_tx.send(()).await.unwrap();
+            };
+            let (result, ()) = futures::join!(engine.step(), finish);
+            assert!(matches!(result.unwrap(), NextStep::Complete(_)));
+            assert_eq!(reached_rx.recv().await.unwrap(), original);
         });
     }
 }
