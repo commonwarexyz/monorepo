@@ -8,6 +8,7 @@ use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
 use commonware_runtime::Handle;
 use core::num::NonZeroU64;
+use futures::future::BoxFuture;
 use std::{future::Future, ops::Range};
 
 /// Unmerkleized batch of operations.
@@ -93,14 +94,13 @@ pub trait DbAny<F: Family>:
         keys: &'a [&'a Self::Key],
     ) -> impl Future<Output = Result<Vec<Option<Self::Value>>, Error<F>>> + Send + use<'a, F, Self>;
 
-    /// Return a future that warms the page cache for the applied state of `keys` without
-    /// borrowing the database. Best effort and candidate-based: keys absent from the index are
-    /// skipped, but an absent key whose translated key collides with an indexed key's may cause
-    /// reads of unrelated operations. Failures are logged.
-    fn prefetch(
-        &self,
-        keys: &[&Self::Key],
-    ) -> impl Future<Output = ()> + Send + 'static + use<F, Self>;
+    /// Return a future that reads the storage holding the applied state of `keys` into the page
+    /// cache. The future does not borrow the database.
+    ///
+    /// Prefetching is best effort and candidate-based. Keys absent from the index are skipped.
+    /// An absent key whose translated key collides with an indexed key's may cause reads of
+    /// unrelated operations. Failures are logged.
+    fn prefetch(&self, keys: &[&Self::Key]) -> BoxFuture<'static, ()>;
 
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
@@ -201,33 +201,8 @@ pub trait Provable<F: Family>: DbAny<F> {
 /// }
 /// ```
 macro_rules! impl_db_any {
-    // Collect the generic parameter names, which the prefetch future captures.
-    (@names [$($gen:tt)*] [$($names:ident)*] [] $($tail:tt)*) => {
-        $crate::qmdb::any::traits::impl_db_any!(@emit [$($gen)*] [$($names)*] $($tail)*);
-    };
-    (@names [$($gen:tt)*] [$($names:ident)*] [const $n:ident : $t:ty $(, $($rest:tt)*)?] $($tail:tt)*) => {
-        $crate::qmdb::any::traits::impl_db_any!(
-            @names [$($gen)*] [$($names)* $n] [$($($rest)*)?] $($tail)*
-        );
-    };
-    (@names [$($gen:tt)*] [$($names:ident)*] [$n:ident $(, $($rest:tt)*)?] $($tail:tt)*) => {
-        $crate::qmdb::any::traits::impl_db_any!(
-            @names [$($gen)*] [$($names)* $n] [$($($rest)*)?] $($tail)*
-        );
-    };
     (
         [$($gen:tt)*] $ty:ty
-        where { $($where_clause:tt)* }
-        Family = $fam:ty, Key = $key:ty, Value = $val:ty, Digest = $dig:ty
-    ) => {
-        $crate::qmdb::any::traits::impl_db_any!(
-            @names [$($gen)*] [] [$($gen)*] $ty
-            where { $($where_clause)* }
-            Family = $fam, Key = $key, Value = $val, Digest = $dig
-        );
-    };
-    (
-        @emit [$($gen:tt)*] [$($names:ident)*] $ty:ty
         where { $($where_clause:tt)* }
         Family = $fam:ty, Key = $key:ty, Value = $val:ty, Digest = $dig:ty
     ) => {
@@ -246,11 +221,8 @@ macro_rules! impl_db_any {
                 <$ty>::get_many(self, keys).await
             }
 
-            fn prefetch(
-                &self,
-                keys: &[&$key],
-            ) -> impl ::core::future::Future<Output = ()> + Send + 'static + use<$($names),*> {
-                <$ty>::prefetch(self, keys)
+            fn prefetch(&self, keys: &[&$key]) -> ::futures::future::BoxFuture<'static, ()> {
+                ::futures::FutureExt::boxed(<$ty>::prefetch(self, keys))
             }
 
             fn root(&self) -> $dig {

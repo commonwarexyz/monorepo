@@ -518,9 +518,12 @@ impl<B: Blob> Writer<B> {
         Ok((None, 0, invalid_data_found))
     }
 
-    /// Return an immutable view of the bytes already written to the blob, excluding the write
-    /// buffer. Written pages never change within one writer, so the view stays valid while the
-    /// writer appends, and it reads through the page cache under the writer's identity.
+    /// Return a [Sealed] view of the full pages already written to the blob, excluding the write
+    /// buffer. The view reads through the page cache under the writer's cache id.
+    ///
+    /// An append-only writer never rewrites a written page under its cache id. Only a
+    /// [Recovery] writer may shrink the blob, and a reopened blob gets a fresh id. So the view
+    /// stays valid while the writer appends, and pages it warms into the cache stay correct.
     #[commonware_macros::stability(ALPHA)]
     pub fn written(&self) -> Sealed<B> {
         Sealed::new(

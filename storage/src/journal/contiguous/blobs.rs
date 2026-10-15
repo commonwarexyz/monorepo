@@ -466,9 +466,11 @@ impl<E: Context> Writable<E> {
 /// Byte ranges of immutable blob views to read into the page cache.
 ///
 /// Holds its own immutable blob views (see [Blobs::immutable]), so warming borrows nothing from
-/// the journal. A view stays readable after the journal prunes or clears its blob (see
-/// [Writable::prune]), and every page is validated before it is cached, so a warm can run
-/// concurrently with any journal operation and be dropped at any point.
+/// the journal. A warm can run concurrently with any journal operation and be dropped at any
+/// point. A view's pages never change under its cache id, since writers only append and a
+/// reopened blob gets a fresh id. A view also stays readable after the journal prunes or clears
+/// its blob, since a removed blob's open handles remain readable (see
+/// [commonware_runtime::Storage::remove]).
 #[commonware_macros::stability(ALPHA)]
 pub(super) struct Warm<B: RBlob> {
     /// Each blob with its byte ranges.
@@ -502,7 +504,7 @@ impl<B: RBlob> Warm<B> {
             .map(|(blob, ranges)| async move { blob.warm(&ranges).await });
         for result in future::join_all(reads).await {
             if let Err(err) = result {
-                warn!(?err, "prefetch read failed");
+                warn!(?err, "prefetch failed");
             }
         }
     }
@@ -885,8 +887,8 @@ impl<'a, B: RBlob> Blobs<'a, B> {
         self.oldest_blob_index + self.sealed.as_slice().len() as u64
     }
 
-    /// Return an immutable view of blob `blob`, if retained: a sealed blob, or the bytes of a
-    /// writable tail already written to storage.
+    /// Return an immutable view of blob `blob`, if retained. The view is a sealed blob, or the
+    /// bytes of a writable tail already written to storage.
     #[commonware_macros::stability(ALPHA)]
     pub(super) fn immutable(&self, blob: u64) -> Option<Sealed<B>> {
         Some(match self.get(blob)? {

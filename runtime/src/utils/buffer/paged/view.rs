@@ -278,8 +278,9 @@ impl<B: Blob> View<'_, B> {
 
     /// Read the pages covering the `(offset, len)` byte ranges (ascending by offset) into the
     /// page cache ahead of their first request, returning how many pages were read from the
-    /// blob. Ranges are clipped to `tail_offset`: later bytes are already in memory. See
-    /// [CacheRef::warm].
+    /// blob. Ranges are clipped to `tail_offset`, since later bytes are already in memory. Ranges
+    /// may overlap, and a page covered by several is read once. A range out of offset order is
+    /// warmed only past the last page an earlier range covers. See [CacheRef::warm].
     #[commonware_macros::stability(ALPHA)]
     pub async fn warm(&self, ranges: &[(u64, u64)]) -> Result<usize, Error> {
         let page_size: u64 = self.cache_ref.page_size().widen();

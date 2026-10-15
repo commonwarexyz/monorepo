@@ -15,6 +15,9 @@
 //! [Shared] futures that every waiting reader drives, so no reader depends on a slow or dropped
 //! one, and each underlying read is polled about once per wake however many readers are waiting.
 //!
+//! A warm ([CacheRef::warm]) joins and starts batches like a batched miss. It caches the pages it
+//! reads, and marks the pages it joins, as expected entries.
+//!
 //! A reader joins everything it needs before driving any of it, examining its misses over a few
 //! holds of the cache's write lock and registering its own batch in the last, so a page another
 //! reader misses between those holds may still be read twice. A batch claims each page's selections
@@ -928,18 +931,25 @@ impl CacheRef {
     }
 
     /// Read pages `page_nums` (strictly increasing) of `blob` into the cache ahead of their first
-    /// request. On success, returns the number of pages this call read from the blob, which
+    /// request. On success, returns the number of pages this call read from the blob. The count
     /// excludes resident pages and pages joined from another reader's fetch or batch.
     ///
     /// Resident pages are marked expected without recording use (see [cache::Cache::expect]).
+    ///
     /// Pages another reader is fetching, alone or in a batch, are joined rather than read again.
-    /// The warm waits on each like any reader, so the fetch completes even if the reader that
-    /// started it cancels, and marks the page expected once it arrives, caching it again if it
-    /// was evicted in the meantime. The rest are read with one batch, registered so other readers
-    /// join it, that caches each valid page as an expected entry as it arrives (see
-    /// [cache::Cache::get_or_insert_mut_expected]). A page that fails validation, or that a failed
-    /// fetch or batch never supplies, is not cached, and the first error is returned after the
-    /// pages that arrived are cached.
+    /// The warm waits on each like any reader, so the read completes even if the reader that
+    /// started it cancels. Each joined page is marked expected as it arrives. If it was evicted
+    /// after its source cached it, the warm caches it again from the bytes it received.
+    ///
+    /// The remaining pages are read with one batch of this call's own. The batch is registered so
+    /// other readers can join it, and it caches each valid page as an expected entry as it arrives
+    /// (see [cache::Cache::get_or_insert_mut_expected]). The warm waits for the batch to end, so a
+    /// read error after its last page still fails the warm.
+    ///
+    /// A page that fails validation, or that a failed source never supplies, is not cached. A
+    /// failure in one source does not stop the others. Once every source finishes, the warm
+    /// returns the first error from the joined sources if any failed, and otherwise the first
+    /// error from its own batch.
     ///
     /// Pages are examined in chunks of [MISSES_PER_LOCK], each under one hold of the write lock,
     /// like the misses of [Self::read_after_misses].
@@ -998,15 +1008,15 @@ impl CacheRef {
                 let insert = Cache::cache_expected;
                 let (batch, driver) =
                     self.start_batch(&mut cache, blob, blob_id, pages, physical, insert);
-                Subscription::starting(batch, driver)
+                (Subscription::starting(batch, driver.clone()), driver)
             })
         };
         let read = own
             .as_ref()
-            .map_or(0, |subscription| subscription.batch.pages.len());
+            .map_or(0, |(subscription, _)| subscription.batch.pages.len());
 
-        // Collect each joined page as its source supplies it, and drive this call's batch, which
-        // caches its own pages, until it delivers them all.
+        // Mark each joined page expected as its source supplies it, and drive this call's batch,
+        // which caches its own pages, until it ends.
         let joins = async {
             let fetches = fetches
                 .into_iter()
@@ -1015,37 +1025,31 @@ impl CacheRef {
             let joined = futures::stream::select_all(joined)
                 .map_ok(|(index, page)| (page_nums[index], page));
             let mut joins = pin!(futures::stream::select(fetches, joined));
-            let mut pages = Vec::new();
             let mut result = Ok(());
             while let Some(page) = joins.next().await {
                 match page {
-                    Ok(page) => pages.push(page),
+                    Ok((page_num, page)) => {
+                        let mut cache = self.cache.write();
+                        if !cache.cache.expect(&(blob_id, page_num)) {
+                            cache.cache_expected(blob_id, page.as_ref(), page_num);
+                        }
+                    }
                     Err(err) => result = result.and(Err(err)),
-                }
-            }
-            (pages, result)
-        };
-        let own = async {
-            let mut result = Ok(());
-            if let Some(mut subscription) = own {
-                while let Some(page) = subscription.next().await {
-                    result = result.and(page.map(drop));
                 }
             }
             result
         };
-        let ((pages, joined), own) = futures::join!(joins, own);
-
-        // Mark the joined pages expected, caching again any evicted since their sources cached
-        // them.
-        let mut cache = self.cache.write();
-        for (i, (page_num, page)) in pages.iter().enumerate() {
-            if i > 0 && i % MISSES_PER_LOCK == 0 {
-                RwLockWriteGuard::bump(&mut cache);
+        let own = async {
+            let Some((mut subscription, driver)) = own else {
+                return Ok(());
+            };
+            let mut result = Ok(());
+            while let Some(page) = subscription.next().await {
+                result = result.and(page.map(drop));
             }
-            cache.cache_expected(blob_id, page.as_ref(), *page_num);
-        }
-        drop(cache);
+            result.and(driver.await)
+        };
+        let (joined, own) = futures::join!(joins, own);
         joined.and(own).map(|()| read)
     }
 
@@ -3718,6 +3722,7 @@ mod tests {
             }
             assert!(!is_cached(&cache_ref, 0, 0));
             assert_eq!(warm.await.unwrap(), 0);
+            assert!(is_cached(&cache_ref, 0, 0));
 
             // Later demand misses churn the probation queue, but the warm expects page 0.
             for page in 3..PAGES {
@@ -3826,6 +3831,22 @@ mod tests {
             assert!(is_cached(&cache_ref, 2, 0));
             assert!(!is_cached(&cache_ref, 2, 1));
             assert!(is_cached(&cache_ref, 2, 2));
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
+    fn test_warm_fails_on_read_error_after_last_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // The warm's own batch delivers its only page, and then its read fails.
+            let blob = ScriptedBlob::new(vec![Step::page(0), Step::Fail(Error::ReadFailed)]);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            assert!(matches!(
+                cache_ref.warm(&blob, 0, &[0]).await,
+                Err(Error::ReadFailed)
+            ));
+            assert!(is_cached(&cache_ref, 0, 0));
             assert_idle(&cache_ref);
         });
     }

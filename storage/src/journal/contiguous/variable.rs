@@ -487,7 +487,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
     ///
     /// Reads each frame's offset and its same-blob successor's offset from the offsets journal
     /// (through the page cache), then the pages covering the frames. Offset pages are warmed like
-    /// frame pages (see [Sealed::warm]), so both stay cached until the frames are read. A blob's
+    /// frame pages, so both get the same best-effort residency (see [Sealed::warm]). A blob's
     /// last frame ends at the end of its blob. Bytes still in the tail's write buffer are skipped.
     #[commonware_macros::stability(ALPHA)]
     pub(super) fn prefetch(
@@ -537,10 +537,10 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 .map(|(run, blob, first)| async move {
                     let ranges: Vec<(u64, u64)> = lookups[run.clone()]
                         .iter()
-                        .map(|&pos| ((pos - first) * item_size, item_size))
+                        .map(|&pos| ((pos - first).saturating_mul(item_size), item_size))
                         .collect();
                     if let Err(err) = blob.warm(&ranges).await {
-                        warn!(?err, "prefetch offsets warm failed");
+                        warn!(?err, "prefetch of offset pages failed");
                     }
 
                     // Only offsets the view holds entirely can be read from it.
@@ -558,7 +558,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 });
             for (missing, buf, result) in join_all(reads).await {
                 if let Err(err) = result {
-                    warn!(?err, "prefetch offsets read failed");
+                    warn!(?err, "prefetch read of offsets failed");
                     continue;
                 }
                 for (idx, item) in missing.into_iter().zip(buf.chunks(offset_size.get())) {

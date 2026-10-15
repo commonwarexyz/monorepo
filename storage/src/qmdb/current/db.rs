@@ -219,9 +219,11 @@ where
     }
 
     /// Return a future that reads the storage holding the applied operations of `keys` into
-    /// the page cache, along with the Merkle nodes that merkleizing a change to those keys reads.
+    /// the page cache. It also warms the graft inputs of the bitmap chunks holding those
+    /// operations, which merkleizing a change to the keys reads.
     ///
-    /// Otherwise behaves like [any::db::Db::prefetch].
+    /// Otherwise behaves like [any::db::Db::prefetch]. Reads made by raising the inactivity floor
+    /// are not prefetched.
     pub fn prefetch(
         &self,
         keys: &[&U::Key],
