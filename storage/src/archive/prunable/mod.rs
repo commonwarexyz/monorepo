@@ -264,15 +264,7 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-    fn test_config<E: BufferPooler>(
-        context: &E,
-        partition_prefix: &str,
-        items_per_section: NonZeroU64,
-    ) -> Config<FourCap, ()> {
-        translated_config(context, partition_prefix, items_per_section, FourCap)
-    }
-
-    fn translated_config<E: BufferPooler, T: Translator>(
+    fn test_config<E: BufferPooler, T: Translator>(
         context: &E,
         partition_prefix: &str,
         items_per_section: NonZeroU64,
@@ -307,7 +299,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION), FourCap);
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -349,7 +341,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .expect("Failed to reopen archive");
@@ -368,7 +360,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION), FourCap);
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -429,7 +421,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1), FourCap);
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -474,7 +466,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1), FourCap);
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -530,7 +522,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION), FourCap);
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -591,7 +583,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION), FourCap);
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -642,7 +634,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -691,7 +683,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -744,7 +736,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -778,7 +770,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -818,7 +810,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -845,7 +837,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .expect("Failed to reopen archive");
@@ -864,7 +856,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -887,7 +879,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .expect("Failed to reopen archive");
@@ -906,7 +898,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -942,7 +934,7 @@ mod tests {
     fn test_archive_truncates_at_first_invalid_value() {
         deterministic::Runner::default().start(|context| async move {
             for (name, bad_position, retained) in [("first", 0, 0), ("middle", 1, 1)] {
-                let cfg = test_config(&context, &format!("invalid-{name}"), NZU64!(4));
+                let cfg = test_config(&context, &format!("invalid-{name}"), NZU64!(4), FourCap);
 
                 // Seed three values in one section. The sync leaves them durable with no marker
                 // (the active section's boundary stays debt), so reopen must CRC-validate every
@@ -1008,7 +1000,7 @@ mod tests {
     #[test_traced]
     fn test_archive_completes_interrupted_rewind_to_empty_section() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_config(&context, "empty-rewind", NZU64!(4));
+            let cfg = test_config(&context, "empty-rewind", NZU64!(4), FourCap);
 
             // Seed one durable value, then drop the sidecar so startup cannot consult markers
             // and must reconcile the journals alone.
@@ -1107,7 +1099,7 @@ mod tests {
     fn test_validation_marker_skips_previously_validated_values() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "marker-skip", NZU64!(4));
+            let cfg = test_config(&context, "marker-skip", NZU64!(4), FourCap);
 
             // Seed two durable values with no published marker.
             let mut archive = Archive::init(context.child("seed"), cfg.clone())
@@ -1162,7 +1154,7 @@ mod tests {
     #[test_traced]
     fn test_validation_marker_skips_covered_interior_values() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_config(&context, "marker-covered-interior", NZU64!(4));
+            let cfg = test_config(&context, "marker-covered-interior", NZU64!(4), FourCap);
 
             // Publish a boundary covering both values. The terminal value remains the floor's
             // cross-journal proof. The earlier value must not be revisited during startup.
@@ -1220,7 +1212,7 @@ mod tests {
                 ("corrupt_values", Damage::CorruptValues),
             ] {
                 let case = context.child(name);
-                let cfg = test_config(&case, name, NZU64!(4));
+                let cfg = test_config(&case, name, NZU64!(4), FourCap);
 
                 // Seed one marked item: the blocking put proves it durable and the trailing
                 // sync publishes its marker.
@@ -1355,7 +1347,7 @@ mod tests {
     #[test_traced]
     fn test_validation_floor_rejection_precedes_index_suffix_repair() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_config(&context, "floor-order", NZU64!(4));
+            let cfg = test_config(&context, "floor-order", NZU64!(4), FourCap);
 
             // Seed one marked item: the blocking put proves it durable and the trailing sync
             // publishes its marker.
@@ -1427,7 +1419,7 @@ mod tests {
     fn test_validation_marker_survives_torn_index_tail_rewrite() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
-            let cfg = test_config(&context, "marker-torn-tail", NZU64!(4));
+            let cfg = test_config(&context, "marker-torn-tail", NZU64!(4), FourCap);
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
@@ -1537,7 +1529,7 @@ mod tests {
                 pending: pending.clone(),
             };
             pending.arm();
-            let cfg = test_config(&delayed, "marker-torn-tail", NZU64!(4));
+            let cfg = test_config(&delayed, "marker-torn-tail", NZU64!(4), FourCap);
 
             // Recovery must trust the marker-covered record, select the older checksum slot, and
             // durably remove only the orphaned value suffix.
@@ -1565,7 +1557,7 @@ mod tests {
     #[test_traced]
     fn test_startup_publishes_validated_marker_without_data_resync() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_config(&context, "startup-order", NZU64!(4));
+            let cfg = test_config(&context, "startup-order", NZU64!(4), FourCap);
 
             // Seed one durable value with no published marker, so the next startup must
             // validate it and derive the marker itself.
@@ -1631,7 +1623,7 @@ mod tests {
     #[test_traced]
     fn test_startup_marker_failure_fails_next_sync() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_config(&context, "startup-marker-failure", NZU64!(4));
+            let cfg = test_config(&context, "startup-marker-failure", NZU64!(4), FourCap);
 
             // Seed one durable value with no published marker, so reopen must derive one.
             let archive = Archive::init(context.child("seed"), cfg.clone())
@@ -1665,7 +1657,7 @@ mod tests {
     fn test_start_sync_publishes_closed_section_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "marker-lag", NZU64!(4));
+            let cfg = test_config(&context, "marker-lag", NZU64!(4), FourCap);
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -1721,7 +1713,7 @@ mod tests {
     fn test_sync_publishes_closed_section_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "blocking-marker-lag", NZU64!(4));
+            let cfg = test_config(&context, "blocking-marker-lag", NZU64!(4), FourCap);
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -1823,7 +1815,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&immediate, "ready-marker-lag", NZU64!(4));
+            let cfg = test_config(&immediate, "ready-marker-lag", NZU64!(4), FourCap);
 
             let archive = Archive::init(immediate.child("archive"), cfg)
                 .await
@@ -1857,7 +1849,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&immediate, "section-marker-batch", NZU64!(4));
+            let cfg = test_config(&immediate, "section-marker-batch", NZU64!(4), FourCap);
             let archive = Archive::init(immediate.child("archive"), cfg)
                 .await
                 .unwrap();
@@ -1886,7 +1878,7 @@ mod tests {
     fn test_start_sync_withholds_marker_for_unproven_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "marker-unproven-boundary", NZU64!(4));
+            let cfg = test_config(&context, "marker-unproven-boundary", NZU64!(4), FourCap);
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -1952,7 +1944,7 @@ mod tests {
     fn test_sync_publishes_previous_durable_sections_across_section_changes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "cross-section-marker-lag", NZU64!(1));
+            let cfg = test_config(&context, "cross-section-marker-lag", NZU64!(1), FourCap);
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -2009,7 +2001,7 @@ mod tests {
     fn test_empty_sync_publishes_final_durable_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "empty-sync-marker", NZU64!(1));
+            let cfg = test_config(&context, "empty-sync-marker", NZU64!(1), FourCap);
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -2050,7 +2042,7 @@ mod tests {
     fn test_sync_recreates_settled_section_barrier() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "marker-recreate", NZU64!(2));
+            let cfg = test_config(&context, "marker-recreate", NZU64!(2), FourCap);
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -2099,7 +2091,7 @@ mod tests {
     fn test_prune_clears_validation_marker_before_section_reuse() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "marker-reuse", NZU64!(2));
+            let cfg = test_config(&context, "marker-reuse", NZU64!(2), FourCap);
 
             // Seed one marked item in section 0 (the trailing sync publishes its marker), then
             // prune the section away. Prune must remove the durable marker along with the data:
@@ -2722,7 +2714,7 @@ mod tests {
     fn test_has_at() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
-            let cfg = test_config(&context, "test", NZU64!(2));
+            let cfg = test_config(&context, "test", NZU64!(2), FourCap);
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -2754,7 +2746,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let cfg = test_config(&context, "test", NZU64!(2));
+            let cfg = test_config(&context, "test", NZU64!(2), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .expect("Failed to reopen archive");
@@ -2778,7 +2770,7 @@ mod tests {
     fn test_has_key() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "test", NZU64!(2));
+            let cfg = test_config(&context, "test", NZU64!(2), FourCap);
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -2914,7 +2906,7 @@ mod tests {
         executor.start(|context| async move {
             // A wide translator never reuses a bucket, so every pruned key must be retired by
             // prune itself.
-            let cfg = translated_config(&context, "test", NZU64!(4), EightCap);
+            let cfg = test_config(&context, "test", NZU64!(4), EightCap);
             let mut archive = Archive::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
@@ -2978,7 +2970,7 @@ mod tests {
         executor.start(|context| async move {
             // Each pruned key shares its translated key with a retained record: another key,
             // a put_multi value, or the same key stored on both sides of the floor.
-            let cfg = test_config(&context, "test", NZU64!(4));
+            let cfg = test_config(&context, "test", NZU64!(4), FourCap);
             let mut archive = Archive::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
