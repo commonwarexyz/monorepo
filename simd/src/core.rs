@@ -702,13 +702,13 @@ pub trait Operation<S: Simd>: Sized {
         self.portable(simd)
     }
 
-    /// Executes the Armv9 with SVE2 algorithm, defaulting to the portable algorithm.
+    /// Executes the Armv9 with SVE2 algorithm, defaulting to the NEON algorithm.
     #[inline(always)]
     fn arm_v9(self, simd: S) -> Self::Output
     where
         S: ArmV9,
     {
-        self.portable(simd)
+        self.neon(simd)
     }
 
     /// Executes the NEON algorithm, defaulting to the portable algorithm.

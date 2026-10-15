@@ -118,8 +118,8 @@ fn add_three<S: Simd>(simd: S, a: S::U64, b: S::U64, c: S::U64) -> S::U64 {
 
 An `Operation` can define equivalent algorithms for different backends. Implement
 `portable` using the common instructions, then optionally override `ice_lake`, `neon`, or
-`arm_v9` to use that profile's extra instructions. Each specialized path defaults
-to `portable` and must produce the same result.
+`arm_v9` to use that profile's extra instructions. `arm_v9` defaults to `neon`, and
+every other specialized path defaults to `portable`. Each path must produce the same result.
 
 Our addition example needs only common instructions. A function returning
 `impl Operation<S>` can capture vector values such as `S::U64`:
