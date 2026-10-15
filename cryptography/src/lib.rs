@@ -415,6 +415,18 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
+    #[cfg(feature = "arbitrary")]
+    impl<'a, T> arbitrary::Arbitrary<'a> for Digested<T>
+    where
+        T: Digestible + arbitrary::Arbitrary<'a>,
+    {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+            let inner = T::arbitrary(u)?;
+            let digest = inner.digest();
+            Ok(Self::precomputed(inner, digest))
+        }
+    }
+
     /// An object that can produce a commitment of itself.
     pub trait Committable: Clone + Sized + Send + Sync + 'static {
         /// The type of commitment produced by this object.

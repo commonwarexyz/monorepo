@@ -6,6 +6,7 @@ use commonware_cryptography::{Digest, Digested, Digestible, Hasher};
 use commonware_parallel::Sequential;
 #[cfg(test)]
 use commonware_utils::sync::Mutex;
+use futures::FutureExt as _;
 use std::fmt::Debug;
 #[cfg(test)]
 use std::{
@@ -27,7 +28,12 @@ pub fn encode_block<B: crate::CertifiableBlock, C: Scheme, H: Hasher>(
     block: B,
     config: CodingConfig,
 ) -> CodedBlock<B, C, H> {
-    futures::executor::block_on(CodedBlock::encode(ready(block), config, &Sequential))
+    // The sequential strategy runs the job before returning its future, so one poll resolves
+    // it. Blocking on a nested executor instead would panic in callers that already run inside
+    // one, such as conformance tests.
+    CodedBlock::encode(ready(block), config, &Sequential)
+        .now_or_never()
+        .expect("sequential encoding is ready on the first poll")
 }
 
 /// Per-test counters follow a block's encoded identity through archive decoding.

@@ -426,12 +426,16 @@ async fn collect_replay<C: Contiguous<Item = Item>>(
     buffer: NonZeroUsize,
 ) -> Result<Vec<(u64, Item)>, Error> {
     let stream = reader
-        .replay(start_pos, buffer, ReadOptions::default())
+        .replay(
+            start_pos..reader.bounds().end,
+            buffer,
+            ReadOptions::default(),
+        )
         .await?;
     futures::pin_mut!(stream);
     let mut out = Vec::new();
-    while let Some(result) = stream.next().await {
-        out.push(result?);
+    while let Some(batch) = stream.next().await {
+        out.extend(batch?);
     }
     Ok(out)
 }
