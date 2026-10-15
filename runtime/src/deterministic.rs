@@ -180,12 +180,17 @@ impl AuditHasher {
     }
 }
 
-/// Track runtime events with CRC32C for determinism auditing.
-///
-/// This non-cryptographic fingerprint detects accidental differences between executions.
-#[derive(Default)]
+/// Track the state of the runtime for determinism auditing.
 pub struct Auditor {
     digest: Mutex<[u8; 4]>,
+}
+
+impl Default for Auditor {
+    fn default() -> Self {
+        Self {
+            digest: <[u8; 4]>::default().into(),
+        }
+    }
 }
 
 impl Auditor {
