@@ -25,8 +25,8 @@ const INLINE_WAKES: usize = 4;
 /// or its output, after which no [WeakShared] handle can recover it.
 ///
 /// Polling requires `F` to be [Unpin] (box it first otherwise) and its output to be [Clone].
-/// Because the inner future's waker refers to the shared state, `F` must also be [Send] and
-/// `'static`, and its output [Send] and [Sync], as `futures::future::Shared` requires.
+/// The shared state is itself the inner future's waker, and a waker must be `'static`, [Send],
+/// and [Sync], so `F` must also be [Send] and `'static`, and its output [Send] and [Sync].
 ///
 /// # Liveness
 ///
@@ -49,8 +49,9 @@ const INLINE_WAKES: usize = 4;
 ///
 /// # Wakers
 ///
-/// Registered wakers are cloned while the shared state is locked, so cloning a waker must not wake
-/// a clone of the same future. Wakes, and drops of displaced wakers, happen after unlocking.
+/// Registered wakers are cloned while the shared state is locked, and that lock is not reentrant,
+/// so cloning a registered waker must not wake this future's inner future, or poll or drop one of
+/// its clones. Wakes, and drops of displaced wakers, happen after unlocking.
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct Shared<F: Future> {
     inner: Arc<Inner<F>>,
