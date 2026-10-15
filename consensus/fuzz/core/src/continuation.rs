@@ -2995,7 +2995,7 @@ impl<P: Simplex> PrefixContext<P> {
 
     /// Waits for `read`'s answer, at most [MARSHAL_READ_TIMEOUT]. A read ready at its
     /// first poll never reached a live actor, which answers from its own task, so it is
-    /// no answer; it and a missing read sleep [NO_ANSWER], so a loop of reads advances
+    /// no answer; it and a missing read sleep `NO_ANSWER`, so a loop of reads advances
     /// time. A read dropped before its answer leaves a closed responder behind.
     async fn bounded<T>(
         &self,
@@ -3032,7 +3032,7 @@ impl<P: Simplex> PrefixContext<P> {
 
     /// Sets the directed link `from` -> `to`, or removes it with `None`, until the
     /// release, which restores the base's. False for a self link, an unknown index and
-    /// after the handoff; a refusal costs [NO_ANSWER], so a loop of them advances time.
+    /// after the handoff; a refusal costs `NO_ANSWER`, so a loop of them advances time.
     pub async fn set_link(&self, from: usize, to: usize, link: Option<Link>) -> bool {
         let keys = match (self.shared.key(from), self.shared.key(to)) {
             (Some(sender), Some(receiver))
@@ -3081,7 +3081,7 @@ impl<P: Simplex> PrefixContext<P> {
     /// Crash-stops honest `replica`: its engine and application tasks are aborted and
     /// awaited. The release restarts it if the prefix did not. False if it is crashed,
     /// while another crash or restart of it runs, and on a base whose replicas cannot
-    /// restart (marshal); a refusal costs [NO_ANSWER], so a loop of them advances time.
+    /// restart (marshal); a refusal costs `NO_ANSWER`, so a loop of them advances time.
     pub async fn crash(&self, replica: usize) -> bool {
         let crashed = match self.shared.tap(replica) {
             Some(tap) => crash(tap).await,
@@ -3095,7 +3095,7 @@ impl<P: Simplex> PrefixContext<P> {
 
     /// Restarts crashed honest `replica` from its journal, on its partition, with its
     /// retained reporter. False if it is not crashed, or while another crash or restart
-    /// of it runs; a refusal costs [NO_ANSWER], so a loop of them advances time.
+    /// of it runs; a refusal costs `NO_ANSWER`, so a loop of them advances time.
     pub async fn restart(&self, replica: usize) -> bool {
         let restarted = match self.shared.tap(replica).cloned() {
             Some(tap) => restart(&self.shared, &tap).await,
@@ -3796,7 +3796,7 @@ mod tests {
     /// Runs `receiver` as an honest replica's engine or marshal would, into `got`.
     fn drain<R>(context: &deterministic::Context, replica: usize, mut receiver: R, got: &Got)
     where
-        R: commonware_p2p::Receiver<PublicKey = Key> + Send + 'static,
+        R: commonware_p2p::Receiver<PublicKey = Key>,
     {
         let got = got.clone();
         context.child("drain").spawn(move |_| async move {
