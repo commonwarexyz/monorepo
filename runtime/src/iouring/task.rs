@@ -22,9 +22,9 @@
 //! tail of the poller's run queue, behind its queued work.
 //! Completion is terminal, so a late wake of a finished task is a no-op.
 //!
-//! ```text
-//! Lifecycle transitions (reference counts omitted):
+//! Lifecycle transitions, with reference counts omitted:
 //!
+//! ```text
 //! Wakers, from any thread (`notify_by_ref`, `notify_by_value`):
 //!   Idle              -> Queued       publishes a runnable
 //!   Running           -> Notified     a pending poll requeues its runnable
@@ -101,10 +101,7 @@ cfg_if::cfg_if! {
         /// loom builds.
         #[derive(Default)]
         #[repr(transparent)]
-        pub struct UnsafeCell<T>(
-            /// Interior value used when loom access tracking is disabled.
-            std::cell::UnsafeCell<T>,
-        );
+        pub struct UnsafeCell<T>(std::cell::UnsafeCell<T>);
 
         impl<T> UnsafeCell<T> {
             /// Wrap `value`.
@@ -1160,10 +1157,7 @@ pub mod tests {
     };
 
     /// Record when a task's captured state is destroyed.
-    struct DropCount(
-        /// Destruction count shared with the test's observer.
-        Arc<AtomicUsize>,
-    );
+    struct DropCount(Arc<AtomicUsize>);
 
     impl Drop for DropCount {
         fn drop(&mut self) {
@@ -2079,10 +2073,7 @@ mod loom_tests {
     }
 
     /// Counts the drops of a future's captured state.
-    struct DropCount(
-        /// Destruction count shared with the model's observer.
-        Arc<AtomicUsize>,
-    );
+    struct DropCount(Arc<AtomicUsize>);
 
     impl Drop for DropCount {
         fn drop(&mut self) {
@@ -2318,6 +2309,32 @@ mod loom_tests {
             .collect()
     }
 
+    /// A gate two threads pass in turn: the first signals that it holds a
+    /// search count, the second signals that its pushes are queued.
+    type Gate = Arc<(Mutex<u8>, Condvar)>;
+
+    /// Advance `gate` to `stage`.
+    fn reach(gate: &Gate, stage: u8) {
+        *gate.0.lock().unwrap() = stage;
+        gate.1.notify_all();
+    }
+
+    /// Block until `gate` has reached `stage`.
+    fn await_stage(gate: &Gate, stage: u8) {
+        let mut current = gate.0.lock().unwrap();
+        while *current < stage {
+            current = gate.1.wait(current).unwrap();
+        }
+    }
+
+    /// Block until at least `count` tasks have raised `ran`.
+    fn wait_ran_count(ran: &Arc<(Mutex<usize>, Condvar)>, count: usize) {
+        let mut raised = ran.0.lock().unwrap();
+        while *raised < count {
+            raised = ran.1.wait(raised).unwrap();
+        }
+    }
+
     /// A push from outside the pool racing a worker's park, waiting or
     /// spinning, is never lost.
     #[test]
@@ -2456,32 +2473,6 @@ mod loom_tests {
             teardown(&set, &pool);
             assert_eq!(drops.load(Ordering::Relaxed), 1);
         });
-    }
-
-    /// A gate two threads pass in turn: the first signals that it holds a
-    /// search count, the second signals that its pushes are queued.
-    type Gate = Arc<(Mutex<u8>, Condvar)>;
-
-    /// Advance `gate` to `stage`.
-    fn reach(gate: &Gate, stage: u8) {
-        *gate.0.lock().unwrap() = stage;
-        gate.1.notify_all();
-    }
-
-    /// Block until `gate` has reached `stage`.
-    fn await_stage(gate: &Gate, stage: u8) {
-        let mut current = gate.0.lock().unwrap();
-        while *current < stage {
-            current = gate.1.wait(current).unwrap();
-        }
-    }
-
-    /// Block until at least `count` tasks have raised `ran`.
-    fn wait_ran_count(ran: &Arc<(Mutex<usize>, Condvar)>, count: usize) {
-        let mut raised = ran.0.lock().unwrap();
-        while *raised < count {
-            raised = ran.1.wait(raised).unwrap();
-        }
     }
 
     /// A searcher's released claim reaches the last count return's fence
