@@ -429,5 +429,16 @@ mod tests {
         // LLVM's assembler encodings for XAR Z0.S, Z0.S, Z0.S.
         assert_eq!(xar_encoding(16), 0x0470_3400);
         assert_eq!(xar_encoding(7), 0x0479_3400);
+        // For 32-bit elements, tszh is 01 and the contiguous tszl:imm3 field at bits 16-20
+        // holds 32 - rotation.
+        for rotation in 1..32 {
+            assert_eq!(
+                xar_encoding(rotation),
+                0x0460_3400 | ((32 - rotation) << 16),
+                "rotation {rotation}"
+            );
+        }
+        assert_eq!(xar_encoding(0), 0);
+        assert_eq!(xar_encoding(32), 0);
     }
 }
