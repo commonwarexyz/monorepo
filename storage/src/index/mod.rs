@@ -2600,4 +2600,46 @@ mod tests {
             }
         });
     }
+
+    #[test_traced]
+    fn test_hash_index_retain_translated() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            let k = index.translate(b"same");
+            let mut pruned = 0;
+            for mask in 0u8..32 {
+                for value in 0..5 {
+                    index.insert(b"same", value);
+                }
+                let before = index.pruned();
+                index.retain_translated(k, |value| mask & (1 << value) != 0);
+
+                // Survivors keep their iteration order (newest first) whether or not the
+                // inline value survived.
+                let expected: Vec<u64> = (0..5).rev().filter(|v| mask & (1 << v) != 0).collect();
+                assert_eq!(values(&index, b"same"), expected);
+                assert_eq!(index.keys(), usize::from(mask != 0));
+                assert_eq!(index.items(), expected.len());
+                assert_eq!(index.pruned() - before, 5 - expected.len());
+
+                // A later insert still lands inline, and removing everything drops the key.
+                index.insert(b"same", 5);
+                assert_eq!(index.get(b"same").next(), Some(&5));
+                index.retain_translated(k, |_| false);
+                assert_eq!((index.keys(), index.items()), (0, 0));
+                pruned += 6;
+                assert_eq!(index.pruned(), pruned);
+            }
+
+            // A key without values is left alone.
+            index.insert(b"other", 1);
+            index.retain_translated(k, |_| false);
+            assert_eq!(values(&index, b"other"), vec![1]);
+            assert_eq!(
+                (index.keys(), index.items(), index.pruned()),
+                (1, 1, pruned)
+            );
+        });
+    }
 }
