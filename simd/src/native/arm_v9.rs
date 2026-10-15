@@ -10,9 +10,8 @@ use core::arch::asm;
 /// It does not expose scalable SVE vectors.
 ///
 /// Construction checks NEON, SHA2, SVE, and SVE2. Only the low 128 bits are
-/// modeled, independently of the full SVE width. All supported SVE vector
-/// lengths are at least 128 bits, so moving a token to another thread does not
-/// invalidate its fixed lane counts.
+/// modeled, independently of the full SVE width. Every SVE vector length is at
+/// least 128 bits, so the fixed lane counts hold on any thread.
 #[derive(Clone, Copy, Debug)]
 pub struct NativeArmV9(NativeNeon);
 
