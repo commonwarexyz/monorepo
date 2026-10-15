@@ -796,14 +796,18 @@ impl Runnable {
         // inside one can take it here. A closing worker polls nothing more,
         // so its wakes go to the global queue, which runs them elsewhere or
         // has closed.
-        if let Some(local) = Local::serving(self.0.owner) {
-            let mut local = local.borrow_mut();
-            if !local.closing {
+        let owner = self.0.owner;
+        let refused = Local::with_current(|local| match local {
+            Some(local) if local.serves(owner) => {
                 local.ready.push(self);
-                return;
+                None
             }
+            _ => Some(self),
+        });
+
+        if let Some(runnable) = refused {
+            runnable.push_global();
         }
-        self.push_global();
     }
 
     /// Deliver a new task's first runnable. A worker of the task's pool that
@@ -811,14 +815,20 @@ impl Runnable {
     /// only worker. Otherwise it goes to the global queue, which wakes a parked
     /// worker to start it.
     pub fn spawn(self) {
-        if let Some(local) = Local::serving(self.0.owner) {
-            let mut local = local.borrow_mut();
-            if !local.closing && (local.ready.is_empty() || local.workers() == 1) {
+        let owner = self.0.owner;
+        let refused = Local::with_current(|local| match local {
+            Some(local)
+                if local.serves(owner) && (local.ready.is_empty() || local.workers() == 1) =>
+            {
                 local.ready.push(self);
-                return;
+                None
             }
+            _ => Some(self),
+        });
+
+        if let Some(runnable) = refused {
+            runnable.push_global();
         }
-        self.push_global();
     }
 
     /// Push the runnable into its pool's global queue.

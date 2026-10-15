@@ -1025,8 +1025,9 @@ impl Role {
 
 /// Mutable execution state accessed only by its owning worker thread.
 ///
-/// Polls and callbacks obtain this state through [`Self::current`]. They release
-/// each borrow before running user code, including waker methods and destructors.
+/// Polls and callbacks obtain this state through [`Self::current`] or
+/// [`Self::with_current`]. They release each borrow before running user code,
+/// including waker methods and destructors.
 pub struct Local {
     /// Which work this worker runs.
     pub role: Role,
@@ -1106,18 +1107,43 @@ impl Local {
     #[inline(always)]
     pub fn owner(mailbox: &Weak<Mailbox>) -> Option<Rc<RefCell<Self>>> {
         let local = Self::current()?;
+
         // The weak reference preserves allocation identity without retaining a worker.
         let matches = ptr::eq(Arc::as_ptr(&local.borrow().mailbox), mailbox.as_ptr());
         matches.then_some(local)
     }
 
-    /// Return the current worker if it polls tasks retained by `owner`,
-    /// including during shutdown.
-    #[inline(always)]
-    pub fn serving(owner: NonZeroU64) -> Option<Rc<RefCell<Self>>> {
-        let local = Self::current()?;
-        let serves = local.borrow().serving == Some(owner);
-        serves.then_some(local)
+    /// Run `f` with the worker installed on this thread, or with `None` when
+    /// no worker is installed or its TLS key has been destroyed. The worker is
+    /// borrowed in place rather than through a clone of its handle, so the
+    /// caller must hold no `Local` borrow, and `f` must run no user code while
+    /// it holds the worker.
+    #[inline]
+    pub fn with_current<R>(f: impl FnOnce(Option<&mut Self>) -> R) -> R {
+        let mut f = Some(f);
+
+        // Escaped wakers can run from native TLS destructors after this key is gone.
+        let result = CURRENT.try_with(|current| {
+            let current = current.borrow();
+            let local = current.as_ref()?;
+            let f = f.take().expect("the closure runs once");
+            Some(f(Some(&mut local.borrow_mut())))
+        });
+
+        if let Ok(Some(result)) = result {
+            return result;
+        }
+
+        // Without a worker, `f` runs outside the TLS borrow.
+        let f = f.take().expect("the closure runs once");
+        f(None)
+    }
+
+    /// Whether this worker polls tasks retained by `owner` and is not
+    /// closing. A closing worker polls nothing more, so it serves no task set.
+    #[inline]
+    pub fn serves(&self, owner: NonZeroU64) -> bool {
+        self.serving == Some(owner) && !self.closing
     }
 
     /// Workers in this worker's pool.
