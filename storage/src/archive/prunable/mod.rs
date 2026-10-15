@@ -100,13 +100,12 @@
 //! called on a `section`, entries below the pruned `section` are gone: `get` returns `None`,
 //! and a `put` below the floor is satisfied without storing.
 //!
-//! ## Lazy Index Cleanup
+//! ## Index Cleanup
 //!
-//! Instead of performing a full iteration of the in-memory index, storing an additional in-memory
-//! index per `section`, or replaying a `section` of the value blob,
-//! [Archive] lazily cleans up the [crate::index::unordered::Index] after pruning. When a new key is
-//! stored that overlaps (same translated value) with a pruned key, the pruned key is removed from
-//! the in-memory index.
+//! Before deleting a section, [Archive] reads its fixed-size index records and removes pruned
+//! locations from the affected translated-key buckets. This reads no values and does not scan the
+//! full in-memory index. References to retained locations survive, including those that share a
+//! translated key with a pruned record. Inserting a key also removes stale locations in its bucket.
 //!
 //! # Read Path
 //!
@@ -222,7 +221,7 @@ mod tests {
     use crate::{
         archive::{Archive as _, Error, Identifier, MultiArchive as _},
         journal::{Error as JournalError, segmented::glob::corrupt_frame},
-        translator::{FourCap, TwoCap},
+        translator::{EightCap, FourCap, TwoCap},
     };
     use commonware_codec::{Error as CodecError, FixedSize};
     use commonware_cryptography::Crc32;
@@ -266,8 +265,17 @@ mod tests {
         partition_prefix: &str,
         items_per_section: NonZeroU64,
     ) -> Config<FourCap, ()> {
+        test_config_with_translator(context, partition_prefix, items_per_section, FourCap)
+    }
+
+    fn test_config_with_translator<E: BufferPooler, T: Translator>(
+        context: &E,
+        partition_prefix: &str,
+        items_per_section: NonZeroU64,
+        translator: T,
+    ) -> Config<T, ()> {
         Config {
-            translator: FourCap,
+            translator,
             metadata_partition: format!("{partition_prefix}-metadata"),
             key_partition: format!("{partition_prefix}-index"),
             key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2389,7 +2397,7 @@ mod tests {
             let buffer = context.encode();
             assert!(has_metric_value(&buffer, "items_tracked", 3));
             assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
-            assert!(has_metric_value(&buffer, "pruned_total", 0)); // no lazy cleanup yet
+            assert!(has_metric_value(&buffer, "pruned_total", 2));
 
             // Try to prune older section
             archive = archive.prune(2).await.expect("Failed to prune");
@@ -2397,7 +2405,7 @@ mod tests {
             // Try to prune current section again
             archive = archive.prune(3).await.expect("Failed to prune");
 
-            // Trigger lazy removal of keys
+            // Reusing a retired key must not prune its old reference again.
             archive = archive
                 .put(6, test_key("key2-blfh"), &5)
                 .await
@@ -2405,9 +2413,9 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(has_metric_value(&buffer, "items_tracked", 4)); // lazily remove one, add one
+            assert!(has_metric_value(&buffer, "items_tracked", 4));
             assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
-            assert!(has_metric_value(&buffer, "pruned_total", 1));
+            assert!(has_metric_value(&buffer, "pruned_total", 2));
 
             // A put below the prune floor is satisfied without storing
             let archive = archive
@@ -2890,6 +2898,103 @@ mod tests {
                 .await
                 .expect("Failed to put_multi_sync below floor");
             assert_eq!(archive.get_all(2).await.expect("Failed to get data"), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_cleans_lookup_index() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_config_with_translator(&context, "test", NZU64!(4), EightCap);
+            let mut archive = Archive::init(context.child("storage"), cfg).await.unwrap();
+            for batch in 0..32 {
+                let first = batch * 16;
+                for index in first..first + 16 {
+                    archive = archive
+                        .put(index, test_key(&format!("{index:04x}")), &(index as i32))
+                        .await
+                        .unwrap();
+                }
+                archive = archive.prune(first).await.unwrap();
+                let buffer = context.encode();
+                assert!(has_metric_value(&buffer, "index_items", 16));
+                assert!(has_metric_value(&buffer, "index_keys", 16));
+                assert!(has_metric_value(&buffer, "items_tracked", 16));
+                assert_eq!(
+                    archive
+                        .get(Identifier::Key(&test_key(&format!("{first:04x}"))))
+                        .await
+                        .unwrap(),
+                    Some(first as i32)
+                );
+                if first > 0 {
+                    assert_eq!(
+                        archive
+                            .get(Identifier::Key(&test_key(&format!("{:04x}", first - 1))))
+                            .await
+                            .unwrap(),
+                        None
+                    );
+                }
+                archive = archive.prune(first + 1).await.unwrap();
+                assert!(has_metric_value(&context.encode(), "index_items", 16));
+            }
+            archive = archive.prune(512).await.unwrap();
+            assert!(has_metric_value(&context.encode(), "index_items", 0));
+            assert!(has_metric_value(&context.encode(), "index_keys", 0));
+            archive.sync().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_preserves_colliding_backfill() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_config(&context, "test", NZU64!(4));
+            let mut archive = Archive::init(context.child("storage"), cfg.clone())
+                .await
+                .unwrap();
+            archive = archive.put(1, test_key("head-pruned"), &10).await.unwrap();
+            archive = archive.put(5, test_key("head-kept"), &50).await.unwrap();
+            archive = archive
+                .put_multi(5, test_key("tail-kept"), &51)
+                .await
+                .unwrap();
+            archive = archive.put(2, test_key("tail-pruned"), &20).await.unwrap();
+            archive = archive.put_multi(1, test_key("shared"), &60).await.unwrap();
+            archive = archive.put_multi(5, test_key("shared"), &61).await.unwrap();
+            archive = archive.prune(7).await.unwrap();
+            assert_eq!(archive.get_all(5).await.unwrap(), Some(vec![50, 51, 61]));
+            for (key, expected) in [
+                ("head-kept", Some(50)),
+                ("tail-kept", Some(51)),
+                ("head-pruned", None),
+                ("tail-pruned", None),
+                ("shared", Some(61)),
+            ] {
+                assert_eq!(
+                    archive.get(Identifier::Key(&test_key(key))).await.unwrap(),
+                    expected
+                );
+            }
+            assert!(has_metric_value(&context.encode(), "index_items", 3));
+            assert!(has_metric_value(&context.encode(), "index_keys", 3));
+            archive = archive.sync().await.unwrap();
+            drop(archive);
+            let reopened = Archive::init(context.child("reopened"), cfg).await.unwrap();
+            assert_eq!(reopened.get_all(5).await.unwrap(), Some(vec![50, 51, 61]));
+            assert_eq!(
+                reopened
+                    .get(Identifier::Key(&test_key("shared")))
+                    .await
+                    .unwrap(),
+                Some(61),
+            );
+            assert_eq!(
+                reopened
+                    .get(Identifier::Key(&test_key("head-pruned")))
+                    .await
+                    .unwrap(),
+                None,
+            );
         });
     }
 }

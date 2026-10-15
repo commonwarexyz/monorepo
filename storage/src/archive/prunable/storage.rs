@@ -412,6 +412,21 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         }
         debug!(min, "pruning archive");
 
+        // Read only the index records being discarded, before their sections disappear.
+        let mut previous_section = None;
+        for index in self.indices.range(..min).map(|(index, _)| *index) {
+            let section = self.section(index);
+            if previous_section == Some(section) {
+                continue;
+            }
+            previous_section = Some(section);
+            let records = self.oversized.size(section)? / Record::<K>::SIZE as u64;
+            for position in 0..records {
+                let entry = self.oversized.get(section, position).await?;
+                self.keys.retain(entry.key.as_ref(), |index| *index >= min);
+            }
+        }
+
         // Prune the section's index, values, and recovery markers together.
         (self.oversized, _) = self.oversized.prune(min).await?;
 
