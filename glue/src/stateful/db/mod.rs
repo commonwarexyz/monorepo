@@ -853,15 +853,23 @@ where
         let coordinator = async {
             let mut current_anchor = anchor;
             let mut tip_updates = Some(tip_updates);
+            let mut last_reached = None;
             loop {
                 if !drain_single_tip_updates(
                     &mut tip_updates,
                     &target_tx,
                     &mut current_anchor,
                     &mut current_target,
+                    &mut reached_rx,
+                    &mut last_reached,
                 )
                 .await
                 {
+                    return (current_anchor, current_target);
+                }
+
+                if last_reached.as_ref() == Some(&current_target) {
+                    let _ = finish_tx.send_lossy(()).await;
                     return (current_anchor, current_target);
                 }
 
@@ -874,21 +882,7 @@ where
                         let Some(reached) = reached else {
                             return (current_anchor, current_target);
                         };
-                        if !drain_single_tip_updates(
-                            &mut tip_updates,
-                            &target_tx,
-                            &mut current_anchor,
-                            &mut current_target,
-                        )
-                        .await
-                        {
-                            return (current_anchor, current_target);
-                        };
-                        if reached != current_target {
-                            continue;
-                        }
-                        let _ = finish_tx.send_lossy(()).await;
-                        return (current_anchor, current_target);
+                        last_reached = Some(reached);
                     },
                     update = update_future => {
                         let Some(update) = update else {
@@ -909,7 +903,7 @@ where
                         let Some(new_target) = target else {
                             continue;
                         };
-                        if !target_tx.send_lossy(new_target).await {
+                        if !send_single_target(&target_tx, new_target, &mut reached_rx, &mut last_reached).await {
                             return (current_anchor, current_target);
                         }
                     },
@@ -927,14 +921,36 @@ where
     }
 }
 
+/// Keep accepting progress while the database's target queue is full.
+async fn send_single_target<T: Send>(
+    target_tx: &mpsc::Sender<T>,
+    target: T,
+    reached_rx: &mut mpsc::Receiver<T>,
+    last_reached: &mut Option<T>,
+) -> bool {
+    let send = target_tx.send(target);
+    futures::pin_mut!(send);
+    loop {
+        select! {
+            sent = &mut send => return sent.is_ok(),
+            reached = reached_rx.recv() => {
+                let Some(reached) = reached else { return false; };
+                *last_reached = Some(reached);
+            },
+        }
+    }
+}
+
 /// Handles every queued tip update, then forwards the newest adopted targets if they changed.
 ///
-/// Returns `false` if the database stopped accepting targets.
+/// Returns `false` if the database closes its target or progress channel.
 async fn drain_single_tip_updates<D, T>(
     tip_updates: &mut Option<ring::Receiver<TipUpdate<D, T>>>,
     target_tx: &mpsc::Sender<T>,
     current_anchor: &mut Anchor<D>,
     current_target: &mut T,
+    reached_rx: &mut mpsc::Receiver<T>,
+    last_reached: &mut Option<T>,
 ) -> bool
 where
     D: Digest,
@@ -977,7 +993,7 @@ where
         return true;
     }
     *current_target = new_target.clone();
-    target_tx.send_lossy(new_target).await
+    send_single_target(target_tx, new_target, reached_rx, last_reached).await
 }
 
 macro_rules! impl_database_set {
@@ -1983,7 +1999,7 @@ mod tests {
         Anchor, AttachableResolver, AttachableResolverSet, Barrier, BatchContext,
         CoordinatorAction, CoordinatorState, DatabaseSet, InitError, MAX_CHANNEL_DRAIN_PER_TICK,
         ManagedDb, Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate,
-        drain_single_tip_updates,
+        drain_single_tip_updates, send_single_target,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
@@ -3959,6 +3975,8 @@ mod tests {
             let _ = tip_tx.send(newer_update).await;
             let _ = tip_tx.send(older_update).await;
 
+            let (_reached_tx, mut reached_rx) = mpsc::channel(1);
+            let mut last_reached = None;
             let mut tip_updates = Some(tip_rx);
             let mut current_anchor = anchor(0);
             let mut current_target = 0u64;
@@ -3968,6 +3986,8 @@ mod tests {
                     &target_tx,
                     &mut current_anchor,
                     &mut current_target,
+                    &mut reached_rx,
+                    &mut last_reached,
                 )
                 .await
             );
@@ -3997,6 +4017,8 @@ mod tests {
 
             let _ = tip_tx.send(update).await;
 
+            let (_reached_tx, mut reached_rx) = mpsc::channel(1);
+            let mut last_reached = None;
             let mut tip_updates = Some(tip_rx);
             let mut current_anchor = anchor(2);
             let mut current_target = 7u64;
@@ -4006,6 +4028,8 @@ mod tests {
                     &target_tx,
                     &mut current_anchor,
                     &mut current_target,
+                    &mut reached_rx,
+                    &mut last_reached,
                 )
                 .await
             );
@@ -4866,6 +4890,112 @@ mod tests {
 
             resolvers.attach_databases(databases).await;
             assert_eq!(&*log.lock(), &["db1", "db2"]);
+        });
+    }
+
+    #[test]
+    fn single_target_send_stops_when_either_channel_closes() {
+        deterministic::Runner::default().start(|_context| async move {
+            let (targets, mut target_rx) = mpsc::channel(1);
+            let (progress, mut reached_rx) = mpsc::channel(1);
+            targets.send(1u64).await.unwrap();
+            drop(progress);
+            let mut reached = None;
+            assert!(!send_single_target(&targets, 2, &mut reached_rx, &mut reached).await);
+            assert_eq!(target_rx.recv().await, Some(1));
+            assert!(target_rx.try_recv().is_err());
+            assert_eq!(reached, None);
+
+            let (_progress, mut reached_rx) = mpsc::channel(1);
+            drop(target_rx);
+            assert!(!send_single_target(&targets, 2, &mut reached_rx, &mut reached).await);
+            assert_eq!(reached, None);
+        });
+    }
+
+    struct ProgressGates {
+        start: oneshot::Receiver<()>,
+        first_update_consumed: oneshot::Sender<()>,
+        resume: oneshot::Receiver<()>,
+    }
+
+    impl<E: Send> StateSyncDb<E, ProgressGates> for SlowSyncDb {
+        type SyncError = Infallible;
+
+        async fn sync_db(
+            _context: E,
+            _config: Self::Config,
+            gates: ProgressGates,
+            target: Self::SyncTarget,
+            mut updates: mpsc::Receiver<Self::SyncTarget>,
+            finish: Option<mpsc::Receiver<()>>,
+            reached: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
+        ) -> Result<Self, Self::SyncError> {
+            let reached = reached.unwrap();
+            let mut finish = finish.unwrap();
+            gates.start.await.unwrap();
+            reached.send(target).await.unwrap();
+            let mut final_target = updates.recv().await.unwrap();
+            assert_eq!(final_target, 1);
+            gates.first_update_consumed.send(()).unwrap();
+            gates.resume.await.unwrap();
+            loop {
+                reached.send(final_target).await.unwrap();
+                select! {
+                    signal = finish.recv() => {
+                        assert_eq!(signal, Some(()));
+                        return Ok(Self { final_target });
+                    },
+                    update = updates.recv() => final_target = update.unwrap(),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn single_state_sync_drains_progress_while_target_send_is_blocked() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut tips, tip_rx) = ring::channel(NZUsize!(4));
+            let (start, start_rx) = oneshot::channel();
+            let (consumed, consumed_rx) = oneshot::channel();
+            let (resume, resume_rx) = oneshot::channel();
+            let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
+                context.child("sync"), (),
+                ProgressGates { start: start_rx, first_update_consumed: consumed, resume: resume_rx },
+                anchor(0), 0, tip_rx,
+                SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1), apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: NZUsize!(1), update_channel_size: NZUsize!(1),
+                },
+            );
+            pin_mut!(sync);
+            // Fill the target queue, then block a second target send while the database waits.
+            for target in [1, 2] {
+                let (update, mut observed) = TipUpdate::with_observation(anchor(target), target);
+                tips.send(update).await.unwrap();
+                assert!(sync.as_mut().now_or_never().is_none());
+                assert_eq!((&mut observed).now_or_never(), Some(Ok(())));
+            }
+            let (update, observed) = TipUpdate::with_observation(anchor(3), 3);
+            tips.send(update).await.unwrap();
+            start.send(()).unwrap();
+            select! {
+                _ = sync.as_mut() => panic!("sync finished before consuming the first target"),
+                consumed = consumed_rx => consumed.unwrap(),
+            };
+            select! {
+                _ = sync.as_mut() => panic!("sync finished before recording the newest target"),
+                observed = observed => observed.unwrap(),
+            };
+            // The next reached notification must unblock even while the target queue is full.
+            resume.send(()).unwrap();
+            let (database, converged) = select! {
+                result = sync => result.unwrap(),
+                _ = context.sleep(Duration::from_secs(1)) => panic!("single-database sync deadlocked on target/progress backpressure"),
+            };
+            assert_eq!(converged, anchor(3));
+            assert_eq!(database.read().await.final_target, 3);
         });
     }
 }
