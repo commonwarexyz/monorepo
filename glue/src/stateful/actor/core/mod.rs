@@ -30,7 +30,7 @@ use std::num::NonZeroUsize;
 
 mod mailbox;
 pub use mailbox::Mailbox;
-pub(super) use mailbox::Verification;
+pub(super) use mailbox::{Proposal, Verification};
 
 mod processing;
 mod syncing;
@@ -199,7 +199,7 @@ where
 
     /// Spawns the actor and returns its handle.
     ///
-    /// With a persisted floor, the actor runs state sync first: proposals return `None` and
+    /// With a persisted floor, the actor runs state sync first: proposals decline and
     /// verifications wait until it completes. Otherwise it recovers from marshal before handling
     /// any message. See [Startup](crate::stateful#startup).
     pub fn start(mut self) -> Handle<()> {
@@ -280,7 +280,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Stateful};
+    use super::{Config, Mailbox, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
         db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
@@ -290,12 +290,12 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Heightable as _, Reporter as _, marshal::Update,
-        simplex::mocks::scheme as scheme_mocks, types::Height,
+        Application as _, CertifiableBlock as _, Handoff, Heightable as _, Reporter as _,
+        marshal::Update, simplex::mocks::scheme as scheme_mocks, types::Height,
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
-    use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{Clock, Handle, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
         Acknowledgement as _, NZU64, NZUsize,
         acknowledgement::Exact,
@@ -366,6 +366,105 @@ mod tests {
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self::default())
+        }
+    }
+
+    /// Starts a [`Stateful`] around `application` and returns its mailbox, the actor handle,
+    /// and the guards that keep its marshal alive.
+    async fn stateful_with(
+        context: &deterministic::Context,
+        application: TestApp,
+    ) -> (
+        Mailbox<deterministic::Context, TestApp>,
+        Handle<()>,
+        Box<dyn std::any::Any>,
+    ) {
+        let mut signing_context = context.child("signing");
+        let fixture = scheme_mocks::fixture(&mut signing_context, b"handoff", 1);
+        let marshal = fixtures::marshal_fixture(
+            context.child("marshal"),
+            "stateful-handoff",
+            fixture.schemes[0].clone(),
+            None,
+            NZUsize!(8),
+            true,
+        )
+        .await;
+        let plan = SyncPlan::init(context.child("plan"), "stateful-handoff-stateful").await;
+        let (stateful, mailbox) = Stateful::new(
+            context.child("stateful"),
+            Config {
+                application,
+                db_config: (),
+                provider: (),
+                marshal: (marshal.mailbox.clone(), marshal.floor),
+                mailbox_size: NZUsize!(8),
+                plan,
+                resolvers: NoopResolver::default(),
+                sync_config: SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: NZUsize!(1),
+                    update_channel_size: NZUsize!(1),
+                },
+                prune_config: None,
+            },
+        );
+        (mailbox, stateful.start(), marshal.guards)
+    }
+
+    /// An application that answers [`Handoff::Wait`] declines, even when it would build an
+    /// ordinary proposal.
+    #[test]
+    fn mailbox_prepare_declines_on_wait() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = Arc::new(TestBlock::new(0, 0));
+            let child = TestBlock::child(&genesis, 1);
+            let (mut mailbox, handle, _guards) =
+                stateful_with(&context, TestApp::default().with_proposal(child.clone())).await;
+            assert_eq!(
+                mailbox
+                    .prepare(
+                        (context.child("wait"), child.context()),
+                        Arc::clone(&genesis),
+                        fixtures::blocks(genesis.height(), std::slice::from_ref(&genesis)),
+                        (),
+                    )
+                    .await
+                    .map(|_| ()),
+                Handoff::Wait,
+                "a Wait decision declines"
+            );
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
+    /// A built block comes back under the application's decision.
+    #[test]
+    fn mailbox_prepare_attaches_decision() {
+        for decision in [Handoff::Vote(()), Handoff::Stage(())] {
+            deterministic::Runner::timed(Duration::from_secs(5)).start(move |context| async move {
+                let genesis = Arc::new(TestBlock::new(0, 0));
+                let child = TestBlock::child(&genesis, 1);
+                let application = TestApp::with_handoff(decision).with_proposal(child.clone());
+                let (mut mailbox, handle, _guards) = stateful_with(&context, application).await;
+                let prepared = mailbox
+                    .prepare(
+                        (context.child("build"), child.context()),
+                        Arc::clone(&genesis),
+                        fixtures::blocks(genesis.height(), std::slice::from_ref(&genesis)),
+                        (),
+                    )
+                    .await;
+                assert_eq!(
+                    prepared,
+                    decision.map(|()| child),
+                    "a built block must carry the {decision:?} decision"
+                );
+                handle.abort();
+                let _ = handle.await;
+            });
         }
     }
 

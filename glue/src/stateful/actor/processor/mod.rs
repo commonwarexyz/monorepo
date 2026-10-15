@@ -4,9 +4,9 @@
 //! of unfinalized blocks by block digest. The _processed anchor_ is the last finalized block whose
 //! finalization has completed.
 //!
-//! - Propose and verify: batches are forked from the parent's cached state, or from the applied
-//!   databases when the parent is the processed anchor, and passed to the [`Application`]. The
-//!   result is cached only if it matches the block's commitments.
+//! - Prepare, propose, and verify: batches are forked from the parent's cached state, or from the
+//!   applied databases when the parent is the processed anchor, and passed to the
+//!   [`Application`]. The result is cached only if it matches the block's commitments.
 //! - Recovery: when a parent's state is not cached (for example after a restart), its missing
 //!   ancestors are acquired from the selected branch and replayed in height order with
 //!   [`Application::apply`], starting above the nearest cached ancestor or the processed anchor.
@@ -19,7 +19,11 @@
 
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
-    actor::{BlockDigest, SyncTargets, core::Verification, metrics::Metrics as StatefulMetrics},
+    actor::{
+        BlockDigest, SyncTargets,
+        core::{Proposal, Verification},
+        metrics::Metrics as StatefulMetrics,
+    },
     db::{Anchor, Barrier, DatabaseSet},
 };
 use commonware_consensus::{
@@ -488,6 +492,12 @@ impl Cancellation for Verification {
     }
 }
 
+impl<B: Send> Cancellation for Proposal<B> {
+    async fn cancelled(&mut self) {
+        self.wait_for_cancellation().await;
+    }
+}
+
 /// Result of applying a newly finalized block.
 pub(super) struct Applied<T> {
     /// Barrier covering the block, present only when the caller requested one.
@@ -706,12 +716,15 @@ where
         self.execution.update_pending_metric();
     }
 
-    /// Builds a proposal on `parent` and sends it on `response`.
+    /// Builds a proposal on `parent` and answers `proposal`.
     ///
-    /// Sends `None` if the parent's history in `blocks` is invalid, or if the application
-    /// declines to propose. Sends nothing and returns once `response` closes if that history is
-    /// unavailable, and returns without sending if `response` closes first. A proposed block's
-    /// state is cached as verified.
+    /// A proposal on a parent that has not yet certified answers the block under the application's
+    /// decision, or [`Handoff::Wait`](commonware_consensus::Handoff::Wait) if the parent's history
+    /// in `blocks` is invalid or unavailable, or if the application declines. An ordinary proposal
+    /// answers the block, or `None` in the same cases. Unavailable history declines at once rather
+    /// than holding the actor until consensus abandons the request. Returns without answering if
+    /// `proposal` is cancelled first. A built block's state is cached as verified. Replaying the
+    /// parent's uncached history is shared with concurrent verifications of the same blocks.
     ///
     /// Panics if the application proposes state that does not match the block's commitments.
     pub(super) async fn propose(
@@ -721,7 +734,7 @@ where
         parent: Arc<A::Block>,
         blocks: Blocks<A::Block>,
         input: Input<A::Input, A::Provider>,
-        mut response: oneshot::Sender<Option<A::Block>>,
+        mut proposal: Proposal<A::Block>,
     ) {
         let timer = self.execution.metrics.propose_duration.timer(context);
 
@@ -729,20 +742,20 @@ where
 
         let round = consensus_context.round();
         let batches = match self
-            .prepare_batches(context, blocks.clone(), parent.clone(), &mut response)
+            .prepare_batches(context, blocks.clone(), parent.clone(), &mut proposal)
             .await
         {
             Ok(batches) => batches,
             Err(PrepareBatchesError::Invalid) => {
-                response.send_lossy(None);
+                proposal.decline();
                 return;
             }
             Err(PrepareBatchesError::Incomplete) => {
                 debug!(
                     ?parent_digest,
-                    "proposal request waiting on incomplete ancestry during prepare_batches"
+                    "proposal declined: incomplete ancestry during prepare_batches"
                 );
-                response.closed().await;
+                proposal.decline();
                 return;
             }
             Err(PrepareBatchesError::Cancelled) => {
@@ -754,29 +767,61 @@ where
             }
         };
 
-        let proposed = match await_or_cancel(
-            &mut response,
-            self.app.propose(
-                (runtime_context, consensus_context),
-                parent,
-                blocks,
-                batches,
-                input,
-            ),
-        )
-        .await
-        {
-            Some(result) => result,
-            None => {
-                debug!(?parent_digest, "proposal request cancelled during propose");
-                return;
+        // A handoff builds through the application's prepare and answers its decision, and an
+        // ordinary proposal builds through propose and answers the block. Both cache the built
+        // block's state as verified before answering and time only a build that yields a block.
+        let application_context = (runtime_context, consensus_context);
+        match proposal {
+            Proposal::Prepare(mut response) => {
+                let Some(prepared) = await_or_cancel(
+                    &mut response,
+                    self.app
+                        .prepare(application_context, parent, blocks, batches, input),
+                )
+                .await
+                else {
+                    debug!(?parent_digest, "proposal request cancelled during prepare");
+                    return;
+                };
+                let prepared =
+                    prepared.map(|proposed| self.cache_proposed(round, parent_digest, proposed));
+                if !prepared.is_wait() {
+                    timer.observe(context);
+                }
+                response.send_lossy(prepared);
             }
-        };
+            Proposal::Propose(mut response) => {
+                let Some(proposed) = await_or_cancel(
+                    &mut response,
+                    self.app
+                        .propose(application_context, parent, blocks, batches, input),
+                )
+                .await
+                else {
+                    debug!(?parent_digest, "proposal request cancelled during propose");
+                    return;
+                };
+                let block =
+                    proposed.map(|proposed| self.cache_proposed(round, parent_digest, proposed));
+                if block.is_some() {
+                    timer.observe(context);
+                }
+                response.send_lossy(block);
+            }
+        }
+    }
 
-        let Some(Proposed { block, merkleized }) = proposed else {
-            response.send_lossy(None);
-            return;
-        };
+    /// Caches the state of a block the application built on `parent` as verified and returns
+    /// the block.
+    ///
+    /// Panics if the state does not match the block's commitments, or if `parent` is no longer
+    /// compatible: only a finalization could discard it, and none runs during a build.
+    fn cache_proposed(
+        &mut self,
+        round: Round,
+        parent: BlockDigest<A, E>,
+        Proposed { block, merkleized }: Proposed<A, E>,
+    ) -> A::Block {
         assert!(
             A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)),
             "proposed state must match block commitments",
@@ -787,7 +832,7 @@ where
                 PendingEntry {
                     height: block.height(),
                     round,
-                    parent: parent_digest,
+                    parent,
                     merkleized,
                     verified: true,
                 },
@@ -795,8 +840,7 @@ where
             "proposal parent must remain compatible until the proposal completes",
         );
         self.execution.update_pending_metric();
-        timer.observe(context);
-        response.send_lossy(Some(block));
+        block
     }
 
     /// Ensures parent state exists, then prepares unmerkleized batches for execution.
@@ -4130,6 +4174,47 @@ mod tests {
             assert_eq!(result, Err(PrepareBatchesError::Invalid));
             assert_eq!(provider.fetches(), 1);
             assert!(!harness.processor.pending_contains(&block3.digest()));
+        });
+    }
+
+    /// An unverified ancestor can claim any height, including `u64::MAX`, which has no
+    /// successor. An ancestor at a height other than the one requested is rejected.
+    #[test]
+    fn execution_rebuild_pending_rejects_parent_at_max_height() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(block1.clone()).await);
+
+            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+            let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
+            let parent = Block {
+                height: Height::new(u64::MAX),
+                ..block2
+            };
+            let child = Block {
+                parent: parent.digest(),
+                ..block3
+            };
+            harness.processor.clear_pending();
+
+            let provider = ScriptedSource::default();
+            provider.push([Some(parent)]);
+            let (mut response, _rx) = oneshot::channel::<bool>();
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    provider.source(&child),
+                    Arc::new(child.clone()),
+                    &mut response,
+                )
+                .await;
+
+            assert_eq!(result, Err(PrepareBatchesError::Invalid));
+            assert_eq!(provider.fetches(), 1);
+            assert!(!harness.processor.pending_contains(&child.digest()));
         });
     }
 

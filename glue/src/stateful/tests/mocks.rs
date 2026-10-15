@@ -4,7 +4,7 @@ use crate::stateful::{
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
+    Block as ConsensusBlock, CertifiableBlock, Handoff, Heightable,
     marshal::{blocks::Blocks, standard::Standard},
     simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
     types::{Epoch, Height, View},
@@ -275,9 +275,21 @@ impl CertifiableBlock for TestBlock {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct TestApp {
     finalization_hooks: Option<Arc<AtomicUsize>>,
+    handoff: Handoff<()>,
+    proposal: Option<TestBlock>,
+}
+
+impl Default for TestApp {
+    fn default() -> Self {
+        Self {
+            finalization_hooks: None,
+            handoff: Handoff::Wait,
+            proposal: None,
+        }
+    }
 }
 
 impl TestApp {
@@ -286,9 +298,23 @@ impl TestApp {
         (
             Self {
                 finalization_hooks: Some(hooks.clone()),
+                ..Self::default()
             },
             hooks,
         )
+    }
+
+    pub(crate) fn with_handoff(handoff: Handoff<()>) -> Self {
+        Self {
+            handoff,
+            ..Self::default()
+        }
+    }
+
+    /// Makes `propose` build `proposal` instead of declining.
+    pub(crate) fn with_proposal(mut self, proposal: TestBlock) -> Self {
+        self.proposal = Some(proposal);
+        self
     }
 }
 
@@ -315,6 +341,23 @@ impl<
         TestBlock::new(0, 0)
     }
 
+    async fn prepare(
+        &mut self,
+        context: (E, Self::Context),
+        parent: Arc<Self::Block>,
+        blocks: Blocks<Self::Block>,
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        input: Input<Self::Input, Self::Provider>,
+    ) -> Handoff<Proposed<Self, E>> {
+        let decision = self.handoff;
+        if decision.is_wait() {
+            return Handoff::Wait;
+        }
+        self.propose(context, parent, blocks, batches, input)
+            .await
+            .map_or(Handoff::Wait, |proposed| decision.map(|()| proposed))
+    }
+
     async fn propose(
         &mut self,
         _context: (E, Self::Context),
@@ -323,7 +366,10 @@ impl<
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
-        None
+        self.proposal.clone().map(|block| Proposed {
+            block,
+            merkleized: TestMerkleized,
+        })
     }
 
     async fn verify(

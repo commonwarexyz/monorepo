@@ -63,6 +63,11 @@ pub(crate) fn blocks<B: Block>(tip: Height, bodies: &[Arc<B>]) -> Blocks<B> {
     )
 }
 
+/// Builds a source through `tip` whose acquisitions never complete.
+pub(crate) fn pending_blocks<B: Block>(tip: Height) -> Blocks<B> {
+    Blocks::new(tip, NZUsize!(1), |_| None, |_| futures::future::pending())
+}
+
 /// Acknowledges reports immediately or retains their receipts for ordered release.
 #[derive(Clone)]
 pub(crate) struct FixtureReporter {
