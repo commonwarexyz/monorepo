@@ -116,10 +116,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
                 let marshal = marshal.clone();
                 async move {
                     // Heights within the resident suffix need no full metadata.
-                    let resident = history.peek().and_then(|commitments| {
-                        suffix_start(parent_height, commitments.len())?;
-                        suffix_at(parent_height, commitments, height)
-                    });
+                    let resident = history
+                        .peek()
+                        .and_then(|commitments| suffix_at(parent_height, commitments, height));
                     let commitment = match resident {
                         Some(commitment) => Some(commitment),
                         None => {
@@ -274,7 +273,6 @@ impl<B: Block> Blocks<B> {
             source: self.clone(),
             next: (start <= end).then_some(start),
             end,
-            start,
             previous: None,
             pending: FuturesOrdered::new(),
             lease: Lease::Idle,
@@ -286,7 +284,6 @@ impl<B: Block> Blocks<B> {
 pub struct BlockRange<B: Block> {
     source: Blocks<B>,
     next: Option<Height>,
-    start: Height,
     end: Height,
     previous: Option<B::Digest>,
     pending: FuturesOrdered<BoxFuture<'static, Result<Digested<B>, Error>>>,
@@ -338,9 +335,9 @@ impl<B: Block> Stream for BlockRange<B> {
         let result = result.and_then(|block| {
             // The preceding digest may only be resident once history has resolved.
             let previous = this.previous.or_else(|| {
-                (block.height() == this.start)
-                    .then(|| this.start.previous())
-                    .flatten()
+                block
+                    .height()
+                    .previous()
                     .and_then(|height| this.source.digest(height))
             });
             if previous.is_some_and(|digest| block.parent() != digest) {
@@ -794,6 +791,42 @@ mod tests {
                 assert!(range.next().await.is_none());
                 assert!(requests.lock().values().all(oneshot::Sender::is_closed));
             }
+        });
+    }
+
+    #[test]
+    fn first_parent_is_checked_against_metadata_revealed_during_fetch() {
+        deterministic::Runner::default().start(|_| async move {
+            let blocks = chain(2);
+            let detached = TestBlock::new(Sha256::fill(7), Height::new(1), 1);
+            let commitments = [blocks[0].digest(), detached.digest()];
+            let resident = Arc::new(Mutex::new(None::<[<TestBlock as Digestible>::Digest; 2]>));
+            let metadata = resident.clone();
+            let source = Blocks::new(
+                Height::new(1),
+                NZUsize!(1),
+                move |height| {
+                    metadata
+                        .lock()
+                        .as_ref()
+                        .and_then(|digests| digests.get(height.get() as usize).copied())
+                },
+                move |_| {
+                    let resident = resident.clone();
+                    let block = detached.clone();
+                    async move {
+                        *resident.lock() = Some(commitments);
+                        Some(digested(block))
+                    }
+                },
+            );
+            assert_eq!(source.digest(Height::zero()), None);
+            let mut range = source.range(Height::new(1)..=Height::new(1));
+            assert_eq!(
+                range.next().await.unwrap().unwrap_err(),
+                Error::InvalidParent
+            );
+            assert!(range.next().await.is_none());
         });
     }
 

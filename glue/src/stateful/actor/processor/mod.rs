@@ -1585,6 +1585,10 @@ where
             })?;
             if block.height().previous() != Some(expected_height)
                 || block.parent() != expected_digest
+                || (block.height() == target_height
+                    && blocks
+                        .digest(target_height)
+                        .is_some_and(|digest| digest != target_digest))
             {
                 return Err(PrepareBatchesError::Invalid);
             }
@@ -3601,6 +3605,67 @@ mod tests {
                 .await;
             assert_eq!(result, Err(PrepareBatchesError::Invalid));
             assert!(!harness.processor.pending_contains(&other.digest()));
+        });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_rejects_late_conflicting_target_commitment() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let first = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let selected = harness.stage_pending_child(&first, View::new(2)).await;
+            let tip = harness.stage_pending_child(&selected, View::new(3)).await;
+            let (target, _) = harness.build_child(&first, View::new(4)).await;
+            harness.processor.clear_pending();
+            let (first_height, first_digest) = (first.height(), first.digest());
+            let (target_height, selected_digest) = (selected.height(), selected.digest());
+            let (tip_height, tip_digest) = (tip.height(), tip.digest());
+            let resolved = Arc::new(Mutex::new(false));
+            let resident = resolved.clone();
+            let provider = harness.provider.clone();
+            let blocks = Blocks::new(
+                tip_height,
+                NZUsize!(8),
+                move |height| {
+                    if height == tip_height {
+                        Some(tip_digest)
+                    } else if *resident.lock() {
+                        match height {
+                            height if height == first_height => Some(first_digest),
+                            height if height == target_height => Some(selected_digest),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                },
+                move |height| {
+                    assert_eq!(height, first_height, "only the ancestor should be fetched");
+                    *resolved.lock() = true;
+                    let block = provider.fetch_by_digest(first_digest);
+                    async move { block.map(digested) }
+                },
+            );
+            assert_eq!(blocks.digest(target_height), None);
+            let metadata = blocks.clone();
+            let probe = ApplicationProbe::new(target.digest(), []);
+            harness.processor.app.apply_probe = Some(probe.clone());
+            let (mut response, _live) = oneshot::channel::<bool>();
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    blocks,
+                    digested(target.clone()),
+                    &mut response,
+                )
+                .await;
+            assert_eq!(metadata.digest(target_height), Some(selected_digest));
+            assert_eq!(*harness.provider.requests.lock(), vec![first_digest]);
+            assert_eq!(result, Err(PrepareBatchesError::Invalid));
+            assert_eq!(probe.calls(), 0, "conflicting held target must not execute");
+            assert!(!harness.processor.pending_contains(&target.digest()));
         });
     }
 

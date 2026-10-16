@@ -185,8 +185,9 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
 
-    /// Invalidates cached suffix walks when their anchor, certificates, or local
-    /// proposal and verification bindings change.
+    /// Revision of the inputs read by `visit_ancestry`. Mutations to its anchor,
+    /// certificates, or local proposal and verification bindings must advance it
+    /// so blocked histories are rechecked.
     ancestry_generation: u64,
 
     /// Monotone cursor for the oldest entered, unfinalized view (the anchor of
