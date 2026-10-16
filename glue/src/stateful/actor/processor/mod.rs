@@ -1481,7 +1481,9 @@ where
     /// or the processed anchor.
     ///
     /// Resident commitments in `blocks` and `target`'s parent identify cached ancestors without
-    /// reading bodies, and the held `target` is never acquired. Returns
+    /// reading bodies, and the held `target` is never acquired. When cached states exist and a
+    /// candidate's commitment is not resident, the search resolves `blocks`' history once, then
+    /// restarts against the current processed anchor and cache. Returns
     /// [`PrepareBatchesError::Invalid`] if `target` is at or below the processed height, above the
     /// tip of `blocks`, or not the selected block at its height, if a cached ancestor has a
     /// different height, if an acquired block does not extend the preceding one, if `blocks`
@@ -1502,47 +1504,66 @@ where
     {
         let timer = self.metrics.rebuild_pending_duration.timer(context);
         let (target_height, target_digest) = (target.height(), target.digest());
-        let anchor = {
-            let state = self.state.lock();
-            if target_digest == state.processed.digest || state.pending.contains_key(&target_digest)
-            {
-                return Ok(());
-            }
-            if target_height <= state.processed.height
-                || target_height > blocks.tip()
-                || blocks
-                    .digest(target_height)
-                    .is_some_and(|digest| digest != target_digest)
-            {
-                return Err(PrepareBatchesError::Invalid);
-            }
-            let mut anchor = state.processed;
-            let mut height = target_height
-                .previous()
-                .expect("unprocessed target must have a parent");
-            while !state.pending.is_empty() && height > anchor.height {
-                let Some(digest) = blocks
-                    .digest(height)
-                    .or_else(|| (height.next() == target_height).then(|| target.parent()))
-                else {
-                    break;
-                };
-                if let Some(entry) = state.pending.get(&digest) {
-                    if entry.height != height {
-                        return Err(PrepareBatchesError::Invalid);
-                    }
-                    anchor = Anchor {
-                        height,
-                        digest,
-                        round: entry.round,
-                    };
-                    break;
+        // Selected metadata below the resident suffix is resolved at most once. The search
+        // restarts afterwards because finalization may advance while resolution is pending.
+        let mut resolved = false;
+        let anchor = loop {
+            let missing = {
+                let state = self.state.lock();
+                if target_digest == state.processed.digest
+                    || state.pending.contains_key(&target_digest)
+                {
+                    return Ok(());
                 }
-                height = height
+                if target_height <= state.processed.height
+                    || target_height > blocks.tip()
+                    || blocks
+                        .digest(target_height)
+                        .is_some_and(|digest| digest != target_digest)
+                {
+                    return Err(PrepareBatchesError::Invalid);
+                }
+                let mut anchor = state.processed;
+                let mut height = target_height
                     .previous()
-                    .expect("selected height exceeds applied anchor");
-            }
-            anchor
+                    .expect("unprocessed target must have a parent");
+                let mut missing = None;
+                while !state.pending.is_empty() && height > anchor.height {
+                    let Some(digest) = blocks
+                        .digest(height)
+                        .or_else(|| (height.next() == target_height).then(|| target.parent()))
+                    else {
+                        missing = (!resolved).then_some(height);
+                        break;
+                    };
+                    if let Some(entry) = state.pending.get(&digest) {
+                        if entry.height != height {
+                            return Err(PrepareBatchesError::Invalid);
+                        }
+                        anchor = Anchor {
+                            height,
+                            digest,
+                            round: entry.round,
+                        };
+                        break;
+                    }
+                    height = height
+                        .previous()
+                        .expect("selected height exceeds applied anchor");
+                }
+                match missing {
+                    Some(height) => height,
+                    None => break anchor,
+                }
+            };
+            await_or_cancel(cancellation, blocks.resolve_digest(missing))
+                .await
+                .ok_or(PrepareBatchesError::Cancelled)?
+                .map_err(|error| match error {
+                    BlocksError::Unavailable => PrepareBatchesError::Incomplete,
+                    _ => PrepareBatchesError::Invalid,
+                })?;
+            resolved = true;
         };
         let (mut expected_height, mut expected_digest) = (anchor.height, anchor.digest);
         let mut range = blocks

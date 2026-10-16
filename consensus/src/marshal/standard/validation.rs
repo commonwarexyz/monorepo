@@ -1,5 +1,5 @@
 use crate::{
-    Application, Block, Epochable, Heightable,
+    Application, Block, Epochable, Heightable, History,
     marshal::{
         application::validation::{is_block_in_expected_epoch, is_valid_reproposal_at_verify},
         core::Mailbox,
@@ -14,7 +14,6 @@ use commonware_macros::select;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::channel::oneshot;
 use rand_core::Rng;
-use std::sync::Arc;
 use tracing::{Instrument as _, debug, info_span};
 
 /// Validation failures for standard verification.
@@ -189,7 +188,7 @@ pub(super) async fn run_app_verify<E, S, A, B, T>(
     application: &mut A,
     marshal: &Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<T>,
-    ancestry: Arc<[B::Digest]>,
+    ancestry: History<B::Digest>,
 ) -> Option<bool>
 where
     E: Rng + Spawner + Metrics + Clock,

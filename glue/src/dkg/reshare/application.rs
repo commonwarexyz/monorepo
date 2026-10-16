@@ -34,10 +34,9 @@ pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = U
 ///
 /// At the final block, verification compares the block's payload with the
 /// independently derived one from [`Mailbox::epoch_info`]. It rejects a
-/// mismatch or [`EpochInfoResponse::Unavailable`]. On
-/// [`EpochInfoResponse::Pending`] or [`EpochInfoResponse::Following`] (for
-/// example, while the actor follows an epoch), it stays unresolved until
-/// consensus cancels it. Before the final block, verification rejects a block
+/// mismatch. On [`EpochInfoResponse::Pending`], [`EpochInfoResponse::Following`],
+/// or [`EpochInfoResponse::Unavailable`], it stays unresolved until consensus
+/// cancels it. Before the final block, verification rejects a block
 /// that carries any payload except a dealer log from the midpoint onward.
 ///
 /// Proposals from the midpoint onward carry this node's dealer log when one is
@@ -180,11 +179,11 @@ where
             .await
     }
 
-    /// Selects the reshare payload for the block that extends `ancestry`, with the dealer-log
+    /// Selects the reshare payload for the block that extends `parent`, with the dealer-log
     /// reservation it was taken from, and asks the inner application to build on it.
     ///
-    /// Returns `None` without asking the inner application when the parent is missing or the
-    /// final block's epoch info is not available.
+    /// Returns `None` without asking the inner application when the final block's epoch info
+    /// is not available.
     #[tracing::instrument(
         name = "dkg.reshare.application.propose",
         level = "info",
@@ -287,8 +286,10 @@ where
                         return false;
                     }
                 }
-                response @ (EpochInfoResponse::Pending | EpochInfoResponse::Following) => {
-                    // Neither response is a verdict, so verification stays
+                response @ (EpochInfoResponse::Pending
+                | EpochInfoResponse::Following
+                | EpochInfoResponse::Unavailable) => {
+                    // An unavailable derivation is not a verdict, so verification stays
                     // unresolved until consensus cancels it.
                     debug!(
                         following = matches!(response, EpochInfoResponse::Following),
@@ -296,10 +297,6 @@ where
                     );
                     future::pending::<()>().await;
                     unreachable!("pending future must not resolve");
-                }
-                EpochInfoResponse::Unavailable => {
-                    debug!("verification rejected: final block epoch info is unavailable");
-                    return false;
                 }
             }
         } else {
@@ -989,37 +986,18 @@ mod tests {
     }
 
     #[test]
-    fn verification_rejects_unavailable_final_epoch_info() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let parent = mocks::genesis_block(leader().public_key());
-            let parent = mocks::ready(parent.clone());
-            let tip = final_block(&parent, Some(epoch_payload(1)));
-            let mut app = wrapper(&context, EpochInfoResponse::Unavailable);
-            let inner = app.inner.clone();
-
-            let verified = app
-                .verify(
-                    (context.child("app"), block_context(&parent, 1)),
-                    tip,
-                    parent.clone(),
-                    mocks::blocks([parent.clone()]),
-                )
-                .await;
-
-            assert!(!verified);
-            assert_eq!(inner.verify_count(), 0);
-        });
-    }
-
-    #[test]
     fn verification_stays_pending_without_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for response in [EpochInfoResponse::Following, EpochInfoResponse::Pending] {
+            for response in [
+                EpochInfoResponse::Following,
+                EpochInfoResponse::Pending,
+                EpochInfoResponse::Unavailable,
+            ] {
                 let parent = mocks::genesis_block(leader().public_key());
                 let parent = mocks::ready(parent.clone());
                 let tip = final_block(&parent, Some(epoch_payload(1)));
+                let retained_tip = Arc::downgrade(&tip.inner_shared());
                 let expected_parent = parent.digest();
                 let inner = RecordingApp::accepting();
                 let (sender, mut receiver) = mailbox::new::<
@@ -1053,6 +1031,12 @@ mod tests {
                     "verification resolved without final epoch info"
                 );
                 assert_eq!(inner.verify_count(), 0);
+                assert!(retained_tip.upgrade().is_some());
+                drop(verify);
+                assert!(
+                    retained_tip.upgrade().is_none(),
+                    "cancelled verification must release its candidate"
+                );
             }
         });
     }

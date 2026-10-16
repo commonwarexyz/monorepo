@@ -1279,7 +1279,9 @@ fn out_of_order_certifications_complete_on_qmdb() {
                     .certify(
                         block.context.round,
                         block.digest(),
-                        ancestor_commitments[..=index].into(),
+                        commonware_consensus::History::ready(Arc::from(
+                            &ancestor_commitments[..=index],
+                        )),
                     )
                     .await,
             );
@@ -1438,7 +1440,9 @@ fn certifications_overtake_deferred_finalizations_on_qmdb() {
                     .certify(
                         block.context.round,
                         block.digest(),
-                        ancestor_commitments[..=index].into(),
+                        commonware_consensus::History::ready(Arc::from(
+                            &ancestor_commitments[..=index],
+                        )),
                     )
                     .await,
             );
@@ -1795,7 +1799,9 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 .certify(
                     block.context.round,
                     block.digest(),
-                    ancestor_commitments[..=index].into(),
+                    commonware_consensus::History::ready(Arc::from(
+                        &ancestor_commitments[..=index],
+                    )),
                 )
                 .await;
             assert!(
@@ -1828,7 +1834,9 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                     .certify(
                         block.context.round,
                         block.digest(),
-                        ancestor_commitments[..=index].into(),
+                        commonware_consensus::History::ready(Arc::from(
+                            &ancestor_commitments[..=index],
+                        )),
                     )
                     .await,
             ));
@@ -2070,7 +2078,9 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
                 .certify(
                     block.context.round,
                     block.digest(),
-                    ancestor_commitments[..=index].into(),
+                    commonware_consensus::History::ready(Arc::from(
+                        &ancestor_commitments[..=index],
+                    )),
                 )
                 .await;
             assert!(
@@ -2125,7 +2135,9 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
                     .certify(
                         block.context.round,
                         block.digest(),
-                        ancestor_commitments[..=index].into(),
+                        commonware_consensus::History::ready(Arc::from(
+                            &ancestor_commitments[..=index],
+                        )),
                     )
                     .await,
             ));
@@ -2329,7 +2341,9 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                 .certify(
                     block.context.round,
                     block.digest(),
-                    ancestor_commitments[..=index].into(),
+                    commonware_consensus::History::ready(Arc::from(
+                        &ancestor_commitments[..=index],
+                    )),
                 )
                 .await;
             assert!(
@@ -2374,7 +2388,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             .certify(
                 block.context.round,
                 block.digest(),
-                ancestor_commitments[..=4].into(),
+                commonware_consensus::History::ready(Arc::from(&ancestor_commitments[..=4])),
             )
             .await;
         first_started

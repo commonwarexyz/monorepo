@@ -22,7 +22,7 @@ use commonware_runtime::{
 use commonware_utils::futures::Aborter;
 use rand_core::CryptoRng;
 use std::{
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet},
     mem::{replace, take},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -185,6 +185,10 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
 
+    /// Invalidates cached suffix walks when their anchor, certificates, or local
+    /// proposal and verification bindings change.
+    ancestry_generation: u64,
+
     /// Monotone cursor for the oldest entered, unfinalized view (the anchor of
     /// the stall timeout). See [`Self::next_stall_timeout`].
     stall_anchor: View,
@@ -208,9 +212,6 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
 
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
-    /// Eligible certifications waiting for an arbitrary older proposal. The
-    /// in-term certification wakeup only covers the immediate child.
-    ancestry_waiters: BTreeMap<View, BTreeSet<View>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -291,13 +292,13 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
+            ancestry_generation: 0,
             stall_anchor: GENESIS_VIEW,
             nullify_views: BTreeSet::new(),
             nullification_views: BTreeSet::new(),
             failed_certifications: BTreeSet::new(),
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
-            ancestry_waiters: BTreeMap::new(),
             current_view,
             tracked_views,
             issuance_window_probes,
@@ -308,9 +309,21 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Seeds the state machine with the genesis payload and advances into view 1.
     pub fn set_genesis(&mut self, genesis: D) {
-        self.genesis = Some(genesis);
+        if self.genesis != Some(genesis) {
+            self.genesis = Some(genesis);
+            self.invalidate_ancestry();
+        }
         self.enter_view(GENESIS_VIEW.next());
         self.set_leader(GENESIS_VIEW.next(), None);
+    }
+
+    /// Returns the generation of the inputs read by the ancestry suffix walkers.
+    pub(super) const fn ancestry_generation(&self) -> u64 {
+        self.ancestry_generation
+    }
+
+    const fn invalidate_ancestry(&mut self) {
+        self.ancestry_generation = self.ancestry_generation.wrapping_add(1);
     }
 
     /// Seeds the state machine from the configured floor.
@@ -632,11 +645,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.set_leader(view.next(), Some(&notarization.certificate));
         let result = self.create_round(view).add_notarization(notarization);
         if result.0 {
+            self.invalidate_ancestry();
             if view > self.last_finalized {
                 self.certification_candidates.insert(view);
-            }
-            if let Some(waiters) = self.ancestry_waiters.remove(&view) {
-                self.certification_candidates.extend(waiters);
             }
             self.slide_optimistic_frontier(view);
         }
@@ -681,7 +692,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         finalization: Finalization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
         let view = finalization.view();
-        if view > self.last_finalized {
+        let anchor_changed = view > self.last_finalized;
+        if anchor_changed {
             self.last_finalized = view;
 
             // Finalization overrides local certification rejections at or
@@ -691,11 +703,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             // Prune certification candidates at or below finalized view.
             // Finalization is definitive, so these certifications are no longer relevant.
             self.certification_candidates.retain(|v| *v > view);
-            let pending = self.ancestry_waiters.split_off(&view.next());
-            for waiters in replace(&mut self.ancestry_waiters, pending).into_values() {
-                self.certification_candidates
-                    .extend(waiters.into_iter().filter(|candidate| *candidate > view));
-            }
 
             // Abort outstanding certifications at or below finalized view for the same reason.
             let keep = self.outstanding_certifications.split_off(&view.next());
@@ -709,6 +716,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.enter_view(view.next());
         self.set_leader(view.next(), Some(&finalization.certificate));
         let result = self.create_round(view).add_finalization(finalization);
+        if anchor_changed || result.0 {
+            self.invalidate_ancestry();
+        }
         if result.0 {
             self.wake_certification_child(view);
             self.slide_optimistic_frontier(view);
@@ -767,6 +777,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .views
             .get_mut(&view)
             .and_then(|round| round.construct_notarize().cloned())?;
+        self.invalidate_ancestry();
         self.prepare_optimistic_successor(view);
 
         // Signing can only fail if we are a verifier, so we don't need to worry about
@@ -909,6 +920,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             round.set_verifying(proposal, parent_payload);
         }
         if matches!(artifact, Artifact::Notarize(_)) {
+            self.invalidate_ancestry();
             self.prepare_optimistic_successor(artifact.view());
         }
     }
@@ -973,20 +985,13 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         round.latch_timeout(now, reason);
     }
 
-    /// Returns a proposal request for the lowest locally admissible tracked view ready to
-    /// propose, plus missing-ancestry repairs encountered during selection. The request
-    /// identifies a pipelined handoff when applicable.
-    pub(super) fn try_propose(
-        &mut self,
-    ) -> (
-        Option<ProposalRequest<D, S::PublicKey>>,
-        Vec<CertificateFetch>,
-    ) {
+    /// Returns a proposal request for the lowest admissible tracked view ready to propose.
+    /// The request identifies a pipelined handoff when applicable.
+    pub(super) fn try_propose(&mut self) -> Option<ProposalRequest<D, S::PublicKey>> {
         // Nothing above the next term start is admissible (see
         // [`Self::admits_outbound`]), so bound the scan rather than walking every
         // tracked future round (certificates can land arbitrarily far ahead).
         // Ascending order gives the current view precedence over optimistic work.
-        let mut fetches = Vec::new();
         let limit = self.view.next_term_start(self.term_length());
         let mut cursor = self.view;
         while let Some(view) = self.next_tracked_view(cursor) {
@@ -1029,21 +1034,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             if is_handoff && self.voted_nullify(self.view) {
                 continue;
             }
-            if let Err(err) = self.visit_ancestry(parent_view, |_| {}) {
-                if let AncestryError::Missing(missing) = err
-                    && self
-                        .views
-                        .get_mut(&view)
-                        .expect("tracked round")
-                        .request(missing)
-                {
-                    fetches.push(CertificateFetch {
-                        proposal: view,
-                        view: missing,
-                    });
-                }
-                continue;
-            }
             let Some(leader) = self
                 .views
                 .get_mut(&view)
@@ -1056,14 +1046,13 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 leader: leader.key,
                 parent: (parent_view, parent_payload),
             };
-            let request = if is_handoff {
+            return Some(if is_handoff {
                 ProposalRequest::Prepare(context)
             } else {
                 ProposalRequest::Propose(context)
-            };
-            return (Some(request), fetches);
+            });
         }
-        (None, fetches)
+        None
     }
 
     /// Returns whether `parent` has certified or finalized with exactly this payload.
@@ -1160,6 +1149,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return false;
         }
         round.set_verifying(proposal, parent_payload);
+        self.invalidate_ancestry();
         true
     }
 
@@ -1168,7 +1158,13 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns true if the proposal should trigger verification, false otherwise.
     pub fn set_proposal(&mut self, view: View, proposal: Proposal<D>) -> bool {
         self.prepare_optimistic_successor(view);
-        self.create_round(view).set_proposal(proposal)
+        let round = self.create_round(view);
+        let was_unequivocated = round.has_unequivocated_proposal();
+        let added = round.set_proposal(proposal);
+        if added || was_unequivocated != round.has_unequivocated_proposal() {
+            self.invalidate_ancestry();
+        }
+        added
     }
 
     /// Returns the ancestry fetch a verification error justifies, if any.
@@ -1258,23 +1254,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                     };
                 }
             };
-            if let Err(err) = self.visit_ancestry(proposal.parent, |_| {}) {
-                if let AncestryError::Missing(missing) = err
-                    && self
-                        .views
-                        .get_mut(&view)
-                        .expect("tracked round")
-                        .request(missing)
-                {
-                    return Verify::Resolve {
-                        proposal: view,
-                        view: missing,
-                        kind: Kind::Notarization,
-                        target: leader.key,
-                    };
-                }
-                continue;
-            }
             let Some(round) = self.views.get_mut(&view) else {
                 continue;
             };
@@ -1282,6 +1261,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 continue;
             }
             round.set_verifying(proposal.clone(), parent_payload);
+            self.invalidate_ancestry();
             return Verify::Ready(
                 Context {
                     round: proposal.round,
@@ -1318,8 +1298,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if self.verification_matches(view) {
             return false;
         }
-        if let Some(round) = self.views.get_mut(&view) {
+        if let Some(round) = self.views.get_mut(&view)
+            && round.verifying().is_some()
+        {
             round.clear_verifying();
+            self.invalidate_ancestry();
         }
         true
     }
@@ -1329,10 +1312,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if self.verification_is_stale(view) {
             return false;
         }
-        self.views
+        let verified = self
+            .views
             .get_mut(&view)
             .map(|round| round.verified())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if verified {
+            self.invalidate_ancestry();
+        }
+        verified
     }
 
     /// Latches `reason` after the automaton rejected or dropped a proposal.
@@ -1407,25 +1395,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                         "blocked candidate has no wake: {err:?}"
                     );
                     fetches.extend(self.certification_fetch(&err));
-                }
-                continue;
-            }
-
-            // The candidate's notarization anchors every parent link to its selected branch.
-            if let Err(err) = self.visit_ancestry(proposal.view(), |_| {}) {
-                if let AncestryError::Missing(missing) = err {
-                    match self.ancestry_waiters.entry(missing) {
-                        Entry::Vacant(entry) => {
-                            entry.insert(BTreeSet::from([view]));
-                            fetches.push(CertificateFetch {
-                                proposal: view,
-                                view: missing,
-                            });
-                        }
-                        Entry::Occupied(mut entry) => {
-                            entry.get_mut().insert(view);
-                        }
-                    }
                 }
                 continue;
             }
@@ -1510,7 +1479,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     pub fn prune(&mut self) -> Vec<View> {
         let min = self.min_active();
         let kept = self.views.split_off(&min);
-        let removed = replace(&mut self.views, kept).into_keys().collect();
+        let removed: Vec<_> = replace(&mut self.views, kept).into_keys().collect();
+        if !removed.is_empty() {
+            self.invalidate_ancestry();
+        }
         self.nullification_views = self.nullification_views.split_off(&min);
         self.nullify_views = self.nullify_views.split_off(&min);
 
@@ -1536,16 +1508,58 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Returns the complete selected path from the current finalized anchor
     /// through `parent`. Consecutive re-proposals contribute one commitment.
+    #[cfg(test)]
     pub fn ancestry(&self, parent: View) -> Result<Arc<[D]>, AncestryError> {
-        let mut ancestry = Vec::new();
-        self.visit_ancestry(parent, |payload| ancestry.push(*payload))?;
-        ancestry.reverse();
-        ancestry.dedup();
-        Ok(ancestry.into())
+        let (ancestry, missing) = self.ancestry_suffix(parent)?;
+        missing.map_or(Ok(ancestry), |view| Err(AncestryError::Missing(view)))
     }
 
-    /// Visits parent links without allocating so input readiness can be checked
-    /// before consuming an application request's one-shot latch.
+    /// Returns the validated resident suffix and its first missing ancestor, if any.
+    /// Consecutive re-proposals contribute one commitment.
+    pub(super) fn ancestry_suffix(
+        &self,
+        parent: View,
+    ) -> Result<(Arc<[D]>, Option<View>), AncestryError> {
+        let mut ancestry = Vec::new();
+        let missing = match self.visit_ancestry(parent, |payload| ancestry.push(*payload)) {
+            Ok(()) => None,
+            Err(AncestryError::Missing(view)) => Some(view),
+            Err(AncestryError::Invalid) => return Err(AncestryError::Invalid),
+        };
+        ancestry.reverse();
+        ancestry.dedup();
+        Ok((ancestry.into(), missing))
+    }
+
+    /// Returns a certification candidate's resident ancestry, excluding the candidate.
+    /// Its certificate requires every ancestor link to be certificate-backed.
+    pub(super) fn certification_ancestry_suffix(
+        &self,
+        candidate: &Proposal<D>,
+    ) -> Result<(Arc<[D]>, Option<View>), AncestryError> {
+        let mut first = None;
+        let mut ancestry = Vec::new();
+        let result = self.visit_ancestry(candidate.view(), |payload| {
+            if first.is_none() {
+                first = Some(*payload);
+            } else {
+                ancestry.push(*payload);
+            }
+        });
+        if first.is_some_and(|payload| payload != candidate.payload) {
+            return Err(AncestryError::Invalid);
+        }
+        let missing = match result {
+            Ok(()) => None,
+            Err(AncestryError::Missing(view)) => Some(view),
+            Err(AncestryError::Invalid) => return Err(AncestryError::Invalid),
+        };
+        ancestry.reverse();
+        ancestry.dedup();
+        Ok((ancestry.into(), missing))
+    }
+
+    /// Visits selected parent links, validating optimistic payload bindings.
     fn visit_ancestry(
         &self,
         mut parent: View,
@@ -2349,6 +2363,129 @@ mod tests {
     }
 
     #[test]
+    fn ancestry_generation_tracks_proofs_and_local_votes() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+            let generation = state.ancestry_generation();
+            assert_ne!(generation, 0);
+            state.set_genesis(test_genesis());
+            assert_eq!(state.ancestry_generation(), generation);
+            let local = fetch_proposal(1, 0, 151);
+            assert!(state.set_proposal(local.view(), local.clone()));
+            assert_ne!(state.ancestry_generation(), generation);
+            let generation = state.ancestry_generation();
+            assert!(!state.set_proposal(local.view(), local.clone()));
+            assert!(matches!(
+                state.ancestry_suffix(local.view()),
+                Ok((_, Some(_)))
+            ));
+            assert!(state.ancestry_suffix(GENESIS_VIEW).unwrap().1.is_none());
+            assert_eq!(state.ancestry_generation(), generation);
+
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
+            assert_ne!(state.ancestry_generation(), generation);
+            let generation = state.ancestry_generation();
+            assert!(state.verified(local.view()));
+            assert_ne!(state.ancestry_generation(), generation);
+            let generation = state.ancestry_generation();
+            assert!(state.construct_notarize(local.view()).is_some());
+            assert_ne!(state.ancestry_generation(), generation);
+            assert_eq!(
+                state.ancestry(local.view()).unwrap().as_ref(),
+                &[test_genesis(), local.payload]
+            );
+            let generation = state.ancestry_generation();
+            assert!(state.construct_notarize(local.view()).is_none());
+            state.trigger_timeout(local.view(), TimeoutReason::Inactivity);
+            assert!(state.add_nullification(build_nullification(&verifier, &schemes, local.round)));
+            assert_eq!(state.ancestry_generation(), generation);
+
+            let selected = fetch_proposal(1, 0, 152);
+            assert!(!state.set_proposal(selected.view(), selected.clone()));
+            assert_ne!(state.ancestry_generation(), generation);
+            assert_eq!(
+                state.ancestry(local.view()),
+                Err(AncestryError::Missing(local.view()))
+            );
+            let generation = state.ancestry_generation();
+            let notarization = build_notarization(&verifier, &schemes, &selected);
+            assert!(state.add_notarization(notarization.clone()).0);
+            assert_ne!(state.ancestry_generation(), generation);
+            let generation = state.ancestry_generation();
+            assert!(!state.add_notarization(notarization).0);
+            assert!(state.certified(selected.view(), true).is_some());
+            assert_eq!(state.ancestry_generation(), generation);
+            assert_eq!(
+                state.ancestry(selected.view()).unwrap().as_ref(),
+                &[test_genesis(), selected.payload]
+            );
+            let finalization = build_finalization(&verifier, &schemes, &selected);
+            assert!(state.add_finalization(finalization.clone()).0);
+            assert_ne!(state.ancestry_generation(), generation);
+            let generation = state.ancestry_generation();
+            assert!(!state.add_finalization(finalization).0);
+            assert_eq!(
+                state.ancestry(selected.view()).unwrap().as_ref(),
+                &[selected.payload]
+            );
+            assert_eq!(state.ancestry_generation(), generation);
+        });
+    }
+
+    #[test]
+    fn ancestry_generation_tracks_local_build_and_replayed_vote() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (Fixture { schemes, .. }, mut state) = setup_state_with(
+                &mut context,
+                4,
+                2,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+            let generation = state.ancestry_generation();
+            let request = state.try_propose().expect("local leader");
+            assert_eq!(state.ancestry_generation(), generation);
+            let proposal = fetch_proposal(1, 0, 153);
+            assert!(state.proposed(request.context(), proposal.payload));
+            assert_ne!(state.ancestry_generation(), generation);
+            let vote = state.construct_notarize(proposal.view()).unwrap();
+            let mut recovered = build_state(
+                context.child("recovered"),
+                schemes[2].clone(),
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+            let generation = recovered.ancestry_generation();
+            recovered.replay(&Artifact::Notarize(vote));
+            assert_ne!(recovered.ancestry_generation(), generation);
+            assert_eq!(
+                recovered.ancestry(proposal.view()).unwrap().as_ref(),
+                &[test_genesis(), proposal.payload]
+            );
+        });
+    }
+
+    #[test]
     fn ancestry_follows_selected_links_and_keeps_finalized_anchor() {
         deterministic::Runner::default().start(|mut context| async move {
             let (
@@ -2415,7 +2552,6 @@ mod tests {
             let first = propose_and_notarize_view1(&mut state, 21);
             let next = state
                 .try_propose()
-                .0
                 .expect("optimistic child ready")
                 .into_context();
             assert_eq!(
@@ -2499,6 +2635,10 @@ mod tests {
             assert!(state.set_proposal(candidate.view(), candidate.clone()));
             assert!(matches!(state.try_verify(), Verify::Wait));
             assert_eq!(state.ancestry(parent.view()), Err(AncestryError::Invalid));
+            assert_eq!(
+                state.ancestry_suffix(parent.view()),
+                Err(AncestryError::Invalid)
+            );
             assert!(state.optimistic_ancestry_payload(parent.view()).is_none());
             let round = state.views.get(&candidate.view()).unwrap();
             assert!(round.pending_verification().is_some());
@@ -2553,7 +2693,60 @@ mod tests {
     }
 
     #[test]
-    fn ancestry_certification_without_verification_repairs_missing_prefix() {
+    fn certification_dispatches_without_history_prefix() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 9, 10, 1, 4);
+            let chain: Vec<_> = (1..=4)
+                .map(|view| fetch_proposal(view, view - 1, view as u8))
+                .collect();
+            let candidate = chain.last().unwrap();
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &schemes, candidate))
+                    .0
+            );
+            let (ready, fetches) = state.certify_candidates();
+            assert_eq!(ready, vec![candidate.clone()]);
+            assert!(fetches.is_empty());
+            for missing in [3, 2, 1] {
+                let (suffix, gap) = state.ancestry_suffix(candidate.view()).unwrap();
+                assert_eq!(gap, Some(View::new(missing)));
+                assert_eq!(
+                    suffix.as_ref(),
+                    &chain[missing as usize..]
+                        .iter()
+                        .map(|p| p.payload)
+                        .collect::<Vec<_>>()
+                );
+                let proposal = &chain[missing as usize - 1];
+                assert!(
+                    state
+                        .add_notarization(build_notarization(&verifier, &schemes, proposal))
+                        .0
+                );
+            }
+            let (suffix, gap) = state.ancestry_suffix(candidate.view()).unwrap();
+            assert_eq!(gap, None);
+            assert_eq!(
+                suffix.as_ref(),
+                &[
+                    test_genesis(),
+                    chain[0].payload,
+                    chain[1].payload,
+                    chain[2].payload,
+                    chain[3].payload
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn ancestry_certification_without_verification_dispatches_with_missing_prefix() {
         deterministic::Runner::default().start(|mut context| async move {
             let (
                 Fixture {
@@ -2571,10 +2764,12 @@ mod tests {
                 );
             }
             let (ready, fetches) = state.certify_candidates();
-            assert_eq!(fetches.len(), 1);
-            assert_eq!(fetches[0].view, View::new(2));
-            assert!(ready.is_empty());
+            assert!(fetches.is_empty());
+            assert!(ready.contains(&candidate));
             assert!(!state.views.get(&candidate.view()).unwrap().is_verified());
+            let (suffix, missing) = state.ancestry_suffix(candidate.parent).unwrap();
+            assert_eq!(suffix.as_ref(), &[parent.payload]);
+            assert_eq!(missing, Some(View::new(2)));
             assert_eq!(
                 state.ancestry(candidate.parent),
                 Err(AncestryError::Missing(View::new(2)))
@@ -2585,9 +2780,6 @@ mod tests {
                     .add_notarization(build_notarization(&verifier, &schemes, &missing))
                     .0
             );
-            let (ready, fetches) = state.certify_candidates();
-            assert!(fetches.is_empty());
-            assert!(ready.contains(&candidate));
             assert_eq!(
                 state.ancestry(candidate.parent).unwrap().to_vec(),
                 vec![test_genesis(), missing.payload, parent.payload]
@@ -2665,6 +2857,17 @@ mod tests {
                 state.ancestry(repeated.view()).unwrap().to_vec(),
                 vec![test_genesis(), first.payload]
             );
+            let (suffix, missing) = state.certification_ancestry_suffix(&repeated).unwrap();
+            assert_eq!(missing, None);
+            assert_eq!(suffix.as_ref(), &[test_genesis(), first.payload]);
+            let (suffix, missing) = state
+                .certification_ancestry_suffix(&nonconsecutive)
+                .unwrap();
+            assert_eq!(missing, None);
+            assert_eq!(
+                suffix.as_ref(),
+                &[test_genesis(), first.payload, distinct.payload]
+            );
             assert_eq!(
                 state.ancestry(nonconsecutive.view()).unwrap().to_vec(),
                 vec![
@@ -2700,7 +2903,7 @@ mod tests {
     }
 
     #[test]
-    fn ancestry_propose_returns_all_missing_metadata_repairs() {
+    fn ancestry_propose_dispatches_each_ready_view_without_metadata_repairs() {
         deterministic::Runner::default().start(|mut context| async move {
             let (
                 Fixture {
@@ -2717,9 +2920,7 @@ mod tests {
                 ViewDelta::new(8),
                 4,
             );
-            let (initial, fetches) = state.try_propose();
-            assert_eq!(initial.unwrap().view(), View::new(1));
-            assert!(fetches.is_empty());
+            assert_eq!(state.try_propose().unwrap().view(), View::new(1));
             for view in [2, 4, 6] {
                 let proposal = fetch_proposal(view, view - 1, view as u8);
                 assert!(
@@ -2728,86 +2929,81 @@ mod tests {
                         .0
                 );
             }
-
-            let (selected, fetches) = state.try_propose();
-            assert!(selected.is_none());
-            assert_eq!(
-                fetches
-                    .into_iter()
-                    .map(|fetch| (fetch.proposal, fetch.view))
-                    .collect::<Vec<_>>(),
-                [
-                    (View::new(3), View::new(1)),
-                    (View::new(5), View::new(3)),
-                    (View::new(7), View::new(5))
-                ]
-            );
-            let (selected, fetches) = state.try_propose();
-            assert!(selected.is_none());
-            assert!(fetches.is_empty());
             for view in [3, 5, 7] {
-                assert!(state.views.get(&View::new(view)).unwrap().should_propose());
+                let selected = state.try_propose().expect("ready despite missing prefix");
+                assert_eq!(selected.view(), View::new(view));
+                let (suffix, missing) = state.ancestry_suffix(selected.context().parent.0).unwrap();
+                assert_eq!(suffix.as_ref(), &[selected.context().parent.1]);
+                assert_eq!(missing, Some(View::new(view - 2)));
+                assert!(!state.views.get(&View::new(view)).unwrap().should_propose());
             }
-
-            let parent = fetch_proposal(1, 0, 1);
-            assert!(
-                state
-                    .add_notarization(build_notarization(&verifier, &schemes, &parent))
-                    .0
-            );
-            let (selected, fetches) = state.try_propose();
-            assert_eq!(selected.unwrap().view(), View::new(3));
-            assert!(fetches.is_empty());
-            assert!(!state.views.get(&View::new(3)).unwrap().should_propose());
-            for view in [5, 7] {
-                assert!(state.views.get(&View::new(view)).unwrap().should_propose());
-            }
+            assert!(state.try_propose().is_none());
         });
     }
 
     #[test]
-    fn ancestry_inputs_wait_before_consuming_proposal_or_verification() {
+    fn ancestry_inputs_dispatch_before_prefix_is_available() {
         for signer in [1, 2] {
             deterministic::Runner::default().start(|mut context| async move {
-                let (Fixture { schemes, verifier, .. }, mut state) = setup_state_with(
-                    &mut context, 4, signer, 9, 10, TermLength::new(NZU32!(5)), ViewDelta::new(2), 4,
+                let (
+                    Fixture {
+                        schemes, verifier, ..
+                    },
+                    mut state,
+                ) = setup_state_with(
+                    &mut context,
+                    4,
+                    signer,
+                    9,
+                    10,
+                    TermLength::new(NZU32!(5)),
+                    ViewDelta::new(2),
+                    4,
                 );
                 if signer == 2 {
-                    assert_eq!(state.try_propose().0.unwrap().view(), View::new(1));
+                    assert_eq!(state.try_propose().unwrap().view(), View::new(1));
                 }
                 let missing = fetch_proposal(1, 0, 71);
                 let parent = fetch_proposal(2, 1, 72);
-                assert!(state.add_notarization(build_notarization(&verifier, &schemes, &parent)).0);
+                assert!(
+                    state
+                        .add_notarization(build_notarization(&verifier, &schemes, &parent))
+                        .0
+                );
                 let candidate = fetch_proposal(3, 2, 73);
-                if signer == 2 {
-                    let (context, fetches) = state.try_propose();
-                    assert!(context.is_none());
-                    assert!(state.views.get(&candidate.view()).unwrap().should_propose());
-                    assert!(fetches.iter().any(|fetch| fetch.proposal == candidate.view() && fetch.view == missing.view()));
+                let selected = if signer == 2 {
+                    let request = state
+                        .try_propose()
+                        .expect("proposal needs no history prefix");
+                    assert!(!state.views.get(&candidate.view()).unwrap().should_propose());
+                    request.into_context()
                 } else {
                     assert!(state.set_proposal(candidate.view(), candidate.clone()));
-                    assert!(matches!(state.try_verify(), Verify::Resolve { view, kind: Kind::Notarization, .. } if view == missing.view()));
-                    assert!(state.views.get(&candidate.view()).unwrap().pending_verification().is_some());
-                }
-                assert!(state.add_notarization(build_notarization(&verifier, &schemes, &missing)).0);
-                assert!(state.certified(missing.view(), true).is_some());
-                assert!(state.certified(parent.view(), true).is_some());
-                let selected = if signer == 2 {
-                    state.try_propose().0.expect("metadata repair must preserve build request").into_context()
-                } else {
-                    let Verify::Ready(context, _) = state.try_verify() else {
-                        panic!("metadata repair must preserve verification request");
+                    let Verify::Ready(context, verifying) = state.try_verify() else {
+                        panic!("verification needs no history prefix");
                     };
+                    assert_eq!(verifying, candidate);
                     context
                 };
                 assert_eq!(selected.view(), candidate.view());
-                assert_eq!(&*state.ancestry(selected.parent.0).unwrap(), &[test_genesis(), missing.payload, parent.payload]);
+                let (suffix, gap) = state.ancestry_suffix(selected.parent.0).unwrap();
+                assert_eq!(suffix.as_ref(), &[parent.payload]);
+                assert_eq!(gap, Some(missing.view()));
+                assert!(
+                    state
+                        .add_notarization(build_notarization(&verifier, &schemes, &missing))
+                        .0
+                );
+                assert_eq!(
+                    &*state.ancestry(selected.parent.0).unwrap(),
+                    &[test_genesis(), missing.payload, parent.payload]
+                );
             });
         }
     }
 
     #[test]
-    fn ancestry_finalization_wakes_metadata_waiters_with_selected_anchor() {
+    fn ancestry_finalization_completes_missing_prefix_at_selected_anchor() {
         deterministic::Runner::default().start(|mut context| async move {
             let (
                 Fixture {
@@ -2833,27 +3029,27 @@ mod tests {
                         .0
                 );
             }
-            assert!(state.certify_candidates().0.is_empty());
-            assert!(
-                state
-                    .ancestry_waiters
-                    .get(&View::new(2))
-                    .unwrap()
-                    .contains(&candidate.view())
+            let (ready, fetches) = state.certify_candidates();
+            assert_eq!(ready, vec![candidate.clone()]);
+            assert_eq!(
+                fetches
+                    .iter()
+                    .map(|fetch| (fetch.proposal, fetch.view))
+                    .collect::<Vec<_>>(),
+                vec![(parent.view(), parent.parent)]
             );
+            let (suffix, missing) = state.ancestry_suffix(candidate.parent).unwrap();
+            assert_eq!(suffix.as_ref(), &[parent.payload]);
+            assert_eq!(missing, Some(View::new(2)));
             assert!(
                 state
                     .add_finalization(build_finalization(&verifier, &schemes, &parent))
                     .0
             );
-            let (ready, fetches) = state.certify_candidates();
-            assert_eq!(ready, vec![candidate.clone()]);
-            assert!(fetches.is_empty());
-            assert!(state.ancestry_waiters.is_empty());
-            assert_eq!(
-                &*state.ancestry(candidate.parent).unwrap(),
-                &[parent.payload]
-            );
+            let (suffix, missing) = state.ancestry_suffix(candidate.parent).unwrap();
+            assert_eq!(suffix.as_ref(), &[parent.payload]);
+            assert_eq!(missing, None);
+            assert_eq!(state.ancestry(candidate.parent).unwrap(), suffix);
             let mut pending = AbortablePool::<()>::default();
             let aborter = pending.push(std::future::pending());
             state.set_certify_handle(candidate.view(), aborter);
@@ -2871,7 +3067,7 @@ mod tests {
     // Defensive malformed-input coverage: these certificates cannot coexist
     // under the protocol's fault bound.
     #[test]
-    fn ancestry_malformed_optimistic_anchor_does_not_claim_build() {
+    fn ancestry_malformed_anchor_is_rejected_independently_of_dispatch() {
         deterministic::Runner::default().start(|mut context| async move {
             let (
                 Fixture {
@@ -2888,15 +3084,25 @@ mod tests {
                 ViewDelta::new(2),
                 4,
             );
-            assert_eq!(state.try_propose().0.unwrap().view(), View::new(1));
+            assert_eq!(state.try_propose().unwrap().view(), View::new(1));
             let malformed = fetch_proposal(2, 2, 91);
             assert!(
                 state
                     .add_notarization(build_notarization(&verifier, &schemes, &malformed))
                     .0
             );
-            assert!(state.try_propose().0.is_none());
-            assert!(state.views.get(&View::new(3)).unwrap().should_propose());
+            let request = state
+                .try_propose()
+                .expect("dispatch does not inspect history");
+            assert_eq!(
+                request.context().parent,
+                (malformed.view(), malformed.payload)
+            );
+            assert!(!state.views.get(&View::new(3)).unwrap().should_propose());
+            assert_eq!(
+                state.ancestry_suffix(malformed.view()),
+                Err(AncestryError::Invalid)
+            );
             assert_eq!(
                 state.ancestry(malformed.view()),
                 Err(AncestryError::Invalid)
@@ -2907,9 +3113,9 @@ mod tests {
                     .add_finalization(build_finalization(&verifier, &schemes, &finalized))
                     .0
             );
+            state.release_proposal_request(request.view());
             let next = state
                 .try_propose()
-                .0
                 .expect("selected finalization must release build input")
                 .into_context();
             assert_eq!(next.parent, (finalized.view(), finalized.payload));
@@ -2939,7 +3145,6 @@ mod tests {
             let (ready, fetches) = state.certify_candidates();
             assert!(ready.is_empty());
             assert!(fetches.is_empty());
-            assert!(state.ancestry_waiters.is_empty());
         });
     }
 
@@ -4194,7 +4399,9 @@ mod tests {
             state.add_finalization(finalization);
 
             // Update last finalize to be in the future
+            let generation = state.ancestry_generation();
             let removed = state.prune();
+            assert_ne!(state.ancestry_generation(), generation);
             assert_eq!(
                 removed,
                 vec![
@@ -4206,6 +4413,9 @@ mod tests {
                 ]
             );
             assert_eq!(state.views.len(), 2); // 20 and 21
+            let generation = state.ancestry_generation();
+            assert!(state.prune().is_empty());
+            assert_eq!(state.ancestry_generation(), generation);
         });
     }
 
@@ -4595,14 +4805,24 @@ mod tests {
             let notarization = build_notarization(&verifier, &schemes, &parent);
             assert!(state.add_notarization(notarization).0);
             assert!(state.certified(View::new(2), true).is_some());
-            assert!(matches!(state.try_verify(), Verify::Resolve { view, kind: Kind::Notarization, .. } if view == View::new(1)));
-            let ancestor = fetch_proposal(1, 0, 42);
-            assert!(state.add_notarization(build_notarization(&verifier, &schemes, &ancestor)).0);
             let Verify::Ready(ctx, proposal) = state.try_verify() else {
-                panic!("proposal should verify once the selected metadata is complete");
+                panic!("proposal should verify once its parent certifies");
             };
             assert_eq!(ctx.parent, (View::new(2), parent.payload));
             assert_eq!(proposal, child);
+            let (suffix, missing) = state.ancestry_suffix(parent.view()).unwrap();
+            assert_eq!(suffix.as_ref(), &[parent.payload]);
+            assert_eq!(missing, Some(View::new(1)));
+            let ancestor = fetch_proposal(1, 0, 42);
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &schemes, &ancestor))
+                    .0
+            );
+            assert_eq!(
+                state.ancestry(parent.view()).unwrap().as_ref(),
+                &[test_genesis(), ancestor.payload, parent.payload]
+            );
         });
     }
 
@@ -4873,8 +5093,7 @@ mod tests {
     /// the candidate's view and the candidate names its immediate predecessor (see
     /// [`State::certification_parent_ready`]). A term-start proposal
     /// remains eligible when its cross-term parent is uncertified and the
-    /// skipped views' nullifications are not held. Its application input
-    /// still requires the parent's commitment metadata.
+    /// skipped views' nullifications are not held. Missing history does not gate dispatch.
     #[test]
     fn certify_candidates_exempts_term_start_from_parent_precheck() {
         let runtime = deterministic::Runner::default();
@@ -4905,9 +5124,11 @@ mod tests {
             );
             let (ready, fetches) = state.certify_candidates();
             assert!(state.certification_parent_ready(&term_start).is_ok());
-            assert!(ready.is_empty());
-            assert_eq!(fetches.len(), 1);
-            assert_eq!(fetches[0].view, View::new(1));
+            assert_eq!(ready, vec![term_start.clone()]);
+            assert!(fetches.is_empty());
+            let (suffix, missing) = state.certification_ancestry_suffix(&term_start).unwrap();
+            assert!(suffix.is_empty());
+            assert_eq!(missing, Some(View::new(1)));
         });
     }
 
@@ -5194,7 +5415,7 @@ mod tests {
     }
 
     #[test]
-    fn certification_repairs_conflicting_optimistic_parent() {
+    fn certification_history_requires_certificates_below_candidate() {
         deterministic::Runner::default().start(|mut context| async move {
             let (
                 Fixture {
@@ -5233,24 +5454,18 @@ mod tests {
             assert!(state.certification_parent_ready(&candidate).is_ok());
 
             let (ready, fetches) = state.certify_candidates();
-            assert!(
-                ready.is_empty(),
-                "local A cannot supply notarized C's parent"
-            );
-            assert_eq!(fetches.len(), 1);
-            assert_eq!(fetches[0].proposal, candidate.view());
-            assert_eq!(fetches[0].view, selected.view());
-            let (ready, fetches) = state.certify_candidates();
-            assert!(ready.is_empty());
+            assert_eq!(ready, vec![candidate.clone()]);
             assert!(fetches.is_empty());
             assert_eq!(
-                state
-                    .views
-                    .get_mut(&candidate.view())
-                    .unwrap()
-                    .try_certify(),
-                Some(candidate.clone()),
+                state.ancestry(local.view()).unwrap().as_ref(),
+                &[test_genesis(), local.payload]
             );
+            let (suffix, missing) = state.certification_ancestry_suffix(&candidate).unwrap();
+            assert!(
+                suffix.is_empty(),
+                "a local vote cannot supply certified ancestry"
+            );
+            assert_eq!(missing, Some(selected.view()));
 
             assert!(
                 state
@@ -5258,16 +5473,18 @@ mod tests {
                     .0
             );
             assert!(state.explicit_ancestry_payload(selected.view()).is_none());
-            let (ready, fetches) = state.certify_candidates();
-            assert!(fetches.is_empty());
-            assert!(ready.contains(&candidate));
+            let (suffix, missing) = state.certification_ancestry_suffix(&candidate).unwrap();
+            assert_eq!(missing, None);
+            assert_eq!(suffix.as_ref(), &[test_genesis(), selected.payload]);
+            let mut conflicting = candidate.clone();
+            conflicting.payload = local.payload;
             assert_eq!(
-                state.ancestry(candidate.parent).unwrap().as_ref(),
-                &[test_genesis(), selected.payload],
+                state.certification_ancestry_suffix(&conflicting),
+                Err(AncestryError::Invalid)
             );
             assert!(state.certified(candidate.view(), true).is_some());
             let (ready, fetches) = state.certify_candidates();
-            assert!(ready.is_empty());
+            assert_eq!(ready, vec![selected]);
             assert!(fetches.is_empty());
         });
     }
@@ -5312,21 +5529,19 @@ mod tests {
             assert_eq!(verifying_parent, parent);
             let candidate = fetch_proposal(3, 2, 133);
             assert!(state.set_proposal(candidate.view(), candidate.clone()));
-            assert!(matches!(
-                state.try_verify(),
-                Verify::Resolve { proposal, view, kind: Kind::Notarization, .. }
-                    if proposal == candidate.view() && view == selected.view()
-            ));
+            let Verify::Ready(context, actual) = state.try_verify() else {
+                panic!("verification needs no history prefix");
+            };
+            assert_eq!(actual, candidate);
+            assert_eq!(context.parent, (parent.view(), parent.payload));
+            let (suffix, missing) = state.ancestry_suffix(parent.view()).unwrap();
+            assert_eq!(suffix.as_ref(), &[parent.payload]);
+            assert_eq!(missing, Some(selected.view()));
             assert!(
                 state
                     .add_notarization(build_notarization(&verifier, &quorum, &selected))
                     .0
             );
-            let Verify::Ready(context, actual) = state.try_verify() else {
-                panic!("selected ancestry repair must preserve the verification request");
-            };
-            assert_eq!(actual, candidate);
-            assert_eq!(context.parent, (parent.view(), parent.payload));
             assert_eq!(
                 state.ancestry(parent.view()).unwrap().as_ref(),
                 &[test_genesis(), selected.payload, parent.payload],
@@ -5659,7 +5874,6 @@ mod tests {
             let parent = propose_and_notarize_view1(&mut state, 118);
             let child_context = state
                 .try_propose()
-                .0
                 .expect("optimistic child proposal should start")
                 .into_context();
             assert_eq!(child_context.view(), View::new(2));
@@ -6308,7 +6522,6 @@ mod tests {
             );
             let context = state
                 .try_propose()
-                .0
                 .expect("optimistic proposal ready")
                 .into_context();
             assert_eq!(context.round, proposal_v2.round);
@@ -6325,7 +6538,6 @@ mod tests {
             );
             let context = state
                 .try_propose()
-                .0
                 .expect("optimistic proposal ready")
                 .into_context();
             assert_eq!(context.round, proposal_v3.round);
@@ -7803,7 +8015,7 @@ mod tests {
 
             // Before late certification arrives, we cannot build a child because parent ancestry
             // is still incomplete for this node.
-            assert!(state.try_propose().0.is_none());
+            assert!(state.try_propose().is_none());
 
             // Late certification after nullification is still recorded.
             assert!(state.certified(parent_view, true).is_some());
@@ -7811,7 +8023,6 @@ mod tests {
             // Child proposal selection should build on the now-certified parent view.
             let propose_context = state
                 .try_propose()
-                .0
                 .expect("child view should be able to build on certified parent")
                 .into_context();
             assert_eq!(propose_context.round.view(), child_view);
@@ -7931,7 +8142,7 @@ mod tests {
             assert!(state.enter_view(View::new(3)));
             state.set_leader(View::new(3), None);
             assert_eq!(state.leader_index(View::new(3)), Some(Participant::new(2)));
-            assert!(state.try_propose().0.is_none());
+            assert!(state.try_propose().is_none());
         });
     }
 
@@ -7986,7 +8197,6 @@ mod tests {
 
             let proposal = state
                 .try_propose()
-                .0
                 .expect("term-start proposal should use prior-term certified parent")
                 .into_context();
             assert_eq!(proposal.round.view(), View::new(6));
@@ -8044,7 +8254,6 @@ mod tests {
 
         let context = state
             .try_propose()
-            .0
             .expect("outgoing leader should propose the term tip")
             .into_context();
         let tip = fetch_proposal(5, 4, 65);
@@ -8053,7 +8262,6 @@ mod tests {
 
         let context = state
             .try_propose()
-            .0
             .expect("handoff proposal should use the uncertified tip")
             .into_context();
         let child = fetch_proposal(6, 5, 66);
@@ -8167,7 +8375,6 @@ mod tests {
             journal.push(journaled_vote(&mut live, &tip));
             let stale = live
                 .try_propose()
-                .0
                 .expect("handoff request on the tip")
                 .into_context();
             assert_eq!(stale.parent, (tip.view(), tip.payload));
@@ -8190,7 +8397,6 @@ mod tests {
             assert!(restarted.certified(replacement.view(), true).is_some());
             let request = restarted
                 .try_propose()
-                .0
                 .expect("ordinary request on the replacement");
             assert!(!request.is_handoff());
             assert_eq!(
@@ -8257,16 +8463,15 @@ mod tests {
             );
             assert_eq!(restarted.explicit_ancestry_payload(a5.view()), None);
             assert_eq!(restarted.optimistic_ancestry_payload(a5.view()), None);
-            let (request, fetches) = restarted.try_propose();
+            let request = restarted.try_propose();
             assert!(request.is_none(), "proposed on a dead chain");
-            assert!(fetches.is_empty());
 
             // Once a conflicting b5 certifies, the leader builds on it.
             let b5 = fetch_proposal(5, 4, 25);
             let b5_notarization = build_notarization(&verifier, &schemes[..3], &b5);
             assert!(restarted.add_notarization(b5_notarization).0);
             assert!(restarted.certified(b5.view(), true).is_some());
-            let request = restarted.try_propose().0.expect("proposal on b5");
+            let request = restarted.try_propose().expect("proposal on b5");
             assert!(!request.is_handoff());
             assert_eq!(request.context().parent, (b5.view(), b5.payload));
         });
@@ -8300,7 +8505,6 @@ mod tests {
             // in the outgoing view.
             let ctx = state
                 .try_propose()
-                .0
                 .expect("handoff proposal should use the uncertified tip")
                 .into_context();
             assert_eq!(ctx.round.view(), View::new(6));
@@ -8359,7 +8563,7 @@ mod tests {
 
             // As the incoming leader, we request a handoff on the uncertified view-5 tip.
             let (_, parent) = prepare_term_boundary(&mut state, &verifier, &schemes);
-            let request = state.try_propose().0.expect("handoff request");
+            let request = state.try_propose().expect("handoff request");
             assert!(request.is_handoff());
             let request = request.into_context();
             assert_eq!(request.view(), View::new(6));
@@ -8384,7 +8588,7 @@ mod tests {
             assert!(!state.supersede_proposal_request(&request));
             assert_eq!(state.pending_handoff_abandonment(&request), None);
             assert!(!state.proposed(&request, Sha256Digest::from([91; 32])));
-            assert!(state.try_propose().0.is_none());
+            assert!(state.try_propose().is_none());
         });
     }
 
@@ -8413,7 +8617,7 @@ mod tests {
                     4,
                 );
                 let (_, parent) = prepare_term_boundary(&mut state, &verifier, &schemes);
-                let request = state.try_propose().0.expect("handoff request");
+                let request = state.try_propose().expect("handoff request");
                 assert!(request.is_handoff());
                 let request = request.into_context();
                 let peers = &schemes[..3];
@@ -8607,8 +8811,7 @@ mod tests {
     ///
     /// That certificate includes a vote from an honest validator that certified view 5, so
     /// a validator that is not the incoming leader must certify it without first certifying
-    /// view 5. It still fetches the notarization of view 5, which the ancestry of view 6
-    /// needs.
+    /// view 5. Its history separately reports the missing notarization of view 5.
     fn certify_conflicting_term_start<L: Elector<ed25519::Scheme>>(
         state: &mut State<deterministic::Context, ed25519::Scheme, L, Sha256Digest>,
         signer: usize,
@@ -8632,21 +8835,18 @@ mod tests {
         let notarization = build_notarization(verifier, &others, &conflicting);
         assert!(state.add_notarization(notarization).0);
         let (ready, fetches) = state.certify_candidates();
-        assert!(ready.is_empty());
-        assert_eq!(
-            fetches
-                .iter()
-                .map(|fetch| (fetch.proposal, fetch.view))
-                .collect::<Vec<_>>(),
-            vec![(View::new(6), View::new(5))]
-        );
+        assert_eq!(ready, vec![conflicting.clone()]);
+        assert!(fetches.is_empty());
+        let (suffix, missing) = state.certification_ancestry_suffix(&conflicting).unwrap();
+        assert!(suffix.is_empty());
+        assert_eq!(missing, Some(View::new(5)));
 
         let parent = fetch_proposal(5, 0, 63);
         let notarization = build_notarization(verifier, schemes, &parent);
         assert!(state.add_notarization(notarization).0);
-        let (ready, fetches) = state.certify_candidates();
-        assert!(fetches.is_empty());
-        assert!(ready.contains(&conflicting));
+        let (suffix, missing) = state.certification_ancestry_suffix(&conflicting).unwrap();
+        assert_eq!(missing, None);
+        assert_eq!(suffix.as_ref(), &[test_genesis(), parent.payload]);
     }
 
     /// Every validator other than the incoming leader of view 6 (participant 3) certifies
@@ -8778,7 +8978,6 @@ mod tests {
             assert_eq!(state.leader_index(View::new(6)), Some(Participant::new(3)));
             let ctx = state
                 .try_propose()
-                .0
                 .expect("replayed outgoing vote should restore the handoff")
                 .into_context();
             assert_eq!(ctx.round.view(), View::new(6));
@@ -8827,7 +9026,7 @@ mod tests {
             let child_vote = Notarize::sign(&schemes[3], child.clone()).expect("child vote");
             state.replay(&Artifact::Notarize(child_vote));
 
-            assert!(state.try_propose().0.is_none());
+            assert!(state.try_propose().is_none());
             assert!(state.construct_notarize(View::new(6)).is_none());
 
             // The other participants nullify the old tip, making the certified
@@ -8842,7 +9041,7 @@ mod tests {
                 state.parent_payload_for(View::new(6), View::new(4)),
                 Ok(certified.payload)
             );
-            assert!(state.try_propose().0.is_none());
+            assert!(state.try_propose().is_none());
 
             let alternate = Context {
                 round: Rnd::new(Epoch::new(9), View::new(6)),
@@ -8885,7 +9084,6 @@ mod tests {
 
             let ctx = state
                 .try_propose()
-                .0
                 .expect("handoff proposal should use the uncertified tip")
                 .into_context();
             assert_eq!(ctx.parent, (View::new(5), tip.payload));
@@ -8903,7 +9101,6 @@ mod tests {
             // Our view-6 proposal binds the displaced tip, so it is dead ancestry.
             let request = state
                 .try_propose()
-                .0
                 .map(|r| (r.view(), r.is_handoff(), r.context().parent));
             assert_eq!(request, None, "proposed on a dead chain");
             assert_eq!(state.optimistic_ancestry_payload(View::new(6)), None);
@@ -8969,7 +9166,6 @@ mod tests {
             // Pipelined handoff at view 6 on the uncertified tip.
             let ctx = state
                 .try_propose()
-                .0
                 .expect("handoff proposal should use the uncertified tip")
                 .into_context();
             assert_eq!(ctx.parent, (View::new(5), tip.payload));
@@ -8989,7 +9185,6 @@ mod tests {
             // nullifies.
             let request = state
                 .try_propose()
-                .0
                 .map(|r| (r.view(), r.is_handoff(), r.context().parent));
             assert_eq!(request, None, "proposed on a dead chain");
             assert_eq!(state.optimistic_ancestry_payload(View::new(6)), None);
@@ -9000,10 +9195,7 @@ mod tests {
                 Rnd::new(Epoch::new(9), View::new(6)),
             );
             assert!(state.add_nullification(nullification));
-            let request = state
-                .try_propose()
-                .0
-                .map(|r| (r.view(), r.context().parent));
+            let request = state.try_propose().map(|r| (r.view(), r.context().parent));
             assert_eq!(
                 request,
                 Some((View::new(7), (View::new(5), conflict.payload)))
@@ -9048,7 +9240,6 @@ mod tests {
 
             let request = state
                 .try_propose()
-                .0
                 .expect("recovered tip should allow a handoff");
             assert!(request.is_handoff());
             let handoff = request.into_context();
@@ -9088,7 +9279,6 @@ mod tests {
 
             let request = state
                 .try_propose()
-                .0
                 .expect("term-start proposal should use the certified fallback");
             assert!(matches!(request, ProposalRequest::Propose(_)));
             let ctx = request.into_context();
@@ -9132,11 +9322,10 @@ mod tests {
 
             let initial = state
                 .try_propose()
-                .0
                 .expect("handoff proposal should use the outgoing tip")
                 .into_context();
             assert_eq!(initial.parent.0, View::new(5));
-            assert!(state.try_propose().0.is_none());
+            assert!(state.try_propose().is_none());
 
             // Abandoning the captured parent leaves the certified fallback
             // selectable, so supersession drops the pending build and releases
@@ -9150,13 +9339,12 @@ mod tests {
             // certified fallback and still permits only one pending build.
             let retry = state
                 .try_propose()
-                .0
                 .expect("superseded handoff should retry on certified ancestry");
             assert!(matches!(retry, ProposalRequest::Propose(_)));
             let retry = retry.into_context();
             assert_eq!(retry.round.view(), View::new(6));
             assert_eq!(retry.parent, (View::new(4), certified.payload));
-            assert!(state.try_propose().0.is_none());
+            assert!(state.try_propose().is_none());
 
             // Completing the replacement build produces a vote on the
             // fallback branch.
@@ -9201,7 +9389,6 @@ mod tests {
             assert_eq!(state.current_view(), View::new(6));
             let start = state
                 .try_propose()
-                .0
                 .expect("term start should be proposed on certified ancestry")
                 .into_context();
             assert_eq!(start.parent, (View::new(4), certified.payload));
@@ -9214,7 +9401,6 @@ mod tests {
             // The next view in the term is requested on the notarized term start.
             let request = state
                 .try_propose()
-                .0
                 .expect("next view should be proposed on the notarized term start");
             assert!(matches!(request, ProposalRequest::Propose(_)));
             let ctx = request.into_context();
@@ -9232,7 +9418,7 @@ mod tests {
             // claimed.
             let finalization = build_finalization(&verifier, &schemes, &term_start);
             assert!(state.add_finalization(finalization).0);
-            assert!(state.try_propose().0.is_none());
+            assert!(state.try_propose().is_none());
         });
     }
 
@@ -9259,7 +9445,6 @@ mod tests {
 
             let ctx = state
                 .try_propose()
-                .0
                 .expect("handoff proposal should use the outgoing tip")
                 .into_context();
             let ours = fetch_proposal(6, 5, 66);
@@ -9296,7 +9481,6 @@ mod tests {
 
             let ctx = state
                 .try_propose()
-                .0
                 .expect("handoff proposal should use the outgoing tip")
                 .into_context();
             let ours = fetch_proposal(6, 5, 66);
@@ -9331,7 +9515,6 @@ mod tests {
 
             let proposal_context = state
                 .try_propose()
-                .0
                 .expect("handoff proposal should use the outgoing tip")
                 .into_context();
             assert_eq!(proposal_context.parent, (View::new(5), tip.payload));
@@ -9386,7 +9569,7 @@ mod tests {
             // Only the incoming leader elects itself before the tip's certificate
             // exists, so only it receives a handoff request.
             assert_eq!(state.leader_index(View::new(6)), None);
-            assert!(state.try_propose().0.is_none());
+            assert!(state.try_propose().is_none());
 
             // The validator learns the incoming leader from the tip's notarization, so a
             // proposal that arrives first waits for it. Either way, the validator then
@@ -9464,7 +9647,6 @@ mod tests {
 
             let ctx = state
                 .try_propose()
-                .0
                 .expect("handoff proposal should pipeline single-view terms")
                 .into_context();
             assert_eq!(ctx.round.view(), View::new(2));
@@ -9543,7 +9725,6 @@ mod tests {
             assert_eq!(state.leader_index(View::new(6)), Some(Participant::new(3)));
             let proposal = state
                 .try_propose()
-                .0
                 .expect("term-start proposal should skip the blocked chain")
                 .into_context();
             assert_eq!(proposal.parent, (View::new(1), payload_v1));

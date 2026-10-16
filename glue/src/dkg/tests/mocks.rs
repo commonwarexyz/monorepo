@@ -578,7 +578,7 @@ impl Automaton for MockApplication {
     async fn propose(
         &mut self,
         _context: Self::Context,
-        _ancestry: Arc<[Self::Digest]>,
+        _ancestry: commonware_consensus::History<Self::Digest>,
     ) -> oneshot::Receiver<Self::Digest> {
         let (sender, receiver) = oneshot::channel();
         self.proposals.lock().push(_context);
@@ -590,7 +590,7 @@ impl Automaton for MockApplication {
         &mut self,
         _context: Self::Context,
         _payload: Self::Digest,
-        _ancestry: Arc<[Self::Digest]>,
+        _ancestry: commonware_consensus::History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         let (sender, receiver) = oneshot::channel();
         sender.send_lossy(true);

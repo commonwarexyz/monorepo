@@ -120,6 +120,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;
 
+    mod history;
+    pub use history::History;
+
     pub mod marshal;
 
     mod reporter;
@@ -134,6 +137,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
     /// and verifying payloads proposed by other participants.
+    ///
+    /// Each request returns a response receiver. Return it promptly and perform application
+    /// work behind it. Never await [`History::resolve`] before returning the receiver:
+    /// history resolution may require consensus progress. Stop work when the receiver closes.
+    /// This contract also applies to [`CertifiableAutomaton`] requests.
     pub trait Automaton: Clone + Send + 'static {
         /// Context is metadata provided by the consensus engine associated with a given payload.
         ///
@@ -161,7 +169,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// rather than rebuilding them from current local state. If consensus
         /// later abandons a dependency, it also abandons the proposal.
         ///
-        /// `ancestry` contains commitments on the selected parent branch in
+        /// `ancestry` resolves to immutable commitments on the selected parent branch in
         /// forward order, ending at the parent and excluding the new payload.
         /// For parent-linked consensus it begins at a finalized or genesis
         /// anchor; applications may resolve older canonical history as needed.
@@ -173,7 +181,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn propose(
             &mut self,
             context: Self::Context,
-            ancestry: Arc<[Self::Digest]>,
+            ancestry: History<Self::Digest>,
         ) -> impl Future<Output = oneshot::Receiver<Self::Digest>> + Send;
 
         /// Verify the payload is valid.
@@ -201,7 +209,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             &mut self,
             context: Self::Context,
             payload: Self::Digest,
-            ancestry: Arc<[Self::Digest]>,
+            ancestry: History<Self::Digest>,
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
     }
 
@@ -275,9 +283,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// then drops the request and can request a proposal on the replacement, unless it has
         /// voted to nullify this view or has left it.
         ///
-        /// Return the receiver promptly and do any work behind it. Parent certification does not
-        /// cancel this request, and while the response is pending, consensus requests no other
-        /// proposal for this view.
+        /// Parent certification does not cancel this request. While the response is pending,
+        /// consensus requests no other proposal for this view.
         ///
         /// Consensus drops the receiver when it abandons the context, so stop pending work when
         /// the receiver closes.
@@ -302,7 +309,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn prepare(
             &mut self,
             _context: Self::Context,
-            _ancestry: Arc<[Self::Digest]>,
+            _ancestry: History<Self::Digest>,
         ) -> impl Future<Output = oneshot::Receiver<Handoff<Self::Digest>>> + Send
         {
             #[allow(clippy::async_yields_async)]
@@ -349,7 +356,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             &mut self,
             _round: Round,
             _payload: Self::Digest,
-            _ancestry: Arc<[Self::Digest]>,
+            _ancestry: History<Self::Digest>,
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send {
             #[allow(clippy::async_yields_async)]
             async move {

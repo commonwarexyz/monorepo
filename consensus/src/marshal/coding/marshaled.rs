@@ -83,7 +83,7 @@
 
 use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
-    Heightable, Relay, Reporter,
+    Heightable, History, Relay, Reporter,
     marshal::{
         application::{
             build::{self, Resolved},
@@ -327,7 +327,7 @@ where
         commitment: Commitment<B, C, H>,
         prefetched_block: Option<Arc<CodedBlock<B, C, H>>>,
         stage: Stage,
-        ancestry: Arc<[Commitment<B, C, H>]>,
+        ancestry: History<Commitment<B, C, H>>,
     ) -> oneshot::Receiver<GateOutcome> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -484,7 +484,7 @@ where
         round: Round,
         payload: Commitment<B, C, H>,
         block_rx: oneshot::Receiver<Arc<CodedBlock<B, C, H>>>,
-        ancestry: Arc<[Commitment<B, C, H>]>,
+        ancestry: History<Commitment<B, C, H>>,
     ) -> oneshot::Receiver<bool> {
         // No in-progress task means we never verified this proposal locally.
         // We can use the block's embedded context to move to the next view. If a Byzantine
@@ -587,7 +587,7 @@ where
         payload: Commitment<B, C, H>,
         task: oneshot::Receiver<GateOutcome>,
         block_rx: oneshot::Receiver<Arc<CodedBlock<B, C, H>>>,
-        ancestry: Arc<[Commitment<B, C, H>]>,
+        ancestry: History<Commitment<B, C, H>>,
     ) -> oneshot::Receiver<bool> {
         // A completed gate either carries an applicable local verdict or requests
         // recovery. After an unclean restart the in-memory task is gone, which also
@@ -626,7 +626,7 @@ where
     fn checks(
         &self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
-        ancestry: Arc<[Commitment<B, C, H>]>,
+        ancestry: History<Commitment<B, C, H>>,
         fetch_parent: bool,
     ) -> impl Future<Output = CodingResolved<B, C, H>> + Send + 'static {
         let scheme_provider = self.scheme_provider.clone();
@@ -741,7 +741,7 @@ where
     async fn propose(
         &mut self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
-        ancestry: Arc<[Self::Digest]>,
+        ancestry: History<Self::Digest>,
     ) -> oneshot::Receiver<Self::Digest> {
         let strategy = self.strategy.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
@@ -793,7 +793,7 @@ where
         &mut self,
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
         payload: Self::Digest,
-        ancestry: Arc<[Self::Digest]>,
+        ancestry: History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         // If there's no scheme for the current epoch, we cannot vote on the proposal.
         // Send back a receiver with a dropped sender.
@@ -1021,7 +1021,7 @@ where
     async fn prepare(
         &mut self,
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
-        ancestry: Arc<[Self::Digest]>,
+        ancestry: History<Self::Digest>,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let strategy = self.strategy.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
@@ -1063,7 +1063,7 @@ where
         &mut self,
         round: Round,
         payload: Self::Digest,
-        ancestry: Arc<[Self::Digest]>,
+        ancestry: History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         // Certify may be reached without an earlier `verify`, so the shard engine may not know
         // the leader yet. A notarized commitment is still enough to start reconstruction from

@@ -11,7 +11,7 @@ use bytes::Bytes;
 use commonware_actor::Feedback;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_p2p::Recipients;
 use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
 use commonware_utils::channel::{
@@ -44,7 +44,7 @@ pub enum Message<D: Digest, P: PublicKey> {
     Certify {
         round: Round,
         payload: D,
-        ancestry: Arc<[D]>,
+        ancestry: crate::History<D>,
         response: oneshot::Sender<bool>,
     },
     Broadcast {
@@ -71,7 +71,7 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     async fn propose(
         &mut self,
         context: Self::Context,
-        _ancestry: Arc<[Self::Digest]>,
+        _ancestry: crate::History<Self::Digest>,
     ) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -83,7 +83,7 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
         &mut self,
         context: Self::Context,
         payload: Self::Digest,
-        _ancestry: Arc<[Self::Digest]>,
+        _ancestry: crate::History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         self.sender.send_lossy(Message::Verify {
@@ -99,7 +99,7 @@ impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
     async fn prepare(
         &mut self,
         context: Self::Context,
-        _ancestry: Arc<[Self::Digest]>,
+        _ancestry: crate::History<Self::Digest>,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -111,7 +111,7 @@ impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
         &mut self,
         round: Round,
         payload: Self::Digest,
-        ancestry: Arc<[Self::Digest]>,
+        ancestry: crate::History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         self.sender.send_lossy(Message::Certify {
@@ -158,7 +158,7 @@ type HandoffController<D> =
 type VerifyObserver<H, P> =
     Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
 
-type AncestryCertifier<D> = Box<dyn Fn(Round, D, Arc<[D]>) -> bool + Send + 'static>;
+type AncestryCertifier<D> = Arc<dyn Fn(Round, D, Arc<[D]>) -> bool + Send + Sync + 'static>;
 
 /// Callback that receives a certification request's round, payload, and response sender.
 type CertificationController<D> = Box<dyn Fn(Round, D, oneshot::Sender<bool>) + Send + 'static>;
@@ -425,7 +425,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         round: Round,
         payload: H::Digest,
         _contents: Bytes,
-        ancestry: Arc<[H::Digest]>,
+        ancestry: crate::History<H::Digest>,
         response: oneshot::Sender<bool>,
     ) {
         // Simulate the certify latency
@@ -443,7 +443,20 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 response.send_lossy(func(round, payload));
             }
             Certifier::WithAncestry(func) => {
-                response.send_lossy(func(round, payload, ancestry));
+                let func = Arc::clone(func);
+                self.context
+                    .child("certify_history")
+                    .spawn(move |_| async move {
+                        let mut response = response;
+                        select! {
+                            _ = response.closed() => {},
+                            ancestry = ancestry.resolve() => {
+                                if let Some(ancestry) = ancestry {
+                                    response.send_lossy(func(round, payload, ancestry));
+                                }
+                            },
+                        }
+                    });
             }
             Certifier::Controlled(controller) => controller(round, payload, response),
             Certifier::Cancel => {}

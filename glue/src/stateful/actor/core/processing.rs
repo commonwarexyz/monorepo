@@ -1974,6 +1974,136 @@ mod tests {
         });
     }
 
+    /// A cached ancestor below a metadata gap is found once history resolves. Verifying block 6
+    /// rebuilds its held parent, block 5, whose parent, block 4, is uncached and whose commitment
+    /// is the only one resident. Block 3 is cached, and only block 4's body is available from
+    /// marshal, so replaying from the processed anchor would never finish. Cancelling while
+    /// history is unresolved leaves the actor usable.
+    #[test]
+    fn rebuild_finds_cached_ancestor_after_history_resolves() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let block1 = Arc::new(TestBlock::child(&genesis, 1));
+            let block2 = Arc::new(TestBlock::child(&block1, 2));
+            let block3 = TestBlock::child(&block2, 3);
+            let block4 = Arc::new(TestBlock::child(&block3, 4));
+            let block5 = Arc::new(TestBlock::child(&block4, 5));
+            let block6 = TestBlock::child(&block5, 6);
+            let mut signing = context.child("signing");
+            let scheme = scheme_mocks::fixture(&mut signing, b"history-gap", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture_with_finalized_block(
+                context.child("marshal"),
+                "history-gap",
+                scheme,
+                &genesis,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let apply_calls = Arc::new(AtomicUsize::new(0));
+            let app = ReplayGatedApp {
+                gates: Arc::default(),
+                verify_gate: Arc::default(),
+                finalized_gate: Arc::default(),
+                gate_height: block4.height(),
+                unexecutable: None,
+                apply_calls: apply_calls.clone(),
+                capture_calls: Arc::default(),
+                verify_calls: Arc::default(),
+                applied_finalizations: Arc::default(),
+            };
+            let processor = Processor::new(
+                app,
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+                Sequential,
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox.clone(),
+                processor,
+                deferred_verifications: Vec::new(),
+            };
+            let actor = context.child("loop").spawn(move |_| processing.run());
+            let mut mailbox = Mailbox::new(sender);
+
+            // Verifying block 3 caches its state above the processed anchor.
+            let source_parent = Arc::new(block2.as_ref().clone());
+            assert!(
+                mailbox
+                    .verify(
+                        (context.child("verify_cached"), block3.context()),
+                        digested(block3.clone()),
+                        digested_shared(&source_parent),
+                        fixtures::blocks(source_parent.height(), &[block1.clone(), block2.clone()]),
+                    )
+                    .await
+            );
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 2);
+
+            // Only block 4's body is available from marshal.
+            assert!(
+                marshal
+                    .mailbox
+                    .verified(block4.context().round, digested(block4.as_ref().clone()))
+                    .await
+            );
+
+            // Only block 5's commitment is resident until history resolves.
+            let (release, released) = oneshot::channel::<()>();
+            let (started, resolving) = oneshot::channel::<()>();
+            let full: Arc<[_]> = Arc::from([
+                genesis.digest(),
+                block1.digest(),
+                block2.digest(),
+                block3.digest(),
+                block4.digest(),
+                block5.digest(),
+            ]);
+            let history =
+                commonware_consensus::History::pending(Arc::from([block5.digest()]), async move {
+                    let _ = started.send(());
+                    released.await.ok()?;
+                    Some(full)
+                });
+            let blocks = || marshal.mailbox.blocks(block5.height(), history.clone());
+
+            // Cancelling while history is unresolved neither replays nor wedges the actor.
+            let mut cancelled_mailbox = mailbox.clone();
+            let mut cancelled = Box::pin(cancelled_mailbox.verify(
+                (context.child("verify_cancelled"), block6.context()),
+                digested(block6.clone()),
+                digested_shared(&block5),
+                blocks(),
+            ));
+            assert!(poll!(&mut cancelled).is_pending());
+            resolving.await.expect("history resolution should start");
+            drop(cancelled);
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 2);
+
+            let mut verify = Box::pin(mailbox.verify(
+                (context.child("verify_gap"), block6.context()),
+                digested(block6),
+                digested_shared(&block5),
+                blocks(),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            release.send(()).expect("history should remain pending");
+            assert!(verify.await);
+
+            // Blocks 4 and 5 are replayed from the cached block 3 state.
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 4);
+            actor.abort();
+            marshal.abort().await;
+        });
+    }
+
     /// Starts a replay-gated processing loop whose `apply` of `gated` takes the next gate.
     async fn spawn_replay_gated_processing(
         context: &deterministic::Context,
@@ -2458,7 +2588,10 @@ mod tests {
             let genesis = TestBlock::new(0, 0);
             let winner = TestBlock::child(&genesis, 1);
             let proposal = deferred
-                .prepare(winner.context(), Arc::from([genesis.digest()]))
+                .prepare(
+                    winner.context(),
+                    commonware_consensus::History::ready(Arc::from([genesis.digest()])),
+                )
                 .await;
             proposal_started.await.expect("proposal should start");
 
@@ -2642,7 +2775,11 @@ mod tests {
             let mut handoff = deferred
                 .prepare(
                     TestBlock::child(&parent, 3).context(),
-                    Arc::from([genesis.digest(), outgoing.digest(), parent.digest()]),
+                    commonware_consensus::History::ready(Arc::from([
+                        genesis.digest(),
+                        outgoing.digest(),
+                        parent.digest(),
+                    ])),
                 )
                 .await;
             proposal_started.await.expect("handoff build should start");
@@ -2654,7 +2791,10 @@ mod tests {
                 .verify(
                     parent.context(),
                     parent.digest(),
-                    Arc::from([genesis.digest(), outgoing.digest()]),
+                    commonware_consensus::History::ready(Arc::from([
+                        genesis.digest(),
+                        outgoing.digest(),
+                    ])),
                 )
                 .await;
             assert_eq!(optimistic.await, Ok(true));
@@ -2662,7 +2802,10 @@ mod tests {
                 .certify(
                     parent.context().round,
                     parent.digest(),
-                    Arc::from([genesis.digest(), outgoing.digest()]),
+                    commonware_consensus::History::ready(Arc::from([
+                        genesis.digest(),
+                        outgoing.digest(),
+                    ])),
                 )
                 .await;
             parent_started

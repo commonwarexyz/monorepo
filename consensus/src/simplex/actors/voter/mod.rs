@@ -6886,6 +6886,143 @@ mod tests {
         missed_notarization_is_fetched(ed25519::fixture);
     }
 
+    /// An automaton whose certification only needs the notarized candidate.
+    #[derive(Clone)]
+    struct TipOnlyAutomaton(mocks::application::Mailbox<Sha256Digest, PublicKey>);
+
+    impl crate::Automaton for TipOnlyAutomaton {
+        type Digest = Sha256Digest;
+        type Context = Context<Sha256Digest, PublicKey>;
+
+        async fn propose(
+            &mut self,
+            context: Self::Context,
+            ancestry: crate::History<Self::Digest>,
+        ) -> oneshot::Receiver<Self::Digest> {
+            self.0.propose(context, ancestry).await
+        }
+
+        async fn verify(
+            &mut self,
+            context: Self::Context,
+            payload: Self::Digest,
+            ancestry: crate::History<Self::Digest>,
+        ) -> oneshot::Receiver<bool> {
+            self.0.verify(context, payload, ancestry).await
+        }
+    }
+
+    impl CertifiableAutomaton for TipOnlyAutomaton {
+        async fn certify(
+            &mut self,
+            round: Round,
+            payload: Self::Digest,
+            ancestry: crate::History<Self::Digest>,
+        ) -> oneshot::Receiver<bool> {
+            assert!(ancestry.peek().is_none());
+            self.0.certify(round, payload, ancestry).await
+        }
+    }
+
+    #[test]
+    fn test_tip_only_certification_dispatches_without_parent_metadata() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let epoch = Epoch::new(333);
+            let Fixture { participants, schemes, .. } =
+                ed25519::fixture(&mut context, b"_COMMONWARE_CONSENSUS_TEST_TIP_CERTIFICATION", 4);
+            let oracle = start_test_network_with_peers(
+                context.child("network"), participants.clone(), true,
+            ).await;
+            let signing = schemes[0].clone();
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter = mocks::reporter::Reporter::new(
+                context.child("reporter"),
+                mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: signing.clone(),
+                    elector: elector.clone(),
+                },
+            );
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let (mut application_actor, application) = mocks::application::Application::new(
+                context.child("app"),
+                mocks::application::Config::<Sha256, _> {
+                    relay,
+                    me: me.clone(),
+                    propose_latency: (1.0, 0.0),
+                    verify_latency: (1.0, 0.0),
+                    certify_latency: (1.0, 0.0),
+                    should_certify: Certifier::Always,
+                },
+            );
+            application_actor.set_stall_proposals(true);
+            application_actor.start();
+            let (voter, mut mailbox) = Actor::new(context.child("actor"), Config {
+                scheme: signing.clone(),
+                elector: elector.build(signing.participants()),
+                blocker: oracle.control(me.clone()),
+                automaton: TipOnlyAutomaton(application.clone()),
+                relay: application,
+                reporter,
+                partition: "tip-only-certification".into(),
+                epoch,
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                mailbox_size: NZUsize!(128),
+                leader_timeout: Duration::from_secs(30),
+                certification_timeout: Duration::from_secs(30),
+                timeout_retry: Duration::from_secs(30),
+                skip_budget: u64::MAX,
+                view_retention: ViewDelta::new(10),
+                replay_buffer: NZUsize!(10240),
+                write_buffer: NZUsize!(10240),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            });
+            let (resolver_sender, mut resolver) =
+                mailbox::new(context.child("resolver"), NZUsize!(16));
+            let (batcher_sender, mut batcher) =
+                mailbox::new(context.child("batcher"), NZUsize!(16));
+            let (vote_sender, _) = oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (certificate_sender, _) = oracle.control(me).register(1, TEST_QUOTA).await.unwrap();
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                certificate_sender,
+            );
+            let candidate = Proposal::new(
+                Round::new(epoch, View::new(4)), View::new(3), Sha256::hash(&[b"tip"]),
+            );
+            let (_, certificate) = build_notarization(&schemes, &candidate, quorum(4));
+            mailbox.recovered(Certificate::Notarization(certificate));
+            loop {
+                select! {
+                    message = resolver.recv() => match message.unwrap() {
+                        MailboxMessage::Resolve { view, .. } if view < candidate.view() =>
+                            panic!("tip-only certification requested ancestor {view}"),
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == candidate.view() => assert!(success),
+                        _ => {},
+                    },
+                    message = batcher.recv() => {
+                        if let batcher::Message::Constructed(Vote::Finalize(vote)) = message.unwrap()
+                            && vote.view() == candidate.view()
+                        {
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) =>
+                        panic!("tip-only certification waited for missing parent metadata"),
+                }
+            }
+            while let Some(message) = resolver.recv().now_or_never().flatten() {
+                if let MailboxMessage::Resolve { view, .. } = message {
+                    assert!(view >= candidate.view(), "unexpected ancestor request {view}");
+                }
+            }
+        });
+    }
+
     fn certification_repairs_cross_term_parent(conflicting_local_parent: bool) {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
             let epoch = Epoch::new(333);
@@ -6917,7 +7054,7 @@ mod tests {
                 VoterOptions {
                     local_index: 1,
                     leader_timeout: Duration::from_secs(20),
-                    certifier: mocks::application::Certifier::WithAncestry(Box::new(
+                    certifier: mocks::application::Certifier::WithAncestry(Arc::new(
                         move |round, payload, ancestry| {
                             if round.view() == candidate_view {
                                 assert!(*repair_observer.lock(),
