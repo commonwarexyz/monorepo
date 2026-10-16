@@ -62,7 +62,8 @@
 //! the correct key is returned: every record whose translated key matches is a candidate, and its
 //! stored key is compared before a value is read. Records that share a translated key, whether
 //! through conflicts or one key stored at many indices, occupy one run of the key table, so
-//! storing, pruning, and looking up such records each cost time linear in their number.
+//! storing, pruning, and looking up such records each cost time linear in their number: storing
+//! or pruning `k` copies of one key costs `O(k^2)` in total.
 //!
 //! _If the [Translator] provided by the caller does not uniformly distribute keys across the key
 //! space or uses a translated representation that means keys on average have many conflicts,
