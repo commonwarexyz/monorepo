@@ -1034,7 +1034,23 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
-        self.view().read_many_into(buf, offsets, item_size).await
+        self.view()
+            .read_many_into(buf, offsets, item_size, true)
+            .await
+    }
+
+    /// Like [`Self::read_many_into`], but cache misses read from the blob without admitting
+    /// pages into the page cache. Suited to bulk scans of items that will not be read again
+    /// soon.
+    pub async fn read_many_into_uncached(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<usize, Error> {
+        self.view()
+            .read_many_into(buf, offsets, item_size, false)
+            .await
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of

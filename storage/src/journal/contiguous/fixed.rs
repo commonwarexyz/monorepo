@@ -1595,6 +1595,20 @@ impl<E: Context, A: CodecFixedShared> std::fmt::Debug for Journal<E, A> {
 }
 
 impl<E: Context, A: CodecFixedShared> Journal<E, A> {
+    /// Like [`super::Contiguous::read_many`], but cache misses read from the blobs without
+    /// admitting pages into the page cache. Suited to bulk scans of items that will not be read
+    /// again soon: admission would churn the cache and serialize concurrent scanning tasks on its
+    /// lock.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn read_many_uncached(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _timer = self.0.metrics.read_many_timer();
+        self.0.metrics.read_many_calls.inc();
+        self.0.reader().read_many_inner(positions, false).await
+    }
+
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened during initialization. Recovery scans the two newest blobs,
@@ -1799,10 +1813,15 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         Ok((blob, offsets))
     }
 
-    /// Shared body of [`super::Contiguous::read_many`] and the variable journal's offsets
-    /// reads; the callers record the batch-read metrics, so routing them through `read_many`
-    /// would count every batch twice.
-    pub(super) async fn read_many_inner(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
+    /// Shared body of [`super::Contiguous::read_many`], `Journal::read_many_uncached`, and the
+    /// variable journal's offsets reads; the callers record the batch-read metrics, so routing
+    /// them through `read_many` would count every batch twice. Pages read from the blobs enter
+    /// the page cache only when `admit` is set.
+    pub(super) async fn read_many_inner(
+        &self,
+        positions: &[u64],
+        admit: bool,
+    ) -> Result<Vec<A>, Error> {
         if positions.is_empty() {
             return Ok(Vec::new());
         }
@@ -1839,8 +1858,17 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             let (group_buf, rest) = remaining_buf.split_at_mut(group.len() * A::SIZE);
             remaining_buf = rest;
             reads.push(async move {
-                blob.read_many_into(group_buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE)
+                if admit {
+                    blob.read_many_into(group_buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE)
+                        .await
+                } else {
+                    blob.read_many_into_uncached(
+                        group_buf,
+                        &blob_offsets,
+                        Inner::<E, A>::CHUNK_SIZE,
+                    )
                     .await
+                }
             });
         }
         let hits: u64 = try_join_all(reads)
@@ -1974,7 +2002,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         }
         let _timer = self.metrics.read_many_timer();
         self.metrics.read_many_calls.inc();
-        self.read_many_inner(positions).await
+        self.read_many_inner(positions, true).await
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {

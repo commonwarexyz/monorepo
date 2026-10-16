@@ -243,7 +243,8 @@ impl<B: Blob> View<'_, B> {
     /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
     ///
     /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
-    /// non-overlapping, and within bounds.
+    /// non-overlapping, and within bounds. Pages read from the blob enter the page cache only
+    /// when `admit` is set.
     ///
     /// Returns the number of items fully served without a blob read (from the in-memory tail and
     /// the page cache). The remaining items required at least one blob read.
@@ -252,6 +253,7 @@ impl<B: Blob> View<'_, B> {
         buf: &mut [u8],
         offsets: &[u64],
         item_size: NonZeroUsize,
+        admit: bool,
     ) -> Result<usize, Error> {
         let ranges = || offsets.iter().map(|&o| (o, item_size.get()));
         super::validate_read_ranges(buf.len(), ranges(), self.size)?;
@@ -268,10 +270,9 @@ impl<B: Blob> View<'_, B> {
             return Ok(offsets.len());
         }
 
-        // Read the pages the misses need, batching those no other reader is fetching, and serve
-        // the misses from them.
+        // Read the pages the misses need and serve the misses from them.
         self.cache_ref
-            .read_after_misses(self.blob, self.id, cache_ranges)
+            .read_after_misses(self.blob, self.id, cache_ranges, admit)
             .await?;
         Ok(offsets.len() - blob_reads)
     }
