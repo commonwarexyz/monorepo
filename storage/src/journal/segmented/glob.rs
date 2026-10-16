@@ -26,6 +26,8 @@
 //! 4. Decompress remaining bytes if compression enabled
 //! 5. Decode value
 
+#[commonware_macros::stability(ALPHA)]
+use super::manager::stored_names;
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::{
     Context,
@@ -35,10 +37,17 @@ use bytes::Bytes;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
 #[cfg(any(test, feature = "test-utils"))]
-use commonware_runtime::{Blob as _, ReadOptions, Storage, WriteOptions};
+use commonware_runtime::WriteOptions;
+// Shared by the ALPHA reader and the test-only corrupt_frame helper.
+#[cfg_attr(
+    not(any(test, feature = "test-utils")),
+    commonware_macros::stability(ALPHA)
+)]
+use commonware_runtime::{Blob, ReadOptions, Storage};
 use commonware_runtime::{BufMut, Error as RError, Handle};
 use std::{collections::BTreeMap, num::NonZeroUsize};
-use zstd::zstd_safe::compress_bound;
+#[commonware_macros::stability(ALPHA)]
+use std::{iter, ops::Range, sync::Arc};
 
 /// Physical overhead appended to every frame: the CRC32 of the frame's data.
 pub(crate) const CHECKSUM_SIZE: usize = crc32::Digest::SIZE;
@@ -60,6 +69,200 @@ pub struct Config<C> {
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
+}
+
+/// Verify and decode one frame (see the module's format section).
+fn decode<V: Codec>(
+    buf: impl AsRef<[u8]> + Into<Bytes>,
+    compressed: bool,
+    cfg: &V::Cfg,
+) -> Result<V, Error> {
+    if buf.as_ref().len() < CHECKSUM_SIZE {
+        return Err(Error::Runtime(RError::BlobInsufficientLength));
+    }
+    let data_len = buf.as_ref().len() - CHECKSUM_SIZE;
+    let data = &buf.as_ref()[..data_len];
+    let stored_checksum = u32::from_be_bytes(
+        buf.as_ref()[data_len..]
+            .try_into()
+            .expect("checksum is 4 bytes"),
+    );
+    let checksum = Crc32::checksum(data);
+    if checksum != stored_checksum {
+        return Err(Error::ChecksumMismatch(stored_checksum, checksum));
+    }
+    if compressed {
+        let decompressed = frame::decompress(data)?;
+        V::decode_cfg(decompressed, cfg).map_err(Error::Codec)
+    } else {
+        // One Bytes owner lets retained codec fields share the read allocation.
+        V::decode_cfg(buf.into().slice(..data_len), cfg).map_err(Error::Codec)
+    }
+}
+
+/// Split `locations` into consecutive runs of byte-adjacent frames spanning at most `max_bytes`.
+///
+/// A frame larger than `max_bytes` forms its own run. Every location must already be range
+/// checked so that its end does not overflow.
+#[commonware_macros::stability(ALPHA)]
+fn coalesced_runs(
+    locations: &[(u64, u32)],
+    max_bytes: NonZeroUsize,
+) -> impl Iterator<Item = Range<usize>> + '_ {
+    let max_bytes = max_bytes.get() as u64;
+    let mut start = 0;
+    iter::from_fn(move || {
+        let (offset, size) = *locations.get(start)?;
+        let mut byte_end = offset + u64::from(size);
+        let mut end = start + 1;
+        while let Some(&(next_offset, next_size)) = locations.get(end) {
+            let next_end = next_offset + u64::from(next_size);
+            if next_offset != byte_end || next_end - offset > max_bytes {
+                break;
+            }
+            byte_end = next_end;
+            end += 1;
+        }
+        let run = start..end;
+        start = end;
+        Some(run)
+    })
+}
+
+/// An owned read-only view of one Glob section with a fixed byte extent.
+///
+/// Appends do not extend this reader's bounds. Dropping the glob or removing its section does
+/// not invalidate the reader. Truncating into its extent makes reads of the affected bytes
+/// unspecified; callers must finish those reads before reusing their locations.
+///
+/// The reader shares the section's open blob handle; see [Storage::open] for handle uniqueness.
+#[commonware_macros::stability(ALPHA)]
+pub struct Reader<B: Blob, V: Codec> {
+    blob: Arc<B>,
+    size: u64,
+    compressed: bool,
+    codec_config: V::Cfg,
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<B: Blob, V: Codec> Clone for Reader<B, V> {
+    fn clone(&self) -> Self {
+        Self {
+            blob: self.blob.clone(),
+            size: self.size,
+            compressed: self.compressed,
+            codec_config: self.codec_config.clone(),
+        }
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<B: Blob, V: CodecShared> Reader<B, V> {
+    /// Open an existing section without recovering, writing, or syncing its contents.
+    ///
+    /// Captures the stored byte length. The caller must exclude mutation and removal while
+    /// opening, and keep the captured bytes unchanged while reading. For an appendable glob, use
+    /// [Glob::snapshot] instead. Missing sections return [Error::SectionOutOfRange] without
+    /// creating a blob. Opening fails while another handle to the section is alive (see
+    /// [Storage::open]); share one reader by cloning it.
+    pub async fn open(
+        context: &impl Storage<Blob = B>,
+        cfg: Config<V::Cfg>,
+        section: u64,
+    ) -> Result<Self, Error> {
+        let name = section.to_be_bytes();
+        if !stored_names(context, &cfg.partition)
+            .await?
+            .iter()
+            .any(|stored| stored.as_slice() == name)
+        {
+            return Err(Error::SectionOutOfRange(section));
+        }
+        let (blob, size) = context.open(&cfg.partition, &name).await?;
+        Ok(Self {
+            blob: Arc::new(blob),
+            size,
+            compressed: cfg.compression.is_some(),
+            codec_config: cfg.codec_config,
+        })
+    }
+
+    /// Returns the captured size of the section in bytes.
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn check_range(&self, offset: u64, size: u32) -> Result<(), Error> {
+        let end = offset
+            .checked_add(u64::from(size))
+            .ok_or(Error::OffsetOverflow)?;
+        if end > self.size || (size as usize) < CHECKSUM_SIZE {
+            return Err(Error::Runtime(RError::BlobInsufficientLength));
+        }
+        Ok(())
+    }
+
+    /// Read a value at the byte offset and frame size returned by [Glob::append].
+    ///
+    /// Rejects ranges outside the captured extent before reading storage. Each read verifies
+    /// the frame's checksum and decodes using the glob's compression and codec configuration.
+    pub async fn get(&self, offset: u64, size: u32) -> Result<V, Error> {
+        self.check_range(offset, size)?;
+        let buf = self
+            .blob
+            .read_at(offset, size as usize, ReadOptions::default())
+            .await?
+            .freeze()
+            .coalesce();
+        decode(buf, self.compressed, &self.codec_config)
+    }
+
+    /// Read values in the order supplied, combining byte-adjacent locations into one I/O.
+    ///
+    /// Each location is the `(offset, size)` returned by [Glob::append]. Locations need not
+    /// be sorted or unique; only consecutive, byte-adjacent entries share a read. Gaps are
+    /// never read. Every range is checked against the captured extent before any I/O, and
+    /// each value's checksum and codec are checked independently.
+    ///
+    /// Coalesced reads are limited to `max_batch_bytes`. A single frame larger than this
+    /// budget is read alone.
+    pub async fn get_many(
+        &self,
+        locations: &[(u64, u32)],
+        max_batch_bytes: NonZeroUsize,
+    ) -> Result<Vec<V>, Error> {
+        for &(offset, size) in locations {
+            self.check_range(offset, size)?;
+        }
+
+        let mut values = Vec::with_capacity(locations.len());
+        for run in coalesced_runs(locations, max_batch_bytes) {
+            let frames = &locations[run];
+            let (offset, _) = frames[0];
+            let (last_offset, last_size) = frames[frames.len() - 1];
+            let len = usize::try_from(last_offset + u64::from(last_size) - offset)
+                .map_err(|_| Error::SizeOverflow)?;
+            let buf = self
+                .blob
+                .read_at(offset, len, ReadOptions::default())
+                .await?
+                .freeze()
+                .coalesce();
+            // Share one Bytes owner across the frames in this physical read.
+            let buf = Bytes::from(buf);
+            let mut cursor = 0;
+            for &(_, size) in frames {
+                let next = cursor + size as usize;
+                values.push(decode(
+                    buf.slice(cursor..next),
+                    self.compressed,
+                    &self.codec_config,
+                )?);
+                cursor = next;
+            }
+        }
+        Ok(values)
+    }
 }
 
 /// The glob's state, boxed so the public [Glob] handle stays pointer-sized.
@@ -92,39 +295,79 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         })
     }
 
-    /// See [Glob::append].
-    async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u32), Error> {
-        // Encode and optionally compress, then append checksum
-        let buf = if let Some(level) = self.compression {
-            // Compressed: encode first, then compress, then append checksum
-            let encoded = value.encode();
-            let mut compressed = Vec::with_capacity(compress_bound(encoded.len()) + CHECKSUM_SIZE);
-            frame::compress_into(level, &encoded, &mut compressed)?;
-            let checksum = Crc32::checksum(&compressed);
-            compressed.put_u32(checksum);
-            compressed
+    /// Append the frame of `value` to `out`, returning the frame size.
+    ///
+    /// A frame is the value's codec output (zstd-compressed at `compression`, if any) followed
+    /// by the CRC32 of those bytes.
+    fn frame(compression: Option<u8>, value: &V, out: &mut Vec<u8>) -> Result<u32, Error> {
+        let start = out.len();
+        if let Some(level) = compression {
+            frame::compress_into(level, &value.encode(), out)?;
         } else {
-            // Uncompressed: pre-allocate exact size to avoid copying
-            let entry_size = value.encode_size() + CHECKSUM_SIZE;
-            let mut buf = Vec::with_capacity(entry_size);
-            value.write(&mut buf);
-            let checksum = Crc32::checksum(&buf);
-            buf.put_u32(checksum);
-            buf
-        };
+            out.reserve(value.encode_size() + CHECKSUM_SIZE);
+            value.write(out);
+        }
+        let checksum = Crc32::checksum(&out[start..]);
+        out.put_u32(checksum);
+        u32::try_from(out.len() - start).map_err(|_| Error::ValueTooLarge)
+    }
 
-        // Write to blob, taking the writer only when the entry does not fit in its buffer
-        let entry_size = u32::try_from(buf.len()).map_err(|_| Error::ValueTooLarge)?;
+    /// Write `frames` at the end of `section` with one buffered-writer operation, returning the
+    /// offset of their first byte.
+    async fn write_frames(&mut self, section: u64, frames: Vec<u8>) -> Result<u64, Error> {
         let writer = self.manager.get_or_create(section).await?;
         let offset = writer.size();
-        if !writer.try_write_at(offset, &buf) {
+        if offset.checked_add(frames.len() as u64).is_none() {
+            return Err(Error::OffsetOverflow);
+        }
+        // Take the writer only when the frames do not fit in its buffer.
+        if !writer.try_write_at(offset, &frames) {
             // Return the writer to the manager only after the owned write succeeds.
             let writer = self.manager.take(section).await?;
-            let writer = writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
+            let writer = writer
+                .write_at(offset, frames)
+                .await
+                .map_err(Error::Runtime)?;
             self.manager.put(section, writer);
         }
+        Ok(offset)
+    }
 
-        Ok((offset, entry_size))
+    /// See [Glob::append].
+    async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u32), Error> {
+        let mut frame = Vec::new();
+        let size = Self::frame(self.compression, value, &mut frame)?;
+        let offset = self.write_frames(section, frame).await?;
+        Ok((offset, size))
+    }
+
+    /// See [Glob::append_many].
+    #[commonware_macros::stability(ALPHA)]
+    async fn append_many<'a>(
+        &mut self,
+        section: u64,
+        values: impl IntoIterator<Item = &'a V>,
+    ) -> Result<Vec<(u64, u32)>, Error>
+    where
+        V: 'a,
+    {
+        let values = values.into_iter();
+        let mut frames = Vec::new();
+        let mut locations = Vec::with_capacity(values.size_hint().0);
+        for value in values {
+            let start = frames.len() as u64;
+            locations.push((start, Self::frame(self.compression, value, &mut frames)?));
+        }
+        if locations.is_empty() {
+            return Err(Error::EmptyAppend);
+        }
+
+        // The write rejects a batch whose end overflows, so no frame offset can.
+        let offset = self.write_frames(section, frames).await?;
+        for (start, _) in &mut locations {
+            *start += offset;
+        }
+        Ok(locations)
     }
 
     /// See [Glob::get].
@@ -137,36 +380,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // Read via buffered writer (handles read-through for buffered data)
         let buf = writer.read_at(offset, size as usize).await?.coalesce();
 
-        // Entry format: [compressed_data] [crc32 (4 bytes)]
-        if buf.len() < CHECKSUM_SIZE {
-            return Err(Error::Runtime(RError::BlobInsufficientLength));
-        }
-
-        let data_len = buf.len() - CHECKSUM_SIZE;
-        let compressed_data = &buf.as_ref()[..data_len];
-        let stored_checksum = u32::from_be_bytes(
-            buf.as_ref()[data_len..]
-                .try_into()
-                .expect("checksum is 4 bytes"),
-        );
-
-        // Verify checksum
-        let checksum = Crc32::checksum(compressed_data);
-        if checksum != stored_checksum {
-            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
-        }
-
-        // Decompress if needed and decode
-        let value = if self.compression.is_some() {
-            let decompressed = frame::decompress(compressed_data)?;
-            V::decode_cfg(decompressed, &self.codec_config).map_err(Error::Codec)?
-        } else {
-            // Share one Bytes owner instead of boxing the pooled IoBuf owner for every field
-            V::decode_cfg(Bytes::from(buf.slice(..data_len)), &self.codec_config)
-                .map_err(Error::Codec)?
-        };
-
-        Ok(value)
+        decode(buf, self.compression.is_some(), &self.codec_config)
     }
 
     /// See [Recovery::verify].
@@ -191,6 +405,21 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 .expect("checksum is 4 bytes"),
         );
         Ok(Crc32::checksum(&buf.as_ref()[..data_len]) == stored_checksum)
+    }
+
+    /// See [Glob::capture].
+    #[commonware_macros::stability(ALPHA)]
+    fn capture(&self, section: u64) -> Result<Reader<E::Blob, V>, Error> {
+        let writer = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+        Ok(Reader {
+            blob: writer.blob().clone(),
+            size: writer.size(),
+            compressed: self.compression.is_some(),
+            codec_config: self.codec_config.clone(),
+        })
     }
 
     /// See [Glob::inject].
@@ -316,12 +545,60 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
         Ok((self, offset, size))
     }
 
+    /// Append multiple values to one section with one buffered-writer operation.
+    ///
+    /// Returns each value's `(offset, size)` in input order, or [Error::EmptyAppend] for no
+    /// values.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn append_many<'a>(
+        mut self,
+        section: u64,
+        values: impl IntoIterator<Item = &'a V>,
+    ) -> Result<(Self, Vec<(u64, u32)>), Error>
+    where
+        V: 'a,
+    {
+        let locations = self.0.append_many(section, values).await?;
+        Ok((self, locations))
+    }
+
     /// Read value at offset with known size (from index entry).
     ///
     /// The offset should be the byte offset returned by `append()`.
     /// Reads directly from blob without any caching.
     pub async fn get(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
         self.0.get(section, offset, size).await
+    }
+
+    /// Capture an owned reader of all values currently appended to `section`.
+    ///
+    /// Syncs the section to flush buffered bytes and resolve pending write failures before
+    /// sharing its blob. A completed sync is reused when no newer writes have occurred.
+    /// The reader supports concurrent appends and section removal; truncation into its captured
+    /// extent make affected reads unspecified.
+    ///
+    /// Returns [Error::AlreadyPrunedToSection] for a pruned section and
+    /// [Error::SectionOutOfRange] for a missing section.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn snapshot(self, section: u64) -> Result<(Self, Reader<E::Blob, V>), Error> {
+        let (glob, handle) = self.start_sync(section).await?;
+        let reader = glob.capture(section)?;
+        handle.await.map_err(Error::Runtime)?;
+        Ok((glob, reader))
+    }
+
+    /// Capture an owned reader of the current extent of `section` without I/O.
+    ///
+    /// Call after a flush of `section` (such as [Glob::start_sync]) and before any further append
+    /// to it: the reader reads the blob directly, so buffered bytes count toward its extent but
+    /// are unreadable. The reader is usable before the sync completes; if the sync handle fails,
+    /// discard the reader along with the glob.
+    ///
+    /// Returns [Error::AlreadyPrunedToSection] for a pruned section and
+    /// [Error::SectionOutOfRange] for a missing section.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn capture(&self, section: u64) -> Result<Reader<E::Blob, V>, Error> {
+        self.0.capture(section)
     }
 
     /// Inject arbitrary bytes at `offset` in `section`, bypassing entry framing.
@@ -518,9 +795,16 @@ mod tests {
     use super::*;
     use commonware_codec::Encode as _;
     use commonware_macros::test_traced;
-    use commonware_runtime::{Runner, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        Runner, Supervisor as _, deterministic,
+        mocks::{
+            DelayedSyncContext, PendingSyncs, RecordingContext, WriteFaultContext, WriteFaults,
+            fail_pending_syncs, release_pending_syncs,
+        },
+    };
     use commonware_utils::{NZUsize, probability};
     use rand::Rng as _;
+    use zstd::bulk::compress;
 
     impl<E: crate::Context, V: CodecShared> Glob<E, V> {
         pub(in super::super) fn test_configuration(&self) -> (E, Config<V::Cfg>) {
@@ -557,6 +841,499 @@ mod tests {
             compression: None,
             codec_config: (),
             write_buffer: NZUsize!(1024),
+        }
+    }
+
+    #[test_traced]
+    fn test_append_many_frames_and_writes_once() {
+        for compression in [None, Some(3)] {
+            deterministic::Runner::default().start(|context| async move {
+                let (context, recordings) = RecordingContext::new(context);
+                let cfg = Config {
+                    compression,
+                    write_buffer: NZUsize!(8),
+                    ..test_cfg()
+                };
+                let values = [[1u8; 64], [2; 64], [3; 64]];
+                let glob = Glob::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                recordings.clear();
+                let (glob, locations) = glob
+                    .append_many(7, values.iter())
+                    .await
+                    .expect("batch append failed");
+                assert_eq!(recordings.snapshot().writes.len(), 1);
+                assert_eq!(locations.len(), values.len());
+                for pair in locations.windows(2) {
+                    assert_eq!(pair[0].0 + u64::from(pair[0].1), pair[1].0);
+                }
+                for (value, &(offset, size)) in values.iter().zip(&locations) {
+                    assert_eq!(glob.get(7, offset, size).await.unwrap(), *value);
+                }
+
+                recordings.clear();
+                let mut glob = glob;
+                let mut single_locations = Vec::new();
+                for value in &values {
+                    let (offset, size);
+                    (glob, offset, size) = glob.append(8, value).await.unwrap();
+                    single_locations.push((offset, size));
+                }
+                assert_eq!(
+                    recordings.snapshot().writes.len(),
+                    values.len(),
+                    "large single appends should require one physical write each"
+                );
+
+                let glob = glob.sync_all().await.unwrap();
+                let total_size = locations
+                    .last()
+                    .map(|(offset, size)| *offset + u64::from(*size))
+                    .unwrap();
+                assert_eq!(
+                    single_locations
+                        .last()
+                        .map(|(offset, size)| *offset + u64::from(*size)),
+                    Some(total_size)
+                );
+                {
+                    // The glob holds each section's only open, so compare the flushed bytes
+                    // through its writers' blobs.
+                    let batch = glob.0.manager.get(7).unwrap().unwrap();
+                    let single = glob.0.manager.get(8).unwrap().unwrap();
+                    assert_eq!((batch.size(), single.size()), (total_size, total_size));
+                    let len = usize::try_from(total_size).unwrap();
+                    let batch_bytes = batch
+                        .blob()
+                        .read_at(0, len, ReadOptions::default())
+                        .await
+                        .unwrap()
+                        .coalesce();
+                    let single_bytes = single
+                        .blob()
+                        .read_at(0, len, ReadOptions::default())
+                        .await
+                        .unwrap()
+                        .coalesce();
+                    assert_eq!(batch_bytes.as_ref(), single_bytes.as_ref());
+                }
+
+                let (glob, removed) = glob.remove_section(8).await.unwrap();
+                assert!(removed);
+                drop(glob.sync(7).await.unwrap());
+
+                let glob = Glob::<_, [u8; 64]>::init(context.child("second"), cfg)
+                    .await
+                    .unwrap();
+                for (value, &(offset, size)) in values.iter().zip(&locations) {
+                    assert_eq!(glob.get(7, offset, size).await.unwrap(), *value);
+                }
+                glob.destroy().await.unwrap();
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_append_many_empty() {
+        deterministic::Runner::default().start(|context| async move {
+            let glob = Glob::<_, u32>::init(context, test_cfg()).await.unwrap();
+            assert!(matches!(
+                glob.append_many(0, std::iter::empty()).await,
+                Err(Error::EmptyAppend)
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_frame_format() {
+        for compression in [None, Some(3)] {
+            deterministic::Runner::default().start(|context| async move {
+                let cfg = Config {
+                    compression,
+                    ..test_cfg()
+                };
+                let values = [[5u8; 64], [6; 64]];
+                let glob = Glob::<_, [u8; 64]>::init(context.child("glob"), cfg.clone())
+                    .await
+                    .unwrap();
+                let (glob, _) = glob.append_many(0, values.iter()).await.unwrap();
+                let (glob, _, _) = glob.append(0, &values[0]).await.unwrap();
+                drop(glob.sync(0).await.unwrap());
+
+                let mut expected = Vec::new();
+                for value in [values[0], values[1], values[0]] {
+                    // A byte array encodes as its raw bytes.
+                    let start = expected.len();
+                    match compression {
+                        Some(level) => expected.extend(compress(&value, i32::from(level)).unwrap()),
+                        None => expected.extend_from_slice(&value),
+                    }
+                    let checksum = Crc32::checksum(&expected[start..]);
+                    expected.put_u32(checksum);
+                }
+                let (blob, size) = context
+                    .open(&cfg.partition, &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                assert_eq!(size, expected.len() as u64);
+                let stored = blob
+                    .read_at(0, expected.len(), ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce();
+                assert_eq!(stored.as_ref(), expected.as_slice());
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_snapshot_lifetime() {
+        for compression in [None, Some(3)] {
+            deterministic::Runner::default().start(|context| async move {
+                let cfg = Config {
+                    compression,
+                    ..test_cfg()
+                };
+                let glob = Glob::<_, [u8; 64]>::init(context, cfg).await.unwrap();
+                let (glob, offset, size) = glob.append(1, &[42; 64]).await.unwrap();
+                let (glob, reader) = glob.snapshot(1).await.unwrap();
+                assert_eq!(reader.size(), u64::from(size));
+
+                let ((glob, next_offset, next_size), value) =
+                    futures::try_join!(glob.append(1, &[7; 64]), reader.get(offset, size)).unwrap();
+                assert_eq!(value, [42; 64]);
+                let glob = glob.sync(1).await.unwrap();
+                assert!(matches!(
+                    reader.get(next_offset, next_size).await,
+                    Err(Error::Runtime(RError::BlobInsufficientLength))
+                ));
+
+                let retained = reader.clone();
+                drop(reader);
+                let (glob, removed) = glob.remove_section(1).await.unwrap();
+                assert!(removed);
+                let (glob, _, _) = glob.append(1, &[9; 64]).await.unwrap();
+                let glob = glob.sync(1).await.unwrap();
+                assert_eq!(retained.get(offset, size).await.unwrap(), [42; 64]);
+
+                let (glob, offset, size) = glob.append(2, &[11; 64]).await.unwrap();
+                let (glob, pruned_reader) = glob.snapshot(2).await.unwrap();
+                let (glob, _) = glob.prune(3).await.unwrap();
+                assert_eq!(pruned_reader.get(offset, size).await.unwrap(), [11; 64]);
+
+                let (glob, offset, size) = glob.append(3, &[13; 64]).await.unwrap();
+                let (glob, destroyed_reader) = glob.snapshot(3).await.unwrap();
+                glob.destroy().await.unwrap();
+                assert_eq!(destroyed_reader.get(offset, size).await.unwrap(), [13; 64]);
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_capture_after_start_sync() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let glob = Glob::<_, u32>::init(context, test_cfg()).await.unwrap();
+            let (glob, offset, size) = glob.append(0, &42).await.unwrap();
+            let (glob, first) = glob.start_sync(0).await.unwrap();
+            let reader = glob.capture(0).unwrap();
+
+            assert_eq!(pending.starts(), 1);
+            assert_eq!(pending.completions(), 0);
+            assert_eq!(reader.get(offset, size).await.unwrap(), 42);
+
+            let (glob, second) = glob.start_sync(0).await.unwrap();
+            let repeated = glob.capture(0).unwrap();
+            assert_eq!(pending.starts(), 1, "the pending cut should be reused");
+            assert_eq!(repeated.size(), reader.size());
+            assert!(matches!(glob.capture(1), Err(Error::SectionOutOfRange(1))));
+
+            release_pending_syncs(&pending);
+            first.await.unwrap();
+            second.await.unwrap();
+
+            let (glob, next_offset, next_size) = glob.append(0, &7).await.unwrap();
+            assert_eq!(reader.get(offset, size).await.unwrap(), 42);
+            assert!(matches!(
+                reader.get(next_offset, next_size).await,
+                Err(Error::Runtime(RError::BlobInsufficientLength))
+            ));
+            drop(glob);
+        });
+    }
+
+    #[test_traced]
+    fn test_capture_keeps_sync_failure() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let glob = Glob::<_, u32>::init(context, test_cfg()).await.unwrap();
+            let (glob, _, _) = glob.append(0, &42).await.unwrap();
+            let (glob, handle) = glob.start_sync(0).await.unwrap();
+            let _reader = glob.capture(0).unwrap();
+
+            fail_pending_syncs(&pending);
+            assert!(matches!(handle.await, Err(RError::Io(_))));
+            drop(glob);
+        });
+    }
+
+    #[test_traced]
+    fn test_capture_pruned_section() {
+        deterministic::Runner::default().start(|context| async move {
+            let glob = Glob::<_, u32>::init(context, test_cfg()).await.unwrap();
+            let (glob, _, _) = glob.append(1, &42).await.unwrap();
+            let (glob, pruned) = glob.prune(2).await.unwrap();
+            assert!(pruned);
+            assert!(matches!(
+                glob.capture(1),
+                Err(Error::AlreadyPrunedToSection(2))
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_snapshot_bounds_before_io() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let glob = Glob::<_, u32>::init(context, test_cfg()).await.unwrap();
+            let (glob, _, size) = glob.append(0, &42).await.unwrap();
+            let (glob, reader) = glob.snapshot(0).await.unwrap();
+            drop(glob);
+            recordings.clear();
+            for (offset, size) in [(u64::MAX, size), (1, size), (0, 0), (0, 3)] {
+                assert!(reader.get(offset, size).await.is_err());
+            }
+            assert!(recordings.snapshot().reads.is_empty());
+            assert_eq!(reader.get(0, size).await.unwrap(), 42);
+        });
+    }
+
+    #[test_traced]
+    fn test_snapshot_missing_section() {
+        deterministic::Runner::default().start(|context| async move {
+            let glob = Glob::<_, u32>::init(context.child("missing"), test_cfg())
+                .await
+                .unwrap();
+            assert!(matches!(
+                glob.snapshot(1).await,
+                Err(Error::SectionOutOfRange(1))
+            ));
+            let glob = Glob::<_, u32>::init(context.child("pruned"), test_cfg())
+                .await
+                .unwrap();
+            let (glob, _, _) = glob.append(1, &42).await.unwrap();
+            let (glob, _) = glob.prune(2).await.unwrap();
+            assert!(matches!(
+                glob.snapshot(1).await,
+                Err(Error::AlreadyPrunedToSection(2))
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_snapshot_flush_failure() {
+        deterministic::Runner::default().start(|context| async move {
+            let faults = WriteFaults::default();
+            let context = WriteFaultContext {
+                inner: context,
+                faults: faults.clone(),
+            };
+            let glob = Glob::<_, u32>::init(context, test_cfg()).await.unwrap();
+            let (glob, _, _) = glob.append(0, &42).await.unwrap();
+            assert_eq!(faults.writes(), 0);
+            faults.arm();
+            assert!(matches!(glob.snapshot(0).await, Err(Error::Runtime(_))));
+        });
+    }
+
+    #[test_traced]
+    fn test_reader_open_is_read_only() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg();
+            let glob = Glob::<_, u32>::init(context.child("writer"), cfg.clone())
+                .await
+                .unwrap();
+            let (glob, offset, size) = glob.append(1, &42).await.unwrap();
+            drop(glob.sync(1).await.unwrap());
+
+            let pending = PendingSyncs::default();
+            pending.arm();
+            pending.unblock();
+            let (context, recordings) = RecordingContext::new(DelayedSyncContext {
+                inner: context.child("reader"),
+                pending: pending.clone(),
+            });
+            assert!(matches!(
+                Reader::<_, u32>::open(&context, cfg.clone(), 2).await,
+                Err(Error::SectionOutOfRange(2))
+            ));
+            assert_eq!(
+                context.scan(&cfg.partition).await.unwrap(),
+                vec![1u64.to_be_bytes().to_vec()]
+            );
+            let reader = Reader::<_, u32>::open(&context, cfg, 1).await.unwrap();
+            assert_eq!(reader.size(), u64::from(size));
+            assert!(recordings.snapshot().reads.is_empty());
+            assert_eq!(reader.get(offset, size).await.unwrap(), 42);
+            assert_eq!(recordings.snapshot().reads.len(), 1);
+            assert!(recordings.snapshot().writes.is_empty());
+            assert_eq!(pending.calls(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_reader_get_many_coalesces_with_budget() {
+        for compression in [None, Some(3)] {
+            deterministic::Runner::default().start(|context| async move {
+                let (context, recordings) = RecordingContext::new(context);
+                let cfg = Config {
+                    compression,
+                    ..test_cfg()
+                };
+                let mut glob = Glob::<_, u32>::init(context, cfg).await.unwrap();
+                let mut locations = Vec::new();
+                for value in 0..5 {
+                    let (offset, size);
+                    (glob, offset, size) = glob.append(0, &value).await.unwrap();
+                    locations.push((offset, size));
+                }
+                let (glob, reader) = glob.snapshot(0).await.unwrap();
+                drop(glob);
+                let pair_bytes = (locations[0].1 + locations[1].1) as usize;
+                let cases: &[(&[usize], usize, usize)] = &[
+                    (&[], 0, usize::MAX),
+                    (&[0, 1, 2, 3], 1, usize::MAX),
+                    (&[0, 1, 3, 4], 2, usize::MAX),
+                    (&[4, 1, 1, 2], 3, usize::MAX),
+                    (&[0, 1, 2, 3], 2, pair_bytes),
+                    (&[0, 1], 2, 1),
+                ];
+                for &(indices, reads, budget) in cases {
+                    let requested = indices.iter().map(|&i| locations[i]).collect::<Vec<_>>();
+                    recordings.clear();
+                    let values = reader
+                        .get_many(&requested, NonZeroUsize::new(budget).unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        values,
+                        indices.iter().map(|&i| i as u32).collect::<Vec<_>>()
+                    );
+                    assert_eq!(recordings.snapshot().reads.len(), reads);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn test_coalesced_runs() {
+        let locations = [(0, 8), (8, 8), (16, 8), (32, 8), (40, 64), (104, 8), (0, 8)];
+        let runs = |max: usize| {
+            coalesced_runs(&locations, NonZeroUsize::new(max).unwrap()).collect::<Vec<_>>()
+        };
+        assert_eq!(runs(usize::MAX), vec![0..3, 3..6, 6..7]);
+        assert_eq!(runs(16), vec![0..2, 2..3, 3..4, 4..5, 5..6, 6..7]);
+        assert_eq!(coalesced_runs(&[], NZUsize!(1)).count(), 0);
+    }
+
+    #[test_traced]
+    fn test_reader_get_many_rejects_ranges_before_io() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let glob = Glob::<_, u32>::init(context, test_cfg()).await.unwrap();
+            let (glob, offset, size) = glob.append(0, &42).await.unwrap();
+            let (_, reader) = glob.snapshot(0).await.unwrap();
+            recordings.clear();
+            for invalid in [(u64::MAX, size), (offset + 1, size), (0, 0), (0, 3)] {
+                assert!(
+                    reader
+                        .get_many(&[(offset, size), invalid], NZUsize!(64))
+                        .await
+                        .is_err()
+                );
+                assert!(recordings.snapshot().reads.is_empty());
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_reader_get_many_checks_each_frame() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let cfg = test_cfg();
+            let mut glob = Glob::<_, u32>::init(context.child("writer"), cfg.clone())
+                .await
+                .unwrap();
+            let mut locations = Vec::new();
+            for value in 0..3 {
+                let (offset, size);
+                (glob, offset, size) = glob.append(0, &value).await.unwrap();
+                locations.push((offset, size));
+            }
+            drop(glob.sync(0).await.unwrap());
+            corrupt_frame(&context, &cfg.partition, &0u64.to_be_bytes(), 1, 8).await;
+            let reader = Reader::<_, u32>::open(&context, cfg.clone(), 0)
+                .await
+                .unwrap();
+            recordings.clear();
+            assert!(matches!(
+                reader.get_many(&locations, NZUsize!(64)).await,
+                Err(Error::ChecksumMismatch(_, _))
+            ));
+            assert_eq!(recordings.snapshot().reads.len(), 1);
+            recordings.clear();
+            assert_eq!(
+                reader
+                    .get_many(&[locations[0], locations[2]], NZUsize!(64))
+                    .await
+                    .unwrap(),
+                vec![0, 2]
+            );
+            assert_eq!(recordings.snapshot().reads.len(), 2);
+
+            // One open per blob: release the first reader before reopening with another codec.
+            drop(reader);
+            let reader = Reader::<_, u64>::open(&context, cfg, 0).await.unwrap();
+            assert!(matches!(
+                reader.get_many(&locations, NZUsize!(64)).await,
+                Err(Error::Codec(_))
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_reader_get_many_retains_decoded_bytes() {
+        for compression in [None, Some(3)] {
+            deterministic::Runner::default().start(|context| async move {
+                let cfg = Config {
+                    partition: "bytes".into(),
+                    compression,
+                    codec_config: (..).into(),
+                    write_buffer: NZUsize!(1024),
+                };
+                let mut glob = Glob::<_, Bytes>::init(context, cfg).await.unwrap();
+                let expected = [Bytes::from(vec![7; 31]), Bytes::from(vec![9; 73])];
+                let mut locations = Vec::new();
+                for value in &expected {
+                    let (offset, size);
+                    (glob, offset, size) = glob.append(0, value).await.unwrap();
+                    locations.push((offset, size));
+                }
+                let (glob, reader) = glob.snapshot(0).await.unwrap();
+                let values = reader.get_many(&locations, NZUsize!(1024)).await.unwrap();
+                drop(reader);
+                glob.destroy().await.unwrap();
+                assert_eq!(values, expected);
+            });
         }
     }
 

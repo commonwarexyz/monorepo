@@ -1,9 +1,10 @@
 use crate::stateful::probe::{mailbox::Message, sample, wire};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::{Encode, ReadExt as _};
-use commonware_consensus::{
+use commonware_consensus::simplex::{
     marshal::core::{Mailbox as MarshalMailbox, Variant},
-    simplex::{scheme::Scheme, types::Finalization},
+    scheme::Scheme,
+    types::Finalization,
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;

@@ -7,7 +7,13 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPool, ContextCell, Handle, Metrics, Spawner, iobuf::EncodeExt, spawn_cell,
+    BufferPool, ContextCell, Handle, Metrics, Spawner,
+    iobuf::EncodeExt,
+    spawn_cell,
+    telemetry::metrics::{
+        MetricsExt as _,
+        status::{self, Status},
+    },
 };
 use commonware_utils::futures::Pool;
 use std::{collections::VecDeque, num::NonZeroUsize, time::SystemTime};
@@ -181,6 +187,7 @@ where
     blocker: B,
     sender: mailbox::UnreliableSender<Decoded<P, V>>,
     strategy: T,
+    decode: status::Counter,
 }
 
 impl<E, P, B, R, V, T> WrappedBackgroundReceiver<E, P, B, R, V, T>
@@ -206,6 +213,7 @@ where
         let (tx, rx) = mailbox::new_unreliable(context.child("mailbox"), channel_capacity);
         (
             Self {
+                decode: context.family("decode", "Inbound decode outcomes"),
                 context: ContextCell::new(context),
                 receiver,
                 codec_config,
@@ -242,7 +250,7 @@ where
                     || (receiver_closed && !decode_pool.is_empty())
                 {
                     let result = decode_pool.next_completed().await;
-                    Self::handle_decode_result(&mut self.blocker, &mut self.sender, result);
+                    self.handle_decode_result(result);
                 }
                 if receiver_closed && decode_pool.is_empty() {
                     break;
@@ -251,7 +259,7 @@ where
             on_stopped => {},
             // Process decode completions as they arrive
             result = decode_pool.next_completed() => {
-                Self::handle_decode_result(&mut self.blocker, &mut self.sender, result);
+                self.handle_decode_result(result);
             },
             // Receive raw bytes and submit decode work to the strategy.
             Ok((peer, bytes)) = self.receiver.recv() else {
@@ -268,18 +276,20 @@ where
         }
     }
 
-    fn handle_decode_result(
-        blocker: &mut B,
-        sender: &mut mailbox::UnreliableSender<Decoded<P, V>>,
-        result: (P, Result<V, commonware_codec::Error>),
-    ) {
+    fn handle_decode_result(&mut self, result: (P, Result<V, commonware_codec::Error>)) {
         let (peer, decode_result) = result;
         match decode_result {
             Ok(value) => {
-                let _ = sender.enqueue(Decoded(peer, value));
+                self.decode
+                    .inc(if self.sender.enqueue(Decoded(peer, value)).accepted() {
+                        Status::Success
+                    } else {
+                        Status::Dropped
+                    });
             }
             Err(err) => {
-                crate::block!(blocker, peer, ?err, "received invalid message");
+                self.decode.inc(Status::Invalid);
+                crate::block!(self.blocker, peer, ?err, "received invalid message");
             }
         }
     }
@@ -291,8 +301,8 @@ mod tests {
     use crate::{
         Manager as _, Recipients,
         simulated::{self, Link, Network, Oracle},
+        utils::mocks::NoopBlocker,
     };
-    use commonware_actor::Feedback;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         Signer,
@@ -300,13 +310,11 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_parallel::{Sequential, mocks};
-    use commonware_runtime::{Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{
-        NZUsize,
-        channel::{mpsc, ring},
-        ordered::Set,
-        probability,
+    use commonware_runtime::{
+        BufMut as _, BufferPooler as _, Clock as _, IoBuf, Quota, Runner, Supervisor as _,
+        deterministic,
     };
+    use commonware_utils::{NZUsize, channel::mpsc, ordered::Set, probability};
     use std::{
         io,
         num::NonZeroU32,
@@ -324,6 +332,58 @@ mod tests {
     };
 
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    #[test_traced]
+    fn test_receivers_share_payload_buffer() {
+        for pooled in [false, true] {
+            deterministic::Runner::default().start(|context| async move {
+                let payload = IoBuf::from(vec![42; 256 * 1024]);
+                let encoded = payload.encode();
+                let raw = if pooled {
+                    let mut raw = context.network_buffer_pool().alloc(encoded.len());
+                    raw.put_slice(&encoded);
+                    raw.freeze()
+                } else {
+                    IoBuf::from(encoded)
+                };
+                let expected = raw.as_ref()[raw.len() - payload.len()..].as_ptr() as usize;
+                for background in [false, true] {
+                    let (tx, receiver) = mpsc::unbounded_channel();
+                    tx.send((pk(0), raw.clone())).unwrap();
+                    drop(tx);
+                    let config = (..=payload.len()).into();
+                    let receiver = MockReceiver { receiver };
+                    let decoded = if background {
+                        let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, IoBuf, _>::new(
+                            context.child("bg"),
+                            receiver,
+                            config,
+                            NoopBlocker::default(),
+                            NZUsize!(1),
+                            Sequential,
+                        );
+                        let handle = bg.start();
+                        let (_, decoded) = rx.recv().await.unwrap();
+                        handle.await.unwrap();
+                        decoded
+                    } else {
+                        WrappedReceiver::<_, IoBuf>::new(config, receiver)
+                            .recv()
+                            .await
+                            .unwrap()
+                            .1
+                            .unwrap()
+                    };
+                    assert_eq!(decoded.as_ref(), payload.as_ref());
+                    assert_eq!(
+                        decoded.as_ref().as_ptr() as usize,
+                        expected,
+                        "background={background}, pooled={pooled}"
+                    );
+                }
+            });
+        }
+    }
 
     fn start_network(context: deterministic::Context) -> Oracle<PublicKey, deterministic::Context> {
         let (network, oracle) = Network::new(
@@ -392,22 +452,6 @@ mod tests {
                 .recv()
                 .await
                 .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct NoopBlocker;
-
-    impl crate::Blocker for NoopBlocker {
-        type PublicKey = PublicKey;
-
-        fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
-            Feedback::Ok
-        }
-
-        fn blocked(&mut self) -> crate::BlockedSubscription<Self::PublicKey> {
-            let (_, receiver) = ring::channel(NZUsize!(1));
-            receiver
         }
     }
 
@@ -499,6 +543,11 @@ mod tests {
 
                 context.sleep(Duration::from_millis(1)).await;
             }
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("bg_decode_total{status=\"Invalid\"} 1"),
+                "{metrics}"
+            );
         });
     }
 
@@ -668,10 +717,12 @@ mod tests {
                 context.child("bg"),
                 MockReceiver { receiver },
                 (),
-                NoopBlocker,
+                NoopBlocker::default(),
                 NZUsize!(1),
                 Sequential,
             );
+            // Keep the metric registered after the receiver exits.
+            let _decode = bg.decode.clone();
             let handle = bg.start();
             handle.await.expect("background receiver should complete");
 
@@ -679,6 +730,15 @@ mod tests {
             assert_eq!(from, sender);
             assert_eq!(value, 0);
             assert!(rx.recv().await.is_none());
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("bg_decode_total{status=\"Dropped\"} 1"),
+                "{metrics}"
+            );
+            assert!(
+                metrics.contains("bg_decode_total{status=\"Success\"} 1"),
+                "{metrics}"
+            );
         });
     }
 
@@ -702,7 +762,7 @@ mod tests {
                     received: received.clone(),
                 },
                 (),
-                NoopBlocker,
+                NoopBlocker::default(),
                 NZUsize!(16),
                 mocks::pending(NZUsize!(2)),
             );
@@ -738,7 +798,7 @@ mod tests {
                 context.child("bg"),
                 MockReceiver { receiver },
                 (),
-                NoopBlocker,
+                NoopBlocker::default(),
                 NZUsize!(64),
                 Sequential,
             );
@@ -805,7 +865,7 @@ mod tests {
                     context.child(label),
                     MockReceiver { receiver },
                     ((..).into(), (..).into()),
-                    NoopBlocker,
+                    NoopBlocker::default(),
                     NZUsize!(1),
                     mocks::inline(NZUsize!(2)),
                 );

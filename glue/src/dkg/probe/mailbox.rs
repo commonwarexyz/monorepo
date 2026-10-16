@@ -1,9 +1,9 @@
 use super::ActorArtifact;
 use crate::dkg::ReshareBlock;
 use commonware_actor::mailbox::{Policy, Sender};
-use commonware_consensus::{
+use commonware_consensus::simplex::{
     marshal::core::{Mailbox as MarshalMailbox, Variant},
-    simplex::scheme::Scheme,
+    scheme::Scheme,
 };
 use commonware_cryptography::Signer;
 use commonware_utils::channel::oneshot;

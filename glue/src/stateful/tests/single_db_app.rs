@@ -18,17 +18,17 @@ use commonware_broadcast::buffered;
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
-    marshal::{
-        self,
-        ancestry::Ancestry,
-        core::{Actor as MarshalActor, CommitmentFallback},
-        resolver::p2p as marshal_resolver,
-        standard::{Deferred, Standard},
-    },
     simplex::{
         self,
         config::{ForwardPolicy, SkipPolicy},
         elector::RoundRobin,
+        marshal::{
+            self,
+            ancestry::Ancestry,
+            core::{Actor as MarshalActor, CommitmentFallback},
+            resolver::p2p as marshal_resolver,
+            standard::{Deferred, Standard},
+        },
         mocks::scheme::{self as scheme_mocks, Scheme as MockScheme},
         types::Context,
     },
@@ -420,10 +420,12 @@ impl EngineDefinition for SingleDbEngine {
         let broadcast_config = buffered::Config {
             public_key: public_key.clone(),
             mailbox_size: NZUsize!(100),
+            ingress_size: NZUsize!(100),
             deque_size: 10,
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: oracle.control(public_key.clone()),
             strategy: Sequential,
         };
         let (broadcast_engine, buffer) =

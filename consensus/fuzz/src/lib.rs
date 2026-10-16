@@ -1,6 +1,7 @@
 pub mod bounds;
 pub mod disrupter;
 pub mod invariants;
+pub mod multimmit_engine;
 pub mod simplex;
 pub mod strategy;
 pub mod types;
@@ -17,9 +18,10 @@ use commonware_consensus::{
     Handoff, Monitor, Viewable,
     simplex::{
         Engine, Floor, ForwardPolicy, SkipBudget, SkipPolicy, config,
-        mocks::{application, relay, reporter, twins},
+        mocks::{application, relay, reporter},
         types::{Certificate, Vote},
     },
+    twins,
     types::{Delta, Epoch, TermLength, View, ViewDelta},
 };
 use commonware_cryptography::{

@@ -17,16 +17,16 @@ use clap::Args;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     Reporters,
-    marshal::{
-        self,
-        core::Actor as MarshalActor,
-        resolver::p2p as marshal_resolver,
-        standard::{Deferred, Standard},
-    },
     simplex::{
         SkipBudget,
         config::{ForwardPolicy, SkipPolicy},
         elector::RoundRobin,
+        marshal::{
+            self,
+            core::Actor as MarshalActor,
+            resolver::p2p as marshal_resolver,
+            standard::{Deferred, Standard},
+        },
     },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
@@ -176,10 +176,12 @@ pub async fn run(context: tokio::Context, args: Validator) {
         buffered::Config {
             public_key: local.clone(),
             mailbox_size: MAILBOX_SIZE,
+            ingress_size: MAILBOX_SIZE,
             deque_size: 16,
             priority: false,
             codec_config: (),
             peer_provider: oracle.clone(),
+            blocker: oracle.clone(),
             strategy: Sequential,
         },
     );
