@@ -1102,6 +1102,10 @@ where
         Ok((self, last_pos))
     }
 
+    fn evict_cached_before(&mut self, min_position: u64) {
+        self.journal.evict_cached_before(min_position);
+    }
+
     async fn prune(self, min_position: u64) -> Result<(Self, bool), JournalError> {
         let prune_to = {
             let bounds = self.journal.bounds();
