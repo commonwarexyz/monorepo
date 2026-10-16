@@ -127,10 +127,10 @@ impl Drop for PageFetchGuard<'_> {
     }
 }
 
-/// The most missing pages a batched read examines per hold of the cache's write lock, which
-/// bounds how long a read with many misses keeps cache hits and publishes waiting. Another reader
-/// can start reading a page this read found unread in an earlier hold, so that page may be read
-/// twice.
+/// Missing pages a batched read examines before it yields the cache's write lock to any thread
+/// waiting for it, so a read with many misses does not keep cache hits and publishes waiting for
+/// its whole scan. A page this read found unread before yielding may be read by another reader
+/// before this read registers its batch, so overlapping reads can read such a page more than once.
 const MISSES_PER_LOCK: usize = 64;
 
 /// The read of a [Batch]. It fails if the read fails or does not yield every page exactly once.
@@ -831,9 +831,10 @@ impl CacheRef {
     /// reader is fetching it, alone or in a batch, and otherwise read with one batched blob read
     /// that validates, caches, and serves each page as it arrives. Other readers that miss a page
     /// of that batch join it. Serving never depends on the cache still holding a page, so no page
-    /// this call reads is read again to serve it. A page failing validation, or a failed read of
-    /// a batch this call depends on, returns an error, like a single fetch. Pages cached before it
-    /// remain, subject to normal eviction.
+    /// this call reads is read again to serve it. A page failing validation returns an error, like
+    /// a single fetch, as does a failed read of this call's own batch, or of a joined batch while
+    /// this call still awaits one of its pages. Pages cached before it remain, subject to normal
+    /// eviction.
     pub(super) async fn read_after_misses<B: Blob>(
         &self,
         blob: &Arc<B>,
