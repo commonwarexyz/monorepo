@@ -19,8 +19,8 @@
 //! holds of the cache's write lock and registering its own batch in the last, so a page another
 //! reader misses between those holds may still be read twice. A batch claims each page's selections
 //! under that lock, so a reader that selects an unpublished page always gets the page or the
-//! batch's error, and nothing is retried. The cache takes its lock before any batch's lock, and
-//! holds batches weakly so a finished or dropped batch never needs the cache lock.
+//! batch's error. The cache takes its lock before any batch's lock, and holds batches weakly so a
+//! finished or dropped batch never needs the cache lock.
 
 use super::{
     CHECKSUM_SIZE, get_page_with_checksum_from_blob, physical_page, validate_physical_page,
