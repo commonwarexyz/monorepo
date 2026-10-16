@@ -1,6 +1,6 @@
 use crate::Channel;
 use commonware_codec::{Buf, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write, varint::UInt};
-use commonware_runtime::{BufMut, BufferPool, IoBuf, IoBufs};
+use commonware_runtime::{BufMut, IoBuf, IoBufMut, IoBufs};
 use commonware_stream::Upgrader;
 
 /// Data is an arbitrary message sent between peers.
@@ -77,11 +77,11 @@ pub struct EncodedData {
 impl EncodedData {
     /// Encode data frame bytes in-place as:
     /// `DATA_PREFIX || channel || message_len || message`.
-    pub fn new(pool: &BufferPool, channel: Channel, mut message: IoBufs) -> Self {
+    pub fn new(channel: Channel, mut message: IoBufs) -> Self {
         let payload_len = message.len();
         let header_len =
             DATA_PREFIX.encode_size() + UInt(channel).encode_size() + payload_len.encode_size();
-        let mut header = pool.alloc(header_len);
+        let mut header = IoBufMut::with_capacity(header_len);
         DATA_PREFIX.write(&mut header);
         UInt(channel).write(&mut header);
         payload_len.write(&mut header);
@@ -192,7 +192,7 @@ mod tests {
     };
     use commonware_codec::{Decode as _, Encode as _, Error};
     use commonware_cryptography::{ChaCha20Poly1305, ed25519};
-    use commonware_runtime::{BufferPooler as _, Runner as _, deterministic};
+    use commonware_runtime::{Runner as _, deterministic};
     use commonware_stream::SakeCups;
 
     #[test]
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn test_encoded_data_new_matches_data_encode() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let mut message = IoBufs::from(IoBuf::from(b"hello "));
             message.append(IoBuf::from(b"world"));
             message.append(IoBuf::from(b"!"));
@@ -260,7 +260,7 @@ mod tests {
             let mut expected = IoBufs::from(data.encode());
             expected.prepend(IoBuf::from(vec![DATA_PREFIX]));
 
-            let encoded = EncodedData::new(context.network_buffer_pool(), 12345, message);
+            let encoded = EncodedData::new(12345, message);
             assert_eq!(encoded.channel, 12345);
             assert_eq!(encoded.payload.coalesce(), expected.coalesce());
         });

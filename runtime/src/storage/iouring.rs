@@ -40,8 +40,7 @@ use super::{
     resolve_header, sync_dir,
 };
 use crate::{
-    BlobVersion, Buf, BufferPool, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions,
-    WriteOptions,
+    BlobVersion, Buf, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     iouring::{
         operation::{self, Operation},
         request::{
@@ -88,15 +87,13 @@ pub struct Storage {
     blob_layouts: RangeInclusive<Layout>,
     /// Directory exclusion also retained by opened files and registered requests.
     hold: Arc<Hold>,
-    /// Shared pool used to allocate read buffers.
-    pool: BufferPool,
     /// The live open of each blob and the debt its dropped handles left behind.
     pending: Arc<Pending>,
 }
 
 impl Storage {
     /// Create storage and acquire its directory hold.
-    pub(crate) fn new(cfg: Config, pool: BufferPool) -> Self {
+    pub(crate) fn new(cfg: Config) -> Self {
         let Config {
             storage_directory,
             blob_layouts,
@@ -112,7 +109,6 @@ impl Storage {
             storage_directory,
             blob_layouts,
             hold,
-            pool,
             pending: Arc::new(Pending::default()),
         }
     }
@@ -194,13 +190,7 @@ impl crate::Storage for Storage {
                 logical_len = file.metadata().map_err(|_| Error::ReadFailed)?.len() - data_offset;
             }
 
-            let blob = Blob::new(
-                file,
-                self.hold.clone(),
-                self.pool.clone(),
-                data_offset,
-                generation,
-            );
+            let blob = Blob::new(file, self.hold.clone(), data_offset, generation);
             (blob, logical_len, blob_version, wait, owed)
         };
 
@@ -287,8 +277,6 @@ pub struct Blob {
     shared: Arc<Shared>,
     /// The logical open's namespace identity.
     generation: Arc<Generation>,
-    /// Buffer pool for read allocations
-    pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
 }
@@ -455,13 +443,7 @@ impl Drop for Blob {
 
 impl Blob {
     /// Construct a blob handle that retains its file and storage directory hold.
-    fn new(
-        file: File,
-        hold: Arc<Hold>,
-        pool: BufferPool,
-        data_offset: u64,
-        generation: Arc<Generation>,
-    ) -> Self {
+    fn new(file: File, hold: Arc<Hold>, data_offset: u64, generation: Arc<Generation>) -> Self {
         let shared = Arc::new(Shared {
             file: Held::new(file, hold),
             tracker: Tracker::default(),
@@ -474,7 +456,6 @@ impl Blob {
         Self {
             shared,
             generation,
-            pool,
             data_offset,
         }
     }
@@ -518,8 +499,9 @@ impl Blob {
             (bufs.coalesce(), None)
         } else {
             // Preserve the caller's chunk layout by reading into a temporary.
+            let mut buf = IoBufMut::with_capacity(len);
             // SAFETY: The read loop fills `len` bytes before copying them back.
-            let buf = unsafe { self.pool.alloc_len(len) };
+            unsafe { buf.set_len(len) };
             (buf, Some(bufs))
         }
     }
@@ -532,7 +514,7 @@ impl crate::Blob for Blob {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(offset, len, self.pool.alloc(len), options)
+        self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
             .await
     }
 
@@ -608,7 +590,7 @@ impl crate::Blob for Blob {
         let reads = offsets
             .into_iter()
             .map(|(offset, len)| {
-                let (io_buf, _) = self.read_buffers(self.pool.alloc(len).into(), len);
+                let (io_buf, _) = self.read_buffers(IoBufMut::with_capacity(len).into(), len);
                 if len == 0 {
                     return Handle::ready(Ok(io_buf.into()));
                 }
@@ -766,10 +748,8 @@ impl crate::Blob for Blob {
 mod tests {
     use super::*;
     use crate::{
-        BLOB_PAGE_SIZE, Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Runner as _,
-        Storage as _, iouring,
+        BLOB_PAGE_SIZE, Blob as _, IoBuf, IoBufMut, Runner as _, Storage as _, iouring,
         storage::{Header, Layout, shared, tests::run_storage_tests},
-        telemetry::metrics::{Register, Registry},
     };
     use std::{
         env,
@@ -785,24 +765,14 @@ mod tests {
     /// Distinguish temporary directories created within one test process.
     static NEXT_STORAGE_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
-    /// Register a buffer pool with the same allocation policy as storage.
-    fn test_pool(scope: &mut impl Register) -> BufferPool {
-        BufferPool::new(BufferPoolConfig::for_storage(), scope)
-    }
-
     /// Build a fresh storage instance rooted in a unique temporary directory.
     fn create_test_storage() -> (Storage, PathBuf) {
         let storage_directory = create_test_directory();
 
-        let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry("pool"));
-        let storage = Storage::new(
-            Config {
-                storage_directory: storage_directory.clone(),
-                blob_layouts: Layout::ALL,
-            },
-            pool,
-        );
+        let storage = Storage::new(Config {
+            storage_directory: storage_directory.clone(),
+            blob_layouts: Layout::ALL,
+        });
         (storage, storage_directory)
     }
 
@@ -822,11 +792,9 @@ mod tests {
     fn test_large_contiguous_write_returns_kernel_error() {
         let directory = create_test_directory();
         let hold = Hold::acquire(&directory).unwrap();
-        let mut registry = Registry::default();
         let blob = Blob::new(
             File::options().write(true).open("/dev/full").unwrap(),
             hold,
-            test_pool(&mut registry),
             0,
             Arc::new(Pending::default())
                 .admit("partition", b"large", false)
@@ -1001,9 +969,7 @@ mod tests {
 
             // A logical page size whose physical page is exactly one blob page.
             let logical = crate::buffer::paged::page_size(BLOB_PAGE_SIZE);
-            let mut registry = Registry::default();
             let cache = crate::buffer::paged::CacheRef::new(
-                test_pool(&mut registry.sub_registry("pool")),
                 logical,
                 std::num::NonZeroUsize::new(16).unwrap(),
             );
@@ -1468,15 +1434,10 @@ mod tests {
             let storage_directory = create_test_directory();
             std::fs::write(storage_directory.join("partition"), b"not a directory").unwrap();
 
-            let mut registry = Registry::default();
-            let pool = test_pool(&mut registry.sub_registry("pool"));
-            let storage = Storage::new(
-                Config {
-                    storage_directory: storage_directory.clone(),
-                    blob_layouts: Layout::ALL,
-                },
-                pool,
-            );
+            let storage = Storage::new(Config {
+                storage_directory: storage_directory.clone(),
+                blob_layouts: Layout::ALL,
+            });
 
             let err = storage
                 .open("partition", b"blob")
@@ -1502,15 +1463,10 @@ mod tests {
             // fails once the wrapper reaches the open call.
             std::fs::create_dir_all(partition.join(&blob_name)).unwrap();
 
-            let mut registry = Registry::default();
-            let pool = test_pool(&mut registry.sub_registry("pool"));
-            let storage = Storage::new(
-                Config {
-                    storage_directory: storage_directory.clone(),
-                    blob_layouts: Layout::ALL,
-                },
-                pool,
-            );
+            let storage = Storage::new(Config {
+                storage_directory: storage_directory.clone(),
+                blob_layouts: Layout::ALL,
+            });
 
             let err = storage
                 .open("partition", b"blob")
@@ -1676,13 +1632,10 @@ mod tests {
 
             // `set_len` on a socket-backed file descriptor should fail in the
             // kernel, letting the wrapper expose `BlobResizeFailed`.
-            let mut registry = Registry::default();
-            let pool = test_pool(&mut registry.sub_registry("pool"));
 
             let blob = Blob::new(
                 file,
                 Hold::acquire(&storage_directory).unwrap(),
-                pool,
                 Layout::V0.data_offset(),
                 Arc::new(Pending::default())
                     .admit("partition", b"blob", false)
@@ -1786,12 +1739,9 @@ mod tests {
                 let storage_directory = create_test_directory();
                 let (socket, _peer) = UnixStream::pair().unwrap();
                 let file = File::from(OwnedFd::from(socket));
-                let mut registry = Registry::default();
-                let pool = test_pool(&mut registry.sub_registry("pool"));
                 let blob = Blob::new(
                     file,
                     Hold::acquire(&storage_directory).unwrap(),
-                    pool,
                     Layout::V0.data_offset(),
                     Arc::new(Pending::default())
                         .admit("partition", b"blob", false)
@@ -1990,12 +1940,10 @@ mod tests {
             let path = directory.join("readonly");
             fs::write(&path, b"").unwrap();
             let hold = Hold::acquire(&directory).unwrap();
-            let mut registry = Registry::default();
             let pending = Arc::new(Pending::default());
             let blob = Blob::new(
                 File::options().read(true).open(&path).unwrap(),
                 hold,
-                test_pool(&mut registry),
                 0,
                 pending.admit("partition", b"readonly", false).unwrap().0,
             );
@@ -2042,7 +1990,7 @@ mod tests {
     fn test_remove_live_dirty_owner_leaves_no_debt() {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();
-            shared::check_remove_live_dirty_owner(&storage, &storage.pending, &storage.pool).await;
+            shared::check_remove_live_dirty_owner(&storage, &storage.pending).await;
             drop(storage);
             let _ = std::fs::remove_dir_all(storage_directory);
         });

@@ -162,7 +162,7 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _,
+        Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
     };
@@ -176,8 +176,8 @@ pub(crate) mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    pub(crate) fn create_test_config(seed: u64) -> VarConfig {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: crate::mmr::full::Config {
                 journal_partition: format!("journal-{seed}"),
@@ -214,7 +214,7 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed, &context);
+        let config = create_test_config(seed);
         AnyTest::init(context, config, None).await.unwrap()
     }
 
@@ -545,7 +545,7 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        let cfg = create_test_config(0, &context);
+        let cfg = create_test_config(0);
         AnyTest::init(context, cfg, None).await.unwrap()
     }
 
@@ -894,7 +894,7 @@ pub(crate) mod test {
     fn test_stage_and_expand_reject_foreign_db() {
         deterministic::Runner::default().start(|context| async move {
             let db_a = open_db(context.child("a")).await;
-            let db_b = AnyTest::init(context.child("b"), create_test_config(1, &context), None)
+            let db_b = AnyTest::init(context.child("b"), create_test_config(1), None)
                 .await
                 .unwrap();
             let key_a = Sha256::hash(&[b"a"]);

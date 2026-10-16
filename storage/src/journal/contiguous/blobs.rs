@@ -921,7 +921,7 @@ mod tests {
             encode_frame_into(None, &cross_page, &mut encoded).unwrap();
 
             // Replay a sealed snapshot so payloads are copied out of the paged replay buffer.
-            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(3));
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(3));
             let (blob, size) = context
                 .open("paged-replay-bulk-fields", b"blob")
                 .await
@@ -961,7 +961,7 @@ mod tests {
     fn test_replay_preserves_byte_views_across_fills() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
+            let cache = CacheRef::new(NZU16!(64), NZUsize!(3));
             let (blob, size) = context.open("replay-views", b"blob").await.unwrap();
             let writer = Writer::new(blob, size, 128, cache.clone()).await.unwrap();
             let (writer, _) = writer.append(b"abcdefghijklmnopqrstuvwx").await.unwrap();
@@ -1015,7 +1015,7 @@ mod tests {
         executor.start(|context| async move {
             let mut encoded = Vec::new();
             encode_frame_into(None, &IoBuf::from(b"abcdefgh"), &mut encoded).unwrap();
-            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
+            let cache = CacheRef::new(NZU16!(64), NZUsize!(3));
             let (blob, size) = context.open("replay-views", &[0]).await.unwrap();
             let pending = Writer::new(blob, size, 256, cache).await.unwrap();
             let (pending, _) = pending.append(&[0; 64]).await.unwrap();
@@ -1054,7 +1054,7 @@ mod tests {
                 for item in &items {
                     encode_frame_into(compression, item, &mut encoded).unwrap();
                 }
-                let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
+                let cache = CacheRef::new(NZU16!(64), NZUsize!(3));
                 let (blob, size) = context
                     .open("replay-frames", &[compression.unwrap_or(0)])
                     .await
@@ -1143,7 +1143,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(3));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(3));
             let (blob, size) = context
                 .open("read_up_to_eof_parity", b"blob")
                 .await

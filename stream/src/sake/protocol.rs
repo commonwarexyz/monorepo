@@ -195,17 +195,17 @@ mod test {
     use super::*;
     use crate::{
         Upgrader as _,
-        cups::{self, Cups},
+        cups::{self, Cups, MAX_BATCH_SIZE},
         sake,
         utils::{Timeout, TimeoutError},
     };
     use commonware_codec::varint::UInt;
     use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
     use commonware_runtime::{
-        BufMut, BufferPool, BufferPoolConfig, BufferPooler as _, Error as RuntimeError, IoBuf,
-        IoBufs, Runner as _, Spawner as _, Supervisor as _, deterministic, mocks,
+        BufMut, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Runner as _, Spawner as _,
+        Supervisor as _, deterministic, mocks,
     };
-    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
+    use commonware_utils::sync::Mutex;
     use futures::FutureExt as _;
     use std::{
         ops::Range,
@@ -356,21 +356,20 @@ mod test {
         }
     }
 
-    /// Wraps a stream to return each read as a fresh, uniquely-owned pooled
-    /// buffer, mirroring the production network backends.
+    /// Wraps a stream to return each read as a fresh, uniquely-owned buffer,
+    /// mirroring the production network backends.
     ///
     /// Records the allocation handed out by the most recent read so tests can
     /// assert that decryption happened in place.
-    struct PoolingStream<S> {
+    struct OwnedStream<S> {
         inner: S,
-        pool: BufferPool,
         last_alloc: Arc<Mutex<Range<usize>>>,
     }
 
-    impl<S: commonware_runtime::Stream> commonware_runtime::Stream for PoolingStream<S> {
+    impl<S: commonware_runtime::Stream> commonware_runtime::Stream for OwnedStream<S> {
         async fn recv(&mut self, len: usize) -> Result<IoBufs, RuntimeError> {
             let mut bufs = self.inner.recv(len).await?;
-            let mut buf = self.pool.alloc(len);
+            let mut buf = IoBufMut::with_capacity(len);
             buf.put(&mut bufs);
             let buf = buf.freeze();
             let start = buf.as_ref().as_ptr() as usize;
@@ -565,8 +564,8 @@ mod test {
         }
     }
 
-    /// Checks that the listener decrypts each record in place, inside the pooled buffer its stream
-    /// read returned.
+    /// Checks that the listener decrypts each record in place, inside the buffer its stream read
+    /// returned.
     #[test]
     fn test_recv_decrypts_unique_frame_in_place() -> Result<(), Box<dyn std::error::Error>> {
         for cups in [cups::Version::V0, cups::Version::V1] {
@@ -579,9 +578,8 @@ mod test {
                 let (listener_sink, dialer_stream) = mocks::Channel::init();
 
                 let last_alloc = Arc::new(Mutex::new(0..0));
-                let listener_stream = PoolingStream {
+                let listener_stream = OwnedStream {
                     inner: listener_stream,
-                    pool: context.network_buffer_pool().clone(),
                     last_alloc: last_alloc.clone(),
                 };
 
@@ -685,7 +683,7 @@ mod test {
                 sends.store(0, Ordering::Relaxed);
                 chunk_counts.lock().clear();
 
-                // Three small messages should fit in one pooled chunk, so `send_many`
+                // Three small messages should fit in one chunk, so `send_many`
                 // still reaches the runtime as a single single-chunk send call.
                 dialer_sender
                     .send_many(vec![
@@ -715,24 +713,19 @@ mod test {
         Ok(())
     }
 
-    /// Checks that `send_many` starts a new chunk before one would exceed a network pool item, with
+    /// Checks that `send_many` starts a new chunk before one would exceed `MAX_BATCH_SIZE`, with
     /// at most one sink call per batch.
     #[test]
-    fn test_send_many_flushes_at_network_pool_item_max() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_send_many_flushes_at_max_batch_size() -> Result<(), Box<dyn std::error::Error>> {
         for cups in [cups::Version::V0, cups::Version::V1] {
-            // Cap network pool items at 256 bytes.
-            let executor = deterministic::Runner::new(
-                deterministic::Config::new().with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network()
-                        .with_pool_min_size(256)
-                        .with_size_class_range(NZUsize!(256), NZUsize!(256), NZU32!(4096)),
-                ),
-            );
+            let executor = deterministic::Runner::default();
             executor.start(|context| async move {
                 let dialer_signer = PrivateKey::from_seed(42);
                 let listener_signer = PrivateKey::from_seed(24);
 
-                let (dialer_sink, listener_stream) = mocks::Channel::init();
+                // Room for a whole batch, so `send_many` completes before the listener reads.
+                let (dialer_sink, listener_stream) =
+                    mocks::Channel::init_with_buffer_size(1 << 20);
                 let (listener_sink, dialer_stream) = mocks::Channel::init();
                 let sends = Arc::new(AtomicUsize::new(0));
                 let chunk_counts = Arc::new(Mutex::new(Vec::new()));
@@ -768,15 +761,19 @@ mod test {
                 let (_listener_peer, _listener_sender, mut listener_receiver) =
                     listener_handle.await.unwrap()?;
 
-                // A V0 frame is 117 bytes (1 length prefix + 100 payload + 16 tag), and two fit
-                // under the 256-byte cap. A V1 frame is 136 bytes (20 sealed header + 116 sealed
-                // payload), and each occupies its own chunk. Zero through nine messages cover
-                // empty, inline, and deque-backed batches with at most one sink call.
+                // A V0 frame is 60,019 bytes (3 length prefix + 60,000 payload + 16 tag) and a V1
+                // frame is 60,036 bytes (20 sealed header + 60,016 sealed payload), so two fit under
+                // the cap and a third does not. Zero through nine messages cover empty, inline, and
+                // deque-backed batches with at most one sink call.
+                const PAYLOAD_LEN: usize = 60_000;
+                const { assert!(PAYLOAD_LEN * 2 < MAX_BATCH_SIZE && PAYLOAD_LEN * 3 > MAX_BATCH_SIZE) };
                 for count in 0..=9usize {
                     sends.store(0, Ordering::Relaxed);
                     chunk_counts.lock().clear();
                     dialer_sender
-                        .send_many((0..count).map(|index| IoBuf::from(vec![index as u8; 100])))
+                        .send_many(
+                            (0..count).map(|index| IoBuf::from(vec![index as u8; PAYLOAD_LEN])),
+                        )
                         .await?;
 
                     if count == 0 {
@@ -784,15 +781,10 @@ mod test {
                         assert!(chunk_counts.lock().is_empty());
                     } else {
                         assert_eq!(sends.load(Ordering::Relaxed), 1);
-                        let expected_chunks = if cups == cups::Version::V1 {
-                            count
-                        } else {
-                            count.div_ceil(2)
-                        };
-                        assert_eq!(*chunk_counts.lock(), vec![expected_chunks]);
+                        assert_eq!(*chunk_counts.lock(), vec![count.div_ceil(2)]);
                     }
                     for index in 0..count {
-                        let expected = [index as u8; 100];
+                        let expected = vec![index as u8; PAYLOAD_LEN];
                         assert_eq!(
                             listener_receiver.recv().await?.coalesce(),
                             expected.as_slice()
@@ -805,25 +797,21 @@ mod test {
         Ok(())
     }
 
-    /// Checks that `send_many` places a frame larger than one network pool item in its own chunk,
+    /// Checks that `send_many` places a frame larger than `MAX_BATCH_SIZE` in its own chunk,
     /// closing the chunks before and after it.
     #[test]
     fn test_send_many_sends_oversized_single_message_alone()
     -> Result<(), Box<dyn std::error::Error>> {
         for cups in [cups::Version::V0, cups::Version::V1] {
-            // Cap network pool items at 128 bytes, below the frame of the 200-byte message.
-            let executor = deterministic::Runner::new(
-                deterministic::Config::new().with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network()
-                        .with_pool_min_size(128)
-                        .with_size_class_range(NZUsize!(128), NZUsize!(128), NZU32!(4096)),
-                ),
-            );
-            executor.start(|context| async move {
+            // The limit must admit a frame larger than the batch bound.
+            let max_message_size = MAX_BATCH_SIZE as u32 + 1;
+            let executor = deterministic::Runner::default();
+            executor.start(move |context| async move {
                 let dialer_signer = PrivateKey::from_seed(42);
                 let listener_signer = PrivateKey::from_seed(24);
 
-                let (dialer_sink, listener_stream) = mocks::Channel::init();
+                // Room for a whole batch, so `send_many` completes before the listener reads.
+                let (dialer_sink, listener_stream) = mocks::Channel::init_with_buffer_size(1 << 20);
                 let (listener_sink, dialer_stream) = mocks::Channel::init();
                 let sends = Arc::new(AtomicUsize::new(0));
                 let chunk_counts = Arc::new(Mutex::new(Vec::new()));
@@ -836,7 +824,7 @@ mod test {
                         .listen(
                             context,
                             NAMESPACE,
-                            MAX_MESSAGE_SIZE,
+                            max_message_size,
                             |_| async { true },
                             listener_stream,
                             listener_sink,
@@ -849,7 +837,7 @@ mod test {
                         .dial(
                             context,
                             NAMESPACE,
-                            MAX_MESSAGE_SIZE,
+                            max_message_size,
                             listener_signer.public_key(),
                             dialer_stream,
                             CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
@@ -865,7 +853,7 @@ mod test {
 
                 // A framed message larger than the cap goes out in its own chunk, whether it
                 // comes first or follows a pending chunk, and the next message starts a new one.
-                let large = vec![3u8; 200];
+                let large = vec![3u8; MAX_BATCH_SIZE + 1];
                 let small = vec![9u8; 16];
                 dialer_sender
                     .send_many(vec![

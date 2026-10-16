@@ -11,7 +11,7 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner, iobuf::EncodeExt,
+    Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner, iobuf::EncodeExt,
     telemetry::metrics::CounterFamily,
 };
 use commonware_stream::{Receiver, Sender};
@@ -39,7 +39,7 @@ impl connection::Control for ring::Receiver<Message> {
     }
 }
 
-pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
+pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
     context: E,
 
     ping_frequency: Duration,
@@ -54,7 +54,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
+impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox, Relay<EncodedData>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (relay, receivers) = Relay::new(context.child("relay"), cfg.mailbox_size);
@@ -126,9 +126,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                         // Periodically send a ping to the peer, batching
                         // any already-queued messages into the same batch.
                         ping.inc();
-                        outbox.append(types::Message::Ping.encode_with_pool(
-                            context.network_buffer_pool()
-                        ));
+                        outbox.append(types::Message::Ping.encode_iobufs());
                         outbox.fill()?;
                         conn_sender
                             .send_many(outbox.drain())
@@ -194,8 +192,8 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
-        BufferPooler, Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner, Supervisor as _,
-        deterministic, mocks, telemetry::metrics::MetricsExt as _,
+        Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner, Supervisor as _, deterministic,
+        mocks, telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::{
         SakeCups, Upgrader as _,
@@ -259,13 +257,13 @@ mod tests {
         Timeout::new(handshake, Duration::from_secs(10))
     }
 
-    fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {
+    fn create_channels(context: impl Metrics) -> Channels<PublicKey> {
         let (router_sender, _router_receiver) = commonware_actor::mailbox::new_unreliable::<
             router::Message<PublicKey>,
         >(
             context.child("router_mailbox"), NZUsize!(10)
         );
-        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        let messenger = router::Messenger::unbound();
         messenger.bind(router::Mailbox::new(router_sender));
         Channels::new(messenger, MAX_MESSAGE_SIZE, NZUsize!(1))
     }
@@ -467,11 +465,10 @@ mod tests {
             let quota = commonware_runtime::Quota::per_second(NonZeroU32::new(100).unwrap());
             let (_sender, _receiver) = channels.register(0, quota, context.child("channel"));
 
-            let pool = context.network_buffer_pool().clone();
             assert!(
                 relay
                     .send(
-                        EncodedData::new(&pool, 0, IoBufs::from(IoBuf::from(b"first"))),
+                        EncodedData::new(0, IoBufs::from(IoBuf::from(b"first"))),
                         false,
                     )
                     .accepted(),
@@ -480,7 +477,7 @@ mod tests {
             assert!(
                 relay
                     .send(
-                        EncodedData::new(&pool, 0, IoBufs::from(IoBuf::from(b"second"))),
+                        EncodedData::new(0, IoBufs::from(IoBuf::from(b"second"))),
                         false,
                     )
                     .accepted(),
@@ -522,7 +519,7 @@ mod tests {
             // A full batch leaves the remaining message for the next write
             let payloads = [b"data3", b"data4", b"data5"];
             for payload in payloads {
-                let data = EncodedData::new(&pool, 0, IoBufs::from(IoBuf::from(payload)));
+                let data = EncodedData::new(0, IoBufs::from(IoBuf::from(payload)));
                 assert!(relay.send(data, false).accepted(), "send failed");
             }
             for payload in payloads {

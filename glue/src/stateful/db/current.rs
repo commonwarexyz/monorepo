@@ -1164,7 +1164,7 @@ mod tests {
     use commonware_macros::boxed;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _,
+        Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{
             self, Config as DeterministicConfig, FaultConfig, PartialWriteMode, WriteConfig,
@@ -1245,8 +1245,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn fixed_config(suffix: &str) -> FixedConfig<TwoCap, Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
@@ -1272,11 +1272,8 @@ mod tests {
         }
     }
 
-    fn variable_config(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-    ) -> VariableConfig<TwoCap, ((), ()), Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn variable_config(suffix: &str) -> VariableConfig<TwoCap, ((), ()), Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
@@ -1334,7 +1331,7 @@ mod tests {
     #[test]
     fn ordered_fixed_managed_db_applies_batch_and_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("ordered-fixed-managed-db", &context);
+            let config = fixed_config("ordered-fixed-managed-db");
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -1376,7 +1373,7 @@ mod tests {
     #[test]
     fn ordered_fixed_staged_merkleize_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("ordered-fixed-glue-staged", &context);
+            let config = fixed_config("ordered-fixed-glue-staged");
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -1453,7 +1450,7 @@ mod tests {
     #[test]
     fn ordered_variable_managed_db_applies_batch_and_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
-            let config = variable_config("ordered-variable-managed-db", &context);
+            let config = variable_config("ordered-variable-managed-db");
             let db = <OrderedVariableDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -1490,7 +1487,7 @@ mod tests {
     #[test]
     fn ordered_managed_db_matches_sync_target_rejects_wrong_ops_root_and_range() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("ordered-matches-sync-target", &context);
+            let config = fixed_config("ordered-matches-sync-target");
             let db =
                 <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone(), None)
                     .await
@@ -1512,7 +1509,7 @@ mod tests {
 
             let verification_db = <OrderedFixedDb as ManagedDb<_>>::init(
                 context.child("verification_db"),
-                fixed_config("ordered-matches-sync-target-verification", &context),
+                fixed_config("ordered-matches-sync-target-verification"),
                 None,
             )
             .await
@@ -1550,7 +1547,7 @@ mod tests {
     fn ordered_managed_db_bounded_initialization_to_target_round_trips() {
         deterministic::Runner::default().start(|context| async move {
             // Finalize two distinct checkpoints so bounded initialization must discard a suffix.
-            let config = fixed_config("ordered-bounded-init-round-trip", &context);
+            let config = fixed_config("ordered-bounded-init-round-trip");
             let db =
                 <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone(), None)
                     .await
@@ -1644,7 +1641,7 @@ mod tests {
     #[test]
     fn managed_db_matches_sync_target_rejects_wrong_ops_root_and_range() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("matches-sync-target", &context);
+            let config = fixed_config("matches-sync-target");
             let db = FixedDb::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
@@ -1665,7 +1662,7 @@ mod tests {
 
             let verification_db = FixedDb::init(
                 context.child("verification_db"),
-                fixed_config("matches-sync-target-verification", &context),
+                fixed_config("matches-sync-target-verification"),
                 None,
             )
             .await
@@ -1721,12 +1718,11 @@ mod tests {
         // append of at most `CAPACITY` operations in memory, and a larger append bypasses it and
         // writes every page to the blob at once. One blob keeps the applied batch over the
         // discarded second target's bytes.
-        fn config(pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
+        fn config() -> FixedConfig<TwoCap, Sequential> {
             let size = <FixedOp as FixedSize>::SIZE;
             let page_size = NonZeroU16::new(size as u16).unwrap();
-            let mut config = fixed_config("bounded-init-crash", pooler);
-            config.journal_config.page_cache =
-                CacheRef::from_pooler(pooler, page_size, PAGE_CACHE_SIZE);
+            let mut config = fixed_config("bounded-init-crash");
+            config.journal_config.page_cache = CacheRef::new(page_size, PAGE_CACHE_SIZE);
             config.journal_config.write_buffer =
                 NonZeroUsize::new(CAPACITY as usize * size).unwrap();
             config.journal_config.items_per_blob = NZU64!(1000);
@@ -1761,7 +1757,7 @@ mod tests {
         );
         let ((first, second, applied), checkpoint) = deterministic::Runner::new(runtime)
             .start_and_recover(|context| async move {
-                let db = FixedDb::init(context.child("db"), config(&context), None)
+                let db = FixedDb::init(context.child("db"), config(), None)
                     .await
                     .unwrap();
                 let db = Shared::new("test", db);
@@ -1785,7 +1781,7 @@ mod tests {
                 // truncated journal before returning.
                 let db = <FixedDb as ManagedDb<_>>::init(
                     context.child("bounded"),
-                    config(&context),
+                    config(),
                     Some(first.clone()),
                 )
                 .await
@@ -1813,7 +1809,7 @@ mod tests {
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
             // Only the first target, or the applied batch on top of it, is a legitimate history.
-            let db = FixedDb::init(context.child("recover"), config(&context), None)
+            let db = FixedDb::init(context.child("recover"), config(), None)
                 .await
                 .unwrap();
             let recovered = <FixedDb as ManagedDb<_>>::sync_target(&db);
@@ -1834,7 +1830,7 @@ mod tests {
             // The first target reopens and durably discards anything above it.
             let db = <FixedDb as ManagedDb<_>>::init(
                 context.child("first"),
-                config(&context),
+                config(),
                 Some(first.clone()),
             )
             .await
@@ -1846,7 +1842,7 @@ mod tests {
             assert!(matches!(
                 <FixedDb as ManagedDb<_>>::init(
                     context.child("second"),
-                    config(&context),
+                    config(),
                     Some(second.clone()),
                 )
                 .await,
@@ -1855,7 +1851,7 @@ mod tests {
             ));
 
             // A rejected initialization leaves the first target in place.
-            let db = FixedDb::init(context.child("restart"), config(&context), None)
+            let db = FixedDb::init(context.child("restart"), config(), None)
                 .await
                 .unwrap();
             assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&db), first);
@@ -1869,7 +1865,7 @@ mod tests {
     fn database_set_current_prune_keeps_recovery_targets_initializable() {
         deterministic::Runner::default().start(|context| async move {
             type DbSet = Shared<FixedDb>;
-            let config = fixed_config("current-prune-recovery-window", &context);
+            let config = fixed_config("current-prune-recovery-window");
             let databases =
                 <DbSet as DatabaseSet<_>>::init(context.child("db"), config.clone(), None).await;
 

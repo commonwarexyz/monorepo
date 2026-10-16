@@ -18,8 +18,7 @@ use crate::{
 };
 use commonware_macros::select;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
-    Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner, spawn_cell,
 };
 use commonware_stream::utils::Timeout;
 use commonware_utils::{SystemTimeExt, ordered::Set, union};
@@ -37,10 +36,7 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 const IP_SUFFIX: &[u8] = b"_IP";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<
-    E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-    U: Upgrader,
-> {
+pub struct Network<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader> {
     context: ContextCell<E>,
     cfg: Config<U>,
     max_frame_size: u32,
@@ -52,9 +48,7 @@ pub struct Network<
     info_verifier: InfoVerifier<U::PublicKey>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader>
-    Network<E, U>
-{
+impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader> Network<E, U> {
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters
@@ -138,7 +132,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 block_duration: cfg.block_duration,
             },
         );
-        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        let messenger = router::Messenger::unbound();
         let channels = Channels::new(messenger, cfg.max_message_size, max_retained_peers);
 
         (

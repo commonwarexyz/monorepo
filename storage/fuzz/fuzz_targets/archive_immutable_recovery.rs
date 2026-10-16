@@ -10,7 +10,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{
-    BufferPooler, Error as RError, Runner, Storage as _, Supervisor as _,
+    Error as RError, Runner, Storage as _, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic::{self, PartialWriteMode, WriteConfig},
 };
@@ -75,7 +75,7 @@ struct Entry {
 }
 
 /// Build the immutable archive configuration used by the recovery scenario.
-fn config(pooler: &impl BufferPooler) -> Config<()> {
+fn config() -> Config<()> {
     Config {
         metadata_partition: "immutable-recovery-metadata".into(),
         freezer_table_partition: "immutable-recovery-table".into(),
@@ -85,7 +85,7 @@ fn config(pooler: &impl BufferPooler) -> Config<()> {
         freezer_key_partition: "immutable-recovery-keys".into(),
         // A page size that no key-record size divides, so terminal boundary entries straddle
         // pages and restore exercises the multi-page tail read.
-        freezer_key_page_cache: CacheRef::from_pooler(pooler, NZU16!(72), NZUsize!(4)),
+        freezer_key_page_cache: CacheRef::new(NZU16!(72), NZUsize!(4)),
         freezer_value_partition: "immutable-recovery-values".into(),
         freezer_value_target_size: 64,
         freezer_value_compression: None,
@@ -263,17 +263,16 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
             // Faults precede the first init, so blob creation and the first-ever metadata
             // publish can tear and recovery must land on the empty commit record.
             *context.storage_fault_config().write() = faults;
-            match Archive::<_, Key, Value>::init(context.child("archive"), config(&context)).await {
+            match Archive::<_, Key, Value>::init(context.child("archive"), config()).await {
                 Ok(archive) => archive,
                 Err(_) => return Outcome::InitFailed,
             }
         } else {
             // Commit a sparse baseline fault-free so both values and gap metadata have an
             // acknowledged floor.
-            let mut archive =
-                Archive::<_, Key, Value>::init(context.child("archive"), config(&context))
-                    .await
-                    .expect("initial immutable archive init failed");
+            let mut archive = Archive::<_, Key, Value>::init(context.child("archive"), config())
+                .await
+                .expect("initial immutable archive init failed");
             for entry in &phase_floor {
                 archive = archive
                     .put(entry.index, entry.key.clone(), &entry.value)
@@ -309,7 +308,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
     // A failed recovery instance is abandoned. Its crash checkpoint must remain recoverable by
     // the same ordinary initialization path with faults disabled.
     let checkpoint = faulted_recovery(checkpoint, |context| async move {
-        Archive::<_, Key, Value>::init(context.child("faulted_recovery"), config(&context)).await
+        Archive::<_, Key, Value>::init(context.child("faulted_recovery"), config()).await
     });
 
     deterministic::Runner::from(checkpoint).start(move |context| async move {
@@ -319,10 +318,9 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         // snapshot after both lower stores sync. Recovery therefore exposes the committed floor or
         // the complete candidate, never a mixed public view. Virgin runs have an empty floor, so
         // a torn first-ever publish must reset every lower store.
-        let mut archive =
-            Archive::<_, Key, Value>::init(context.child("recovered"), config(&context))
-                .await
-                .expect("immutable archive recovery failed");
+        let mut archive = Archive::<_, Key, Value>::init(context.child("recovered"), config())
+            .await
+            .expect("immutable archive recovery failed");
         let recovered = snapshot(&archive, &candidate).await;
         match outcome {
             Outcome::InitFailed | Outcome::PutFailed => assert_eq!(recovered, floor),
@@ -347,7 +345,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         expected.push(sentinel);
         drop(archive);
 
-        let archive = Archive::<_, Key, Value>::init(context.child("reopened"), config(&context))
+        let archive = Archive::<_, Key, Value>::init(context.child("reopened"), config())
             .await
             .expect("post-recovery reopen failed");
         assert_eq!(

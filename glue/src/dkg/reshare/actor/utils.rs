@@ -60,7 +60,7 @@ pub(super) async fn new_actor(
             mailbox_size: NZUsize!(16),
             muxer_size: 16,
             partition_prefix: format!("{partition_prefix}-actor"),
-            page_cache: mocks::page_cache(&context),
+            page_cache: mocks::page_cache(),
             write_buffer: mocks::IO_BUFFER,
             replay_buffer: mocks::IO_BUFFER,
             max_participants: NZU32!(16),

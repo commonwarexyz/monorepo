@@ -16,7 +16,7 @@ use commonware_p2p::{
     utils::codec::{WrappedSender, wrap},
 };
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_utils::{Span, channel::oneshot, futures::Pool as FuturesPool};
@@ -35,7 +35,7 @@ struct Serve<P: PublicKey> {
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
 pub struct Engine<E, P, D, B, Key, Con, Pro>
 where
-    E: BufferPooler + Clock + Spawner + Rng + Metrics,
+    E: Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -85,7 +85,7 @@ where
 
 impl<E, P, D, B, Key, Con, Pro> Engine<E, P, D, B, Key, Con, Pro>
 where
-    E: BufferPooler + Clock + Spawner + Rng + Metrics,
+    E: Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -150,12 +150,7 @@ where
         network: (NetS, NetR),
     ) {
         // Wrap channel
-        let (mut sender, mut receiver) = wrap(
-            (),
-            self.context.network_buffer_pool().clone(),
-            network.0,
-            network.1,
-        );
+        let (mut sender, mut receiver) = wrap((), network.0, network.1);
         let mut peer_set_subscription = self.peer_provider.subscribe().await;
         let mut blocked_subscription = Some(self.blocker.blocked());
 
