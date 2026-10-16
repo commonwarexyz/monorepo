@@ -15,13 +15,13 @@ use commonware_runtime::{
 use commonware_utils::{
     NZUsize, Probability,
     channel::{mpsc, oneshot},
+    futures::try_join_all,
     probability,
 };
 use estimator::{
     Command, Distribution, Latencies, RegionConfig, calculate_proposer_region, calculate_threshold,
     count_peers, crate_version, get_latency_data, mean, median, parse_task, std_dev,
 };
-use futures::future::try_join_all;
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, BTreeSet},

@@ -40,10 +40,8 @@ use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay},
 };
-use futures::{
-    FutureExt as _, Stream,
-    future::{try_join, try_join_all},
-};
+use commonware_utils::futures::try_join_all;
+use futures::{FutureExt as _, Stream, future::try_join};
 #[cfg(test)]
 use std::future::pending;
 use std::{
