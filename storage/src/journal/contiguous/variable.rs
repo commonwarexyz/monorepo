@@ -21,7 +21,7 @@ use super::{
     position_to_blob,
 };
 #[commonware_macros::stability(ALPHA)]
-use crate::journal::authenticated;
+use crate::journal::{authenticated, frame::decompress};
 use crate::{
     Context, SyncCompletion,
     journal::{
@@ -44,6 +44,8 @@ use futures::{
     FutureExt as _, Stream,
     future::{try_join, try_join_all},
 };
+#[commonware_macros::stability(ALPHA)]
+use std::collections::VecDeque;
 #[cfg(test)]
 use std::future::pending;
 use std::{
@@ -355,6 +357,83 @@ impl<B: RBlob, V: CodecShared> super::BatchDecoder for ReplayState<'_, B, V> {
             },
             self,
         ))
+    }
+}
+
+/// Copies the stored encodings of varint-framed items, one blob at a time.
+#[commonware_macros::stability(ALPHA)]
+struct EncodedReader<'a, B: RBlob, V: Codec> {
+    /// Remaining blobs, in order.
+    states: VecDeque<ReplayState<'a, B, V>>,
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<B: RBlob, V: CodecShared> authenticated::EncodedReader for EncodedReader<'_, B, V> {
+    async fn read(
+        &mut self,
+        bytes: &mut Vec<u8>,
+        ends: &mut Vec<usize>,
+        max_items: usize,
+        max_bytes: usize,
+    ) -> Result<usize, Error> {
+        let mut read = 0;
+        while read < max_items && bytes.len() < max_bytes {
+            let Some(state) = self.states.front_mut() else {
+                break;
+            };
+            if state.pos == state.end_pos {
+                self.states.pop_front();
+                continue;
+            }
+            // Refill only when the header is not already buffered, as [ReplayState] does. A short
+            // read before a frame header is corruption for replay: bounds and offsets say this
+            // item exists, so EOF here means the data blob is shorter than expected.
+            if state.replay.remaining() < MAX_U32_VARINT_SIZE
+                && !state.replay.ensure(MAX_U32_VARINT_SIZE).await?
+                && state.replay.remaining() == 0
+            {
+                return Err(Error::Corruption(format!(
+                    "data blob {} ended before position {}",
+                    state.blob, state.pos
+                )));
+            }
+
+            // Keep the initial byte count for classifying a failed header read.
+            let before_remaining = state.replay.remaining();
+            let (item_size, varint_len) = state.replay.read_length().map_err(|err| {
+                if state.replay.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
+                    Error::Corruption(format!(
+                        "incomplete frame header in data blob {} at offset {}",
+                        state.blob, state.offset
+                    ))
+                } else {
+                    err
+                }
+            })?;
+            if state.replay.remaining() < item_size && !state.replay.ensure(item_size).await? {
+                return Err(Error::Corruption(format!(
+                    "incomplete frame in data blob {} at offset {}",
+                    state.blob, state.offset
+                )));
+            }
+            let next_offset = state
+                .offset
+                .checked_add(varint_len as u64)
+                .and_then(|offset| offset.checked_add(item_size as u64))
+                .ok_or(Error::OffsetOverflow)?;
+            let start = bytes.len();
+            commonware_runtime::BufMut::put(bytes, Buf::take(&mut state.replay, item_size));
+            if state.compressed {
+                let item = decompress(&bytes[start..])?;
+                bytes.truncate(start);
+                bytes.extend_from_slice(&item);
+            }
+            ends.push(bytes.len());
+            state.pos += 1;
+            state.offset = next_offset;
+            read += 1;
+        }
+        Ok(read)
     }
 }
 
@@ -1872,24 +1951,29 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.bounds.end
     }
 
+    /// Return the retained start that [Self::prune] would leave for `min_position`.
+    fn prune_target(&self, min_position: u64) -> u64 {
+        // Calculate the blob that would contain min_position, capped to the tail (which is
+        // guaranteed to exist by our invariant).
+        let items_per_blob = self.items_per_blob.get();
+        let target = position_to_blob(min_position.min(self.bounds.end), items_per_blob);
+        if target <= self.blobs.oldest_blob_index() {
+            return self.bounds.start;
+        }
+        // Cannot overflow: the target blob starts at or before the journal's end.
+        target * items_per_blob
+    }
+
     /// See [Journal::prune].
     pub(crate) async fn prune(
         mut self: Box<Self>,
         min_position: u64,
     ) -> Result<(Box<Self>, bool), Error> {
-        let items_per_blob = self.items_per_blob.get();
-
-        // Calculate the blob that would contain min_position, capped to the tail (which is
-        // guaranteed to exist by our invariant).
-        let target_blob = position_to_blob(min_position, items_per_blob);
-        let tail_blob = position_to_blob(self.bounds.end, items_per_blob);
-        let min_blob = target_blob.min(tail_blob);
-
-        if min_blob <= self.blobs.oldest_blob_index() {
+        let new_boundary = self.prune_target(min_position);
+        if new_boundary <= self.bounds.start {
             return Ok((self, false));
         }
-
-        let new_boundary = blob_first_position(min_blob, items_per_blob)?;
+        let min_blob = position_to_blob(new_boundary, self.items_per_blob.get());
 
         // Make all data durable before removing any: the prune target may be justified by an
         // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
@@ -2601,6 +2685,10 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
         Self::prune(self, min_position).await
     }
 
+    fn prune_target(&self, min_position: u64) -> u64 {
+        self.0.prune_target(min_position)
+    }
+
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
         Self::start_sync(self).await
     }
@@ -2668,6 +2756,23 @@ impl<E: Context, V: CodecShared> authenticated::BackingRecovery for Recovery<E, 
 
     async fn finish(self, size: u64) -> Result<Self::Journal, Error> {
         Ok(Journal(Box::new(Self::publish(self, size).await?)))
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<E: Context, V: CodecShared> authenticated::ReplayEncoded for Journal<E, V> {
+    async fn replay_encoded(
+        &self,
+        range: Range<u64>,
+        buffer: NonZeroUsize,
+    ) -> Result<impl authenticated::EncodedReader, Error> {
+        let reader = self.0.reader();
+        let states = reader
+            .replay_states(range, buffer, ReadOptions::default())
+            .await?;
+        Ok(EncodedReader {
+            states: states.into(),
+        })
     }
 }
 
@@ -2848,7 +2953,7 @@ mod tests {
             authenticated::{self, BackingRecovery as _},
             contiguous::{
                 checkpoint::Checkpoint,
-                tests::{replay_items, run_contiguous_tests},
+                tests::{assert_replay_encoded, replay_items, run_contiguous_tests},
             },
         },
         utils::{codec::View, storage_pool_allocated_bytes},
@@ -5485,6 +5590,43 @@ mod tests {
             ));
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `replay_encoded` yields each item's encoding from a pruned, mid-section start through an
+    /// unsynced tail, within the read limits, with and without compression.
+    #[test_traced]
+    fn test_variable_replay_encoded() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for (label, compression) in [("plain", None), ("compressed", Some(3))] {
+                let cfg = Config {
+                    partition: format!("replay-encoded-{label}"),
+                    items_per_section: NZU64!(3),
+                    compression,
+                    codec_config: ((..=4096).into(), ()),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                    write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(64),
+                };
+                let items: Vec<Vec<u8>> = (0..25u8)
+                    .map(|i| (0..(i as usize * 37) % 250).map(|j| i ^ j as u8).collect())
+                    .collect();
+                let mut journal = Journal::<_, Vec<u8>>::init(context.child(label), cfg)
+                    .await
+                    .unwrap();
+                for item in &items[..20] {
+                    (journal, _) = journal.append(item).await.unwrap();
+                }
+                journal = journal.sync().await.unwrap();
+                (journal, _) = journal.prune(4).await.unwrap();
+                for item in &items[20..] {
+                    (journal, _) = journal.append(item).await.unwrap();
+                }
+
+                assert_replay_encoded(&journal, 5..25, &items[5..]).await;
+                journal.destroy().await.unwrap();
+            }
         });
     }
 

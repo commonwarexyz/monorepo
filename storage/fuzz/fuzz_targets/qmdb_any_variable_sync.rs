@@ -7,8 +7,8 @@ use commonware_runtime::{
     BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
-    journal::contiguous::variable::Config as VConfig,
-    merkle::{Family as MerkleFamily, Location, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::variable::Config as VConfig},
+    merkle::{Family as MerkleFamily, Location, mmb, mmr},
     qmdb::{
         any::{VariableConfig as Config, unordered::variable::Db},
         floor::Proportional,
@@ -144,13 +144,10 @@ fn test_config(
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
         merkle_config: MerkleConfig {
-            journal_partition: format!("{test_name}-merkle"),
             metadata_partition: format!("{test_name}-meta"),
-            items_per_blob: NZU64!(3),
-            write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            cache: commonware_storage_fuzz::single_region_cache(),
         },
         journal_config: VConfig {
             partition: format!("{test_name}-log"),

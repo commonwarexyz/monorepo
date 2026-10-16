@@ -1,7 +1,12 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
 use super::{Batch, Contiguous, Many, fixed, variable};
-use crate::journal::{Error, contiguous::Mutable};
+use crate::journal::{
+    Error,
+    authenticated::{EncodedReader as _, ReplayEncoded},
+    contiguous::Mutable,
+};
+use commonware_codec::Encode as _;
 use commonware_macros::boxed;
 use commonware_runtime::{
     ReadOptions, Runner as _, Spawner as _, Supervisor as _,
@@ -36,6 +41,40 @@ pub(crate) async fn replay_items<J: Contiguous>(
         };
         stream::iter(entries)
     }))
+}
+
+/// Check that `replay_encoded` yields the encodings of `items` over `range`, read whole, two items
+/// at a time, and one item at a time by byte budget.
+pub(super) async fn assert_replay_encoded<J: ReplayEncoded>(
+    journal: &J,
+    range: Range<u64>,
+    items: &[J::Item],
+) {
+    let (mut expected, mut expected_ends) = (Vec::new(), Vec::new());
+    for item in items {
+        expected.extend_from_slice(&item.encode());
+        expected_ends.push(expected.len());
+    }
+    for (max_items, max_bytes) in [(usize::MAX, usize::MAX), (2, usize::MAX), (usize::MAX, 1)] {
+        let mut reader = journal
+            .replay_encoded(range.clone(), NZUsize!(64))
+            .await
+            .unwrap();
+        let (mut bytes, mut ends) = (Vec::new(), Vec::new());
+        loop {
+            let limit = bytes.len().saturating_add(max_bytes);
+            let read = reader
+                .read(&mut bytes, &mut ends, max_items, limit)
+                .await
+                .unwrap();
+            if read == 0 {
+                break;
+            }
+            assert!(read <= max_items);
+        }
+        assert_eq!(bytes, expected);
+        assert_eq!(ends, expected_ends);
+    }
 }
 
 /// Run the full suite of generic tests on a [Contiguous] implementation.

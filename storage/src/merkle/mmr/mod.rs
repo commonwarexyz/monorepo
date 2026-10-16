@@ -79,7 +79,7 @@ cfg_if::cfg_if! {
 }
 
 pub use super::proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
-use crate::merkle::{self, Family as _, Graftable};
+use crate::merkle::{self, Graftable};
 pub use crate::merkle::{Readable, hasher};
 pub use batch::{MerkleizedBatch, UnmerkleizedBatch};
 use commonware_cryptography::Digest;
@@ -218,31 +218,6 @@ impl merkle::Family for Family {
         }
         true
     }
-}
-
-impl Graftable for Family {
-    type PendingChunk<D: Digest> = merkle::Unused;
-
-    fn chunk_peaks(
-        size: Position,
-        chunk_idx: u64,
-        grafting_height: u32,
-    ) -> impl Iterator<Item = (Position, u32)> {
-        let chunk_end_loc = Location::new((chunk_idx + 1) << grafting_height);
-        let chunk_end_pos = Position::try_from(chunk_end_loc).expect("chunk_peaks: chunk overflow");
-        assert!(
-            chunk_end_pos <= size,
-            "chunk's leaf range exceeds the structure's leaf count"
-        );
-
-        // In an MMR, every aligned chunk of 2^h leaves has exactly one subtree root at height h.
-        let first_leaf_loc = Location::new(chunk_idx << grafting_height);
-        let first_leaf_pos =
-            Position::try_from(first_leaf_loc).expect("chunk_peaks: chunk overflow");
-        let root_pos = Position::new(*first_leaf_pos + (1u64 << (grafting_height + 1)) - 2);
-
-        core::iter::once((root_pos, grafting_height))
-    }
 
     fn subtree_root_position(leaf_start: Location, height: u32) -> Position {
         let leaf_pos = Self::location_to_position(leaf_start);
@@ -269,10 +244,35 @@ impl Graftable for Family {
     }
 }
 
+impl Graftable for Family {
+    type PendingChunk<D: Digest> = merkle::Unused;
+
+    fn chunk_peaks(
+        size: Position,
+        chunk_idx: u64,
+        grafting_height: u32,
+    ) -> impl Iterator<Item = (Position, u32)> {
+        let chunk_end_loc = Location::new((chunk_idx + 1) << grafting_height);
+        let chunk_end_pos = Position::try_from(chunk_end_loc).expect("chunk_peaks: chunk overflow");
+        assert!(
+            chunk_end_pos <= size,
+            "chunk's leaf range exceeds the structure's leaf count"
+        );
+
+        // In an MMR, every aligned chunk of 2^h leaves has exactly one subtree root at height h.
+        let first_leaf_loc = Location::new(chunk_idx << grafting_height);
+        let first_leaf_pos =
+            Position::try_from(first_leaf_loc).expect("chunk_peaks: chunk overflow");
+        let root_pos = Position::new(*first_leaf_pos + (1u64 << (grafting_height + 1)) - 2);
+
+        core::iter::once((root_pos, grafting_height))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::Bagging::ForwardFold;
+    use crate::merkle::{Bagging::ForwardFold, Family as _};
     use commonware_cryptography::Sha256;
 
     const MAX_NODES: Position = <Family as crate::merkle::Family>::MAX_NODES;

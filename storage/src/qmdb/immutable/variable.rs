@@ -28,8 +28,10 @@ pub type CompactConfig<C, S> = super::CompactConfig<C, S>;
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::variable::Config as JournalConfig,
-        merkle::{Family, full::Config as MmrConfig, mmb, mmr},
+        journal::{
+            authenticated::Config as MerkleConfig, contiguous::variable::Config as JournalConfig,
+        },
+        merkle::{Family, mmb, mmr},
         qmdb::{
             Error,
             immutable::tests::{self, immutable_tests},
@@ -52,14 +54,11 @@ mod tests {
     fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         super::BaseConfig {
-            merkle_config: MmrConfig {
-                journal_partition: format!("journal-{suffix}"),
+            merkle_config: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: crate::journal::authenticated::single_region_cache(),
             },
             log: JournalConfig {
                 partition: format!("log-{suffix}"),
@@ -223,7 +222,7 @@ mod tests {
         test_variable_batch_chain => run_batch_chain, open;
         test_variable_operations_match_applied_log => run_operations_match_applied_log, open;
         test_variable_build_and_authenticate => run_build_and_authenticate, open;
-        test_variable_recovery_from_failed_merkle_sync => run_recovery_from_failed_merkle_sync, open;
+        test_variable_recovery_from_unsynced_commit => run_recovery_from_unsynced_commit, open;
         test_variable_recovery_from_failed_log_sync => run_recovery_from_failed_log_sync, open;
         test_variable_pruning => run_pruning, open;
         test_variable_prune_beyond_floor => run_prune_beyond_floor, open;

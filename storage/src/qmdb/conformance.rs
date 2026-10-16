@@ -8,8 +8,11 @@
 //! forward and reverse order to two separate databases and asserts root equality.
 
 use crate::{
-    journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{Family, full::Config as MerkleConfig, mmb, mmr},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+    },
+    merkle::{Family, mmb, mmr},
     qmdb::{
         any::{
             self,
@@ -125,15 +128,12 @@ type ImmutableMmbCompactVariable =
 const PAGE_SIZE: NonZeroU16 = NZU16!(101);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-fn merkle_config(suffix: &str, page_cache: &CacheRef) -> MerkleConfig<Sequential> {
+fn merkle_config(suffix: &str) -> MerkleConfig<Sequential> {
     MerkleConfig {
-        journal_partition: format!("{suffix}-mj"),
         metadata_partition: format!("{suffix}-mm"),
-        items_per_blob: NZU64!(11),
-        write_buffer: NZUsize!(1024),
         replay_buffer: NZUsize!(1024),
         strategy: Sequential,
-        page_cache: page_cache.clone(),
+        cache: Default::default(),
     }
 }
 
@@ -165,7 +165,7 @@ fn any_fixed_config(
 ) -> any::FixedConfig<OneCap, Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
-        merkle_config: merkle_config(suffix, &pc),
+        merkle_config: merkle_config(suffix),
         journal_config: fixed_log_config(suffix, pc),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
@@ -180,7 +180,7 @@ fn any_variable_config(
 ) -> any::VariableConfig<OneCap, ((), ()), Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
-        merkle_config: merkle_config(suffix, &pc),
+        merkle_config: merkle_config(suffix),
         journal_config: variable_log_config(suffix, pc, ((), ())),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
@@ -195,7 +195,7 @@ fn current_fixed_config(
 ) -> current::FixedConfig<OneCap, Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
-        merkle_config: merkle_config(suffix, &pc),
+        merkle_config: merkle_config(suffix),
         journal_config: fixed_log_config(suffix, pc),
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
@@ -211,7 +211,7 @@ fn current_variable_config(
 ) -> current::VariableConfig<OneCap, ((), ()), Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
-        merkle_config: merkle_config(suffix, &pc),
+        merkle_config: merkle_config(suffix),
         journal_config: variable_log_config(suffix, pc, ((), ())),
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
@@ -227,7 +227,7 @@ fn immutable_fixed_config(
 ) -> immutable::fixed::Config<TwoCap, Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
-        merkle_config: merkle_config(suffix, &pc),
+        merkle_config: merkle_config(suffix),
         log: fixed_log_config(suffix, pc),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),
@@ -240,7 +240,7 @@ fn immutable_variable_config(
 ) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
-        merkle_config: merkle_config(suffix, &pc),
+        merkle_config: merkle_config(suffix),
         log: variable_log_config(suffix, pc, ((), ())),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),
@@ -361,7 +361,7 @@ mod tests {
     ) -> keyless::fixed::Config<Sequential> {
         let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
-            merkle: merkle_config(suffix, &pc),
+            merkle: merkle_config(suffix),
             log: fixed_log_config(suffix, pc),
         }
     }
@@ -372,7 +372,7 @@ mod tests {
     ) -> keyless::variable::Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
-            merkle: merkle_config(suffix, &pc),
+            merkle: merkle_config(suffix),
             log: variable_log_config(suffix, pc, ((0..=10000).into(), ())),
         }
     }

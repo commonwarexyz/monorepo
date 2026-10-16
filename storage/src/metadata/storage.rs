@@ -204,20 +204,22 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 
         // Extract data
         //
-        // If the checksum is correct, we assume data is correctly packed and we don't perform
-        // length checks on the cursor.
+        // A valid checksum does not guarantee that values obey the caller's codec bounds.
         let mut data = BTreeMap::new();
         let mut lengths = HashMap::new();
         let mut cursor = u64::SIZE;
         while cursor < checksum_index {
             // Read key
-            let key =
-                K::read(&mut Copying(&bytes[cursor..])).expect("unable to read key from blob");
+            let key = K::read(&mut Copying(&bytes[cursor..checksum_index])).map_err(|error| {
+                Error::Corruption(format!("unable to decode metadata key: {error}"))
+            })?;
             cursor += key.encode_size();
 
             // Read value
-            let value = V::read_cfg(&mut Copying(&bytes[cursor..]), codec_config)
-                .expect("unable to read value from blob");
+            let value = V::read_cfg(&mut Copying(&bytes[cursor..checksum_index]), codec_config)
+                .map_err(|error| {
+                    Error::Corruption(format!("unable to decode metadata value: {error}"))
+                })?;
             lengths.insert(key.clone(), Info::new(cursor, value.encode_size()));
             cursor += value.encode_size();
             data.insert(key, value);

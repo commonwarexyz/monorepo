@@ -53,8 +53,8 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     Context as Ctx,
-    journal::contiguous::fixed::Config as FConfig,
-    merkle::{full, mmb},
+    journal::{authenticated, contiguous::fixed::Config as FConfig},
+    merkle::mmb,
     qmdb::{any::FixedConfig, floor::Proportional},
     translator::EightCap,
 };
@@ -295,14 +295,11 @@ fn config<E: Strategizer + commonware_runtime::BufferPooler>(
     let page_size = args.logical.unwrap_or(paged::page_size(args.page));
     let page_cache = CacheRef::from_pooler(ctx, page_size, NZUsize!(args.cache));
     FixedConfig {
-        merkle_config: full::Config {
-            journal_partition: "cold-merkle".into(),
+        merkle_config: authenticated::Config {
             metadata_partition: "cold-merkle-meta".into(),
-            items_per_blob: NZU64!(args.blob),
-            write_buffer: WRITE_BUFFER,
             replay_buffer: REPLAY_BUFFER,
             strategy: ctx.strategy(NZUsize!(args.threads)),
-            page_cache: page_cache.clone(),
+            cache: Default::default(),
         },
         journal_config: FConfig {
             partition: "cold-log".into(),

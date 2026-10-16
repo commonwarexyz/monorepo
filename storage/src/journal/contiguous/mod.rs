@@ -332,6 +332,9 @@ pub trait Mutable: Contiguous + Sized {
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<(Self, bool), Error>> + Send;
 
+    /// Return the retained start that [Self::prune] with `min_position` would leave.
+    fn prune_target(&self, min_position: u64) -> u64;
+
     /// Begin durably persisting the current state of the journal.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]

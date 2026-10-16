@@ -43,18 +43,12 @@ fn fill_variable_item<const COMPRESSED: bool>(
     }
 }
 
-fn authenticated_merkle_config(
-    prefix: &str,
-    pooler: &impl BufferPooler,
-) -> crate::merkle::full::Config<Sequential> {
-    crate::merkle::full::Config {
-        journal_partition: format!("{prefix}-merkle-journal"),
+fn authenticated_merkle_config(prefix: &str) -> crate::journal::authenticated::Config<Sequential> {
+    crate::journal::authenticated::Config {
         metadata_partition: format!("{prefix}-merkle-metadata"),
-        items_per_blob: NZU64!(11),
-        write_buffer: WRITE_BUFFER,
         replay_buffer: REPLAY_BUFFER,
         strategy: Sequential,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        cache: Default::default(),
     }
 }
 
@@ -80,7 +74,7 @@ where
     let mut journal =
         authenticated::Journal::<F, _, fixed::Journal<_, u64>, Sha256, Sequential>::new(
             context.child("authenticated"),
-            authenticated_merkle_config(&prefix, &context),
+            authenticated_merkle_config(&prefix),
             authenticated_journal_config(&prefix, &context),
             |_| true,
             crate::merkle::Bagging::ForwardFold,

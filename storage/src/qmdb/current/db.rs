@@ -220,8 +220,7 @@ where
 
     /// Return the retained operation range `[start, end)`.
     ///
-    /// Proof generation also requires the necessary Merkle nodes to be retained. Proofs against
-    /// [`Self::root`] also require the operations' bitmap chunks to be retained.
+    /// Proofs against [`Self::root`] also require the operations' bitmap chunks to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         self.any.bounds()
     }
@@ -256,7 +255,7 @@ where
         grafting::Storage::<F, H, _, _>::new(
             &self.grafted_tree,
             grafting::height::<N>(),
-            &self.any.log.merkle,
+            &self.any.log,
         )
     }
 
@@ -1003,7 +1002,7 @@ pub(super) async fn compute_grafted_root<
 ///
 /// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born in
 /// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
-/// [`merkle::Graftable::subtree_root_position`].
+/// [`merkle::Family::subtree_root_position`].
 pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: usize>(
     ops_tree: &impl MerkleStorage<F, Digest = D>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,

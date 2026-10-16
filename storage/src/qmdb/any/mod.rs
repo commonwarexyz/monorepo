@@ -123,9 +123,10 @@ use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
+        authenticated::Config as MerkleConfig,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{Family, Location, full::Config as MerkleConfig},
+    merkle::{Family, Location},
     qmdb::{
         Error as QmdbError,
         any::operation::{Operation, Update},
@@ -330,7 +331,7 @@ pub(crate) mod test {
         NZU16, NZU64, NZUsize, Widen,
         bitmap::{Prunable, Readable as _},
     };
-    use core::{fmt::Debug, future::Future, pin::Pin};
+    use core::{fmt::Debug, future::Future, ops::RangeInclusive, pin::Pin};
     use std::{
         collections::{BTreeMap, BTreeSet, HashMap},
         num::{NonZeroU16, NonZeroUsize},
@@ -381,13 +382,10 @@ pub(crate) mod test {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy,
-                page_cache: page_cache.clone(),
+                cache: crate::journal::authenticated::single_region_cache(),
             },
             journal_config: FConfig {
                 partition: format!("log-journal-{suffix}"),
@@ -436,13 +434,10 @@ pub(crate) mod test {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: crate::journal::authenticated::single_region_cache(),
             },
             journal_config: VConfig {
                 partition: format!("log-journal-{suffix}"),
@@ -5844,14 +5839,15 @@ pub(crate) mod test {
             // Decide every eighth update, or write every odd one of the first sixteen updates and
             // decide the eight even ones, which spends every entry before the writes. Every
             // decision follows the same batched reads. Without writes, those reads hold exactly
-            // the eight decided updates.
-            let (stride, batch, deltas): (_, _, &[u64]) = if in_batch {
+            // the eight decided updates. With writes, the read of the written keys may already
+            // cache the decided updates, leaving the policy nothing to read.
+            let (stride, batch, deltas): (_, _, &[RangeInclusive<u64>]) = if in_batch {
                 let batch = (1..16).step_by(2).fold(db.new_batch(), |batch, i| {
                     batch.write(keys[i], Some(make_value(i as u64 + 100)))
                 });
-                (2, batch, &[0, 2])
+                (2, batch, &[0..=0, 1..=2])
             } else {
-                (8, db.new_batch(), &[0, 1, 8])
+                (8, db.new_batch(), &[0..=0, 1..=1, 8..=8])
             };
             let sample = || -> Vec<_> {
                 names[..deltas.len()]
@@ -5859,7 +5855,7 @@ pub(crate) mod test {
                     .map(|name| counter(&context, name))
                     .collect()
             };
-            let after: Vec<_> = sample().iter().zip(deltas).map(|(n, d)| n + d).collect();
+            let before = sample();
             let mut probes = Vec::new();
             let mut policy = Script::new(8, u64::MAX, |_: &Digest| {
                 probes.push(sample());
@@ -5876,8 +5872,11 @@ pub(crate) mod test {
                 .map(|(loc, key, _)| (*loc, *key))
                 .collect();
             assert_eq!(decided, expected, "in_batch={in_batch}");
+            let after = sample();
             assert_eq!(probes, vec![after.clone(); 8], "in_batch={in_batch}");
-            assert_eq!(sample(), after, "in_batch={in_batch}");
+            for ((after, before), delta) in after.iter().zip(&before).zip(deltas) {
+                assert!(delta.contains(&(after - before)), "in_batch={in_batch}");
+            }
 
             // Start the next case from an empty database.
             db.destroy().await.unwrap();
