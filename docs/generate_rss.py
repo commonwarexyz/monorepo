@@ -53,7 +53,7 @@ def collect_posts() -> list[tuple[datetime, dict[str, str]]]:
     posts: list[tuple[datetime, dict[str, str]]] = []
     required = {"title", "description", "published-time", "url"}
 
-    for path in BLOGS_ROOT.glob("*.md"):
+    for path in sorted(BLOGS_ROOT.glob("*.md")):
         metadata = parse_frontmatter(path)
         if not required.issubset(metadata):
             continue
