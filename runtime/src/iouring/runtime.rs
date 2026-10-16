@@ -1933,7 +1933,7 @@ impl crate::Runner for Runner {
             shared.clone(),
             move |mailbox| {
                 f(Context {
-                    name: label.name(),
+                    name: label.name().to_string(),
                     attributes: Vec::new(),
                     shared: context_shared,
                     origin: Arc::downgrade(mailbox),

@@ -517,7 +517,7 @@ impl crate::Runner for Runner {
         let tree = Tree::root();
         let context = Context {
             storage,
-            name: label.name(),
+            name: label.name().to_string(),
             attributes: Vec::new(),
             executor: executor.clone(),
             network,
