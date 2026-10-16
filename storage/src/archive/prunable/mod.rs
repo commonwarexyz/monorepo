@@ -3,7 +3,7 @@
 //! Data is stored across two backends: [crate::journal::segmented::fixed] for fixed-size index entries and
 //! [crate::journal::segmented::glob::Glob] for values (managed by [crate::journal::segmented::oversized]).
 //! The location of written data is stored in-memory by both index and key (see
-//! [In-Memory State](#in-memory-state)) to enable efficient lookups (on average).
+//! [Indexing](#indexing)) to enable efficient lookups (on average).
 //!
 //! _Notably, [Archive] does not make use of compaction nor on-disk indexes (and thus has no read
 //! nor write amplification during normal operation).
@@ -38,7 +38,7 @@
 //! whose index has been pruned are never returned or reported as present, so a key matching
 //! both a pruned and a non-pruned entry resolves to the non-pruned entry.
 //!
-//! ## In-Memory State
+//! ## Indexing
 //!
 //! Each retained `section` (selected by `section = index / items_per_section * items_per_section`
 //! to minimize the number of open blobs) holds the translated key of every record it stores, by
@@ -69,7 +69,7 @@
 //! ## Memory Overhead
 //!
 //! Per retained record, [Archive] keeps `translated(key).len()` bytes and `8` bytes of position
-//! in its section (see [In-Memory State](#in-memory-state) for sparse sections) and one key-table
+//! in its section (see [Indexing](#indexing) for sparse sections) and one key-table
 //! entry of `12` bytes per slot, where the table holds at most three quarters of a power-of-two
 //! number of slots. With a [Translator] that uses the first `8` bytes of a key, this is between
 //! `~30` and `~40` bytes per record depending on how full the key table is.
