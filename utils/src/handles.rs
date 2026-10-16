@@ -18,6 +18,9 @@
 //! Removal uses backward-shift deletion: the following entries of the run move back one slot.
 //! No tombstones exist, so removals never lengthen probes or force a rebuild, and the allocation
 //! depends only on the number of entries that have been live at once. The table never shrinks.
+//!
+//! Entries that share a hash occupy one contiguous run, so inserting or removing one of them
+//! costs time linear in the run's length.
 
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};

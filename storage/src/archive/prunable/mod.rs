@@ -45,9 +45,9 @@
 //! journal position, and the first journal position of every index it stores, in a vector by
 //! offset from the section's start. The vector spans every offset up to the highest one stored,
 //! so a section costs `8` bytes per index from its start to its highest stored index whether or
-//! not the indices between are stored. Records usually arrive contiguously, which keeps that
-//! proportional to the records themselves; an `items_per_section` far larger than the number of
-//! records a section ever holds, with those records spread across it, is the shape to avoid.
+//! not the indices between are stored: contiguous records cost `8` bytes each, while records
+//! spread sparsely across a large `items_per_section` cost up to `8 * items_per_section` bytes
+//! per section.
 //!
 //! Lookups by key go through a [commonware_utils::handles::Table] from the hash of a translated
 //! key to a handle naming the record's section and position. The table stores no keys: a lookup
@@ -60,7 +60,9 @@
 //! expected) that two keys will eventually be represented by the same translated key. To handle
 //! this case, [Archive] must check the persisted form of all conflicting keys to ensure data from
 //! the correct key is returned: every record whose translated key matches is a candidate, and its
-//! stored key is compared before a value is read.
+//! stored key is compared before a value is read. Records that share a translated key, whether
+//! through conflicts or one key stored at many indices, occupy one run of the key table, so
+//! storing, pruning, and looking up such records each cost time linear in their number.
 //!
 //! _If the [Translator] provided by the caller does not uniformly distribute keys across the key
 //! space or uses a translated representation that means keys on average have many conflicts,
@@ -69,10 +71,12 @@
 //! ## Memory Overhead
 //!
 //! Per retained record, [Archive] keeps `translated(key).len()` bytes and `8` bytes of position
-//! in its section (see [Indexing](#indexing) for sparse sections) and one key-table
-//! entry of `12` bytes per slot, where the table holds at most three quarters of a power-of-two
-//! number of slots. With a [Translator] that uses the first `8` bytes of a key, this is between
-//! `~30` and `~40` bytes per record depending on how full the key table is.
+//! in its section (see [Indexing](#indexing) for sparse sections) and one key-table entry of
+//! `12` bytes per slot, where the table holds between three eighths and three quarters of a
+//! power-of-two number of slots. With a [Translator] that uses the first `8` bytes of a key,
+//! this is between `~32` and `~48` bytes per record depending on how full the key table is. The
+//! table never shrinks, so after a large prune its allocation reflects the most records retained
+//! at once rather than the current count.
 //!
 //! ### MultiArchive Overhead
 //!
@@ -3107,6 +3111,34 @@ mod tests {
             assert!(has_metric_value(&buffer, "reopened_items_tracked", 9));
             assert!(has_metric_value(&buffer, "reopened_keys_tracked", 10));
             check(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_init_rejects_changed_items_per_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Records written with one section size land in sections another size never selects.
+            let mut archive = Archive::init(
+                context.child("storage"),
+                test_config(&context, "test", NZU64!(16), FourCap),
+            )
+            .await
+            .expect("Failed to initialize archive");
+            for index in 0..40u64 {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), &(index as i32))
+                    .await
+                    .expect("Failed to put data");
+            }
+            archive.sync().await.expect("Failed to sync archive");
+
+            let result = Archive::<_, _, FixedBytes<64>, i32>::init(
+                context.child("reopened"),
+                test_config(&context, "test", NZU64!(32), FourCap),
+            )
+            .await;
+            assert!(matches!(result, Err(Error::RecordCorrupted)));
         });
     }
 }

@@ -138,7 +138,8 @@ impl Positions {
 
     /// Records `position` as the first for `offset`, returning false if `offset` already has one.
     pub(super) fn insert(&mut self, offset: u64, position: u64) -> bool {
-        let offset = usize::try_from(offset).expect("section offset exceeds the address space");
+        let offset =
+            usize::try_from(offset).expect("section offset must not exceed the address space");
         if offset >= self.positions.len() {
             self.positions.resize(offset + 1, NONE);
         }
@@ -187,7 +188,7 @@ impl<K> Sections<K> {
     fn slot(&self, slot: usize) -> &Section<K> {
         self.slots[slot]
             .as_ref()
-            .expect("key handle references a retained section")
+            .expect("key handle must reference a retained section")
     }
 
     /// Visits every retained section with its slot.
@@ -225,7 +226,7 @@ impl<K> Sections<K> {
                 slot
             }
         };
-        let section = self.slots[slot].as_mut().expect("slot was just filled");
+        let section = self.slots[slot].as_mut().expect("slot must be filled");
         debug_assert_eq!(
             section.keys.len() as u64,
             position,
@@ -241,7 +242,9 @@ impl<K> Sections<K> {
         std::mem::replace(&mut self.by_start, retained)
             .into_values()
             .map(|slot| {
-                let section = self.slots[slot].take().expect("retained section has state");
+                let section = self.slots[slot]
+                    .take()
+                    .expect("retained section must have state");
                 (slot, section)
             })
             .collect()
@@ -386,7 +389,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         .await?;
 
         // Rebuild the sections from the replay. It yields exactly the entries recovery retained,
-        // in journal order, so one scan serves both recovery and indexing.
+        // in journal order, so one scan serves both recovery and indexing. A record outside the
+        // section its index selects would be unreachable by index, so it is corruption.
         let translator = cfg.translator;
         let mut sections = Sections::new();
         let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
@@ -396,11 +400,10 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         debug!("initializing archive from index journal");
         while let Some(result) = replay.next().await {
             let (start, position, entry) = result?;
-            let offset = entry
-                .index
-                .checked_sub(start)
-                .filter(|offset| *offset < items_per_section)
-                .ok_or(Error::RecordCorrupted)?;
+            if entry.index / items_per_section * items_per_section != start {
+                return Err(Error::RecordCorrupted);
+            }
+            let offset = entry.index - start;
             let translated = translator.transform(entry.key.as_ref());
             let (_, first) = sections.add(start, offset, position, translated);
             if first {
