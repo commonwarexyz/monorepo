@@ -8,11 +8,13 @@ mod common;
 mod generate;
 mod init;
 mod merkleize;
+mod stream_range;
 
 criterion_main!(
     apply_batch::benches,
     chained_growth::benches,
     generate::benches,
     init::benches,
-    merkleize::benches
+    merkleize::benches,
+    stream_range::benches
 );
