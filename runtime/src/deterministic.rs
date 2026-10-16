@@ -631,7 +631,7 @@ impl Runner {
                     // Record task for auditing
                     executor.auditor.event(b"process_task", |hasher| {
                         hasher.update(task.id.to_be_bytes());
-                        hasher.update(task.label.name().as_bytes());
+                        hasher.update(task.label.name());
                     });
                     executor.metrics.task_polls.get_or_create(&task.label).inc();
                     trace!(id, "processing task");
