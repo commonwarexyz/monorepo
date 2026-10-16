@@ -62,34 +62,6 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
         .map_err(|_| Error::TooManyTotalShards(total))
 }
 
-/// Hash ordered, equal-width payloads in balanced batches across the strategy.
-fn hash_shards<H: Hasher, M: AsRef<[u8]> + Sync>(
-    shards: &[M],
-    strategy: &impl Strategy,
-) -> Vec<H::Digest> {
-    if shards.is_empty() {
-        return Vec::new();
-    }
-    let work = shards.iter().fold(0usize, |sum, shard| {
-        sum.saturating_add(shard.as_ref().len().saturating_add(1))
-    });
-    strategy.run_batches(
-        shards.len(),
-        NZUsize!(1),
-        work.div_ceil(shards.len()),
-        |batches| {
-            batches
-                .map_collect_vec(
-                    |ranges| ranges.into_iter().map(move |range| &shards[range]),
-                    H::hash_many,
-                )
-                .into_iter()
-                .flatten()
-                .collect()
-        },
-    )
-}
-
 /// Validate the requested shard index, embedded index, proof leaf count, and shard width before
 /// hashing.
 ///
@@ -202,6 +174,10 @@ impl<D: Digest> Write for Chunk<D> {
 
 impl<D: Digest> Read for Chunk<D> {
     /// The coding config and the maximum number of data bytes.
+    ///
+    /// A chunk decodes only if its shard is no wider than encoding that many bytes under the
+    /// config would produce. The bound shrinks as `minimum_shards` grows and is widest at one,
+    /// where a single shard holds the length prefix and all of the data.
     type Cfg = (Config, usize);
 
     fn read_cfg(
@@ -449,7 +425,7 @@ fn encode<H: Hasher, S: Strategy>(
         .map(|i| originals.slice(i * shard_len..(i + 1) * shard_len))
         .chain((0..m).map(|i| recoveries.slice(i * shard_len..(i + 1) * shard_len)))
         .collect();
-    let shard_hashes = hash_shards::<H, _>(&shard_slices, strategy);
+    let shard_hashes = H::hash_many(&shard_slices, strategy);
     for hash in &shard_hashes {
         builder.add(hash);
     }
@@ -914,7 +890,7 @@ fn verify_commitment<H: Hasher, S: Strategy>(
         .unzip();
     for (i, digest) in missing_indices
         .into_iter()
-        .zip(hash_shards::<H, _>(&missing_payloads, strategy))
+        .zip(H::hash_many(&missing_payloads, strategy))
     {
         shard_digests[i] = Some(digest);
     }
@@ -1217,9 +1193,12 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         commitment: &Self::Commitment,
         index: u16,
         shard: &Self::Shard,
+        strategy: &impl Strategy,
     ) -> Result<Self::CheckedShard, Self::Error> {
         let total = total_shards(config)?;
-        check_chunk::<H>(total, commitment, index, shard, || H::hash(&[&shard.shard]))
+        check_chunk::<H>(total, commitment, index, shard, || {
+            H::hash_across(&[&shard.shard], strategy)
+        })
     }
 
     fn check_many(
@@ -1231,7 +1210,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         let Ok(total) = total_shards(config) else {
             return shards
                 .iter()
-                .map(|&(index, shard)| Self::check(config, commitment, index, shard))
+                .map(|&(index, shard)| Self::check(config, commitment, index, shard, strategy))
                 .collect();
         };
 
@@ -1242,7 +1221,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
             shard.shard.len() != width || check_metadata(total, index, shard).is_err()
         }) {
             return strategy.map_collect_vec(shards, |&(index, shard)| {
-                Self::check(config, commitment, index, shard)
+                Self::check(config, commitment, index, shard, strategy)
             });
         }
 
@@ -1250,7 +1229,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
             .iter()
             .map(|(_, shard)| shard.shard.as_ref())
             .collect::<Vec<_>>();
-        let digests = hash_shards::<H, _>(&payloads, strategy);
+        let digests = H::hash_many(&payloads, strategy);
         strategy.map_collect_vec(
             shards.iter().copied().zip(digests),
             |((index, shard), digest)| check_chunk::<H>(total, commitment, index, shard, || digest),
@@ -1311,11 +1290,18 @@ mod tests {
             Sha256::hash(parts)
         }
 
-        fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
-            Sha256::hash_pair(left, right)
+        fn hash_pair(
+            left: &[&[u8]],
+            right: &[&[u8]],
+            strategy: &impl Strategy,
+        ) -> (Self::Digest, Self::Digest) {
+            Sha256::hash_pair(left, right, strategy)
         }
 
-        fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
+        fn hash_many<M: AsRef<[u8]> + Sync>(
+            messages: &[M],
+            _strategy: &impl Strategy,
+        ) -> Vec<Self::Digest> {
             HASH_INPUTS.with(|inputs| {
                 inputs
                     .borrow_mut()
@@ -1389,51 +1375,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_shards_parallel_preserves_order() {
-        let strategy = Rayon::new(NZUsize!(8)).unwrap().manual();
-        for count in [0, 1, 7, 9, 15, 16, 17, 128, 129, 144] {
-            let shards = (0..count)
-                .map(|index| vec![index as u8; 128])
-                .collect::<Vec<_>>();
-            let expected = shards
-                .iter()
-                .map(|shard| Sha256::hash(&[shard]))
-                .collect::<Vec<_>>();
-            assert_eq!(hash_shards::<Sha256, _>(&shards, &strategy), expected);
-        }
-    }
-
-    #[test]
-    fn test_hash_shards_keeps_balanced_batches_per_worker() {
-        // One execution thread makes the recorder observable while planning eight workers.
-        let strategy = Rayon::new(NZUsize!(1))
-            .unwrap()
-            .with_parallelism(NZUsize!(8))
-            .manual();
-        strategy.join(
-            || {
-                for count in [0, 1, 7, 9, 17, 128, 129, 144] {
-                    let shards = (0..count)
-                        .map(|index| vec![index as u8; 128])
-                        .collect::<Vec<_>>();
-                    reset_hash_many_calls();
-                    hash_shards::<InstrumentedSha256, _>(&shards, &strategy);
-                    let mut calls = take_hash_many_calls();
-                    assert_eq!(calls.len(), count.min(8));
-                    assert!(calls.iter().all(|batch| !batch.is_empty()));
-                    if let Some(min) = calls.iter().map(Vec::len).min() {
-                        let max = calls.iter().map(Vec::len).max().unwrap();
-                        assert!(max - min <= 1);
-                    }
-                    calls.sort_by_key(|batch| batch[0][0]);
-                    assert_eq!(calls.into_iter().flatten().collect::<Vec<_>>(), shards);
-                }
-            },
-            || (),
-        );
-    }
-
-    #[test]
     fn test_check_many_batches_payloads_in_input_order() {
         let config = Config {
             minimum_shards: NZU16!(4),
@@ -1463,8 +1404,14 @@ mod tests {
             requested
         );
         for (checked, &index) in checked.iter().zip(&requested) {
-            let scalar =
-                InstrumentedRS::check(&config, &root, index, &chunks[usize::from(index)]).unwrap();
+            let scalar = InstrumentedRS::check(
+                &config,
+                &root,
+                index,
+                &chunks[usize::from(index)],
+                &STRATEGY,
+            )
+            .unwrap();
             assert_eq!(checked, &scalar);
         }
     }
@@ -1560,7 +1507,9 @@ mod tests {
         ];
         let expected = shards
             .iter()
-            .map(|&(index, shard)| format!("{:?}", RS::check(&config, &root, index, shard)))
+            .map(|&(index, shard)| {
+                format!("{:?}", RS::check(&config, &root, index, shard, &STRATEGY))
+            })
             .collect::<Vec<_>>();
 
         reset_hash_many_calls();
@@ -1603,7 +1552,7 @@ mod tests {
             .collect::<Vec<_>>();
         let expected = shards
             .iter()
-            .map(|&(index, shard)| RS::check(&config, &root, index, shard).unwrap())
+            .map(|&(index, shard)| RS::check(&config, &root, index, shard, &STRATEGY).unwrap())
             .collect::<Vec<_>>();
         // Observe every hashing call on one thread while planning eight workers.
         let strategy = Rayon::new(NZUsize!(1))
@@ -1658,7 +1607,10 @@ mod tests {
         let scalar = shards
             .iter()
             .map(|&(index, shard)| {
-                format!("{:?}", InstrumentedRS::check(&config, &root, index, shard))
+                format!(
+                    "{:?}",
+                    InstrumentedRS::check(&config, &root, index, shard, &STRATEGY)
+                )
             })
             .collect::<Vec<_>>();
         let batched = InstrumentedRS::check_many(&config, &root, &shards, &STRATEGY)
@@ -1676,7 +1628,7 @@ mod tests {
             .map(|&(index, shard)| {
                 format!(
                     "{:?}",
-                    InstrumentedRS::check(&invalid_config, &root, index, shard)
+                    InstrumentedRS::check(&invalid_config, &root, index, shard, &STRATEGY)
                 )
             })
             .collect::<Vec<_>>();
@@ -1718,7 +1670,7 @@ mod tests {
         };
         let pieces = selected
             .iter()
-            .map(|&i| RS::check(&config, &root, i, &chunks[usize::from(i)]).unwrap())
+            .map(|&i| RS::check(&config, &root, i, &chunks[usize::from(i)], &STRATEGY).unwrap())
             .collect::<Vec<_>>();
 
         let Ok(decoded) = decode::<Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY) else {
@@ -1878,7 +1830,7 @@ mod tests {
 
         // Verify all proofs at invalid index
         for i in 0..total {
-            assert!(RS::check(&config, &root, i + 1, &chunks[i as usize]).is_err());
+            assert!(RS::check(&config, &root, i + 1, &chunks[i as usize], &STRATEGY).is_err());
         }
     }
 
@@ -2485,7 +2437,13 @@ mod tests {
 
             // Each shard is rejected individually.
             for chunk in &chunks {
-                assert!(invalid(&RS::check(&config, &root, chunk.index, chunk)));
+                assert!(invalid(&RS::check(
+                    &config,
+                    &root,
+                    chunk.index,
+                    chunk,
+                    &STRATEGY
+                )));
             }
 
             // The same shards are rejected as a batch.
@@ -2556,7 +2514,9 @@ mod tests {
 
         // Verify all proofs at incorrect root
         for i in 0..total {
-            assert!(RS::check(&config, &malicious_root, i, &chunks[i as usize]).is_err());
+            assert!(
+                RS::check(&config, &malicious_root, i, &chunks[i as usize], &STRATEGY).is_err()
+            );
         }
 
         // Collect valid pieces (these are legitimate fragments checked against
@@ -2589,7 +2549,7 @@ mod tests {
 
         // A proof generated under a different shard configuration is invalid
         // for this commitment.
-        let check_result = RS::check(&config_expected, &commitment, 0, &shards[0]);
+        let check_result = RS::check(&config_expected, &commitment, 0, &shards[0], &STRATEGY);
         assert!(matches!(check_result, Err(Error::InvalidProof)));
     }
 

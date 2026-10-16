@@ -1702,6 +1702,7 @@ pub trait EncodeExt: EncodeSize + Write {
 impl<T: EncodeSize + Write> EncodeExt for T {}
 
 #[cfg(all(test, not(feature = "loom")))]
+#[commonware_macros::test_group("miri")]
 mod tests {
     use super::{super::pool::BufferPoolConfig, *};
     use bytes::{Bytes, BytesMut};

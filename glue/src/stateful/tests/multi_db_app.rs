@@ -1,4 +1,4 @@
-use super::common::*;
+use super::{common::*, mocks::digested};
 use crate::{
     simulate::{
         engine::{EngineDefinition, InitContext},
@@ -328,10 +328,10 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let mut ancestry = Box::pin(ancestry);
         let tip = ancestry.next().await?;
         let (merkleized_a, merkleized_b) = Self::execute(tip.height(), batches).await;
-        let matches_a =
-            merkleized_a.root() == tip.root_a && merkleized_a.target().range == tip.range_a;
-        let matches_b =
-            merkleized_b.root() == tip.root_b && merkleized_b.target().range == tip.range_b;
+        let matches_a = merkleized_a.root() == tip.inner().root_a
+            && merkleized_a.target().range == tip.inner().range_a;
+        let matches_b = merkleized_b.root() == tip.inner().root_b
+            && merkleized_b.target().range == tip.inner().range_b;
         if !matches_a || !matches_b {
             return None;
         }
@@ -516,6 +516,7 @@ impl EngineDefinition for MultiDbEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -582,7 +583,7 @@ impl EngineDefinition for MultiDbEngine {
         let marshal_config = marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: plan.marshal_start(genesis_block.clone().into()),
+            start: plan.marshal_start(digested(genesis_block.clone())),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
@@ -661,6 +662,7 @@ impl EngineDefinition for MultiDbEngine {
                     retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
+                strategy: Sequential,
             },
         );
 
@@ -712,8 +714,8 @@ impl EngineDefinition for MultiDbEngine {
             elector: RoundRobin::<Sha256>::default(),
             blocker: oracle.control(public_key.clone()),
             automaton: deferred.clone(),
-            relay: deferred,
-            reporter: marshal_mailbox.clone(),
+            relay: deferred.clone(),
+            reporter: deferred,
             strategy: Sequential,
             partition: format!("{partition_prefix}-simplex"),
             mailbox_size: NZUsize!(100),

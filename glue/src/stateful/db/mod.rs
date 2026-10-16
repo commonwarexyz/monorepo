@@ -86,10 +86,10 @@
 //! that fails state sync is reported through the error returned by [`StateSyncSet::sync`].
 
 use commonware_consensus::{
-    CertifiableBlock, Epochable, Roundable, Viewable,
+    CertifiableBlock, Epochable, Heightable, Roundable, Viewable,
     types::{Height, Round},
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{Digest, Digested, Digestible};
 use commonware_macros::select;
 use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, reschedule};
 use commonware_storage::qmdb::sync::{Request, Source, source};
@@ -650,13 +650,13 @@ pub struct Anchor<D: Digest> {
     pub digest: D,
 }
 
-impl<B, D> From<&B> for Anchor<D>
-where
-    B: CertifiableBlock<Digest = D>,
-    B::Context: Epochable + Viewable,
-    D: Digest,
-{
-    fn from(block: &B) -> Self {
+impl<D: Digest> Anchor<D> {
+    /// Builds the anchor of `block`.
+    pub fn from_block<B>(block: &Digested<B>) -> Self
+    where
+        B: CertifiableBlock<Digest = D>,
+        B::Context: Epochable + Viewable,
+    {
         Self {
             height: block.height(),
             round: block.context().round(),

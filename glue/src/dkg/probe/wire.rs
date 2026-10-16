@@ -9,6 +9,7 @@ use commonware_consensus::{
     simplex::{scheme::Scheme, types::Finalization},
     types::Epoch,
 };
+use commonware_parallel::Strategy;
 
 /// First byte of a DKG probe message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -234,18 +235,24 @@ where
     }
 }
 
-/// Decodes a block response body against `commitment`, the payload of a verified
+/// Decodes a block response body and binds it to `commitment`, the payload of a verified
 /// finalization.
-pub(crate) fn read_block<V>(
+pub(crate) async fn read_block<V>(
     reader: impl Buf,
     commitment: V::Commitment,
     block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
+    strategy: &impl Strategy,
 ) -> Result<V::Block, Error>
 where
     V: Variant,
 {
-    let block_cfg = V::block_cfg(block_codec_config, ExpectedCommitment::Trusted(commitment));
-    V::Block::decode_cfg(reader, &block_cfg)
+    V::decode_block(
+        reader,
+        block_codec_config,
+        ExpectedCommitment::Trusted(commitment),
+        strategy,
+    )
+    .await
 }
 
 #[cfg(all(test, feature = "arbitrary"))]

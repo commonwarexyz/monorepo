@@ -59,7 +59,7 @@ where
         S::PublicKey,
         <V::ApplicationBlock as ReshareBlock>::Directory,
     >,
-    /// Strategy for certificate verification.
+    /// Strategy for certificate verification and block decoding.
     pub strategy: T,
     /// Blocker used to block peers that send invalid bootstrap data.
     pub blocker: B,

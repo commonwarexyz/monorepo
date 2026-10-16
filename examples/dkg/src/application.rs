@@ -11,7 +11,7 @@ use commonware_glue::{
     dkg::reshare::Input as ReshareInput,
     stateful::{
         Application, Input, Proposed,
-        db::{DatabaseSet, Merkleized as _, Unmerkleized as _},
+        db::{DatabaseSet, Unmerkleized as _},
     },
 };
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
@@ -74,14 +74,13 @@ where
         let parent = ancestry.next().await?;
         let height = parent.height().next();
         let merkleized = Self::execute(height, batches).await;
-        let block = Block {
-            context: context.1,
-            parent: parent.digest(),
+        let block = Block::new(
+            context.1,
+            parent.digest(),
             height,
-            state_root: merkleized.root(),
-            range: merkleized.target().range,
+            merkleized.target(),
             payload,
-        };
+        );
         Some(Proposed { block, merkleized })
     }
 

@@ -1,4 +1,5 @@
 use commonware_cryptography::{Hasher, Sha256};
+use commonware_parallel::Sequential;
 use commonware_utils::test_rng;
 use criterion::{Criterion, criterion_group};
 use rand::Rng;
@@ -25,7 +26,7 @@ fn bench_hash_pair(c: &mut Criterion) {
         ),
     ] {
         c.bench_function(&format!("{}/shape={shape}", module_path!()), |b| {
-            b.iter(|| Sha256::hash_pair(black_box(&parts[0]), black_box(&parts[1])));
+            b.iter(|| Sha256::hash_pair(black_box(&parts[0]), black_box(&parts[1]), &Sequential));
         });
     }
 }

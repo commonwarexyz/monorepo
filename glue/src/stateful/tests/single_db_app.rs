@@ -1,4 +1,4 @@
-use super::common::*;
+use super::{common::*, mocks::digested};
 use crate::{
     simulate::{
         engine::{EngineDefinition, InitContext},
@@ -253,7 +253,9 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let mut ancestry = Box::pin(ancestry);
         let tip = ancestry.next().await?;
         let merkleized = Self::execute(tip.height(), batches).await;
-        if merkleized.root() != tip.state_root || merkleized.target().range != tip.range {
+        if merkleized.root() != tip.inner().state_root
+            || merkleized.target().range != tip.inner().range
+        {
             return None;
         }
         Some(merkleized)
@@ -421,6 +423,7 @@ impl EngineDefinition for SingleDbEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -483,7 +486,7 @@ impl EngineDefinition for SingleDbEngine {
         let marshal_config = marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: plan.marshal_start(genesis_block.clone().into()),
+            start: plan.marshal_start(digested(genesis_block.clone())),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
@@ -544,6 +547,7 @@ impl EngineDefinition for SingleDbEngine {
                     retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
+                strategy: Sequential,
             },
         );
 
@@ -595,8 +599,8 @@ impl EngineDefinition for SingleDbEngine {
             elector: RoundRobin::<Sha256>::default(),
             blocker: oracle.control(public_key.clone()),
             automaton: deferred.clone(),
-            relay: deferred,
-            reporter: marshal_mailbox.clone(),
+            relay: deferred.clone(),
+            reporter: deferred,
             strategy: Sequential,
             partition: format!("{partition_prefix}-simplex"),
             mailbox_size: NZUsize!(3),

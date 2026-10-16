@@ -50,7 +50,7 @@ use commonware_consensus::{
     types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
     bls12381::{
         dkg::feldman_desmedt::{Reveal, deal},
         primitives::{group::Share, sharing::Mode, variant::MinPk},
@@ -897,6 +897,7 @@ impl EngineDefinition for ReshareEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -949,6 +950,7 @@ impl EngineDefinition for ReshareEngine {
         );
 
         let genesis = Block::genesis(self.participants[0].clone(), self.initial.info.clone());
+        let genesis = Digested::precomputed(genesis.clone(), genesis.digest());
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(
             stateful_startup_context.child("plan"),
@@ -1063,7 +1065,7 @@ impl EngineDefinition for ReshareEngine {
                     *self.initial.info.output.public().public(),
                 )),
                 epocher: FixedEpocher::new(EPOCH_LENGTH),
-                start: plan.marshal_start(genesis.clone().into()),
+                start: plan.marshal_start(genesis.clone()),
                 partition_prefix: partition_prefix.clone(),
                 mailbox_size: NZUsize!(100),
                 view_retention: ViewDelta::new(10),
@@ -1195,7 +1197,7 @@ impl EngineDefinition for ReshareEngine {
             context.child("stateful"),
             StatefulConfig {
                 application: App {
-                    genesis: genesis.clone(),
+                    genesis: genesis.inner().clone(),
                     processed: self.processed.clone(),
                     public_key: public_key.clone(),
                     hold: self.processed_hold.clone(),
@@ -1213,6 +1215,7 @@ impl EngineDefinition for ReshareEngine {
                     update_channel_size: NZUsize!(256),
                 },
                 prune_config: None,
+                strategy: Sequential,
             },
         );
 

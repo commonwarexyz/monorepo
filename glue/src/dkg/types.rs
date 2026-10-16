@@ -16,8 +16,8 @@ use commonware_cryptography::{
     },
 };
 use commonware_p2p::TrackedPeers;
-use commonware_utils::{Faults as _, N3f1, ordered::Set, sequence::Unit};
-use std::num::{NonZeroU32, NonZeroU64};
+use commonware_utils::{ordered::Set, sequence::Unit};
+use std::num::NonZeroU32;
 use thiserror::Error;
 
 /// Material for an epoch-scoped threshold scheme, with or without a signing share.
@@ -111,12 +111,6 @@ pub enum ParticipantsError {
     UnknownReshareDealer,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct EpochCapacityError {
-    available: u64,
-    required: u64,
-}
-
 impl<P: PublicKey> Participants<P> {
     /// Returns the peers to activate for this epoch: the dealers as primary peers, and the
     /// players and next players as secondary peers.
@@ -183,39 +177,6 @@ impl<P: PublicKey> Participants<P> {
 
         Ok(())
     }
-
-    pub(crate) fn validate_epoch_capacity<V: Variant>(
-        &self,
-        blocks_per_epoch: NonZeroU64,
-        previous: Option<&Output<V, P>>,
-    ) -> Result<(), EpochCapacityError> {
-        let available = dealer_log_slots(blocks_per_epoch);
-        let required = self.required_dealer_logs(previous);
-        if available < required {
-            return Err(EpochCapacityError {
-                available,
-                required,
-            });
-        }
-        Ok(())
-    }
-
-    fn required_dealer_logs<V: Variant>(&self, previous: Option<&Output<V, P>>) -> u64 {
-        let dealer_quorum = u64::from(N3f1::quorum(self.dealers.len()));
-        let previous_quorum = previous
-            .map(|previous| u64::from(previous.quorum::<N3f1>()))
-            .unwrap_or_default();
-        dealer_quorum.max(previous_quorum)
-    }
-}
-
-const fn dealer_log_slots(blocks_per_epoch: NonZeroU64) -> u64 {
-    let blocks = blocks_per_epoch.get();
-    // Shorter epochs do not leave a usable dealing-to-inclusion window.
-    if blocks < 4 {
-        return 0;
-    }
-    blocks.saturating_sub(blocks / 2 + 1)
 }
 
 impl<P: PublicKey> Write for Participants<P> {
@@ -259,7 +220,7 @@ mod tests {
         ed25519,
     };
     use commonware_p2p::Address;
-    use commonware_utils::{NZU32, NZU64, TestRng};
+    use commonware_utils::{N3f1, NZU32, TestRng};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn keys(count: u64) -> Set<ed25519::PublicKey> {
@@ -380,85 +341,6 @@ mod tests {
                 &(NZU32!(1), crate::dkg::tests::max_supported_mode()),
             )
             .is_err()
-        );
-    }
-
-    fn participants(count: u64) -> Participants<ed25519::PublicKey> {
-        let keys = keys(count);
-        Participants {
-            dealers: keys.clone(),
-            players: keys,
-            next_players: Set::default(),
-        }
-    }
-
-    #[test]
-    fn epoch_capacity_rejects_insufficient_bootstrap_slots() {
-        assert_eq!(
-            participants(2).validate_epoch_capacity::<MinPk>(NZU64!(4), None),
-            Err(EpochCapacityError {
-                available: 1,
-                required: 2,
-            })
-        );
-    }
-
-    #[test]
-    fn epoch_capacity_accepts_exact_bootstrap_slots() {
-        assert!(
-            participants(2)
-                .validate_epoch_capacity::<MinPk>(NZU64!(5), None)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn epoch_capacity_rejects_short_epoch_with_single_dealer() {
-        assert_eq!(
-            participants(1).validate_epoch_capacity::<MinPk>(NZU64!(3), None),
-            Err(EpochCapacityError {
-                available: 0,
-                required: 1,
-            })
-        );
-    }
-
-    #[test]
-    fn epoch_capacity_rejects_insufficient_reshare_slots() {
-        let players = keys(4);
-        let (previous, _) =
-            deal::<MinPk, _, N3f1>(TestRng::new(0), Mode::NonZeroCounter, players.clone())
-                .expect("trusted deal");
-
-        assert_eq!(
-            Participants {
-                dealers: players.clone(),
-                players,
-                next_players: Set::default(),
-            }
-            .validate_epoch_capacity(NZU64!(6), Some(&previous)),
-            Err(EpochCapacityError {
-                available: 2,
-                required: 3,
-            })
-        );
-    }
-
-    #[test]
-    fn epoch_capacity_accepts_exact_reshare_slots() {
-        let players = keys(4);
-        let (previous, _) =
-            deal::<MinPk, _, N3f1>(TestRng::new(1), Mode::NonZeroCounter, players.clone())
-                .expect("trusted deal");
-
-        assert!(
-            Participants {
-                dealers: players.clone(),
-                players,
-                next_players: Set::default(),
-            }
-            .validate_epoch_capacity(NZU64!(7), Some(&previous))
-            .is_ok()
         );
     }
 }

@@ -9,7 +9,7 @@ use crate::{
     stateful::probe::sample::Sample,
 };
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Buf, Encode as _, Error as CodecError, Read};
+use commonware_codec::{Buf, Encode as _, Read};
 use commonware_consensus::{
     Epochable, Heightable,
     marshal::core::Variant,
@@ -29,12 +29,6 @@ use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use std::collections::VecDeque;
 use tracing::{debug, warn};
-
-#[derive(Debug)]
-enum BoundaryBlockError {
-    Commitment,
-    Decode(CodecError),
-}
 
 struct Candidate<S, V>
 where
@@ -167,7 +161,7 @@ where
                 debug!("boundary receiver closed, shutting down");
                 return;
             } => {
-                if self.handle_boundary_response(peer, message, &mut boundary_sender) {
+                if self.handle_boundary_response(peer, message, &mut boundary_sender).await {
                     deadline = self.context.current() + self.retry_timeout.get();
                 }
             },
@@ -255,7 +249,7 @@ where
     }
 
     /// Handles a probe response and returns whether it sent a new request.
-    fn handle_boundary_response(
+    async fn handle_boundary_response(
         &mut self,
         peer: S::PublicKey,
         message: impl Buf,
@@ -293,6 +287,7 @@ where
                     return false;
                 }
                 self.handle_boundary_block(peer, epoch, body, boundary_sender)
+                    .await
             }
         }
     }
@@ -450,7 +445,7 @@ where
         requested
     }
 
-    fn handle_boundary_block(
+    async fn handle_boundary_block(
         &mut self,
         peer: S::PublicKey,
         epoch: Epoch,
@@ -470,21 +465,17 @@ where
 
         let commitment = candidate.finalization.proposal.payload;
         let block =
-            match authenticate_boundary_block::<V>(&self.block_codec_config, commitment, body) {
+            match wire::read_block::<V>(body, commitment, &self.block_codec_config, &self.strategy)
+                .await
+            {
                 Ok(block) => block,
-                Err(BoundaryBlockError::Decode(err)) => {
+                Err(err) => {
                     commonware_p2p::block!(
                         self.blocker,
                         peer,
                         ?err,
                         "invalid bootstrap boundary block"
                     );
-                    Self::request_next_block(&mut pending, boundary_sender);
-                    self.pending = Some(pending);
-                    return true;
-                }
-                Err(BoundaryBlockError::Commitment) => {
-                    commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary block");
                     Self::request_next_block(&mut pending, boundary_sender);
                     self.pending = Some(pending);
                     return true;
@@ -541,7 +532,7 @@ where
         }
 
         let block = V::into_shared(block);
-        let Some(Payload::EpochInfo(info)) = block.payload() else {
+        let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
             return None;
         };
         if info.epoch != pending.floor.epoch() {
@@ -564,25 +555,12 @@ where
     }
 }
 
-fn authenticate_boundary_block<V: Variant>(
-    block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
-    commitment: V::Commitment,
-    body: impl Buf,
-) -> Result<V::Block, BoundaryBlockError> {
-    let block = wire::read_block::<V>(body, commitment, block_codec_config)
-        .map_err(BoundaryBlockError::Decode)?;
-    if V::commitment(&block) != commitment {
-        return Err(BoundaryBlockError::Commitment);
-    }
-    Ok(block)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dkg::tests::mocks;
     use bytes::{BufMut, Bytes};
-    use commonware_codec::{EncodeSize, Read, Write};
+    use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
     use commonware_coding::ReedSolomon;
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable,
@@ -597,7 +575,8 @@ mod tests {
         types::{Epoch, Height, Round, View, coding::Commitment},
     };
     use commonware_cryptography::{
-        Digest as _, Digestible, Hasher, bls12381::primitives::variant::MinPk, sha256::Sha256,
+        Digest as _, Digested, Digestible, Hasher, bls12381::primitives::variant::MinPk,
+        sha256::Sha256,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
@@ -735,7 +714,7 @@ mod tests {
         )
     }
 
-    fn coding_block(
+    async fn coding_block(
         leader: mocks::TestPublicKey,
         participants: u16,
     ) -> Arc<CodedBlock<CodingBlock, ReedSolomon<Sha256>, Sha256>> {
@@ -754,11 +733,14 @@ mod tests {
             ),
         };
         let block = CodingBlock::new::<Sha256>(context, parent, Height::new(1), 0);
-        Arc::new(CodedBlock::new(
-            block,
-            coding_config_for_participants(participants),
-            &Sequential,
-        ))
+        Arc::new(
+            CodedBlock::encode(
+                Digested::precomputed(block.clone(), block.digest()),
+                coding_config_for_participants(participants),
+                &Sequential,
+            )
+            .await,
+        )
     }
 
     #[test]
@@ -777,7 +759,8 @@ mod tests {
                     .len()
                     .try_into()
                     .expect("participant count fits u16"),
-            );
+            )
+            .await;
             let payload = TestCodingVariant::commitment(&block);
             let mut finalization = finalization(
                 Proposal::new(
@@ -842,7 +825,7 @@ mod tests {
             let block_message =
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::zero(),
-                    block: block.clone().into(),
+                    block: Digested::precomputed(block.clone(), block.digest()),
                 }
                 .encode();
             let (epoch, body) = split_block_response::<
@@ -851,10 +834,11 @@ mod tests {
             >(block_message, &fixture.schemes[0]);
             assert_eq!(epoch, Epoch::zero());
             let decoded =
-                authenticate_boundary_block::<mocks::TestMarshalVariant>(&(), commitment, body)
+                wire::read_block::<mocks::TestMarshalVariant>(body, commitment, &(), &Sequential)
+                    .await
                     .expect("standard block authenticated");
 
-            assert_eq!(decoded.as_ref(), &block);
+            assert_eq!(decoded.inner(), &block);
         });
     }
 
@@ -870,7 +854,8 @@ mod tests {
                     .len()
                     .try_into()
                     .expect("participant count fits u16"),
-            );
+            )
+            .await;
             let payload = TestCodingVariant::commitment(&block);
             let finalization = finalization(
                 Proposal::new(
@@ -903,7 +888,8 @@ mod tests {
             );
             assert_eq!(epoch, Epoch::zero());
             let commitment = finalization.proposal.payload;
-            let decoded = authenticate_boundary_block::<TestCodingVariant>(&(), commitment, body)
+            let decoded = wire::read_block::<TestCodingVariant>(body, commitment, &(), &Sequential)
+                .await
                 .expect("coding block authenticated");
 
             assert_eq!(decoded.height(), Height::new(1));
@@ -930,7 +916,8 @@ mod tests {
                     .len()
                     .try_into()
                     .expect("participant count fits u16"),
-            );
+            )
+            .await;
             let payload = TestCodingVariant::commitment(&block);
             let finalization = finalization(
                 Proposal::new(
@@ -965,7 +952,8 @@ mod tests {
             >(block_message, &verifier);
             assert_eq!(epoch, Epoch::zero());
             let commitment = finalization.proposal.payload;
-            let decoded = authenticate_boundary_block::<TestCodingVariant>(&(), commitment, body)
+            let decoded = wire::read_block::<TestCodingVariant>(body, commitment, &(), &Sequential)
+                .await
                 .expect("coding block authenticated");
 
             assert_eq!(decoded.height(), Height::new(1));

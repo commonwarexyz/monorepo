@@ -492,7 +492,8 @@ impl<B: RBlob> SealedBlobs<'_, B> {
 
 /// A read handle for one journal blob.
 pub(super) enum Blob<'a, B: RBlob> {
-    /// Writable tail, read through the writer's cache-aware logical view.
+    /// Writable tail. Point reads go through the writer's cache-aware logical view, and
+    /// [`Self::replay_from`] chooses the replay path.
     Writer(&'a Writer<B>),
     /// Immutable historical blob.
     Sealed(Sealed<B>),
@@ -547,26 +548,29 @@ impl<'a, B: RBlob> Blob<'a, B> {
 
     /// Return a sequential replay handle starting at `offset`.
     ///
-    /// Constructing the handle is cheap: paged replay stores prefetch settings, and writer-view
+    /// Constructing the handle is cheap. Paged replay stores prefetch settings, and writer-view
     /// replay starts with an empty buffer. Read buffers are allocated later by `Replay::ensure`.
     ///
-    /// Sealed blobs can use paged replay directly because their bytes are already fixed. The
-    /// writable tail is replayed through a live view so replay observes logical bytes without
-    /// mutating or flushing the writer.
+    /// A sealed blob, or a writable tail whose write buffer holds no unwritten full page (as
+    /// after a sync), is replayed from the blob in batches with `read_options`. A tail still
+    /// holding one is replayed through a live view of the writer, which reads through its page
+    /// cache without flushing it.
     pub(super) fn replay_from(
         self,
         offset: u64,
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Replay<'a, B>, Error> {
-        match self {
-            Self::Writer(writer) => Replay::view(Self::Writer(writer), offset, buffer_size),
-            Self::Sealed(sealed) => {
-                let mut replay = sealed.replay(buffer_size, read_options)?;
-                replay.seek_to(offset)?;
-                Ok(Replay::paged(replay))
-            }
-        }
+        let sealed = match self {
+            Self::Writer(writer) => match writer.try_snapshot() {
+                Some(snapshot) => snapshot,
+                None => return Replay::view(Self::Writer(writer), offset, buffer_size),
+            },
+            Self::Sealed(sealed) => sealed,
+        };
+        let mut replay = sealed.replay(buffer_size, read_options)?;
+        replay.seek_to(offset)?;
+        Ok(Replay::paged(replay))
     }
 
     /// Read fixed-size items at sorted byte offsets into `buf`.
@@ -955,14 +959,25 @@ mod tests {
         executor.start(|context| async move {
             let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
             let (blob, size) = context.open("replay-views", b"blob").await.unwrap();
-            let writer = Writer::new(blob, size, 128, cache).await.unwrap();
+            let writer = Writer::new(blob, size, 128, cache.clone()).await.unwrap();
             let (writer, _) = writer.append(b"abcdefghijklmnopqrstuvwx").await.unwrap();
             let (writer, snapshot) = writer.snapshot().await.unwrap();
 
-            for source in [Blob::Writer(&writer), Blob::Sealed(snapshot)] {
-                let paged = matches!(source, Blob::Sealed(_));
+            // A writer holding an unwritten full page is replayed through a live view. Its
+            // page of filler precedes the same bytes, which the view reads from the tip.
+            let (blob, size) = context.open("replay-views", b"pending").await.unwrap();
+            let pending = Writer::new(blob, size, 128, cache).await.unwrap();
+            let (pending, _) = pending.append(&[0; 40]).await.unwrap();
+            let (pending, _) = pending.append(b"abcdefghijklmnopqrstuvwx").await.unwrap();
+            assert!(pending.try_snapshot().is_none());
+
+            for (source, offset, paged) in [
+                (Blob::Writer(&pending), 40, false),
+                (Blob::Writer(&writer), 0, true),
+                (Blob::Sealed(snapshot), 0, true),
+            ] {
                 let mut replay = source
-                    .replay_from(0, NZUsize!(12), ReadOptions::default())
+                    .replay_from(offset, NZUsize!(12), ReadOptions::default())
                     .unwrap();
                 assert!(replay.ensure(12).await.unwrap());
                 let first_range = replay.chunk().as_ptr_range();
@@ -1006,14 +1021,29 @@ mod tests {
                     .open("replay-frames", &[compression.unwrap_or(0)])
                     .await
                     .unwrap();
-                let writer = Writer::new(blob, size, 128, cache).await.unwrap();
+                let writer = Writer::new(blob, size, 128, cache.clone()).await.unwrap();
                 let (writer, _) = writer.append(&encoded).await.unwrap();
                 let (writer, snapshot) = writer.snapshot().await.unwrap();
 
-                for source in [Blob::Writer(&writer), Blob::Sealed(snapshot)] {
+                // A writer holding an unwritten full page is replayed through a live view. Its
+                // page of filler precedes the same frames.
+                let (blob, size) = context
+                    .open("replay-frames-pending", &[compression.unwrap_or(0)])
+                    .await
+                    .unwrap();
+                let pending = Writer::new(blob, size, 256, cache).await.unwrap();
+                let (pending, _) = pending.append(&[0; 64]).await.unwrap();
+                let (pending, _) = pending.append(&encoded).await.unwrap();
+                assert!(pending.try_snapshot().is_none());
+
+                for (source, offset) in [
+                    (Blob::Writer(&pending), 64),
+                    (Blob::Writer(&writer), 0),
+                    (Blob::Sealed(snapshot), 0),
+                ] {
                     let mut replay = source
                         .clone()
-                        .replay_from(0, NZUsize!(12), ReadOptions::default())
+                        .replay_from(offset, NZUsize!(12), ReadOptions::default())
                         .unwrap();
                     let mut retained = Vec::new();
                     for _ in &items {
@@ -1040,7 +1070,7 @@ mod tests {
                         for case in 0..3 {
                             let mut replay = source
                                 .clone()
-                                .replay_from(0, NZUsize!(12), ReadOptions::default())
+                                .replay_from(offset, NZUsize!(12), ReadOptions::default())
                                 .unwrap();
                             assert!(replay.ensure(12).await.unwrap());
                             let (len, _) = replay.read_length().unwrap();
