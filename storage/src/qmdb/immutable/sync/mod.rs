@@ -114,6 +114,7 @@ where
             journal,
             root,
             snapshot,
+            snapshot_lower_bound_loc: inactivity_floor_loc,
             inactivity_floor_loc,
             metrics,
         };
