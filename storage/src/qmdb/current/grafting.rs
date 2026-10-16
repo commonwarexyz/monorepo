@@ -214,7 +214,7 @@ pub fn grafted_to_ops_pos<F: Graftable>(
 /// structure's leaves correspond 1:1 with bitmap chunks. This adapter intercepts
 /// [`HasherTrait::node_digest`] and [`HasherTrait::node_digest_pair`] to convert each grafted
 /// position to the corresponding ops-space position via [`Graftable::leftmost_leaf`] and
-/// [`Graftable::subtree_root_position`], ensuring hash pre-images use ops-space positions for
+/// [`Family::subtree_root_position`], ensuring hash pre-images use ops-space positions for
 /// domain separation.
 #[derive(Clone)]
 pub(super) struct GraftedHasher<F: Graftable, H: HasherTrait<F>> {
